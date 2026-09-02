@@ -26,6 +26,22 @@ doesn't trigger this. This isn't legal advice; read the license for the authorit
 
 ## Run it
 
+The quickest way is the published image. It needs one directory to keep its
+database and built prototypes in, and one variable saying what URL it is
+reached at:
+
+```bash
+docker run -d --name desde-viewer -p 3100:3100 \
+  -v desde-viewer-data:/data \
+  -e VIEWER_PUBLIC_URL=http://localhost:3100 \
+  ghcr.io/desde-design/viewer:latest
+```
+
+Then open http://localhost:3100 and follow the one-time sign-in link the
+container prints (`docker logs desde-viewer`). Everything below is the
+from-source path, which is what the image is built from.
+
+
 ```bash
 npm install                 # repo root first: next and react resolve from here
 npm install --prefix viewer

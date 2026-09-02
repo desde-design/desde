@@ -6,7 +6,8 @@ to run it.
 
 - **Documentation:** [desde.design/docs](https://desde.design/docs)
 - **Editor download (macOS, Apple silicon):** [releases](https://github.com/desde-design/desde-editor-releases/releases)
-- **Viewer Docker image:** build it from [viewer/Dockerfile](viewer/Dockerfile); the
+- **Viewer Docker image:** `docker pull ghcr.io/desde-design/viewer:latest`, or build it
+  from [viewer/Dockerfile](viewer/Dockerfile); the
   [deploy guide](https://desde.design/docs/self-hosting/deploy-viewer) walks through it
 
 ## Start here
@@ -14,8 +15,8 @@ to run it.
 This is a large monorepo. Here are three ways in, depending on what you want to do.
 
 - **Self-host the Viewer.** A self-hosted review app: one Node process, SQLite, local
-  disk, a build pipeline, comments and mentions. There is no published container image
-  yet, so you build it from this checkout. See [viewer/README.md](viewer/README.md) or
+  disk, a build pipeline, comments and mentions. The image is published at
+  `ghcr.io/desde-design/viewer`, or you build it from this checkout. See [viewer/README.md](viewer/README.md) or
   the [deploy guide](https://desde.design/docs/self-hosting/deploy-viewer).
 - **Use the Editor.** Point it at your own prototype's repo and edit its source live.
   Desde is in beta. The desktop app is a signed macOS build on the
