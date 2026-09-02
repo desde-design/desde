@@ -62,7 +62,13 @@ say where to fetch your own copy.
 
 ## Before opening a pull request
 
-Run the gates that apply to what you changed. Continuous integration on this repository is deliberately narrow: one workflow fails any push that tracks a private path, and one asks first-time contributors to sign the CLA. Neither builds or tests the code. The gates below run on your machine, and that is where a change is proven.
+Run the gates that apply to what you changed. Continuous integration runs
+the same `npm run verify` gate on every push and pull request, plus the
+Viewer's own typecheck and tests, so a red check on GitHub means the same
+thing as a red run on your machine. Two more workflows fail any push that
+tracks a private path, and ask first-time contributors to sign the CLA.
+Run the gates locally first anyway: it is faster than waiting for a runner,
+and the browser smoke stage only runs where a prototype is checked out.
 
 **Always run this from the repo root:**
 
@@ -168,6 +174,39 @@ CLA Document and I hereby sign the CLA." You only need to do this once;
 later pull requests will not ask again.
 
 ## Opening the pull request
+
+Every change lands through a pull request, including the maintainer's own.
+`main` is protected: it takes fast-forward merges only, and a commit has to
+carry a passing CI run before it can land. The loop is short:
+
+1. Start a branch from an up-to-date `main`:
+
+   ```bash
+   git switch main && git pull && git switch -c fix-thing
+   ```
+
+2. Commit as usual. Run `npm run verify` before you push.
+
+3. Push the branch and open the pull request:
+
+   ```bash
+   git push -u origin fix-thing && gh pr create --fill
+   ```
+
+   (`gh` is the GitHub CLI. The web UI works the same way.)
+
+4. Wait for the checks. `CI` is `npm run verify` plus the Viewer's own
+   tests; `guard-private-paths` and `CLA Assistant` are the other two.
+   Fix anything red by pushing more commits to the same branch.
+
+5. When everything is green, squash-merge and delete the branch:
+
+   ```bash
+   gh pr merge --squash --delete-branch
+   ```
+
+   If `main` moved while you were working, GitHub asks you to update the
+   branch first (`git merge origin/main`, or the "Update branch" button).
 
 Use the pull request template. Say what changed, why, and which gates you
 ran. Keep the change focused. A pull request that does one thing is easier
