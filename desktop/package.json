@@ -1,6 +1,6 @@
 {
   "name": "@desde/desktop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "description": "Desde Editor desktop shell (Electron). Spawns the Phase 1 CLI payload as a child process and hosts it in a BrowserWindow — see tasks/electron-app.md.",
