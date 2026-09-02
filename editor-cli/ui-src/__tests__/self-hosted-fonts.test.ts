@@ -114,13 +114,25 @@ beforeAll(() => {
 })
 
 describe("fonts referenced by the built CSS", () => {
-  it("finds at least one, so the assertions below are not vacuous", () => {
-    // Without this, deleting the @font-face entirely would make every other
-    // test in this file pass.
-    expect(refs.length).toBeGreaterThan(0)
+  it("references none, because the product self-hosts no font any more", () => {
+    // Inverted on 2026-09-02, when the wordmark became outlines and Chillax
+    // was deleted (see `src/components/blocks/wordmark.tsx` and the note at
+    // the top of `src/styles/globals.css`). It used to assert the opposite —
+    // "finds at least one, so the assertions below are not vacuous" — which
+    // was the right guard while a face was shipped.
+    //
+    // It is kept rather than deleted, and kept as an EQUALITY rather than a
+    // deletion, because the tests below are generic: with zero refs they all
+    // pass trivially. This line is what stops that from being silent. If a
+    // self-hosted face is ever added, this fails first and points at the
+    // three checks below that then start doing real work.
+    expect(refs.map((r) => r.url)).toEqual([])
   })
 
   it("ship at the path the stylesheet points at", () => {
+    // Vacuous today, and deliberately retained: this is the assertion that
+    // caught the original bug, and it is the one that has to survive a face
+    // being reintroduced.
     const missing = refs
       .filter((r) => !existsSync(join(DIST, r.resolvesTo)))
       .map((r) => `${r.url} in ${r.from} -> ${r.resolvesTo} (404)`)
@@ -132,13 +144,17 @@ describe("fonts referenced by the built CSS", () => {
     // above while still rendering as the fallback face.
     //
     // Matched by CONTENT, not by name: depending on which code path placed
-    // the file it is either `fonts/Chillax-Variable.woff2` or Vite's
-    // fingerprinted `Chillax-Variable-3OGwrkmm.woff2`, and a name-based lookup
-    // silently skips the second one instead of checking it.
+    // the file it is either `fonts/x.woff2` or Vite's fingerprinted
+    // `x-3OGwrkmm.woff2`, and a name-based lookup silently skips the second.
+    //
+    // The source directory holds only a licence file now, so this loop has
+    // nothing to iterate. The `sources.length` guard that used to sit here
+    // was removed with the fonts: asserting a font source exists would fail
+    // for the correct reason, which is not what a guard is for.
+    if (refs.length === 0) return
     const sources = readdirSync(FONT_SOURCE_DIR)
       .filter((f) => /\.(woff2|woff|ttf|otf)$/.test(f))
       .map((f) => readFileSync(join(FONT_SOURCE_DIR, f)))
-    expect(sources.length).toBeGreaterThan(0)
 
     for (const ref of refs) {
       const shipped = readFileSync(join(DIST, ref.resolvesTo))
@@ -148,20 +164,33 @@ describe("fonts referenced by the built CSS", () => {
       ).toBe(true)
     }
   })
-
-  it("includes the wordmark face, which is the one the product actually needs", () => {
-    // Named explicitly: the checks above are generic and would still pass if
-    // Chillax were dropped and some other face added.
-    expect(refs.map((r) => r.url).join(" ")).toContain("Chillax-Variable.woff2")
-  })
 })
 
-describe("the CSS that consumes them", () => {
-  it("still declares the utility, so the font is not shipped for nothing", () => {
-    const css = readdirSync(join(DIST, "assets"))
-      .filter((f) => f.endsWith(".css"))
+describe("the wordmark", () => {
+  it("carries no Chillax reference into the built bundle", () => {
+    // The licence reason, not just tidiness. The ITF Free Font License forbids
+    // providing the Font Software to third parties, and a packaged desktop app
+    // is exactly that. Nothing in a shipped build should name it.
+    const files = readdirSync(join(DIST, "assets"))
+    const bundled = files
+      .filter((f) => f.endsWith(".css") || f.endsWith(".js"))
       .map((f) => readFileSync(join(DIST, "assets", f), "utf8"))
       .join("\n")
-    expect(css).toMatch(/\.font-display\{font-family:Chillax/)
+    expect(bundled).not.toContain("Chillax")
+    expect(bundled).not.toMatch(/\.woff2?\b/)
+  })
+
+  it("ships as geometry instead", () => {
+    // The replacement has to actually be in the bundle. Without this, deleting
+    // the wordmark altogether would pass every assertion in this file.
+    const js = readdirSync(join(DIST, "assets"))
+      .filter((f) => f.endsWith(".js"))
+      .map((f) => readFileSync(join(DIST, "assets", f), "utf8"))
+      .join("\n")
+    expect(js).toContain('aria-label')
+    // The first moveTo of the extracted outline. Enough to prove the real path
+    // shipped, short enough not to break on a regenerate that shifts later
+    // coordinates.
+    expect(js).toContain("Desde")
   })
 })

@@ -3,45 +3,36 @@
 @import "shadcn/tailwind.css";
 
 /*
- * Chillax — the wordmark face, self-hosted.
+ * There is no self-hosted font here any more.
  *
- * Declared AFTER the @import lines, not before them: CSS requires @import
- * to precede every other rule, so an @font-face above them makes the imports
- * invalid. Tailwind then emitted no utilities at all — `font-display` and
- * `font-bold` silently stopped applying while `text-primary`, already in the
- * browser's cached sheet, kept working. MEASURED 2026-08-26.
+ * Chillax used to be declared at this spot, as the wordmark face, and it was
+ * the only self-hosted face in the product. It is gone (2026-09-02): the
+ * wordmark ships as OUTLINES instead — see
+ * `src/components/blocks/wordmark.tsx`, and
+ * `tasks/scripts/extract-wordmark-outlines.py` for how the path is generated.
  *
- * The file sits beside this stylesheet rather than in either surface's
- * `public/`, because BOTH bundlers resolve a relative `url()` in CSS into
- * their own asset pipeline: Next for the Viewer, Vite for the Editor UI and
- * both galleries. One copy, four surfaces, no per-surface static route to
- * keep in sync.
+ * Two reasons, and the second is the one with a deadline attached.
  *
- * The variable cut, not six static ones: 55KB against ~22KB for a single
- * weight, in exchange for every weight 200-700 being a CSS number away. For
- * one wordmark on one line that trade is worth it — the alternative is
- * another download the next time the weight is wrong.
+ * It was 55KB of variable font, in two hand-synced copies, inside every
+ * packaged desktop build, serving five glyphs on one line.
  *
- * `swap`: the wordmark is five letters of decoration, and blocking first
- * paint on it would be the tail wagging the dog.
+ * And the comment that stood here already named the risk: the ITF Free Font
+ * License permits self-hosting via @font-face but PROHIBITS redistributing
+ * the font file through a repository (Section 02). That was written as
+ * something to resolve "before the Viewer ships to anyone who self-hosts it".
+ * The repository was made public on 2026-09-01 with
+ * `src/styles/fonts/Chillax-Variable.woff2` tracked in it, which is exactly
+ * the prohibited act, so the deadline arrived. Removing the file is the fix.
  *
- * Licence: Fontshare / Indian Type Foundry Free Font License, in
- * `fonts/Chillax-LICENSE.txt`. It permits self-hosting via @font-face and
- * explicitly permits wordmarks. It PROHIBITS redistributing the font itself
- * through a repository — see that file's Section 02, and this repo's
- * `docs/design.md` for what that means before the Viewer ships to anyone who
- * self-hosts it.
+ * The same licence explicitly permits what replaced it: "Derivative Work does
+ * not include any logo ... created through the normal use of the Font
+ * Software." The licence text stays in `fonts/` as provenance for those
+ * outlines even though the font itself is gone.
+ *
+ * If a display face is ever wanted again, do NOT restore this: use a
+ * `next/font/google` face on the surfaces that have a font pipeline, or
+ * outlines for anything that is a mark rather than text.
  */
-@font-face {
-  font-family: "Chillax";
-  /* `format("woff2")`, not the legacy `woff2-variations`: the variable axes
-     work either way, and the older keyword is rejected outright by some
-     engines, which drops the only src and fails the whole face. */
-  src: url("./fonts/Chillax-Variable.woff2") format("woff2");
-  font-weight: 200 700;
-  font-style: normal;
-  font-display: swap;
-}
 
 @plugin "@tailwindcss/typography";
 
@@ -100,7 +91,6 @@
 
      `--font-serif` below stays Playfair, which is still loaded from the CDN
      link every surface carries. */
-  --font-display: "Chillax", ui-sans-serif, system-ui, sans-serif;
   /* Dense-UI type scale, ANCHORED ON 13px (2026-08-11).
      Use these, never text-[Npx].
 
@@ -321,7 +311,6 @@
   --font-sans: "DM Sans", sans-serif;
   --font-serif: "Playfair Display", serif;
   --font-mono: "Fira Code", monospace;
-  --font-display: "Chillax", ui-sans-serif, system-ui, sans-serif;
   --shadow-color: #000000;
   --shadow-opacity: 0.1;
   --shadow-blur: 10px;
@@ -403,7 +392,6 @@
   --font-sans: "DM Sans", sans-serif;
   --font-serif: "Playfair Display", serif;
   --font-mono: "Fira Code", monospace;
-  --font-display: "Chillax", ui-sans-serif, system-ui, sans-serif;
   --shadow-color: #000000;
   --shadow-opacity: 0.3;
   --shadow-blur: 15px;

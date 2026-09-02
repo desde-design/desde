@@ -111,7 +111,11 @@ describe("LauncherPage — the settings gear and its update chrome", () => {
     expect(await screen.findByTestId("launcher-settings")).toBeInTheDocument()
     expect(screen.queryByTestId("desktop-update-badge")).not.toBeInTheDocument()
 
-    const wordmark = screen.getByText("Desde")
+    // By ACCESSIBLE NAME, not text. The wordmark became outlines on
+    // 2026-09-02, so "Desde" is an `aria-label` on an `img` role rather than a
+    // text node. `getByText` stopped matching, which is the right failure: the
+    // mark is a graphic now, and its name is the thing worth asserting.
+    const wordmark = screen.getByRole("img", { name: "Desde" })
     expect(wordmark.closest("header")).not.toBeNull()
     // The gear's column, and nothing else, trails the wordmark.
     const row = wordmark.parentElement
@@ -127,7 +131,7 @@ describe("LauncherPage — the settings gear and its update chrome", () => {
     // window edges) but its contents ride <main>'s column. jsdom computes no
     // layout, so this asserts the mechanism that produces the alignment: the
     // wordmark's row and <main> carry the same centring + max-width + padding.
-    const row = screen.getByText("Desde").parentElement
+    const row = screen.getByRole("img", { name: "Desde" }).parentElement
     const main = document.querySelector("main")
     for (const cls of ["mx-auto", "w-full", "max-w-5xl", "px-6"]) {
       expect(row?.className).toContain(cls)
@@ -135,7 +139,9 @@ describe("LauncherPage — the settings gear and its update chrome", () => {
     }
     // The full-bleed bar must NOT re-add its own horizontal padding, which
     // would offset the column it wraps and undo the alignment.
-    expect(screen.getByText("Desde").closest("header")?.className).not.toMatch(/\bpx-\d/)
+    expect(
+      screen.getByRole("img", { name: "Desde" }).closest("header")?.className,
+    ).not.toMatch(/\bpx-\d/)
   })
 
   it("grows the gear to say Update when one is actionable, instead of a dot", async () => {
@@ -282,8 +288,11 @@ describe("project card row tinting", () => {
     render(<LauncherPage folderPickerSupported={true} />)
     await screen.findByTestId("launcher-project-p0")
 
-    // 14 cards at 4 columns is 4 rows; there are 5 tint steps, so nothing
-    // clamps yet and row 4 must still be its own tint.
+    // 14 cards at 4 columns is 4 rows, and there are 4 tint steps, so row 4
+    // lands exactly on the last one: nothing clamps yet and row 4 must still
+    // be its own tint. (Five steps until 2026-09-01, when the darkest was
+    // dropped — these assertions hold either way, but the reason they hold
+    // changed, so the comment did too.)
     expect(tintOf("p12")).not.toBe(tintOf("p8"))
     // The clamp itself: the deepest row must never return to row 1's tint.
     expect(tintOf("p12")).not.toBe(tintOf("p0"))
