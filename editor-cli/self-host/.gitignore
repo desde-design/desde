@@ -1,0 +1,7 @@
+dist/
+node_modules/
+verify-harness.mjs
+verify-tabs.mjs
+verify-inner.mjs
+verify-msgs.mjs
+check-props.mjs

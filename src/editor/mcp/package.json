@@ -1,0 +1,4 @@
+{
+  "//": "Marks this subtree as ESM for Node's loader (and tsx's loader) so editor-cli — which is ESM — can statically import named exports from status-schema.ts. The parent package.json has no `type` field, defaulting to CJS, which strips named exports across the boundary. Next.js bundles via SWC and ignores this field, so the web app is unaffected.",
+  "type": "module"
+}

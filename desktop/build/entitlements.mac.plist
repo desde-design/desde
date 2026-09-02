@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the TOP-LEVEL app bundle only (electron-builder's default
+  path for this file — see electron-builder.config.mjs's doc comment).
+  Nested binaries (Electron's own helper apps, and everything under
+  Resources/server) get entitlements.mac.inherit.plist instead — see that
+  file, and tasks/electron-app.md §5 Phase 5.
+
+  Two entitlements, both because Electron's own hardened-runtime build needs
+  them, not because a checklist said so:
+
+    - com.apple.security.cs.allow-jit
+      V8 (the main process's own JS engine) marks pages executable at
+      runtime. Without this, the hardened runtime's default deny blocks JIT
+      and the app cannot start.
+    - com.apple.security.cs.allow-unsigned-executable-memory
+      Electron/V8 allocate executable memory that isn't itself backed by a
+      code-signed page (e.g. some JIT paths, and Electron's own known need —
+      see https://github.com/electron/electron/issues/27862 and the
+      hardened-runtime guidance electron-builder's own docs link to).
+
+    - com.apple.security.cs.disable-library-validation
+      REQUIRED. Added 2026-08-13 against the concrete failure this file's
+      previous revision asked for. That revision reasoned: "our own `.node`
+      modules are re-signed with Mo's identity, so there is no cross-identity
+      library in the picture." The premise was true and the conclusion was
+      wrong, because it counted only the libraries WE ship. It missed the
+      ones the product exists to load.
+
+      The failure. Opening the dogfood prototype in the packaged, signed,
+      notarized app died with:
+
+        failed to load config from …/ai-gateway-prototype/vite.config.ts
+        Cause: Cannot find module @rollup/rollup-darwin-arm64. npm has a bug
+        related to optional dependencies (npm/cli#4828)…
+
+      That message is rollup's own, and it is a red herring — the module was
+      installed and intact the whole time. Rollup's `native.js` wraps ANY
+      failure to load its platform binary in that one npm-optional-deps
+      story. MEASURED, calling `process.dlopen` directly on the same file
+      under `ELECTRON_RUN_AS_NODE=1 Desde`:
+
+        code signature … not valid for use in process: mapping process and
+        mapped file (non-platform) have different Team IDs
+
+      That is macOS library validation, which the hardened runtime turns on
+      by default. The `.node` is `adhoc, linker-signed` (npm publishes it
+      that way; `TeamIdentifier=not set`). Our process is signed with Team ID
+      JWK4LSZPKZ. Different Team IDs, so dyld refuses the mapping.
+
+      Why the entitlement is the fix, and not a workaround. The prototype's
+      native modules live in the USER'S project directory. They are npm
+      artifacts we neither ship nor sign, and re-signing a customer's
+      `node_modules` is not something this app gets to do. MEASURED: all
+      three natives in the dogfood prototype fail identically without this
+      entitlement (`@rollup/rollup-darwin-arm64`, `fsevents`,
+      `@parcel/watcher-darwin-arm64`) and all three load with it. The
+      in-process dev-server host — the default path for vite, nuxt,
+      react-router and next — cannot work on macOS without it. There is no
+      narrower entitlement: library validation is on or off.
+
+      What it costs, stated plainly. The process will load any validly-formed
+      dylib regardless of signer. We accept that because the process ALREADY
+      executes arbitrary code from the user's project by design: it imports
+      their `vite.config.ts` and every plugin it names. A native module is
+      not a new trust boundary here, it is the same one in a different file
+      format.
+
+      Scope: this file only. entitlements.mac.inherit.plist does NOT get it —
+      see that file. The process that loads project natives is the top-level
+      executable, because `process.execPath` under ELECTRON_RUN_AS_NODE is
+      `Contents/MacOS/Desde` (desktop/child.ts:121, main.ts:579), and the
+      top-level bundle is exactly what this plist signs.
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+  </dict>
+</plist>

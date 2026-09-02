@@ -1,0 +1,10 @@
+{
+  "generatedAt": "2026-08-08T21:30:00.000Z",
+  "stages": {
+    "typecheck": [],
+    "lint": [],
+    "unit-tests": [],
+    "editor-cli-tests": []
+  },
+  "note": "Reset 2026-08-08. Every prior entry named a test file that had since been DELETED (session-manager-push.test.ts, commit-push-state.integration.test.ts), so the baseline could never match anything and tolerated nothing real. Stage 'composer-cli-tests' renamed to 'editor-cli-tests'. The lint stage now counts warnings as well as errors, so an empty lint baseline means 0 of both. Regenerate with: npm run verify -- --update-baseline"
+}

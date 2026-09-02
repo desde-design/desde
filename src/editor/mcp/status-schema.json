@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://desde.dev/schemas/editor-mcp-status/v1",
+  "title": "Editor MCP /status response (v1)",
+  "description": "Wire-format contract for the editor-local (CLI) and desde-deployed (platform) MCP servers' status query. Both implementations import this schema. Cross-field invariants (e.g., scope=deployed implies dirty:false) are enforced by the validateStatusResponse() TS function — JSON Schema's expressiveness for cross-field rules is limited, so basic shape lives here and invariants live in the TS validator. Both layers run on every status reply in CI.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "scope",
+    "deployment_id",
+    "deployed_head_commit",
+    "branch",
+    "head_commit",
+    "dirty",
+    "ahead_of_deployment",
+    "last_edit_timestamp",
+    "warnings"
+  ],
+  "properties": {
+    "scope": {
+      "enum": ["local", "deployed"],
+      "description": "Which server emitted this response."
+    },
+    "deployment_id": {
+      "type": ["string", "null"],
+      "description": "Latest deployment id this scope is tracking. Null on local when the branch has never deployed."
+    },
+    "deployed_head_commit": {
+      "type": ["string", "null"],
+      "description": "Short SHA of the commit deployment_id was built from. Null when deployment_id is null."
+    },
+    "branch": {
+      "type": ["string", "null"],
+      "description": "Git branch. Null on local in detached-HEAD state."
+    },
+    "head_commit": {
+      "type": ["string", "null"],
+      "description": "Short SHA of HEAD. Null on local with unborn HEAD."
+    },
+    "dirty": {
+      "type": "boolean",
+      "description": "Working tree has uncommitted changes (local scope) or always false (deployed scope)."
+    },
+    "ahead_of_deployment": {
+      "anyOf": [{ "type": "boolean" }, { "const": "unknown" }],
+      "description": "Whether the local view differs from the deployed view. Tri-state: true when local is ahead, false when they agree, 'unknown' when comparison is undefined (unborn HEAD, never-deployed branch)."
+    },
+    "last_edit_timestamp": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO-8601 with timezone. Most recent edit timestamp."
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Free-text non-fatal notes. Empty array when no warnings."
+    }
+  }
+}

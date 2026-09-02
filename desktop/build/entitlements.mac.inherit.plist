@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for every signed file that is NOT the top-level app bundle —
+  electron-builder's default path for this file, applied automatically by
+  its MacTargetHelper.getOptionsForFile to anything that isn't the app
+  itself and isn't under Library/LoginItems. Traced in
+  app-builder-lib/out/mac/MacTargetHelper.js: this is NOT limited to
+  Electron's helper .app bundles (GPU/Renderer/Plugin/normal) — it is also
+  what gets applied to every Mach-O under Resources/server (the claude
+  binary, and the .node native modules), since those are signed in the same
+  pass and are equally "not the top-level app".
+
+  That matters concretely: the spawned `claude` binary is itself a Node/V8
+  process. It needs the same allow-jit / allow-unsigned-executable-memory
+  entitlements the main process needs, for the same reason (its own V8
+  instance marks pages executable at runtime) — this file is what supplies
+  them to it, not entitlements.mac.plist (which only ever applies to the
+  top-level bundle).
+
+  Deliberately NOT included here: com.apple.security.cs.disable-library-validation.
+  entitlements.mac.plist DOES carry it as of 2026-08-13 — read that file for
+  the measured failure that forced it. The split is intentional, so do not
+  "make the two files consistent" without re-reading this paragraph.
+
+  The entitlement is needed by exactly one process: the one that loads native
+  `.node` modules out of the USER'S project (their vite/rollup/fsevents), and
+  that is the top-level executable, since `process.execPath` under
+  ELECTRON_RUN_AS_NODE is `Contents/MacOS/Desde` (desktop/child.ts:121,
+  main.ts:579). Nothing signed with THIS file loads a foreign-signed library:
+  the Electron helper apps load only Electron's own frameworks, and the
+  binaries under Resources/server (the `claude` binary, our two payload
+  `.node` files) are all re-signed with Mo's identity in the same pass — same
+  Team ID, so library validation is satisfied without weakening anything.
+
+  Keeping it off here is not caution for its own sake. It means a compromised
+  helper or the spawned `claude` binary still cannot map a dylib from an
+  arbitrary signer, which is the whole protection the top-level process has
+  to give up to do its job.
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+  </dict>
+</plist>

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignore": [
+    "tasks/**",
+    "public/**",
+    "**/__fixtures__/**",
+    "**/dist/**",
+    "ai-gateway-prototype/**",
+    ".playwright-mcp/**",
+    "src/hooks/useColorTheme.ts",
+    "viewer/gallery/harness/shims/next-link.tsx",
+    "scripts/**"
+  ],
+  "ignoreDependencies": [
+    "depcheck",
+    "electron"
+  ],
+  "ignoreBinaries": [
+    "rg"
+  ],
+  "workspaces": {
+    ".": {
+      "entry": [
+        "src/bridge/comment-bridge.ts",
+        "src/editor/icon-preview/render-vue.mjs",
+        "src/stores/editor-only-guard.ts"
+      ],
+      "project": [
+        "src/**"
+      ]
+    },
+    "editor-cli": {
+      "ignoreDependencies": [
+        "tailwind-merge",
+        "tailwindcss",
+        "astro",
+        "nuxt"
+      ],
+      "entry": [
+        "bin/*.mjs",
+        "src/cli.ts",
+        "src/smoke/smoke-runner.ts",
+        "ui-src/src/main.tsx",
+        "ui-src/vite.config.ts",
+        "self-host/src/main.tsx",
+        "self-host/vite.config.ts",
+        "src/attach/stampers/*.entry.ts"
+      ],
+      "project": [
+        "src/**",
+        "ui-src/**",
+        "self-host/**"
+      ]
+    },
+    "viewer": {
+      "entry": [
+        "server/index.ts",
+        "app/**/{page,layout,not-found,error,loading}.tsx",
+        "next.config.ts",
+        "gallery/harness/main.tsx",
+        "gallery/vite.config.ts",
+        "gallery/postcss.config.mjs"
+      ],
+      "project": [
+        "server/**",
+        "app/**",
+        "gallery/**"
+      ]
+    }
+  }
+}

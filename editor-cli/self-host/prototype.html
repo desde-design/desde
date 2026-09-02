@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sample prototype</title>
+    <!--
+      The inner "live prototype" for the self-host harness. Served at the
+      Vite ROOT (not public/) so the supervising CLI's bridge-plugin
+      transformIndexHtml injects /@desde-bridge.js into it — that's
+      what lets the harness's inner EditorSurface connect its bridge,
+      so BRIDGE STATUS flips to "Connected" and the layers tree + inspector
+      populate from this DOM (read-only inspection; this is a static page
+      with no data-desde-src, so it's for selection/inspection, not editing).
+
+      Run standalone (no CLI) and there's no bridge to inject, so the
+      inner editor stays "Connecting…" — expected.
+    -->
+    <style>
+      :root { --bg: #f8fafc; --card: #ffffff; --border: #e2e8f0; --fg: #0f172a; --muted: #64748b; --primary: #6366f1; }
+      * { box-sizing: border-box; }
+      body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; color: var(--fg); background: var(--bg); }
+      .app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+      .sidebar { background: var(--card); border-right: 1px solid var(--border); padding: 20px 16px; }
+      .brand { font-weight: 700; font-size: 15px; margin-bottom: 24px; }
+      .nav { display: flex; flex-direction: column; gap: 4px; }
+      .nav a { text-decoration: none; color: var(--muted); font-size: 14px; padding: 8px 10px; border-radius: 8px; }
+      .nav a.active { background: #eef2ff; color: var(--primary); font-weight: 600; }
+      .main { padding: 28px 32px; }
+      .page-title { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
+      .page-sub { color: var(--muted); font-size: 14px; margin: 0 0 24px; }
+      .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px; }
+      .stat { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+      .stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+      .stat .value { font-size: 26px; font-weight: 700; margin-top: 6px; }
+      .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; max-width: 520px; }
+      .card h2 { font-size: 16px; margin: 0 0 16px; }
+      .field { margin-bottom: 14px; }
+      .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+      .field input { width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
+      .actions { display: flex; gap: 10px; margin-top: 20px; }
+      .btn { padding: 9px 16px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: var(--card); color: var(--fg); }
+      .btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">Acme Console</div>
+        <nav class="nav">
+          <a href="#" class="active">Overview</a>
+          <a href="#">Projects</a>
+          <a href="#">Members</a>
+          <a href="#">Settings</a>
+        </nav>
+      </aside>
+      <main class="main">
+        <h1 class="page-title">Overview</h1>
+        <p class="page-sub">A sample prototype to inspect with the editor.</p>
+
+        <section class="grid">
+          <div class="stat"><div class="label">Requests</div><div class="value">12,402</div></div>
+          <div class="stat"><div class="label">Errors</div><div class="value">37</div></div>
+          <div class="stat"><div class="label">Latency p95</div><div class="value">142ms</div></div>
+        </section>
+
+        <section class="card">
+          <h2>Project settings</h2>
+          <div class="field">
+            <label for="name">Project name</label>
+            <input id="name" type="text" value="ai-gateway-prototype" />
+          </div>
+          <div class="field">
+            <label for="domain">Domain</label>
+            <input id="domain" type="text" value="acme.proto.dev" />
+          </div>
+          <div class="actions">
+            <button class="btn">Cancel</button>
+            <button class="btn primary">Save changes</button>
+          </div>
+        </section>
+
+        <section class="card" style="margin-top: 24px;">
+          <h2>Danger zone</h2>
+          <div class="field">
+            <label for="transfer">Transfer ownership</label>
+            <input id="transfer" type="text" placeholder="new-owner@acme.dev" />
+          </div>
+          <div class="field">
+            <label for="confirm">Type the project name to confirm deletion</label>
+            <input id="confirm" type="text" placeholder="ai-gateway-prototype" />
+          </div>
+          <div class="actions">
+            <button class="btn">Transfer</button>
+            <button class="btn primary" style="background: #dc2626; border-color: #dc2626;">Delete project</button>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

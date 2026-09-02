@@ -1,0 +1,27 @@
+/*
+ * Tailwind v4 entry for the editor self-host harness.
+ *
+ * Mirrors `editor-cli/ui-src/src/editor-cli.css`: import the parent
+ * monorepo's globals.css for the shared theme tokens, then pin `@source`
+ * directives at the real component trees so Tailwind v4's content scanner
+ * picks up every utility class the chrome uses. Without these the harness
+ * builds but the panels render unstyled (the scanner would only look
+ * inside `editor-cli/self-host/`).
+ */
+@import "../../../src/styles/globals.css";
+
+/* `blocks/` was MISSING until 2026-08-17, and the failure is silent: the class
+   lands in the DOM, Tailwind never emits a rule for it, and the element falls
+   back to whatever the `*` base rule says. MEASURED on the Stepper's active
+   step — `border-primary` was in the class list and the border computed to
+   `--border` grey, because no other scanned file used that utility bare (only
+   `hover:` and `has-data-checked:` variants, which are different rules).
+
+   This is the design system's MAIN layer, so anything it is the sole user of
+   silently does nothing here. Add a directory to this list the moment UI code
+   starts living in it. */
+@source "../../../src/components/blocks/**/*.{ts,tsx}";
+@source "../../../src/components/editor/**/*.{ts,tsx}";
+@source "../../../src/components/ui/**/*.{ts,tsx}";
+@source "../../../src/editor-ui/**/*.{ts,tsx}";
+@source "../../../src/lib/**/*.{ts,tsx}";

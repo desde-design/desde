@@ -1,0 +1,10 @@
+{
+  "name": "editor-self-host-harness",
+  "private": true,
+  "description": "Supervised-prototype harness that renders the real editor chrome (src/components/editor/*) with mock data so Editor can edit its own UI. Declares react + vite so the CLI's framework-detection resolves it as a React + Vite target; the actual deps resolve up the tree to the monorepo root node_modules (see vite.config.ts @ alias).",
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "vite": "^7.3.2"
+  }
+}

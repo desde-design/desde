@@ -1,0 +1,125 @@
+import { afterEach, describe, expect, it } from "vitest"
+import {
+  dormantSurfaceRefusal,
+  isCodeViewEnabled,
+  isCanvasEnabled,
+  isNotesEnabled,
+} from "../dormant-surfaces.js"
+
+// Every gate's env var, because this list does double duty: `setEnv` is typed
+// from it, and the save/restore around each test reads it. A surface added to
+// GATES but not here fails typecheck rather than silently leaking its variable
+// into the next case.
+const ENV_KEYS = ["EDITOR_CODE_VIEW", "EDITOR_NOTES", "EDITOR_CANVAS"] as const
+const saved = new Map<string, string | undefined>()
+
+afterEach(() => {
+  for (const key of ENV_KEYS) {
+    const was = saved.get(key)
+    if (was === undefined) delete process.env[key]
+    else process.env[key] = was
+    saved.delete(key)
+  }
+})
+
+function setEnv(key: (typeof ENV_KEYS)[number], value: string | undefined) {
+  if (!saved.has(key)) saved.set(key, process.env[key])
+  if (value === undefined) delete process.env[key]
+  else process.env[key] = value
+}
+
+/**
+ * Both gates are the same shape, so they get the same table. The point of
+ * every falsy case is that `=== true` is the mechanism: an opt-in flag whose
+ * absent state reads as enabled is not a gate.
+ */
+const GATES = [
+  { name: "codeView", read: isCodeViewEnabled, env: "EDITOR_CODE_VIEW" },
+  { name: "notes", read: isNotesEnabled, env: "EDITOR_NOTES" },
+  { name: "canvas", read: isCanvasEnabled, env: "EDITOR_CANVAS" },
+] as const
+
+describe.each(GATES)("$name gate", ({ name, read, env }) => {
+  it("is dormant with no editor block at all", () => {
+    expect(read({})).toBe(false)
+  })
+
+  it("is dormant when the editor block omits the key", () => {
+    expect(read({ editor: {} })).toBe(false)
+  })
+
+  it("is dormant on an explicit false", () => {
+    expect(read({ editor: { [name]: false } })).toBe(false)
+  })
+
+  it("is dormant on a truthy value that is not true", () => {
+    // A config typo must not open the gate.
+    expect(read({ editor: { [name]: 1 } as never })).toBe(false)
+    expect(read({ editor: { [name]: "true" } as never })).toBe(false)
+  })
+
+  it("is enabled on an explicit true", () => {
+    expect(read({ editor: { [name]: true } })).toBe(true)
+  })
+
+  it("is enabled by the env var alone", () => {
+    setEnv(env, "1")
+    expect(read({})).toBe(true)
+  })
+
+  it("ignores an env var set to anything other than 1", () => {
+    setEnv(env, "true")
+    expect(read({})).toBe(false)
+    setEnv(env, "0")
+    expect(read({})).toBe(false)
+  })
+
+  it("cannot be turned OFF by the env var once config says true", () => {
+    // Either source enables; neither disables, because absent already means
+    // dormant and a second way to say "off" buys nothing.
+    setEnv(env, "0")
+    expect(read({ editor: { [name]: true } })).toBe(true)
+  })
+})
+
+describe("the two gates are independent", () => {
+  it("does not leak config across surfaces", () => {
+    expect(isCodeViewEnabled({ editor: { notes: true } })).toBe(false)
+    expect(isNotesEnabled({ editor: { codeView: true } })).toBe(false)
+  })
+
+  it("does not leak env vars across surfaces", () => {
+    setEnv("EDITOR_NOTES", "1")
+    expect(isNotesEnabled({})).toBe(true)
+    expect(isCodeViewEnabled({})).toBe(false)
+  })
+})
+
+describe("dormantSurfaceRefusal", () => {
+  it("names the config key and the env var, so a caller can act on it", () => {
+    const reason = dormantSurfaceRefusal("codeView", "The in-app code view")
+    expect(reason).toContain("The in-app code view is dormant")
+    expect(reason).toContain('"codeView": true')
+    expect(reason).toContain(".desde/config.json")
+    expect(reason).toContain("EDITOR_CODE_VIEW=1")
+  })
+
+  it("names the right env var per surface", () => {
+    expect(dormantSurfaceRefusal("notes", "Notes")).toContain("EDITOR_NOTES=1")
+    expect(dormantSurfaceRefusal("notes", "Notes")).not.toContain("EDITOR_CODE_VIEW")
+    // The third arm was added when canvas joined. A chained ternary is
+    // exactly where a new surface silently inherits the previous one's env
+    // var, so assert the name AND the absence of its neighbours.
+    expect(dormantSurfaceRefusal("canvas", "Canvas")).toContain("EDITOR_CANVAS=1")
+    expect(dormantSurfaceRefusal("canvas", "Canvas")).not.toContain("EDITOR_NOTES")
+    expect(dormantSurfaceRefusal("canvas", "Canvas")).not.toContain("EDITOR_CODE_VIEW")
+  })
+
+  it("reads as a sentence, per the repo's copy rules", () => {
+    for (const surface of ["codeView", "notes", "canvas"] as const) {
+      const reason = dormantSurfaceRefusal(surface, "X")
+      expect(reason).not.toContain("—")
+      expect(reason.endsWith(".")).toBe(true)
+    }
+  })
+})

@@ -1,0 +1,21 @@
+/*
+ * Tailwind v4 entry for the viewer surface gallery.
+ *
+ * Mirrors `viewer/app/globals.css`: import the repo-root globals.css for the
+ * shared theme tokens, then pin `@source` at the real component trees.
+ * Tailwind v4 scans from THIS file's directory by default, so without the
+ * directives below the gallery builds and renders completely unstyled.
+ *
+ * `../../app` is the one line that differs from the viewer's own entry, and
+ * it is the load-bearing one: the screens under review live there, so every
+ * utility class this gallery must show is only visible to the scanner through
+ * it.
+ */
+@import "../../../src/styles/globals.css";
+
+@source "../../app/**/*.{ts,tsx}";
+@source "../fixtures/**/*.{ts,tsx}";
+@source "../*.tsx";
+@source "./**/*.{ts,tsx}";
+@source "../../../src/components/**/*.{ts,tsx}";
+@source "../../../src/lib/**/*.{ts,tsx}";

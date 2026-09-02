@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: mailto:security@desde.design
+    about: >-
+      Do not open a public issue for a security vulnerability. Email
+      security@desde.design instead. See SECURITY.md for what to include
+      and what to expect.
+  - name: General question or contact
+    url: mailto:hello@desde.design
+    about: For anything that is not a bug, a feature request, or a security report.

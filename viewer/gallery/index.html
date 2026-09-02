@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en" data-theme="teal">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Viewer surface gallery</title>
+    <!-- The same three families the shipped viewer loads. The gallery is the
+         instrument these screens get reviewed in, so it has to render the type
+         the product actually ships; without them every review happens in the
+         system fallback. Kept in step with `editor-cli/self-host/index.html`. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=Fira+Code:wght@300..700&family=Playfair+Display:ital,wght@0,400..900;1,400..900&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/harness/main.tsx"></script>
+  </body>
+</html>

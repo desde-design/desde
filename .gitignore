@@ -1,0 +1,149 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# deploy
+.deploy-logs
+
+# dependencies — node_modules at ANY depth (nested functions/*/node_modules,
+# mcp-server/node_modules, etc. were previously committed; Dockerfiles reinstall
+# via `npm ci`, so these are never deploy artifacts). Keeping them out of git
+# also keeps Grep/Glob from sweeping ~44k vendor files.
+# NOTE: no trailing slash — a trailing-slash pattern matches directories ONLY,
+# which lets a `node_modules` *symlink* (what Composer worktrees create) slip
+# past the ignore and get committed via `git add -A`. A self-referential symlink
+# committed this way poisons the main checkout ("too many levels of symbolic
+# links"). Match the name regardless of file type.
+node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# compiled function output — Cloud Run images COPY these from the build context,
+# so the tracked copies stay on disk and keep deploying; gitignoring them only
+# stops Grep/Glob from reading compiled .js/.d.ts/.map noise (incl. the 5.8k-line
+# minified dist/bridge-bundle.js, which IS tracked via the negation below).
+# Note `dist/*` not `dist/` — git will not descend into an ignored DIRECTORY,
+# so a negation inside one never matches. Already-tracked files remain
+# tracked — modifications still show in `git status`. New files need `git add -f`.
+dist/*
+!dist/bridge-bundle.js
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+# ...but DO commit the templates so a fresh clone is reproducible
+!.env.example
+!**/.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# emulator runtime logs
+*-debug.log
+
+# emulator data snapshot (kept locally, not committed)
+
+# substrate prototype (untracked; lives as its own git repo locally)
+/ai-gateway-prototype
+
+# verify-host.mts fixtures for the Next.js and React Router hosts — same
+# precedent as /ai-gateway-prototype above: untracked, each its own git repo
+# locally. See tasks/scripts/verify-host.mts and tasks/dev-server-hosts.md § 10a.
+/next-fixture
+/react-router-fixture
+
+# composer LLM-patch backups — written before each llm-patch save into
+# the prototype root; designer can recover originals from disk if a
+# patch goes wrong. Pruned manually; .desde/ is .gitignore'd in
+# every prototype that this composer touches.
+#
+# ONE exception is tracked anyway: `editor-cli/demo/.desde/config.json`, the
+# bundled demo's pre-filled viewer link, which is what makes "Open in viewer"
+# and "Copy link" work on first launch with no setup. It is tracked via
+# `git add -f`, NOT via a negation here. A negation cannot work: the CLI's own
+# `ensureLocallyIgnored` writes `.desde/` into `.git/info/exclude` on every
+# boot, and that is the directory form, so git never descends far enough to
+# evaluate one. Already-tracked files stay tracked regardless, so the force-add
+# only has to happen once. If you regenerate that file, force-add it again.
+.desde/
+
+# Phase 0 spike report JSONs — generated per run, large, churn-prone.
+tasks/composer-agent-sdk-phase-0-*-report.json
+
+# Verify harness artifacts (screenshots, logs, report.json) — generated per run.
+tasks/.verify-artifacts/
+.verify-artifacts/
+
+# Local Claude Code git worktrees — ephemeral per-session checkouts, were
+# previously committed as an accidental gitlink (no .gitmodules). Never tracked.
+.claude/worktrees/
+
+# Scheduler lock — holds a live session id, pid and process start time. Machine
+# state, rewritten every time a session takes the lock, so it churned the diff
+# on every run and could never merge cleanly between two checkouts. Untracked
+# 2026-08-13; the file is still written, just not versioned.
+.claude/scheduled_tasks.lock
+
+# SDD (subagent-driven-development) scratch workspace — ledger, briefs, review packages
+.superpowers/
+
+# Playwright MCP output (console logs, traces) — tool debris, not source
+.playwright-mcp/
+
+# Surface-gallery screenshots — regenerated per run by
+# tasks/scripts/surface-gallery-shots.mts, churn-prone, large.
+tasks/screenshots/surfaces/
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# NOT the repo's .gitignore. This file is a source list, private-repo-only.
+#
+# tasks/scripts/build-public-tree.mts appends these lines to the built
+# public tree's .gitignore (or a future "relayering" step does the same, if
+# Mo ends up syncing the public repo some other way). It never ships as
+# .gitignore itself.
+#
+# Why these lines exist: on disk, in the layout Mo works in, these
+# directories are nested private git repos (tasks/, docs/, website/,
+# .claude/ each keep their own .git, tracked only
+# on the private side). The public repo's .gitignore has to ignore them, or
+# its own git could see and stage their contents.
+#
+# This list is the same as EXCLUDED_PREFIXES in build-public-tree.mts, and
+# the same as the prefix list in .github/workflows/guard-private-paths.yml
+# and tasks/scripts/guard-private-paths.sh. If you add or remove a prefix,
+# update all four places.
+# ─────────────────────────────────────────────────────────────────────────
+
+tasks/
+docs/
+website/
+.claude/
+CLAUDE.md
+src/editor/CLAUDE.md

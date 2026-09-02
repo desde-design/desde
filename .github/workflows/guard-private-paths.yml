@@ -1,0 +1,110 @@
+name: Guard private paths
+
+# This workflow only matters in the PUBLIC repo (desde-design/desde). It
+# fails the build if anything private is ever tracked there.
+#
+# Why this exists: a secret already reached this project's private history
+# once, by accident, when a data directory got committed during a rename.
+# That directory held a real session secret and two real email addresses.
+# Deleting it from a later commit does not delete it from history, and a
+# public repo cannot un-publish. This workflow is what makes that mistake
+# impossible to repeat here: it checks the tracked file list on every push
+# and every pull request, not just the diff.
+#
+# Two things it checks:
+#   1. Nothing is tracked under a private-repo-only prefix (tasks/, the
+#      internal docs directories, website/, .claude/). Those directories
+#      exist on disk here as nested private git repos and must stay
+#      gitignored, never tracked. See .gitignore.public in the private repo
+#      for where that gitignore rule comes from.
+#   2. Nothing tracked looks secret-shaped by name: an .env file (other than
+#      the checked-in .env.example), a *.p8/*.pem/*.key file, or a path
+#      under a viewer data directory (.desde-viewer, or its old name
+#      .prototools-viewer). That old name is exactly what leaked before.
+#
+# Plain shell, no third-party action. actions/checkout is GitHub's own, and
+# is only here to get the tree onto the runner.
+#
+# A local mirror of this same check lives in the private repo at
+# tasks/scripts/guard-private-paths.sh, for running before a push. It can't
+# live in this one file: that script is under tasks/, and tasks/ is one of
+# the very prefixes this workflow forbids, so it never reaches this repo.
+# The prefix list below is kept in sync with that script by hand. See the
+# comment in guard-private-paths.sh pointing back here.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  guard-private-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail if any private path is tracked
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Keep in sync with PRIVATE_PREFIXES in
+          # tasks/scripts/guard-private-paths.sh (private repo only).
+          PRIVATE_PREFIXES=(
+            "tasks/"
+            "docs/"
+            "website/"
+            ".claude/"
+          )
+
+          fail=0
+          tracked="$(git ls-files)"
+
+          for prefix in "${PRIVATE_PREFIXES[@]}"; do
+            matches="$(printf '%s\n' "$tracked" | grep "^${prefix}" || true)"
+            if [ -n "$matches" ]; then
+              echo "::error::Tracked files under private prefix '$prefix':"
+              echo "$matches" | sed 's/^/  /'
+              fail=1
+            fi
+          done
+
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            base="$(basename "$path")"
+
+            case "$base" in
+              CLAUDE.md)
+                echo "::error::Tracked agent-instruction file: $path"
+                fail=1
+                ;;
+              .env)
+                echo "::error::Tracked env file: $path"
+                fail=1
+                ;;
+              .env.*)
+                if [ "$base" != ".env.example" ]; then
+                  echo "::error::Tracked env file: $path"
+                  fail=1
+                fi
+                ;;
+              *.p8 | *.pem | *.key)
+                echo "::error::Tracked key or certificate file: $path"
+                fail=1
+                ;;
+            esac
+
+            case "$path" in
+              */.desde-viewer/* | .desde-viewer/* | */.prototools-viewer/* | .prototools-viewer/*)
+                echo "::error::Tracked viewer data directory: $path"
+                fail=1
+                ;;
+            esac
+          done <<<"$tracked"
+
+          if [ "$fail" -ne 0 ]; then
+            echo ""
+            echo "One or more private paths are tracked in this repo. See this workflow's header for why that must never happen."
+            exit 1
+          fi
+
+          echo "guard-private-paths: OK"

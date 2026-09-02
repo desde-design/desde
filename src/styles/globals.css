@@ -1,0 +1,795 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/*
+ * Chillax — the wordmark face, self-hosted.
+ *
+ * Declared AFTER the @import lines, not before them: CSS requires @import
+ * to precede every other rule, so an @font-face above them makes the imports
+ * invalid. Tailwind then emitted no utilities at all — `font-display` and
+ * `font-bold` silently stopped applying while `text-primary`, already in the
+ * browser's cached sheet, kept working. MEASURED 2026-08-26.
+ *
+ * The file sits beside this stylesheet rather than in either surface's
+ * `public/`, because BOTH bundlers resolve a relative `url()` in CSS into
+ * their own asset pipeline: Next for the Viewer, Vite for the Editor UI and
+ * both galleries. One copy, four surfaces, no per-surface static route to
+ * keep in sync.
+ *
+ * The variable cut, not six static ones: 55KB against ~22KB for a single
+ * weight, in exchange for every weight 200-700 being a CSS number away. For
+ * one wordmark on one line that trade is worth it — the alternative is
+ * another download the next time the weight is wrong.
+ *
+ * `swap`: the wordmark is five letters of decoration, and blocking first
+ * paint on it would be the tail wagging the dog.
+ *
+ * Licence: Fontshare / Indian Type Foundry Free Font License, in
+ * `fonts/Chillax-LICENSE.txt`. It permits self-hosting via @font-face and
+ * explicitly permits wordmarks. It PROHIBITS redistributing the font itself
+ * through a repository — see that file's Section 02, and this repo's
+ * `docs/design.md` for what that means before the Viewer ships to anyone who
+ * self-hosts it.
+ */
+@font-face {
+  font-family: "Chillax";
+  /* `format("woff2")`, not the legacy `woff2-variations`: the variable axes
+     work either way, and the older keyword is rejected outright by some
+     engines, which drops the only src and fails the whole face. */
+  src: url("./fonts/Chillax-Variable.woff2") format("woff2");
+  font-weight: 200 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  /* Three faces, three jobs (set 2026-08-13).
+
+     Families are named LITERALLY here, with no `var()` indirection. The
+     previous value was `var(--font-be-vietnam-pro, "Be Vietnam Pro")`, a Next
+     font-loader variable that only ever existed on the Next shell's <body>.
+     That shell is gone (`src/app/` no longer exists), and a bare
+     `var(--undefined)` makes the whole font-family declaration invalid — so
+     `--font-sans` computed to the EMPTY STRING and `font-sans` was a silent
+     no-op everywhere the editor actually runs. Keep these literal.
+
+     Both HTML surfaces that mount this bundle must load all three families:
+     `editor-cli/ui-src/index.html` (the real CLI UI, and therefore the desktop
+     app) and `editor-cli/self-host/index.html` (the surface gallery). Adding a
+     family here without adding it there renders the system fallback. */
+  --font-sans: "DM Sans", sans-serif;
+  /* Fira Code's programming ligatures do NOT fire here, and that is the
+     wanted state — but it is worth knowing it is not the state you would
+     guess. MEASURED in the running app at 34px: `=> != ===` renders as plain
+     characters by default, identical to `font-variant-ligatures: none`, while
+     `font-feature-settings: "calt" 1, "liga" 1` renders the real ⇒ ≠ ≡. So
+     the ligature tables ARE in the font Google serves; the browser just does
+     not enable them for a monospace-classified family on its own.
+
+     Leaving them off suits what `font-mono` actually carries here: paths,
+     selectors, CSS values, package specs, ids. Those are strings to be read
+     character by character, not expressions — a `->` inside a path or a `!=`
+     inside a selector silently becoming one glyph is a misreading risk with
+     no upside. Turn them on per call site if a genuine code block ever wants
+     them; do not turn them on globally.
+
+     Do not "fix" this by width-testing: a monospace ligature keeps the same
+     advance, so all three states measure identically (72.27px for `=>` at
+     60px). Only rendered pixels can tell them apart. */
+  --font-mono: "Fira Code", monospace;
+  /* Logo/wordmark only. `font-display` belongs on the wordmark and nothing
+     else — at rail sizes a display face is decoration, not information.
+
+     Chillax (Mo, 2026-08-26), replacing Playfair Display. SELF-HOSTED, and
+     the only face here that is: the other three come from the Google CDN,
+     and Chillax is Fontshare's, whose CSS API answered "Access to the
+     Fontshare API has been temporarily restricted" when this was wired up.
+     Self-hosting is also what its licence recommends, and it is the right
+     posture for a product that ships to be self-hosted and run offline.
+
+     Variable across wght 200-700, so the wordmark can be asked for a weight
+     — but `body` sets 300 app-wide, so it pins its own rather than
+     inheriting one (see `blocks/wordmark.tsx`).
+
+     `--font-serif` below stays Playfair, which is still loaded from the CDN
+     link every surface carries. */
+  --font-display: "Chillax", ui-sans-serif, system-ui, sans-serif;
+  /* Dense-UI type scale, ANCHORED ON 13px (2026-08-11).
+     Use these, never text-[Npx].
+
+     `base` is 13 because 13 is this product's body size. That sounds obvious
+     and it is the thing the scale got wrong for a year: `base` was Tailwind's
+     16px, nothing used it, and the text people actually read was two and three
+     steps BELOW base, in a bolt-on micro-tier (`3xs`/`2xs`) invented to reach
+     down there. 306 of 425 type classes in `src/` sat under `base`. A scale
+     whose base is unused is not a scale, it is a document ramp with a tool
+     bolted underneath.
+
+     Two things happened at once and they are worth keeping apart. The whole
+     ramp shifted one name down, which moved no pixels by itself: `base` now
+     names the size the panels are actually set in. Separately the ramp came
+     down a notch — the three steps below `base` are unchanged, everything from
+     the old `sm` up lost 1px (2 at the top).
+
+     `3xs` is gone because the floor is reachable without it, so what remains
+     below base is two steps, not three, and each means something: `sm` is
+     dense body, `xs` is the rail workhorse, `2xs` is an input label.
+
+     THE FLOOR IS 10px AND IT IS SANS-ONLY. `2xs` is where the right rail
+     labels a control without competing with it. Nothing goes below it. (It
+     spent an afternoon at 9px, which measured a little too small to read.)
+     Mono does not go there at all: measured on JetBrains Mono, 11px is where
+     the face stops being legible and starts being decorative, so `text-xs` is
+     the floor for anything in `font-mono` and `text-2xs` is the floor for
+     anything else. A mono value at `text-2xs` is a bug, not a density choice.
+     (That measurement predates the 2026-08-13 face changes and has not been
+     re-run on Fira Code. The floor stands until it is.)
+
+     Each size carries its own line-height, and that is the whole point: leading
+     belongs to the size, so `text-base` alone is always correct and there is
+     never a second value to remember. The micro sizes used to be font-size
+     only, which meant they INHERITED their container's leading; inside a
+     primitive that was 1.625, so a 10px label sat in a 16.25px box while the
+     12px text beside it was tighter. Smallest type was the airiest on screen.
+
+     Ratios tighten as size drops, which is how a type scale normally behaves.
+
+     Declared here rather than by moving the root font size, which is the
+     obvious-looking lever and the wrong one. Tailwind's `--spacing` is rem too,
+     so a 13px root would shrink padding, gaps, control heights and dialog
+     widths by 19% along with the type, and every step below base would land on
+     a fraction. It also scales against the reader's own browser default, which
+     is the one size on the page that is not ours to choose. `body` takes
+     `--text-base` instead (see @layer base), so unclassed text is on-scale
+     without dragging the geometry with it.
+
+     NOT to be confused with `FONT_SIZE_VALUES` in
+     `src/components/editor/tailwind-declarations.ts`. That table is Tailwind's
+     STOCK ramp, and it is how the editor interprets a class in the CUSTOMER's
+     prototype. It must keep saying `sm = 0.875rem` no matter what we set here;
+     changing it would make the cascade panel lie about someone else's app. */
+  --text-2xs: 0.625rem; /* 10px — the floor: input labels in the rail. SANS ONLY. */
+  --text-2xs--line-height: 1.3;
+  --text-xs: 0.6875rem; /* 11px — the rail workhorse, and the mono floor */
+  --text-xs--line-height: 1.35;
+  --text-sm: 0.75rem; /* 12px — dense body outside the rail */
+  /* Matches `base`. Both are body text that WRAPS, at two densities, and the
+     ramp's logic is role rather than a pure typographic curve: the two rail
+     sizes below are tight because they are single-line furniture, and the
+     headings above tighten again because they are large and short. Followed
+     `base` down from 1.45 on 2026-08-17 rather than being left stranded above
+     it, which had inverted the ramp at one step. */
+  --text-sm--line-height: 1.4;
+  --text-base: 0.8125rem; /* 13px — THE body size. Dialog copy, option cards. */
+  --text-base--line-height: 1.4; /* was 1.45, tightened 2026-08-17 */
+  --text-lg: 0.9375rem; /* 15px — dialog titles */
+  --text-lg--line-height: 1.5;
+  --text-xl: 1.0625rem; /* 17px */
+  --text-xl--line-height: 1.5;
+  --text-2xl: 1.1875rem; /* 19px */
+  --text-2xl--line-height: 1.4;
+  --text-3xl: 1.375rem; /* 22px — the largest thing in the product */
+  --text-3xl--line-height: 1.3;
+  /* MONO IS ITS OWN SCALE, on purpose.
+     Pairing `font-mono` with a sans step couples two faces that do not share a
+     floor. Measured on the original pair (JetBrains Mono + Be Vietnam Pro):
+     the mono stopped being legible around 11px where the sans still read at
+     10, so 16 mono sites sitting on the sans floor were already under their
+     own limit — and a sans retune could push them further without anyone
+     noticing. Every face on the page was re-picked over one afternoon
+     (2026-08-13) and settled on DM Sans + Fira Code + Playfair Display; the
+     argument did not move, because two unrelated faces never share an
+     x-height, which is exactly why the scales are separate. That separation
+     is also what kept each of those swaps to a couple of lines, and why the
+     sans could be changed three times without anything mono moving. Two steps
+     is all mono needs, and its own names mean the next sans change cannot
+     reach it.
+       text-code    dense: inline keys, paths, selectors, ids in the rail
+       text-code-lg an exact value the user is meant to read, in a dialog */
+  --text-code: 0.6875rem; /* 11px — the mono FLOOR. Nothing mono goes below. */
+  --text-code--line-height: 1.4;
+  --text-code-lg: 0.8125rem; /* 13px — mono at body size */
+  --text-code-lg--line-height: 1.45;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  /* Semantic feedback + domain tokens (intentional colors beyond the core
+     shadcn palette). Drive utilities like bg-success, text-warning,
+     border-boxmodel-margin, bg-note. */
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning-strong: var(--warning-strong);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-note: var(--note);
+  --color-note-foreground: var(--note-foreground);
+  --color-component: var(--component);
+  --color-component-foreground: var(--component-foreground);
+  --color-status-concept: var(--status-concept);
+  --color-status-in-design: var(--status-in-design);
+  --color-status-dev-ready: var(--status-dev-ready);
+  --color-boxmodel-margin: var(--boxmodel-margin);
+  --color-boxmodel-border: var(--boxmodel-border);
+  --color-boxmodel-padding: var(--boxmodel-padding);
+  --color-boxmodel-content: var(--boxmodel-content);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  --font-serif: "Playfair Display", serif;
+  --radius: 0.5rem;
+  --tracking-tighter: calc(var(--tracking-normal) - 0.05em);
+  --tracking-tight: calc(var(--tracking-normal) - 0.025em);
+  --tracking-wide: calc(var(--tracking-normal) + 0.025em);
+  --tracking-wider: calc(var(--tracking-normal) + 0.05em);
+  --tracking-widest: calc(var(--tracking-normal) + 0.1em);
+  --tracking-normal: var(--tracking-normal);
+  --shadow-2xl: var(--shadow-2xl);
+  --shadow-xl: var(--shadow-xl);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-md: var(--shadow-md);
+  --shadow: var(--shadow);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-xs: var(--shadow-xs);
+  --shadow-2xs: var(--shadow-2xs);
+  --spacing: var(--spacing);
+  --letter-spacing: var(--letter-spacing);
+  --shadow-offset-y: var(--shadow-offset-y);
+  --shadow-offset-x: var(--shadow-offset-x);
+  --shadow-spread: var(--shadow-spread);
+  --shadow-blur: var(--shadow-blur);
+  --shadow-opacity: var(--shadow-opacity);
+  --color-shadow-color: var(--shadow-color);
+  --color-destructive-foreground: var(--destructive-foreground);
+}
+
+:root {
+  --radius: 0.5rem;
+  --background: oklch(0.976 0.004 92); /* #f8f7f4 */
+  --foreground: oklch(0.147 0.004 49.25);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.147 0.004 49.25);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.147 0.004 49.25);
+  --primary: oklch(0.216 0.006 56.043);
+  --primary-foreground: oklch(0.985 0.001 106.423);
+  --secondary: oklch(0.97 0.001 106.424);
+  --secondary-foreground: oklch(0.216 0.006 56.043);
+  --muted: oklch(0.925 0.007 92); /* warm gray matching #f8f7f4 bg, darker */
+  --muted-foreground: oklch(0.553 0.013 58.071);
+  --accent: oklch(0.97 0.001 106.424);
+  --accent-foreground: oklch(0.216 0.006 56.043);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.923 0.003 48.717);
+  --input: oklch(0.923 0.003 48.717);
+  --ring: oklch(0.709 0.01 56.259);
+  --chart-1: oklch(0.869 0.005 56.366);
+  --chart-2: oklch(0.553 0.013 58.071);
+  --chart-3: oklch(0.444 0.011 73.639);
+  --chart-4: oklch(0.374 0.01 67.558);
+  --chart-5: oklch(0.268 0.007 34.298);
+  --sidebar: oklch(0.985 0.001 106.423);
+  --sidebar-foreground: oklch(0.147 0.004 49.25);
+  --sidebar-primary: oklch(0.216 0.006 56.043);
+  --sidebar-primary-foreground: oklch(0.985 0.001 106.423);
+  --sidebar-accent: oklch(0.97 0.001 106.424);
+  --sidebar-accent-foreground: oklch(0.216 0.006 56.043);
+  --sidebar-border: oklch(0.923 0.003 48.717);
+  --sidebar-ring: oklch(0.709 0.01 56.259);
+  --destructive-foreground: oklch(0.985 0.001 106.423);
+  /* Must stay byte-identical to the @theme inline values above: these are what
+     a direct `var(--font-mono)` reads (chat-thread.tsx does exactly that), so
+     changing a family in one place and not the other splits the app in two. */
+  --font-sans: "DM Sans", sans-serif;
+  --font-serif: "Playfair Display", serif;
+  --font-mono: "Fira Code", monospace;
+  --font-display: "Chillax", ui-sans-serif, system-ui, sans-serif;
+  --shadow-color: #000000;
+  --shadow-opacity: 0.1;
+  --shadow-blur: 10px;
+  --shadow-spread: 0px;
+  --shadow-offset-x: 0px;
+  --shadow-offset-y: 4px;
+  --letter-spacing: 0.01em;
+  --spacing: 0.25rem;
+  --shadow-2xs: 0px 4px 10px 0px hsl(0 0% 0% / 0.05);
+  --shadow-xs: 0px 4px 10px 0px hsl(0 0% 0% / 0.05);
+  --shadow-sm: 0px 4px 10px 0px hsl(0 0% 0% / 0.10), 0px 1px 2px -1px hsl(0 0% 0% / 0.10);
+  --shadow: 0px 4px 10px 0px hsl(0 0% 0% / 0.10), 0px 1px 2px -1px hsl(0 0% 0% / 0.10);
+  --shadow-md: 0px 4px 10px 0px hsl(0 0% 0% / 0.10), 0px 2px 4px -1px hsl(0 0% 0% / 0.10);
+  --shadow-lg: 0px 4px 10px 0px hsl(0 0% 0% / 0.10), 0px 4px 6px -1px hsl(0 0% 0% / 0.10);
+  --shadow-xl: 0px 4px 10px 0px hsl(0 0% 0% / 0.10), 0px 8px 10px -1px hsl(0 0% 0% / 0.10);
+  --shadow-2xl: 0px 4px 10px 0px hsl(0 0% 0% / 0.25);
+  --tracking-normal: 0.01em;
+  /* Semantic feedback + domain colors (light) */
+  --success: oklch(0.627 0.155 149.2);
+  --success-foreground: oklch(0.985 0.001 106.423);
+  --warning: oklch(0.769 0.146 70.08);
+  --warning-foreground: oklch(0.216 0.006 56.043);
+  /* Amber text ON a warning-tinted surface.
+     `--warning` is L=0.769 and the page ground is L=0.976, so amber-on-tint
+     was barely darker than the box it sat in — MEASURED as the lowest-contrast
+     copy in the product. `--warning-foreground` is the wrong fix: it is
+     near-black, for a SOLID amber fill, and on a 10% tint it throws the tone
+     away entirely. Same hue, same family, dark enough to read. */
+  --warning-strong: oklch(0.50 0.155 58);
+  --info: oklch(0.605 0.13 250.2);
+  --info-foreground: oklch(0.985 0.001 106.423);
+  --note: oklch(0.918 0.06 350.5);
+  --note-foreground: oklch(0.32 0.04 350.5);
+  --component: oklch(0.575 0.135 190);
+  --component-foreground: oklch(0.985 0.001 106.423);
+  --status-concept: oklch(0.605 0.13 250.2);
+  --status-in-design: oklch(0.769 0.146 70.08);
+  --status-dev-ready: oklch(0.627 0.155 149.2);
+  --boxmodel-margin: oklch(0.705 0.16 52);
+  --boxmodel-border: oklch(0.8 0.13 88);
+  --boxmodel-padding: oklch(0.66 0.16 150);
+  --boxmodel-content: oklch(0.605 0.13 250.2);
+}
+
+.dark {
+  --background: oklch(0.2161 0.0061 56.0434); /* solar-dusk background */
+  --foreground: oklch(0.985 0.001 106.423);
+  --card: oklch(0.216 0.006 56.043);
+  --card-foreground: oklch(0.985 0.001 106.423);
+  --popover: oklch(0.216 0.006 56.043);
+  --popover-foreground: oklch(0.985 0.001 106.423);
+  --primary: oklch(0.923 0.003 48.717);
+  --primary-foreground: oklch(0.216 0.006 56.043);
+  --secondary: oklch(0.268 0.007 34.298);
+  --secondary-foreground: oklch(0.985 0.001 106.423);
+  --muted: oklch(0.268 0.007 34.298);
+  --muted-foreground: oklch(0.709 0.01 56.259);
+  --accent: oklch(0.268 0.007 34.298);
+  --accent-foreground: oklch(0.985 0.001 106.423);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.553 0.013 58.071);
+  --chart-1: oklch(0.869 0.005 56.366);
+  --chart-2: oklch(0.553 0.013 58.071);
+  --chart-3: oklch(0.444 0.011 73.639);
+  --chart-4: oklch(0.374 0.01 67.558);
+  --chart-5: oklch(0.268 0.007 34.298);
+  --sidebar: oklch(0.216 0.006 56.043);
+  --sidebar-foreground: oklch(0.985 0.001 106.423);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0.001 106.423);
+  --sidebar-accent: oklch(0.268 0.007 34.298);
+  --sidebar-accent-foreground: oklch(0.985 0.001 106.423);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.553 0.013 58.071);
+  --destructive-foreground: oklch(0.985 0.001 106.423);
+  --radius: 0.5rem;
+  --font-sans: "DM Sans", sans-serif;
+  --font-serif: "Playfair Display", serif;
+  --font-mono: "Fira Code", monospace;
+  --font-display: "Chillax", ui-sans-serif, system-ui, sans-serif;
+  --shadow-color: #000000;
+  --shadow-opacity: 0.3;
+  --shadow-blur: 15px;
+  --shadow-spread: 0px;
+  --shadow-offset-x: 0px;
+  --shadow-offset-y: 6px;
+  --letter-spacing: 0.01em;
+  --spacing: 0.25rem;
+  --shadow-2xs: 0px 6px 15px 0px hsl(0 0% 0% / 0.15);
+  --shadow-xs: 0px 6px 15px 0px hsl(0 0% 0% / 0.15);
+  --shadow-sm: 0px 6px 15px 0px hsl(0 0% 0% / 0.30), 0px 1px 2px -1px hsl(0 0% 0% / 0.30);
+  --shadow: 0px 6px 15px 0px hsl(0 0% 0% / 0.30), 0px 1px 2px -1px hsl(0 0% 0% / 0.30);
+  --shadow-md: 0px 6px 15px 0px hsl(0 0% 0% / 0.30), 0px 2px 4px -1px hsl(0 0% 0% / 0.30);
+  --shadow-lg: 0px 6px 15px 0px hsl(0 0% 0% / 0.30), 0px 4px 6px -1px hsl(0 0% 0% / 0.30);
+  --shadow-xl: 0px 6px 15px 0px hsl(0 0% 0% / 0.30), 0px 8px 10px -1px hsl(0 0% 0% / 0.30);
+  --shadow-2xl: 0px 6px 15px 0px hsl(0 0% 0% / 0.75);
+  /* Semantic feedback + domain colors (dark) */
+  --success: oklch(0.696 0.16 152.5);
+  --success-foreground: oklch(0.16 0.004 49.25);
+  --warning: oklch(0.828 0.15 76);
+  --warning-foreground: oklch(0.16 0.004 49.25);
+  /* On a dark ground the tint is dark, so the light amber is already the
+     readable one. Dark mode is not designed yet; this exists so the var
+     always resolves rather than as a considered dark-mode value. */
+  --warning-strong: oklch(0.828 0.15 76);
+  --info: oklch(0.68 0.14 248);
+  --info-foreground: oklch(0.16 0.004 49.25);
+  --note: oklch(0.43 0.08 350.5);
+  --note-foreground: oklch(0.95 0.03 350.5);
+  --component: oklch(0.72 0.12 190);
+  --component-foreground: oklch(0.16 0.004 49.25);
+  --status-concept: oklch(0.68 0.14 248);
+  --status-in-design: oklch(0.828 0.15 76);
+  --status-dev-ready: oklch(0.696 0.16 152.5);
+  --boxmodel-margin: oklch(0.72 0.16 52);
+  --boxmodel-border: oklch(0.82 0.13 88);
+  --boxmodel-padding: oklch(0.7 0.16 150);
+  --boxmodel-content: oklch(0.68 0.14 248);
+}
+
+/* ---------------------------------------------------------------------------
+ * Warm theme palettes — pick one with `data-theme` on <html>.
+ *
+ * Design brief: a light, *warm* surface (not plain white + gray) that stays
+ * calm enough to never compete with the prototype in the iframe. The vivid
+ * hue lands almost entirely on `--primary` — which the chrome uses sparingly
+ * (action buttons like Commit/Send, links, focus rings, a faint chat-bubble
+ * tint). The warmth of the everyday surface comes instead from very low-chroma
+ * tints on `--background` / `--muted` / `--accent` / `--border`, so the UI
+ * reads warm without the accent color shouting.
+ *
+ * Each theme ships a light block (`[data-theme="x"]`) and a dark block
+ * (`.dark[data-theme="x"]`, which only re-tints the accent tokens and leaves
+ * the shared dark neutrals from `.dark` alone). These blocks sit AFTER `:root`
+ * and `.dark` so equal-specificity ties resolve in the theme's favor.
+ *
+ * Default is `coral`; the html surfaces set `data-theme="coral"`. Switch by
+ * changing that attribute. All three primaries are tuned to read in both
+ * modes: deeper + white foreground in light, brighter + dark foreground in
+ * dark (the inverted shadcn button pattern).
+ * ------------------------------------------------------------------------- */
+
+/* ── Coral — soft red-pink pop on a rosy-warm paper (default) ─────────────── */
+[data-theme="coral"] {
+  --background: oklch(0.977 0.005 38); /* rosy warm paper */
+  --card: oklch(0.995 0.004 38);
+  --muted: oklch(0.945 0.013 32);
+  --accent: oklch(0.952 0.02 28);
+  --accent-foreground: oklch(0.3 0.06 28);
+  --border: oklch(0.912 0.012 32);
+  --input: oklch(0.912 0.012 32);
+  --primary: oklch(0.615 0.175 25);
+  --primary-foreground: oklch(0.985 0.012 30);
+  --ring: oklch(0.7 0.15 25);
+  --sidebar: oklch(0.984 0.006 38);
+  --sidebar-accent: oklch(0.952 0.02 28);
+  --sidebar-accent-foreground: oklch(0.3 0.06 28);
+  --sidebar-primary: oklch(0.615 0.175 25);
+  --sidebar-primary-foreground: oklch(0.985 0.012 30);
+  --sidebar-border: oklch(0.912 0.012 32);
+  --sidebar-ring: oklch(0.7 0.15 25);
+}
+.dark[data-theme="coral"] {
+  --primary: oklch(0.71 0.16 27);
+  --primary-foreground: oklch(0.205 0.03 27);
+  --ring: oklch(0.71 0.16 27);
+  --accent: oklch(0.305 0.03 28);
+  --accent-foreground: oklch(0.955 0.02 28);
+  --sidebar-primary: oklch(0.71 0.16 27);
+  --sidebar-primary-foreground: oklch(0.205 0.03 27);
+  --sidebar-accent: oklch(0.305 0.03 28);
+  --sidebar-accent-foreground: oklch(0.955 0.02 28);
+  --sidebar-ring: oklch(0.71 0.16 27);
+}
+
+/* ── Amber — warm orange pop on a cream paper ────────────────────────────── */
+[data-theme="amber"] {
+  --background: oklch(0.978 0.007 82); /* cream paper */
+  --card: oklch(0.996 0.005 82);
+  --muted: oklch(0.946 0.016 78);
+  --accent: oklch(0.954 0.024 72);
+  --accent-foreground: oklch(0.33 0.06 55);
+  --border: oklch(0.913 0.014 76);
+  --input: oklch(0.913 0.014 76);
+  --primary: oklch(0.63 0.16 54);
+  --primary-foreground: oklch(0.992 0.012 85);
+  --ring: oklch(0.72 0.14 60);
+  --sidebar: oklch(0.985 0.008 82);
+  --sidebar-accent: oklch(0.954 0.024 72);
+  --sidebar-accent-foreground: oklch(0.33 0.06 55);
+  --sidebar-primary: oklch(0.63 0.16 54);
+  --sidebar-primary-foreground: oklch(0.992 0.012 85);
+  --sidebar-border: oklch(0.913 0.014 76);
+  --sidebar-ring: oklch(0.72 0.14 60);
+}
+.dark[data-theme="amber"] {
+  --primary: oklch(0.76 0.15 68);
+  --primary-foreground: oklch(0.22 0.035 68);
+  --ring: oklch(0.76 0.15 68);
+  --accent: oklch(0.31 0.028 68);
+  --accent-foreground: oklch(0.958 0.022 78);
+  --sidebar-primary: oklch(0.76 0.15 68);
+  --sidebar-primary-foreground: oklch(0.22 0.035 68);
+  --sidebar-accent: oklch(0.31 0.028 68);
+  --sidebar-accent-foreground: oklch(0.958 0.022 78);
+  --sidebar-ring: oklch(0.76 0.15 68);
+}
+
+/* ── Teal — vivid blue-green pop kept warm by a neutral-warm paper ────────── */
+[data-theme="teal"] {
+  --background: oklch(0.986 0.004 92); /* warm paper, cool accent contrast */
+  --card: oklch(0.996 0.003 92);
+  --muted: oklch(0.915 0.01 90); /* tab-group track — a shade darker than card */
+  --secondary: oklch(0.915 0.01 90); /* filled secondary buttons — matches the tab-group track (--muted) */
+  --accent: oklch(0.88 0.035 195); /* hover + structure-tree highlight, darker */
+  --accent-foreground: oklch(0.34 0.06 200);
+  --border: oklch(0.913 0.007 90);
+  --input: oklch(0.913 0.007 90);
+  --primary: oklch(0.575 0.135 190);
+  --primary-foreground: oklch(0.99 0.006 190);
+  --ring: oklch(0.66 0.12 190);
+  --sidebar: oklch(0.985 0.004 92);
+  --sidebar-accent: oklch(0.88 0.035 195);
+  --sidebar-accent-foreground: oklch(0.34 0.06 200);
+  --sidebar-primary: oklch(0.575 0.135 190);
+  --sidebar-primary-foreground: oklch(0.99 0.006 190);
+  --sidebar-border: oklch(0.913 0.007 90);
+  --sidebar-ring: oklch(0.66 0.12 190);
+}
+.dark[data-theme="teal"] {
+  --primary: oklch(0.74 0.135 188);
+  --primary-foreground: oklch(0.2 0.03 195);
+  --ring: oklch(0.74 0.135 188);
+  --accent: oklch(0.31 0.03 200);
+  --accent-foreground: oklch(0.95 0.025 195);
+  --sidebar-primary: oklch(0.74 0.135 188);
+  --sidebar-primary-foreground: oklch(0.2 0.03 195);
+  --sidebar-accent: oklch(0.31 0.03 200);
+  --sidebar-accent-foreground: oklch(0.95 0.025 195);
+  --sidebar-ring: oklch(0.74 0.135 188);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    /* font-sans + antialiased live here (not only on the web shell's <body>
+       className in layout.tsx) so the CLI UI — which mounts into its own
+       index.html with an unclassed <body> — inherits the theme font globally.
+       Theming is CLI-first; the legacy Next.js shell is incidental. */
+    @apply bg-background text-foreground font-sans antialiased;
+    /* Unclassed text is `base`, not the 16px root. Once base is 13 the root
+       size is off the ramp entirely, so anything that forgot a `text-*` used
+       to render larger than the product's biggest heading. Set here rather
+       than on `html` so rem — and therefore all of Tailwind's spacing — keeps
+       answering to the reader's browser default. */
+    font-size: var(--text-base);
+    line-height: var(--text-base--line-height);
+    font-weight: 300;
+    letter-spacing: var(--tracking-normal);
+  }
+
+  /* Radix ScrollArea injects an inline-styled `<div style="min-width:100%; display:table">`
+     inside its viewport. `display:table` lets long unbreakable tokens (e.g. a CSS selector
+     string in the inspector) widen the wrapper past its parent, blowing through fixed-width
+     side panels. Force it to behave like a normal block so children honor the panel width. */
+  [data-radix-scroll-area-viewport] > div {
+    display: block !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Toasts — the banner treatment (Mo, 2026-08-18)
+
+   Sonner ships its own look, so a toast read as a different product from the
+   Alert banners and the dialogs beside it: neutral popover ground for every
+   severity, a close button hanging OUTSIDE the top-left corner, and a
+   description indented under the title rather than under the icon.
+
+   `.cn-toast` is the class `sonner.tsx` already assigned and, until now, the
+   only thing it did — nothing anywhere styled it.
+
+   ## Why every selector is `[data-sonner-toast].cn-toast.cn-toast`
+
+   MEASURED, not defensive. Sonner injects its stylesheet into `<head>` at
+   runtime, which puts it AFTER this file, so a selector of equal specificity
+   loses the tie. With a bare `.cn-toast` the grid never applied — `display`
+   computed to `flex`, the action button kept its solid near-black fill, and
+   the tones stayed Sonner's own reds rather than our tokens. Two class-level
+   selectors (0,2,0) beat its `[data-sonner-toast]` (0,1,0) on specificity, so
+   load order stops mattering. `!important` would also work and would be worse:
+   it takes the override away from any caller who legitimately needs one.
+
+   ## The layout is a grid, and it has to be
+
+   Sonner nests the title and the description together inside `[data-content]`,
+   which is why the description lines up with the TITLE by default. `display:
+   contents` on that wrapper lifts both out as direct grid children, so the
+   description can start at the icon's left edge instead:
+
+       ┌────────┬──────────────────┐
+       │  icon  │ title            │
+       ├────────┴──────────────────┤
+       │ description               │
+       └───────────────────────────┘
+
+   ## Tones mirror TONE_SURFACE
+
+   Same tokens, same /40 border and /10 fill, same `font-medium`. Warning uses
+   `--warning-strong` for the same reason the banners do: base amber on an
+   amber tint is the lowest-contrast copy in the product.
+--------------------------------------------------------------------------- */
+
+[data-sonner-toast].cn-toast.cn-toast {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  /* Column gap tightened to 0.375rem (Mo, 2026-08-18): at 0.5rem the glyph
+     read as a separate object beside the title rather than as its marker. */
+  gap: 0.125rem 0.375rem;
+  /* Room on the right for the close button, which now sits inside. */
+  padding: 0.625rem 1.75rem 0.625rem 0.75rem;
+  border-radius: var(--radius);
+  border-width: 1px;
+  font-size: var(--text-base);
+  line-height: var(--text-base--line-height);
+  font-weight: 500;
+}
+
+[data-sonner-toast].cn-toast.cn-toast [data-content] {
+  /* Lifts title + description out as direct grid children. Without this they
+     stay one column and the description indents under the title. */
+  display: contents;
+}
+
+[data-sonner-toast].cn-toast.cn-toast [data-icon] {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  /* Centred on the TITLE's line, not on the toast (Mo, 2026-08-18). Row 1 is
+     exactly the title's height, so centring within the row is centring on the
+     title — and it keeps working when the title wraps to two lines, which a
+     fixed height matched to one line box would not. */
+  align-self: center;
+  align-items: center;
+  margin: 0;
+}
+
+[data-sonner-toast].cn-toast.cn-toast [data-icon] > svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+[data-sonner-toast].cn-toast.cn-toast [data-title] {
+  grid-column: 2;
+  grid-row: 1;
+  /* 600 (Mo, 2026-08-18), one step above the body it heads. The toast as a
+     whole is already 500, so at 500 the title had no weight of its own. */
+  font-weight: 600;
+}
+
+[data-sonner-toast].cn-toast.cn-toast [data-description] {
+  /* Column 2, so it hangs off the TITLE's left edge and the icon keeps its own
+     gutter. It spanned both columns for a few hours, which put the description
+     under the icon and left the title looking indented from its own body text.
+  */
+  grid-column: 2;
+  grid-row: 2;
+  font-weight: 500;
+  /* Inherit the tone. Sonner's default drops the description to a muted grey,
+     which on a tinted ground reads as disabled text. */
+  color: inherit;
+  opacity: 0.9;
+}
+
+/* The action goes UNDER the text, not beside it (Mo, 2026-08-18), and it takes
+   the toast's own tone as an outline rather than shipping Sonner's solid black
+   pill. A filled dark button inside a red toast was the loudest thing on
+   screen and read as belonging to some other surface.
+
+   `color: inherit` + a tinted border is the same recipe the outline Buttons
+   use elsewhere, expressed in CSS because this element is Sonner's, not ours. */
+[data-sonner-toast].cn-toast.cn-toast [data-button] {
+  /* Column 2 as well: it follows the description, so it starts where the
+     description starts. */
+  grid-column: 2;
+  grid-row: 3;
+  /* Left-aligned under the text (Mo, 2026-08-18), and it takes all three
+     declarations. MEASURED in two rounds: `justify-self: start` alone
+     computed correctly and still rendered hard right, because Sonner sets
+     `margin-left: auto` on this element; adding only `margin-right: auto`
+     then balanced the two autos and centred it. Zeroing the left margin is
+     the one that actually decides it. */
+  justify-self: start;
+  margin-left: 0;
+  margin-right: auto;
+  margin-top: 0.5rem;
+  height: auto;
+  padding: 0.125rem 0.5rem;
+  border-radius: calc(var(--radius) - 2px);
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+[data-sonner-toast].cn-toast.cn-toast [data-button]:hover {
+  /* A wash of the tone rather than a fill, so hover does not become the
+     solid button this replaced. */
+  background: color-mix(in oklab, currentColor 10%, transparent);
+}
+
+/* Top-right and INSIDE, like the banners' dismiss. Sonner's default hangs it
+   off the top-left corner as a bordered circle, which is the one piece of
+   chrome that made a toast unmistakably not-ours. */
+[data-sonner-toast].cn-toast.cn-toast [data-close-button] {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  left: auto;
+  transform: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: none;
+  background: transparent;
+  /* The tone's own colour, same rule the banner X follows. */
+  color: inherit;
+  opacity: 0.6;
+}
+
+[data-sonner-toast].cn-toast.cn-toast [data-close-button]:hover {
+  /* A deeper wash of the toast's OWN tone (Mo, 2026-08-18). Sonner's default
+     hover is a grey, which on a red or green ground reads as a foreign chip
+     landing on the banner. `currentColor` is the tone's text colour here, so
+     one rule serves all four without naming any of them — and it stays
+     correct if a fifth tone is added. */
+  background: color-mix(in oklab, currentColor 15%, transparent);
+  opacity: 1;
+}
+
+/* --- Tones, mirroring src/lib/tone-surface.ts ---------------------------- */
+
+[data-sonner-toast].cn-toast.cn-toast[data-type="error"] {
+  background-color: color-mix(in oklab, var(--destructive) 10%, var(--background));
+  border-color: color-mix(in oklab, var(--destructive) 40%, transparent);
+  color: var(--destructive);
+}
+
+[data-sonner-toast].cn-toast.cn-toast[data-type="warning"] {
+  background-color: color-mix(in oklab, var(--warning) 10%, var(--background));
+  border-color: color-mix(in oklab, var(--warning) 40%, transparent);
+  color: var(--warning-strong);
+}
+
+[data-sonner-toast].cn-toast.cn-toast[data-type="success"] {
+  background-color: color-mix(in oklab, var(--success) 10%, var(--background));
+  border-color: color-mix(in oklab, var(--success) 40%, transparent);
+  color: var(--success);
+}
+
+[data-sonner-toast].cn-toast.cn-toast[data-type="info"] {
+  background-color: color-mix(in oklab, var(--info) 10%, var(--background));
+  border-color: color-mix(in oklab, var(--info) 40%, transparent);
+  color: var(--info);
+}

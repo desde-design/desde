@@ -1,0 +1,33 @@
+{
+  "name": "@desde/viewer",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "description": "Desde viewer — self-hostable prototype hosting, viewing and commenting.",
+  "type": "module",
+  "scripts": {
+    "dev": "NODE_ENV=development tsx watch server/index.ts",
+    "build": "next build",
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "dev:local": "NODE_ENV=development tsx watch --env-file=.env.local server/index.ts",
+    "start:local": "NODE_ENV=production tsx --env-file=.env.local server/index.ts",
+    "build:demo": "npm --prefix fixtures/demo-react install && npm --prefix fixtures/demo-react run build"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "nodemailer": "^9.0.5",
+    "tar": "^7.5.1",
+    "tsx": "^4.22.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "@types/node": "^24",
+    "@types/nodemailer": "^8.0.1",
+    "@types/supertest": "^6.0.2",
+    "supertest": "^7.1.1",
+    "typescript": "^5",
+    "vitest": "^4.0.18"
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "_comment_include": [
+    "No Next-generated type artifacts here (`next-env.d.ts`, `.next/types/**`,",
+    "`.next/dev/types/**`). The ROOT stopped being a Next app when `src/app/`",
+    "and `next.config.ts` were deleted 2026-08-08; the surviving Next app is",
+    "`viewer/`, which this tsconfig EXCLUDES and which carries its own.",
+    "",
+    "Those entries were not merely dead — `next-env.d.ts` carries",
+    "`/// <reference types=\"next\" />`, which loads Next's global augmentation",
+    "of `NodeJS.ProcessEnv` (`readonly NODE_ENV: 'development'|'production'|",
+    "'test'`) into every file in the repo. MEASURED 2026-08-13: that made a",
+    "required, read-only NODE_ENV apply to code that has nothing to do with",
+    "Next, producing 36 errors across three unrelated subsystems — 25 TS2345",
+    "(a test's fake env object 'missing' NODE_ENV), 6 TS2540 and 5 TS2704",
+    "(cannot assign to / delete a read-only NODE_ENV). Deleting the stale",
+    "generated `next-env.d.ts` took it to 0.",
+    "",
+    "The file is gitignored, so a fresh clone never had the problem and only",
+    "machines that once ran a root Next build did.",
+    "",
+    "The guard is the `next-env.d.ts` entry in `exclude` below, NOT its absence",
+    "from `include`. Dropping it from `include` alone is cosmetic and was",
+    "MEASURED to be: `**/*.ts` matches `next-env.d.ts` on its own, so with the",
+    "file recreated the same 36 errors returned. Only `exclude` outranks the",
+    "glob."
+  ],
+  "_excludeNote_editorCliDemo": [
+    "`editor-cli/demo` is the bundled demo prototype: a STANDALONE Vite app with",
+    "its own tsconfig, whose `@/*` alias points at its OWN src/. This config's",
+    "alias points at the repo's src/, so without this exclude the root checker",
+    "resolves the demo's imports against the wrong components and reports",
+    "whichever ones the repo happens not to have. MEASURED: it passed on button,",
+    "badge, card and switch (which exist in both trees) and failed only on",
+    "table — i.e. it was silently checking the demo against the wrong files and",
+    "would have kept doing so. Same category as viewer/, website/ and desktop/.",
+    "`editor-cli/self-host` is deliberately NOT excluded: its alias points at the",
+    "repo's src/ on purpose, so the root checker is correct there."
+  ],
+  "include": ["**/*.ts", "**/*.tsx", "**/*.mts"],
+  "exclude": [
+    "node_modules",
+    "next-env.d.ts",
+    "src/bridge",
+    "functions",
+    "tasks/scripts",
+    "scripts",
+    "src/editor/adapters/storybook/__fixtures__",
+    "src/editor/adapters/local-vue/__fixtures__",
+    "ai-gateway-prototype",
+    "editor-cli/demo",
+    "tasks/_archive",
+    "viewer",
+    "website",
+    "desktop",
+    "next-fixture",
+    "react-router-fixture"
+  ]
+}

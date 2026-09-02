@@ -1,0 +1,5 @@
+node_modules/
+dist/
+ui-src/dist/
+ui-src/node_modules/
+*.tsbuildinfo

@@ -1,0 +1,17 @@
+/*
+ * Tailwind entry for the viewer shell.
+ *
+ * Imports the repo-root globals.css so the viewer renders with exactly
+ * the same theme tokens, shadcn defaults and type scale as Editor —
+ * one central design system, no second theme to keep in sync.
+ *
+ * The @source lines are required: Tailwind v4 scans from this file's
+ * directory by default, which would miss every utility class used in
+ * ../src/components/**. Without them the page builds but renders
+ * unstyled.
+ */
+@import "../../src/styles/globals.css";
+
+@source "../../src/components";
+@source "../../src/lib";
+@source "./";

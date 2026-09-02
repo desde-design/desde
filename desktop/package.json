@@ -1,0 +1,33 @@
+{
+  "name": "@desde/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "description": "Desde Editor desktop shell (Electron). Spawns the Phase 1 CLI payload as a child process and hosts it in a BrowserWindow — see tasks/electron-app.md.",
+  "main": "dist/main.js",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "node scripts/ensure-installed.mjs && node scripts/build.mjs",
+    "start": "node scripts/ensure-installed.mjs && electron .",
+    "dev": "npm run build && electron .",
+    "package": "node scripts/ensure-installed.mjs && node scripts/package.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "pacote": "^21.5.1"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^2.5.0",
+    "@types/node": "^20",
+    "electron": "^35.7.5",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.27.3",
+    "license-checker-rseidelsohn": "^5.0.1",
+    "typescript": "^5",
+    "vitest": "^4.0.18"
+  }
+}

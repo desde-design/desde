@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Fake prototype</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        font-family: system-ui, sans-serif;
+        color: #333;
+        background: #fafafa;
+      }
+      p {
+        max-width: 32em;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      Stand-in prototype for the Viewer surface gallery's review screen. The
+      real review screen wraps whatever prototype the reviewer connected — this
+      page's only job is to be SOMETHING, so the iframe shows real content
+      instead of a broken frame.
+    </p>
+    <script>
+      // Exposed so a driven review-shell gallery fixture — running in the
+      // PARENT page, same-origin with this document in the gallery harness —
+      // can invoke a function whose home realm is THIS window and have it
+      // call `window.parent.postMessage`. That is the only way to make the
+      // received message's `event.source` genuinely equal this iframe's
+      // `contentWindow`, which is exactly what
+      // `viewer/app/review/use-viewer-comment-bridge.ts` checks before
+      // trusting a message. A plain `window.postMessage(...)` called from the
+      // fixture's OWN script would carry the fixture's window as `source`
+      // instead — `source` is always the CALLING realm, not the object a
+      // method happens to be invoked on — and the bridge hook would silently
+      // ignore it. Calling a function that lives in this iframe's realm, even
+      // from outside it, runs it WITH this realm current: the ordinary
+      // mechanism behind any cross-frame call, not a hack specific to this
+      // harness.
+      window.__desdeFireBridgeMessage = function (message) {
+        window.parent.postMessage(message, "*")
+      }
+    </script>
+  </body>
+</html>

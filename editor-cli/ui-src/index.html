@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en" data-theme="teal">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Desde Editor</title>
+    <!-- The three families globals.css names: DM Sans (--font-sans), Fira
+         Code (--font-mono), Playfair Display (--font-display, wordmark only,
+         and also what --font-serif points at). Nothing else loads them for
+         this bundle, so
+         a family named in globals.css and not requested here renders as the
+         system fallback with no error anywhere: no console warning, no failed
+         request, just the wrong type. That is not hypothetical — it is what
+         JetBrains Mono did for as long as it was named, so every `font-mono`
+         site in the app was quietly rendering in the OS default monospace.
+         Change a family in globals.css, change it here.
+         `editor-cli/self-host/index.html` (the surface gallery) carries the
+         same block and must be kept in step, or the gallery reviews type the
+         product does not ship. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=Fira+Code:wght@300..700&family=Playfair+Display:ital,wght@0,400..900;1,400..900&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

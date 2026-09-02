@@ -1,0 +1,39 @@
+/*
+ * D-0.5 Tailwind entry for the editor-cli UI bundle.
+ *
+ * Imports the parent monorepo's globals.css for the shared theme tokens
+ * (CSS custom properties, shadcn defaults, tw-animate-css, etc.), then
+ * adds explicit `@source` directives so Tailwind v4's content scanner
+ * picks up utility classes used across the parent monorepo's tree —
+ * not just the files inside `editor-cli/ui-src/`.
+ *
+ * Without these `@source` directives Tailwind v4 defaults to scanning
+ * from the postcss invocation directory (here: `editor-cli/ui-src/`).
+ * That misses every utility class used in
+ * `src/components/editor/*.tsx`, `src/components/ui/*.tsx`,
+ * `src/editor-ui/*.tsx`, etc. — i.e., the actual pages this
+ * bundle renders. Result without pinning: bundle builds, classes are
+ * absent from the output, panels render unstyled. Pin'ing fixes that.
+ */
+
+/* CSS spec: @import statements must precede any non-@charset/@layer
+   rule. @source is Tailwind-specific (processed by the postcss plugin)
+   but PostCSS still enforces the spec ordering when validating, so the
+   imports come first. */
+@import "../../../src/styles/globals.css";
+
+/* `blocks/` was MISSING until 2026-08-17, and the failure is silent: the class
+   lands in the DOM, Tailwind never emits a rule for it, and the element falls
+   back to whatever the `*` base rule says. MEASURED on the Stepper's active
+   step — `border-primary` was in the class list and the border computed to
+   `--border` grey, because no other scanned file used that utility bare (only
+   `hover:` and `has-data-checked:` variants, which are different rules).
+
+   This is the design system's MAIN layer, so anything it is the sole user of
+   silently does nothing here. Add a directory to this list the moment UI code
+   starts living in it. */
+@source "../../../src/components/blocks/**/*.{ts,tsx}";
+@source "../../../src/components/editor/**/*.{ts,tsx}";
+@source "../../../src/components/ui/**/*.{ts,tsx}";
+@source "../../../src/editor-ui/**/*.{ts,tsx}";
+@source "../../../src/lib/**/*.{ts,tsx}";

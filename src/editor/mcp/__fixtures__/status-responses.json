@@ -1,0 +1,285 @@
+{
+  "valid": [
+    {
+      "name": "local-clean-tree-deployed-match",
+      "description": "Designer is composing on main, no edits, deployed state matches local HEAD. Selection rule picks deployed (both agree).",
+      "payload": {
+        "scope": "local",
+        "deployment_id": "deploy-01H8QJK7P6XNWZTBEDXR4GMPY3",
+        "deployed_head_commit": "abc1234",
+        "branch": "main",
+        "head_commit": "abc1234",
+        "dirty": false,
+        "ahead_of_deployment": false,
+        "last_edit_timestamp": "2026-05-04T22:18:31Z",
+        "warnings": []
+      }
+    },
+    {
+      "name": "local-dirty-tree",
+      "description": "Designer is iterating with uncommitted edits. Selection rule picks local.",
+      "payload": {
+        "scope": "local",
+        "deployment_id": "deploy-01H8QJK7P6XNWZTBEDXR4GMPY3",
+        "deployed_head_commit": "abc1234",
+        "branch": "feat/editor-pass",
+        "head_commit": "abc1234",
+        "dirty": true,
+        "ahead_of_deployment": true,
+        "last_edit_timestamp": "2026-05-07T15:42:09.117Z",
+        "warnings": []
+      }
+    },
+    {
+      "name": "local-committed-unbuilt",
+      "description": "Designer committed locally but the build hasn't deployed yet. Selection rule picks local — committed-but-unbuilt is a real ahead case.",
+      "payload": {
+        "scope": "local",
+        "deployment_id": "deploy-01H8QJK7P6XNWZTBEDXR4GMPY3",
+        "deployed_head_commit": "abc1234",
+        "branch": "main",
+        "head_commit": "def5678",
+        "dirty": false,
+        "ahead_of_deployment": true,
+        "last_edit_timestamp": "2026-05-07T15:42:09.117Z",
+        "warnings": []
+      }
+    },
+    {
+      "name": "local-branch-never-deployed",
+      "description": "Feature branch with commits but no deployment record. Selection rule picks local (branch has nothing to compare to on deployed side).",
+      "payload": {
+        "scope": "local",
+        "deployment_id": null,
+        "deployed_head_commit": null,
+        "branch": "feat/new-screen",
+        "head_commit": "9a8b7c6",
+        "dirty": false,
+        "ahead_of_deployment": "unknown",
+        "last_edit_timestamp": "2026-05-07T13:01:00Z",
+        "warnings": []
+      }
+    },
+    {
+      "name": "local-unborn-head",
+      "description": "Fresh git init, no commits yet. Selection rule picks local (only side with anything to show).",
+      "payload": {
+        "scope": "local",
+        "deployment_id": null,
+        "deployed_head_commit": null,
+        "branch": "main",
+        "head_commit": null,
+        "dirty": true,
+        "ahead_of_deployment": "unknown",
+        "last_edit_timestamp": null,
+        "warnings": []
+      }
+    },
+    {
+      "name": "local-detached-head",
+      "description": "Working tree at a specific commit with no branch context. Selection rule defaults to deployed; local emits an explanatory warning.",
+      "payload": {
+        "scope": "local",
+        "deployment_id": null,
+        "deployed_head_commit": null,
+        "branch": null,
+        "head_commit": "abc1234",
+        "dirty": false,
+        "ahead_of_deployment": "unknown",
+        "last_edit_timestamp": "2026-05-04T22:18:31Z",
+        "warnings": ["local is detached-HEAD"]
+      }
+    },
+    {
+      "name": "deployed-canonical",
+      "description": "Standard deployed-scope reply: clean, deployed-id non-null, dirty always false, ahead_of_deployment always false.",
+      "payload": {
+        "scope": "deployed",
+        "deployment_id": "deploy-01H8QJK7P6XNWZTBEDXR4GMPY3",
+        "deployed_head_commit": "abc1234",
+        "branch": "main",
+        "head_commit": "abc1234",
+        "dirty": false,
+        "ahead_of_deployment": false,
+        "last_edit_timestamp": "2026-05-04T22:18:31Z",
+        "warnings": []
+      }
+    },
+    {
+      "name": "deployed-with-supervisor-warning",
+      "description": "Deployed scope reporting a non-fatal note (e.g., source of truth was Firestore but a sub-query was stale).",
+      "payload": {
+        "scope": "deployed",
+        "deployment_id": "deploy-01H8QJK7P6XNWZTBEDXR4GMPY3",
+        "deployed_head_commit": "abc1234",
+        "branch": "main",
+        "head_commit": "abc1234",
+        "dirty": false,
+        "ahead_of_deployment": false,
+        "last_edit_timestamp": "2026-05-04T22:18:31Z",
+        "warnings": ["deployment record sub-query was stale; data may be off by 1s"]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "missing-required-field",
+      "description": "scope is required.",
+      "payload": {
+        "deployment_id": null,
+        "deployed_head_commit": null,
+        "branch": "main",
+        "head_commit": "abc1234",
+        "dirty": false,
+        "ahead_of_deployment": false,
+        "last_edit_timestamp": null,
+        "warnings": []
+      },
+      "expected_error_substring": "scope"
+    },
+    {
+      "name": "bad-scope-value",
+      "description": "scope must be 'local' or 'deployed'.",
+      "payload": {
+        "scope": "remote",
+        "deployment_id": null,
+        "deployed_head_commit": null,
+        "branch": "main",
+        "head_commit": "abc1234",
+        "dirty": false,
+        "ahead_of_deployment": false,
+        "last_edit_timestamp": null,
+        "warnings": []
+      },
+      "expected_error_substring": "scope"
+    },
+    {
+      "name": "deployed-with-dirty-true",
+      "description": "Cross-field invariant: deployed scope MUST be clean.",
+      "payload": {
+        "scope": "deployed",
+        "deployment_id": "deploy-x",
+        "deployed_head_commit": "abc1234",
+        "branch": "main",
+        "head_commit": "abc1234",
+        "dirty": true,
+        "ahead_of_deployment": false,
+        "last_edit_timestamp": "2026-05-04T22:18:31Z",
+        "warnings": []
+      },
+      "expected_error_substring": "dirty"
+    },
+    {
+      "name": "deployed-ahead-true",
+      "description": "Cross-field invariant: deployed scope ahead_of_deployment is always false.",
+      "payload": {
+        "scope": "deployed",
+        "deployment_id": "deploy-x",
+        "deployed_head_commit": "abc1234",
+        "branch": "main",
+        "head_commit": "abc1234",
+        "dirty": false,
+        "ahead_of_deployment": true,
+        "last_edit_timestamp": "2026-05-04T22:18:31Z",
+        "warnings": []
+      },
+      "expected_error_substring": "ahead_of_deployment"
+    },
+    {
+      "name": "null-deployment-with-non-null-deployed-head",
+      "description": "Cross-field invariant: deployed_head_commit must be null when deployment_id is null.",
+      "payload": {
+        "scope": "local",
+        "deployment_id": null,
+        "deployed_head_commit": "abc1234",
+        "branch": "feat/x",
+        "head_commit": "def5678",
+        "dirty": false,
+        "ahead_of_deployment": "unknown",
+        "last_edit_timestamp": "2026-05-04T22:18:31Z",
+        "warnings": []
+      },
+      "expected_error_substring": "deployed_head_commit"
+    },
+    {
+      "name": "deployed-with-null-branch",
+      "description": "Cross-field invariant: deployed scope ships from a named branch; null branch is a bug.",
+      "payload": {
+        "scope": "deployed",
+        "deployment_id": "deploy-x",
+        "deployed_head_commit": "abc1234",
+        "branch": null,
+        "head_commit": "abc1234",
+        "dirty": false,
+        "ahead_of_deployment": false,
+        "last_edit_timestamp": "2026-05-04T22:18:31Z",
+        "warnings": []
+      },
+      "expected_error_substring": "branch"
+    },
+    {
+      "name": "ahead-unknown-with-comparable-state",
+      "description": "Cross-field invariant: 'unknown' is reserved for cases where the comparison is undefined. With both head_commit and deployment_id non-null on local scope, the scope must commit to true/false.",
+      "payload": {
+        "scope": "local",
+        "deployment_id": "deploy-x",
+        "deployed_head_commit": "abc1234",
+        "branch": "main",
+        "head_commit": "abc1234",
+        "dirty": false,
+        "ahead_of_deployment": "unknown",
+        "last_edit_timestamp": "2026-05-04T22:18:31Z",
+        "warnings": []
+      },
+      "expected_error_substring": "ahead_of_deployment"
+    },
+    {
+      "name": "bad-timestamp-format",
+      "description": "last_edit_timestamp must be ISO-8601 with timezone.",
+      "payload": {
+        "scope": "local",
+        "deployment_id": null,
+        "deployed_head_commit": null,
+        "branch": "main",
+        "head_commit": "abc1234",
+        "dirty": false,
+        "ahead_of_deployment": "unknown",
+        "last_edit_timestamp": "May 4 2026",
+        "warnings": []
+      },
+      "expected_error_substring": "last_edit_timestamp"
+    },
+    {
+      "name": "warnings-not-array",
+      "description": "warnings must be an array; a single string is rejected.",
+      "payload": {
+        "scope": "local",
+        "deployment_id": null,
+        "deployed_head_commit": null,
+        "branch": "main",
+        "head_commit": "abc1234",
+        "dirty": false,
+        "ahead_of_deployment": "unknown",
+        "last_edit_timestamp": null,
+        "warnings": "looks like an array but isn't"
+      },
+      "expected_error_substring": "warnings"
+    },
+    {
+      "name": "wrong-type-on-dirty",
+      "description": "dirty must be a boolean, not a string.",
+      "payload": {
+        "scope": "local",
+        "deployment_id": null,
+        "deployed_head_commit": null,
+        "branch": "main",
+        "head_commit": "abc1234",
+        "dirty": "true",
+        "ahead_of_deployment": "unknown",
+        "last_edit_timestamp": null,
+        "warnings": []
+      },
+      "expected_error_substring": "dirty"
+    }
+  ]
+}

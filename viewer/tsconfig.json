@@ -1,0 +1,53 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "@/*": [
+        "../src/*"
+      ]
+    },
+    "allowJs": true,
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ]
+  },
+  "include": [
+    "server/**/*.ts",
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "gallery/**/*.ts",
+    "gallery/**/*.tsx",
+    "*.ts",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    ".next",
+    // A build script, not app code. `vite` and `postcss` each resolve to two
+    // copies from inside `viewer/` — the repo root's and the one vitest
+    // installs here — so type-checking this file compares two structurally
+    // identical `Plugin` types and rejects them. The config is proven by the
+    // dev server booting, which is the stronger check for a build file.
+    "gallery/vite.config.ts"
+  ]
+}

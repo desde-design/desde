@@ -1,0 +1,16 @@
+.next/
+node_modules/
+
+# The runtime data directory: SQLite database, generated session secret,
+# GitHub App credentials when the setup card created them, and every built
+# prototype's assets. Never committable.
+#
+# BOTH names are listed on purpose. The rename changed the default from
+# `.prototools-viewer` to `.desde-viewer` and updated this file to match, which
+# silently un-ignored the directory for anyone whose `.env.local` still set the
+# old `VIEWER_DATA_DIR` — the data dir then sat in the working tree, staged by
+# the next `git add`. Measured during the 2026-09-01 stress test, by doing
+# exactly that. A `VIEWER_DATA_DIR` pointed anywhere else still needs its own
+# ignore; prefer a path outside the repo.
+.desde-viewer/
+.prototools-viewer/

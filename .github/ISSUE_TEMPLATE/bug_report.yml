@@ -1,0 +1,104 @@
+name: Bug report
+description: Something is broken or not working as expected.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. Desde is a small, new project, so a clear
+        report makes a real difference in how fast it gets fixed.
+
+        Do not use this form for a security vulnerability. Email
+        security@desde.design instead, and see `SECURITY.md`.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface is this about?
+      options:
+        - Editor CLI
+        - Editor desktop app
+        - Viewer
+        - Docs (website)
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: framework
+    attributes:
+      label: Framework of the prototype you were editing or viewing
+      description: Only relevant to an Editor or Viewer bug. Leave unset for docs or a general bug.
+      options:
+        - Vue
+        - React
+        - Not applicable
+    validations:
+      required: false
+
+  - type: dropdown
+    id: host
+    attributes:
+      label: Dev server or framework host of the prototype
+      description: Only relevant to an Editor or Viewer bug.
+      options:
+        - Vite
+        - Nuxt
+        - Next.js
+        - React Router
+        - Other
+        - Not applicable
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. macOS 15.1, Ubuntu 24.04, Windows 11"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Desde version or commit
+      description: The version shown at startup, or the git commit you have checked out.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or errors
+      description: Terminal output, browser console errors, or a screenshot. Text pasted here is formatted as code automatically.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Anything else?
+    validations:
+      required: false

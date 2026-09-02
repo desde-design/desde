@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en" data-theme="teal">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Editor Self-Host Harness</title>
+    <!-- Kept in step with `editor-cli/ui-src/index.html`. The gallery is the
+         instrument the surfaces get reviewed in, so it has to load the same
+         three families the shipped UI does; without them it reviews type the
+         product does not ship. It loaded none at all until 2026-08-13, which
+         is why every gallery shot to date is in the system fallback. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=Fira+Code:wght@300..700&family=Playfair+Display:ital,wght@0,400..900;1,400..900&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <!--
+      Mock CLI bootstrap. MUST run before the module script: several
+      exported flags in `src/lib/editor-feature-flags.ts` (EDITOR_FRAMEWORK,
+      EDITOR_STYLING_SYSTEM, …) read fields like `framework`/`stylingSystem`
+      off window.__DESDE_CLI__ at module-EVAL time, and ES imports are
+      hoisted — setting it inside main.tsx would be too late. This mirrors
+      how the real CLI injects the bootstrap into the served HTML.
+    -->
+    <script>
+      window.__DESDE_CLI__ = {
+        token: "self-host-mock-token",
+        shellOrigin: location.origin,
+        viteUrl: location.origin,
+        framework: "react",
+        sessionId: "self-host-edit-session",
+        worktreePath: "/mock/worktree",
+        user: { username: "self-host", hostname: "harness" },
+      }
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

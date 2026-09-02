@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "platformBaseUrl": "https://REPLACE-WITH-DEMO-VIEWER-HOST",
+  "project": {
+    "id": "REPLACE-WITH-DEMO-PROJECT-ID",
+    "slug": "demo",
+    "name": "Demo prototype"
+  }
+}

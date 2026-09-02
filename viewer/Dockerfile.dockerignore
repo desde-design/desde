@@ -1,0 +1,56 @@
+# Dockerfile-specific ignore-file for viewer/Dockerfile.
+#
+# BuildKit prefers an ignore-file named "<Dockerfile>.dockerignore" living
+# next to the Dockerfile over the context-root ".dockerignore" (the root one
+# lives at /.dockerignore since the build context for this image is the repo
+# root — see Dockerfile's COPY of both viewer/package.json and root
+# package.json). This file REPLACES the root one for this build; it isn't
+# merged with it.
+#
+# Two deliberate differences from the root .dockerignore:
+#
+# 1. It does NOT exclude `dist`. server/serve/html-inject.ts reads
+#    ../../../dist/bridge-bundle.js at boot (an unguarded readFileSync — a
+#    missing file crashes the process on startup), so that bundle must survive
+#    into the build context. (Until 2026-08-08 the bundle lived under
+#    `functions/serve/dist/` and the (now deleted) root .dockerignore's blanket `functions`
+#    exclusion silently stripped it, producing an image that builds but exits
+#    immediately on boot. Same hazard, new path.)
+#
+# 2. node_modules is `**/node_modules`, not `node_modules`. Docker matches
+#    ignore patterns against the path relative to the context root using
+#    Go filepath.Match semantics, so a bare `node_modules` excludes ONLY
+#    /node_modules — `viewer/node_modules` and `editor-cli/node_modules`
+#    would be copied by `COPY . .`, landing ON TOP of the deps installed a
+#    few lines earlier and replacing them with whatever happened to be on
+#    the build machine (including dangling symlinks, which is exactly what a
+#    dev checkout using linked worktrees has). Same reasoning for .next.
+#
+# 3. EVERY pattern that must catch a nested path is written `**/`-prefixed,
+#    for the reason spelled out in (2): Docker matches against the path
+#    relative to the CONTEXT ROOT, and the context root here is the repo
+#    root. A bare `.env*` excludes only `/.env*` — it does NOT exclude
+#    `viewer/.env.local`, which is where an operator's GitHub App private
+#    key, session secret, client secret, webhook secret and admin token
+#    actually live. `COPY . .` below would then bake all five into the
+#    image. (This was a real defect, found in the 2026-08-09 security
+#    audit as B3; the `**/node_modules` note above had already worked out
+#    the rule one line earlier without applying it here.) The build stage
+#    now also ASSERTS no .env survived — see viewer/Dockerfile.
+#
+#    `.env.production` is deliberately NOT re-included: the image's start
+#    command does not read a .env file of any kind (config comes from the
+#    container environment), so an in-image .env is never anything but a
+#    secret waiting to leak.
+**/node_modules
+**/.next
+**/.git
+.claude
+*.md
+**/.env*
+# Runtime state directories — the viewer's default VIEWER_DATA_DIR holds the
+# live SQLite database (sessions, machine-token hashes, comments) and the
+# Editor's `.desde` holds chat transcripts and per-edit source backups.
+# Neither belongs in a distributable image.
+**/.desde-viewer
+**/.desde
