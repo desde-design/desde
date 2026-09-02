@@ -1,0 +1,34 @@
+# Context-root ignore list for the Viewer image build.
+#
+# BuildKit does NOT read this file for viewer/Dockerfile: it prefers
+# viewer/Dockerfile.dockerignore, which REPLACES this one (see the notes in
+# there, they are the authoritative list). The classic builder, which is
+# what `docker build` still is on a stock Debian docker.io install without
+# the buildx plugin, ignores that per-Dockerfile file and reads THIS one.
+# The Dockerfile ends its build stage with `COPY . .`, so on that builder
+# the build context is the image, and a build from a working tree (rather
+# than the clean checkout CI uses) would otherwise drag in installed
+# modules, build output, secrets and the nested private repositories.
+#
+# Every pattern that must catch a nested path is `**/`-prefixed: Docker
+# matches against the path relative to the context root, so a bare `.env*`
+# would exclude only /.env* and leave viewer/.env.local in. `dist` is
+# deliberately NOT here: dist/bridge-bundle.js must reach the image.
+.git
+**/node_modules
+**/.env
+**/.env.*
+!**/.env.example
+.verify-artifacts
+tasks
+docs
+website
+.claude
+CLAUDE.md
+desktop/release
+desktop/dist
+desktop/.signed-keep
+ai-gateway-prototype
+.desde-viewer
+.prototools-viewer
+*.log

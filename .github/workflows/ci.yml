@@ -1,0 +1,51 @@
+name: CI
+
+# The same gate a developer runs locally before pushing (`npm run verify`),
+# run by a machine on every push and every pull request, so a green check on
+# GitHub means the tree passed typecheck, lint, the three test suites, knip
+# and the bridge-version check. The browser smoke stage skips itself here:
+# a clone has no prototype to boot against, and it says so (F-55).
+#
+# Plain `npm ci` in the three workspaces, on Node 24, matching the Viewer
+# image. No caching of node_modules beyond what setup-node offers: a fresh
+# install is what a contributor gets, and the lockfiles are what is under test.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            editor-cli/package-lock.json
+            viewer/package-lock.json
+
+      - name: Install (root, editor-cli, viewer)
+        run: |
+          npm ci
+          npm --prefix editor-cli ci
+          npm --prefix viewer ci
+
+      - name: Verify
+        run: npm run verify
+
+      - name: Viewer typecheck and tests
+        working-directory: viewer
+        run: |
+          npx tsc --noEmit -p tsconfig.json
+          npx vitest run

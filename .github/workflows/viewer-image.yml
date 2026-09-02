@@ -1,0 +1,63 @@
+name: Viewer image
+
+# Builds the Viewer container image from the tree as it is on GitHub and
+# publishes it to ghcr.io/desde-design/viewer, for both amd64 and arm64.
+# Building here rather than on a laptop is what makes the published image
+# the same thing every time: a clean checkout, no working-tree leftovers,
+# no nested private repos in the build context, a label naming the commit.
+#
+# Tags, so `latest` means "released" and not "whatever main is right now":
+#   push to main       -> :main and :sha-<short>   (the edge of development)
+#   tag v*             -> :<version> and :latest    (a release)
+#
+# The demo viewer at demo.desde.design pulls :latest. See viewer/README.md
+# for the docker run command a self-hoster uses.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/desde-design/viewer
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/desde-design/desde
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: viewer/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
