@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, type ReactElement } from "react"
+import { useMemo, useState, type ReactElement } from "react"
 import { Search, ChevronRight, MousePointerClick } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { EmptyState } from "@/components/blocks"
@@ -11,6 +11,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import { cn } from "@/lib/utils"
+import { summarizeStyleProperties, type SummarizedStyleProperty } from "./summarize-style-properties"
 import type {
   InspectionData,
   BoxModelData,
@@ -331,7 +332,21 @@ function StylesSection({
   defaultOpen: boolean
 }) {
   const [open, setOpen] = useState(defaultOpen)
-  const filtered = category.properties.filter((p) => !query || p.name.toLowerCase().includes(query))
+  // Four identical `border-*-width` rows say one thing four times. See
+  // `summarize-style-properties.ts` for the rule and what it deliberately
+  // does NOT collapse.
+  const summarized = useMemo(
+    () => summarizeStyleProperties(category.properties),
+    [category.properties],
+  )
+  // A collapsed row must still answer to the longhand names it replaced, or
+  // typing "border-top" finds nothing in a panel that used to find it.
+  const filtered = summarized.filter(
+    (p) =>
+      !query ||
+      p.name.toLowerCase().includes(query) ||
+      p.members?.some((m) => m.toLowerCase().includes(query)),
+  )
   if (filtered.length === 0) return null
 
   return (
@@ -369,7 +384,7 @@ function StylesSection({
               </span>
               <span
                 className="flex min-w-0 items-center gap-1.5 text-xs text-foreground"
-                title={prop.rawValue ? `Computed: ${prop.value}` : undefined}
+                title={rowTitle(prop)}
               >
                 <ColorSwatch value={prop.value} />
                 <span className="truncate">{prop.rawValue ?? prop.value}</span>
@@ -380,6 +395,22 @@ function StylesSection({
       </CollapsibleContent>
     </Collapsible>
   )
+}
+
+/**
+ * The hover title for one style row.
+ *
+ * Two facts can each be worth saying, and a collapsed row can carry both: the
+ * computed value behind an authored one, and the longhands this row stands
+ * for. Naming the members matters more than it looks — it is the only place
+ * the panel still admits that `border-width` is four properties, which is
+ * what someone reading a box model needs to know before they trust it.
+ */
+function rowTitle(prop: SummarizedStyleProperty): string | undefined {
+  const parts: string[] = []
+  if (prop.rawValue) parts.push(`Computed: ${prop.value}`)
+  if (prop.members) parts.push(`All four sides: ${prop.members.join(", ")}`)
+  return parts.length ? parts.join("\n") : undefined
 }
 
 function TokensSection({ tokens, defaultOpen }: { tokens: DesignToken[]; defaultOpen: boolean }) {

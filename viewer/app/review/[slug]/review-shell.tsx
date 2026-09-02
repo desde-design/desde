@@ -581,14 +581,46 @@ export function ReviewShell({ project }: { project: ReviewShellProject }) {
     else exitCommentMode()
   }, [bridgeReadyEpoch, commentMode, enterCommentMode, exitCommentMode])
 
+  /**
+   * Comments this shell asked the bridge to highlight, awaiting their echo.
+   *
+   * Selecting a rail row posts `HIGHLIGHT_COMMENT`, and the bridge answers
+   * with a `COMMENT_PIN_CLICKED` carrying the pin's rect — after a 350ms
+   * settle for its smooth scroll (`comment-pins.ts`, `highlightComment`). The
+   * shell cannot tell that echo from a real click on a pin by its payload:
+   * they are the same message.
+   *
+   * Left unfiltered it produced a visible jump (Mo, 2026-09-01: "the comment
+   * appears next to the rail and then moves to the right position"). The
+   * popup anchored to the rail row immediately, then a third of a second
+   * later the echo's `pinRect` won the precedence below and moved it to the
+   * pin. Two anchors for one selection, applied in sequence.
+   *
+   * So the origin decides the anchor, once: a selection made in the rail
+   * stays anchored to its row, and a selection made on a pin anchors to the
+   * pin. A ref rather than state because nothing renders from it, and a SET
+   * rather than one id because two rail clicks in quick succession have two
+   * echoes in flight and the second must not consume the first's.
+   */
+  const awaitingHighlightEcho = useRef<Set<string>>(new Set())
+
   // A pin click closes any in-progress new-comment draft and opens that
   // comment's thread card.
-  useEffect(() => {
-    if (pinClick) {
-      clearDraft()
-      setActiveCommentId(pinClick.commentId)
+  //
+  // `useLayoutEffect`, not `useEffect`: it has to consume the echo BEFORE the
+  // browser paints, or the frame that set `pinClick` is the frame that shows
+  // the popup in the wrong place — which is the whole defect.
+  useLayoutEffect(() => {
+    if (!pinClick) return
+    if (awaitingHighlightEcho.current.delete(pinClick.commentId)) {
+      // Our own highlight coming back. The row is already selected and
+      // already anchored; drop the rect so it cannot re-anchor.
+      clearPinClick()
+      return
     }
-  }, [pinClick, clearDraft])
+    clearDraft()
+    setActiveCommentId(pinClick.commentId)
+  }, [pinClick, clearDraft, clearPinClick])
 
   // A new-comment placement closes any open thread card.
   useEffect(() => {
@@ -682,6 +714,10 @@ export function ReviewShell({ project }: { project: ReviewShellProject }) {
       clearDraft()
       setActiveCommentId(id)
       setPendingReplyBody(null)
+      // Record it BEFORE asking, so the echo cannot arrive first. It cannot
+      // today (the bridge waits 350ms), but a shell that depends on the
+      // network being slow is a shell with a race in it.
+      awaitingHighlightEcho.current.add(id)
       highlightComment(id)
     },
     [clearDraft, highlightComment],
@@ -694,10 +730,39 @@ export function ReviewShell({ project }: { project: ReviewShellProject }) {
       setRowAnchorRect(null)
       return
     }
-    const row = document.querySelector<HTMLElement>(
-      `[data-testid="comment-row-${activeCommentId}"]`,
-    )
-    setRowAnchorRect(row ? row.getBoundingClientRect() : null)
+    const measure = () => {
+      const row = document.querySelector<HTMLElement>(
+        `[data-testid="comment-row-${activeCommentId}"]`,
+      )
+      const next = row ? row.getBoundingClientRect() : null
+      // Only commit a rect that actually moved. This runs on every scroll
+      // frame while a thread is open, and a fresh object each time would
+      // re-render the whole shell for a popup that has not moved.
+      setRowAnchorRect((prev) => {
+        if (!next) return prev === null ? prev : null
+        if (
+          prev &&
+          prev.top === next.top &&
+          prev.left === next.left &&
+          prev.width === next.width &&
+          prev.height === next.height
+        ) {
+          return prev
+        }
+        return next
+      })
+    }
+    measure()
+    // The row moves under its own popup when the rail LIST scrolls, which the
+    // original one-shot measurement never noticed. `true` for capture, so a
+    // scroll inside the rail's own overflow container is seen: it does not
+    // bubble to `window`.
+    window.addEventListener("resize", measure)
+    window.addEventListener("scroll", measure, true)
+    return () => {
+      window.removeEventListener("resize", measure)
+      window.removeEventListener("scroll", measure, true)
+    }
   }, [activeCommentId, comments])
 
   // Hoisted (rather than defined inline inside the JSX ternaries below) so
@@ -963,18 +1028,32 @@ export function ReviewShell({ project }: { project: ReviewShellProject }) {
 
         That makes the cards the same tone as what is behind them, and their
         border and shadow are what define them — which is why this container
-        carries neither a background nor a `border-l` any more. Both were
-        redundant the moment the cards stopped being a different colour from
-        the page: the rail's left edge is now the cards' own left edges, and a
-        `bg-background` container in front of a `bg-background` body was
-        painting the same colour twice.
+        carries no BACKGROUND of its own: a `bg-background` container in front
+        of a `bg-background` body was painting the same colour twice.
+
+        It does carry a `border-l` again (Mo, 2026-09-01: "let's add back in
+        the light left border in the panel / rail. It looks a little off with
+        it just ending"). It was dropped on 2026-08-28 on the argument that
+        the cards' own left edges were now the rail's edge. On screen they are
+        not: the cards are inset by `p-2`, so the rail ended in whatever the
+        prototype had painted, at no particular line.
+
+        `border-border/60`, not the full-strength `border-border` the cards
+        wear. It is the same value the Editor's rail uses, so the two surfaces
+        state their edge identically, and it is deliberately lighter than the
+        cards it contains — a container rule that competed with its own
+        contents would read as a third card.
+
+        Note this sits between the shell and the PROTOTYPE's colour (see the
+        `style` below), so it is the one border on this screen whose ground is
+        not ours.
 
         `p-2` + `gap-2` is what the rules used to do. The header block and the
         panel were told apart by a `border-b`; now they are told apart by
         being separate objects, so the borders inside them come out.
       */
       <aside
-        className="flex h-full w-80 flex-none flex-col gap-2 p-2"
+        className="flex h-full w-80 flex-none flex-col gap-2 border-l border-border/60 p-2"
         /*
           The prototype's own page colour, so the iframe's edge stops being a
           seam (Mo, 2026-08-28). Inline because it is a genuinely dynamic
