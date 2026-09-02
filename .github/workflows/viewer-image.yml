@@ -51,7 +51,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/desde-design/desde
             org.opencontainers.image.revision=${{ github.sha }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: viewer/Dockerfile
