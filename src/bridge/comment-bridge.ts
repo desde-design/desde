@@ -67,7 +67,7 @@ import { createOverridePreview } from "./override-preview"
   // the viewer's `html-inject`). Keep it a single-use literal;
   // bridge-bundle-version.test.ts fails if that stops holding.
   ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__ =
-    "2026-09-01a-callsite-edit-target"
+    "2026-09-01b-placement-teal"
   const BRIDGE_VERSION = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__ as string
 

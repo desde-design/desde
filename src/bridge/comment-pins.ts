@@ -13,6 +13,7 @@
 import { sendToShell } from "./bridge-runtime"
 import { isElementVisible, areTabPanelsActive } from "./selector-engine"
 import { AnchorPinsManager, currentPageKey, rectJson } from "./anchor-pins"
+import { COMMENT_PLACEMENT_ACCENT } from "./placement-overlay"
 import type { Comment } from "./bridge-types"
 
 const PINS_STYLES = `
@@ -188,6 +189,9 @@ export class CommentPinsManager extends AnchorPinsManager {
       hostName: "comment-pins",
       styles: PINS_STYLES,
       layerClass: "pt-pins-layer",
+      // Teal, matching the pins this tool drops and the Inspector overlay.
+      // Was the note pink until 2026-09-01 (Mo: "it should use the aqua").
+      placementAccent: COMMENT_PLACEMENT_ACCENT,
       newPositionType: "NEW_COMMENT_POSITION",
       exitModeType: "EXIT_COMMENT_MODE",
       placementOffsetX: -4,

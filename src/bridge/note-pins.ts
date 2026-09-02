@@ -14,6 +14,7 @@
 import { sendToShell } from "./bridge-runtime"
 import { isElementVisible, areTabPanelsActive } from "./selector-engine"
 import { AnchorPinsManager, currentPageKey, rectJson, type PinRect } from "./anchor-pins"
+import { NOTE_PLACEMENT_ACCENT } from "./placement-overlay"
 import type { BridgeNote } from "./bridge-types"
 
 const NOTE_STYLES = `
@@ -100,6 +101,9 @@ export class NotePinsManager extends AnchorPinsManager {
       hostName: "note-pins",
       styles: NOTE_STYLES,
       layerClass: "pt-notes-layer",
+      // Pink, unchanged. Notes are deliberately the pink surface; only the
+      // COMMENT tool moved to teal on 2026-09-01.
+      placementAccent: NOTE_PLACEMENT_ACCENT,
       newPositionType: "NEW_NOTE_POSITION",
       exitModeType: "EXIT_NOTE_MODE",
       placementOffsetX: 4,

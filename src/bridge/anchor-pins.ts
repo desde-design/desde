@@ -14,7 +14,7 @@
  */
 import { sendToShell } from "./bridge-runtime"
 import { generateSelector } from "./selector-engine"
-import { PlacementOverlay } from "./placement-overlay"
+import { PlacementOverlay, type PlacementAccent } from "./placement-overlay"
 
 /** The JSON-safe rect shape both surfaces post to the shell. */
 export interface PinRect {
@@ -53,6 +53,16 @@ export interface AnchorPinsOptions {
   styles: string
   /** Class name on the absolutely-positioned pin layer. */
   layerClass: string
+  /**
+   * Colours for this surface's placement overlay (hover box, chip, cursor).
+   *
+   * REQUIRED, with no default, deliberately. One overlay class serves both
+   * annotation surfaces, and when it hard-coded one palette the other
+   * inherited it and nobody noticed for six weeks. A surface that does not
+   * state its colours should fail to compile, not pick up somebody else's.
+   */
+  placementAccent: PlacementAccent
+
   /** Message emitted when placement resolves to an element. */
   newPositionType: string
   /** Message emitted when placement is cancelled (Escape / overlay cancel). */
@@ -89,7 +99,7 @@ export abstract class AnchorPinsManager {
 
     document.body.appendChild(this.root)
 
-    this.placementOverlay = new PlacementOverlay()
+    this.placementOverlay = new PlacementOverlay(options.placementAccent)
     this.placementOverlay.onElementSelected = (el) => {
       const selector = generateSelector(el)
       if (!selector) return
