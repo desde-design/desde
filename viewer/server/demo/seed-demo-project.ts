@@ -37,6 +37,8 @@ import type { AssetStore } from "../assets/types"
 import { loadRuntimeConfig, updateRuntimeConfig } from "../runtime-config"
 import type { Deployment, Project, StorageAdapter } from "../storage/types"
 
+import { demoComments } from "./demo-comments"
+
 export const DEMO_SLUG = "demo"
 const DEMO_NAME = "Demo prototype"
 
@@ -63,6 +65,18 @@ export interface SeedDemoDeps {
    * demo stays memberless.
    */
   seedMemberUserId?: string
+  /**
+   * The path prefix the prototype will be served under, WITH a trailing
+   * slash: `/p/demo/` when prototypes are path-namespaced, `/` when the
+   * prototype gets an origin of its own (subdomain or loopback).
+   *
+   * Seeded comments store a page key that is compared to the iframe's raw
+   * `pathname + hash` by strict equality (`src/bridge/comment-pins.ts`), so
+   * this has to be the mode this deployment actually serves in. Optional, and
+   * absent means seed no comments at all: a wrong prefix is worse than none,
+   * because it fills the rail with threads whose pins never appear.
+   */
+  commentPagePrefix?: string
 }
 
 /** Every file under `dir`, as paths relative to it, POSIX-separated for the asset store. */
@@ -126,6 +140,26 @@ export async function seedDemoProject(deps: SeedDemoDeps): Promise<"seeded" | "s
       buildLog: "Seeded from the bundled demo prototype.\n",
     })
     await deps.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
+
+    // Inside the same try as everything above, so a failure here takes the
+    // cleanup path with the rest. A demo with a prototype and no conversation
+    // is a demo of half the product; better to retry the whole thing on the
+    // next boot than to freeze that half in place.
+    if (deps.commentPagePrefix) {
+      for (const seed of demoComments(deps.commentPagePrefix)) {
+        const created = await deps.storage.createComment(project.id, seed.comment)
+        for (const reply of seed.replies) {
+          await deps.storage.addCommentReply(created.id, reply)
+        }
+        // Resolved LAST. `addCommentReply` returns the whole comment, and
+        // resolving before the replies land would be undone by nothing today
+        // but reads as an ordering nobody chose.
+        if (seed.resolved) {
+          await deps.storage.updateComment(created.id, { resolved: true })
+        }
+      }
+    }
+
     updateRuntimeConfig(deps.dataDir, { demoSeededAt: new Date().toISOString() })
     return "seeded"
   } catch (error) {

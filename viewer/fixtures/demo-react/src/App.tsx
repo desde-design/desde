@@ -1,3 +1,9 @@
+import { useEffect } from "react"
+import { Overview } from "./pages/overview"
+import { Workspaces } from "./pages/workspaces"
+import { Settings } from "./pages/settings"
+import { href, useRoute, type Route } from "./router"
+
 /**
  * The demo prototype that ships with the viewer.
  *
@@ -7,26 +13,55 @@
  * reviewer would question, a form with a control someone would argue about,
  * and one visibly unfinished row.
  *
+ * THREE PAGES since 2026-09-02 (Mo: "you can't really navigate"). It was one
+ * page whose nav items were `#overview` / `#workspaces` / `#settings`
+ * anchors, and that was worse than merely thin. A comment's page key is
+ * `pathname + hash` (`src/bridge/anchor-pins.ts`) and the pin layer filters on
+ * it, so clicking a nav anchor moved the key from `/p/demo/` to
+ * `/p/demo/#workspaces` and every pin the reviewer had just placed vanished.
+ * Nothing was lost; it looked exactly like loss.
+ *
  * Self-contained by necessity. The viewer sends a Content-Security-Policy on
  * every prototype response, so no web fonts, no CDN scripts, and no network
  * calls of any kind.
  */
 
-const METRICS = [
-  { label: "Active workspaces", value: "1,284", delta: "+12.4%", positive: true },
-  { label: "Requests today", value: "48,210", delta: "+3.1%", positive: true },
-  { label: "Error rate", value: "0.42%", delta: "+0.18%", positive: false },
-  { label: "Median latency", value: "184ms", delta: "-22ms", positive: true },
+const NAV: { route: Route; label: string }[] = [
+  { route: "", label: "Overview" },
+  { route: "workspaces", label: "Workspaces" },
+  { route: "settings", label: "Settings" },
 ]
 
-const ROWS = [
-  { name: "acme-production", region: "us-east-1", status: "Healthy", requests: "18,402" },
-  { name: "acme-staging", region: "us-east-1", status: "Healthy", requests: "4,118" },
-  { name: "northwind-eu", region: "eu-west-2", status: "Degraded", requests: "9,733" },
-  { name: "internal-tools", region: "us-west-2", status: "Healthy", requests: "2,004" },
-]
+/**
+ * Which source file painted each route.
+ *
+ * This is not decoration. The bridge gates its FIRST `ROUTE_CHANGED` on
+ * `data-page-source` being present on `<html>`
+ * (`src/bridge/comment-bridge.ts`), and the viewer's rail prints
+ * `page.sourceFile`, falling back to the URL and then to an em dash. Before
+ * this stamp existed the viewer's own demo was the one prototype that could
+ * not demonstrate the viewer's page tracking: the rail showed a dash.
+ *
+ * On a prototype connected to a repo the rail turns this into a GitHub link,
+ * so the paths have to be real repo-relative paths, not labels.
+ */
+const PAGE_SOURCE: Record<Route, string> = {
+  "": "src/pages/overview.tsx",
+  workspaces: "src/pages/workspaces.tsx",
+  settings: "src/pages/settings.tsx",
+}
 
 export function App() {
+  const [route, navigate] = useRoute()
+
+  useEffect(() => {
+    // Set AFTER render, which is the order the bridge's mutation observer
+    // expects: it watches for the attribute to change and then reports the
+    // route, so stamping before the new page has painted would name the page
+    // the reviewer is leaving.
+    document.documentElement.setAttribute("data-page-source", PAGE_SOURCE[route])
+  }, [route])
+
   return (
     <div className="page">
       <header className="topbar">
@@ -35,80 +70,31 @@ export function App() {
           Northwind Analytics
         </div>
         <nav className="nav">
-          <a className="nav-item nav-item--active" href="#overview">Overview</a>
-          <a className="nav-item" href="#workspaces">Workspaces</a>
-          <a className="nav-item" href="#settings">Settings</a>
+          {NAV.map((item) => (
+            <a
+              key={item.label}
+              className={item.route === route ? "nav-item nav-item--active" : "nav-item"}
+              href={href(item.route)}
+              aria-current={item.route === route ? "page" : undefined}
+              onClick={(e) => {
+                // Plain left click only, so the reviewer keeps every ordinary
+                // browser affordance: cmd-click, middle-click and "open in new
+                // tab" all still get a real URL because `href` is a real one.
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return
+                e.preventDefault()
+                navigate(item.route)
+              }}
+            >
+              {item.label}
+            </a>
+          ))}
         </nav>
       </header>
 
       <main className="main">
-        <section className="intro">
-          <h1>Overview</h1>
-          <p className="lede">
-            This is a demo prototype served by your viewer. Try the comment tool in the
-            toolbar, then click anything on this page to leave a note on it.
-          </p>
-        </section>
-
-        <section className="metrics" id="overview">
-          {METRICS.map((metric) => (
-            <article className="metric" key={metric.label}>
-              <p className="metric-label">{metric.label}</p>
-              <p className="metric-value">{metric.value}</p>
-              <p className={metric.positive ? "metric-delta metric-delta--up" : "metric-delta metric-delta--down"}>
-                {metric.delta}
-              </p>
-            </article>
-          ))}
-        </section>
-
-        <section className="panel" id="workspaces">
-          <h2>Workspaces</h2>
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Region</th>
-                <th>Status</th>
-                <th className="numeric">Requests</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ROWS.map((row) => (
-                <tr key={row.name}>
-                  <td className="table-name">{row.name}</td>
-                  <td>{row.region}</td>
-                  <td>
-                    <span className={row.status === "Healthy" ? "pill pill--ok" : "pill pill--warn"}>
-                      {row.status}
-                    </span>
-                  </td>
-                  <td className="numeric">{row.requests}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-
-        <section className="panel" id="settings">
-          <h2>Alert settings</h2>
-          <div className="field">
-            <label htmlFor="threshold">Error rate threshold</label>
-            <input id="threshold" type="text" defaultValue="0.50%" />
-          </div>
-          <div className="field">
-            <label htmlFor="channel">Notify</label>
-            <select id="channel" defaultValue="email">
-              <option value="email">Email</option>
-              <option value="slack">Slack</option>
-              <option value="none">Nobody</option>
-            </select>
-          </div>
-          <div className="actions">
-            <button className="button button--primary" type="button">Save changes</button>
-            <button className="button" type="button">Discard</button>
-          </div>
-        </section>
+        {route === "" ? <Overview navigate={navigate} /> : null}
+        {route === "workspaces" ? <Workspaces /> : null}
+        {route === "settings" ? <Settings /> : null}
       </main>
     </div>
   )

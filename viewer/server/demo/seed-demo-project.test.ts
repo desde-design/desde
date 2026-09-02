@@ -211,3 +211,65 @@ it("propagates the original failure, not a cleanup failure, when rollback's own 
     seedDemoProject({ ...d, storage: flakyStorage, assets: flakyAssets }),
   ).rejects.toThrow("simulated write failure on put #2")
 })
+
+// ── Seeded conversation (2026-09-01) ────────────────────────────────────────
+
+it("seeds comments and replies when a page prefix is given", async () => {
+  const d = deps()
+  await seedDemoProject({ ...d, commentPagePrefix: "/p/demo/" })
+  const project = (await d.storage.listProjects())[0]
+  const comments = await d.storage.listComments(project.id)
+
+  expect(comments).toHaveLength(5)
+  expect(comments.flatMap((c) => c.replies)).toHaveLength(3)
+  // One arrives already resolved, so the rail's Resolved toggle is not empty
+  // on a first boot.
+  expect(comments.filter((c) => c.resolved)).toHaveLength(1)
+})
+
+it("seeds nothing when no page prefix is given", async () => {
+  // A wrong page key is worse than none: the threads would fill the rail while
+  // their pins never appeared, which reads as a broken product rather than an
+  // unseeded one.
+  const d = deps()
+  await seedDemoProject(d)
+  const project = (await d.storage.listProjects())[0]
+  expect(await d.storage.listComments(project.id)).toHaveLength(0)
+})
+
+it("keys every seeded comment to the prefix it was given", async () => {
+  const d = deps()
+  await seedDemoProject({ ...d, commentPagePrefix: "/" })
+  const project = (await d.storage.listProjects())[0]
+  const pages = new Set((await d.storage.listComments(project.id)).map((c) => c.position.page))
+  // Root prefix, i.e. the prototype has an origin of its own.
+  expect([...pages].sort()).toEqual(["/", "/settings", "/workspaces"])
+})
+
+it("gives every seeded author a uid strangers cannot mutate", async () => {
+  // `mayMutateCommentContent` treats a non-`user:` uid as unowned and lets ANY
+  // writer rewrite or delete it. On the public demo, where anonymous comments
+  // are allowed, that is every visitor. This assertion is the guard.
+  const d = deps()
+  await seedDemoProject({ ...d, commentPagePrefix: "/p/demo/" })
+  const project = (await d.storage.listProjects())[0]
+  const comments = await d.storage.listComments(project.id)
+  const authors = [...comments.map((c) => c.author), ...comments.flatMap((c) => c.replies.map((r) => r.author))]
+  expect(authors).not.toHaveLength(0)
+  for (const a of authors) expect(a.uid.startsWith("user:")).toBe(true)
+})
+
+it("says nothing in first person, and uses no em dashes", async () => {
+  // Both are absolute copy rules, and seeded text is copy: on the public demo
+  // it is the first thing most people read in this product.
+  const d = deps()
+  await seedDemoProject({ ...d, commentPagePrefix: "/p/demo/" })
+  const project = (await d.storage.listProjects())[0]
+  const comments = await d.storage.listComments(project.id)
+  const text = [...comments.map((c) => c.body), ...comments.flatMap((c) => c.replies.map((r) => r.body))]
+  expect(text).not.toHaveLength(0)
+  for (const body of text) {
+    expect(body).not.toContain("—")
+    expect(body.toLowerCase()).not.toMatch(/\b(me|my)\b/)
+  }
+})

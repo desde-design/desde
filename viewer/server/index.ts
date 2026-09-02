@@ -10,6 +10,7 @@ import { decideBrowserOpen, openUrl } from "./open-browser"
 import { loadRuntimeConfig, updateRuntimeConfig } from "./runtime-config"
 import { createApp, type AppDeps } from "./create-app"
 import { DEMO_SLUG, seedDemoProject } from "./demo/seed-demo-project"
+import { resolveOrigins } from "./serve/prototype-origin-resolve"
 import { createReloadableEmailProvider } from "./notify/reloadable-email-provider"
 import { emailStatusLine } from "./notify/email-status-line"
 import { startOutboxDrain } from "./notify/outbox-drain"
@@ -112,11 +113,35 @@ async function main(): Promise<void> {
       // performs, keyed on the same identity — so the demo's access list names
       // a real account from the first boot rather than being empty.
       const demoMember = localOperatorToken !== undefined ? await ensureLocalOperatorUser(storage) : null
+      // Which path the demo's own pages will live at, so its seeded comments
+      // carry a page key that matches. `resolveOrigins` is normally a
+      // per-request call, but it documents a boot-shaped branch: with no
+      // request host, and the host neither allowed nor a prototype host, the
+      // mode is decided from `publicUrl` alone. That is exactly the question
+      // here, so this reuses the real precedence rather than restating it.
+      //
+      // Prototypes that get an origin of their own are served at that
+      // origin's ROOT; the other two modes namespace them under `/p/{slug}/`.
+      const demoOrigins = resolveOrigins({
+        requestHost: undefined,
+        hostAllowed: false,
+        hostIsPrototype: false,
+        publicUrl: config.publicUrl,
+        serveDomain: config.serveDomain,
+        loopbackAvailable: config.loopbackAvailable,
+        prototypeOrigin: config.prototypeOrigin,
+      })
+      const demoPagePrefix =
+        demoOrigins.mode === "subdomain" || demoOrigins.mode === "loopback"
+          ? "/"
+          : `/p/${DEMO_SLUG}/`
+
       const outcome = await seedDemoProject({
         storage,
         assets,
         dataDir: config.dataDir,
         fixtureDir: join(viewerRoot, "fixtures", "demo-react", "dist"),
+        commentPagePrefix: demoPagePrefix,
         ...(demoMember ? { seedMemberUserId: demoMember.id } : {}),
       })
       if (outcome === "seeded") {
