@@ -69,6 +69,16 @@ export default defineConfig({
       // still importing `src/composer-ui/` is the obvious case). Excluded so
       // `npm test` reports on this checkout only.
       "**/.claude/worktrees/**",
+      // `.verify-artifacts/**` is `npm run verify`'s own scratch output, and
+      // it is gitignored — but `scripts-transform/` inside it holds TRANSFORMED
+      // COPIES of real test files, which match the include globs. A root run
+      // collected them and failed to resolve their `.mjs` siblings, so two
+      // files errored at import time while every actual test passed: a red
+      // suite reporting on a build artifact rather than on the source tree.
+      //
+      // Same shape as the worktrees entry above, and the same fix. A directory
+      // being gitignored says nothing about whether a test runner walks it.
+      "**/.verify-artifacts/**",
     ],
   },
   resolve: {
