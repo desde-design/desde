@@ -356,6 +356,21 @@ const signBuild = process.env.DESDE_DESKTOP_SIGN === "1"
 /** @type {import('electron-builder').Configuration['mac']} */
 const mac = {
   category: "public.app-category.developer-tools",
+  // Version-less artifact names, so GitHub's permanent "latest asset" URL
+  // (`/releases/latest/download/Desde-arm64.dmg`) resolves for every release
+  // rather than only the one it was written against. The default
+  // `${productName}-${version}-${arch}.${ext}` put the version in the
+  // filename, and the site's download link went stale the day 0.1.1 shipped
+  // after 0.1.0: it pointed at a file the new release did not contain.
+  //
+  // Mo, 2026-09-02: "the download for macos ... should just download the
+  // latest dmg. No need to have users trying to figure out what to download."
+  //
+  // The version is not lost: it is in the release tag, in `latest-mac.yml`,
+  // and in the app's own Info.plist. electron-updater reads the filename out
+  // of `latest-mac.yml` per release, so a stable name is fine for updates —
+  // each release's assets are its own on GitHub.
+  artifactName: "${productName}-${arch}.${ext}",
   // The app icon. Set EXPLICITLY even though electron-builder would find
   // `build/icon.icns` on its own, because implicit discovery is exactly how
   // this was missing in the first place: with no icon anywhere in the repo,
