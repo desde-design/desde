@@ -156,6 +156,299 @@ describe("useEditorBranches — remote sync", () => {
     )
   })
 
+  it("stops the background fetch after one failure instead of retrying every interval", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    editorFetchMock.mockImplementation(async (path: string) =>
+      path === "/api/editor/branches/fetch"
+        ? failureResponse(502, { ok: false, reason: "could not read Username for 'https://github.com'" })
+        : jsonResponse({ ...branchesBody([]), hasRemote: true }),
+    )
+    const { result } = renderHook(() => useEditorBranches())
+    await waitFor(() => expect(result.current.hasRemote).toBe(true))
+    const fetchCalls = () =>
+      editorFetchMock.mock.calls.filter((c) => c[0] === "/api/editor/branches/fetch").length
+    await waitFor(() => expect(fetchCalls()).toBe(1))
+
+    // Two full intervals later: still exactly one attempt. A fetch that
+    // needs a human (credentials, a keychain prompt) must not nag every
+    // minute in the background.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 * 2 + 100)
+    })
+    expect(fetchCalls()).toBe(1)
+  })
+
+  it("an explicit fetchRemote() still runs while paused, and a success resumes the background fetch", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let fetchOk = false
+    editorFetchMock.mockImplementation(async (path: string) =>
+      path === "/api/editor/branches/fetch"
+        ? fetchOk
+          ? jsonResponse({ ok: true, behind: 0 })
+          : failureResponse(502, { ok: false, reason: "no credentials" })
+        : jsonResponse({ ...branchesBody([]), hasRemote: true }),
+    )
+    const { result } = renderHook(() => useEditorBranches())
+    const fetchCalls = () =>
+      editorFetchMock.mock.calls.filter((c) => c[0] === "/api/editor/branches/fetch").length
+    await waitFor(() => expect(fetchCalls()).toBe(1))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 100)
+    })
+    expect(fetchCalls()).toBe(1)
+
+    // The user opens the Merge/Push menu: that fetch is explicit and runs.
+    fetchOk = true
+    await act(async () => {
+      await result.current.fetchRemote()
+    })
+    expect(fetchCalls()).toBe(2)
+
+    // It succeeded, so the background interval is live again.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 100)
+    })
+    expect(fetchCalls()).toBe(3)
+  })
+
+  it("a stale background failure landing after an explicit success does not re-pause the interval", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    // The first (background) fetch hangs until released; the explicit one
+    // answers at once.
+    let releaseFirst: (() => void) | null = null
+    let fetchIndex = 0
+    editorFetchMock.mockImplementation(async (path: string) => {
+      if (path !== "/api/editor/branches/fetch") {
+        return jsonResponse({ ...branchesBody([]), hasRemote: true })
+      }
+      fetchIndex += 1
+      if (fetchIndex === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve
+        })
+        return failureResponse(502, { ok: false, reason: "no credentials" })
+      }
+      return jsonResponse({ ok: true, behind: 0 })
+    })
+    const { result } = renderHook(() => useEditorBranches())
+    const fetchCalls = () =>
+      editorFetchMock.mock.calls.filter((c) => c[0] === "/api/editor/branches/fetch").length
+    await waitFor(() => expect(fetchCalls()).toBe(1))
+    await waitFor(() => expect(releaseFirst).not.toBeNull())
+
+    // Explicit fetch starts and succeeds while the background one is
+    // still in flight; then the background one fails.
+    await act(async () => {
+      await result.current.fetchRemote()
+    })
+    expect(fetchCalls()).toBe(2)
+    await act(async () => {
+      releaseFirst!()
+      await Promise.resolve()
+    })
+
+    // Next interval: the background fetch is still live.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 100)
+    })
+    expect(fetchCalls()).toBe(3)
+  })
+
+  it("a stale background success landing after an explicit failure still resumes the interval", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    // The first (background) fetch hangs until released and then SUCCEEDS;
+    // the explicit one fails at once. The remote did answer, so the
+    // interval should be live.
+    let releaseFirst: (() => void) | null = null
+    let fetchIndex = 0
+    editorFetchMock.mockImplementation(async (path: string) => {
+      if (path !== "/api/editor/branches/fetch") {
+        return jsonResponse({ ...branchesBody([]), hasRemote: true })
+      }
+      fetchIndex += 1
+      if (fetchIndex === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve
+        })
+        return jsonResponse({ ok: true, behind: 0 })
+      }
+      if (fetchIndex === 2) return failureResponse(502, { ok: false, reason: "index.lock exists" })
+      return jsonResponse({ ok: true, behind: 0 })
+    })
+    const { result } = renderHook(() => useEditorBranches())
+    const fetchCalls = () =>
+      editorFetchMock.mock.calls.filter((c) => c[0] === "/api/editor/branches/fetch").length
+    await waitFor(() => expect(fetchCalls()).toBe(1))
+    await waitFor(() => expect(releaseFirst).not.toBeNull())
+
+    await act(async () => {
+      await result.current.fetchRemote()
+    })
+    expect(fetchCalls()).toBe(2)
+    await act(async () => {
+      releaseFirst!()
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 100)
+    })
+    expect(fetchCalls()).toBe(3)
+  })
+
+  it("a successful Pull or Push resumes the background fetch too, since it reached the remote", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let fetchOk = false
+    editorFetchMock.mockImplementation(async (path: string) => {
+      if (path === "/api/editor/branches/fetch") {
+        return fetchOk
+          ? jsonResponse({ ok: true, behind: 0 })
+          : failureResponse(502, { ok: false, reason: "no credentials" })
+      }
+      if (path === "/api/editor/branches/pull-remote") return jsonResponse({ ok: true })
+      return jsonResponse({ ...branchesBody([]), hasRemote: true })
+    })
+    const { result } = renderHook(() => useEditorBranches())
+    const fetchCalls = () =>
+      editorFetchMock.mock.calls.filter((c) => c[0] === "/api/editor/branches/fetch").length
+    await waitFor(() => expect(fetchCalls()).toBe(1))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 100)
+    })
+    expect(fetchCalls()).toBe(1)
+
+    // Pull fetches on the server as its first step; a success means the
+    // remote answered, so the interval comes back without a standalone fetch.
+    fetchOk = true
+    await act(async () => {
+      await result.current.pullRemote()
+    })
+    expect(fetchCalls()).toBe(1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 100)
+    })
+    expect(fetchCalls()).toBe(2)
+  })
+
+  it("a stale fetch failure landing after a successful Pull does not re-pause the interval", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    // The first (background) fetch hangs, then fails; Pull succeeds while
+    // it is still in flight.
+    let releaseFirst: (() => void) | null = null
+    let fetchIndex = 0
+    editorFetchMock.mockImplementation(async (path: string) => {
+      if (path === "/api/editor/branches/fetch") {
+        fetchIndex += 1
+        if (fetchIndex === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve
+          })
+          return failureResponse(502, { ok: false, reason: "no credentials" })
+        }
+        return jsonResponse({ ok: true, behind: 0 })
+      }
+      if (path === "/api/editor/branches/pull-remote") return jsonResponse({ ok: true })
+      return jsonResponse({ ...branchesBody([]), hasRemote: true })
+    })
+    const { result } = renderHook(() => useEditorBranches())
+    const fetchCalls = () =>
+      editorFetchMock.mock.calls.filter((c) => c[0] === "/api/editor/branches/fetch").length
+    await waitFor(() => expect(fetchCalls()).toBe(1))
+    await waitFor(() => expect(releaseFirst).not.toBeNull())
+
+    await act(async () => {
+      await result.current.pullRemote()
+    })
+    await act(async () => {
+      releaseFirst!()
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 100)
+    })
+    expect(fetchCalls()).toBe(2)
+  })
+
+  it("a Pull that fetched fine but hit a merge conflict still resumes the background fetch", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let fetchOk = false
+    editorFetchMock.mockImplementation(async (path: string) => {
+      if (path === "/api/editor/branches/fetch") {
+        return fetchOk
+          ? jsonResponse({ ok: true, behind: 0 })
+          : failureResponse(502, { ok: false, reason: "no credentials" })
+      }
+      if (path === "/api/editor/branches/pull-remote") {
+        return failureResponse(409, {
+          ok: false,
+          reason: "Merging 'origin/main' hit conflicts.",
+          conflict: true,
+          conflictFiles: ["src/App.vue"],
+        })
+      }
+      return jsonResponse({ ...branchesBody([]), hasRemote: true })
+    })
+    const { result } = renderHook(() => useEditorBranches())
+    const fetchCalls = () =>
+      editorFetchMock.mock.calls.filter((c) => c[0] === "/api/editor/branches/fetch").length
+    await waitFor(() => expect(fetchCalls()).toBe(1))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 100)
+    })
+    expect(fetchCalls()).toBe(1)
+
+    fetchOk = true
+    let res: Awaited<ReturnType<typeof result.current.pullRemote>> | null = null
+    await act(async () => {
+      res = await result.current.pullRemote()
+    })
+    expect(res!.ok).toBe(false)
+    expect(res!.conflictFiles).toEqual(["src/App.vue"])
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 100)
+    })
+    expect(fetchCalls()).toBe(2)
+  })
+
+  it("creating a pull request (which pushes) resumes the background fetch", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let fetchOk = false
+    editorFetchMock.mockImplementation(async (path: string) => {
+      if (path === "/api/editor/branches/fetch") {
+        return fetchOk
+          ? jsonResponse({ ok: true, behind: 0 })
+          : failureResponse(502, { ok: false, reason: "no credentials" })
+      }
+      if (path === "/api/editor/branches/pull-request") {
+        return jsonResponse({ ok: true, url: "https://github.com/o/r/pull/1" })
+      }
+      return jsonResponse({ ...branchesBody([]), hasRemote: true })
+    })
+    const { result } = renderHook(() => useEditorBranches())
+    const fetchCalls = () =>
+      editorFetchMock.mock.calls.filter((c) => c[0] === "/api/editor/branches/fetch").length
+    await waitFor(() => expect(fetchCalls()).toBe(1))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 100)
+    })
+    expect(fetchCalls()).toBe(1)
+
+    fetchOk = true
+    await act(async () => {
+      await result.current.createPullRequest({
+        repoRef: "o/r",
+        base: "main",
+        head: "feat/x",
+        title: "x",
+      })
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 100)
+    })
+    expect(fetchCalls()).toBe(2)
+  })
+
   it("never fetches origin when the repo has no remote", async () => {
     editorFetchMock.mockResolvedValue(jsonResponse(branchesBody([])))
     const { result } = renderHook(() => useEditorBranches())

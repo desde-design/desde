@@ -179,8 +179,13 @@ export interface BranchesApi {
    * explicit user action; the hook also runs it on a long interval. It is
    * NEVER part of the 2.5s poll. Failures are swallowed (the numbers just
    * stay stale), so this never surfaces an error.
+   *
+   * `background: true` is what the hook's own interval passes. After a
+   * failed fetch the interval is paused (see {@link fetchRemote}'s body);
+   * a background call while paused is a no-op, an explicit call always
+   * runs, and any success resumes the interval.
    */
-  fetchRemote: () => Promise<void>
+  fetchRemote: (opts?: { background?: boolean }) => Promise<void>
   /**
    * Merge the default branch into the current branch, all-or-nothing: a
    * conflict changes nothing and reports `conflictFiles`.
@@ -564,25 +569,75 @@ export function useEditorBranches(onChanged?: () => void): BranchesApi {
     (message?: string) => mutate("/api/editor/branches/commit", { message }, false),
     [mutate],
   )
+  // Set after a failed fetch, cleared by the next successful one. A `git
+  // fetch` that fails is usually one that needs a human — missing
+  // credentials, a credential helper the OS wants to confirm (the macOS
+  // keychain dialog), a remote that wants a password — and retrying it
+  // unattended every minute turns that one prompt into a prompt every
+  // minute. So a failure stops the BACKGROUND interval; the next explicit
+  // action (opening the Merge/Push menu, Pull, Push) reaches the remote
+  // regardless, and its success starts the interval again.
+  const remoteFetchPausedRef = useRef(false)
+  // Fetches overlap: the interval's can still be in flight when the user
+  // opens the menu and starts an explicit one. Any success clears the
+  // pause (the remote answered, whichever request it answered), but only
+  // the NEWEST request's failure sets it, or a stale failure landing after
+  // a fresh success would re-pause the interval that success just resumed.
+  const remoteFetchGenerationRef = useRef(0)
+  // The one way the pause is lifted. Bumping the generation here is what
+  // makes every fetch still in flight stale, so one of them failing later
+  // cannot undo this resume.
+  const resumeRemoteFetch = useCallback(() => {
+    remoteFetchPausedRef.current = false
+    remoteFetchGenerationRef.current += 1
+  }, [])
+  // `mutate` for the actions that talk to origin (push, pull): a success
+  // proves the remote answers, so it lifts the pause the same way a
+  // successful standalone fetch does. So does a merge CONFLICT: pull
+  // fetches first and merges second, and `conflictFiles` only exists
+  // when the fetch half already succeeded. Known gap, left on purpose: a
+  // pull whose fetch succeeded but whose merge failed for some OTHER
+  // local reason, or a PR creation whose push succeeded but whose `gh`
+  // step failed, come back as plain failures and leave the pause in
+  // place. The cost is only that `behind` stays stale until the next
+  // explicit fetch, and opening the Merge/Push menu is one; closing it
+  // would mean the server reporting per-stage outcomes on failure.
+  const mutateReachingRemote = useCallback(
+    async (path: string, body: Record<string, unknown>, reloadsTree: boolean) => {
+      const result = await mutate(path, body, reloadsTree)
+      if (result.ok || result.conflictFiles !== undefined) resumeRemoteFetch()
+      return result
+    },
+    [mutate, resumeRemoteFetch],
+  )
   const pushBranch = useCallback(
     // Push commits pending edits then pushes; it doesn't rewrite the working
     // tree, so no iframe reload. `refresh` flips `dirty`/`unpushed`.
-    () => mutate("/api/editor/branches/push", {}, false),
-    [mutate],
+    () => mutateReachingRemote("/api/editor/branches/push", {}, false),
+    [mutateReachingRemote],
   )
-  const fetchRemote = useCallback(async () => {
-    try {
-      await editorFetch("/api/editor/branches/fetch", {
-        method: "POST",
-        headers: JSON_HEADERS,
-        body: "{}",
-      })
-    } catch {
-      // Background freshness only. A failed fetch means `behind`/`unpushed`
-      // stay stale until the next one; not an error the UI needs to show.
-    }
-    await refresh({ quiet: true })
-  }, [refresh])
+  const fetchRemote = useCallback(
+    async (opts?: { background?: boolean }) => {
+      if (opts?.background && remoteFetchPausedRef.current) return
+      const generation = ++remoteFetchGenerationRef.current
+      let ok = false
+      try {
+        const res = await editorFetch("/api/editor/branches/fetch", {
+          method: "POST",
+          headers: JSON_HEADERS,
+          body: "{}",
+        })
+        ok = res.ok
+      } catch {
+        // Background freshness only. A failed fetch means `behind`/`unpushed`
+        // stay stale until the next one; not an error the UI needs to show.
+      }
+      if (ok) resumeRemoteFetch()
+      else if (generation === remoteFetchGenerationRef.current) remoteFetchPausedRef.current = true
+      await refresh({ quiet: true })
+    },
+    [refresh, resumeRemoteFetch],
+  )
   const updateFromDefault = useCallback(
     // A clean update rewrites the working tree (the merge brings the
     // default's files in) — reload the iframe, same as switch/publish.
@@ -590,8 +645,8 @@ export function useEditorBranches(onChanged?: () => void): BranchesApi {
     [mutate],
   )
   const pullRemote = useCallback(
-    () => mutate("/api/editor/branches/pull-remote", {}, true),
-    [mutate],
+    () => mutateReachingRemote("/api/editor/branches/pull-remote", {}, true),
+    [mutateReachingRemote],
   )
 
   // Long-interval remote freshness. Deliberately NOT the 2.5s poll above:
@@ -599,8 +654,11 @@ export function useEditorBranches(onChanged?: () => void): BranchesApi {
   // then every REMOTE_FETCH_INTERVAL_MS while one exists.
   useEffect(() => {
     if (!hasRemote) return
-    void fetchRemote()
-    const id = setInterval(() => void fetchRemote(), REMOTE_FETCH_INTERVAL_MS)
+    // A remote newly seen (or re-seen) gets a fresh start regardless of
+    // how the previous one's fetches went.
+    remoteFetchPausedRef.current = false
+    void fetchRemote({ background: true })
+    const id = setInterval(() => void fetchRemote({ background: true }), REMOTE_FETCH_INTERVAL_MS)
     return () => clearInterval(id)
   }, [hasRemote, fetchRemote])
   const discardFile = useCallback(
@@ -663,6 +721,9 @@ export function useEditorBranches(onChanged?: () => void): BranchesApi {
               : undefined,
           }
         }
+        // The push half reached origin: lift the background-fetch pause,
+        // same as a successful push or pull would.
+        if (body.pushed) resumeRemoteFetch()
         await refresh()
         // Like publish, the local merge can rebaseline the branch → reload.
         onChangedRef.current?.()
@@ -671,7 +732,7 @@ export function useEditorBranches(onChanged?: () => void): BranchesApi {
         return { ok: false, reason: (e as Error).message }
       }
     },
-    [refresh],
+    [refresh, resumeRemoteFetch],
   )
 
   const preflightPullRequest = useCallback(async (): Promise<PullRequestPreflightResult> => {
@@ -714,14 +775,16 @@ export function useEditorBranches(onChanged?: () => void): BranchesApi {
           return { ok: false, reason: body?.reason ?? `Request failed (${res.status})`, kind: body?.kind }
         }
         // The server commits and pushes on the way, so the toolbar's dirty and
-        // unpushed state is stale by the time this returns.
+        // unpushed state is stale by the time this returns. That push also
+        // reached origin: lift the background-fetch pause.
+        resumeRemoteFetch()
         await refresh()
         return { ok: true, url: body.url }
       } catch (e) {
         return { ok: false, reason: (e as Error).message }
       }
     },
-    [refresh],
+    [refresh, resumeRemoteFetch],
   )
 
   return {

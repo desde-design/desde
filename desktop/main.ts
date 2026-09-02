@@ -33,6 +33,7 @@ import { COPYRIGHT_LINE } from "./copyright.js"
 import { openExternalIfSafe } from "./external-url-guard.js"
 import { shouldPromptMoveToApplications } from "./first-launch.js"
 import { pickLicensesMenuTarget, resolveLegalResourcePaths } from "./legal-resources.js"
+import { mergePathEntries, resolveLoginShellPath } from "./login-shell-path.js"
 import { isTrustedNavigationTarget, loopbackHttpOrigin } from "./navigation-guard.js"
 import { assertOutsidePackagedAsar, resolvePayloadRoot } from "./payload-resolve.js"
 import { PRODUCT_NAME } from "./product-name.js"
@@ -571,6 +572,27 @@ function fatalBoot(err: unknown): void {
 
 async function boot(): Promise<void> {
   await maybePromptMoveToApplications()
+
+  // A Finder/Dock launch inherits launchd's bare PATH, not the user's
+  // terminal PATH — so the child CLI, and every `git`/`gh`/`npm` it spawns,
+  // would resolve to Apple's copies or to nothing (see login-shell-path.ts
+  // for the keychain-prompt-every-minute failure this produced). Fix
+  // `process.env` itself, once, before anything below spawns: child.ts
+  // spreads `process.env` into the payload child, and the dev-mode payload
+  // build and the claude-runtime installer spawn from this process too.
+  // The shell is detached (so a hung rc file's whole process group can be
+  // killed on timeout), which also means a quit during these few seconds
+  // would otherwise leave it running with nothing to time it out.
+  const loginShellAbort = new AbortController()
+  const abortLoginShell = () => loginShellAbort.abort()
+  app.once("before-quit", abortLoginShell)
+  const loginShellPath = await resolveLoginShellPath({
+    platform: process.platform,
+    env: process.env,
+    signal: loginShellAbort.signal,
+  })
+  app.removeListener("before-quit", abortLoginShell)
+  if (loginShellPath) process.env.PATH = mergePathEntries(loginShellPath, process.env.PATH)
 
   // AGPL-3.0 relicensing: sets the native About panel's copyright line
   // explicitly (macOS/Windows both read `copyright` here) rather than
