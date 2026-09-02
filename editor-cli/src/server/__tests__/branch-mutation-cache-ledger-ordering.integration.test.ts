@@ -35,7 +35,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { execFile } from "node:child_process"
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
@@ -101,9 +101,10 @@ import { newSecurityContext } from "../auth.js"
 
 const run = promisify(execFile)
 
-let handle: HttpServerHandle
+let handle: HttpServerHandle | undefined
 let bundleDir: string
 let repoDir: string
+let linkDir: string | undefined
 let token: string
 let shellOrigin: string
 
@@ -199,8 +200,11 @@ beforeEach(() => {
 
 afterEach(async () => {
   await handle?.close()
+  handle = undefined
   await rm(bundleDir, { recursive: true, force: true }).catch(() => {})
   await rm(repoDir, { recursive: true, force: true }).catch(() => {})
+  if (linkDir) await rm(linkDir, { recursive: true, force: true }).catch(() => {})
+  linkDir = undefined
   vi.clearAllMocks()
 })
 
@@ -224,14 +228,14 @@ describe("A3 — branch mutation cleanup runs inside the exclusive tree gate", (
     hooks.setRenameLedgerGate(new Promise<void>((resolve) => (openGate = resolve)))
     const renameStarted = new Promise<void>((resolve) => hooks.setOnRenameStart(resolve))
 
-    const renamePromise = authedFetch(handle, token, shellOrigin, "/api/editor/branches/rename", {
+    const renamePromise = authedFetch(started.handle, token, shellOrigin, "/api/editor/branches/rename", {
       method: "POST",
       body: JSON.stringify({ name: "feature", to: "feature-v2" }),
     })
     await renameStarted
 
     // Queued behind the exclusive tree gate the rename holds.
-    const editPromise = authedFetch(handle, token, shellOrigin, "/api/editor/edit", {
+    const editPromise = authedFetch(started.handle, token, shellOrigin, "/api/editor/edit", {
       method: "POST",
       body: JSON.stringify({
         edit: { kind: "overwrite", file: "Other.ts", newSource: "export const x = 2\n" },
@@ -280,25 +284,26 @@ describe("A3 — branch mutation cleanup runs inside the exclusive tree gate", (
 
 describe("B3 — branch-cache invalidation covers both the raw and realpath'd root", () => {
   it("a direct edit right after a rename sees the new branch even when repoRoot and its realpath differ", async () => {
-    const raw = await makeRepo()
-    repoDir = raw
+    // Build the divergence instead of hoping for one. On macOS `os.tmpdir()`
+    // resolves through /private, so `realpath(raw) !== raw` for free; on
+    // Linux /tmp is a real directory and the two spellings are identical,
+    // which used to turn this test into a silent no-op on CI. A symlink to
+    // the repo gives every platform a raw path whose realpath differs.
+    repoDir = await makeRepo()
+    linkDir = await mkdtemp(join(tmpdir(), "editor-cli-branchcache-link-"))
+    const raw = join(linkDir, "repo")
+    await symlink(repoDir, raw)
     const repoRootReal = await realpath(raw)
-    if (repoRootReal === repoDir) {
-      // This Mac's tmp path has no realpath divergence for once — the test
-      // can't exercise B3 without one, so it's a no-op pass rather than a
-      // false failure. (Not expected in this repo's normal CI/dev
-      // environment — macOS's /tmp -> /private/tmp routinely produces one.)
-      return
-    }
+    expect(repoRootReal).not.toBe(raw)
 
-    const started = await startServer({ repoRoot: repoDir, repoRootReal })
+    const started = await startServer({ repoRoot: raw, repoRootReal })
     handle = started.handle
     token = started.token
     shellOrigin = started.shellOrigin
 
     // Warm the branch cache under the REALPATH key — the same key a
     // direct edit's own `resolveBranchCached(rootReal)` call uses.
-    const first = await authedFetch(handle, token, shellOrigin, "/api/editor/edit", {
+    const first = await authedFetch(started.handle, token, shellOrigin, "/api/editor/edit", {
       method: "POST",
       body: JSON.stringify({
         edit: { kind: "overwrite", file: "Other.ts", newSource: "export const x = 2\n" },
@@ -306,7 +311,7 @@ describe("B3 — branch-cache invalidation covers both the raw and realpath'd ro
     })
     expect(first.status).toBe(200)
 
-    const renameRes = await authedFetch(handle, token, shellOrigin, "/api/editor/branches/rename", {
+    const renameRes = await authedFetch(started.handle, token, shellOrigin, "/api/editor/branches/rename", {
       method: "POST",
       body: JSON.stringify({ name: "feature", to: "feature-v2" }),
     })
@@ -315,7 +320,7 @@ describe("B3 — branch-cache invalidation covers both the raw and realpath'd ro
     // Immediately after (well within the 5s TTL) — a DIFFERENT file, so
     // this is a fresh ledger entry whose branch reflects whatever
     // `resolveBranchCached(rootReal)` returns right now.
-    const second = await authedFetch(handle, token, shellOrigin, "/api/editor/edit", {
+    const second = await authedFetch(started.handle, token, shellOrigin, "/api/editor/edit", {
       method: "POST",
       body: JSON.stringify({
         edit: { kind: "overwrite", file: "App.vue", newSource: "<template><h1>Pricing</h1></template>\n" },

@@ -41,8 +41,21 @@ jobs:
           npm --prefix editor-cli ci
           npm --prefix viewer ci
 
+      - name: Build the Editor UI bundle
+        # A clone has no ui-src/dist; the editor-cli boot tests refuse to
+        # start without it, the same way the CLI itself does.
+        run: npm --prefix editor-cli run build:ui
+
       - name: Verify
         run: npm run verify
+
+      - name: Keep the per-stage logs when verify fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-artifacts
+          path: .verify-artifacts/
+          if-no-files-found: ignore
 
       - name: Viewer typecheck and tests
         working-directory: viewer
