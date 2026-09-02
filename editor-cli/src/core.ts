@@ -290,6 +290,12 @@ export interface CoreOptions {
    * the CLI from the same flags `runLauncher` forwards; defaults to `[]`.
    */
   launcherForwardArgs?: string[]
+  /**
+   * Optional: the launcher this process was spawned from, answered by the
+   * breadcrumb "home" instead of lazily starting a second launcher. See
+   * `server/home-url.ts`.
+   */
+  homeUrl?: string
 }
 
 export interface CoreHandle {
@@ -1509,6 +1515,7 @@ export async function startCore(opts: CoreOptions): Promise<CoreHandle> {
     enabledLanes,
     branchMode,
     launcherForwardArgs: opts.launcherForwardArgs,
+      homeUrl: opts.homeUrl,
     iconSetRegistry,
     reconciliationStatusHolder,
     stalenessCacheHolder,

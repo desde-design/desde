@@ -24,6 +24,7 @@ import { spawn } from "node:child_process"
 import { createChildTracker, type ChildTracker } from "./child-tracker.js"
 import { launchCwd } from "../launch-cwd.js"
 import { spawnEnvWithInheritedLlmCredentials } from "./inherited-llm-env.js"
+import { homeUrlEnv } from "./home-url.js"
 import { existsSync } from "node:fs"
 import { stat } from "node:fs/promises"
 import { basename, resolve as resolvePath } from "node:path"
@@ -149,9 +150,14 @@ export async function startLauncher(
   // injected `spawnEditor` (tests) never produces anything that needs
   // tracking, since it returns just `{ url }` with no process behind it.
   const childTracker = createChildTracker()
+  // Where a spawned editor's breadcrumb Home comes back to: THIS launcher.
+  // Read at spawn time, not closure-creation time, because with `port: 0`
+  // the real origin is only known once the socket is bound (below).
+  let launcherOrigin = shellOrigin
   const spawnEditor =
     opts.spawnEditor ??
-    ((repoPath: string) => defaultSpawnEditor(repoPath, forwardArgs, childTracker))
+    ((repoPath: string) =>
+      defaultSpawnEditor(repoPath, forwardArgs, childTracker, () => launcherOrigin))
 
   const uiBundleRoot = resolvePath(opts.uiBundleRoot ?? resolveUiBundleRoot())
   if (!existsSync(uiBundleRoot)) {
@@ -217,6 +223,7 @@ export async function startLauncher(
   // arrives, and no request can arrive before this point.
   const boundOrigin = `http://${host}:${boundPort}`
   ctx.security.shellOrigin = boundOrigin
+  launcherOrigin = boundOrigin
 
   return {
     url: boundOrigin,
@@ -884,6 +891,7 @@ async function defaultSpawnEditor(
   repoPath: string,
   forwardArgs: string[] = [],
   childTracker?: ChildTracker,
+  homeUrl?: () => string,
 ): Promise<{ url: string }> {
   const port = await pickFreePort()
   // Checked here — immediately before `spawn()`, with no `await` between
@@ -938,7 +946,9 @@ async function defaultSpawnEditor(
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
       cwd: launchCwd(),
-      env: spawnEnvWithInheritedLlmCredentials(),
+      // `DESDE_HOME_URL`: the spawned editor answers its breadcrumb Home
+      // with this launcher instead of starting a second one (home-url.ts).
+      env: { ...spawnEnvWithInheritedLlmCredentials(), ...homeUrlEnv(homeUrl?.()) },
     },
   )
   // Track immediately at spawn time, independent of whether boot ever

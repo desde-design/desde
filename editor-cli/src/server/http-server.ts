@@ -494,6 +494,14 @@ export interface HttpServerOptions {
    */
   launcherForwardArgs?: string[]
   /**
+   * The launcher this editor was spawned from, when there is one. The
+   * breadcrumb's Home (`GET /api/editor/home`) answers with it instead of
+   * lazily starting a second launcher. Absent for an editor started by hand
+   * (`desde <repo>`), which keeps the lazy start. Sourced from the
+   * `DESDE_HOME_URL` env var a launcher sets on its children (`home-url.ts`).
+   */
+  homeUrl?: string
+  /**
    * Icon-set registry populated by the CLI bootstrap (auto-detected
    * from the prototype's `package.json`). Exposed read-only via
    * `GET /api/editor/icon-sets`. Omitted → endpoint returns 503.
@@ -748,6 +756,7 @@ interface RouteContext extends Required<Pick<HttpServerOptions, "applicatorLoade
   mcp?: Pick<McpHandlerContext, "platformBaseUrl">
   project?: HttpServerOptions["project"]
   launcherForwardArgs?: string[]
+  homeUrl?: string
   homeLauncherHolder?: HomeLauncherHolder
   chatQuotas?: HttpServerOptions["chatQuotas"]
   conventions?: HttpServerOptions["conventions"]
@@ -3621,6 +3630,14 @@ async function handleHomeRequest(
   res: ServerResponse,
   ctx: RouteContext,
 ): Promise<void> {
+  // Spawned by a launcher that is still running: go back to it. Starting a
+  // second launcher here leaked one process per project opened, and in the
+  // desktop app sent the hop to the system browser, because the shell's
+  // navigation guard had only ever been told about the launcher it booted.
+  if (ctx.homeUrl) {
+    sendJson(res, 200, { ok: true, url: ctx.homeUrl })
+    return
+  }
   const holder = ctx.homeLauncherHolder
   if (!holder) {
     sendJson(res, 500, { ok: false, reason: "home launcher unavailable" })

@@ -43,6 +43,7 @@ export interface InspectPathResult {
 }
 import type { ReferenceDirectoryInspection } from "@/components/editor/reference-dirs/add-reference-directory"
 import { editorFetch } from "@/lib/editor-fetch"
+import { navigateTopLevel } from "@/lib/top-level-navigate"
 
 /**
  * Client for the launcher server's `/api/launcher/*` endpoints. Auth is
@@ -311,9 +312,7 @@ export function useLauncherApi(): UseLauncherApi {
     // is swallowed rather than surfaced as an error banner: worst case the
     // guard still blocks the navigation and opens it externally instead,
     // which is a degraded outcome, not a broken one.
-    await window.desdeDesktop?.__trustOrigin?.(res.url).catch(() => {})
-    // Keep `busy` set — we're navigating away.
-    window.location.href = res.url
+    await navigateTopLevel(res.url)
   }, [])
 
   const inspectPath = useCallback(async (path: string): Promise<InspectPathResult> => {

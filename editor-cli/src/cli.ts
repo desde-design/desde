@@ -17,6 +17,7 @@ import { formatStampNoticeLines } from "./hosts/stamp-notices.js"
 import { normalizeEqualsFlags } from "./cli-args.js"
 import type { HostId } from "./hosts/types.js"
 import { cloneRepo } from "./server/clone-repo.js"
+import { readHomeUrl } from "./server/home-url.js"
 import { startLauncher } from "./server/launcher-server.js"
 import { captureInheritedLlmEnv } from "./server/inherited-llm-env.js"
 
@@ -369,6 +370,9 @@ async function main(): Promise<void> {
       // launcher, so they run the same assets this process was started
       // with (mirrors runLauncher's forwarding).
       launcherForwardArgs: buildForwardArgs(args),
+        // Set by the launcher that spawned this editor, if any: Home goes
+        // back there rather than starting a second launcher.
+        homeUrl: readHomeUrl(process.env),
     })
   } catch (err) {
     if (err instanceof FrameworkUnsupportedError) {

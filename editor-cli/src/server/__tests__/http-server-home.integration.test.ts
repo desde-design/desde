@@ -78,3 +78,53 @@ describe("GET /api/editor/home", () => {
     expect(second.url).toBe(first.url)
   })
 })
+
+/**
+ * An editor spawned by a launcher must send Home back to THAT launcher, not
+ * start a second one. The desktop shell has only ever been told about the
+ * launcher it booted, so a fresh random-port launcher was handed to the
+ * system browser (MEASURED 2026-09-01). The url is whatever the parent set,
+ * echoed verbatim, and no launcher is started: nothing listens on it.
+ */
+describe("GET /api/editor/home with a parent launcher (homeUrl)", () => {
+  let parented: HttpServerHandle
+  let parentedOrigin: string
+  let parentedToken: string
+  // A port nothing listens on, picked fresh so the assertion below cannot be
+  // satisfied by whatever happens to be running on this machine (the first
+  // draft hard-coded 4321 and passed against a live desktop launcher).
+  let parentLauncher: string
+
+  beforeEach(async () => {
+    parentLauncher = `http://127.0.0.1:${await pickFreePort()}`
+    const port = await pickFreePort()
+    parentedOrigin = `http://127.0.0.1:${port}`
+    const security = newSecurityContext(parentedOrigin)
+    parentedToken = security.token
+    parented = await startHttpServer({
+      host: "127.0.0.1",
+      port,
+      repoRoot: repoDir,
+      uiBundleRoot: bundleDir,
+      viteUrl: "http://localhost:5173",
+      security,
+      homeUrl: parentLauncher,
+    })
+  })
+  afterEach(async () => {
+    await parented.close()
+  })
+
+  it("answers with the parent launcher's url and starts nothing", async () => {
+    const res = await fetch(`${parentedOrigin}/api/editor/home`, {
+      headers: { authorization: `Bearer ${parentedToken}` },
+    })
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { ok: boolean; url: string }
+    expect(json).toEqual({ ok: true, url: parentLauncher })
+    // Nothing was started on the parent's port by this process: the handle
+    // owns no launcher, so closing it has nothing extra to tear down, and
+    // the url is not something this test made reachable.
+    await expect(fetch(`${parentLauncher}/`)).rejects.toThrow()
+  })
+})
