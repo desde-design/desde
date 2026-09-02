@@ -401,13 +401,38 @@ export function EditorRightRail({
       <Tabs
         value={activeTab}
         onValueChange={(v) => onTabChange(v as RightRailTab)}
-        className="flex h-full min-h-0 flex-col border-l border-border/60 pt-4"
+        /*
+          One card, matching the Viewer's card two exactly — same radius,
+          same border token, same `shadow-xs`, same `overflow-hidden` (Mo,
+          2026-09-01). The `overflow-hidden` is load-bearing rather than
+          decorative: a scrolling panel inside is clipped BY the rounded
+          corner instead of painting over it.
+
+          `flex-1`, not `h-full`. The aside around this now has `p-2`, so a
+          child claiming the full height would overflow it by the padding.
+
+          The `border-l` this used to carry moved OUT to that aside, where the
+          Viewer keeps its own. A rail's edge belongs to the rail, not to
+          whichever panel happens to be mounted in it.
+        */
+        className="flex min-h-0 flex-1 flex-col gap-0 overflow-hidden rounded-lg border border-border bg-background shadow-xs"
         data-testid="editor-right-rail"
       >
+        {/* `p-2 pb-1` is the Viewer's own tab-strip wrapper, copied so the two
+            rails space their strips identically. The 4px shortfall at the
+            bottom is deliberate there and inherited here: the strip is
+            NAVIGATION between panels, so it wants a little more air under it
+            than the 8px rhythm inside a panel.
+
+            The strip stays `w-auto justify-start` rather than the Viewer's
+            `w-full`. Four tabs stretched across a resizable rail would change
+            width as the user drags it, which the Viewer's fixed 320px never
+            has to survive. */}
+        <div className="flex-none p-2 pb-1">
         <TabsList
           variant="default"
           size="sm"
-          className="mx-3 w-auto justify-start"
+          className="w-auto justify-start"
         >
           <TabsTrigger value="edit" data-testid="right-rail-tab-edit">
             Edit
@@ -425,6 +450,7 @@ export function EditorRightRail({
             Activity
           </TabsTrigger>
         </TabsList>
+        </div>
 
         <TabsContent
           value="edit"

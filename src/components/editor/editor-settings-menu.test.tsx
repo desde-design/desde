@@ -289,22 +289,85 @@ describe("EditorSettingsMenu — API key section", () => {
 })
 
 /**
- * Codex review round four: the credential marker and `DesktopUpdateBadge`
- * both sat at `-right-0.5 -top-0.5`, and the marker rendered second, so a
- * missing credential hid update-ready and update-error on desktop.
+ * There is ONE dot on the gear (2026-09-02). There used to be two, told apart
+ * only by corner and hue, and the corners existed to stop them overlapping
+ * rather than to mean anything.
+ *
+ * The history is worth keeping because both halves of it are load-bearing.
+ * Codex review round four found that the credential marker and the update
+ * badge both sat at `-right-0.5 -top-0.5` with the marker rendering second, so
+ * a missing credential HID update-ready and update-error. The fix moved the
+ * marker to the bottom-right. That worked and was unreadable: Mo, reading the
+ * amber bottom-right dot in the project view, took it for an update
+ * indicator. A dot can say "look here"; it cannot say which of four things.
+ *
+ * So one dot, one corner, priority-ordered, with the menu carrying the words.
+ * These tests pin the priority, because the failure they replace was silent
+ * in exactly the same way: an indicator that renders, in the right place,
+ * meaning something other than what the reader thinks.
  */
-describe("EditorSettingsMenu gear indicators", () => {
-  it("keeps the credential marker clear of the update badge's corner", async () => {
-    mockResponse = response()
+describe("EditorSettingsMenu gear indicator", () => {
+  const noCredentials = () =>
     stubCredentials({
       source: "none",
       devMode: false,
       hasStoredKey: false,
       promptDismissed: false,
     })
+
+  it("puts the credential dot in the top-right corner", async () => {
+    mockResponse = response()
+    noCredentials()
     render(<EditorSettingsMenu />)
     const marker = await screen.findByTestId("editor-settings-credential-marker")
-    expect(marker.className).toContain("-bottom-0.5")
-    expect(marker.className).not.toContain("-top-0.5")
+    expect(marker.className).toContain("-top-0.5")
+    expect(marker.className).not.toContain("-bottom-0.5")
+  })
+
+  it("shows only one dot, so nothing has to share a corner", async () => {
+    mockResponse = response()
+    noCredentials()
+    render(<EditorSettingsMenu />)
+    await screen.findByTestId("editor-settings-credential-marker")
+    // The update badge is the other dot that used to be on this button. With
+    // no desktop bridge there is no update state, so it must not render — and
+    // with one, the assertion below proves it takes the corner alone.
+    expect(screen.queryByTestId("desktop-update-badge")).not.toBeInTheDocument()
+  })
+
+  it("lets an update outrank a missing credential for the one corner", async () => {
+    mockResponse = response()
+    noCredentials()
+    // `downloading`. `updateReady` covers BOTH `available` and `ready`, and
+    // those replace the dot with the word "Update" (see the test above), so
+    // `downloading` and `error` are the only phases that put a dot on this
+    // button at all — which makes `downloading` the only honest way to ask
+    // which indicator wins the corner.
+    const bridge: DesktopBridge = {
+      appVersion: "1.4.0",
+      updates: {
+        getState: async () => ({ phase: "downloading", version: "1.5.0", percent: 43 }),
+        onState: () => () => {},
+        download: async () => {},
+        restartAndInstall: () => {},
+        checkForUpdates: async () => ({ performed: true }),
+        getAutoDownload: async () => true,
+        setAutoDownload: async () => {},
+      },
+      claudeRuntime: {
+        getState: async () => ({ phase: "ready" }),
+        onState: () => () => {},
+        retry: () => {},
+      },
+      pickFolder: async () => null,
+    }
+    ;(window as unknown as { desdeDesktop: DesktopBridge }).desdeDesktop = bridge
+    render(<EditorSettingsMenu />)
+    await waitFor(() => {
+      expect(screen.getByTestId("desktop-update-badge")).toHaveAttribute("data-phase", "downloading")
+    })
+    // The credential dot stands down rather than stacking. This is the exact
+    // case the bottom-right workaround existed for, now handled by priority.
+    expect(screen.queryByTestId("editor-settings-credential-marker")).not.toBeInTheDocument()
   })
 })

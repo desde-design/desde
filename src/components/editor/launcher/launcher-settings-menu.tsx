@@ -33,7 +33,7 @@
  */
 
 import { useCallback, useState } from "react"
-import { KeyRound, Settings } from "lucide-react"
+import { KeyRound, SlidersHorizontal } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -42,9 +42,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
-  DesktopUpdateBadge,
   DesktopUpdateSection,
 } from "@/components/editor/desktop-update-menu"
+import { SettingsStatusDot } from "@/components/editor/settings-status-dot"
 import { LlmCredentialDialog } from "@/components/editor/llm-credential-dialog"
 import { useLlmCredentials } from "@/hooks/useLlmCredentials"
 import type { DesktopUpdatesApi } from "@/hooks/useDesktopUpdates"
@@ -81,17 +81,24 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
             aria-label="Settings"
             data-testid="launcher-settings"
           >
-            <Settings />
+            {/* `SlidersHorizontal`, matching the Viewer's settings control
+                (`viewer/app/account-menu.tsx`) — Mo, 2026-09-02: "The Editor is
+                using a different settings icon (gear) it should match the
+                viewer settings icon". It was lucide's `Settings` gear. Two
+                surfaces of one product opening the same kind of panel behind
+                two different glyphs is the drift the shared `blocks/` layer
+                exists to prevent; this one just never went through it. */}
+            <SlidersHorizontal />
             {updateReady ? "Update" : null}
-            {updates && !updateReady ? <DesktopUpdateBadge state={updates.state} /> : null}
-            {credentialMissing ? (
-              <span
-                data-testid="launcher-settings-credential-marker"
-                aria-label="AI features need an API key"
-                // Bottom-right, leaving the top-right corner to the update
-                // badge. Sharing it hid update-ready whenever a key was also
-                // missing — the same defect the project gear already fixed.
-                className="absolute -bottom-0.5 -right-0.5 size-2 rounded-full bg-warning"
+            {/* ONE dot, top-right — see `settings-status-dot.tsx`. Replaces
+                an update badge at the top-right plus a credential marker at
+                the bottom-right, which could not be told apart on a 24px
+                glyph. Suppressed once the word "Update" is showing. */}
+            {!updateReady ? (
+              <SettingsStatusDot
+                state={updates?.state}
+                credentialMissing={credentialMissing}
+                credentialTestId="launcher-settings-credential-marker"
               />
             ) : null}
           </Button>

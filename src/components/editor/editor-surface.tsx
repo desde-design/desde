@@ -1016,7 +1016,21 @@ export function EditorSurface({
           </section>
         </div>
         {showRightRail ? (
-          <ResizableRail storageKey="desde.editor.right-rail-width.v1">
+          /* `gap-2 p-2` + `border-l` mirror the Viewer's rail aside exactly
+             (Mo, 2026-09-01: "make this panel have the same visual treatment
+             as the viewer panel"). The padding is what lets the card inside
+             read as a card rather than as the rail itself; the border is what
+             stops the rail ending at no particular line. Passed from here
+             rather than baked into `ResizableRail`, which is a generic
+             width-drag container with no opinion about chrome.
+
+             A plain JS comment rather than a braced JSX one: this sits in a
+             ternary BRANCH, which takes exactly one expression, and a braced
+             comment beside the element is a second one. */
+          <ResizableRail
+            storageKey="desde.editor.right-rail-width.v1"
+            className="gap-2 border-l border-border/60 p-2"
+          >
             <EditorRightRail
               activeTab={activeTab}
               onTabChange={handleTabChange}

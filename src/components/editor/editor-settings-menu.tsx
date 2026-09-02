@@ -26,7 +26,7 @@ import {
   Boxes,
   FolderSearch,
   KeyRound,
-  Settings,
+  SlidersHorizontal,
   Puzzle,
   ScrollText,
   Share2,
@@ -54,12 +54,10 @@ import { ReferenceDirsPanel } from "@/components/editor/reference-dirs/reference
 import { DesignSystemsPanel } from "@/components/editor/design-systems-panel"
 import { CapabilitiesPanel } from "@/components/editor/capabilities-panel"
 import {
-} from "@/components/editor/smoke-test-control"
-import {
-  DesktopUpdateBadge,
   DesktopUpdateRestartConfirmDialog,
   DesktopUpdateSection,
 } from "@/components/editor/desktop-update-menu"
+import { SettingsStatusDot } from "@/components/editor/settings-status-dot"
 import { useProjectKnowledge } from "@/hooks/useProjectKnowledge"
 import { useDesktopUpdates } from "@/hooks/useDesktopUpdates"
 import { useClaudeRuntimeStatus } from "@/hooks/useClaudeRuntimeStatus"
@@ -197,21 +195,25 @@ export function EditorSettingsMenu({
               glyph every desktop app already spends on settings, which is
               what this menu is.
             */}
-            <Settings />
+            {/* `SlidersHorizontal`, matching the Viewer's settings control
+                (`viewer/app/account-menu.tsx`) — Mo, 2026-09-02: "The Editor is
+                using a different settings icon (gear) it should match the
+                viewer settings icon". It was lucide's `Settings` gear. Two
+                surfaces of one product opening the same kind of panel behind
+                two different glyphs is the drift the shared `blocks/` layer
+                exists to prevent; this one just never went through it. */}
+            <SlidersHorizontal />
             {updateReady ? "Update" : null}
-            {/* The dot is redundant once the word is there. */}
-            {updates && !updateReady ? (
-              <DesktopUpdateBadge state={updates.state} />
-            ) : null}
-            {credentialMissing ? (
-              <span
-                data-testid="editor-settings-credential-marker"
-                aria-label="AI features need an API key"
-                // BOTTOM-right, not top-right: `DesktopUpdateBadge` owns the
-                // top-right corner, and this marker renders after it, so
-                // sharing the position hid update-ready and update-error
-                // whenever credentials were also missing.
-                className="absolute -bottom-0.5 -right-0.5 size-2 rounded-full bg-warning"
+            {/* ONE dot, top-right, priority-ordered — see
+                `settings-status-dot.tsx`. It replaces an update badge at the
+                top-right plus a credential marker at the bottom-right, which
+                nobody could tell apart. The dot is redundant once the word
+                "Update" is there, so it is suppressed then. */}
+            {!updateReady ? (
+              <SettingsStatusDot
+                state={updates?.state}
+                credentialMissing={credentialMissing}
+                credentialTestId="editor-settings-credential-marker"
               />
             ) : null}
           </Button>
