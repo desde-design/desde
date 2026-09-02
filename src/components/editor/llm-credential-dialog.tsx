@@ -31,8 +31,16 @@ import type { UseLlmCredentials } from "@/hooks/useLlmCredentials"
 /**
  * Ctrl+? reveals the dev-mode toggle.
  *
- * Matches on `key`, never `code`: `?` sits on different physical keys across
- * layouts, and `key` reports the character the layout actually produced.
+ * Matches on `key` first, never `code` alone: `?` sits on different physical
+ * keys across layouts, and `key` reports the character the layout actually
+ * produced.
+ *
+ * The `code === "Slash"` fallback exists because macOS does NOT report `?`
+ * here. Measured in the desktop app 2026-09-02: Ctrl+Shift+/ on a US layout
+ * arrives as `key: "/"`, `code: "Slash"`, ctrl and shift both true. Chromium
+ * recomputes the key value without Control and the result is the unshifted
+ * character. So on macOS the `key` branch never fired and the toggle was
+ * unreachable. The fallback still requires Shift, so plain Ctrl+/ stays inert.
  *
  * Ctrl ONLY. `Cmd+Shift+/` is the macOS Help-menu search shortcut and macOS is
  * the primary platform, so accepting `metaKey` would collide with the OS.
@@ -42,9 +50,11 @@ import type { UseLlmCredentials } from "@/hooks/useLlmCredentials"
  * click the dialog body first.
  */
 export function shouldRevealDevMode(
-  event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey">,
+  event: Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "shiftKey" | "metaKey">,
 ): boolean {
-  return event.key === "?" && event.ctrlKey && !event.metaKey
+  if (!event.ctrlKey || event.metaKey) return false
+  if (event.key === "?") return true
+  return event.shiftKey && event.code === "Slash"
 }
 
 export interface LlmCredentialDialogProps {

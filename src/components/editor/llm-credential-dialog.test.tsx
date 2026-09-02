@@ -21,25 +21,47 @@ function stubStatus(status: unknown) {
 }
 
 describe("shouldRevealDevMode", () => {
+  const press = (over: Partial<Parameters<typeof shouldRevealDevMode>[0]>) =>
+    shouldRevealDevMode({
+      key: "?",
+      code: "Slash",
+      ctrlKey: true,
+      shiftKey: true,
+      metaKey: false,
+      ...over,
+    })
+
   it("reveals on Ctrl+?", () => {
-    expect(shouldRevealDevMode({ key: "?", ctrlKey: true, metaKey: false })).toBe(true)
+    expect(press({})).toBe(true)
+  })
+
+  it("reveals on Ctrl+Shift+/ when the OS reports the unshifted key", () => {
+    // Measured in the macOS desktop app 2026-09-02: Chromium reports
+    // key "/" (not "?") while Control is held, so matching on `key` alone
+    // never fired there.
+    expect(press({ key: "/" })).toBe(true)
   })
 
   it("does not reveal on a bare ?", () => {
-    expect(shouldRevealDevMode({ key: "?", ctrlKey: false, metaKey: false })).toBe(false)
+    expect(press({ ctrlKey: false, shiftKey: false })).toBe(false)
+    expect(press({ ctrlKey: false })).toBe(false)
   })
 
   it("does not reveal on Cmd+?, which is the macOS Help shortcut", () => {
-    expect(shouldRevealDevMode({ key: "?", ctrlKey: false, metaKey: true })).toBe(false)
+    expect(press({ ctrlKey: false, metaKey: true })).toBe(false)
+  })
+
+  it("does not reveal on Ctrl+/ without Shift", () => {
+    expect(press({ key: "/", shiftKey: false })).toBe(false)
   })
 
   it("does not reveal on Ctrl with any other key", () => {
-    expect(shouldRevealDevMode({ key: "/", ctrlKey: true, metaKey: false })).toBe(false)
-    expect(shouldRevealDevMode({ key: "k", ctrlKey: true, metaKey: false })).toBe(false)
+    expect(press({ key: "k", code: "KeyK" })).toBe(false)
+    expect(press({ key: "K", code: "KeyK" })).toBe(false)
   })
 
   it("does not reveal when Cmd is held alongside Ctrl", () => {
-    expect(shouldRevealDevMode({ key: "?", ctrlKey: true, metaKey: true })).toBe(false)
+    expect(press({ metaKey: true })).toBe(false)
   })
 })
 
