@@ -17,9 +17,9 @@
   },
   "dependencies": {
     "express": "^5.1.0",
-    "nodemailer": "^9.0.5",
+    "nodemailer": "^9.0.6",
     "tar": "^7.5.1",
-    "tsx": "^4.22.2"
+    "tsx": "^4.23.13"
   },
   "devDependencies": {
     "@types/express": "^5.0.1",
@@ -28,6 +28,6 @@
     "@types/supertest": "^6.0.2",
     "supertest": "^7.1.1",
     "typescript": "^5",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.11"
   }
 }
