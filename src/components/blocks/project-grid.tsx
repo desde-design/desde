@@ -39,24 +39,31 @@ const COLUMN_STEPS = [
 /**
  * Row tints: teal, fading down the page.
  *
- * Alpha steps on `--primary` (which IS the brand teal) rather than five new
+ * Alpha steps on `--primary` (which IS the brand teal) rather than four new
  * teal colour tokens. That is not just brevity — it is what makes the fade
  * correct in dark mode for free. A ramp of fixed light-teal hex values would
  * invert on a dark ground: the "lightest" row would glow brightest and the
  * banding would read upside down. A tint of the ground always settles toward
- * the ground, so row 5 recedes in both modes, which is the actual intent.
+ * the ground, so the last row recedes in both modes, which is the actual
+ * intent.
  *
- * The ceiling is deliberate. These stay under 50% so the tinted strip never
- * drifts far from the mode's own background lightness, which is what lets one
- * `text-foreground` carry legible contrast on every row in BOTH modes. Push
- * row 1 up to a solid teal and the strip's label needs a per-row, per-mode
- * colour to stay readable.
+ * The ceiling is deliberate. These stay well under 50% so the tinted strip
+ * never drifts far from the mode's own background lightness, which is what
+ * lets one `text-foreground` carry legible contrast on every row in BOTH
+ * modes. Push row 1 up to a solid teal and the strip's label needs a per-row,
+ * per-mode colour to stay readable.
+ *
+ * The ramp STARTS at /34 (Mo, 2026-09-01: "the bg color of the first row is a
+ * little dark, let's start with the color from the 2nd row"). It used to open
+ * on /45. Nothing was added at the shallow end to keep the count at five: /10
+ * to a hypothetical /6 is not a band anyone can see, so a fifth step would
+ * have bought a distinction that does not survive being looked at. Four
+ * visible steps beat five where two of them match.
  *
  * Rows past the last step clamp to it rather than cycling: a long list should
  * settle into calm, not restart at full saturation halfway down.
  */
 export const ROW_TINTS = [
-  "bg-primary/45",
   "bg-primary/34",
   "bg-primary/25",
   "bg-primary/17",

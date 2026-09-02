@@ -722,10 +722,15 @@ function ProjectCard({
           change this with it, or two left edges drift a few pixels apart and
           read as a mistake rather than a choice.
 
-          One label colour serves all five rows in both modes, which is what
+          One label colour serves all four rows in both modes, which is what
           the alpha ceiling in `ROW_TINTS` buys. /85 rather than /75: measured
           across every tint-over-mode combination, the worst case (deepest row
-          on dark) is 5.13:1 at /85 against 4.36:1 at /75, which is under AA. */}
+          on dark) was 5.13:1 at /85 against 4.36:1 at /75, which is under AA.
+
+          That measurement was taken when the ramp opened on /45. It now opens
+          on /34 (Mo, 2026-09-01), so the deepest tint is lighter than the one
+          measured and the worst case can only have improved. /85 stays, and
+          stays conservative. */}
       {/* The strip is a ROW now, not a lone label: the card's own actions sit
           at its right end (Mo, 2026-08-25), matching the Editor launcher's
           card, whose gear left the hover-revealed top-right corner for this

@@ -59,12 +59,24 @@ export interface ProjectLoaderProps {
    * the animation already says it is running.
    */
   label?: string
-  /** Rendered size of the square animation. Defaults to 160px. */
+  /**
+   * Rendered size of the square animation, in px. Defaults to 120.
+   *
+   * There are two sizes in the product and only two. Thirteen inline and
+   * panel waits pass `80` explicitly; the three FULL-PAGE waits (the Editor
+   * launcher's overlay, the Viewer loading a prototype over its iframe, and
+   * the project list) take this default. So the default IS the full-page
+   * size, and changing it reaches exactly those three and nothing else.
+   *
+   * 120, not 160 (Mo, 2026-09-01: "a little large ... let's make it a little
+   * smaller"). Not 80: a full-screen overlay and a row inside a settings card
+   * should not wear the same size.
+   */
   size?: number
   className?: string
 }
 
-export function ProjectLoader({ label, size = 160, className }: ProjectLoaderProps) {
+export function ProjectLoader({ label, size = 120, className }: ProjectLoaderProps) {
   return (
     <div
       // `status` + `polite`: this reports progress, it does not interrupt.
