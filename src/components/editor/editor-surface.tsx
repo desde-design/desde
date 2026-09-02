@@ -939,6 +939,11 @@ export function EditorSurface({
             Canvas view layers the stub on top via absolute positioning;
             switching back to Editor un-hides the iframe without a
             re-mount → no SPA-route loss, no bridge re-handshake. */}
+        {/* `pt-4` is the prototype card's clearance from the floating
+            toolbar. The rail's aside pads its top to the same 16px so the two
+            cards start on one line (Mo, 2026-09-02). Align by moving the
+            rail DOWN, not the prototype up: an 8px version of this put the
+            prototype "too close to the toolbar". */}
         <div
           className={cn(
             "relative flex flex-1 flex-col overflow-hidden",
@@ -950,7 +955,7 @@ export function EditorSurface({
               "flex flex-col flex-1 overflow-hidden",
               chromeHidden
                 ? ""
-                : "mx-3 rounded-t-md border-x border-t border-border/60 shadow-sm",
+                : "ml-3 mr-2 rounded-t-md border-x border-t border-border/60 shadow-sm",
             )}
           >
           <div className="relative flex flex-1 overflow-hidden">
@@ -1016,20 +1021,25 @@ export function EditorSurface({
           </section>
         </div>
         {showRightRail ? (
-          /* `gap-2 p-2` + `border-l` mirror the Viewer's rail aside exactly
-             (Mo, 2026-09-01: "make this panel have the same visual treatment
-             as the viewer panel"). The padding is what lets the card inside
-             read as a card rather than as the rail itself; the border is what
-             stops the rail ending at no particular line. Passed from here
-             rather than baked into `ResizableRail`, which is a generic
-             width-drag container with no opinion about chrome.
+          /* The padding mirrors the Viewer's rail aside (Mo, 2026-09-01:
+             "make this panel have the same visual treatment as the viewer
+             panel"), with two departures asked for on 2026-09-02. `pt-4`
+             matches the prototype wrapper's own top clearance, so the two
+             cards start on one line. `pl-0`, with the prototype's `mr-2`
+             beside it, closes the gap between the two cards to 9px (8px of
+             margin plus the 1px drag handle); it was 21px, which read as a
+             gutter. The aside carried a `border-l` too until 2026-09-02,
+             when Mo asked for it to go: the card's own border already draws
+             the rail's edge, so the line beside it was a second edge. Passed
+             from here rather than baked into `ResizableRail`, which is a
+             generic width-drag container with no opinion about chrome.
 
              A plain JS comment rather than a braced JSX one: this sits in a
              ternary BRANCH, which takes exactly one expression, and a braced
              comment beside the element is a second one. */
           <ResizableRail
             storageKey="desde.editor.right-rail-width.v1"
-            className="gap-2 border-l border-border/60 p-2"
+            className="gap-2 pt-4 pr-2 pb-2 pl-0"
           >
             <EditorRightRail
               activeTab={activeTab}

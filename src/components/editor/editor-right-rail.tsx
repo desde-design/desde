@@ -424,16 +424,13 @@ export function EditorRightRail({
             NAVIGATION between panels, so it wants a little more air under it
             than the 8px rhythm inside a panel.
 
-            The strip stays `w-auto justify-start` rather than the Viewer's
-            `w-full`. Four tabs stretched across a resizable rail would change
-            width as the user drags it, which the Viewer's fixed 320px never
-            has to survive. */}
+            `w-full`, like the Viewer's strip (Mo, 2026-09-02: "the tabs at
+            the top should be full width"). The four triggers are `flex-1`,
+            so they share the rail's width and re-share it as the rail is
+            dragged; the strip sat `w-auto justify-start` before, hugging its
+            labels at the left. */}
         <div className="flex-none p-2 pb-1">
-        <TabsList
-          variant="default"
-          size="sm"
-          className="w-auto justify-start"
-        >
+        <TabsList variant="default" size="sm" className="w-full">
           <TabsTrigger value="edit" data-testid="right-rail-tab-edit">
             Edit
           </TabsTrigger>

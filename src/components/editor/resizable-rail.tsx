@@ -6,15 +6,41 @@
  * width survives reloads. The handle sits on the rail's left edge;
  * dragging left widens, dragging right narrows. Width is clamped to
  * [minWidth, maxWidth] so the rail can't swallow the iframe or collapse.
+ *
+ * The default width is a FRACTION of the viewport, not a fixed 320px (Mo,
+ * 2026-09-02: "the default width of the panel is a bit thin on big screens,
+ * make it 20% of screen width by default"). A fixed default is one size for
+ * every monitor, and 320 on a 2560px display is an eighth of the screen. The
+ * fraction is read once, on mount, and then clamped like any other width; it
+ * does not track the window afterwards, because a rail that resizes itself
+ * under a drag the user just made is worse than one that started narrow.
+ * A stored width still wins over it: a default is only for the first visit.
  */
 
 import * as React from "react"
 import { cn } from "@/lib/utils"
 
+/** A fixed width, or one derived from the viewport width at mount. */
+type DefaultWidth = number | ((viewportWidth: number) => number)
+
+const DEFAULT_WIDTH_FRACTION = 0.2
+/** With no window to measure (a server render), the old fixed default. */
+const SSR_FALLBACK_WIDTH = 320
+
+function defaultRailWidth(viewportWidth: number): number {
+  return Math.round(viewportWidth * DEFAULT_WIDTH_FRACTION)
+}
+
+function resolveDefaultWidth(defaultWidth: DefaultWidth): number {
+  if (typeof defaultWidth === "number") return defaultWidth
+  if (typeof window === "undefined") return SSR_FALLBACK_WIDTH
+  return defaultWidth(window.innerWidth)
+}
+
 interface ResizableRailProps {
   children: React.ReactNode
   storageKey?: string
-  defaultWidth?: number
+  defaultWidth?: DefaultWidth
   minWidth?: number
   maxWidth?: number
   className?: string
@@ -23,7 +49,7 @@ interface ResizableRailProps {
 export function ResizableRail({
   children,
   storageKey,
-  defaultWidth = 320,
+  defaultWidth = defaultRailWidth,
   minWidth = 280,
   maxWidth = 640,
   className,
@@ -35,7 +61,7 @@ export function ResizableRail({
 
   const [width, setWidth] = React.useState<number>(() => {
     const stored = readStoredWidth(storageKey)
-    return clamp(stored ?? defaultWidth)
+    return clamp(stored ?? resolveDefaultWidth(defaultWidth))
   })
   const [dragging, setDragging] = React.useState(false)
 

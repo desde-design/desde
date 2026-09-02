@@ -236,37 +236,14 @@ export function LauncherPage({
       */}
       {dialogOpen || settingsPath ? null : (
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
-        <h1 className="mb-5 text-2xl font-medium">Projects</h1>
-
-        {/* Filter row: search on the left, the create action pushed to the
-            right edge by `ml-auto`. The button moved down out of the heading
-            row so the two live on one line — a page title and a primary
-            action on separate lines read as two unrelated bars.
-
-            The search input renders only when there is something to search.
-            A filter over an empty list is a control that cannot do anything,
-            and the empty state below already carries the ways in. The button
-            is outside that condition so it never disappears with it. */}
-        <div className="mb-8 flex items-center gap-3">
-          {projects.length > 0 ? (
-            <div className="relative w-full max-w-xs">
-              <Search
-                className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
-                aria-hidden
-              />
-              <Input
-                type="search"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search projects"
-                aria-label="Search projects"
-                className="pl-8"
-                data-testid="launcher-search"
-              />
-            </div>
-          ) : null}
+        {/* Heading row: the page title on the left, the create action on the
+            right, one line. The button sat a row lower, beside the search
+            field, until 2026-09-02 (Mo: align it with the Projects header).
+            It lives here rather than in the search row so it never
+            disappears with that row on an empty list. */}
+        <div className="mb-6 flex items-center justify-between gap-3">
+          <h1 className="text-2xl font-medium">Projects</h1>
           <Button
-            className="ml-auto"
             onClick={() => openDialog(null)}
             disabled={busy}
             data-testid="launcher-new-project"
@@ -275,6 +252,27 @@ export function LauncherPage({
             New project
           </Button>
         </div>
+
+        {/* The search input renders only when there is something to search.
+            A filter over an empty list is a control that cannot do anything,
+            and the empty state below already carries the ways in. */}
+        {projects.length > 0 ? (
+          <div className="relative mb-8 w-full max-w-xs">
+            <Search
+              className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <Input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search projects"
+              aria-label="Search projects"
+              className="pl-8"
+              data-testid="launcher-search"
+            />
+          </div>
+        ) : null}
 
         {/* A structured refusal renders in full; a plain string stays a one
             line banner. The two are mutually exclusive in the hook, so the
@@ -309,7 +307,6 @@ export function LauncherPage({
           <EmptyState
             title="No projects"
             description="Open a prototype repo to start authoring."
-            className="rounded-lg border border-dashed px-6 py-12"
           >
             {/*
               The demo tile leads, because it is the only option here that
@@ -321,7 +318,7 @@ export function LauncherPage({
             */}
             <div
               className={cn(
-                "mt-4 grid w-full gap-3 text-left",
+                "grid w-full gap-3 text-left",
                 showDemoTile ? "max-w-3xl sm:grid-cols-3" : "max-w-xl sm:grid-cols-2",
               )}
             >
@@ -368,7 +365,6 @@ export function LauncherPage({
           <EmptyState
             title="No matching projects"
             description={`Nothing here matches "${query.trim()}".`}
-            className="rounded-lg border border-dashed px-6 py-12"
             data-testid="launcher-no-matches"
           >
             <Button

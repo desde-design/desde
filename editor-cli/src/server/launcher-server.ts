@@ -31,6 +31,11 @@ import { basename, resolve as resolvePath } from "node:path"
 import { newSecurityContext, checkAuth, type SecurityContext } from "./auth.js"
 import { checkHost, isCrossSiteFetch, listenOriginFor } from "./host-guard.js"
 import { readJsonBody, sendJson, runHandler } from "./artifact-http.js"
+import {
+  LLM_CREDENTIALS_ROUTE,
+  handleLlmCredentialsRoute,
+} from "./llm-credentials-handler.js"
+import { isClaudeRuntimeResolvable } from "./claude-runtime-available.js"
 
 /**
  * The one refusal for "there is no directory at that path".
@@ -257,6 +262,34 @@ async function route(
     return
   }
   const url = new URL(req.url ?? "/", ctx.security.shellOrigin)
+
+  // The Anthropic API key surface, shared with the editor: the launcher's
+  // settings gear opens the same dialog, and the hook behind it polls this
+  // route on mount. Same auth split as the editor's table (`http-server.ts`):
+  // the GET returns a masked hint and takes the lenient origin policy, every
+  // write is a secret and stays strict.
+  //
+  // Missing until 2026-09-02. The request fell through to the static bundle's
+  // SPA fallback below, a 200 carrying `index.html`, and the hook's
+  // `res.json()` threw "Unexpected token '<'" into the dialog before anything
+  // was typed. The credential file is machine-wide, so a key saved here is the
+  // key every editor this launcher spawns inherits (`spawnEnvWithInheritedLlmCredentials`).
+  if (
+    url.pathname === LLM_CREDENTIALS_ROUTE ||
+    url.pathname.startsWith(`${LLM_CREDENTIALS_ROUTE}/`)
+  ) {
+    const auth = checkAuth(req, ctx.security, {
+      originPolicy: req.method === "GET" ? "if-present" : "required",
+    })
+    if (!auth.ok) {
+      sendJson(res, auth.status, { ok: false, reason: auth.reason, error: auth.reason })
+      return
+    }
+    await handleLlmCredentialsRoute(req, res, url, {
+      claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+    })
+    return
+  }
 
   if (url.pathname.startsWith("/api/launcher/")) {
     const isGet = req.method === "GET"
@@ -851,6 +884,15 @@ async function route(
     }
 
     sendJson(res, 404, { ok: false, reason: "Unknown launcher endpoint" })
+    return
+  }
+
+  // Any other `/api/*` path is a JSON 404, never the SPA fallback. A JSON
+  // client that gets `index.html` with a 200 fails one step later with a
+  // parse error that names no route, which is how the credentials route above
+  // stayed missing unnoticed. A 404 names the problem at the request.
+  if (url.pathname.startsWith("/api/")) {
+    sendJson(res, 404, { ok: false, reason: "Unknown endpoint", error: "Not found." })
     return
   }
 

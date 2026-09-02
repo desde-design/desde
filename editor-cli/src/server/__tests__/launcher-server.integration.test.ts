@@ -1218,3 +1218,50 @@ describe("launcher server", () => {
     })
   })
 })
+
+/**
+ * The Anthropic API key dialog opens from the launcher's settings gear as
+ * well as the editor's, and the hook behind it polls
+ * `/api/editor/llm-credentials` on mount. Until 2026-09-02 the launcher had
+ * no such route, so the request fell through to the static bundle's SPA
+ * fallback: a 200 carrying `index.html`, which the hook then tried to parse
+ * as JSON. The dialog opened already showing "Unexpected token '<'" with
+ * nothing typed. These pin both halves: the route answers JSON, and no other
+ * `/api/*` path can ever fall through to HTML again.
+ */
+describe("launcher server — LLM credentials", () => {
+  it("answers the credentials status as JSON, not the SPA fallback", async () => {
+    const token = await tokenFromBootstrap()
+    const res = await fetch(handle.url + "/api/editor/llm-credentials", {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toContain("application/json")
+    const body = (await res.json()) as { source: string; devMode: boolean }
+    expect(typeof body.source).toBe("string")
+    expect(typeof body.devMode).toBe("boolean")
+  })
+
+  it("refuses an unauthenticated credential write", async () => {
+    const res = await fetch(handle.url + "/api/editor/llm-credentials", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ apiKey: "sk-ant-nope" }),
+    })
+    // 403 today: the strict-origin check runs before the bearer check and this
+    // request carries neither. Either refusal is the point, so the assertion
+    // does not pin their order.
+    expect([401, 403]).toContain(res.status)
+    // JSON, not "method not allowed" text: the hook reads `error` off it.
+    expect(res.headers.get("content-type")).toContain("application/json")
+  })
+
+  it("answers an unknown /api path with a JSON 404 rather than index.html", async () => {
+    const token = await tokenFromBootstrap()
+    const res = await fetch(handle.url + "/api/editor/does-not-exist", {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    expect(res.status).toBe(404)
+    expect(res.headers.get("content-type")).toContain("application/json")
+  })
+})

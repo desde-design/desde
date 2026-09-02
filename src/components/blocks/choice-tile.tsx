@@ -36,7 +36,10 @@ const choiceTileIconVariants = cva("shrink-0 text-muted-foreground", {
   variants: {
     size: {
       default: "mt-0.5 size-4",
-      lg: "mt-1 size-6",
+      // 20px, not 24 (Mo, 2026-09-02: "the icons should be smaller"). At 24
+      // the glyph outweighed the 15px title beside it. `mt-0.5` centres it on
+      // the title's first line.
+      lg: "mt-0.5 size-5",
     },
   },
   defaultVariants: { size: "default" },
