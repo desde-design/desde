@@ -106,7 +106,12 @@ export function GalleryShell({
         )}
       </main>
 
-      <aside className="z-100 flex h-screen w-80 flex-none flex-col gap-2 border-l border-border bg-popover p-2 pointer-events-auto">
+      <aside
+        // Same marker as the Editor gallery's picker, so a screenshot harness
+        // (tasks/scripts/docs-media-shots.mts) can hide both with one rule.
+        data-gallery-picker
+        className="z-100 flex h-screen w-80 flex-none flex-col gap-2 border-l border-border bg-popover p-2 pointer-events-auto"
+      >
         <div className="flex items-center justify-between gap-2">
           <Eyebrow>Viewer gallery</Eyebrow>
           <div className="flex items-center gap-1">
