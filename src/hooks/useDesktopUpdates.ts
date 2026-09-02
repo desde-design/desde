@@ -19,6 +19,8 @@ import { toast } from "sonner"
 import type { DesktopUpdateState } from "@/types/desktop-bridge"
 
 export interface DesktopUpdatesApi {
+  /** The running app's version, off the bridge. What "up to date" names. */
+  appVersion: string
   state: DesktopUpdateState
   /** `undefined` while the initial `getAutoDownload()` read is in flight. */
   autoDownload: boolean | undefined
@@ -27,25 +29,47 @@ export interface DesktopUpdatesApi {
   download: () => Promise<void>
   /** Only valid in phase "ready" (enforced main-process side) — fire-and-forget, the app may quit before any reply. */
   restartAndInstall: () => void
-  /** On-demand "Check for updates" — same effect as the periodic 4h timer firing once, right now. Fire-and-forget; the result arrives via the pushed `state` above. */
+  /**
+   * On-demand "Check for updates" — same effect as the periodic 4h timer
+   * firing once, right now. Fire-and-forget: the click's own outcome lands
+   * in `lastCheck` below, and the update's state keeps arriving through
+   * `state` as before.
+   */
   checkForUpdates: () => void
+  /**
+   * The most recent on-demand check's own outcome, or `undefined` before
+   * the first click. `DesktopUpdateCheckDialog` reads this together with
+   * `state`: `state` alone cannot tell "checked, nothing new" from "no
+   * check ever ran" (both sit at "idle"), and it cannot say whether the
+   * check the user just asked for is still in flight when a background
+   * check happens to be running too.
+   */
+  lastCheck: DesktopUpdateCheckResult | undefined
 }
+
+/**
+ * What ONE click of "Check for updates" produced, tracked separately from
+ * the update state machine.
+ *
+ * - `checking`: the bridge call is still pending.
+ * - `performed`: a real check ran and settled; `state` says what it found
+ *   (`idle` means up to date, everything else has its own phase).
+ * - `not-performed`: nothing was checked, so `state` says nothing about
+ *   this click. A packaged build with no publish provider configured, or
+ *   unpackaged dev's own no-op (see the bridge's `checkForUpdates()` doc).
+ * - `failed`: the IPC call itself threw. The check may or may not have run;
+ *   nothing more is known.
+ */
+export type DesktopUpdateCheckResult =
+  | { status: "checking" }
+  | { status: "performed" }
+  | { status: "not-performed" }
+  | { status: "failed"; error: string }
 
 const IDLE_STATE: DesktopUpdateState = { phase: "idle" }
 
 /** Stable id so a second failed toggle updates the SAME toast in place instead of stacking a new one — matches `resolution-failure-notice.ts`'s toast-id pattern. */
 export const AUTO_DOWNLOAD_WRITE_FAILED_TOAST_ID = "desktop-auto-download-write-failed"
-
-/**
- * F3 (whole-branch review, Important; P2 fix on second pass). Same
- * stable-id pattern as `AUTO_DOWNLOAD_WRITE_FAILED_TOAST_ID` — a repeat
- * on-demand check result (whichever of the two messages below it is)
- * updates the same toast in place rather than stacking. Named for the
- * FEATURE ("the on-demand check's result"), not one specific message,
- * since F8 (whole-branch review, third pass, P2 fix) added a second,
- * different message this same id now also covers.
- */
-export const UPDATE_CHECK_RESULT_TOAST_ID = "desktop-update-check-result"
 
 function notifyAutoDownloadWriteFailed(err: unknown): void {
   toast.error("Couldn't save the update setting", {
@@ -97,6 +121,9 @@ export function useDesktopUpdates(): DesktopUpdatesApi | undefined {
   // state or toast; an older, superseded call's outcome is moot once a newer
   // one has already landed.
   const autoDownloadCallSeq = useRef(0)
+  const [lastCheck, setLastCheck] = useState<DesktopUpdateCheckResult | undefined>(undefined)
+  /** Same job as `autoDownloadCallSeq`, for the on-demand check: only the newest click's settle may write `lastCheck`. */
+  const checkCallSeq = useRef(0)
 
   useEffect(() => {
     if (!bridge) return
@@ -189,57 +216,45 @@ export function useDesktopUpdates(): DesktopUpdatesApi | undefined {
   }, [bridge])
 
   /**
-   * F3 (whole-branch review, Important; P2 fix on second pass). The bridge's
-   * `checkForUpdates()` now resolves once THIS call's own check has settled
-   * (`updater.ts`'s `runCheck()` return value, threaded through IPC
-   * `invoke`/`handle`) — so instead of guessing how long a check might take
-   * (the original fix's 30s timeout raced electron-updater's own up-to-60s
-   * HTTP layer and lost on slow networks), this awaits the real completion
-   * signal, then reads the CURRENT state directly. No window to miss,
-   * however long the request actually took. "idle" is the one conclusion
-   * with nothing else on screen to say the click did anything — every other
-   * outcome (available/downloading/ready/error) already has its own visible
-   * row in `DesktopUpdateStatusRow`.
+   * The click's own outcome, as state rather than a toast (Mo, 2026-09-02:
+   * "we should use a modal and not a toast as this is an explicit action
+   * from a user"). The toast it replaces also had nowhere to render on the
+   * launcher, which mounts no toast host, so "Check for updates" there did
+   * nothing visible at all.
    *
-   * F8 (whole-branch review, third pass, P2 fix): the P2 fix above closed
-   * "no feedback" but opened "WRONG feedback" — `getState()` reading "idle"
-   * does NOT mean a check ran and found nothing new. It's also what a
-   * PACKAGED build with no publish provider configured shows (F1's guard
-   * skips the real check and leaves state exactly where it was), and what
-   * unpackaged DEV shows when nothing forces a real check either
-   * (`electron-updater`'s own no-op). Toasting "up to date" in either case
-   * tells the user their version was verified when nothing was checked —
-   * worse than the original silence, because it's a confident lie instead
-   * of an absence. `performed` is the bridge's own answer to "did a check
-   * actually run" (see `Updater.checkForUpdates()`'s doc comment) and is
-   * checked FIRST: only `performed && phase === "idle"` earns the "up to
-   * date" toast. `performed === false` says so plainly instead.
+   * The bridge's `checkForUpdates()` resolves once THIS call's own check
+   * has settled (`updater.ts`'s `runCheck()` return value, threaded through
+   * IPC `invoke`/`handle`), so there is no timeout to guess against
+   * electron-updater's own up-to-60s HTTP layer: `checking` holds until the
+   * real completion signal, however long it takes.
+   *
+   * `performed` is checked FIRST (F8): `state` reading "idle" does NOT mean
+   * a check ran and found nothing new. It is also what a packaged build
+   * with no publish provider configured shows, and what unpackaged dev
+   * shows when nothing forces a real check. Reporting "up to date" there
+   * would claim a result that was never obtained.
+   *
+   * Two rapid clicks are two in-flight bridge calls with no guaranteed
+   * settle order. Only the most recently issued call may write `lastCheck`
+   * once it settles, the same discipline `setAutoDownload` uses above.
    */
   const checkForUpdates = useCallback(() => {
     if (!bridge) return
+    const callId = ++checkCallSeq.current
+    setLastCheck({ status: "checking" })
     void (async () => {
+      let result: DesktopUpdateCheckResult
       try {
         const { performed } = await bridge.updates.checkForUpdates()
-        if (!performed) {
-          toast.info("No update check was performed", {
-            id: UPDATE_CHECK_RESULT_TOAST_ID,
-            description: "Update checks aren't available in this copy of the app.",
-          })
-          return
-        }
-        const s = await bridge.updates.getState()
-        if (s.phase === "idle") {
-          toast.success("You're up to date", {
-            id: UPDATE_CHECK_RESULT_TOAST_ID,
-            description: `Running v${bridge.appVersion}`,
-          })
-        }
+        result = performed ? { status: "performed" } : { status: "not-performed" }
       } catch (err) {
-        // An IPC-layer failure (the main-process handler itself threw) —
-        // nothing to roll back (no optimistic UI here), just don't let this
-        // become an unhandled rejection.
+        // An IPC-layer failure (the main-process handler itself threw).
+        // Nothing to roll back; it becomes a result rather than an
+        // unhandled rejection.
         console.error("[editor] checkForUpdates failed:", err)
+        result = { status: "failed", error: err instanceof Error ? err.message : String(err) }
       }
+      if (checkCallSeq.current === callId) setLastCheck(result)
     })()
   }, [bridge])
 
@@ -252,5 +267,14 @@ export function useDesktopUpdates(): DesktopUpdatesApi | undefined {
   // just what gets handed back to the caller.
   if (!bridge) return undefined
 
-  return { state, autoDownload, setAutoDownload, download, restartAndInstall, checkForUpdates }
+  return {
+    appVersion: bridge.appVersion,
+    state,
+    autoDownload,
+    setAutoDownload,
+    download,
+    restartAndInstall,
+    checkForUpdates,
+    lastCheck,
+  }
 }

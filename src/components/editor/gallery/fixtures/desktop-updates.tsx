@@ -56,7 +56,23 @@ function useDesktopBridgeOverride(bridge: DesktopBridge): void {
   }, [bridge])
 }
 
-function makeBridge(ctx: SurfaceRenderContext, state: DesktopUpdateState, autoDownload = true): DesktopBridge {
+/**
+ * How the fake bridge answers "Check for updates". `pending` never settles,
+ * which is how the dialog's "checking" state is held on screen; `performed`
+ * is what the settled call reports (see the bridge's `checkForUpdates()`
+ * doc comment for the `performed: false` case).
+ */
+interface CheckBehavior {
+  pending?: boolean
+  performed?: boolean
+}
+
+function makeBridge(
+  ctx: SurfaceRenderContext,
+  state: DesktopUpdateState,
+  autoDownload = true,
+  check: CheckBehavior = {},
+): DesktopBridge {
   return {
     appVersion: "1.4.0",
     updates: {
@@ -64,9 +80,10 @@ function makeBridge(ctx: SurfaceRenderContext, state: DesktopUpdateState, autoDo
       onState: () => () => {},
       download: async () => ctx.log("download"),
       restartAndInstall: () => ctx.log("restartAndInstall"),
-      checkForUpdates: async () => {
+      checkForUpdates: () => {
         ctx.log("checkForUpdates")
-        return { performed: true }
+        if (check.pending) return new Promise<{ performed: boolean }>(() => {})
+        return Promise.resolve({ performed: check.performed ?? true })
       },
       getAutoDownload: async () => autoDownload,
       setAutoDownload: async (value) => ctx.log("setAutoDownload", value),
@@ -113,11 +130,14 @@ function SettingsMenuFixture({
   bridge,
   chatSubmitting,
   thenClickRestart,
+  thenClickCheck,
 }: {
   bridge: DesktopBridge
   chatSubmitting?: boolean
   /** Also click "Restart to update" once the menu is open — for the confirm-dialog state. */
   thenClickRestart?: boolean
+  /** Also click "Check for updates" once the menu is open — for the check dialog's states. */
+  thenClickCheck?: boolean
 }) {
   useDesktopBridgeOverride(bridge)
 
@@ -127,6 +147,13 @@ function SettingsMenuFixture({
       const trigger = await waitForElement(() => rootTestid<HTMLButtonElement>("editor-settings"))
       if (cancelled || !trigger) return
       clickLikeUser(trigger)
+
+      if (thenClickCheck) {
+        const check = await waitForElement(() => testid<HTMLElement>("desktop-update-check-now"))
+        if (cancelled || !check) return
+        clickLikeUser(check)
+        return
+      }
 
       if (!thenClickRestart) return
       const restart = await waitForElement(() => testid<HTMLElement>("desktop-update-restart"))
@@ -183,12 +210,63 @@ function LauncherNavFixture({ bridge }: { bridge: DesktopBridge }) {
 // settings menu still carries.
 const MENU_OPEN = '[data-testid="editor-settings-api-key"]'
 
+/** One check-dialog state: the menu opens, "Check for updates" is clicked, and the dialog lands on `view`. */
+function checkDialogState(
+  id: string,
+  label: string,
+  view: string,
+  state: DesktopUpdateState,
+  check: CheckBehavior,
+) {
+  return {
+    id: `desktop-updates/check-dialog-${id}`,
+    label,
+    readyWhen: `[data-testid="desktop-update-check-dialog"][data-view="${view}"]`,
+    render: (ctx: SurfaceRenderContext) => (
+      <SettingsMenuFixture bridge={makeBridge(ctx, state, true, check)} thenClickCheck />
+    ),
+  }
+}
+
 export const DESKTOP_UPDATES_SURFACE: SurfaceEntry = {
   id: "desktop-updates",
-  title: "Desktop auto-update: badge, menu section, restart confirm",
+  title: "Desktop auto-update: badge, menu section, check dialog, restart confirm",
   kind: "modal",
   sourceFile: "src/components/editor/desktop-update-menu.tsx",
   states: [
+    // The dialog "Check for updates" opens, one state per view it can land
+    // on. Idle here means "checked, nothing new": the up-to-date case.
+    checkDialogState("checking", "Check dialog: checking", "checking", { phase: "idle" }, { pending: true }),
+    checkDialogState("up-to-date", "Check dialog: up to date", "up-to-date", { phase: "idle" }, {}),
+    checkDialogState(
+      "not-performed",
+      "Check dialog: checks unavailable in this build",
+      "not-performed",
+      { phase: "idle" },
+      { performed: false },
+    ),
+    checkDialogState(
+      "available",
+      "Check dialog: update available",
+      "available",
+      { phase: "available", version: "1.5.0" },
+      {},
+    ),
+    checkDialogState(
+      "downloading",
+      "Check dialog: downloading",
+      "downloading",
+      { phase: "downloading", version: "1.5.0", progressPercent: 43 },
+      {},
+    ),
+    checkDialogState("ready", "Check dialog: ready to restart", "ready", { phase: "ready", version: "1.5.0" }, {}),
+    checkDialogState(
+      "error",
+      "Check dialog: check failed",
+      "error",
+      { phase: "error", error: "getaddrinfo ENOTFOUND github.com" },
+      {},
+    ),
     {
       id: "desktop-updates/available",
       label: "Update available",

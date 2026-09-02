@@ -258,3 +258,102 @@ describe("mergePathEntries", () => {
     expect(mergePathEntries(LOGIN_PATH, undefined)).toBe(LOGIN_PATH)
   })
 })
+
+/**
+ * 2026-09-02: the packaged app, relaunched by the updater right after
+ * installing itself, booted with the bare launchd PATH although the same
+ * shell answered fine inside that process minutes later. The cause was not
+ * reproduced; what changed is that one failed attempt is no longer the
+ * whole answer, and each attempt now leaves a line of evidence.
+ */
+describe("resolveLoginShellPath second attempt", () => {
+  it("falls back to a login-only shell (-l -c, no -i) when the interactive attempt prints no PATH", async () => {
+    const exec = vi.fn<LoginShellExec>(async (_file, args) => {
+      if (args.includes("-i")) return { stdout: "" }
+      return { stdout: framed(LOGIN_PATH) }
+    })
+    const path = await resolveLoginShellPath({ platform: "darwin", env: { SHELL: "/bin/zsh" }, exec })
+    expect(path).toBe(LOGIN_PATH)
+    expect(exec.mock.calls.map(([, args]) => [...args])).toEqual([
+      ["-i", "-l", "-c", PRINT_PATH_COMMAND],
+      ["-l", "-c", PRINT_PATH_COMMAND],
+    ])
+  })
+
+  it("falls back when the interactive attempt throws (timed out, killed), too", async () => {
+    const exec = vi.fn<LoginShellExec>(async (_file, args) => {
+      if (args.includes("-i")) throw new Error("/bin/zsh did not answer within 5000ms")
+      return { stdout: framed(LOGIN_PATH) }
+    })
+    const path = await resolveLoginShellPath({ platform: "darwin", env: { SHELL: "/bin/zsh" }, exec })
+    expect(path).toBe(LOGIN_PATH)
+    expect(exec).toHaveBeenCalledTimes(2)
+  })
+
+  it("does not run the second attempt when the first one answers", async () => {
+    const exec = quietShell()
+    await resolveLoginShellPath({ platform: "darwin", env: { SHELL: "/bin/zsh" }, exec })
+    expect(exec).toHaveBeenCalledTimes(1)
+  })
+
+  it("has no second shape for csh and tcsh, which already ran without -i", async () => {
+    const exec = vi.fn<LoginShellExec>(async () => ({ stdout: "" }))
+    const path = await resolveLoginShellPath({ platform: "darwin", env: { SHELL: "/bin/tcsh" }, exec })
+    expect(path).toBeNull()
+    expect(exec).toHaveBeenCalledTimes(1)
+  })
+
+  it("logs one line per attempt: the failure's reason, or the PATH and how long it took", async () => {
+    const lines: string[] = []
+    const exec = vi.fn<LoginShellExec>(async (_file, args) => {
+      if (args.includes("-i")) throw new Error("/bin/zsh did not answer within 5000ms")
+      return { stdout: framed(LOGIN_PATH) }
+    })
+    await resolveLoginShellPath({ platform: "darwin", env: { SHELL: "/bin/zsh" }, exec, log: (l) => lines.push(l) })
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toMatch(/^login shell \/bin\/zsh -i -l -c: failed after \d+ms: \/bin\/zsh did not answer within 5000ms$/)
+    expect(lines[1]).toMatch(new RegExp(`^login shell /bin/zsh -l -c: PATH in \\d+ms: ${LOGIN_PATH}$`))
+  })
+
+  it("says when the shell answered but printed nothing usable", async () => {
+    const lines: string[] = []
+    const exec = vi.fn<LoginShellExec>(async () => ({ stdout: "rc file noise\n" }))
+    await resolveLoginShellPath({ platform: "darwin", env: { SHELL: "/bin/zsh" }, exec, log: (l) => lines.push(l) })
+    expect(lines[0]).toMatch(/printed no PATH \(14 chars of output\)$/)
+  })
+})
+
+describe("resolveLoginShellPath shared budget", () => {
+  it("gives the second attempt only what is left of 1.6 times the per-attempt timeout", async () => {
+    const timeouts: number[] = []
+    let now = 1_000_000
+    vi.spyOn(Date, "now").mockImplementation(() => now)
+    const exec = vi.fn<LoginShellExec>(async (_file, args, o) => {
+      timeouts.push(o.timeout)
+      if (args.includes("-i")) {
+        now += o.timeout // the interactive attempt used its whole timeout
+        throw new Error("did not answer")
+      }
+      return { stdout: framed(LOGIN_PATH) }
+    })
+    const path = await resolveLoginShellPath({ platform: "darwin", env: { SHELL: "/bin/zsh" }, exec, timeoutMs: 5000 })
+    vi.restoreAllMocks()
+    expect(path).toBe(LOGIN_PATH)
+    expect(timeouts).toEqual([5000, 3000])
+  })
+
+  it("skips the second attempt, and says so, when the first one left less than half a second", async () => {
+    const lines: string[] = []
+    let now = 1_000_000
+    vi.spyOn(Date, "now").mockImplementation(() => now)
+    const exec = vi.fn<LoginShellExec>(async (_file, _args, o) => {
+      now += Math.round(o.timeout * 1.6) // slower than its own timeout: the kill and close took a while too
+      throw new Error("did not answer")
+    })
+    const path = await resolveLoginShellPath({ platform: "darwin", env: { SHELL: "/bin/zsh" }, exec, timeoutMs: 5000, log: (l) => lines.push(l) })
+    vi.restoreAllMocks()
+    expect(path).toBeNull()
+    expect(exec).toHaveBeenCalledTimes(1)
+    expect(lines[1]).toMatch(/^login shell \/bin\/zsh -l -c: skipped, -?\d+ms of the budget left$/)
+  })
+})

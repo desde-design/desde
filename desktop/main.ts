@@ -24,6 +24,7 @@ import {
   type MenuItemConstructorOptions,
 } from "electron"
 import { buildAppMenuItem } from "./app-menu.js"
+import { createBootLog } from "./boot-log.js"
 import { spawnPayloadChild, PayloadBootFailure, SHUTDOWN_GRACE_MS, type PayloadChildHandle } from "./child.js"
 import { createAutoDownloadMutationQueue } from "./auto-download-mutation-queue.js"
 import { createChildShutdownCoordinator } from "./child-shutdown-coordinator.js"
@@ -583,6 +584,11 @@ async function boot(): Promise<void> {
   // The shell is detached (so a hung rc file's whole process group can be
   // killed on timeout), which also means a quit during these few seconds
   // would otherwise leave it running with nothing to time it out.
+  // `boot.log` in the user data directory: a Finder launch has no stdout,
+  // and the one time this resolver failed (2026-09-02, the updater's
+  // relaunch of 0.1.1) nothing recorded why. See boot-log.ts.
+  const bootLog = createBootLog(join(app.getPath("userData"), "boot.log"))
+  bootLog(`boot: version ${app.getVersion()}, packaged ${app.isPackaged}, launch PATH ${process.env.PATH ?? "(unset)"}`)
   const loginShellAbort = new AbortController()
   const abortLoginShell = () => loginShellAbort.abort()
   app.once("before-quit", abortLoginShell)
@@ -590,9 +596,15 @@ async function boot(): Promise<void> {
     platform: process.platform,
     env: process.env,
     signal: loginShellAbort.signal,
+    log: bootLog,
   })
   app.removeListener("before-quit", abortLoginShell)
-  if (loginShellPath) process.env.PATH = mergePathEntries(loginShellPath, process.env.PATH)
+  if (loginShellPath) {
+    process.env.PATH = mergePathEntries(loginShellPath, process.env.PATH)
+    bootLog(`PATH for children: ${process.env.PATH}`)
+  } else {
+    bootLog("PATH for children: the launch PATH, unchanged (no login shell answered)")
+  }
 
   // AGPL-3.0 relicensing: sets the native About panel's copyright line
   // explicitly (macOS/Windows both read `copyright` here) rather than

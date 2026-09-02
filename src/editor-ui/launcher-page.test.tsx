@@ -8,7 +8,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { toast } from "sonner"
 import { LauncherPage, trimPathToTail } from "./launcher-page"
 import type { DesktopBridge } from "@/types/desktop-bridge"
 import { HOVER_REVEAL } from "@/components/blocks"
@@ -466,5 +467,69 @@ describe("project search", () => {
 
     expect(screen.queryByTestId("launcher-search")).not.toBeInTheDocument()
     expect(screen.getByTestId("launcher-new-project")).toBeInTheDocument()
+  })
+})
+
+/**
+ * Mo, 2026-09-02: "I clicked check for updates and nothing happened
+ * afterwards." The click's only feedback was a toast, and this page mounted
+ * no toast host, so on the launcher it rendered into nothing. The feedback
+ * is a dialog now (an explicit action gets a modal), and the page mounts a
+ * toast host for the notices that still are toasts.
+ */
+describe("LauncherPage — Check for updates", () => {
+  afterEach(() => {
+    delete (window as { desdeDesktop?: unknown }).desdeDesktop
+  })
+
+  function bridgeWithCheck(check: () => Promise<{ performed: boolean }>): DesktopBridge {
+    return {
+      appVersion: "0.1.1",
+      updates: {
+        getState: async () => ({ phase: "idle" }),
+        onState: () => () => {},
+        download: async () => {},
+        restartAndInstall: () => {},
+        checkForUpdates: check,
+        getAutoDownload: async () => true,
+        setAutoDownload: async () => {},
+      },
+      claudeRuntime: {
+        getState: async () => ({ phase: "ready" }),
+        onState: () => () => {},
+        retry: () => {},
+      },
+      pickFolder: async () => null,
+    }
+  }
+
+  it("opens a dialog that shows the check running, then that the app is up to date", async () => {
+    let settle: ((r: { performed: boolean }) => void) | undefined
+    const check = vi.fn(() => new Promise<{ performed: boolean }>((resolve) => { settle = resolve }))
+    ;(window as unknown as { desdeDesktop: DesktopBridge }).desdeDesktop = bridgeWithCheck(check)
+
+    render(<LauncherPage folderPickerSupported={true} />)
+    fireEvent.pointerDown(await screen.findByTestId("launcher-settings"), { button: 0, ctrlKey: false })
+    fireEvent.click(await screen.findByTestId("desktop-update-check-now"))
+
+    expect(check).toHaveBeenCalledTimes(1)
+    const dialog = await screen.findByTestId("desktop-update-check-dialog")
+    expect(dialog).toHaveAttribute("data-view", "checking")
+    expect(screen.getByText("Checking for updates")).toBeInTheDocument()
+
+    settle?.({ performed: true })
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-update-check-dialog")).toHaveAttribute("data-view", "up-to-date"),
+    )
+    expect(screen.getByText("Version 0.1.1 is the latest available.")).toBeInTheDocument()
+  })
+
+  it("mounts a toast host, so notices raised on this page have somewhere to render", async () => {
+    render(<LauncherPage folderPickerSupported={true} />)
+    await screen.findByText("Projects")
+    act(() => {
+      toast("A notice raised on the launcher")
+    })
+    expect(await screen.findByText("A notice raised on the launcher")).toBeInTheDocument()
   })
 })

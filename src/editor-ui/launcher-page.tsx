@@ -45,6 +45,7 @@ import { LauncherSettingsMenu } from "@/components/editor/launcher/launcher-sett
 import { ProjectSettingsPage } from "@/components/editor/launcher/project-settings-page"
 import { demoDeleteMessage } from "@/components/editor/launcher/demo-delete-message"
 import { useDesktopUpdates } from "@/hooks/useDesktopUpdates"
+import { Toaster } from "@/components/ui/sonner"
 import { useClaudeRuntimeStatus } from "@/hooks/useClaudeRuntimeStatus"
 
 /**
@@ -215,6 +216,12 @@ export function LauncherPage({
         */}
         <LauncherSettingsMenu updates={updates} />
       </AppHeader>
+      {/* The launcher's toast outlet, matching `editor-page.tsx`. Without it
+          every notice raised on this page (the runtime install's "Setting up
+          AI chat", a failed update-setting write) rendered into nothing:
+          sonner needs a mounted Toaster on the page, and this page had none
+          until 2026-09-02. */}
+      <Toaster position="bottom-left" richColors closeButton />
 
       {/*
         The project list and the create flow are two VIEWS of this page, not a

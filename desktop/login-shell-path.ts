@@ -77,6 +77,13 @@ export interface ResolveLoginShellPathOptions {
    * running with nothing left to time them out.
    */
   signal?: AbortSignal
+  /**
+   * Receives one line per attempt: what was run, how long it took, and the
+   * PATH it printed or why it did not. The caller routes it to the boot
+   * log. This exists because the one failure seen so far (see
+   * {@link loginShellFallbackInvocation}) left no evidence at all.
+   */
+  log?: (line: string) => void
 }
 
 /**
@@ -180,6 +187,31 @@ export function loginShellInvocation(shell: string): LoginShellInvocation {
 }
 
 /**
+ * The second attempt, when the interactive one yields nothing: the same
+ * shell as a login shell only (`-l -c`, no `-i`). It runs the profile
+ * files and skips the interactive rc, which on macOS is where Homebrew's
+ * `brew shellenv` lives (`~/.zprofile`) versus where nvm and friends live
+ * (`~/.zshrc`): a narrower PATH than the terminal's, but the one that
+ * fixes the failure this module exists for (Apple's git winning over
+ * Homebrew's). csh and tcsh already ran as a login shell without `-i`, so
+ * there is no second shape to try for them.
+ *
+ * Why a second attempt exists at all (2026-09-02, MEASURED, cause not
+ * reproduced): the packaged 0.1.1 app, relaunched by the updater right
+ * after installing itself, booted with the bare launchd PATH, so the
+ * interactive attempt had answered nothing. The very same spawn, run inside
+ * that same process eight minutes later, answered in 135ms, and a fresh
+ * launch answered at boot. Whatever made the first attempt fail was
+ * transient, and a cheap second attempt is worth more than a boot that
+ * silently settles for Apple's tools.
+ */
+export function loginShellFallbackInvocation(shell: string): LoginShellInvocation | null {
+  const name = basename(shell)
+  if (name === "csh" || name === "tcsh") return null
+  return { args: ["-l", "-c", PRINT_PATH_COMMAND] }
+}
+
+/**
  * The PATH out of what the shell printed: the one line between the first
  * pair of sentinel lines. Anything an rc file printed before, or a logout
  * hook printed after, is outside the frame and ignored. An empty PATH, or
@@ -202,20 +234,68 @@ export async function resolveLoginShellPath(
 ): Promise<string | null> {
   if (opts.platform === "win32") return null
   const shell = loginShellFor(opts.platform, opts.env)
-  const { args, input } = loginShellInvocation(shell)
+  const perAttempt = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const deadline = Date.now() + Math.round(perAttempt * TOTAL_BUDGET_FACTOR)
+  const attempts = [loginShellInvocation(shell), loginShellFallbackInvocation(shell)]
+  for (const invocation of attempts) {
+    if (invocation === null) continue
+    if (opts.signal?.aborted) return null
+    const timeout = Math.min(perAttempt, deadline - Date.now())
+    if (timeout < MIN_ATTEMPT_MS) {
+      opts.log?.(`login shell ${shell} ${invocation.args.slice(0, -1).join(" ")}: skipped, ${timeout}ms of the budget left`)
+      continue
+    }
+    const path = await runAttempt(shell, invocation, timeout, opts)
+    if (path !== null) return path
+  }
+  return null
+}
+
+/**
+ * The two attempts share one budget: `timeoutMs` (5s by default) times
+ * this. A startup file both shapes run (`~/.zprofile`, `~/.zshenv`) that
+ * hangs would otherwise cost two full timeouts of boot. 1.6 leaves the
+ * second attempt three seconds after a first one that used all five, which
+ * is enough for a login-only shell to answer (measured at 68 to 135ms on a
+ * Mac with Homebrew, gcloud and a Java path), while the worst case grows
+ * from five seconds to eight rather than ten.
+ */
+const TOTAL_BUDGET_FACTOR = 1.6
+
+/** Below this there is no point starting a shell at all. */
+const MIN_ATTEMPT_MS = 500
+
+/** One shell run, reported to `opts.log` either way. `null` on any failure. */
+async function runAttempt(
+  shell: string,
+  { args, input }: LoginShellInvocation,
+  timeout: number,
+  opts: ResolveLoginShellPathOptions,
+): Promise<string | null> {
   const exec = opts.exec ?? defaultExec
+  const started = Date.now()
+  const label = `${shell} ${args.slice(0, -1).join(" ")}`.trimEnd()
   let stdout: string
   try {
     ;({ stdout } = await exec(shell, args, {
-      timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      timeout,
       env: opts.env,
       ...(input === undefined ? {} : { input }),
       ...(opts.signal === undefined ? {} : { signal: opts.signal }),
     }))
-  } catch {
+  } catch (err) {
+    opts.log?.(
+      `login shell ${label}: failed after ${Date.now() - started}ms: ${err instanceof Error ? err.message : String(err)}`,
+    )
     return null
   }
-  return parsePrintedPath(stdout)
+  const path = parsePrintedPath(stdout)
+  opts.log?.(
+    path === null
+      ? `login shell ${label}: answered in ${Date.now() - started}ms but printed no PATH (${stdout.length} chars of output)`
+      : `login shell ${label}: PATH in ${Date.now() - started}ms: ${path}`,
+  )
+  return path
 }
 
 /**

@@ -42,6 +42,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
+  DesktopUpdateCheckDialog,
   DesktopUpdateSection,
 } from "@/components/editor/desktop-update-menu"
 import { SettingsStatusDot } from "@/components/editor/settings-status-dot"
@@ -53,6 +54,9 @@ import { cn } from "@/lib/utils"
 export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi | undefined }) {
   const credentials = useLlmCredentials()
   const [credentialDialogOpen, setCredentialDialogOpen] = useState(false)
+  // Owned here, not in `DesktopUpdateSection`: the dropdown closes on
+  // select, so a dialog rendered inside it would unmount with the menu.
+  const [checkDialogOpen, setCheckDialogOpen] = useState(false)
 
   const status = credentials.status
   const credentialMissing = status?.source === "none"
@@ -107,7 +111,11 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
           {/* Renders nothing, separator included, when there is no desktop
               bridge — so a plain browser tab gets a menu of one item rather
               than a leading rule with nothing above it. */}
-          <DesktopUpdateSection updates={updates} onRestartClick={handleRestartClick} />
+          <DesktopUpdateSection
+            updates={updates}
+            onRestartClick={handleRestartClick}
+            onCheckClick={() => setCheckDialogOpen(true)}
+          />
           <DropdownMenuItem
             onSelect={() => setCredentialDialogOpen(true)}
             data-testid="launcher-settings-api-key"
@@ -120,6 +128,12 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      <DesktopUpdateCheckDialog
+        open={checkDialogOpen}
+        onOpenChange={setCheckDialogOpen}
+        updates={updates}
+        onRestartClick={handleRestartClick}
+      />
       <LlmCredentialDialog
         open={credentialDialogOpen}
         onOpenChange={setCredentialDialogOpen}

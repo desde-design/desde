@@ -12,19 +12,13 @@ vi.mock("sonner", () => ({
 }))
 
 import { toast } from "sonner"
-import {
-  AUTO_DOWNLOAD_WRITE_FAILED_TOAST_ID,
-  UPDATE_CHECK_RESULT_TOAST_ID,
-  useDesktopUpdates,
-} from "./useDesktopUpdates"
+import { AUTO_DOWNLOAD_WRITE_FAILED_TOAST_ID, useDesktopUpdates } from "./useDesktopUpdates"
 import type { DesktopBridge, DesktopClaudeRuntimeState, DesktopUpdateState } from "@/types/desktop-bridge"
 
-// F3/F8 tests assert absence of a toast.success/toast.info call, which only
-// holds if each test starts from a clean slate — the mock is module-scoped
-// and otherwise accumulates calls across every `it` in this file.
+// The mock is module-scoped and would otherwise accumulate calls across
+// every `it` in this file.
 beforeEach(() => {
-  vi.mocked(toast.success).mockClear()
-  vi.mocked(toast.info).mockClear()
+  vi.mocked(toast.error).mockClear()
 })
 
 function installBridge(overrides: Partial<DesktopBridge["updates"]> = {}): {
@@ -159,64 +153,32 @@ describe("useDesktopUpdates — bridge present", () => {
   })
 
   /**
-   * F3 (whole-branch review, Important; P2 fix on second pass): "Check for
-   * updates" gave no feedback in its commonest outcome — an up-to-date check
-   * concludes at "idle", which renders nothing (`DesktopUpdateStatusRow`'s
-   * `idle` case returns `null`), so a user could not tell "you're current"
-   * from "the button is broken".
+   * The click's own outcome is state (`lastCheck`), not a toast. Mo,
+   * 2026-09-02: "we should use a modal and not a toast as this is an
+   * explicit action from a user". The toast this replaces also had no host
+   * on the launcher page, so there the click did nothing visible at all.
    *
-   * P2 fix: the FIRST version of this fix guessed a 30s window to keep the
-   * toast armed, racing electron-updater's own up-to-60s HTTP layer and
-   * losing on a slow response. The bridge's `checkForUpdates()` now resolves
-   * PRECISELY when the underlying check settles (threaded through
-   * `updater.ts`'s own tracked-check promise via IPC `invoke`/`handle`), so
-   * the hook awaits that, then reads `getState()` directly — no guessing,
-   * no window to miss regardless of how long the request actually takes.
-   *
-   * F8 (whole-branch review, third pass, P2 fix): that fix then produced
-   * WRONG feedback — "idle" also describes a check that never ran at all (a
-   * packaged build with no publish provider configured, or unpackaged dev's
-   * own no-op), and the hook was toasting "You're up to date" for that too.
-   * `performed` is checked first now; only `performed && phase === "idle"`
-   * earns the success toast.
+   * The bridge's `checkForUpdates()` resolves precisely when the underlying
+   * check settles (threaded through `updater.ts`'s own tracked-check
+   * promise via IPC `invoke`/`handle`), so "checking" holds until then with
+   * no timeout window to guess. `performed` is read first (F8): a check
+   * that never ran (a packaged build with no publish provider, unpackaged
+   * dev's no-op) must not be reported as anything the state says.
    */
-  describe("checkForUpdates() result toast (F3, P2 fix; F8, third pass, P2 fix)", () => {
-    it("toasts 'up to date' once checkForUpdates() resolves performed:true and getState() reports idle", async () => {
-      installBridge({
-        checkForUpdates: vi.fn(async () => ({ performed: true })),
-        getState: vi.fn(async () => ({ phase: "idle" }) as DesktopUpdateState),
-      })
+  describe("checkForUpdates() records the click's own result in lastCheck", () => {
+    it("is undefined before any click", async () => {
+      installBridge()
       const { result } = renderHook(() => useDesktopUpdates())
       await waitFor(() => expect(result.current).not.toBeUndefined())
-
-      act(() => {
-        result.current?.checkForUpdates()
-      })
-
-      await waitFor(() =>
-        expect(toast.success).toHaveBeenCalledWith(
-          "You're up to date",
-          expect.objectContaining({ id: UPDATE_CHECK_RESULT_TOAST_ID, description: "Running v0.1.0" }),
-        ),
-      )
+      expect(result.current?.lastCheck).toBeUndefined()
     })
 
-    /**
-     * The exact case named by the P2 review: electron-updater's HTTP layer
-     * allows a request to stay pending up to ~60s. Nothing here uses a
-     * timer at all anymore, so an arbitrarily long-pending response must
-     * still resolve the toast whenever it eventually settles — proven by
-     * NOT resolving the bridge's promise for many microtask turns (there is
-     * no wall-clock delay to simulate: the fix removed the only thing that
-     * could time out).
-     */
-    it("still toasts after an arbitrarily long-pending response — no timeout window at all", async () => {
+    it("holds 'checking' until the bridge call settles, however long that takes, then records 'performed'", async () => {
       let resolveCheck: ((result: { performed: boolean }) => void) | undefined
       installBridge({
         checkForUpdates: vi.fn(
           () => new Promise<{ performed: boolean }>((resolve) => { resolveCheck = resolve }),
         ),
-        getState: vi.fn(async () => ({ phase: "idle" }) as DesktopUpdateState),
       })
       const { result } = renderHook(() => useDesktopUpdates())
       await waitFor(() => expect(result.current).not.toBeUndefined())
@@ -224,98 +186,90 @@ describe("useDesktopUpdates — bridge present", () => {
       act(() => {
         result.current?.checkForUpdates()
       })
+      expect(result.current?.lastCheck).toEqual({ status: "checking" })
 
-      // Flush many microtask turns with the bridge call still unsettled —
-      // must NOT toast yet, and nothing here is racing a clock to make it.
+      // Many microtask turns with the bridge call still unsettled: nothing
+      // here races a clock, so it must still say "checking".
       await act(async () => {
         for (let i = 0; i < 50; i++) await Promise.resolve()
       })
-      expect(toast.success).not.toHaveBeenCalled()
+      expect(result.current?.lastCheck).toEqual({ status: "checking" })
 
       await act(async () => {
         resolveCheck?.({ performed: true })
         await Promise.resolve()
         await Promise.resolve()
-        await Promise.resolve()
       })
-
-      expect(toast.success).toHaveBeenCalledWith(
-        "You're up to date",
-        expect.objectContaining({ id: UPDATE_CHECK_RESULT_TOAST_ID }),
-      )
+      expect(result.current?.lastCheck).toEqual({ status: "performed" })
     })
 
-    it("does NOT toast for a background state push that was never triggered by this hook's checkForUpdates() (the silent 4h/boot check)", async () => {
+    it("records 'not-performed' when the bridge says nothing was checked, so idle is not read as up to date", async () => {
+      installBridge({
+        checkForUpdates: vi.fn(async () => ({ performed: false })),
+        getState: vi.fn(async () => ({ phase: "idle" }) as DesktopUpdateState),
+      })
+      const { result } = renderHook(() => useDesktopUpdates())
+      await waitFor(() => expect(result.current).not.toBeUndefined())
+
+      await act(async () => {
+        result.current?.checkForUpdates()
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(result.current?.lastCheck).toEqual({ status: "not-performed" })
+      expect(result.current?.state).toEqual({ phase: "idle" })
+    })
+
+    it("is untouched by a background state push that no click here triggered (the silent boot/4h check)", async () => {
       const { listeners } = installBridge()
       const { result } = renderHook(() => useDesktopUpdates())
       await waitFor(() => expect(result.current).not.toBeUndefined())
 
-      // No checkForUpdates() call from this hook at all — this models the
-      // main-process boot/4h-timer check pushing state on its own.
       act(() => {
         listeners.forEach((cb) => cb({ phase: "checking" }))
       })
       act(() => {
         listeners.forEach((cb) => cb({ phase: "idle" }))
       })
-
-      expect(toast.success).not.toHaveBeenCalled()
+      expect(result.current?.lastCheck).toBeUndefined()
+      expect(result.current?.state).toEqual({ phase: "idle" })
     })
 
-    it("does NOT toast when checkForUpdates() resolves but getState() reports something other than idle (that outcome already has its own visible row)", async () => {
+    it("only the most recently issued click may write lastCheck, so an older settle cannot overwrite a newer click", async () => {
+      const settlers: Array<(r: { performed: boolean }) => void> = []
       installBridge({
-        checkForUpdates: vi.fn(async () => ({ performed: true })),
-        getState: vi.fn(async () => ({ phase: "available", version: "9.9.9" }) as DesktopUpdateState),
+        checkForUpdates: vi.fn(
+          () => new Promise<{ performed: boolean }>((resolve) => settlers.push(resolve)),
+        ),
       })
       const { result } = renderHook(() => useDesktopUpdates())
       await waitFor(() => expect(result.current).not.toBeUndefined())
 
-      await act(async () => {
+      act(() => {
         result.current?.checkForUpdates()
-        await Promise.resolve()
+      })
+      act(() => {
+        result.current?.checkForUpdates()
+      })
+      expect(settlers).toHaveLength(2)
+
+      // The FIRST click settles after the second was issued: ignored.
+      await act(async () => {
+        settlers[0]?.({ performed: false })
         await Promise.resolve()
         await Promise.resolve()
       })
+      expect(result.current?.lastCheck).toEqual({ status: "checking" })
 
-      expect(toast.success).not.toHaveBeenCalled()
+      await act(async () => {
+        settlers[1]?.({ performed: true })
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(result.current?.lastCheck).toEqual({ status: "performed" })
     })
 
-    it("a second check toasts again with the SAME stable id, so sonner updates it in place rather than stacking", async () => {
-      const { bridge } = installBridge({
-        checkForUpdates: vi.fn(async () => ({ performed: true })),
-        getState: vi.fn(async () => ({ phase: "idle" }) as DesktopUpdateState),
-      })
-      const { result } = renderHook(() => useDesktopUpdates())
-      await waitFor(() => expect(result.current).not.toBeUndefined())
-
-      await act(async () => {
-        result.current?.checkForUpdates()
-        await Promise.resolve()
-        await Promise.resolve()
-        await Promise.resolve()
-      })
-      await act(async () => {
-        result.current?.checkForUpdates()
-        await Promise.resolve()
-        await Promise.resolve()
-        await Promise.resolve()
-      })
-
-      expect(bridge.updates.checkForUpdates).toHaveBeenCalledTimes(2)
-      expect(toast.success).toHaveBeenCalledTimes(2)
-      expect(toast.success).toHaveBeenNthCalledWith(
-        1,
-        "You're up to date",
-        expect.objectContaining({ id: UPDATE_CHECK_RESULT_TOAST_ID }),
-      )
-      expect(toast.success).toHaveBeenNthCalledWith(
-        2,
-        "You're up to date",
-        expect.objectContaining({ id: UPDATE_CHECK_RESULT_TOAST_ID }),
-      )
-    })
-
-    it("an IPC-layer failure from checkForUpdates() is caught, not an unhandled rejection", async () => {
+    it("an IPC-layer failure from checkForUpdates() becomes a 'failed' result, not an unhandled rejection", async () => {
       installBridge({
         checkForUpdates: vi.fn(async () => {
           throw new Error("IPC channel closed")
@@ -329,85 +283,18 @@ describe("useDesktopUpdates — bridge present", () => {
           result.current?.checkForUpdates()
         })
       }).not.toThrow()
-      // No toast either — the check never actually concluded.
       await act(async () => {
         await Promise.resolve()
         await Promise.resolve()
       })
-      expect(toast.success).not.toHaveBeenCalled()
+      expect(result.current?.lastCheck).toEqual({ status: "failed", error: "IPC channel closed" })
     })
 
-    /**
-     * F8 (whole-branch review, third pass, P2 fix) — the core regression:
-     * a packaged build with no publish provider configured (F1's guard)
-     * resolves `checkForUpdates()` WITHOUT ever contacting a feed, and
-     * `getState()` still reports "idle" (nothing changed it) — indistinguishable
-     * from "checked, nothing new" by state alone. The pre-fix code would
-     * have toasted "You're up to date" here, which is a claim about a
-     * result that was never obtained. This is the test the reviewer asked
-     * for: no success toast when the check is skipped.
-     */
-    it("F8: does NOT toast 'up to date' when checkForUpdates() resolves performed:false, even though getState() still reads idle", async () => {
-      installBridge({
-        checkForUpdates: vi.fn(async () => ({ performed: false })),
-        getState: vi.fn(async () => ({ phase: "idle" }) as DesktopUpdateState),
-      })
+    it("exposes the running app's version, which is what 'up to date' names", async () => {
+      installBridge()
       const { result } = renderHook(() => useDesktopUpdates())
       await waitFor(() => expect(result.current).not.toBeUndefined())
-
-      await act(async () => {
-        result.current?.checkForUpdates()
-        await Promise.resolve()
-        await Promise.resolve()
-        await Promise.resolve()
-      })
-
-      expect(toast.success).not.toHaveBeenCalled()
-    })
-
-    it("F8: says plainly that no check was performed, rather than staying silent, when performed:false", async () => {
-      installBridge({
-        checkForUpdates: vi.fn(async () => ({ performed: false })),
-        getState: vi.fn(async () => ({ phase: "idle" }) as DesktopUpdateState),
-      })
-      const { result } = renderHook(() => useDesktopUpdates())
-      await waitFor(() => expect(result.current).not.toBeUndefined())
-
-      await act(async () => {
-        result.current?.checkForUpdates()
-        await Promise.resolve()
-        await Promise.resolve()
-        await Promise.resolve()
-      })
-
-      expect(toast.info).toHaveBeenCalledWith(
-        "No update check was performed",
-        expect.objectContaining({ id: UPDATE_CHECK_RESULT_TOAST_ID }),
-      )
-    })
-
-    /**
-     * F8: `performed:false` must short-circuit BEFORE `getState()` is even
-     * consulted — asserting the mock was never called is what proves the
-     * fix reads `performed` first rather than merely happening to agree
-     * with whatever `getState()` would have said in this particular test.
-     */
-    it("F8: does not call getState() at all when performed:false", async () => {
-      const { bridge } = installBridge({
-        checkForUpdates: vi.fn(async () => ({ performed: false })),
-      })
-      const { result } = renderHook(() => useDesktopUpdates())
-      await waitFor(() => expect(result.current).not.toBeUndefined())
-      vi.mocked(bridge.updates.getState).mockClear() // clear the initial-hydration call
-
-      await act(async () => {
-        result.current?.checkForUpdates()
-        await Promise.resolve()
-        await Promise.resolve()
-        await Promise.resolve()
-      })
-
-      expect(bridge.updates.getState).not.toHaveBeenCalled()
+      expect(result.current?.appVersion).toBe("0.1.0")
     })
   })
 

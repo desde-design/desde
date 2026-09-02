@@ -7,7 +7,7 @@
  * jsdom). A single menu test covers the gear → menu-item → dialog wiring.
  */
 
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ProjectKnowledge } from "@/editor/core/project-knowledge"
 import type { ProjectKnowledgeResponse } from "@/hooks/useProjectKnowledge"
@@ -369,5 +369,50 @@ describe("EditorSettingsMenu gear indicator", () => {
     // The credential dot stands down rather than stacking. This is the exact
     // case the bottom-right workaround existed for, now handled by priority.
     expect(screen.queryByTestId("editor-settings-credential-marker")).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * "Check for updates" opens a dialog (Mo, 2026-09-02: an explicit action
+ * gets a modal, not a toast). The menu closes on select, so the dialog is
+ * this menu's to own; this proves the wiring from the item to it.
+ */
+describe("EditorSettingsMenu — Check for updates opens the check dialog", () => {
+  afterEach(() => {
+    delete (window as { desdeDesktop?: unknown }).desdeDesktop
+  })
+
+  it("shows the check running in a dialog, then the result", async () => {
+    mockResponse = response()
+    let settle: ((r: { performed: boolean }) => void) | undefined
+    const bridge: DesktopBridge = {
+      appVersion: "0.1.1",
+      updates: {
+        getState: async () => ({ phase: "idle" }),
+        onState: () => () => {},
+        download: async () => {},
+        restartAndInstall: () => {},
+        checkForUpdates: () => new Promise((resolve) => { settle = resolve }),
+        getAutoDownload: async () => true,
+        setAutoDownload: async () => {},
+      },
+      claudeRuntime: {
+        getState: async () => ({ phase: "ready" }),
+        onState: () => () => {},
+        retry: () => {},
+      },
+      pickFolder: async () => null,
+    }
+    ;(window as unknown as { desdeDesktop: DesktopBridge }).desdeDesktop = bridge
+    render(<EditorSettingsMenu />)
+
+    fireEvent.pointerDown(await screen.findByTestId("editor-settings"), { button: 0, ctrlKey: false })
+    fireEvent.click(await screen.findByTestId("desktop-update-check-now"))
+
+    expect(await screen.findByTestId("desktop-update-check-dialog")).toHaveAttribute("data-view", "checking")
+    settle?.({ performed: true })
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-update-check-dialog")).toHaveAttribute("data-view", "up-to-date"),
+    )
   })
 })

@@ -54,6 +54,7 @@ import { ReferenceDirsPanel } from "@/components/editor/reference-dirs/reference
 import { DesignSystemsPanel } from "@/components/editor/design-systems-panel"
 import { CapabilitiesPanel } from "@/components/editor/capabilities-panel"
 import {
+  DesktopUpdateCheckDialog,
   DesktopUpdateRestartConfirmDialog,
   DesktopUpdateSection,
 } from "@/components/editor/desktop-update-menu"
@@ -97,6 +98,9 @@ export function EditorSettingsMenu({
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   const [referenceDirsOpen, setReferenceDirsOpen] = useState(false)
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false)
+  // Owned here, not in `DesktopUpdateSection`: the dropdown closes on
+  // select, so a dialog rendered inside it would unmount with the menu.
+  const [checkDialogOpen, setCheckDialogOpen] = useState(false)
   const updates = useDesktopUpdates()
   // Side-effect-only (toast on downloading/error) — see the hook's own doc
   // comment for why this has no return value the menu needs to render.
@@ -219,7 +223,11 @@ export function EditorSettingsMenu({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DesktopUpdateSection updates={updates} onRestartClick={handleRestartClick} />
+          <DesktopUpdateSection
+            updates={updates}
+            onRestartClick={handleRestartClick}
+            onCheckClick={() => setCheckDialogOpen(true)}
+          />
           <DropdownMenuItem
             onSelect={() => setCredentialDialogManuallyOpen(true)}
             data-testid="editor-settings-api-key"
@@ -336,6 +344,12 @@ export function EditorSettingsMenu({
       {/* No SmokeTestFailureDialog: nothing can start a smoke run from here
           while the menu item is hidden, so its failure dialog had no producer.
           Both come back together. */}
+      <DesktopUpdateCheckDialog
+        open={checkDialogOpen}
+        onOpenChange={setCheckDialogOpen}
+        updates={updates}
+        onRestartClick={handleRestartClick}
+      />
       <DesktopUpdateRestartConfirmDialog
         open={restartConfirmOpen}
         onOpenChange={setRestartConfirmOpen}

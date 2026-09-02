@@ -19,6 +19,15 @@
  *    into `EditorSettingsMenu` directly rather than living in its own dialog
  *    — updates aren't a daily surface, same reasoning `editor-settings-menu.tsx`
  *    already gives for keeping config-adjacent chrome behind the gear.
+ *  - `DesktopUpdateCheckDialog` — what "Check for updates" opens (Mo,
+ *    2026-09-02: "we should use a modal and not a toast as this is an
+ *    explicit action from a user"). It follows the click from "checking"
+ *    through whatever the check finds: up to date, an update to download,
+ *    the download's progress, ready to restart, or the failure. The menu
+ *    closes on select, so the dialog cannot live inside the section; each
+ *    settings menu owns its `open` state, the same way it owns the restart
+ *    confirm. Before this, the click's only feedback was a toast, and the
+ *    launcher mounted no toast host, so there it did nothing visible.
  *  - There is no launcher-specific button here any more. It existed because
  *    the launcher had no settings gear to attach a badge to; the launcher
  *    grew one on 2026-08-18 (`LauncherSettingsMenu`) and folds updates in
@@ -47,7 +56,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { StatusDot, type StatusTone } from "@/components/blocks"
 import { cn } from "@/lib/utils"
-import type { DesktopUpdatesApi } from "@/hooks/useDesktopUpdates"
+import type { DesktopUpdateCheckResult, DesktopUpdatesApi } from "@/hooks/useDesktopUpdates"
 import type { DesktopUpdateState } from "@/types/desktop-bridge"
 
 /**
@@ -145,14 +154,7 @@ export function DesktopUpdateStatusRow({
             <span>Downloading update</span>
             <span className="tabular-nums text-muted-foreground">{percent}%</span>
           </div>
-          <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full rounded-full bg-primary transition-[width]"
-              // Genuinely dynamic: the download's live progress. Everything
-              // static about this bar is in className.
-              style={{ width: `${percent}%` }}
-            />
-          </div>
+          <UpdateProgressBar percent={percent} />
         </div>
       )
     }
@@ -200,6 +202,20 @@ export function DesktopUpdateStatusRow({
   }
 }
 
+/** The download's progress, shared by the menu row and the check dialog so the two cannot drift. */
+function UpdateProgressBar({ percent }: { percent: number }) {
+  return (
+    <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
+      <div
+        className="h-full rounded-full bg-primary transition-[width]"
+        // Genuinely dynamic: the download's live progress. Everything
+        // static about this bar is in className.
+        style={{ width: `${percent}%` }}
+      />
+    </div>
+  )
+}
+
 /** The "Download updates automatically" toggle — always shown when the desktop bridge is present, independent of the current update phase. */
 export function DesktopUpdateAutoDownloadItem({ updates }: { updates: DesktopUpdatesApi }) {
   return (
@@ -226,13 +242,26 @@ export function DesktopUpdateAutoDownloadItem({ updates }: { updates: DesktopUpd
  * hiding the control. Follows "Run smoke test"'s shape in
  * `editor-settings-menu.tsx` — a spinner + swapped label while running,
  * disabled for the duration.
+ *
+ * `onSelect` is the caller's: the item only starts the check, and the
+ * caller opens `DesktopUpdateCheckDialog` to show it. The menu closes on
+ * select, so nothing rendered in here could stay on screen to do that.
  */
-export function DesktopUpdateCheckNowItem({ updates }: { updates: DesktopUpdatesApi }) {
+export function DesktopUpdateCheckNowItem({
+  updates,
+  onSelect,
+}: {
+  updates: DesktopUpdatesApi
+  onSelect: () => void
+}) {
   const checking = updates.state.phase === "checking"
   return (
     <DropdownMenuItem
       disabled={checking}
-      onSelect={() => updates.checkForUpdates()}
+      onSelect={() => {
+        updates.checkForUpdates()
+        onSelect()
+      }}
       data-testid="desktop-update-check-now"
     >
       {checking ? (
@@ -251,23 +280,214 @@ export function DesktopUpdateCheckNowItem({ updates }: { updates: DesktopUpdates
  * on-demand check item, then a separator before the rest of the menu.
  * Returns null entirely when `updates` is undefined (browser tab) — nothing
  * renders, not even the separator.
+ *
+ * `onCheckClick` fires after the on-demand check has been started; the
+ * caller opens its `DesktopUpdateCheckDialog` there.
  */
 export function DesktopUpdateSection({
   updates,
   onRestartClick,
+  onCheckClick,
 }: {
   updates: DesktopUpdatesApi | undefined
   onRestartClick: () => void
+  onCheckClick: () => void
 }) {
   if (!updates) return null
   return (
     <>
       <DesktopUpdateStatusRow updates={updates} onRestartClick={onRestartClick} />
       <DesktopUpdateAutoDownloadItem updates={updates} />
-      <DesktopUpdateCheckNowItem updates={updates} />
+      <DesktopUpdateCheckNowItem updates={updates} onSelect={onCheckClick} />
       <DropdownMenuSeparator />
     </>
   )
+}
+
+/**
+ * What the check dialog shows, derived from the click's own result and the
+ * update state. Pure and exported so the gallery fixtures and the tests can
+ * drive every case without mounting a component.
+ *
+ * The click's result is consulted FIRST, because `state` alone cannot tell
+ * two of these apart: "idle" is both "checked, nothing new" and "no check
+ * ever ran". Once a check has `performed`, the state machine is the truth
+ * and keeps being read live, so a download that starts after the dialog
+ * opened shows its progress in place.
+ */
+export type UpdateCheckView =
+  | { kind: "checking" }
+  | { kind: "up-to-date"; version: string }
+  | { kind: "not-performed" }
+  | { kind: "available"; version?: string }
+  | { kind: "downloading"; version?: string; percent: number }
+  | { kind: "ready"; version?: string }
+  | { kind: "error"; scope: "check" | "update"; message?: string }
+
+export function describeUpdateCheck(
+  lastCheck: DesktopUpdateCheckResult | undefined,
+  state: DesktopUpdateState,
+  appVersion: string,
+): UpdateCheckView {
+  if (lastCheck === undefined || lastCheck.status === "checking") return { kind: "checking" }
+  if (lastCheck.status === "not-performed") return { kind: "not-performed" }
+  if (lastCheck.status === "failed") return { kind: "error", scope: "check", message: lastCheck.error }
+  switch (state.phase) {
+    case "idle":
+      return { kind: "up-to-date", version: appVersion }
+    case "checking":
+      // A background check began after this click's own check settled.
+      // Its result will land in `state` too; "checking" is the honest
+      // reading until it does.
+      return { kind: "checking" }
+    case "available":
+      return { kind: "available", version: state.version }
+    case "downloading":
+      return {
+        kind: "downloading",
+        version: state.version,
+        percent: Math.round(state.progressPercent ?? 0),
+      }
+    case "ready":
+      return { kind: "ready", version: state.version }
+    case "error":
+      // Same rule as `DesktopUpdateStatusRow`: a version means the failure
+      // belongs to a download or install, not to the check.
+      return { kind: "error", scope: state.version ? "update" : "check", message: state.error }
+  }
+}
+
+/**
+ * The dialog "Check for updates" opens. `updates` may be undefined (browser
+ * tab), in which case nothing renders.
+ *
+ * Close is always in the footer. It hides the dialog and nothing else: a
+ * check or a download carries on in the background, and the menu's own
+ * status row and the settings dot keep reporting it, so closing is a way
+ * out that is one. Restart goes through `onRestartClick` for the same
+ * reason the menu row's does: the project menu confirms first when a chat
+ * turn is streaming.
+ */
+export function DesktopUpdateCheckDialog({
+  open,
+  onOpenChange,
+  updates,
+  onRestartClick,
+}: {
+  open: boolean
+  onOpenChange: (next: boolean) => void
+  updates: DesktopUpdatesApi | undefined
+  onRestartClick: () => void
+}) {
+  if (!updates) return null
+  const view = describeUpdateCheck(updates.lastCheck, updates.state, updates.appVersion)
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent size="md" data-testid="desktop-update-check-dialog" data-view={view.kind}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            {checkDialogTitle(view)}
+            {view.kind === "checking" ? (
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            ) : null}
+          </DialogTitle>
+          <DialogDescription>
+            {view.kind === "error" ? (
+              <span role="status" className="text-destructive">
+                {checkDialogDescription(view)}
+              </span>
+            ) : (
+              checkDialogDescription(view)
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        {view.kind === "downloading" ? (
+          <div className="flex flex-col gap-1" data-testid="desktop-update-check-progress">
+            <div className="flex items-center justify-between text-sm">
+              <span>Downloading</span>
+              <span className="tabular-nums text-muted-foreground">{view.percent}%</span>
+            </div>
+            <UpdateProgressBar percent={view.percent} />
+          </div>
+        ) : null}
+        <DialogFooter>
+          <Button
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+            data-testid="desktop-update-check-close"
+          >
+            Close
+          </Button>
+          {view.kind === "available" ? (
+            <Button
+              onClick={() => void updates.download()}
+              data-testid="desktop-update-check-download"
+            >
+              <Download />
+              Download
+            </Button>
+          ) : null}
+          {view.kind === "ready" ? (
+            <Button onClick={onRestartClick} data-testid="desktop-update-check-restart">
+              <RefreshCw />
+              Restart to update
+            </Button>
+          ) : null}
+          {view.kind === "error" ? (
+            <Button
+              onClick={() => updates.checkForUpdates()}
+              data-testid="desktop-update-check-retry"
+            >
+              <RotateCw />
+              Try again
+            </Button>
+          ) : null}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** Titles are sentences that name the state. No trailing ellipsis: the spinner already says it is running. */
+export function checkDialogTitle(view: UpdateCheckView): string {
+  switch (view.kind) {
+    case "checking":
+      return "Checking for updates"
+    case "up-to-date":
+      return "Up to date"
+    case "not-performed":
+      return "Update checks aren't available"
+    case "available":
+      return "Update available"
+    case "downloading":
+      return "Downloading update"
+    case "ready":
+      return "Update ready to install"
+    case "error":
+      return view.scope === "update" ? "Update failed" : "Update check failed"
+  }
+}
+
+export function checkDialogDescription(view: UpdateCheckView): string {
+  const version = (v: string | undefined) => (v ? `Version ${v}` : "A new version")
+  switch (view.kind) {
+    case "checking":
+      return "Looking for a newer version."
+    case "up-to-date":
+      return `Version ${view.version} is the latest available.`
+    case "not-performed":
+      return "This copy of the app can't check for updates."
+    case "available":
+      return `${version(view.version)} can be downloaded now.`
+    case "downloading":
+      return `${version(view.version)} is downloading. Closing this keeps the download going.`
+    case "ready":
+      return `${version(view.version)} is downloaded and installs on the next restart.`
+    case "error":
+      return view.message
+        ? `${view.message} Check the connection and try again.`
+        : "Something went wrong. Check the connection and try again."
+  }
 }
 
 /**
