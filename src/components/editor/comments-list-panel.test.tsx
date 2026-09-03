@@ -200,6 +200,29 @@ describe("CommentsListPanel", () => {
     expect(useAppStore.getState().expandedNoteIds.has("n1")).toBe(true)
   })
 
+  it("search narrows the list, says so when nothing matches, and clears", () => {
+    useAppStore.setState({
+      comments: [
+        makeComment("c-hero", "2026-05-23T10:00:00Z", { body: "The hero copy is too long" }),
+        makeComment("c-footer", "2026-05-23T11:00:00Z", { body: "Footer links are misaligned" }),
+      ],
+      notes: [],
+    })
+    render(<CommentsListPanel syncMode="viewer" {...makeCommentsOnlyProps()} />)
+    const search = screen.getByTestId("comment-search") as HTMLInputElement
+    fireEvent.change(search, { target: { value: "footer" } })
+    expect(screen.queryByTestId("annotation-row-comment-c-hero")).toBeNull()
+    expect(screen.getByTestId("annotation-row-comment-c-footer")).toBeInTheDocument()
+
+    fireEvent.change(search, { target: { value: "zzqx" } })
+    expect(screen.getByTestId("comment-search-no-matches")).toBeInTheDocument()
+    // The field stays on screen so the query can be edited, not only thrown away.
+    expect(screen.getByTestId("comment-search")).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }))
+    expect(screen.getAllByTestId(/^annotation-row-/)).toHaveLength(2)
+  })
+
   it("hides resolved rows when Show resolved is off", () => {
     useAppStore.setState({
       comments: [

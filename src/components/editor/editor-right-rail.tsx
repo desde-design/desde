@@ -485,10 +485,14 @@ export function EditorRightRail({
           />
         </TabsContent>
 
+        {/* No side padding: the panel insets its own group by 8px, as the
+            Viewer's does, and the 12px this carried on top made everything
+            in it sit 20px from the card edge (Mo, 2026-09-02: "padding
+            should be less"). */}
         <TabsContent
           value="comments"
           forceMount
-          className="min-h-0 flex-1 overflow-hidden px-3 data-[state=inactive]:hidden"
+          className="min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden"
         >
           <CommentsPanel
             iframeRef={iframeRef}
@@ -505,10 +509,12 @@ export function EditorRightRail({
           />
         </TabsContent>
 
+        {/* Same as Comments above: the panel's own 8px group inset is the
+            padding. */}
         <TabsContent
           value="activity"
           forceMount
-          className="min-h-0 flex-1 overflow-hidden px-3 data-[state=inactive]:hidden"
+          className="min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden"
         >
           <ActivityPanel
             changes={branches?.changes}

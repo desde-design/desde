@@ -39,7 +39,7 @@
  * owns the data hooks.
  */
 
-import { useCallback, useMemo } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { useAppStore } from "@/stores"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
@@ -49,11 +49,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { MentionText } from "@/components/comments/mention-text"
 import { EmptyState } from "@/components/blocks"
 import { CommentModeButton } from "@/components/editor/comment-mode-button"
-import { MapPinOff, MoreVertical, StickyNote } from "lucide-react"
+import { MapPinOff, MoreVertical, Search, StickyNote } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { formatRelativeTimeShort } from "@/lib/relative-time"
 import { avatarInitial } from "@/lib/initials"
@@ -116,6 +117,8 @@ interface Row {
   resolved: boolean
   replies: { id: string }[]
   page: string
+  /** Everything the search matches against, lower-cased once. */
+  searchText: string
 }
 
 export function CommentsListPanel({
@@ -180,6 +183,15 @@ export function CommentsListPanel({
       resolved: c.resolved,
       replies: c.replies,
       page: c.position.page,
+      searchText: [
+        c.body,
+        c.position.page,
+        c.author.displayName,
+        ...c.replies.map((r) => r.body),
+        ...c.replies.map((r) => r.author.displayName),
+      ]
+        .join("\n")
+        .toLowerCase(),
     }))
     const fromNotes: Row[] = (
       !notesEnabled
@@ -197,11 +209,31 @@ export function CommentsListPanel({
       resolved: n.resolved,
       replies: n.replies,
       page: n.position.page,
+      searchText: [
+        n.body,
+        n.position.page,
+        n.author.displayName,
+        ...n.replies.map((r) => r.body),
+        ...n.replies.map((r) => r.author.displayName),
+      ]
+        .join("\n")
+        .toLowerCase(),
     }))
     return [...fromComments, ...fromNotes].sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt),
     )
   }, [comments, notes, showResolvedAny, notesEnabled])
+
+  /**
+   * The rail's filter, as in the Viewer. It narrows THE LIST ONLY: the pins
+   * in the prototype are unaffected, and so is the Resolved switch.
+   */
+  const [query, setQuery] = useState("")
+  const filteredRows = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return rows
+    return rows.filter((row) => row.searchText.includes(q))
+  }, [rows, query])
 
   const handleToggleShowResolved = useCallback(() => {
     const next = !showResolvedAny
@@ -371,8 +403,42 @@ export function CommentsListPanel({
             the action row's `pb-2` puts 12px above it, as the Viewer does.
           */
           <div className="mx-2 mt-1 mb-2 flex flex-col overflow-hidden rounded-md border border-border">
+            {/* Search is the group's FIRST ROW, as in the Viewer: it shares the
+                group's border and divider, and strips the Input's own border,
+                background, radius and focus ring so it reads as a row rather
+                than a box inside a box. A background tint marks focus instead;
+                the ring would be clipped by the group's overflow. It wraps the
+                no-matches state too, so the query can still be edited. */}
+            <div className="relative border-b border-border">
+              <Search
+                className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+                aria-hidden
+              />
+              <Input
+                type="search"
+                size="sm"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search"
+                aria-label="Search comments"
+                className="rounded-none border-0 bg-transparent pl-8 focus-visible:ring-0 focus-visible:bg-muted/50"
+                data-testid="comment-search"
+              />
+            </div>
+            {filteredRows.length === 0 ? (
+              <EmptyState
+                size="sm"
+                title="No matching comments"
+                description={`Nothing here matches "${query.trim()}".`}
+                data-testid="comment-search-no-matches"
+              >
+                <Button variant="outline" size="sm" onClick={() => setQuery("")}>
+                  Clear search
+                </Button>
+              </EmptyState>
+            ) : (
             <ul className="flex flex-col">
-              {rows.map((row) => {
+              {filteredRows.map((row) => {
                 const isActive =
                   (row.kind === "comment" && activeCommentId === row.id) ||
                   (row.kind === "note" && activeNoteId === row.id)
@@ -393,6 +459,7 @@ export function CommentsListPanel({
                 )
               })}
             </ul>
+            )}
           </div>
         )}
       </div>

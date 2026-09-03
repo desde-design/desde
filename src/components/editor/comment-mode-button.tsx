@@ -24,7 +24,7 @@
  * after one comment.
  */
 
-import { MessageSquarePlus } from "lucide-react"
+import { MessageCirclePlus } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/stores"
@@ -51,9 +51,11 @@ export function CommentModeButton({
 
   return (
     <Button
-      // Filled only while the mode is on, so the one active control in a row
-      // is the loudest thing in it.
-      variant={commentMode ? "secondary" : "ghost"}
+      // The Viewer's button, exactly (Mo, 2026-09-02: "same icon and say
+      // Add comment"): tertiary at rest, PRIMARY fill while the mode is
+      // armed, so the one active control in a row is the loudest thing in
+      // it, and colour carries the state as well as weight.
+      variant={commentMode ? "default" : "ghost"}
       size="sm"
       onClick={() => onCommentModeChange(!commentMode)}
       title={commentMode ? "Exit comment mode" : "Add comment"}
@@ -61,8 +63,8 @@ export function CommentModeButton({
       data-testid={testId}
       className={cn(className)}
     >
-      <MessageSquarePlus />
-      Comment
+      <MessageCirclePlus data-icon="inline-start" />
+      Add comment
     </Button>
   )
 }
