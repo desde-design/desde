@@ -38,8 +38,9 @@
  *     before seeing this line.
  *   - Every state change is written as one line: `STATE {"phase":"ready",…}`
  *     — the driver parses these to assert on the transition sequence.
- *   - Further stdin lines are commands: "download" -> `updater.download()`,
- *     "restart" -> `updater.restartAndInstall()`. Both are the SAME
+*   - Further stdin lines are commands: "download" -> `updater.download()`,
+ *     "restart" -> `updater.restartAndInstall()`, "check" ->
+ *     `updater.checkForUpdates()` (its result echoed as `CHECK {...}`). All are the SAME
  *     phase-guarded no-ops the real preload/IPC path uses (see updater.ts) —
  *     this harness never bypasses that guard.
  *   - The driver owns lifecycle: it SIGTERMs this process once it has seen
@@ -49,6 +50,7 @@
  *     explicit `waitForState` timeouts are supposed to replace.
  */
 import { app } from "electron"
+import { autoUpdater } from "electron-updater"
 import * as readline from "node:readline"
 import { createUpdater } from "../updater.js"
 
@@ -74,12 +76,28 @@ async function main(): Promise<void> {
       updater.onState((state) => {
         process.stdout.write(`STATE ${JSON.stringify(state)}\n`)
       })
+      // The RAW library-level error stream, before updater.ts's attribution
+      // ladder decides which operation (if any) it belongs to. A driver that
+      // only watches STATE cannot see an error the ladder parks behind an
+      // in-flight check and then drops as a superseded operation's.
+      autoUpdater.on("error", (err: unknown) => {
+        process.stdout.write(`RAWERR ${JSON.stringify(err instanceof Error ? err.message : String(err))}\n`)
+      })
       process.stdout.write("READY\n")
       return
     }
 
     if (line === "download") void updater.download()
     else if (line === "restart") updater.restartAndInstall()
+    else if (line === "check") {
+      // The on-demand "Check for updates" trigger — the SAME `runCheck()`
+      // path the menu item and the 4h timer use. Its settled result is
+      // echoed as one `CHECK {...}` line so the driver can assert on
+      // `performed` (see updater.ts's `checkForUpdates()` doc comment).
+      void updater.checkForUpdates().then((result) => {
+        process.stdout.write(`CHECK ${JSON.stringify(result)}\n`)
+      })
+    }
     else process.stderr.write(`update-smoke-harness-main: unrecognized command ${JSON.stringify(line)}\n`)
   })
 }

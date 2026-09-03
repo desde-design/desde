@@ -11,11 +11,15 @@
  *    doc comment first; this module is the "scope is assigned upstream" half
  *    of that contract). The reducer never guesses which operation an event
  *    belongs to; this module never folds state.
- *  - "Checking is ALWAYS on": one check at construction (called from
- *    `main.ts`'s `boot()`, i.e. after `app.whenReady()`), then every 4 hours
- *    on a timer, plus `checkForUpdates()`, the on-demand trigger for "Check
- *    for updates" in the UI. All three funnel through the SAME `runCheck()`,
- *    which starts by calling `shouldSkipCheck()` (F1, whole-branch review,
+ *  - "Checking is ALWAYS on" — except while an update is READY: one check
+ *    at construction (called from `main.ts`'s `boot()`, i.e. after
+ *    `app.whenReady()`), then every 4 hours on a timer, plus
+ *    `checkForUpdates()`, the on-demand trigger for "Check for updates" in
+ *    the UI. All three funnel through the SAME `runCheck()`, which refuses
+ *    outright while `getState().phase === "ready"` (on macOS a check there
+ *    destroys Squirrel.Mac's in-progress or finished install prep — see the
+ *    comment in `runCheck()`) and otherwise
+ *    starts by calling `shouldSkipCheck()` (F1, whole-branch review,
  *    P1 fix) — a packaged app whose package-time stamp confirms no publish
  *    provider is configured (see `update-feed-guard.ts`) skips THAT
  *    trigger's real check and stays wherever it already was, instead of
@@ -194,15 +198,19 @@ export interface Updater {
    * electron-updater's own (up to 60s) HTTP layer.
    *
    * `performed` (F8, whole-branch review, P2 fix) is `false` when NOTHING
-   * was actually checked — either `shouldSkipCheck()` said skip (a packaged
-   * build with no publish provider configured), or `electron-updater`'s own
+   * was actually checked — `shouldSkipCheck()` said skip (a packaged build
+   * with no publish provider configured), `electron-updater`'s own
    * unpackaged-dev no-op (`isUpdaterActive()` returns `Promise.resolve(null)`
-   * before ever attempting anything, unless `forceDevUpdateConfig` is set).
-   * Both leave `getState()` at whatever it already was — typically `"idle"`,
-   * indistinguishable by state alone from "checked, nothing new". A caller
-   * must read `performed` FIRST: `getState().phase === "idle"` only means
-   * "up to date" when `performed` is also `true` — otherwise no check ever
-   * ran, and saying so would be reporting a result that was never obtained.
+   * before ever attempting anything, unless `forceDevUpdateConfig` is set),
+   * or an update is already `"ready"` (re-checking then is destructive on
+   * macOS — see `runCheck()`). The first two leave `getState()` at whatever
+   * it already was — typically `"idle"`, indistinguishable by state alone
+   * from "checked, nothing new". A caller must read `performed` FIRST:
+   * `getState().phase === "idle"` only means "up to date" when `performed`
+   * is also `true` — otherwise no check ever ran, and saying so would be
+   * reporting a result that was never obtained. The third leaves it at
+   * `"ready"`, which IS the answer: the update is downloaded and waits for
+   * a restart.
    */
   checkForUpdates(): Promise<{ performed: boolean }>
   /** Flips the live `autoDownload` flag. Called at boot from the persisted
@@ -578,6 +586,27 @@ export function createUpdater(options: CreateUpdaterOptions): Updater {
           "not decided once at boot — this guard is temporary and self-disables once " +
           "Phase 5 lands a real publish config.",
       )
+      return Promise.resolve({ performed: false })
+    }
+    // An update that is already downloaded is never re-checked. On macOS a
+    // check here is DESTRUCTIVE, not redundant — measured 2026-09-02 (the
+    // "Update failed: ditto: Could not lstat …/ShipIt/update.XXXXXXX/…"
+    // field failure, reproduced by `tasks/scripts/desktop-update-smoke.mts`
+    // scenario 4): "ready" is reported the moment the zip is handed to
+    // Squirrel.Mac, which then unzips and verifies it in the background.
+    // With autoDownload on, a later `checkForUpdates()` re-runs
+    // `MacUpdater.updateDownloaded()` from the cached file, which closes
+    // the proxy Squirrel is reading from, calls `setFeedURL` again (Electron
+    // discards its SQRLUpdater and creates a new one), and the new one's
+    // housekeeping deletes EVERY `update.*` directory in Squirrel's cache —
+    // including the one still being extracted, and including a finished one
+    // that ShipIt has already been pointed at. Nothing about the 4h timer
+    // makes it safer, so the gate is here, on every trigger. The update
+    // stays ready; the caller sees `performed: false` and the UI reads the
+    // state machine ("ready") for the truth. Once the ready update FAILS
+    // (a native-prep error flips it to "error"), checking is open again —
+    // that is the recovery path.
+    if (wireState.phase === "ready") {
       return Promise.resolve({ performed: false })
     }
     const promise = source.checkForUpdates()

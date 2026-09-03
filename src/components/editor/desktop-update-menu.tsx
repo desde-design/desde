@@ -160,6 +160,16 @@ export function DesktopUpdateStatusRow({
     }
 
     case "ready":
+      if (updates.restarting) {
+        // The click already happened; the menu was reopened during the
+        // seconds before the window closes. Not a second invitation.
+        return (
+          <div className="flex items-center gap-2 px-2 py-1.5 text-sm" data-testid="desktop-update-restarting">
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            Restarting to update
+          </div>
+        )
+      }
       return (
         <DropdownMenuItem onSelect={onRestartClick} data-testid="desktop-update-restart">
           <RefreshCw className="h-4 w-4" />
@@ -235,10 +245,12 @@ export function DesktopUpdateAutoDownloadItem({ updates }: { updates: DesktopUpd
 
 /**
  * On-demand "Check for updates" — the third trigger alongside boot and the
- * 4h timer. Always shown (not phase-gated): checking is safe to invoke from
- * any phase (a no-op mid-download, reused rather than duplicated while
- * already checking — see `updater.ts`'s `checkForUpdates()` doc comment), so
- * the current check state is reflected in the item's own label instead of
+ * 4h timer. Always shown (not phase-gated): invoking it is safe from any
+ * phase because `updater.ts` decides what a click may do — it shares an
+ * in-flight check, shares a running download, and REFUSES while an update
+ * is already ready (see `runCheck()` there for why a re-check then is
+ * destructive on macOS; the dialog shows "ready" for that click). So the
+ * current check state is reflected in the item's own label instead of
  * hiding the control. Follows "Run smoke test"'s shape in
  * `editor-settings-menu.tsx` — a spinner + swapped label while running,
  * disabled for the duration.
@@ -313,9 +325,11 @@ export function DesktopUpdateSection({
  * two of these apart: "idle" is both "checked, nothing new" and "no check
  * ever ran". Once a check has `performed`, the state machine is the truth
  * and keeps being read live, so a download that starts after the dialog
- * opened shows its progress in place.
+ * opened shows its progress in place. `restarting` (the hook's flag, set by
+ * a "Restart to update" click) outranks even that — see the first branch.
  */
 export type UpdateCheckView =
+  | { kind: "restarting" }
   | { kind: "checking" }
   | { kind: "up-to-date"; version: string }
   | { kind: "not-performed" }
@@ -328,8 +342,25 @@ export function describeUpdateCheck(
   lastCheck: DesktopUpdateCheckResult | undefined,
   state: DesktopUpdateState,
   appVersion: string,
+  restarting = false,
 ): UpdateCheckView {
+  // "Restart to update" was clicked and the app has not closed yet: the
+  // payload child is being shut down, then the native installer takes over
+  // and the window goes away. Outranks everything, including a click's own
+  // result — no check matters once the restart is under way. Measured
+  // 2026-09-02: that shutdown is normally well under a second, but the
+  // whole round trip (quit, install, relaunch) can run to a minute, and
+  // with no state on screen it read as "nothing happened", so the app was
+  // relaunched by hand mid-install and the installer aborted.
+  if (restarting) return { kind: "restarting" }
   if (lastCheck === undefined || lastCheck.status === "checking") return { kind: "checking" }
+  // A check is refused, not just skipped, while an update is already
+  // downloaded (`updater.ts`'s `runCheck()`: re-checking then would destroy
+  // the native install prep on macOS). The state machine is unambiguous
+  // there, so it is the answer; "can't check for updates" would be false.
+  if (lastCheck.status === "not-performed" && state.phase === "ready") {
+    return { kind: "ready", version: state.version }
+  }
   if (lastCheck.status === "not-performed") return { kind: "not-performed" }
   if (lastCheck.status === "failed") return { kind: "error", scope: "check", message: lastCheck.error }
   switch (state.phase) {
@@ -380,14 +411,14 @@ export function DesktopUpdateCheckDialog({
   onRestartClick: () => void
 }) {
   if (!updates) return null
-  const view = describeUpdateCheck(updates.lastCheck, updates.state, updates.appVersion)
+  const view = describeUpdateCheck(updates.lastCheck, updates.state, updates.appVersion, updates.restarting)
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent size="md" data-testid="desktop-update-check-dialog" data-view={view.kind}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {checkDialogTitle(view)}
-            {view.kind === "checking" ? (
+            {view.kind === "checking" || view.kind === "restarting" ? (
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
             ) : null}
           </DialogTitle>
@@ -451,6 +482,8 @@ export function DesktopUpdateCheckDialog({
 /** Titles are sentences that name the state. No trailing ellipsis: the spinner already says it is running. */
 export function checkDialogTitle(view: UpdateCheckView): string {
   switch (view.kind) {
+    case "restarting":
+      return "Restarting to update"
     case "checking":
       return "Checking for updates"
     case "up-to-date":
@@ -471,6 +504,8 @@ export function checkDialogTitle(view: UpdateCheckView): string {
 export function checkDialogDescription(view: UpdateCheckView): string {
   const version = (v: string | undefined) => (v ? `Version ${v}` : "A new version")
   switch (view.kind) {
+    case "restarting":
+      return "Closing the editor. Desde will quit and reopen on its own. This can take a minute, so leave it be."
     case "checking":
       return "Looking for a newer version."
     case "up-to-date":

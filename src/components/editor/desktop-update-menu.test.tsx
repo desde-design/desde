@@ -29,6 +29,7 @@ function api(
     setAutoDownload: vi.fn(async () => {}),
     download: vi.fn(async () => {}),
     restartAndInstall: vi.fn(),
+    restarting: false,
     checkForUpdates: vi.fn(),
   }
 }
@@ -50,6 +51,20 @@ describe("describeUpdateCheck", () => {
     expect(describeUpdateCheck({ status: "performed" }, idle, "0.1.1")).toEqual({
       kind: "up-to-date",
       version: "0.1.1",
+    })
+    // A check refused because an update is already downloaded (updater.ts
+    // never re-checks while ready — re-checking destroys Squirrel.Mac's
+    // install prep on macOS) reads the state machine: the update IS the answer.
+    expect(describeUpdateCheck({ status: "not-performed" }, { phase: "ready", version: "1.5.0" }, "0.1.1")).toEqual({
+      kind: "ready",
+      version: "1.5.0",
+    })
+    // A restart under way outranks everything, the click's own result included.
+    expect(describeUpdateCheck(undefined, { phase: "ready", version: "1.5.0" }, "0.1.1", true)).toEqual({
+      kind: "restarting",
+    })
+    expect(describeUpdateCheck({ status: "performed" }, { phase: "ready", version: "1.5.0" }, "0.1.1", true)).toEqual({
+      kind: "restarting",
     })
     expect(describeUpdateCheck({ status: "not-performed" }, idle, "0.1.1")).toEqual({
       kind: "not-performed",
@@ -190,6 +205,22 @@ describe("DesktopUpdateCheckDialog", () => {
     expect(screen.getByRole("status")).toHaveTextContent("ENOTFOUND github.com")
     fireEvent.click(screen.getByTestId("desktop-update-check-retry"))
     expect(updates.checkForUpdates).toHaveBeenCalledTimes(1)
+  })
+
+  it("shows the restarting view once Restart was clicked: a spinner, no Restart or Download to click again, Close still there", () => {
+    render(
+      <DesktopUpdateCheckDialog
+        open
+        onOpenChange={() => {}}
+        updates={{ ...api({ phase: "ready", version: "1.5.0" }, undefined), restarting: true }}
+        onRestartClick={() => {}}
+      />,
+    )
+    expect(screen.getByTestId("desktop-update-check-dialog")).toHaveAttribute("data-view", "restarting")
+    expect(screen.getByText("Restarting to update")).toBeInTheDocument()
+    expect(screen.queryByTestId("desktop-update-check-restart")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("desktop-update-check-download")).not.toBeInTheDocument()
+    expect(screen.getByTestId("desktop-update-check-close")).toBeInTheDocument()
   })
 
   it("says plainly when nothing was checked, instead of claiming up to date", () => {

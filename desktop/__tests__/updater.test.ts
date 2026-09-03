@@ -704,6 +704,87 @@ describe("createUpdater — setAutoDownload", () => {
  * preceding their original patches, door five and the F14 variant against the
  * last pre-restructure commit).
  */
+/**
+ * 2026-09-02 field failure: "Update failed: ditto: Could not lstat
+ * …/com.desde.editor.ShipIt/update.XXXXXXX/…: No such file or directory".
+ * On macOS "ready" is reported when the zip is handed to Squirrel.Mac, which
+ * unzips and verifies it afterwards. A check while ready (autoDownload on)
+ * re-runs electron-updater's download step from cache, which replaces the
+ * native updater, and the replacement's housekeeping deletes every
+ * `update.*` directory — the one still being extracted included. Measured
+ * end to end by `tasks/scripts/desktop-update-smoke.mts` scenario 4; these
+ * pin the wrapper-level rule that closes it: no trigger re-checks while ready.
+ */
+describe("createUpdater — no re-check while an update is ready", () => {
+  function readyUpdater(autoDownload = true) {
+    const source = fakeSource()
+    const scheduler = fakeScheduler()
+    const updater = createUpdater({ autoDownload, source, scheduleCheck: scheduler.schedule })
+    source.emit("checking-for-update")
+    source.emit("update-available", { version: "1.2.0" })
+    source.emit("download-progress", { percent: 100 })
+    source.emit("update-downloaded", { version: "1.2.0" })
+    expect(updater.getState()).toEqual({ phase: "ready", version: "1.2.0" })
+    source.checkForUpdates.mockClear()
+    return { source, scheduler, updater }
+  }
+
+  it("the on-demand check never reaches the source, resolves {performed:false}, and ready stays", async () => {
+    const { source, updater } = readyUpdater()
+    await expect(updater.checkForUpdates()).resolves.toEqual({ performed: false })
+    expect(source.checkForUpdates).not.toHaveBeenCalled()
+    expect(updater.getState()).toEqual({ phase: "ready", version: "1.2.0" })
+  })
+
+  it("the 4h timer never reaches the source either — the periodic path is the same hazard", () => {
+    const { source, scheduler, updater } = readyUpdater()
+    scheduler.fire()
+    expect(source.checkForUpdates).not.toHaveBeenCalled()
+    expect(updater.getState()).toEqual({ phase: "ready", version: "1.2.0" })
+  })
+
+  it("holds with autoDownload off too — a manually downloaded update is just as ready", async () => {
+    const { source, updater } = readyUpdater(false)
+    await expect(updater.checkForUpdates()).resolves.toEqual({ performed: false })
+    expect(source.checkForUpdates).not.toHaveBeenCalled()
+  })
+
+  it("a re-check while still DOWNLOADING runs — electron-updater shares the pending download there, which is safe", async () => {
+    const source = fakeSource()
+    const updater = createUpdater({ autoDownload: true, source, scheduleCheck: fakeScheduler().schedule })
+    source.emit("checking-for-update")
+    source.emit("update-available", { version: "1.2.0" })
+    source.emit("download-progress", { percent: 40 })
+    source.checkForUpdates.mockClear()
+    // The real library concludes only after its HTTP round trip — never
+    // synchronously inside the call.
+    source.checkForUpdates.mockImplementationOnce(() => {
+      source.emit("checking-for-update")
+      return Promise.resolve().then(() => {
+        source.emit("update-available", { version: "1.2.0" })
+        return null
+      })
+    })
+    await expect(updater.checkForUpdates()).resolves.toEqual({ performed: true })
+    expect(source.checkForUpdates).toHaveBeenCalledTimes(1)
+  })
+
+  it("once the ready update fails (a native-prep error), checking is open again — that is the recovery path", async () => {
+    const { source, updater } = readyUpdater()
+    source.emit("error", new Error("ditto: Could not lstat …/update.8BFC7tX/…: No such file or directory"))
+    expect(updater.getState().phase).toBe("error")
+    source.checkForUpdates.mockImplementationOnce(() => {
+      source.emit("checking-for-update")
+      return Promise.resolve().then(() => {
+        source.emit("update-not-available", { version: "1.2.0" })
+        return null
+      })
+    })
+    await expect(updater.checkForUpdates()).resolves.toEqual({ performed: true })
+    expect(source.checkForUpdates).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe("createUpdater — the five doors (one bug class, five orderings)", () => {
   /** A recheck that fails the way 6.8.9 really fails: `checking-for-update`
    *  emitted at the check's start, then the "error" emit and the rejection
@@ -733,11 +814,19 @@ describe("createUpdater — the five doors (one bug class, five orderings)", () 
     // original scenario IS the periodic recheck, and the timer path predates
     // the on-demand API (which lets this test run, and fail honestly,
     // against the pre-F3 implementation).
+    //
+    // Since 2026-09-02 the timer never reaches the source while an update
+    // is ready (see "no re-check while an update is ready" below), so the
+    // failing recheck armed here is never consumed — the door is closed one
+    // step earlier. The invariant this door states still holds and is still
+    // asserted: ready survives.
     failingRecheck(source, "net::ERR_NETWORK_CHANGED")
+    source.checkForUpdates.mockClear()
     scheduler.fire()
     await Promise.resolve()
     await Promise.resolve()
 
+    expect(source.checkForUpdates).not.toHaveBeenCalled()
     // restartAndInstall() must remain live.
     expect(updater.getState()).toEqual({ phase: "ready", version: "1.2.0" })
   })
@@ -951,24 +1040,35 @@ describe("createUpdater — the five doors (one bug class, five orderings)", () 
     const updater = createUpdater({ autoDownload: true, source, scheduleCheck: fakeScheduler().schedule })
     source.emit("checking-for-update")
     source.emit("update-available", { version: "1.0.0" })
-    source.emit("download-progress", { percent: 100 })
-    source.emit("update-downloaded", { version: "1.0.0" })
+    source.emit("download-progress", { percent: 40 })
 
-    // The recheck finds v2 and (autoDownload) starts downloading it — the
+    // The only ordering in which a recheck can supersede a READY update
+    // since 2026-09-02 (no trigger re-checks while ready): it STARTS while
+    // v1 is still downloading and CONCLUDES after v1 reached ready, finding
+    // v2 in an advanced feed. autoDownload then starts v2's download — the
     // real 6.8.9 shape: `UpdateCheckResult.downloadPromise` carries the
     // download's own terminal signal.
     const downloadError = new Error("ECONNRESET: download stream reset")
     let rejectDownload: ((err: Error) => void) | undefined
+    let concludeCheck: (() => void) | undefined
     source.checkForUpdates.mockImplementationOnce(() => {
       source.emit("checking-for-update")
-      source.emit("update-available", { version: "2.0.0" })
-      return Promise.resolve({
-        downloadPromise: new Promise((_resolve, reject) => {
-          rejectDownload = reject
-        }),
+      return new Promise((resolve) => {
+        concludeCheck = () => {
+          source.emit("update-available", { version: "2.0.0" })
+          resolve({
+            downloadPromise: new Promise((_resolve, reject) => {
+              rejectDownload = reject
+            }),
+          })
+        }
       })
     })
     updater.checkForUpdates()
+    source.emit("download-progress", { percent: 100 })
+    source.emit("update-downloaded", { version: "1.0.0" })
+    expect(updater.getState()).toEqual({ phase: "ready", version: "1.0.0" })
+    concludeCheck?.()
     await Promise.resolve()
     await Promise.resolve()
     expect(updater.getState()).toEqual({ phase: "available", version: "2.0.0" })
@@ -1020,19 +1120,28 @@ describe("createUpdater — the five doors (one bug class, five orderings)", () 
     await Promise.resolve()
     await Promise.resolve()
 
+    source.emit("download-progress", { percent: 40 })
+
+    // A recheck starts while v1 is still downloading (the only ordering
+    // that can still supersede a ready update — no trigger re-checks while
+    // ready) and reports v2 after v1 reached ready, while v1's preparation
+    // is still pending. Like the real library, it does NOT start a second
+    // download — it returns v1's EXISTING promise object inside v2's result.
+    let concludeCheck: (() => void) | undefined
+    source.checkForUpdates.mockImplementationOnce(() => {
+      source.emit("checking-for-update")
+      return new Promise((resolve) => {
+        concludeCheck = () => {
+          source.emit("update-available", { version: "2.0.0" })
+          resolve({ downloadPromise: v1DownloadPromise })
+        }
+      })
+    })
+    updater.checkForUpdates()
     source.emit("download-progress", { percent: 100 })
     source.emit("update-downloaded", { version: "1.0.0" })
     expect(updater.getState()).toEqual({ phase: "ready", version: "1.0.0" })
-
-    // A recheck reports v2 while v1's preparation is still pending. Like the
-    // real library, it does NOT start a second download — it returns v1's
-    // EXISTING promise object inside v2's result.
-    source.checkForUpdates.mockImplementationOnce(() => {
-      source.emit("checking-for-update")
-      source.emit("update-available", { version: "2.0.0" })
-      return Promise.resolve({ downloadPromise: v1DownloadPromise })
-    })
-    updater.checkForUpdates()
+    concludeCheck?.()
     await Promise.resolve()
     await Promise.resolve()
     expect(updater.getState()).toEqual({ phase: "available", version: "2.0.0" })
