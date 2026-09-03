@@ -235,6 +235,57 @@ button:focus-visible {
   font-size: 13px;
 }
 
+/* ── Workspace card grid ────────────────────────────────────────────────────
+   Same tokens, radius, and border as .metric/.panel; the grid mirrors
+   .metrics so the two pages read as one system. */
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.workspace-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.workspace-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.workspace-card__name {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 550;
+}
+
+.workspace-card__facts {
+  display: flex;
+  gap: 24px;
+  margin: 0;
+}
+
+.workspace-fact dt {
+  margin: 0 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+}
+
+.workspace-fact dd {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 550;
+}
+
 /* ── Button variants and sizes ──────────────────────────────────────────────
    `.button` and `.button--primary` above are the originals; these complete
    the set the `Button` component's `variant` and `size` props enumerate.

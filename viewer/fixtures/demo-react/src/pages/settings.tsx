@@ -22,7 +22,7 @@ export function Settings() {
         </section>
 
         <section className="panel" data-demo-anchor="alert-settings">
-          <h2>Alerts</h2>
+          <h2>Alert rules</h2>
           <div className="field">
             <label htmlFor="threshold">Error rate threshold</label>
             <input id="threshold" type="text" defaultValue="0.50%" data-demo-anchor="threshold" />
@@ -43,8 +43,8 @@ export function Settings() {
         </section>
 
         <section className="panel" data-demo-anchor="retention">
-          <h2>Retention</h2>
-          <p className="empty">Retention controls are not built yet.</p>
+          <h2>Data retention</h2>
+          <p className="empty">Retention controls are coming next.</p>
         </section>
     </div>
   )
