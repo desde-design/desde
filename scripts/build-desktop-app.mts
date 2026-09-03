@@ -61,6 +61,7 @@
  */
 import { execFileSync, spawnSync } from "node:child_process"
 import { refreshUpdateManifestEntry, verifyUpdateManifest } from "../desktop/scripts/update-manifest.mjs"
+import { findDeveloperIdIdentity, signMachOsInsideArchive } from "../desktop/scripts/sign-archived-machos.mjs"
 import { existsSync, readFileSync, statSync, writeFileSync, promises as fs } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -411,6 +412,28 @@ async function main(): Promise<void> {
     payloadDir = join(DESKTOP_ROOT, ".package-payload", `${process.platform}-${process.arch}`)
     console.log(`\n▸ Building a fresh payload at ${payloadDir}`)
     run("npm", ["run", "build:payload", "--", "--out", payloadDir], REPO_ROOT)
+  }
+
+  // ── Sign inside the demo archive (--sign only) ─────────────────────────
+  // Apple's notary opens the demo's node_modules.tgz and rejects the build
+  // for any unsigned Mach-O it finds there, and @electron/osx-sign's walk of
+  // the bundle never sees inside a tarball. So those binaries are signed
+  // here, in the staged payload, before electron-builder runs — see
+  // desktop/scripts/sign-archived-machos.mjs for the measured failure.
+  if (args.sign) {
+    const archive = join(payloadDir, "demo", "node_modules.tgz")
+    if (existsSync(archive)) {
+      const identity = findDeveloperIdIdentity()
+      console.log(`\n▸ Signing the Mach-O files inside ${archive}\n  identity: ${identity.name}`)
+      const signed = await signMachOsInsideArchive(archive, {
+        identityHash: identity.hash,
+        timestamp: process.env.DESDE_DESKTOP_SIGN_TIMESTAMP,
+      })
+      for (const rel of signed) console.log(`  signed ${rel}`)
+      console.log(`  ${signed.length} Mach-O file(s) signed and repacked`)
+    } else {
+      console.log(`\n▸ No demo archive at ${archive}; a loose demo tree is signed by osx-sign's own walk`)
+    }
   }
 
   // ── desktop/ shell ─────────────────────────────────────────────────────

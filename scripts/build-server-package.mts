@@ -591,6 +591,11 @@ export async function pruneNodeModules(
  * and materialize.ts for the unpack. `tar` rather than a JS tar library:
  * symlinks (`.bin/*`) and modes round-trip exactly, and the same `tar` is
  * what unpacks it on the user's machine.
+ *
+ * Packing takes the tree's native modules out of @electron/osx-sign's reach,
+ * and Apple's notary looks inside the archive: a signed desktop build signs
+ * them separately (build-desktop-app.mts → sign-archived-machos.mjs) before
+ * electron-builder runs.
  */
 export async function packDemoNodeModules(out: string): Promise<{ files: number; bytes: number }> {
   const demoDir = join(out, "demo")
