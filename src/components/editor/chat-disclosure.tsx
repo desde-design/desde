@@ -88,7 +88,13 @@ export function ChatDisclosure({
         // className would win the merge and reopen the gap.
         "mt-1",
         "[[data-chat-disclosure]+&]:mt-0 [[data-chat-disclosure]+&]:rounded-t-none [[data-chat-disclosure]+&]:border-t-0",
-        "[&:has(+[data-chat-disclosure])]:rounded-b-none",
+        // `mb-0` as well as `rounded-b-none`. The assistant message spaces
+        // its parts with `space-y-3`, which is a BOTTOM margin on every part
+        // but the last; the follower's `mt-0` above cannot cancel that, so a
+        // run of tool calls sat 12px apart with all its top rounding intact
+        // (Mo, 2026-09-02: "there should be none"). The leader gives up its
+        // bottom margin when a disclosure follows.
+        "[&:has(+[data-chat-disclosure])]:rounded-b-none [&:has(+[data-chat-disclosure])]:mb-0",
         className,
       )}
       data-testid={dataTestId}

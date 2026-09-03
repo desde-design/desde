@@ -1958,6 +1958,11 @@ function withoutEmptyAssistantMessages(messages: ChatMessage[]): ChatMessage[] {
 }
 
 function appendTextBlock(blocks: AssistantBlockUi[], delta: string): AssistantBlockUi[] {
+  // An empty delta (the SDK opens a text block before it has any text) must
+  // not mint an empty part: rendered, it is an empty div between two tool
+  // rows, which breaks their fusing and adds two margins where there should
+  // be none.
+  if (delta.length === 0) return blocks
   const out = [...blocks]
   const last = out[out.length - 1]
   if (last && last.type === "text") {

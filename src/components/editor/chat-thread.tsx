@@ -25,6 +25,7 @@ import {
   ThreadPrimitive,
   MessagePrimitive,
   MessagePartPrimitive,
+  useMessagePartText,
 } from "@assistant-ui/react"
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown"
 import { makePrismSyntaxHighlighter } from "@assistant-ui/react-syntax-highlighter/full"
@@ -146,7 +147,13 @@ const UserTextPart: FC = () => (
  * a copy button. Both are passed as `components` to MarkdownTextPrimitive;
  * the CodeHeader renders above each fenced block, SyntaxHighlighter below.
  */
-const AssistantMarkdownPart: FC = () => (
+const AssistantMarkdownPart: FC = () => {
+  // A part with no text renders nothing, not an empty prose block. Such a
+  // part between two tool rows would keep them from fusing and add two
+  // margins where there should be none.
+  const { text } = useMessagePartText()
+  if (text.length === 0) return null
+  return (
   <MarkdownTextPrimitive
     smooth
     // `text-base` is load-bearing, not decoration: `prose-sm` sets its own
@@ -160,7 +167,8 @@ const AssistantMarkdownPart: FC = () => (
       CodeHeader,
     }}
   />
-)
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Reasoning (extended-thinking) part — a collapsible chain-of-thought
