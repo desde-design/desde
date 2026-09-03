@@ -274,16 +274,14 @@ export function EditorSurface({
     setActiveTab(next)
   }, [])
 
-  // Phase 2: a comment pin click inside the iframe auto-opens the
-  // Comments tab so the user's thread surfaces alongside the
-  // popup (which the bridge already places at the pin via slice
-  // state). Context-aware default opening per the architecture doc.
-  const handleCommentPinClicked = useCallback(() => {
-    // Comment or note — both flip the right rail to Comments.
-    // `id` and `kind` are intentionally unused at v1; the merged
-    // panel + slice mutual exclusivity handle the per-kind activation.
-    setActiveTab("comments")
-  }, [])
+  // A comment pin click inside the iframe does NOT switch the rail to the
+  // Comments tab any more (Mo, 2026-09-02). The thread and its replies open
+  // in the popup beside the pin, so the tab added nothing, and it threw away
+  // whatever the user had open in the rail (an inspector selection, a chat
+  // mid-turn) to do it. The bridge still sets the active comment on the
+  // slice, which is what opens the popup; nothing here listens for the
+  // click. It used to, from 2026-06 to 2026-09-02, as "context-aware
+  // default opening".
 
   // ── Comment mode, owned here ─────────────────────────────────────
   // The comment store and the comment bridge are mounted at the surface
@@ -300,10 +298,7 @@ export function EditorSurface({
   // rail, so pin clicks and comment syncing keep working in Canvas view
   // and focus mode, where the rail unmounts.
   const commentSync = useEditorCommentStore()
-  const commentBridge = useEditorCommentBridge(iframeRef, {
-    enabled: true,
-    onPinClicked: handleCommentPinClicked,
-  })
+  const commentBridge = useEditorCommentBridge(iframeRef, { enabled: true })
   // Destructured so the two callbacks below depend on the individual
   // functions rather than on the whole bridge object. `bridgeReadyEpoch` and
   // `offTargetCommentIds` move on bridge events; rebuilding these handlers
@@ -1049,7 +1044,6 @@ export function EditorSurface({
               commentBridge={commentBridge}
               commentSync={commentSync}
               onCommentModeChange={handleCommentModeChange}
-              onCommentPinClicked={handleCommentPinClicked}
               onEscalateToChat={handleEditEscalation}
               activeBreakpoint={activeBreakpoint}
               branches={branches}

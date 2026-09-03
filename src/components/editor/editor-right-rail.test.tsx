@@ -327,7 +327,6 @@ function renderRail(overrides: Partial<RailProps> = {}): {
       commentBridge={overrides.commentBridge ?? commentBridge}
       commentSync={overrides.commentSync ?? commentSync}
       onCommentModeChange={overrides.onCommentModeChange ?? vi.fn()}
-      onCommentPinClicked={overrides.onCommentPinClicked}
       branches={overrides.branches}
     />,
   )

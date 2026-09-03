@@ -106,14 +106,6 @@ interface EditorRightRailProps {
   /** Toggle comment placement mode; the same handler the toolbar fires. */
   onCommentModeChange: (next: boolean) => void
   /**
-   * Fires when a NOTE pin is clicked inside the iframe. The surface uses
-   * this to auto-switch the active tab to Comments (context-aware default
-   * opening). `kind` disambiguates Comment vs Note for any per-type
-   * behavior; v1 surfaces use it identically. The comment half of the
-   * signal is wired at the surface, on the lifted bridge.
-   */
-  onCommentPinClicked?: (id: string, kind: "comment" | "note") => void
-  /**
    * Escalate-to-chat seam forwarded to the Comments tab's per-comment
    * "Fix with AI" action. Same handler direct-manipulation edits use.
    */
@@ -145,7 +137,6 @@ export function EditorRightRail({
   commentBridge,
   commentSync,
   onCommentModeChange,
-  onCommentPinClicked,
   onEscalateToChat,
   activeBreakpoint,
   branches,
@@ -499,12 +490,12 @@ export function EditorRightRail({
             commentBridge={commentBridge}
             commentSync={commentSync}
             onCommentModeChange={onCommentModeChange}
-            onPinClicked={onCommentPinClicked}
             onEscalateToChat={onEscalateToChat}
             // Keep the container active even when the tab isn't visible
-            // so the note bridge can listen for pin clicks (the surface-
-            // level auto-switch needs that signal) and so a fresh sync
-            // goes through as soon as comments load.
+            // so a fresh sync goes through as soon as comments load, and
+            // the pin bridges keep answering clicks while another tab is
+            // showing. (A pin click no longer switches to this tab, since
+            // 2026-09-02; the popup at the pin is the whole answer.)
             enabled
           />
         </TabsContent>
