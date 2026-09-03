@@ -220,11 +220,14 @@ it("seeds comments and replies when a page prefix is given", async () => {
   const project = (await d.storage.listProjects())[0]
   const comments = await d.storage.listComments(project.id)
 
-  expect(comments).toHaveLength(5)
+  expect(comments).toHaveLength(4)
   expect(comments.flatMap((c) => c.replies)).toHaveLength(3)
   // One arrives already resolved, so the rail's Resolved toggle is not empty
   // on a first boot.
   expect(comments.filter((c) => c.resolved)).toHaveLength(1)
+  // One comment on the Overview page, not two (Mo, 2026-09-02).
+  const overview = comments.filter((c) => c.position.page === "/p/demo/")
+  expect(overview).toHaveLength(1)
 })
 
 it("seeds nothing when no page prefix is given", async () => {

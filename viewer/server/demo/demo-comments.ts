@@ -4,7 +4,7 @@ import type { StoredCommentInput, StoredCommentReplyInput } from "../storage/typ
  * The conversation the demo prototype ships with.
  *
  * A review tool whose demo has nothing to review shows the reviewer an empty
- * list and asks them to imagine the product. These five threads exist so the
+ * list and asks them to imagine the product. These four threads exist so the
  * first screen a stranger sees is the thing the product is for (Mo,
  * 2026-09-01: "let's seed it with some comments and replies").
  *
@@ -105,15 +105,6 @@ export function demoComments(pagePrefix: string): DemoCommentSeed[] {
     },
     {
       comment: {
-        position: { anchorSelector: '[data-demo-anchor="attention"]', page: overview },
-        body: "This panel did not exist last week and it is already the most useful thing on the page. Worth keeping above the fold.",
-        author: TOMAS,
-      },
-      replies: [],
-      resolved: true,
-    },
-    {
-      comment: {
         position: { anchorSelector: '[data-demo-anchor="workspace-northwind-eu"]', page: workspaces },
         body: "northwind-eu has been degraded for three days. Is there a way to see since when, without leaving this table?",
         author: ANA,
@@ -140,6 +131,10 @@ export function demoComments(pagePrefix: string): DemoCommentSeed[] {
         author: TOMAS,
       },
       replies: [],
+      // The one resolved thread. It used to be a second Overview comment on the
+      // attention panel; Mo wanted one comment on Overview (2026-09-02), and
+      // the rail's Resolved toggle still needs something behind it.
+      resolved: true,
     },
   ]
 }
