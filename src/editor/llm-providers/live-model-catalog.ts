@@ -156,17 +156,41 @@ export function versionedNameFrom(description: string | undefined): string | und
   return VERSIONED_NAME.exec(description.trim())?.[1]
 }
 
-/** Shape the Agent SDK's list. Everything it offers is usable as a `model`. */
+/**
+ * The same name out of a model ID (`claude-fable-5-1[1m]` is "Fable 5.1"),
+ * for an entry whose description says nothing ("Custom model"). The `[1m]`
+ * context suffix and a dated snapshot are ignored; a bare alias with no
+ * version in it (`fable[1m]`) yields nothing, and the alias stays.
+ */
+export function versionedNameFromId(id: string): string | undefined {
+  const m = /^claude-(fable|opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:-\d{8})?(?:\[.*\])?$/.exec(id)
+  if (!m) return undefined
+  const family = m[1]!.charAt(0).toUpperCase() + m[1]!.slice(1)
+  return m[3] !== undefined ? `${family} ${m[2]}.${m[3]}` : `${family} ${m[2]}`
+}
+
+/**
+ * Shape the Agent SDK's list. Everything it offers is usable as a `model`,
+ * but only entries with a NAME AND VERSION are shown (Mo, 2026-09-02: "there
+ * should not be any value called default. It should be model name and
+ * version"). An entry whose version can be read from neither its description
+ * nor its id is dropped: today that is the "Custom model" row the binary adds
+ * for a bare alias in the user's own Claude Code settings (`fable[1m]`, the
+ * `fable` alias with the 1M-context suffix), which duplicates the versioned
+ * Fable entry beside it.
+ */
 export function fromAgentSdk(models: readonly AgentSdkModel[]): LiveModel[] {
   return models
     .filter((m) => typeof m.value === 'string' && m.value.length > 0)
-    .map((m) => {
+    .flatMap((m) => {
+      const label = versionedNameFrom(m.description) ?? versionedNameFromId(m.value)
+      if (!label) return []
       const ladder = Array.isArray(m.supportedEffortLevels)
         ? EFFORT_LEVELS.filter((level) => m.supportedEffortLevels!.includes(level))
         : undefined
-      return {
+      return [{
         id: m.value,
-        label: versionedNameFrom(m.description) ?? (m.displayName || m.value),
+        label,
         ...(m.description ? { description: m.description } : {}),
         ...(m.supportsEffort === false
           ? { effortLevels: null }
@@ -177,7 +201,7 @@ export function fromAgentSdk(models: readonly AgentSdkModel[]): LiveModel[] {
         ...(typeof m.supportsAdaptiveThinking === 'boolean'
           ? { adaptiveThinking: m.supportsAdaptiveThinking }
           : {}),
-      }
+      }]
     })
 }
 

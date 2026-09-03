@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ProviderModelCatalog } from '../core/model-catalog'
-import { fromAgentSdk, fromModelsApi, mergeLiveModels, versionedNameFrom } from './live-model-catalog'
+import { fromAgentSdk, fromModelsApi, mergeLiveModels, versionedNameFrom, versionedNameFromId } from './live-model-catalog'
 
 const STATIC: ProviderModelCatalog = {
   providerId: 'anthropic',
@@ -46,7 +46,7 @@ describe('fromModelsApi', () => {
 })
 
 describe('fromAgentSdk', () => {
-  it('keeps every offered value, carrying the effort flag through', () => {
+  it('keeps every versioned value, carrying the effort flag through', () => {
     const live = fromAgentSdk([
       { value: 'default', displayName: 'Default (recommended)', description: 'Opus 4.8', supportsEffort: true },
       { value: 'claude-haiku-4-5', displayName: 'Haiku 4.5', description: 'Fastest', supportsEffort: false },
@@ -58,6 +58,14 @@ describe('fromAgentSdk', () => {
       { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest', effortLevels: null, supportsEffort: false },
       { id: 'claude-opus-5', label: 'Opus 5' },
     ])
+  })
+
+  it('drops an entry whose version cannot be read from its description or id', () => {
+    const live = fromAgentSdk([
+      { value: 'fable[1m]', displayName: 'fable[1m]', description: 'Custom model' },
+      { value: 'mystery', displayName: 'Mystery', description: 'Something' },
+    ])
+    expect(live).toEqual([])
   })
 
   it('reads the per-level ladder and the adaptive flag the binary actually sends', () => {
@@ -94,6 +102,24 @@ describe('versionedNameFrom', () => {
     expect(versionedNameFrom('Custom model')).toBeUndefined()
     expect(versionedNameFrom('')).toBeUndefined()
     expect(versionedNameFrom(undefined)).toBeUndefined()
+  })
+})
+
+describe('versionedNameFromId', () => {
+  it('reads family and version out of an id, ignoring context and snapshot suffixes', () => {
+    expect(versionedNameFromId('claude-fable-5-1[1m]')).toBe('Fable 5.1')
+    expect(versionedNameFromId('claude-opus-5')).toBe('Opus 5')
+    expect(versionedNameFromId('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
+    expect(versionedNameFromId('fable[1m]')).toBeUndefined()
+    expect(versionedNameFromId('default')).toBeUndefined()
+  })
+
+  it('is the fallback for a binary entry whose description says nothing', () => {
+    const live = fromAgentSdk([
+      { value: 'claude-fable-5-1[1m]', displayName: 'Fable', description: 'Custom model' },
+      { value: 'fable[1m]', displayName: 'fable[1m]', description: 'Custom model' },
+    ])
+    expect(live.map((m) => m.label)).toEqual(['Fable 5.1'])
   })
 })
 
