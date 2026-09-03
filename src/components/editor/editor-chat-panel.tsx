@@ -599,13 +599,21 @@ function ImageAttachmentChip() {
   )
 }
 
+/**
+ * The examples are EDITS, at three sizes (Mo, 2026-09-02: the earlier
+ * "what file is this in?" / "show me the props" read as informational and
+ * "didn't resonate"; this chat is for changing the prototype). One tweak, one
+ * layout change, one whole page, so the range is the message.
+ */
 export function EmptyState() {
   return (
     <div className="px-3 py-4 text-center text-xs text-muted-foreground">
       <p className="mb-1 font-normal text-foreground">Start a conversation</p>
       <p>
-        Ask about the selected element, this page, or a source file. Try{" "}
-        &quot;what file is this in?&quot; or &quot;show me the props&quot;.
+        Ask for an edit, from a tweak to a whole page. Try{" "}
+        &quot;make this button secondary&quot;, &quot;put these cards two per row
+        on mobile&quot;, or &quot;add a settings page with a form and a save
+        button&quot;.
       </p>
     </div>
   )
