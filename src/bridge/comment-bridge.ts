@@ -11,6 +11,7 @@
  * imports below get inlined at bundle time; the runtime output is
  * still a single self-contained IIFE with no external deps.
  */
+import { currentReactFiber, getReactComponentMountRoot } from "./framework-component-detection"
 import { type FrameworkRuntimeAdapter as ImportedFrameworkRuntimeAdapter } from "./leaf-prop-attribution"
 import {
   configureElementAttribution,
@@ -67,7 +68,7 @@ import { createOverridePreview } from "./override-preview"
   // the viewer's `html-inject`). Keep it a single-use literal;
   // bridge-bundle-version.test.ts fails if that stops holding.
   ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__ =
-    "2026-09-02c-outermost-primary"
+    "2026-09-02d-current-fiber"
   const BRIDGE_VERSION = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__ as string
 
@@ -617,13 +618,16 @@ import { createOverridePreview } from "./override-preview"
     // consistent across all elements on the page. Cache after first
     // resolve so subsequent lookups are O(1).
     if (reactFiberKey !== null) {
-      const cached = (el as Record<string, unknown>)[reactFiberKey]
-      return (cached as Record<string, unknown>) ?? null
+      // Resolved to the CURRENT alternate: the DOM node's pointer is the
+      // stale one on every other commit (see `currentReactFiber`).
+      const cached = (el as Record<string, unknown>)[reactFiberKey] as Record<string, unknown> | undefined
+      return cached ? currentReactFiber(cached) : null
     }
     for (const k of Object.keys(el)) {
       if (k.startsWith("__reactFiber$")) {
         reactFiberKey = k
-        return ((el as Record<string, unknown>)[k] as Record<string, unknown>) ?? null
+        const found = (el as Record<string, unknown>)[k] as Record<string, unknown> | undefined
+        return found ? currentReactFiber(found) : null
       }
     }
     return null
@@ -640,7 +644,6 @@ import { createOverridePreview } from "./override-preview"
   //   14 = MemoComponent
   //   15 = SimpleMemoComponent
   const REACT_COMPONENT_TAGS = new Set([0, 1, 11, 14, 15])
-  const REACT_HOST_COMPONENT_TAG = 5
 
   function findReactComponentFiber(
     start: Record<string, unknown> | null,
@@ -650,41 +653,6 @@ import { createOverridePreview } from "./override-preview"
       const tag = cur.tag as number | undefined
       if (typeof tag === "number" && REACT_COMPONENT_TAGS.has(tag)) return cur
       cur = (cur.return as Record<string, unknown> | null | undefined) ?? null
-    }
-    return null
-  }
-
-  function findFirstReactHostFiber(
-    start: Record<string, unknown>,
-  ): Record<string, unknown> | null {
-    // Depth-first walk through `start`'s SUBTREE looking for the
-    // first HostComponent. Seed the stack with `start.child` (not
-    // `start` itself) because:
-    //   1. A component fiber's `.stateNode` is the instance/state,
-    //      not a DOM element. We want a descendant HostComponent.
-    //   2. `start.sibling` is OUTSIDE `start`'s subtree — pushing
-    //      it would let the walk leak into a neighboring component's
-    //      DOM and return the wrong mount root. Codex round-1 P1 #3.
-    // Capped at 256 nodes so a pathological tree can't run away.
-    const firstChild = start.child as Record<string, unknown> | null | undefined
-    if (!firstChild) return null
-    const stack: Record<string, unknown>[] = [firstChild]
-    let budget = 256
-    while (stack.length > 0 && budget-- > 0) {
-      const cur = stack.pop()!
-      const tag = cur.tag as number | undefined
-      if (tag === REACT_HOST_COMPONENT_TAG && cur.stateNode instanceof Element) {
-        return cur
-      }
-      // sibling: at the START fiber's depth, siblings are different
-      // top-level children of `start` (still in scope). Past that
-      // depth, siblings are children of the parent we just descended
-      // into — also in scope. Only EXCLUDED is `start.sibling`,
-      // which we never push (we seeded with start.child).
-      const sibling = cur.sibling as Record<string, unknown> | null | undefined
-      const child = cur.child as Record<string, unknown> | null | undefined
-      if (sibling) stack.push(sibling)
-      if (child) stack.push(child)
     }
     return null
   }
@@ -833,9 +801,12 @@ import { createOverridePreview } from "./override-preview"
       return owner === instance
     },
     getInstanceMountRoot(instance) {
-      const host = findFirstReactHostFiber(instance as Record<string, unknown>)
-      if (!host) return null
-      return host.stateNode instanceof Element ? host.stateNode : null
+      // The shared walk (`framework-component-detection.ts`): the one host
+      // the component's output starts with, none for a multi-root or
+      // portal-only component, resolved on the current alternate. The
+      // Structure panel and the tree use the same function, so attribution
+      // and labelling cannot disagree about what a component's root is.
+      return getReactComponentMountRoot(instance as Record<string, unknown>)
     },
     getParentInstance(instance) {
       const i = instance as Record<string, unknown>

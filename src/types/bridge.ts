@@ -235,6 +235,8 @@ export interface ComponentTreeNode {
    * uses it to pick the selection's component on React.
    */
   callsite?: string
+  /** The `data-desde-v` file version paired with `callsite`. */
+  callsiteVersion?: string
 }
 
 /**

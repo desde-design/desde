@@ -84,26 +84,25 @@ describe("React mount-root helpers, against real React 19 fibers", () => {
     const span = container.querySelector(".label")!
 
     // buildReactComponentTree: root-first, one node per named component,
-    // each carrying the elementSelector of ITS OWN mount root (App's is the
-    // shell div, Overview's is the intro section — not the div that wraps
-    // Button, since that div is not Overview's own first-rendered host).
+    // each carrying the elementSelector of ITS OWN mount root. Overview
+    // renders a Fragment with two top-level hosts, so like a multi-root Vue
+    // component it has NO mount root and an empty selector: calling its
+    // first section "Overview" would misread the page as "Overview is the
+    // intro" (adversarial review, 2026-09-02).
     const tree = buildReactComponentTree(a)
     expect(tree.map((n) => n.name)).toEqual(["App", "Overview", "Button"])
     expect(tree[0].elementSelector).toBe(generateSelector(appShellDiv))
-    expect(tree[1].elementSelector).toBe(generateSelector(introSection))
+    expect(tree[1].elementSelector).toBe("")
     expect(tree[2].elementSelector).toBe(generateSelector(a))
 
-    // detectOutlineComponent labels each component's own mount root, and
-    // nothing else.
+    // detectOutlineComponent labels each single-root component's mount
+    // root, and nothing else.
     expect(detectOutlineComponent(a)?.name).toBe("Button")
-    expect(detectOutlineComponent(introSection)?.name).toBe("Overview")
+    expect(detectOutlineComponent(introSection)).toBeNull()
     expect(detectOutlineComponent(appShellDiv)?.name).toBe("App")
     // An inner <span> inside the <a> (Button's own child content) is not a
-    // mount root of anything.
+    // mount root of anything, and neither is the wrapper div in Overview.
     expect(detectOutlineComponent(span)).toBeNull()
-    // The <div class="actions"> Overview renders around Button is plain
-    // markup in Overview's template, not Overview's own mount root (that's
-    // the earlier <section class="intro">) — so it is unlabeled too.
     expect(detectOutlineComponent(actionsDiv)).toBeNull()
   })
 
@@ -167,7 +166,7 @@ describe("React mount-root helpers, against real React 19 fibers", () => {
     expect(detectReactOutlineComponent(arrowDiv)?.name).toBe("NamedArrow")
   })
 
-  it("case 4: Fragment root with two host children — mount root is the FIRST host in render order, the second is not labeled", () => {
+  it("case 4: Fragment root with two host children — the component has NO mount root, same as a multi-root Vue component", () => {
     function TwoHosts() {
       return (
         <>
@@ -189,11 +188,12 @@ describe("React mount-root helpers, against real React 19 fibers", () => {
     const second = container.querySelector(".second-host")!
 
     const twoHostsFiber = getReactFiberOf(first)!.return as Record<string, unknown>
-    expect(getReactComponentMountRoot(twoHostsFiber)).toBe(first)
-    expect(getReactComponentMountRoot(twoHostsFiber)).not.toBe(second)
+    expect(getReactComponentMountRoot(twoHostsFiber)).toBeNull()
 
-    expect(detectReactOutlineComponent(first)?.name).toBe("TwoHosts")
+    expect(detectReactOutlineComponent(first)).toBeNull()
     expect(detectReactOutlineComponent(second)).toBeNull()
+    // The owner is single-root and unaffected.
+    expect(detectReactOutlineComponent(container.querySelector(".owner-of-two-hosts")!)?.name).toBe("Owner")
   })
 
   it("case 5: transparent wrapper chain — Card renders Panel renders div; the div is labeled the OUTERMOST (Card), and the tree carries both with the same elementSelector", () => {
@@ -223,7 +223,7 @@ describe("React mount-root helpers, against real React 19 fibers", () => {
     expect(tree[1].elementSelector).toBe(tree[2].elementSelector)
   })
 
-  it("case 6: parent whose first host is a sibling — Page renders <span/><Child/>, Child renders <a>: the <a> is labeled Child, the span is labeled Page", () => {
+  it("case 6: Page renders <span/><Child/>, Child renders <a>: the <a> is labeled Child; Page has two roots and labels nothing", () => {
     function Child() {
       return <a className="child-a">link</a>
     }
@@ -247,11 +247,11 @@ describe("React mount-root helpers, against real React 19 fibers", () => {
     const span = container.querySelector(".page-span")!
     const a = container.querySelector(".child-a")!
 
-    expect(detectReactOutlineComponent(span)?.name).toBe("Page")
+    expect(detectReactOutlineComponent(span)).toBeNull()
     expect(detectReactOutlineComponent(a)?.name).toBe("Child")
   })
 
-  it("case 7: a portal — getReactComponentMountRoot follows the FIBER tree through the HostPortal, returning a host element that is NOT in the component's DOM position", () => {
+  it("case 7: a portal is not a mount root — a portal-only component has none, and a component with a local host beside its portal mounts as the local host", () => {
     function Modal() {
       return createPortal(<div className="portal-root">portal content</div>, document.body)
     }
@@ -282,27 +282,111 @@ describe("React mount-root helpers, against real React 19 fibers", () => {
     }
     expect(modalFiber).not.toBeNull()
 
-    // ACTUAL BEHAVIOR (measured): the returned "mount root" is the portal's
-    // div — a real Element, attached to the live DOM — but it is a child of
-    // `document.body`, NOT a descendant of `ownerDiv` (Modal's structural
-    // position in the render tree). `getReactComponentMountRoot` walks
-    // `fiber.child`/`fiber.sibling`, and a HostPortal fiber (tag 4) stays a
-    // child in the FIBER tree even though React re-parents its content
-    // elsewhere in the DOM tree at commit time — so the walk finds it same
-    // as any other host descendant.
-    const root = getReactComponentMountRoot(modalFiber!)
-    expect(root).toBe(portalDiv)
-    expect(ownerDiv.contains(root)).toBe(false)
-    expect(document.body.contains(root!)).toBe(true)
+    // A HostPortal fiber (tag 4) stays a child in the FIBER tree while React
+    // re-parents its content elsewhere in the DOM, so a walk that followed
+    // it returned an element outside the component's DOM position (first
+    // cut, measured). Vue's Teleport root gives a component no root either.
+    expect(getReactComponentMountRoot(modalFiber!)).toBeNull()
+    expect(detectReactOutlineComponent(portalDiv)).toBeNull()
+    expect(ownerDiv.contains(portalDiv)).toBe(false)
 
-    // Whether this is a "defect" depends on what a caller wants: as a
-    // literal reading of the doc comment ("First HostComponent in fiber's
-    // subtree — the DOM element the component mounts as"), this is
-    // CORRECT — Modal's real rendered output genuinely is the portal div.
-    // It is a defect only for a caller that assumes a mount root is always
-    // positioned inside the component's DOM ancestry (e.g. an outline/
-    // highlight overlay computing a bounding box relative to nearby
-    // content) — see the report.
+    // Portal beside a local host: the local host is the one root.
+    function Tip() {
+      return (
+        <>
+          {createPortal(<div className="tip-portal">tip</div>, document.body)}
+          <button className="tip-trigger">open</button>
+        </>
+      )
+    }
+    const container2 = mount(<div className="tip-owner"><Tip /></div>)
+    const trigger = container2.querySelector(".tip-trigger")!
+    expect(detectReactOutlineComponent(trigger)?.name).toBe("Tip")
+    expect(detectReactOutlineComponent(document.body.querySelector(".tip-portal")!)).toBeNull()
+  })
+
+  it("case 10: the fiber on a DOM node is the stale alternate on every other commit; after a child deletion the walk must still find the root", () => {
+    // React's passive unmount runs detachAlternateSiblings(parent): the
+    // STALE parent's `child` is nulled and its stale sibling links cut.
+    // Whichever fiber the DOM node points at, the walk must resolve to the
+    // current one first (adversarial review, 2026-09-02; probe showed
+    // `Bar.child = null` on the stale alternate and a null mount root).
+    let hideFirst: (v: boolean) => void = () => {}
+    function Bar() {
+      const [hidden, setHidden] = React.useState(false)
+      hideFirst = setHidden
+      return (
+        <>
+          {!hidden && <i className="bar-lead">lead</i>}
+          <a className="bar-root">bar</a>
+        </>
+      )
+    }
+    let closeDrawer: (v: boolean) => void = () => {}
+    function Drawer() {
+      return <aside className="drawer">drawer</aside>
+    }
+    function Panel() {
+      const [open, setOpen] = React.useState(true)
+      closeDrawer = setOpen
+      return (
+        <>
+          <div className="panel-root">panel</div>
+          {open && <Drawer />}
+        </>
+      )
+    }
+    function Owner() {
+      return (
+        <div className="owner-of-stale">
+          <Bar />
+          <Panel />
+        </div>
+      )
+    }
+    const container = mount(<Owner />)
+    const barRoot = container.querySelector(".bar-root")!
+    const panelRoot = container.querySelector(".panel-root")!
+
+    // Both are multi-root while their optional child is present.
+    expect(detectReactOutlineComponent(barRoot)).toBeNull()
+    expect(detectReactOutlineComponent(panelRoot)).toBeNull()
+
+    // Delete a FIRST child, then a LAST child, each on its own commit.
+    act(() => hideFirst(true))
+    act(() => closeDrawer(false))
+    expect(container.querySelector(".bar-lead")).toBeNull()
+    expect(container.querySelector(".drawer")).toBeNull()
+
+    // Now single-root: the walk must find the root even though the DOM
+    // node's fiber may be the stale alternate whose `child` React nulled.
+    expect(detectReactOutlineComponent(barRoot)?.name).toBe("Bar")
+    expect(detectReactOutlineComponent(panelRoot)?.name).toBe("Panel")
+    const tree = buildReactComponentTree(panelRoot)
+    expect(tree.map((n) => n.name)).toEqual(["Owner", "Panel"])
+    expect(tree[1].elementSelector).toBe(generateSelector(panelRoot))
+
+    // And one more prop-only re-render flips parity again: still found.
+    act(() => closeDrawer(false))
+    expect(detectReactOutlineComponent(panelRoot)?.name).toBe("Panel")
+  })
+
+  it("case 11: React.memo with a comparator (a MemoComponent wrapping an inner FunctionComponent) is one tree node, not two", () => {
+    const MemoCmp = React.memo(function MemoCmpImpl() {
+      return <span className="memo-compare">m</span>
+    }, () => false)
+    function Page() {
+      return (
+        <div className="page-of-memo">
+          <MemoCmp />
+        </div>
+      )
+    }
+    const container = mount(<Page />)
+    const span = container.querySelector(".memo-compare")!
+    const tree = buildReactComponentTree(span)
+    expect(tree.map((n) => n.name)).toEqual(["Page", "MemoCmpImpl"])
+    expect(detectReactOutlineComponent(span)?.name).toBe("MemoCmpImpl")
   })
 
   it("case 8: a Context.Provider and Suspense boundary between the component and its host — mount root still resolves through them, labeled as the component", () => {

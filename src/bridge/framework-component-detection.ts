@@ -128,6 +128,8 @@ export interface ComponentTreeNode {
    * both are named Button.
    */
   callsite?: string
+  /** The `data-desde-v` file version paired with {@link callsite}. */
+  callsiteVersion?: string
 }
 
 export interface OutlineNode {
@@ -337,18 +339,59 @@ export function extractPackageName(filePath: string): string | undefined {
 //     `subTree.el === el` rule the Vue branch applies. Without it every
 //     React row was a tag name.
 //
+// What "mount root" means here, and it is Vue's meaning: the ONE host
+// element a component's output starts with. A component whose top-level
+// output holds two hosts (a Fragment of sections, an element beside a text
+// node) has no mount root, exactly as a multi-root Vue component has a text
+// anchor for `subTree.el` and no root element. Calling its first host the
+// root misread the demo's Overview page as "Overview is the intro"
+// (adversarial review, 2026-09-02). Portal content is never a root: React
+// re-parents it elsewhere in the DOM while the fiber stays a child, and
+// Vue's Teleport gives no root either.
+//
+// Two React facts the walks have to respect. The fiber a DOM node points at
+// is the STALE alternate on every other commit, and after a deletion among a
+// component's direct children React nulls the stale parent's `child`
+// (`detachAlternateSiblings`), so every walk starts by resolving to the
+// current fiber. And when an app renders into `document`, React 19 makes
+// `<html>`/`<head>`/`<body>` HostSingleton (27) and `<title>`/`<link>`/
+// `<meta>` HostHoistable (26) fibers, which are hosts too.
+//
 // Tags are React's `WorkTag` numbers: FunctionComponent 0, ClassComponent 1,
-// HostComponent 5, ForwardRef 11, MemoComponent 14, SimpleMemoComponent 15 —
-// the set the runtime adapter in `comment-bridge.ts` keys on.
+// HostRoot 3, HostPortal 4, HostComponent 5, HostText 6, ForwardRef 11,
+// MemoComponent 14, SimpleMemoComponent 15, HostHoistable 26, HostSingleton
+// 27. The runtime adapter in `comment-bridge.ts` shares these walks.
 const REACT_COMPONENT_FIBER_TAGS = new Set([0, 1, 11, 14, 15])
-const REACT_HOST_FIBER_TAG = 5
+const REACT_HOST_FIBER_TAGS = new Set([5, 26, 27])
+const REACT_HOST_ROOT_TAG = 3
+const REACT_PORTAL_TAG = 4
+const REACT_HOST_TEXT_TAG = 6
 
 type ReactFiber = Record<string, unknown>
+
+/**
+ * The current fiber for `fiber`, which may be the stale alternate. React
+ * keeps two fibers per node and flips which one is current on every commit;
+ * the DOM node's `__reactFiber$` points at whichever was current when the
+ * node was last touched. The root's FiberRootNode (`stateNode` of the
+ * HostRoot) names the current tree, so walk up and compare. A fiber with
+ * no HostRoot above it (detached) is returned as is.
+ */
+export function currentReactFiber(fiber: ReactFiber): ReactFiber {
+  let top: ReactFiber = fiber
+  let budget = 512
+  while (top.return && budget-- > 0) top = top.return as ReactFiber
+  if (top.tag !== REACT_HOST_ROOT_TAG) return fiber
+  const rootNode = top.stateNode as { current?: unknown } | null | undefined
+  if (!rootNode || rootNode.current === top) return fiber
+  return (fiber.alternate as ReactFiber | null | undefined) ?? fiber
+}
 
 export function getReactFiberOf(el: Element): ReactFiber | null {
   const key = Object.keys(el).find((k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"))
   if (!key) return null
-  return ((el as Record<string, unknown>)[key] as ReactFiber | undefined) ?? null
+  const fiber = (el as Record<string, unknown>)[key] as ReactFiber | undefined
+  return fiber ? currentReactFiber(fiber) : null
 }
 
 /**
@@ -400,25 +443,37 @@ function isReactComponentFiber(fiber: ReactFiber): boolean {
 }
 
 /**
- * First HostComponent in `fiber`'s subtree — the DOM element the component
- * mounts as. Seeded with `fiber.child`, never `fiber.sibling` (outside the
- * subtree), and capped so a pathological tree cannot run away. The same
- * walk as `findFirstReactHostFiber` in the runtime adapter.
+ * The one host element `fiber`'s output starts with, or null when the
+ * output has no host, two or more top-level hosts (Fragment root, element
+ * beside text), or only portal content. Walks DOWN through component,
+ * context, fragment and boundary fibers, collecting the hosts that begin the
+ * output; stops at the second. Resolves `fiber` to its current alternate
+ * first. Budgeted so a pathological tree cannot run away. The runtime
+ * adapter's `getInstanceMountRoot` uses this same function.
  */
 export function getReactComponentMountRoot(fiber: ReactFiber): Element | null {
-  const firstChild = fiber.child as ReactFiber | null | undefined
-  if (!firstChild) return null
-  const stack: ReactFiber[] = [firstChild]
-  let budget = 256
-  while (stack.length > 0 && budget-- > 0) {
-    const cur = stack.pop()!
-    if (cur.tag === REACT_HOST_FIBER_TAG && cur.stateNode instanceof Element) return cur.stateNode
-    const sibling = cur.sibling as ReactFiber | null | undefined
-    const child = cur.child as ReactFiber | null | undefined
-    if (sibling) stack.push(sibling)
-    if (child) stack.push(child)
+  const roots: ReactFiber[] = []
+  const budget = { n: 256 }
+  collectOutputRoots(currentReactFiber(fiber).child as ReactFiber | null | undefined, roots, budget)
+  if (roots.length !== 1) return null
+  const only = roots[0]
+  const tag = only.tag as number | undefined
+  if (typeof tag !== "number" || !REACT_HOST_FIBER_TAGS.has(tag)) return null
+  return only.stateNode instanceof Element ? only.stateNode : null
+}
+
+/** Push the hosts that begin the output of `first` and its siblings; give up past the second. */
+function collectOutputRoots(first: ReactFiber | null | undefined, out: ReactFiber[], budget: { n: number }): void {
+  let cur = first
+  while (cur && out.length < 2 && budget.n-- > 0) {
+    const tag = cur.tag as number | undefined
+    if (typeof tag === "number" && (REACT_HOST_FIBER_TAGS.has(tag) || tag === REACT_HOST_TEXT_TAG)) {
+      out.push(cur)
+    } else if (tag !== REACT_PORTAL_TAG) {
+      collectOutputRoots(cur.child as ReactFiber | null | undefined, out, budget)
+    }
+    cur = cur.sibling as ReactFiber | null | undefined
   }
-  return null
 }
 
 function isNamedReactComponent(name: string | null): name is string {
@@ -430,7 +485,11 @@ function reactPropsOf(fiber: ReactFiber): Record<string, unknown> {
   const props: Record<string, unknown> = {}
   if (memoized) {
     for (const key of Object.keys(memoized)) {
-      if (key === "children" || isDesdeStampProp(key)) continue
+      if (key === "children" || key === "key" || key === "ref" || isDesdeStampProp(key)) continue
+      // `onSomething` is a handler: a function reference the rail cannot
+      // edit, which the no-manifest fallback would otherwise print as
+      // "[Function: onClick]" in a text box.
+      if (key.length > 2 && key.startsWith("on") && key[2] >= "A" && key[2] <= "Z") continue
       props[key] = serializePropValue(memoized[key])
     }
   }
@@ -456,7 +515,7 @@ export function detectReactOutlineComponent(el: Element): FrameworkComponentInfo
   let budget = 64
   while (cur && budget-- > 0) {
     const tag = cur.tag as number | undefined
-    if (tag === REACT_HOST_FIBER_TAG) break
+    if (typeof tag === "number" && REACT_HOST_FIBER_TAGS.has(tag)) break
     if (typeof tag === "number" && REACT_COMPONENT_FIBER_TAGS.has(tag)) {
       if (getReactComponentMountRoot(cur) !== el) break
       if (isNamedReactComponent(reactComponentName(cur.type))) best = cur
@@ -475,10 +534,8 @@ export function detectReactOutlineComponent(el: Element): FrameworkComponentInfo
 }
 
 export function buildReactComponentTree(el: Element): ComponentTreeNode[] {
-  const fiberKey = Object.keys(el).find((k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"))
-  if (!fiberKey) return []
-
-  let fiber = (el as Record<string, unknown>)[fiberKey] as Record<string, unknown> | null
+  let fiber: Record<string, unknown> | null = getReactFiberOf(el)
+  if (!fiber) return []
 
   // Walk up the fiber tree, collecting all function components
   const chain: ComponentTreeNode[] = []
@@ -497,6 +554,8 @@ export function buildReactComponentTree(el: Element): ComponentTreeNode[] {
         const memoized = fiber.memoizedProps as Record<string, unknown> | undefined
         const stamp = memoized?.["data-desde-src"]
         const callsite = typeof stamp === "string" && stamp.length > 0 ? stamp : undefined
+        const version = memoized?.["data-desde-v"]
+        const callsiteVersion = typeof version === "string" && version.length > 0 ? version : undefined
 
         const typeSource = (type as Record<string, unknown>).__source as Record<string, unknown> | undefined
         const fiberSource = fiber._debugSource as Record<string, unknown> | undefined
@@ -517,16 +576,24 @@ export function buildReactComponentTree(el: Element): ComponentTreeNode[] {
           if (root) selector = generateSelector(root)
         } catch { /* ignore */ }
 
-        chain.push({
-          name,
-          file,
-          line,
-          props: Object.keys(props).length > 0 ? props : undefined,
-          elementSelector: selector,
-          isLibrary: isLibrary || undefined,
-          packageName,
-          callsite,
-        })
+        // `React.memo(fn, compare)` is a MemoComponent fiber wrapping an inner
+        // FunctionComponent fiber of the same name at the same root: one
+        // component, two fibers. The inner one was pushed just before.
+        const previous = chain[chain.length - 1]
+        const duplicate = !!previous && previous.name === name && previous.elementSelector === selector
+        if (!duplicate) {
+          chain.push({
+            name,
+            file,
+            line,
+            props: Object.keys(props).length > 0 ? props : undefined,
+            elementSelector: selector,
+            isLibrary: isLibrary || undefined,
+            packageName,
+            callsite,
+            callsiteVersion,
+          })
+        }
       }
     }
 
@@ -561,9 +628,8 @@ export function detectVue2(el: Element): FrameworkComponentInfo | null {
 }
 
 export function detectReact(el: Element): FrameworkComponentInfo | null {
-  const fiberKey = Object.keys(el).find((k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"))
-  if (!fiberKey) return null
-  let fiber = (el as Record<string, unknown>)[fiberKey] as Record<string, unknown> | null
+  let fiber: Record<string, unknown> | null = getReactFiberOf(el)
+  if (!fiber) return null
   while (fiber) {
     const type = fiber.type as ((...args: unknown[]) => unknown) | Record<string, unknown> | string | undefined
     // An unnamed wrapper (anonymous forwardRef/memo) keeps the walk going to

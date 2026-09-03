@@ -212,18 +212,28 @@ describe("React mount roots", () => {
     expect(detectReactOutlineComponent(div)?.name).toBe("Card")
   })
 
-  it("a parent whose first host is a sibling element is not rooted here, and neither is anything above it", () => {
-    // Page renders <><span/><Child/></>, Child renders <a>. Page's mount
-    // root is the span, so a click on the <a> is Child's alone.
+  it("a component with two top-level hosts has no mount root, like a multi-root Vue component; its single-root child still does", () => {
+    // Page renders <><span/><Child/></>, Child renders <a>. Page has two
+    // roots, so neither the span nor anything above Page is labeled; the
+    // <a> is Child's alone.
     const span = el("span"); const a = el("a"); document.body.replaceChildren(span, a)
     const Layout = componentFiber("Layout")
     const Page = under(Layout, componentFiber("Page"))
     const hostSpan = under(Page, hostFiber(span))
     const Child = componentFiber("Child"); hostSpan.sibling = Child; Child.return = Page
     under(Child, hostFiber(a))
-    expect(getReactComponentMountRoot(Page)).toBe(span)
+    expect(getReactComponentMountRoot(Page)).toBeNull()
+    expect(getReactComponentMountRoot(Layout)).toBeNull()
     expect(detectReactOutlineComponent(a)?.name).toBe("Child")
-    expect(detectReactOutlineComponent(span)?.name).toBe("Layout")
+    expect(detectReactOutlineComponent(span)).toBeNull()
+  })
+
+  it("event handlers, ref and key never reach the props, matching the Vue side and the runtime adapter", () => {
+    const a = el("a", "button"); document.body.replaceChildren(a)
+    const Button = componentFiber("Button", { variant: "ghost", onClick: () => {}, onMouseEnter: () => {}, ref: {}, key: "k", once: true })
+    under(Button, hostFiber(a))
+    expect(buildReactComponentTree(a)[0].props).toEqual({ variant: "ghost", once: true })
+    expect(detectOutlineComponent(a)?.props).toEqual({ variant: "ghost", once: true })
   })
 
   it("forwardRef and memo components are in the tree and label their mount root (their type is an object, not a function)", () => {
