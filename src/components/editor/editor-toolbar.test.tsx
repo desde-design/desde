@@ -55,6 +55,8 @@ function renderToolbar(overrides: Partial<Parameters<typeof EditorToolbar>[0]> =
       toolMode="navigate"
       onToolModeChange={vi.fn()}
       branches={makeBranches()}
+      onPinsHiddenChange={vi.fn()}
+      onHideChrome={vi.fn()}
       showIframe
       activeBreakpoint="base"
       breakpointOptions={BREAKPOINT_OPTIONS}
@@ -275,6 +277,8 @@ describe("EditorToolbar", () => {
             })
           }}
           branches={makeBranches()}
+          onPinsHiddenChange={vi.fn()}
+          onHideChrome={vi.fn()}
           showIframe
           activeBreakpoint="base"
           breakpointOptions={BREAKPOINT_OPTIONS}
@@ -343,5 +347,54 @@ describe("EditorToolbar", () => {
         expect(active()).toHaveLength(1)
       }
     })
+  })
+})
+
+/**
+ * The hide-comments toggle, after Undo and Redo (Mo, 2026-09-02). It moved
+ * here from the Comments panel's "Hide" switch, and it is the ONLY control
+ * for the pins now, so it has to do both halves: the store (which the panel
+ * and the pin bridge read) and the bridge callback (which posts to the
+ * iframe).
+ */
+describe("EditorToolbar — hide comments", () => {
+  beforeEach(() => {
+    useAppStore.setState({ pinsHidden: false })
+  })
+
+  it("flips pinsHidden in the store and tells the bridge", () => {
+    const onPinsHiddenChange = vi.fn()
+    renderToolbar({ onPinsHiddenChange })
+    const toggle = screen.getByTestId("editor-pins-hidden")
+    expect(toggle).toHaveAttribute("aria-pressed", "false")
+    expect(toggle).toHaveAccessibleName("Hide comments")
+
+    fireEvent.click(toggle)
+    expect(useAppStore.getState().pinsHidden).toBe(true)
+    expect(onPinsHiddenChange).toHaveBeenCalledWith(true)
+    expect(screen.getByTestId("editor-pins-hidden")).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByTestId("editor-pins-hidden")).toHaveAccessibleName("Show comments")
+
+    fireEvent.click(screen.getByTestId("editor-pins-hidden"))
+    expect(useAppStore.getState().pinsHidden).toBe(false)
+    expect(onPinsHiddenChange).toHaveBeenLastCalledWith(false)
+  })
+
+  it("is not rendered without the prototype iframe", () => {
+    renderToolbar({ showIframe: false })
+    expect(screen.queryByTestId("editor-pins-hidden")).not.toBeInTheDocument()
+  })
+})
+
+/** Full screen is the toolbar's LAST control (Mo, 2026-09-02). */
+describe("EditorToolbar — hide chrome", () => {
+  it("fires onHideChrome and sits at the right edge", () => {
+    const onHideChrome = vi.fn()
+    renderToolbar({ onHideChrome })
+    const toolbar = screen.getByTestId("editor-toolbar")
+    const button = screen.getByTestId("editor-hide-chrome")
+    expect(toolbar.lastElementChild).toBe(button)
+    fireEvent.click(button)
+    expect(onHideChrome).toHaveBeenCalledTimes(1)
   })
 })

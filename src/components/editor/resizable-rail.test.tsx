@@ -40,14 +40,14 @@ describe("ResizableRail default width", () => {
     setViewportWidth(1024)
   })
 
-  it("defaults to 20% of the viewport when nothing is stored", () => {
-    setViewportWidth(2560)
+  it("defaults to 25% of the viewport when nothing is stored", () => {
+    setViewportWidth(2000)
     render(
       <ResizableRail storageKey="test.rail.default">
         <div>content</div>
       </ResizableRail>,
     )
-    expect(getWidth()).toBe(512)
+    expect(getWidth()).toBe(500)
   })
 
   it("clamps the viewport default to [minWidth, maxWidth]", () => {
@@ -57,7 +57,7 @@ describe("ResizableRail default width", () => {
         <div>content</div>
       </ResizableRail>,
     )
-    // 20% of 1024 is 205, under the 280 floor.
+    // 25% of 1024 is 256, under the 280 floor.
     expect(getWidth()).toBe(280)
     unmount()
     setViewportWidth(4000)
@@ -66,7 +66,7 @@ describe("ResizableRail default width", () => {
         <div>content</div>
       </ResizableRail>,
     )
-    // 20% of 4000 is 800, over the 640 ceiling.
+    // 25% of 4000 is 1000, over the 640 ceiling.
     expect(getWidth()).toBe(640)
   })
 

@@ -4,7 +4,7 @@
  * surface. Pure presentational, so the tests focus on:
  *   - interleaved sorting by createdAt desc
  *   - per-row click routes to the correct highlight handler
- *   - filter chrome (Hide, Show resolved) toggles both kinds in sync
+ *   - the Resolved switch toggles both kinds in sync (Hide moved to the toolbar)
  *   - "Minimize all notes" affordance appears only when notes exist
  *   - empty state shows the merged copy ("No comments")
  */
@@ -62,8 +62,6 @@ function makeProps() {
     onHighlightNote: vi.fn(),
     onCommentModeChange: vi.fn(),
     onAddNote: vi.fn(),
-    onPinsHiddenChange: vi.fn(),
-    onNotesHiddenChange: vi.fn(),
     onShowResolvedChange: vi.fn(),
     onShowResolvedNotesChange: vi.fn(),
   }
@@ -113,7 +111,6 @@ describe("CommentsListPanel", () => {
       <CommentsListPanel
         onHighlightComment={vi.fn()}
         onCommentModeChange={vi.fn()}
-        onPinsHiddenChange={vi.fn()}
         onShowResolvedChange={vi.fn()}
       />,
     )
@@ -133,7 +130,6 @@ describe("CommentsListPanel", () => {
         needsViewerToken
         onHighlightComment={vi.fn()}
         onCommentModeChange={vi.fn()}
-        onPinsHiddenChange={vi.fn()}
         onShowResolvedChange={vi.fn()}
       />,
     )
@@ -204,19 +200,6 @@ describe("CommentsListPanel", () => {
     expect(useAppStore.getState().expandedNoteIds.has("n1")).toBe(true)
   })
 
-  it("Hide toggle flips both pinsHidden and notesHidden in sync", () => {
-    const props = makeProps()
-    render(<CommentsListPanel syncMode="viewer" {...props} />)
-
-    const hide = screen.getByRole("switch", { name: /Hide/i })
-    fireEvent.click(hide)
-
-    expect(useAppStore.getState().pinsHidden).toBe(true)
-    expect(useAppStore.getState().notesHidden).toBe(true)
-    expect(props.onPinsHiddenChange).toHaveBeenCalledWith(true)
-    expect(props.onNotesHiddenChange).toHaveBeenCalledWith(true)
-  })
-
   it("hides resolved rows when Show resolved is off", () => {
     useAppStore.setState({
       comments: [
@@ -242,9 +225,9 @@ describe("CommentsListPanel", () => {
     })
     render(<CommentsListPanel syncMode="viewer" {...makeProps()} />)
 
-    // Open the ⋮ menu — querying for the menu item by name.
-    fireEvent.click(screen.getByRole("button", { name: "" })) // ⋮ icon-only
-    // The minimize-all entry only renders when notes.length > 0.
+    // The ⋮ menu carries only the minimize-all entry, so with no notes the
+    // menu itself is not rendered.
+    expect(screen.queryByRole("button", { name: "More" })).not.toBeInTheDocument()
     expect(
       screen.queryByText(/(Minimize|Expand) all notes/i),
     ).not.toBeInTheDocument()
@@ -297,7 +280,6 @@ function makeCommentsOnlyProps() {
   return {
     onHighlightComment: vi.fn(),
     onCommentModeChange: vi.fn(),
-    onPinsHiddenChange: vi.fn(),
     onShowResolvedChange: vi.fn(),
   }
 }
@@ -328,21 +310,10 @@ describe("CommentsListPanel with Notes dormant", () => {
     ).toBeInTheDocument()
   })
 
-  it("keeps the Hide toggle able to latch", () => {
-    // `hideAll` used to reduce over `pinsHidden && notesHidden`. Nothing sets
-    // `notesHidden` once Notes are gone, so leaving the note half in the
-    // reduction would make the switch permanently un-latchable.
-    const props = makeCommentsOnlyProps()
-    render(<CommentsListPanel syncMode="viewer" {...props} />)
-    fireEvent.click(screen.getByRole("switch"))
-    expect(props.onPinsHiddenChange).toHaveBeenCalledWith(true)
-    expect(useAppStore.getState().pinsHidden).toBe(true)
-  })
-
   it("hides the minimize-all-notes item even when notes exist in the store", () => {
     useAppStore.setState({ notes: [makeNote("n1", "2026-05-23T11:00:00Z")] })
     render(<CommentsListPanel syncMode="viewer" {...makeCommentsOnlyProps()} />)
-    fireEvent.click(screen.getByRole("button", { name: "" }))
+    expect(screen.queryByRole("button", { name: "More" })).not.toBeInTheDocument()
     expect(
       screen.queryByText(/(Minimize|Expand) all notes/i),
     ).not.toBeInTheDocument()

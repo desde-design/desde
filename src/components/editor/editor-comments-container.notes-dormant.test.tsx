@@ -167,7 +167,6 @@ describe("EditorCommentsContainer with Notes dormant", () => {
   it("reads as a comments-only surface in its own copy", async () => {
     render(<TestHarness />)
     await waitFor(() => expect(mockCommentStore.list).toHaveBeenCalled())
-    expect(screen.getByText("Comments on the prototype")).toBeInTheDocument()
     expect(
       // Reaches the viewer gate first (no viewer in this harness), which is
       // still comments-only copy — the point this test is making. It must not

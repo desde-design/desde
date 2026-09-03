@@ -41,29 +41,20 @@
 
 import { useCallback, useMemo } from "react"
 import { useAppStore } from "@/stores"
-import { Badge } from "@/components/ui/badge"
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuCheckboxItem,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Label } from "@/components/ui/label"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { Switch } from "@/components/ui/switch"
 import { MentionText } from "@/components/comments/mention-text"
-import { EmptyState, ListRow } from "@/components/blocks"
+import { EmptyState } from "@/components/blocks"
 import { CommentModeButton } from "@/components/editor/comment-mode-button"
-import {
-  CloudOff,
-  MapPinOff,
-  MessageSquare,
-  MoreVertical,
-  StickyNote,
-} from "lucide-react"
+import { MapPinOff, MoreVertical, StickyNote } from "lucide-react"
+import { cn } from "@/lib/utils"
 import { formatRelativeTimeShort } from "@/lib/relative-time"
 import { avatarInitial } from "@/lib/initials"
 import type { Comment } from "@/types/bridge"
@@ -86,12 +77,10 @@ interface CommentsListPanelProps {
    * controls cannot disagree about what a click does.
    */
   onCommentModeChange: (next: boolean) => void
-  /** Hide-all toggle: shell informs both bridges in parallel. */
-  onPinsHiddenChange: (hidden: boolean) => void
   /** Show-resolved toggle: applies to both types. */
   onShowResolvedChange: (show: boolean) => void
   /**
-   * The four NOTE handlers below travel as a group, and an absent group
+   * The three NOTE handlers below travel as a group, and an absent group
    * means Notes do not exist on this surface. That is the same rule the
    * dormant edit lanes use for their menu items, and it keeps the
    * `EDITOR_NOTES` flag out of this leaf: only the container reads it.
@@ -102,7 +91,6 @@ interface CommentsListPanelProps {
    */
   onHighlightNote?: (noteId: string) => void
   onAddNote?: () => void
-  onNotesHiddenChange?: (hidden: boolean) => void
   onShowResolvedNotesChange?: (show: boolean) => void
   /**
    * Comment storage mode — `"viewer"` (shared project, synced with a
@@ -135,8 +123,6 @@ export function CommentsListPanel({
   onHighlightNote,
   onCommentModeChange,
   onAddNote,
-  onPinsHiddenChange,
-  onNotesHiddenChange,
   onShowResolvedChange,
   onShowResolvedNotesChange,
   syncMode,
@@ -147,14 +133,10 @@ export function CommentsListPanel({
   const notes = useAppStore((s) => s.notes)
   const activeCommentId = useAppStore((s) => s.activeCommentId)
   const activeNoteId = useAppStore((s) => s.activeNoteId)
-  const pinsHidden = useAppStore((s) => s.pinsHidden)
-  const notesHidden = useAppStore((s) => s.notesHidden)
   const showResolved = useAppStore((s) => s.showResolved)
   const showResolvedNotes = useAppStore((s) => s.showResolvedNotes)
   const setActiveComment = useAppStore((s) => s.setActiveComment)
   const setActiveNote = useAppStore((s) => s.setActiveNote)
-  const setPinsHidden = useAppStore((s) => s.setPinsHidden)
-  const setNotesHidden = useAppStore((s) => s.setNotesHidden)
   const setShowResolved = useAppStore((s) => s.setShowResolved)
   const setShowResolvedNotes = useAppStore((s) => s.setShowResolvedNotes)
   const setPopupAnchorRect = useAppStore((s) => s.setPopupAnchorRect)
@@ -168,17 +150,16 @@ export function CommentsListPanel({
   // signal — see the props doc above.
   const notesEnabled = onAddNote !== undefined
 
-  // Unified hide/show-resolved state: both types are gated together,
-  // mirroring the merged-panel design (one panel, one set of filters).
-  // We collapse "any one type hidden" to the checkbox-on state so the
-  // user can never get into a "two checkboxes disagree" state through
-  // this panel.
+  // Unified show-resolved state: both types are gated together, mirroring
+  // the merged-panel design (one panel, one set of filters). "Any one type
+  // shown" collapses to the switch-on state so the user can never get into a
+  // "two switches disagree" state through this panel.
   //
-  // With Notes dormant the note half of each pair drops out of the
-  // reduction entirely. Leaving it in would break the Hide toggle: nothing
-  // sets `notesHidden`, so `pinsHidden && notesHidden` could never become
-  // true and the switch would refuse to latch.
-  const hideAll = notesEnabled ? pinsHidden && notesHidden : pinsHidden
+  // With Notes dormant the note half drops out of the reduction entirely.
+  //
+  // The Hide switch that sat beside this moved to the floating toolbar
+  // (`pins-hidden-toggle.tsx`, 2026-09-02), so the hidden pair and the two
+  // hide handlers are gone from this panel.
   const showResolvedAny = notesEnabled
     ? showResolved || showResolvedNotes
     : showResolved
@@ -221,20 +202,6 @@ export function CommentsListPanel({
       b.createdAt.localeCompare(a.createdAt),
     )
   }, [comments, notes, showResolvedAny, notesEnabled])
-
-  const handleToggleHide = useCallback(() => {
-    const next = !hideAll
-    setPinsHidden(next)
-    setNotesHidden(next)
-    onPinsHiddenChange(next)
-    onNotesHiddenChange?.(next)
-  }, [
-    hideAll,
-    setPinsHidden,
-    setNotesHidden,
-    onPinsHiddenChange,
-    onNotesHiddenChange,
-  ])
 
   const handleToggleShowResolved = useCallback(() => {
     const next = !showResolvedAny
@@ -292,227 +259,246 @@ export function CommentsListPanel({
   const synced = syncMode === "viewer"
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col">
+      {/* The Viewer's action row, copied (Mo, 2026-09-02: "look at how the
+          viewer does it"): `px-2 py-2`, the placement button on the left,
+          the Resolved switch on the right. Same button component the toolbar
+          renders, reading the same state, so a mode started from the toolbar
+          can be ended from here. */}
       <div
-        className="flex flex-none items-center justify-between border-b px-3 py-2"
+        className="flex flex-none items-center gap-2 px-2 py-2"
         data-testid="comments-list-panel-header"
       >
-        <div className="flex items-center gap-1.5">
-          {/* The same component the toolbar renders, reading the same
-              state. It used to be a look-alike here: a different icon, a
-              different variant, and enter-only, so a mode started from the
-              toolbar could not be ended from this panel. */}
-          <CommentModeButton
-            onCommentModeChange={onCommentModeChange}
-            testId="comments-panel-comment"
+        <CommentModeButton
+          onCommentModeChange={onCommentModeChange}
+          testId="comments-panel-comment"
+        />
+        {onAddNote ? (
+          <Button size="sm" variant="ghost" onClick={onAddNote} title="Add note">
+            <StickyNote data-icon="inline-start" />
+            Note
+          </Button>
+        ) : null}
+        {/* A switch, labelled "Resolved", as in the Viewer: a persistent view
+            setting, not an action. It was a "Show resolved" checkbox item
+            inside the ⋮ menu here, one click further away than the Viewer
+            keeps it. `aria-label` keeps the full sentence for anyone who
+            cannot see that the label and the switch are one pair. */}
+        <label className="ml-auto flex cursor-pointer items-center gap-2 text-xs font-normal text-muted-foreground">
+          Resolved
+          <Switch
+            size="sm"
+            checked={showResolvedAny}
+            onCheckedChange={handleToggleShowResolved}
+            aria-label="Show resolved comments"
+            data-testid="show-resolved"
           />
-          {onAddNote ? (
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={onAddNote}
-              title="Add note"
-            >
-              <StickyNote className="h-3.5 w-3.5" />
-              Note
-            </Button>
-          ) : null}
-        </div>
-        <div className="flex items-center gap-1">
-          {/*
-            No sync badge. It read "Local" or "Synced" with the explanation
-            buried in a `title` tooltip, so the common state — no viewer
-            attached — showed a word that means nothing on its own and hid the
-            one sentence that would have explained it.
-
-            The state still matters, and it is about to be said properly: the
-            empty state gets a message about attaching a viewer and project
-            (see the gating task). A badge is the wrong place for a setup
-            instruction.
-          */}
-          <div
-            className="flex items-center gap-1.5"
-            title={hideAll ? "Show comments" : "Hide comments"}
-          >
-            <Switch
-              size="sm"
-              id="comments-hide-toggle"
-              checked={hideAll}
-              onCheckedChange={handleToggleHide}
-            />
-            <Label htmlFor="comments-hide-toggle" className="cursor-pointer text-muted-foreground font-normal">
-              Hide
-            </Label>
-          </div>
+        </label>
+        {/* The menu only ever carried the notes item once Show resolved
+            became a switch, so it renders only when there is a note to act
+            on. Notes are dormant, so this is unreachable today. */}
+        {notesEnabled && notes.length > 0 ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon">
-                <MoreVertical className="h-3.5 w-3.5" />
+              <Button variant="ghost" size="icon-sm" aria-label="More">
+                <MoreVertical />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuCheckboxItem
-                checked={showResolvedAny}
-                onCheckedChange={handleToggleShowResolved}
-              >
-                Show resolved
-              </DropdownMenuCheckboxItem>
-              {notesEnabled && notes.length > 0 ? (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={handleToggleMinimizeAllNotes}>
-                    {allNotesMinimized ? "Expand all notes" : "Minimize all notes"}
-                  </DropdownMenuItem>
-                </>
-              ) : null}
+              <DropdownMenuItem onClick={handleToggleMinimizeAllNotes}>
+                {allNotesMinimized ? "Expand all notes" : "Minimize all notes"}
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        </div>
+        ) : null}
       </div>
 
-      <ScrollArea className="flex-1">
-        {/*
-          `p-2` only while empty. `EmptyState` carries a dashed border now, and
-          this wrapper has no padding of its own, so an unpadded empty state
-          would draw its box flush against the panel's edges. The populated
-          list wants to stay flush (rows are full-bleed), which is why this is
-          conditional rather than padding on the wrapper.
-        */}
-        <div className={rows.length === 0 ? "p-2" : undefined}>
-          {rows.length === 0 && !synced ? (
-            /*
-              Comments with nowhere to go.
-              
-              Without a viewer and a project, a comment is written to this
-              machine and read by nobody — which is the opposite of what a
-              comment is for. Saying "No comments yet. Add a comment to get
-              started" there invites work that quietly goes nowhere.
-              
-              This replaces the "Local" / "Synced" badge that used to carry the
-              same fact in one word, with the explanation hidden in a `title`
-              tooltip. A setup instruction is not a badge.
-            */
-            <EmptyState
-              data-testid="comments-needs-viewer"
-              icon={<CloudOff />}
-              title={
-                needsViewerToken
-                  ? "This machine has no access token"
-                  : "Connect a viewer to share comments"
-              }
-              description={
-                needsViewerToken
-                  ? "A viewer is set up for this repo, but comments cannot reach it without a token. Add one from the project menu."
-                  : "Comments are only useful when the people reviewing can see them. That needs a viewer server and a project on it; until then anything written here stays on this machine."
-              }
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {/* Every message here is `frame="panel"`, as in the Viewer: the empty
+            and setup states replace each other in the same space, and a rail
+            that centres one and top-aligns the other reads as two surfaces. */}
+        {rows.length === 0 && !synced ? (
+          /*
+            Comments with nowhere to go.
+
+            Without a viewer and a project, a comment is written to this
+            machine and read by nobody, which is the opposite of what a
+            comment is for. Saying "No comments yet. Add a comment to get
+            started" there invites work that quietly goes nowhere.
+          */
+          <EmptyState
+            size="sm"
+            frame="panel"
+            data-testid="comments-needs-viewer"
+            title={
+              needsViewerToken
+                ? "This machine has no access token"
+                : "Connect a viewer to share comments"
+            }
+            description={
+              needsViewerToken
+                ? "A viewer is set up for this repo, but comments cannot reach it without a token. Add one from the project menu."
+                : "Comments are only useful when the people reviewing can see them. That needs a viewer server and a project on it; until then anything written here stays on this machine."
+            }
+          >
+            <a
+              className="text-base text-primary underline underline-offset-4"
+              href={VIEWER_SETUP_DOCS}
+              target="_blank"
+              rel="noreferrer"
+              data-testid="comments-viewer-docs-link"
             >
-              <a
-                className="text-base text-primary underline underline-offset-4"
-                href={VIEWER_SETUP_DOCS}
-                target="_blank"
-                rel="noreferrer"
-                data-testid="comments-viewer-docs-link"
-              >
-                How to set up a viewer and project
-              </a>
-            </EmptyState>
-          ) : rows.length === 0 ? (
-            <EmptyState
-              data-testid="comments-list-empty"
-              icon={<MessageSquare />}
-              title="No comments"
-              description={
-                notesEnabled
-                  ? "Add a comment or note to get started"
-                  : "Add a comment to get started"
-              }
-            />
-          ) : (
-            rows.map((row) => {
-              const isActive =
-                (row.kind === "comment" && activeCommentId === row.id) ||
-                (row.kind === "note" && activeNoteId === row.id)
-              const TypeIcon =
-                row.kind === "note" ? StickyNote : MessageSquare
-              const isOffTarget =
-                row.kind === "comment" && !!offTargetCommentIds?.has(row.id)
-              return (
-                <ListRow
-                  key={`${row.kind}:${row.id}`}
-                  data-testid={`annotation-row-${row.kind}-${row.id}`}
-                  selected={isActive}
-                  className="flex-col items-stretch rounded-none border-b border-border px-3 py-2.5"
-                  onClick={() => handleRowClick(row)}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <TypeIcon
-                        className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-                        aria-label={row.kind}
-                      />
-                      {row.author.photoURL ? (
-                        <img
-                          src={row.author.photoURL}
-                          alt={row.author.displayName}
-                          className="h-5 w-5 rounded-full object-cover"
-                        />
-                      ) : (
-                        <span
-                          aria-label={row.author.displayName}
-                          className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-2xs font-normal text-muted-foreground"
-                        >
-                          {avatarInitial(row.author.displayName)}
-                        </span>
-                      )}
-                      <span className="text-sm font-normal">
-                        {row.author.displayName}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      {isOffTarget ? (
-                        <span
-                          className="flex items-center"
-                          title="This comment's anchor didn't resolve on this build, so it's shown at a fallback position."
-                        >
-                          <MapPinOff
-                            className="h-3 w-3 shrink-0 text-warning"
-                            aria-label="Off-target anchor"
-                          />
-                        </span>
-                      ) : null}
-                      <span className="text-sm text-muted-foreground">
-                        {formatRelativeTimeShort(row.createdAt)}
-                      </span>
-                    </div>
-                  </div>
-                  <p className="mt-1 line-clamp-2 text-base text-muted-foreground">
-                    <MentionText text={row.body} />
-                  </p>
-                  <div className="mt-1.5 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <code className="rounded bg-muted px-1 py-0.5 text-code text-muted-foreground">
-                        {row.page}
-                      </code>
-                      {row.resolved && (
-                        <Badge variant="secondary">
-                          Resolved
-                        </Badge>
-                      )}
-                    </div>
-                    {row.replies.length > 0 && (
-                      <span className="text-sm text-muted-foreground">
-                        {row.replies.length}{" "}
-                        {row.replies.length === 1 ? "reply" : "replies"}
-                      </span>
-                    )}
-                  </div>
-                </ListRow>
-              )
-            })
-          )}
-        </div>
-      </ScrollArea>
+              How to set up a viewer and project
+            </a>
+          </EmptyState>
+        ) : rows.length === 0 ? (
+          <EmptyState
+            size="sm"
+            frame="panel"
+            data-testid="comments-list-empty"
+            title="No comments"
+            description={
+              notesEnabled
+                ? "Add a comment or note to get started"
+                : "Add a comment to get started"
+            }
+          />
+        ) : (
+          /*
+            The Viewer's group: a bordered, rounded box inset 8px from the
+            card, rows divided by their `<li>`s, the last divider dropped
+            because the group's own bottom edge ends the list. `mt-1` against
+            the action row's `pb-2` puts 12px above it, as the Viewer does.
+          */
+          <div className="mx-2 mt-1 mb-2 flex flex-col overflow-hidden rounded-md border border-border">
+            <ul className="flex flex-col">
+              {rows.map((row) => {
+                const isActive =
+                  (row.kind === "comment" && activeCommentId === row.id) ||
+                  (row.kind === "note" && activeNoteId === row.id)
+                const isOffTarget =
+                  row.kind === "comment" && !!offTargetCommentIds?.has(row.id)
+                return (
+                  <li
+                    key={`${row.kind}:${row.id}`}
+                    className="border-b border-border last:border-b-0"
+                  >
+                    <AnnotationRow
+                      row={row}
+                      selected={isActive}
+                      offTarget={isOffTarget}
+                      onClick={() => handleRowClick(row)}
+                    />
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+        )}
+      </div>
     </div>
+  )
+}
+
+/**
+ * One row of the list. The Viewer's `CommentRow`, with a note glyph added
+ * for the (dormant) note kind and the off-target marker kept in the status
+ * slot.
+ *
+ * The hierarchy is the Viewer's: the body is the only `text-foreground` on
+ * the row and the only `text-sm`. Everything else is `text-xs
+ * text-muted-foreground`, and the author is told apart from the rest of the
+ * metadata by weight rather than by contrast. It used to be the other way
+ * round here, with the body muted and the author at full weight, so the one
+ * thing a reader came for was the quietest text on the row.
+ *
+ * One status slot beside the timestamp: "Resolved" when the thread is
+ * closed, the reply count while it is open, never both. A `Badge` for
+ * "Resolved" drew more attention than the comment above it.
+ *
+ * `bg-clip-border` matters: `Button` clips its background to the padding
+ * box, which on a full-bleed row leaves a hairline of un-tinted ground down
+ * both edges of the selected state. See the Viewer's row for the contrast
+ * measurements behind `primary/6` and `primary/10`.
+ */
+function AnnotationRow({
+  row,
+  selected,
+  offTarget,
+  onClick,
+}: {
+  row: Row
+  selected: boolean
+  offTarget: boolean
+  onClick: () => void
+}) {
+  const replies = row.replies.length
+  return (
+    <Button
+      variant="ghost"
+      onClick={onClick}
+      aria-current={selected ? "true" : undefined}
+      data-testid={`annotation-row-${row.kind}-${row.id}`}
+      className={cn(
+        "h-auto w-full flex-col items-stretch gap-1 rounded-none px-3 py-2.5 text-left whitespace-normal",
+        "bg-clip-border hover:bg-primary/6",
+        selected && "bg-primary/10 hover:bg-primary/10",
+      )}
+    >
+      <span className="flex items-center gap-2">
+        {row.kind === "note" ? (
+          <StickyNote
+            className="size-3.5 shrink-0 text-muted-foreground"
+            aria-label="note"
+          />
+        ) : null}
+        <Avatar size="xs" className="flex-none" aria-label={row.author.displayName}>
+          <AvatarImage src={row.author.photoURL} alt="" />
+          <AvatarFallback>{avatarInitial(row.author.displayName)}</AvatarFallback>
+        </Avatar>
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground">
+          {row.author.displayName}
+        </span>
+        <span className="flex flex-none items-center gap-1 text-xs font-normal text-muted-foreground">
+          {offTarget ? (
+            <span
+              className="flex items-center"
+              title="This comment's anchor didn't resolve on this build, so it's shown at a fallback position."
+            >
+              <MapPinOff
+                className="size-3 shrink-0 text-warning"
+                aria-label="Off-target anchor"
+              />
+            </span>
+          ) : null}
+          {row.resolved ? (
+            <>
+              <span>Resolved</span>
+              <span aria-hidden>·</span>
+            </>
+          ) : replies > 0 ? (
+            <>
+              <span>
+                {replies} {replies === 1 ? "reply" : "replies"}
+              </span>
+              <span aria-hidden>·</span>
+            </>
+          ) : null}
+          <span>{formatRelativeTimeShort(row.createdAt)}</span>
+        </span>
+      </span>
+      <span
+        className={cn(
+          "line-clamp-2 text-sm font-normal",
+          row.resolved ? "text-muted-foreground" : "text-foreground",
+        )}
+      >
+        <MentionText text={row.body} />
+      </span>
+      {/* Sans at 10px, not mono: a location matched at a glance, never
+          transcribed, so the face buys nothing and costs width. */}
+      <span className="min-w-0 truncate text-2xs text-muted-foreground">{row.page}</span>
+    </Button>
   )
 }
 

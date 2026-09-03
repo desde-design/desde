@@ -362,7 +362,11 @@ export function ActivityRow({
       <ListRow
         asChild
         className={cn(
-          "group flex-col items-stretch gap-0.5 rounded-none px-3 py-2 cursor-pointer",
+          // The Comments row's box and hierarchy (Mo, 2026-09-02): `px-3
+          // py-2.5`, the description as the only full-weight text, the
+          // metadata a size down and muted, and the brand-teal hover the
+          // Viewer's rows use instead of the neutral `bg-muted`.
+          "group flex-col items-stretch gap-1 rounded-none px-3 py-2.5 cursor-pointer hover:bg-primary/6",
           // Failures keep the destructive tint — the one state that wants
           // attention, carried over from the Checks list's own treatment.
           isFailure && "bg-destructive/10 hover:bg-destructive/15",
@@ -395,7 +399,7 @@ export function ActivityRow({
             <span
               className={cn(
                 "min-w-0 flex-1 truncate text-foreground",
-                mono ? "font-mono text-code" : "text-xs",
+                mono ? "font-mono text-code" : "text-sm",
               )}
             >
               {description}
@@ -447,7 +451,7 @@ export function ActivityRow({
               </DropdownMenu>
             </div>
           </div>
-          <div className="truncate text-2xs text-muted-foreground">
+          <div className="truncate text-xs text-muted-foreground">
             {path} · {changeType} · {committedLabel}
           </div>
         </div>

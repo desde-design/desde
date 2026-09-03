@@ -9,7 +9,8 @@
  *
  * The default width is a FRACTION of the viewport, not a fixed 320px (Mo,
  * 2026-09-02: "the default width of the panel is a bit thin on big screens,
- * make it 20% of screen width by default"). A fixed default is one size for
+ * make it 20% of screen width by default", then 25% the same day after
+ * seeing it). A fixed default is one size for
  * every monitor, and 320 on a 2560px display is an eighth of the screen. The
  * fraction is read once, on mount, and then clamped like any other width; it
  * does not track the window afterwards, because a rail that resizes itself
@@ -23,7 +24,7 @@ import { cn } from "@/lib/utils"
 /** A fixed width, or one derived from the viewport width at mount. */
 type DefaultWidth = number | ((viewportWidth: number) => number)
 
-const DEFAULT_WIDTH_FRACTION = 0.2
+const DEFAULT_WIDTH_FRACTION = 0.25
 /** With no window to measure (a server render), the old fixed default. */
 const SSR_FALLBACK_WIDTH = 320
 

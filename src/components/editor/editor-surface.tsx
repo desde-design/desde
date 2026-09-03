@@ -896,9 +896,9 @@ export function EditorSurface({
           editing={editing}
           branches={branches}
           chatSubmitting={chat.submitting}
-          onHideChrome={handleHideChrome}
         >
           <EditorToolbar
+            onHideChrome={handleHideChrome}
             view={view}
             onViewChange={handleViewChange}
             canvasMode={canvasMode}
@@ -906,6 +906,7 @@ export function EditorSurface({
             toolMode={toolMode}
             onToolModeChange={handleToolModeChange}
             branches={branches}
+            onPinsHiddenChange={commentBridge.setPinsHidden}
             showIframe={showIframe}
             activeBreakpoint={activeBreakpoint}
             breakpointOptions={BREAKPOINT_OPTIONS}
@@ -939,17 +940,11 @@ export function EditorSurface({
             Canvas view layers the stub on top via absolute positioning;
             switching back to Editor un-hides the iframe without a
             re-mount → no SPA-route loss, no bridge re-handshake. */}
-        {/* `pt-4` is the prototype card's clearance from the floating
-            toolbar. The rail's aside pads its top to the same 16px so the two
-            cards start on one line (Mo, 2026-09-02). Align by moving the
-            rail DOWN, not the prototype up: an 8px version of this put the
-            prototype "too close to the toolbar". */}
-        <div
-          className={cn(
-            "relative flex flex-1 flex-col overflow-hidden",
-            chromeHidden ? "pt-0" : "pt-4",
-          )}
-        >
+        {/* No top padding (Mo, 2026-09-02, later the same day): the card sits
+            flush under the nav bar, which lost its bottom border, and the
+            toolbar floats over the card from 50px of its own margin. The rail's
+            aside matches, so the two cards still start on one line. */}
+        <div className="relative flex flex-1 flex-col overflow-hidden">
           <section
             className={cn(
               "flex flex-col flex-1 overflow-hidden",
@@ -1023,9 +1018,10 @@ export function EditorSurface({
         {showRightRail ? (
           /* The padding mirrors the Viewer's rail aside (Mo, 2026-09-01:
              "make this panel have the same visual treatment as the viewer
-             panel"), with two departures asked for on 2026-09-02. `pt-4`
-             matches the prototype wrapper's own top clearance, so the two
-             cards start on one line. `pl-0`, with the prototype's `mr-2`
+             panel"), with two departures asked for on 2026-09-02. `pt-0`
+             matches the prototype wrapper, which has no top padding either,
+             so the two cards start on one line, flush under the nav bar.
+             `pl-0`, with the prototype's `mr-2`
              beside it, closes the gap between the two cards to 9px (8px of
              margin plus the 1px drag handle); it was 21px, which read as a
              gutter. The aside carried a `border-l` too until 2026-09-02,
@@ -1039,7 +1035,7 @@ export function EditorSurface({
              comment beside the element is a second one. */
           <ResizableRail
             storageKey="desde.editor.right-rail-width.v1"
-            className="gap-2 pt-4 pr-2 pb-2 pl-0"
+            className="gap-2 pt-0 pr-2 pb-2 pl-0"
           >
             <EditorRightRail
               activeTab={activeTab}

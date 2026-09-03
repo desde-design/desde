@@ -32,7 +32,6 @@ describe("EditorNavBar", () => {
         editing={editing}
         branches={branches}
         chatSubmitting={false}
-        onHideChrome={vi.fn()}
       />,
     )
     expect(screen.getByTestId("editor-nav-bar")).toBeTruthy()
@@ -44,7 +43,6 @@ describe("EditorNavBar", () => {
         editing={editing}
         branches={branches}
         chatSubmitting={false}
-        onHideChrome={vi.fn()}
       >
         <div data-testid="stub-toolbar" />
       </EditorNavBar>,
@@ -62,24 +60,15 @@ describe("EditorNavBar", () => {
         editing={editing}
         branches={branches}
         chatSubmitting={false}
-        onHideChrome={vi.fn()}
       />,
     )
     expect(screen.queryByTestId("editor-undo")).toBeNull()
     expect(screen.queryByTestId("editor-redo")).toBeNull()
   })
 
-  it("hides the chrome when the hide button is clicked", () => {
-    const onHideChrome = vi.fn()
-    render(
-      <EditorNavBar
-        editing={editing}
-        branches={branches}
-        chatSubmitting={false}
-        onHideChrome={onHideChrome}
-      />,
-    )
-    screen.getByTestId("editor-hide-chrome").click()
-    expect(onHideChrome).toHaveBeenCalledTimes(1)
+  // The full-screen button moved to the toolbar's right edge on 2026-09-02.
+  it("no longer carries the hide-chrome button", () => {
+    render(<EditorNavBar editing={editing} branches={branches} chatSubmitting={false} />)
+    expect(screen.queryByTestId("editor-hide-chrome")).toBeNull()
   })
 })

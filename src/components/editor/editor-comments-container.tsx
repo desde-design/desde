@@ -217,18 +217,6 @@ export function EditorCommentsContainer({
     },
     [noteBridge],
   )
-  const handlePinsHiddenChange = useCallback(
-    (hidden: boolean) => {
-      commentBridge.setPinsHidden(hidden)
-    },
-    [commentBridge],
-  )
-  const handleNotesHiddenChange = useCallback(
-    (hidden: boolean) => {
-      noteBridge.setNotesHidden(hidden)
-    },
-    [noteBridge],
-  )
   const handleAddNote = useCallback(() => {
     noteBridge.enterNoteMode()
   }, [noteBridge])
@@ -337,14 +325,10 @@ export function EditorCommentsContainer({
       className="flex h-full min-h-0 flex-col"
       data-testid="editor-comments-container"
     >
-      <div className="shrink-0 border-b px-3 py-2">
-        <h3 className="text-sm font-semibold">Comments</h3>
-        <p className="text-2xs text-muted-foreground">
-          {EDITOR_NOTES
-            ? "Comments and notes on the prototype"
-            : "Comments on the prototype"}
-        </p>
-      </div>
+      {/* No panel header. The tab strip above already says "Comments", so a
+          title plus a caption restating it was the surface repeating itself
+          (Mo, 2026-09-02: "there should be no header"). The Viewer's
+          Comments tab has none either; the action row is the first thing. */}
       {error ? (
         <div
           // A full-bleed strip, not a rounded Alert, so it composes the
@@ -372,14 +356,12 @@ export function EditorCommentsContainer({
         <CommentsListPanel
           onHighlightComment={handleHighlightComment}
           onCommentModeChange={onCommentModeChange}
-          onPinsHiddenChange={handlePinsHiddenChange}
           onShowResolvedChange={handleShowResolvedChange}
-          // The four note handlers travel together. Absent means Notes do not
+          // The three note handlers travel together. Absent means Notes do not
           // exist for this panel: no "Note" button, no note rows, no note
           // filters. See EDITOR_NOTES.
           onHighlightNote={EDITOR_NOTES ? handleHighlightNote : undefined}
           onAddNote={EDITOR_NOTES ? handleAddNote : undefined}
-          onNotesHiddenChange={EDITOR_NOTES ? handleNotesHiddenChange : undefined}
           onShowResolvedNotesChange={
             EDITOR_NOTES ? handleShowResolvedNotesChange : undefined
           }

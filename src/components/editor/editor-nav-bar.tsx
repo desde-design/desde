@@ -21,8 +21,6 @@
  */
 
 import type { ReactNode } from "react"
-import { Maximize2 } from "lucide-react"
-import { Button } from "@/components/ui/button"
 import { EditorBreadcrumb } from "@/components/editor/project-breadcrumb"
 import { EditorSettingsMenu } from "@/components/editor/editor-settings-menu"
 import { BranchModeControls } from "@/components/editor/branch-mode-controls"
@@ -37,7 +35,6 @@ interface EditorNavBarProps {
   /** Disables the settings actions that would race a running chat turn. */
   chatSubmitting: boolean
   /** Enter focus mode: hide all editor chrome. */
-  onHideChrome: () => void
   /** The floating toolbar, positioned against this row. */
   children?: ReactNode
 }
@@ -46,7 +43,6 @@ export function EditorNavBar({
   editing,
   branches,
   chatSubmitting,
-  onHideChrome,
   children,
 }: EditorNavBarProps) {
   return (
@@ -57,7 +53,9 @@ export function EditorNavBar({
       // no resting text colour, only `hover:text-foreground`, so every label
       // and glyph in this row quiets down together and snaps back to full
       // contrast under the pointer.
-      className="relative flex shrink-0 items-center border-b px-3 py-2 text-foreground/70"
+      // No bottom border (Mo, 2026-09-02). The prototype and rail cards start
+      // flush under this bar now, and their own top edges are the line.
+      className="relative flex shrink-0 items-center px-3 py-2 text-foreground/70"
       data-testid="editor-nav-bar"
     >
       {/* Navigation breadcrumb: home › project ▾ › branch ▾. Replaces
@@ -82,15 +80,8 @@ export function EditorNavBar({
           invalidateManifest={editing.invalidateAttributionManifest}
           chatSubmitting={chatSubmitting}
         />
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={onHideChrome}
-          title="Hide chrome"
-          data-testid="editor-hide-chrome"
-        >
-          <Maximize2 />
-        </Button>
+        {/* The full-screen button left this cluster for the floating
+            toolbar's right edge on 2026-09-02 (`editor-toolbar.tsx`). */}
       </div>
       {children}
     </div>

@@ -366,12 +366,24 @@ function ActivityPanelImpl({
         </Callout>
       ) : null}
       {activityRows.length > 0 ? (
+        /*
+          The same group the Comments tab and the Viewer's comment list use
+          (Mo, 2026-09-02: "Activity should also be similarly styled"): a
+          bordered, rounded box inset 8px from the card, rows divided by
+          their `<li>`s, the last divider dropped because the group's own
+          bottom edge ends the list. The scroll stays on the outer column so
+          the group grows with its rows rather than clipping them.
+        */
+        <div className="min-h-0 flex-1 overflow-y-auto">
         <ul
-          className="min-h-0 flex-1 divide-y divide-border overflow-auto"
+          className="mx-2 my-2 flex flex-col overflow-hidden rounded-md border border-border"
           data-testid="activity-changes-list"
         >
           {activityRows.map((row) => (
-            <li key={`${row.source}:${row.id}`}>
+            <li
+              key={`${row.source}:${row.id}`}
+              className="border-b border-border last:border-b-0"
+            >
               <ActivityRow
                 row={row}
                 verification={
@@ -387,6 +399,7 @@ function ActivityPanelImpl({
             </li>
           ))}
         </ul>
+        </div>
       ) : (
         <div className="min-h-0 flex-1 space-y-3 overflow-auto px-3 py-3 text-sm text-muted-foreground">
           <p>

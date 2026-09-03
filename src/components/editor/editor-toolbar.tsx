@@ -34,14 +34,7 @@
  * read as floating across the seam.
  */
 
-import {
-  Compass,
-  MessageSquarePlus,
-  MousePointerClick,
-  Pencil,
-  SquareDashedMousePointer,
-  X,
-} from "lucide-react"
+import { Compass, Maximize2, MessageSquarePlus, MousePointerClick, Pencil, SquareDashedMousePointer, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   SegmentedToggle,
@@ -50,6 +43,7 @@ import {
 import { BreakpointMenu } from "@/components/editor/breakpoint-menu"
 import { CaptureToCanvasButton } from "@/components/editor/capture-to-canvas-button"
 import { UndoRedoControls } from "@/components/editor/undo-redo-controls"
+import { PinsHiddenToggle } from "@/components/editor/pins-hidden-toggle"
 import type { ActiveBreakpoint } from "@/components/editor/tailwind-classes"
 import type { CaptureScreenshotResult } from "@/hooks/useIframeScreenshotCapture"
 import type { BranchesApi } from "@/hooks/useEditorBranches"
@@ -117,6 +111,8 @@ interface EditorToolbarProps {
   onToolModeChange: (next: EditorToolMode) => void
   /** Branch-mode git state. Feeds the Undo/Redo pair. */
   branches: BranchesApi
+  /** Hide or show every comment pin in the prototype. Feeds the pin toggle. */
+  onPinsHiddenChange: (hidden: boolean) => void
   /** Whether the prototype iframe is the foreground surface. */
   showIframe: boolean
   activeBreakpoint: ActiveBreakpoint
@@ -132,6 +128,13 @@ interface EditorToolbarProps {
   captureEnabled: boolean
   /** When provided, the toolbar renders an exit-editor X button. */
   onExitCompose?: () => void
+  /**
+   * Hide every piece of editor chrome so the prototype fills the window.
+   * Rendered LAST, at the right edge (Mo, 2026-09-02: "move the full screen
+   * button in the project top bar into the tool bar. It should be the last
+   * option"). It lived in the nav bar's right-hand cluster until then.
+   */
+  onHideChrome: () => void
 }
 
 export function EditorToolbar({
@@ -142,6 +145,7 @@ export function EditorToolbar({
   toolMode,
   onToolModeChange,
   branches,
+  onPinsHiddenChange,
   showIframe,
   activeBreakpoint,
   breakpointOptions,
@@ -151,6 +155,7 @@ export function EditorToolbar({
   prototypeUrl,
   captureEnabled,
   onExitCompose,
+  onHideChrome,
 }: EditorToolbarProps) {
   return (
     <header
@@ -183,7 +188,15 @@ export function EditorToolbar({
       // always reachable" is the rule worth keeping. An arbitrary value is
       // used knowingly: Tailwind's z scale stops at 50, so there is no step
       // above the portal to reach for.
-      className="absolute left-1/2 top-full z-[60] flex -translate-x-1/2 -translate-y-3/4 items-center gap-1 rounded-md border bg-card p-1 shadow-xs"
+      //
+      // `top-12.5`: the pill's top edge sits 50px below the top of the nav
+      // bar it is positioned in (Mo, 2026-09-02: "add to the margin top of
+      // the toolbar to 50px"). The nav bar is 40px tall, so the pill floats
+      // 10px under it, over the prototype card. It used to hang off the
+      // nav's bottom edge with a three-quarter lift, straddling a border
+      // the nav no longer has; a first attempt added the 50px ON TOP of
+      // that anchor and landed the bar "really low".
+      className="absolute left-1/2 top-12.5 z-[60] flex -translate-x-1/2 items-center gap-1 rounded-md border bg-card p-1 shadow-xs"
       data-testid="editor-toolbar"
     >
       {/* The tool picker. Navigate = clicks drive the prototype. Select =
@@ -225,6 +238,9 @@ export function EditorToolbar({
       {/* Undo/Redo — not gated on `showIframe`: they act on source edits,
           which are just as real in the file-editor view. */}
       <UndoRedoControls branches={branches} />
+      {/* Hide comments, after Undo and Redo (Mo, 2026-09-02). Gated on the
+          iframe like the picker: pins only exist in the prototype. */}
+      {showIframe ? <PinsHiddenToggle onPinsHiddenChange={onPinsHiddenChange} /> : null}
       {showIframe ? (
         <BreakpointMenu
           value={activeBreakpoint}
@@ -276,6 +292,19 @@ export function EditorToolbar({
           <X />
         </Button>
       ) : null}
+      {/* Full screen, last. A one-shot action like Undo and Redo, so it sits
+          in this cluster; rightmost because it is the one control here that
+          takes the whole toolbar away with it. */}
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        onClick={onHideChrome}
+        title="Hide chrome"
+        aria-label="Hide chrome"
+        data-testid="editor-hide-chrome"
+      >
+        <Maximize2 />
+      </Button>
     </header>
   )
 }
