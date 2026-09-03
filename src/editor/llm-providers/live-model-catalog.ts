@@ -180,11 +180,18 @@ export function versionedNameFromId(id: string): string | undefined {
  * Fable entry beside it.
  */
 export function fromAgentSdk(models: readonly AgentSdkModel[]): LiveModel[] {
+  // One row per name-and-version. The binary offers the same model under
+  // two aliases (`default` and `opus[1m]` both resolve to Opus 5 with the
+  // 1M context, MEASURED on SDK 0.3.259), and a menu that says "Opus 5"
+  // twice asks the reader to guess which one to pick. The first alias wins,
+  // which is the binary's own preferred one.
+  const seenLabels = new Set<string>()
   return models
     .filter((m) => typeof m.value === 'string' && m.value.length > 0)
     .flatMap((m) => {
       const label = versionedNameFrom(m.description) ?? versionedNameFromId(m.value)
-      if (!label) return []
+      if (!label || seenLabels.has(label)) return []
+      seenLabels.add(label)
       const ladder = Array.isArray(m.supportedEffortLevels)
         ? EFFORT_LEVELS.filter((level) => m.supportedEffortLevels!.includes(level))
         : undefined

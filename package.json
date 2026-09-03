@@ -23,7 +23,7 @@
     "verify": "tsx scripts/verify.mts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.143",
+    "@anthropic-ai/claude-agent-sdk": "0.3.259",
     "@anthropic-ai/sdk": "^0.95.0",
     "@assistant-ui/react": "^0.14.11",
     "@assistant-ui/react-markdown": "^0.14.1",

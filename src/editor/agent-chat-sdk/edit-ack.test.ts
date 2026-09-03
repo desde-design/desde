@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import {
   mkdirSync,
   mkdtempSync,
@@ -66,21 +67,21 @@ describe('canUseTool — non-Write/Edit tools', () => {
   it('allows Read for an in-root path', async () => {
     writeFileSync(join(h.root, 'app.vue'), 'x')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Read', { file_path: join(h.root, 'app.vue') }, fakeOpts())
+    const r = await call(cut, 'Read', { file_path: join(h.root, 'app.vue') }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(h.emitted).toHaveLength(0)
   })
 
   it('denies Read for a path that escapes the worktree', async () => {
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Read', { file_path: '/etc/passwd' }, fakeOpts())
+    const r = await call(cut, 'Read', { file_path: '/etc/passwd' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/Read denied/)
   })
 
   it('hints at the worktree-relative form when Read escapes without matching an external root', async () => {
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Read', { file_path: '/etc/passwd' }, fakeOpts())
+    const r = await call(cut, 'Read', { file_path: '/etc/passwd' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     const msg = (r as { message: string }).message
     expect(msg).toMatch(/worktree-relative path/)
@@ -110,7 +111,7 @@ describe('canUseTool — non-Write/Edit tools', () => {
         emitEditProposal: h.emit,
         readRoots: registry,
       })
-      const r = await cut('Read', { file_path: externalFile }, fakeOpts())
+      const r = await call(cut, 'Read', { file_path: externalFile }, fakeOpts())
       expect(r.behavior).toBe('deny')
       const msg = (r as { message: string }).message
       // The hint must name the matching root AND the right MCP tool
@@ -126,7 +127,7 @@ describe('canUseTool — non-Write/Edit tools', () => {
 
   it('falls back to the generic hint when readRoots is undefined', async () => {
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Read', { file_path: '/some/external/path' }, fakeOpts())
+    const r = await call(cut, 'Read', { file_path: '/some/external/path' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     const msg = (r as { message: string }).message
     // Without a registry, every escape gets the worktree-relative
@@ -161,7 +162,7 @@ describe('canUseTool — non-Write/Edit tools', () => {
         emitEditProposal: h.emit,
         readRoots: registry,
       })
-      const r = await cut(
+      const r = await call(cut, 
         'Read',
         { file_path: 'prod-link/src/views/Bar.vue' },
         fakeOpts(),
@@ -197,7 +198,7 @@ describe('canUseTool — non-Write/Edit tools', () => {
         emitEditProposal: h.emit,
         readRoots: registry,
       })
-      const r = await cut('Read', { file_path: targetFile }, fakeOpts())
+      const r = await call(cut, 'Read', { file_path: targetFile }, fakeOpts())
       expect(r.behavior).toBe('deny')
       const msg = (r as { message: string }).message
       expect(msg).toContain('root="ui"')
@@ -223,7 +224,7 @@ describe('canUseTool — non-Write/Edit tools', () => {
         emitEditProposal: h.emit,
         readRoots: registry,
       })
-      const r = await cut('Read', { file_path: externalDir }, fakeOpts())
+      const r = await call(cut, 'Read', { file_path: externalDir }, fakeOpts())
       expect(r.behavior).toBe('deny')
       const msg = (r as { message: string }).message
       // The hint must NOT include a bogus retry path. It should point
@@ -239,20 +240,20 @@ describe('canUseTool — non-Write/Edit tools', () => {
 
   it('allows Read with no file_path (Read shape variant)', async () => {
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Read', {}, fakeOpts())
+    const r = await call(cut, 'Read', {}, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
   })
 
   it('allows MCP tools without emitting', async () => {
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('mcp__editor__get_selection', {}, fakeOpts())
+    const r = await call(cut, 'mcp__editor__get_selection', {}, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(h.emitted).toHaveLength(0)
   })
 
   it('denies when SDK passes blockedPath (B2)', async () => {
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut(
+    const r = await call(cut, 
       'Read',
       { file_path: '/some/path' },
       { ...fakeOpts(), blockedPath: '/some/path' },
@@ -274,7 +275,7 @@ describe('canUseTool — Write', () => {
     writeFileSync(target, 'old contents')
 
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Write', { file_path: target, content: 'new contents' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: 'new contents' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(h.emitted).toHaveLength(1)
     const payload = asOverwrite(h.emitted[0])
@@ -292,7 +293,7 @@ describe('canUseTool — Write', () => {
     const target = join(h.root, 'X.vue')
     writeFileSync(target, 'same')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Write', { file_path: target, content: 'same' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: 'same' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/no change/)
     expect(h.emitted).toHaveLength(0)
@@ -301,7 +302,7 @@ describe('canUseTool — Write', () => {
   it('allows new-file write with .vue extension and marks allowCreate + appliedByAgent', async () => {
     const target = join(h.root, 'NewComponent.vue')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Write', { file_path: target, content: '<template/>' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: '<template/>' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     const payload = asOverwrite(h.emitted[0])
     expect(payload).toMatchObject({
@@ -317,7 +318,7 @@ describe('canUseTool — Write', () => {
   it('allows new-file write with .ts extension', async () => {
     const target = join(h.root, 'useThing.ts')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Write', { file_path: target, content: 'export {}' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: 'export {}' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(asOverwrite(h.emitted[0]).allowCreate).toBe(true)
   })
@@ -327,7 +328,7 @@ describe('canUseTool — Write', () => {
       const local = makeHarness()
       const target = join(local.root, name)
       const cut = buildCanUseTool({ worktreeRoot: local.root, emitEditProposal: local.emit })
-      const r = await cut(
+      const r = await call(cut, 
         'Write',
         { file_path: target, content: 'export const C = () => <div/>' },
         fakeOpts(),
@@ -341,7 +342,7 @@ describe('canUseTool — Write', () => {
   it('allows new-file write with .md extension (plans / docs)', async () => {
     const target = join(h.root, 'docs/plan.md')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Write', { file_path: target, content: '# Plan\n' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: '# Plan\n' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(asOverwrite(h.emitted[0])).toMatchObject({
       file: 'docs/plan.md',
@@ -353,7 +354,7 @@ describe('canUseTool — Write', () => {
   it('denies new-file write with a disallowed extension (binary/script/secret)', async () => {
     const target = join(h.root, 'malware.exe')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Write', { file_path: target, content: 'x' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: 'x' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/extension '\.exe'/)
     expect(h.emitted).toHaveLength(0)
@@ -362,13 +363,13 @@ describe('canUseTool — Write', () => {
   it('denies write with missing content', async () => {
     const target = join(h.root, 'X.vue')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Write', { file_path: target }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target }, fakeOpts())
     expect(r.behavior).toBe('deny')
   })
 
   it('denies path that escapes worktree root', async () => {
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Write', { file_path: '../escape.vue', content: 'x' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: '../escape.vue', content: 'x' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/escapes|denied/)
   })
@@ -381,7 +382,7 @@ describe('canUseTool — Write', () => {
       symlinkSync(outside, join(h.root, 'sneaky'))
       const target = join(h.root, 'sneaky', 'X.vue')
       const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-      const r = await cut('Write', { file_path: target, content: '<template/>' }, fakeOpts())
+      const r = await call(cut, 'Write', { file_path: target, content: '<template/>' }, fakeOpts())
       expect(r.behavior).toBe('deny')
       expect((r as { message: string }).message).toMatch(/symlink|denied/)
     } finally {
@@ -401,7 +402,7 @@ describe('canUseTool — Edit', () => {
     writeFileSync(target, 'before X after')
 
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut(
+    const r = await call(cut, 
       'Edit',
       { file_path: target, old_string: 'X', new_string: 'Y' },
       fakeOpts(),
@@ -421,7 +422,7 @@ describe('canUseTool — Edit', () => {
     const file = 'X.vue'
     writeFileSync(join(h.root, file), 'X X X')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut(
+    const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, file), old_string: 'X', new_string: 'Y', replace_all: true },
       fakeOpts(),
@@ -434,7 +435,7 @@ describe('canUseTool — Edit', () => {
     const file = 'X.vue'
     writeFileSync(join(h.root, file), 'abc')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut(
+    const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, file), old_string: 'XYZ', new_string: 'Y' },
       fakeOpts(),
@@ -447,7 +448,7 @@ describe('canUseTool — Edit', () => {
     const file = 'X.vue'
     writeFileSync(join(h.root, file), 'X X')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut(
+    const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, file), old_string: 'X', new_string: 'Y' },
       fakeOpts(),
@@ -460,7 +461,7 @@ describe('canUseTool — Edit', () => {
     const file = 'X.vue'
     writeFileSync(join(h.root, file), 'abc')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut(
+    const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, file), old_string: '', new_string: 'Y' },
       fakeOpts(),
@@ -473,7 +474,7 @@ describe('canUseTool — Edit', () => {
     const file = 'X.vue'
     writeFileSync(join(h.root, file), 'abc')
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut(
+    const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, file), old_string: 'abc', new_string: 'abc' },
       fakeOpts(),
@@ -484,7 +485,7 @@ describe('canUseTool — Edit', () => {
 
   it('denies edit to nonexistent file', async () => {
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut(
+    const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, 'ghost.vue'), old_string: 'x', new_string: 'y' },
       fakeOpts(),
@@ -502,7 +503,7 @@ describe('canUseTool — Edit', () => {
     try {
       symlinkSync(outsideFile, join(h.root, 'evil.vue'))
       const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-      const r = await cut(
+      const r = await call(cut, 
         'Edit',
         { file_path: join(h.root, 'evil.vue'), old_string: 'outside', new_string: 'x' },
         fakeOpts(),
@@ -525,7 +526,7 @@ describe('canUseTool — emitEditProposal rejection', () => {
         worktreeRoot: h.root,
         emitEditProposal: async () => ({ ok: false, reason: 'shell offline' }),
       })
-      const r = await cut('Write', { file_path: target, content: 'new' }, fakeOpts())
+      const r = await call(cut, 'Write', { file_path: target, content: 'new' }, fakeOpts())
       expect(r.behavior).toBe('deny')
       expect((r as { message: string }).message).toMatch(/shell offline/)
     } finally {
@@ -563,7 +564,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
     const cut = buildCutWithReads({
       [target]: { hashAtRead: sha256('old contents') },
     })
-    const r = await cut('Write', { file_path: target, content: 'new contents' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: 'new contents' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(conflicts).toHaveLength(0)
     expect(h.emitted).toHaveLength(1)
@@ -579,7 +580,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
       // The session read the file when it had the old contents.
       [target]: { hashAtRead: sha256('old contents') },
     })
-    const r = await cut('Write', { file_path: target, content: 'this session\'s patch' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: 'this session\'s patch' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(conflicts).toHaveLength(1)
     expect(conflicts[0]).toMatchObject({
@@ -601,7 +602,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
     const cut = buildCutWithReads({
       [target]: { hashAtRead: sha256('original content with foo bar baz inside') },
     })
-    const r = await cut(
+    const r = await call(cut, 
       'Edit',
       { file_path: target, old_string: 'bar', new_string: 'BAR' },
       fakeOpts(),
@@ -622,7 +623,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
       // Some other file was read, not this one.
       [join(h.root, 'other.vue')]: { hashAtRead: sha256('whatever') },
     })
-    const r = await cut('Write', { file_path: target, content: 'new contents' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: 'new contents' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(conflicts).toHaveLength(0)
   })
@@ -634,7 +635,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
     writeFileSync(target, 'old contents')
 
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Write', { file_path: target, content: 'new contents' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: 'new contents' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     // No conflicts surfaced because no callback registered.
     expect(conflicts).toHaveLength(0)
@@ -665,7 +666,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
     })
 
     // First Write — baseline matches, no conflict.
-    const first = await cut('Write', { file_path: target, content: 'first new contents' }, fakeOpts())
+    const first = await call(cut, 'Write', { file_path: target, content: 'first new contents' }, fakeOpts())
     expect(first).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(conflicts).toHaveLength(0)
     // Baseline advanced.
@@ -680,7 +681,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
     // Second Write of the same file — without the codex #2 fix this
     // would trip a conflict because the seeded fileReads still
     // pointed at the original baseline.
-    const second = await cut(
+    const second = await call(cut, 
       'Write',
       { file_path: target, content: 'second new contents' },
       fakeOpts(),
@@ -711,7 +712,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
         reads[abs] = { hashAtRead: nextHash }
       },
     })
-    const r = await cut('Write', { file_path: target, content: 'new' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: 'new' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     // Baseline unchanged.
     expect(reads[target].hashAtRead).toBe(sha256('old contents'))
@@ -734,7 +735,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
         conflicts.push(c)
       },
     })
-    const r = await cut('Write', { file_path: target, content: '<template/>' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: '<template/>' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(conflicts).toHaveLength(1)
     expect(conflicts[0]).toMatchObject({
@@ -758,7 +759,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
         conflicts.push(c)
       },
     })
-    const r = await cut('Write', { file_path: target, content: '<template/>' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: '<template/>' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(conflicts).toHaveLength(0)
   })
@@ -799,7 +800,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
         conflicts.push(c)
       },
     })
-    const r = await cut(
+    const r = await call(cut, 
       'Write',
       { file_path: realFile, content: 'patched contents' },
       fakeOpts(),
@@ -825,7 +826,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
         throw new Error('boom')
       },
     })
-    const r = await cut('Write', { file_path: target, content: 'patched' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: 'patched' }, fakeOpts())
     // Detection threw but the edit still proceeded.
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(h.emitted).toHaveLength(1)
@@ -865,11 +866,28 @@ describe('ALLOWED_NEW_FILE_EXTENSIONS', () => {
   })
 })
 
-function fakeOpts() {
+function fakeOpts(): Parameters<CanUseTool>[2] {
   return {
     signal: new AbortController().signal,
     toolUseID: 'tu-1',
+    // Required since SDK 0.3.259: the control_request envelope id a host
+    // echoes when answering out-of-band. Unused by `buildCanUseTool`.
+    requestId: 'req-1',
   }
+}
+
+/**
+ * `CanUseTool` may resolve `null` since SDK 0.3.259 (the host declining to
+ * decide). `buildCanUseTool` always decides, so a `null` here is a failure
+ * the assertions below should see as one, not silently narrow around.
+ */
+async function call(
+  cut: CanUseTool,
+  ...args: Parameters<CanUseTool>
+): Promise<PermissionResult> {
+  const r = await cut(...args)
+  if (r === null) throw new Error('canUseTool resolved null')
+  return r
 }
 
 function asOverwrite(p: EditProposalPayload): Extract<EditProposalPayload, { type: 'overwrite' }> {
@@ -884,7 +902,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
 
   it('denies WebFetch when no policy is wired (default off)', async () => {
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('WebFetch', { url: 'https://vuejs.org/' }, fakeOpts())
+    const r = await call(cut, 'WebFetch', { url: 'https://vuejs.org/' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/no web policy configured/)
   })
@@ -895,7 +913,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
       emitEditProposal: h.emit,
       webPolicy: { webFetchAllowedHosts: ['vuejs.org'], webSearchEnabled: false },
     })
-    const r = await cut('WebFetch', { url: 'https://evil.example/' }, fakeOpts())
+    const r = await call(cut, 'WebFetch', { url: 'https://evil.example/' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/not in the allowlist/)
   })
@@ -906,7 +924,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
       emitEditProposal: h.emit,
       webPolicy: { webFetchAllowedHosts: ['vuejs.org'], webSearchEnabled: false },
     })
-    const r = await cut('WebFetch', { url: 'https://vuejs.org/guide/' }, fakeOpts())
+    const r = await call(cut, 'WebFetch', { url: 'https://vuejs.org/guide/' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
   })
 
@@ -916,14 +934,14 @@ describe('canUseTool — WebFetch / WebSearch', () => {
       emitEditProposal: h.emit,
       webPolicy: { webFetchAllowedHosts: ['vuejs.org'], webSearchEnabled: false },
     })
-    const r = await cut('WebFetch', { url: 'file://vuejs.org/etc/passwd' }, fakeOpts())
+    const r = await call(cut, 'WebFetch', { url: 'file://vuejs.org/etc/passwd' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/invalid or non-http/)
   })
 
   it('denies WebSearch when no policy is wired', async () => {
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('WebSearch', { query: 'how to vue' }, fakeOpts())
+    const r = await call(cut, 'WebSearch', { query: 'how to vue' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/WebSearch is disabled/)
   })
@@ -934,7 +952,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
       emitEditProposal: h.emit,
       webPolicy: { webFetchAllowedHosts: [], webSearchEnabled: false },
     })
-    const r = await cut('WebSearch', { query: 'how to vue' }, fakeOpts())
+    const r = await call(cut, 'WebSearch', { query: 'how to vue' }, fakeOpts())
     expect(r.behavior).toBe('deny')
   })
 
@@ -944,7 +962,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
       emitEditProposal: h.emit,
       webPolicy: { webFetchAllowedHosts: [], webSearchEnabled: true },
     })
-    const r = await cut('WebSearch', { query: 'how to vue' }, fakeOpts())
+    const r = await call(cut, 'WebSearch', { query: 'how to vue' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
   })
 
@@ -955,7 +973,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
     // mcpServers.figma only when figmaConfig is set — but belt+
     // suspenders.)
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('mcp__figma__get_file', { fileId: 'x' }, fakeOpts())
+    const r = await call(cut, 'mcp__figma__get_file', { fileId: 'x' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/no extension named 'figma' is configured/)
   })
@@ -966,7 +984,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
       emitEditProposal: h.emit,
       figmaAllowedToolPrefixes: ['get_', 'list_'],
     })
-    const r = await cut('mcp__figma__get_file', { fileId: 'x' }, fakeOpts())
+    const r = await call(cut, 'mcp__figma__get_file', { fileId: 'x' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
   })
 
@@ -976,7 +994,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
       emitEditProposal: h.emit,
       figmaAllowedToolPrefixes: ['get_', 'list_'],
     })
-    const r = await cut('mcp__figma__update_node', { nodeId: 'x' }, fakeOpts())
+    const r = await call(cut, 'mcp__figma__update_node', { nodeId: 'x' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/read-only by contract/)
     expect((r as { message: string }).message).toMatch(/update_node/)
@@ -994,7 +1012,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
       figmaAllowedToolPrefixes: ['list_'],
     })
     // `create_*` is not in the configured prefixes, so it denies.
-    const r = await cut('mcp__figma__create_frame', { name: 'x' }, fakeOpts())
+    const r = await call(cut, 'mcp__figma__create_frame', { name: 'x' }, fakeOpts())
     expect(r.behavior).toBe('deny')
   })
 
@@ -1004,7 +1022,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
       emitEditProposal: h.emit,
       // Even with figma denied, editor tools must be untouched.
     })
-    const r = await cut('mcp__editor__get_selection', {}, fakeOpts())
+    const r = await call(cut, 'mcp__editor__get_selection', {}, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
   })
 })
@@ -1058,7 +1076,7 @@ describe('canUseTool — MCP extensions (generalised)', () => {
       emitEditProposal: h.emit,
       extensionToolPolicy: policy([['tracker', ['get_', 'list_']]]),
     })
-    expect((await cut('mcp__tracker__list_issues', {}, fakeOpts())).behavior).toBe('allow')
+    expect((await call(cut, 'mcp__tracker__list_issues', {}, fakeOpts())).behavior).toBe('allow')
   })
 
   it('denies a write-verb tool on a read-only extension', async () => {
@@ -1067,7 +1085,7 @@ describe('canUseTool — MCP extensions (generalised)', () => {
       emitEditProposal: h.emit,
       extensionToolPolicy: policy([['tracker', ['get_', 'list_']]]),
     })
-    const r = await cut('mcp__tracker__create_issue', {}, fakeOpts())
+    const r = await call(cut, 'mcp__tracker__create_issue', {}, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/read-only by contract/)
   })
@@ -1078,7 +1096,7 @@ describe('canUseTool — MCP extensions (generalised)', () => {
       emitEditProposal: h.emit,
       extensionToolPolicy: policy([['tracker', null]]),
     })
-    expect((await cut('mcp__tracker__create_issue', {}, fakeOpts())).behavior).toBe('allow')
+    expect((await call(cut, 'mcp__tracker__create_issue', {}, fakeOpts())).behavior).toBe('allow')
   })
 
   it('denies an extension that is not configured at all', async () => {
@@ -1089,7 +1107,7 @@ describe('canUseTool — MCP extensions (generalised)', () => {
       emitEditProposal: h.emit,
       extensionToolPolicy: policy([['tracker', ['get_']]]),
     })
-    const r = await cut('mcp__other__get_thing', {}, fakeOpts())
+    const r = await call(cut, 'mcp__other__get_thing', {}, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/no extension named 'other'/)
   })
@@ -1101,7 +1119,7 @@ describe('canUseTool — MCP extensions (generalised)', () => {
       extensionToolPolicy: policy([]),
     })
     expect(
-      (await cut('mcp__editor__get_design_tokens', {}, fakeOpts())).behavior,
+      (await call(cut, 'mcp__editor__get_design_tokens', {}, fakeOpts())).behavior,
     ).toBe('allow')
   })
 })
@@ -1147,7 +1165,7 @@ describe('canUseTool — protected config files', () => {
   for (const rel of PROTECTED) {
     it(`denies Write that CREATES ${rel}`, async () => {
       const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-      const r = await cut(
+      const r = await call(cut, 
         'Write',
         { file_path: join(h.root, rel), content: '{"mcpServers":{"x":{"command":"sh"}}}' },
         fakeOpts(),
@@ -1162,7 +1180,7 @@ describe('canUseTool — protected config files', () => {
       mkdirSync(dirname(target), { recursive: true })
       writeFileSync(target, '{}')
       const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-      const r = await cut(
+      const r = await call(cut, 
         'Write',
         { file_path: target, content: '{"mcpServers":{"x":{"command":"sh"}}}' },
         fakeOpts(),
@@ -1176,7 +1194,7 @@ describe('canUseTool — protected config files', () => {
       mkdirSync(dirname(target), { recursive: true })
       writeFileSync(target, '{"a":1}')
       const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-      const r = await cut(
+      const r = await call(cut, 
         'Edit',
         { file_path: target, old_string: '{"a":1}', new_string: '{"a":2}' },
         fakeOpts(),
@@ -1190,13 +1208,13 @@ describe('canUseTool — protected config files', () => {
     const target = join(h.root, 'src/data.json')
     mkdirSync(dirname(target), { recursive: true })
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut('Write', { file_path: target, content: '{"ok":true}' }, fakeOpts())
+    const r = await call(cut, 'Write', { file_path: target, content: '{"ok":true}' }, fakeOpts())
     expect(r.behavior).toBe('allow')
   })
 
   it('is not fooled by a path that reaches the same file indirectly', async () => {
     const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
-    const r = await cut(
+    const r = await call(cut, 
       'Write',
       { file_path: join(h.root, 'src', '..', '.mcp.json'), content: '{}' },
       fakeOpts(),

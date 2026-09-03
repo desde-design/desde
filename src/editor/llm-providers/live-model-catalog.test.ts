@@ -60,6 +60,18 @@ describe('fromAgentSdk', () => {
     ])
   })
 
+  it('keeps one row per name and version, the first alias winning', () => {
+    const live = fromAgentSdk([
+      { value: 'default', displayName: 'Default (recommended)', description: 'Opus 5 with 1M context · Most capable' },
+      { value: 'opus[1m]', displayName: 'Opus', description: 'Opus 5 with 1M context' },
+      { value: 'sonnet', displayName: 'Sonnet', description: 'Sonnet 5 · Best for everyday tasks' },
+    ])
+    expect(live.map((m) => [m.id, m.label])).toEqual([
+      ['default', 'Opus 5'],
+      ['sonnet', 'Sonnet 5'],
+    ])
+  })
+
   it('drops an entry whose version cannot be read from its description or id', () => {
     const live = fromAgentSdk([
       { value: 'fable[1m]', displayName: 'fable[1m]', description: 'Custom model' },
