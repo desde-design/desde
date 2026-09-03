@@ -189,15 +189,16 @@ export function EditorToolbar({
       // used knowingly: Tailwind's z scale stops at 50, so there is no step
       // above the portal to reach for.
       //
-      // `top-4`: the pill's top edge sits 16px below the top of the nav bar
+      // `top-2.5`: the pill's top edge sits 10px below the top of the nav bar
       // it is positioned in (Mo, 2026-09-02: "I am ok with position top,
-      // but then make it 16 instead of 50"). The nav bar is 40px tall, so
-      // the pill overlaps its lower half and reaches 18px into the
-      // prototype card below. It used to hang off the nav's bottom edge
+      // but then make it 16 instead of 50", then "10 instead of 16"). The
+      // nav bar is 40px tall, so the pill sits mostly over the nav and
+      // reaches 12px into the prototype card below. It used to hang off the
+      // nav's bottom edge
       // with a three-quarter lift, straddling a border the nav no longer
       // has; two earlier attempts today put it 50px down, first as margin
       // on top of that anchor, then as the offset itself, both too low.
-      className="absolute left-1/2 top-4 z-[60] flex -translate-x-1/2 items-center gap-1 rounded-md border bg-card p-1 shadow-xs"
+      className="absolute left-1/2 top-2.5 z-[60] flex -translate-x-1/2 items-center gap-1 rounded-md border bg-card p-1 shadow-xs"
       data-testid="editor-toolbar"
     >
       {/* The tool picker. Navigate = clicks drive the prototype. Select =
