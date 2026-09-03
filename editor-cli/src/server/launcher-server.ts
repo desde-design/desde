@@ -53,6 +53,7 @@ import { isClaudeRuntimeResolvable } from "./claude-runtime-available.js"
  */
 const DIRECTORY_NOT_FOUND = "Directory not found"
 import { readProjectsRegistry, removeProjectRegistryEntry } from "./projects-registry.js"
+import { seedDemoProject } from "./demo/seed.js"
 import { checkLauncherOpen, supportedHostsFor } from "./launcher-open-check.js"
 import { createReadyLineReader } from "./ready-line.js"
 import {
@@ -116,6 +117,14 @@ export interface StartLauncherOptions {
   /** Override the native folder picker (tests). */
   pickFolder?: PickFolder
   /**
+   * Seed the bundled demo as a project on the first projects request
+   * (default true). Tests that boot many launchers switch it off, since
+   * seeding copies the demo fixture into HOME; see `demo/seed.ts`.
+   */
+  seedDemo?: boolean
+  /** Override the demo fixture the seed copies (tests). */
+  demoFixtureDir?: string
+  /**
    * Where the built editor UI bundle lives. Defaults to
    * `editor-cli/ui-src/dist`; the `--ui-bundle-root` CLI flag both
    * overrides this and is forwarded to spawned editors.
@@ -141,6 +150,12 @@ interface LauncherContext {
    * See `host-guard.ts`.
    */
   listenOrigin: string
+  /**
+   * The one-time demo seed, shared across requests. Resolves to the same
+   * promise for every caller, so two concurrent projects requests (React's
+   * dev double-effect, a second tab) cannot both copy the fixture.
+   */
+  seedDemo: () => Promise<void>
 }
 
 export async function startLauncher(
@@ -171,11 +186,28 @@ export async function startLauncher(
     )
   }
 
+  let seedInFlight: Promise<void> | null = null
+  const seedDemo = (): Promise<void> => {
+    if (opts.seedDemo === false) return Promise.resolve()
+    if (seedInFlight === null) {
+      seedInFlight = seedDemoProject({ fixtureDir: opts.demoFixtureDir }).then(
+        () => undefined,
+        (err: unknown) => {
+          // Best-effort: a machine that cannot take the demo still gets its
+          // project list, and the empty state offers the other ways in.
+          console.error(`[launcher] could not seed the demo project: ${(err as Error).message}`)
+        },
+      )
+    }
+    return seedInFlight
+  }
+
   const ctx: LauncherContext = {
     security,
     spawnEditor,
     pickFolder: opts.pickFolder ?? defaultPickFolder,
     uiBundleRoot,
+    seedDemo,
     // Corrected below from what `listen` actually bound (`port: 0` picks its
     // own), before the server can answer anything.
     listenOrigin: listenOriginFor(host, port),
@@ -302,6 +334,10 @@ async function route(
     }
 
     if (req.method === "GET" && url.pathname === "/api/launcher/projects") {
+      // First-run seeding of the demo, before the read, so the first list
+      // this machine ever sees already has the demo in it. A no-op forever
+      // after; see `demo/seed.ts`.
+      await ctx.seedDemo()
       const registry = await readProjectsRegistry()
       sendJson(res, 200, { ok: true, projects: registry.projects })
       return

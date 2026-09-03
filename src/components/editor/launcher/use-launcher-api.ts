@@ -171,8 +171,6 @@ export interface UseLauncherApi {
    * accident still finds it in the New prototype sources.
    */
   demo: LauncherDemoState | null
-  /** Materialize the demo if needed, then open it. Idempotent server-side. */
-  tryDemo: () => Promise<void>
   /** Re-read the demo's change summary, so a confirmation cannot go stale. */
   refreshDemo: () => Promise<void>
   /** Delete the demo for real: the directory and its recents entry. */
@@ -529,27 +527,6 @@ export function useLauncherApi(): UseLauncherApi {
   )
 
   /**
-   * Materialize the demo if it is not already on disk, then open it. The POST
-   * is idempotent server-side, so a second click opens what is there rather
-   * than failing, and this needs no local guard against a double click.
-   */
-  const tryDemo = useCallback(async () => {
-    setError(null)
-    setOpenBlock(null)
-    setBusy("Setting up the demo")
-    const res = await post("/api/launcher/demo")
-    if (!res.ok || typeof res.path !== "string") {
-      setBusy(null)
-      setError(res.reason ?? "The demo could not be set up.")
-      return
-    }
-    // Deliberately no setBusy(null) on the success path: openPath redirects
-    // the browser, and clearing the overlay first flashes an idle launcher
-    // between the two.
-    await openPath(res.path)
-  }, [openPath])
-
-  /**
    * Re-read the demo's change summary. Called when its delete confirmation is
    * about to open: the mount-time value can be minutes old, and a stale
    * "nothing will be lost" on a demo the user has since edited is a lie told at
@@ -592,7 +569,6 @@ export function useLauncherApi(): UseLauncherApi {
     error,
     openBlock,
     demo,
-    tryDemo,
     refreshDemo,
     deleteDemo,
     clearError: useCallback(() => {

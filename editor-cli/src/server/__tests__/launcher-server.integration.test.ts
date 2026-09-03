@@ -77,6 +77,10 @@ beforeEach(async () => {
   const port = await pickFreePort()
   handle = await startLauncher({
     port,
+    // Off for the shared launcher: seeding copies the demo fixture into the
+    // per-test HOME on the first projects request. The seed has its own
+    // tests below and in `demo/__tests__/seed.test.ts`.
+    seedDemo: false,
     spawnEditor: spawnStub,
     pickFolder: pickFolderStub,
     uiBundleRoot: bundleRoot,
@@ -1263,5 +1267,54 @@ describe("launcher server — LLM credentials", () => {
     })
     expect(res.status).toBe(404)
     expect(res.headers.get("content-type")).toContain("application/json")
+  })
+})
+
+/**
+ * The demo arrives as a PROJECT on a fresh machine (Mo, 2026-09-02), seeded
+ * on the first projects request rather than offered as an empty-state tile.
+ * Once only: a deleted demo stays deleted, and the list is empty again.
+ */
+describe("launcher server — demo seeding", () => {
+  it("seeds the demo into the projects list once, and not after it is deleted", async () => {
+    const fixtureDir = path.join(tmp, "demo-fixture")
+    await fs.mkdir(path.join(fixtureDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(fixtureDir, "package.json"), '{"name":"desde-demo"}')
+    await fs.writeFile(path.join(fixtureDir, "src", "App.tsx"), "export const App = () => null\n")
+
+    const h = await startLauncher({
+      port: 0,
+      spawnEditor: spawnStub,
+      pickFolder: pickFolderStub,
+      uiBundleRoot: bundleRoot,
+      demoFixtureDir: fixtureDir,
+    })
+    try {
+      const boot = await fetch(`${h.url}/__desde/bootstrap.js`)
+      const m = (await boot.text()).match(/window\.__DESDE_LAUNCHER__=(\{.*\});/)
+      const token = (JSON.parse(m![1]) as { token: string }).token
+      const headers = { authorization: `Bearer ${token}`, origin: h.url }
+
+      // Two concurrent first requests share one seed.
+      const [a, b] = await Promise.all([
+        fetch(`${h.url}/api/launcher/projects`, { headers }),
+        fetch(`${h.url}/api/launcher/projects`, { headers }),
+      ])
+      const listA = (await a.json()) as { projects: { path: string; slug?: string }[] }
+      const listB = (await b.json()) as { projects: { path: string; slug?: string }[] }
+      const demoPath = path.join(tmpHome, ".desde-demo")
+      expect(listA.projects.map((p) => [p.path, p.slug])).toEqual([[demoPath, "demo"]])
+      expect(listB.projects).toHaveLength(1)
+      await expect(fs.access(path.join(demoPath, "src", "App.tsx"))).resolves.toBeUndefined()
+
+      // Delete it, ask again: no re-seed, and the list is empty.
+      const del = await fetch(`${h.url}/api/launcher/demo`, { method: "DELETE", headers })
+      expect(del.status).toBe(200)
+      const after = await fetch(`${h.url}/api/launcher/projects`, { headers })
+      expect(((await after.json()) as { projects: unknown[] }).projects).toEqual([])
+      await expect(fs.access(demoPath)).rejects.toThrow()
+    } finally {
+      await h.close()
+    }
   })
 })

@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react"
 import { useLauncherRoute } from "./use-launcher-route"
-import { FolderOpen, GitBranch, MoreVertical, Plus, Search, Sparkles } from "lucide-react"
+import { FolderOpen, GitBranch, MoreVertical, Plus, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -126,22 +126,6 @@ export function LauncherPage({
    */
   const deletingDemo =
     pendingDelete !== null && (api.demo?.path ?? "") !== "" && pendingDelete.path === api.demo?.path
-  /**
-   * Offered whenever the demo is not already on disk.
-   *
-   * Deliberately NOT gated on `triedAt`, which an earlier draft used to demote
-   * the tile after one try. That gate turned out to be redundant and, in its
-   * one reachable case, wrong: this empty state renders only when there are
-   * ZERO prototypes, and trying the demo makes one, so the state disappears on
-   * its own. The single case where the gate would have fired is "tried the
-   * demo, deleted it, have nothing else" — which is exactly when offering it
-   * again is the right thing to do.
-   *
-   * `triedAt` stays on the server. It is the durable record of whether this
-   * machine has ever seen the demo, and a future New-prototype source card can
-   * use it to rank itself. Nothing reads it here.
-   */
-  const showDemoTile = api.demo !== null && !api.demo.present
   const [deleting, setDeleting] = useState(false)
   const dialogOpen = route.view === "new-project"
   // A third view, same mechanism: settings SWAP the list rather than stacking
@@ -309,30 +293,14 @@ export function LauncherPage({
             description="Open a prototype repo to start authoring."
           >
             {/*
-              The demo tile leads, because it is the only option here that
-              needs nothing the reader does not already have. It disappears once
-              the demo has been tried: `triedAt` survives deleting it, so
-              someone who removed it on purpose is not offered it again in the
-              most prominent slot on the page. It stays reachable from the New
-              prototype sources either way.
+              Two ways in, no demo tile. The demo used to lead here as "Try the
+              demo"; since 2026-09-02 it arrives as a PROJECT on a fresh machine
+              (seeded on the first projects request, see the launcher server's
+              `demo/seed.ts`), so this state is only reachable once the demo
+              has been deleted and nothing else has been added. Re-offering
+              the demo to someone who just removed it would undo their delete.
             */}
-            <div
-              className={cn(
-                "grid w-full gap-3 text-left",
-                showDemoTile ? "max-w-3xl sm:grid-cols-3" : "max-w-xl sm:grid-cols-2",
-              )}
-            >
-              {showDemoTile ? (
-                <ChoiceTile
-                  size="lg"
-                  icon={<Sparkles />}
-                  title="Try the demo"
-                  hint="A sample app, ready to edit. Nothing to install."
-                  disabled={busy}
-                  onClick={() => void api.tryDemo()}
-                  data-testid="launcher-empty-try-demo"
-                />
-              ) : null}
+            <div className="grid w-full max-w-xl gap-3 text-left sm:grid-cols-2">
               <ChoiceTile
                 size="lg"
                 icon={<FolderOpen />}
