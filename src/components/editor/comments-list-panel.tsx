@@ -68,7 +68,7 @@ import type { Note } from "@/types/note"
  */
 // desde.design, not desde.dev — the site lives at desde.design (see
 // website/README.md), and this constant had drifted to a domain nothing owns.
-const VIEWER_SETUP_DOCS = "https://desde.design/docs/viewer/projects"
+const VIEWER_SETUP_DOCS = "https://desde.design/docs/viewer/deploy-a-prototype"
 
 interface CommentsListPanelProps {
   onHighlightComment: (commentId: string) => void
