@@ -307,7 +307,7 @@ function MailSettings({
             <>Sending from {email.from}.{" "}</>
           ) : null}
           <a
-            href="https://desde.design/docs/self-hosting/email"
+            href="https://desde.design/docs/viewer/email"
             target="_blank"
             rel="noreferrer"
             className="underline underline-offset-2 hover:no-underline"

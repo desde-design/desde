@@ -23,7 +23,7 @@ export function GithubAppUnreachableBanner() {
       This deployment can&apos;t connect to its GitHub App, so builds and edits are
       unavailable.{" "}
       <a
-        href="https://desde.design/docs/self-hosting/github-app#the-viewer-cant-connect-to-its-github-app"
+        href="https://desde.design/docs/viewer/github-app#the-viewer-cant-connect-to-its-github-app"
         target="_blank"
         rel="noreferrer"
         className="underline underline-offset-2 hover:no-underline"
