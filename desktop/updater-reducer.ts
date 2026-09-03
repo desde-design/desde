@@ -254,16 +254,27 @@ function applyCheckOutcome(state: ReducerState, outcome: CheckOutcome): UpdateSl
       // reuses `this.downloadPromise`). The news is dropped; the next check
       // after this download settles will re-report whatever's still true.
       if (update.stage === "downloading") return unchanged
-      // A re-report of the SAME version is the SAME operation continuing:
-      // it doesn't un-ready a verified download (re-arming a restart the
-      // user may already have been offered), doesn't churn an unchanged
-      // "available", and keeps the operation's identity. A DIFFERENT
-      // version replaces the artifact — the feed changed under us, and
-      // there is no correct reason to hide a newer release from someone
-      // sitting on an older one, verified-and-ready or not — and that
+      // A READY update is frozen, whatever the feed says now (2026-09-03,
+      // codex's second-round finding on the re-check fix). On macOS a
+      // ready update has already been handed to Squirrel.Mac, which unzips
+      // and verifies it in the background and then arms ShipIt; offering a
+      // newer version here would restore autoDownload (updater.ts's
+      // `applyAutoDownload` keys on the phase) exactly as electron-updater
+      // reads it, start the newer download from cache, replace the native
+      // updater, and have the replacement's housekeeping delete the
+      // directory the first one is still working in. The ready update
+      // installs on the next restart, and the newer release is found on
+      // the boot after — the same trade `runCheck()`'s ready gate makes.
+      // This used to replace the artifact ("no correct reason to hide a
+      // newer release from someone sitting on an older one"); the reason
+      // is that the older one is no longer only ours.
+      if (update.stage === "ready") return unchanged
+      // A re-report of the SAME undownloaded version is the SAME operation
+      // continuing: it doesn't churn an unchanged "available" and keeps the
+      // operation's identity. A DIFFERENT version replaces the artifact —
+      // the feed changed under us and nothing is in flight — and that
       // replacement is where a NEW update operation begins, so identity is
       // minted here (invariant rule 2).
-      if (update.stage === "ready" && update.version === outcome.version) return unchanged
       if (update.stage === "available" && update.version === outcome.version) return unchanged
       return {
         update: { stage: "available", version: outcome.version },

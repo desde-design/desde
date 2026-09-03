@@ -314,7 +314,10 @@ export function createUpdater(options: CreateUpdaterOptions): Updater {
    *  running — recorded at `update-downloaded` (macOS runs async native
    *  prep AFTER reporting ready), re-pointed by the next `update-downloaded`.
    *  Consulted by `spontaneousOpStamp` so a superseded update's delayed
-   *  prep error is stamped with ITS operation, not the successor's. */
+   *  prep error is stamped with ITS operation, not the successor's. Since
+   *  2026-09-03 the reducer never supersedes a READY update (see
+   *  `applyCheckOutcome`), so this can no longer differ from the current
+   *  operation; it stays as a defence, not a reachable path. */
   let nativePrepOp: UpdateOpId | null = null
 
   /**

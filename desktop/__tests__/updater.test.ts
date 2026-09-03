@@ -1047,74 +1047,36 @@ describe("createUpdater — the five doors (one bug class, five orderings)", () 
    * operation they were observed against (`nativePrepOp` for delayed prep
    * errors), gated exactly like check conclusions.
    */
-  it("G1: a superseded update's delayed native-prep error does not invalidate its successor", () => {
-    const source = fakeSource()
-    const updater = createUpdater({ autoDownload: true, source, scheduleCheck: fakeScheduler().schedule })
-    source.emit("checking-for-update")
-    source.emit("update-available", { version: "1.0.0" })
-    source.emit("download-progress", { percent: 100 })
-    source.emit("update-downloaded", { version: "1.0.0" })
-    expect(updater.getState().phase).toBe("ready")
-
-    // A recheck finds v2 and supersedes ready(v1) while v1's native prep is
-    // still running.
-    source.emit("checking-for-update")
-    source.emit("update-available", { version: "2.0.0" })
-    expect(updater.getState()).toEqual({ phase: "available", version: "2.0.0" })
-
-    // v1's delayed native signature error finally arrives. It is v1's
-    // outcome; v1's artifact is gone; v2 must stay offered.
-    source.emit("error", new Error("SQRLCodeSignatureErrorDomain: code signature did not pass validation"))
-    expect(updater.getState()).toEqual({ phase: "available", version: "2.0.0" })
-  })
-
-  it("G1: a delayed prep error parked behind the superseding recheck keeps its park-time stamp — parking defers dispatch, never attribution", () => {
-    const source = fakeSource()
-    const updater = createUpdater({ autoDownload: true, source, scheduleCheck: fakeScheduler().schedule })
-    source.emit("checking-for-update")
-    source.emit("update-available", { version: "1.0.0" })
-    source.emit("download-progress", { percent: 100 })
-    source.emit("update-downloaded", { version: "1.0.0" })
-
-    // The recheck is UNSETTLED when v1's prep error arrives, so the error is
-    // parked — stamped, at park time, with v1's operation (the artifact
-    // current at that moment).
-    source.emit("checking-for-update")
-    source.emit("error", new Error("SQRLCodeSignatureErrorDomain: code signature did not pass validation"))
-
-    // The recheck then concludes with v2. Flushing the parked error must
-    // dispatch it under its park-time stamp — v1's — not re-address it to
-    // the v2 artifact the conclusion just created.
-    source.emit("update-available", { version: "2.0.0" })
-    expect(updater.getState()).toEqual({ phase: "available", version: "2.0.0" })
-  })
-
-  it("G1: the successor's own auto-download failure still surfaces while a stale prep error is being diverted", async () => {
+  /**
+   * Since 2026-09-03 a READY update is frozen: a check that concludes with a
+   * newer version while one is ready is dropped by the reducer (see
+   * applyCheckOutcome), because on macOS the ready one already belongs to
+   * the native installer and starting another download destroys its prep
+   * (codex's second-round finding on the re-check fix). The G1 tests that
+   * used to model "v2 supersedes ready(v1) while v1's prep runs" now model
+   * what actually happens there: v1 stays ready, autoDownload stays off at
+   * the moment the library reads it, nothing downloads, and v1's own
+   * delayed outcome still lands on v1.
+   */
+  it("G1 (frozen ready): a late check finding v2 while v1 is ready leaves v1 ready, keeps autoDownload off, and starts no download", async () => {
     const source = fakeSource()
     const updater = createUpdater({ autoDownload: true, source, scheduleCheck: fakeScheduler().schedule })
     source.emit("checking-for-update")
     source.emit("update-available", { version: "1.0.0" })
     source.emit("download-progress", { percent: 40 })
 
-    // The only ordering in which a recheck can supersede a READY update
-    // since 2026-09-02 (no trigger re-checks while ready): it STARTS while
-    // v1 is still downloading and CONCLUDES after v1 reached ready, finding
-    // v2 in an advanced feed. autoDownload then starts v2's download — the
-    // real 6.8.9 shape: `UpdateCheckResult.downloadPromise` carries the
-    // download's own terminal signal.
-    const downloadError = new Error("ECONNRESET: download stream reset")
-    let rejectDownload: ((err: Error) => void) | undefined
+    // The recheck starts mid-download and concludes after v1 reached ready.
+    // The fake mirrors 6.8.9: the emit, THEN the read of `autoDownload`
+    // (which must be false by then), then `downloadUpdate()` only if true.
+    let autoDownloadAtConclusion: boolean | undefined
     let concludeCheck: (() => void) | undefined
     source.checkForUpdates.mockImplementationOnce(() => {
       source.emit("checking-for-update")
       return new Promise((resolve) => {
         concludeCheck = () => {
           source.emit("update-available", { version: "2.0.0" })
-          resolve({
-            downloadPromise: new Promise((_resolve, reject) => {
-              rejectDownload = reject
-            }),
-          })
+          autoDownloadAtConclusion = source.autoDownload
+          resolve({ downloadPromise: source.autoDownload ? source.downloadUpdate() : null })
         }
       })
     })
@@ -1122,45 +1084,52 @@ describe("createUpdater — the five doors (one bug class, five orderings)", () 
     source.emit("download-progress", { percent: 100 })
     source.emit("update-downloaded", { version: "1.0.0" })
     expect(updater.getState()).toEqual({ phase: "ready", version: "1.0.0" })
+    source.downloadUpdate.mockClear()
     concludeCheck?.()
     await Promise.resolve()
     await Promise.resolve()
-    expect(updater.getState()).toEqual({ phase: "available", version: "2.0.0" })
+    expect(updater.getState()).toEqual({ phase: "ready", version: "1.0.0" })
+    expect(autoDownloadAtConclusion).toBe(false)
+    expect(source.downloadUpdate).not.toHaveBeenCalled()
 
-    // v2's download fails: the emit half is diverted to the dead v1 prep op
-    // (dropped), but the downloadPromise rejection is v2's OWN signal and
-    // must land.
-    source.emit("error", downloadError)
-    rejectDownload?.(downloadError)
-    await Promise.resolve()
-    await Promise.resolve()
+    // v1's delayed native-prep error lands on v1 — the artifact it belongs to.
+    source.emit("error", new Error("SQRLCodeSignatureErrorDomain: code signature did not pass validation"))
     expect(updater.getState()).toEqual({
       phase: "error",
-      version: "2.0.0",
-      error: "ECONNRESET: download stream reset",
+      version: "1.0.0",
+      error: "SQRLCodeSignatureErrorDomain: code signature did not pass validation",
+    })
+    // …and only then is auto-download open again.
+    expect(source.autoDownload).toBe(true)
+  })
+
+  it("G1 (frozen ready): a prep error parked behind an unsettled recheck still lands on the ready update once the recheck concludes with v2", () => {
+    const source = fakeSource()
+    const updater = createUpdater({ autoDownload: true, source, scheduleCheck: fakeScheduler().schedule })
+    source.emit("checking-for-update")
+    source.emit("update-available", { version: "1.0.0" })
+    source.emit("download-progress", { percent: 100 })
+    source.emit("update-downloaded", { version: "1.0.0" })
+
+    // The recheck is UNSETTLED when v1's prep error arrives, so it is parked.
+    source.emit("checking-for-update")
+    source.emit("error", new Error("SQRLCodeSignatureErrorDomain: code signature did not pass validation"))
+    expect(updater.getState().phase).toBe("ready")
+
+    // The recheck concludes with v2: dropped (v1 stays ready), the parked
+    // error flushes onto v1.
+    source.emit("update-available", { version: "2.0.0" })
+    expect(updater.getState()).toEqual({
+      phase: "error",
+      version: "1.0.0",
+      error: "SQRLCodeSignatureErrorDomain: code signature did not pass validation",
     })
   })
 
-  /**
-   * G1-P1 (review of the G1 fix itself): ownership must follow the promise
-   * OBJECT, not the moment a check result surfaced it. 6.8.9's
-   * `downloadUpdate()` returns `this.downloadPromise` whenever one is
-   * pending (nulled only in its `.finally`) — and on macOS that promise
-   * stays pending through native preparation, rejecting only when
-   * Squirrel's validation fails. So a recheck that reports v2 during v1's
-   * preparation hands v1's OWN promise back inside v2's check result. A
-   * capture of the current operation at result time stamped that reused
-   * promise v2 — and v1's later rejection then flipped v2 to "error":
-   * exactly the cross-operation invalidation the stamp was built to
-   * prevent, through the promise path. First observation now owns the
-   * promise for good.
-   */
-  it("G1-P1: a reused downloadPromise keeps its ORIGINAL owner — v1's delayed rejection cannot invalidate v2 through v2's check result", async () => {
+  it("G1-P1 (frozen ready): v1's reused downloadPromise rejecting after a v2 conclusion is v1's outcome, on v1", async () => {
     const source = fakeSource()
     const updater = createUpdater({ autoDownload: true, source, scheduleCheck: fakeScheduler().schedule })
 
-    // v1 found; autoDownload starts; v1's check result carries its
-    // downloadPromise, which stays PENDING through native preparation.
     let rejectV1Download: ((err: Error) => void) | undefined
     const v1DownloadPromise = new Promise((_resolve, reject) => {
       rejectV1Download = reject
@@ -1173,14 +1142,11 @@ describe("createUpdater — the five doors (one bug class, five orderings)", () 
     updater.checkForUpdates()
     await Promise.resolve()
     await Promise.resolve()
-
     source.emit("download-progress", { percent: 40 })
 
-    // A recheck starts while v1 is still downloading (the only ordering
-    // that can still supersede a ready update — no trigger re-checks while
-    // ready) and reports v2 after v1 reached ready, while v1's preparation
-    // is still pending. Like the real library, it does NOT start a second
-    // download — it returns v1's EXISTING promise object inside v2's result.
+    // A recheck starts mid-download and reports v2 after v1 reached ready,
+    // handing v1's EXISTING promise back inside its result (6.8.9 reuses a
+    // pending downloadPromise).
     let concludeCheck: (() => void) | undefined
     source.checkForUpdates.mockImplementationOnce(() => {
       source.emit("checking-for-update")
@@ -1194,22 +1160,21 @@ describe("createUpdater — the five doors (one bug class, five orderings)", () 
     updater.checkForUpdates()
     source.emit("download-progress", { percent: 100 })
     source.emit("update-downloaded", { version: "1.0.0" })
-    expect(updater.getState()).toEqual({ phase: "ready", version: "1.0.0" })
     concludeCheck?.()
     await Promise.resolve()
     await Promise.resolve()
-    expect(updater.getState()).toEqual({ phase: "available", version: "2.0.0" })
+    expect(updater.getState()).toEqual({ phase: "ready", version: "1.0.0" })
 
-    // v1's native preparation fails: MacUpdater forwards the native "error"
-    // AND the still-pending download promise rejects.
     const prepError = new Error("SQRLCodeSignatureErrorDomain: code signature did not pass validation")
     source.emit("error", prepError)
     rejectV1Download?.(prepError)
     await Promise.resolve()
     await Promise.resolve()
-
-    // v1's outcome belongs to v1, whose artifact is gone. v2 stays offered.
-    expect(updater.getState()).toEqual({ phase: "available", version: "2.0.0" })
+    expect(updater.getState()).toEqual({
+      phase: "error",
+      version: "1.0.0",
+      error: "SQRLCodeSignatureErrorDomain: code signature did not pass validation",
+    })
   })
 
   /**

@@ -205,10 +205,14 @@ describe("reduceUpdateState — out-of-order and duplicate events", () => {
     expect(result.activeCheckId).toBeNull()
   })
 
-  it("'available' for a DIFFERENT version while ready DOES still override — no in-flight download to mislabel", () => {
+  it("'available' for a DIFFERENT version while ready does NOT override — the ready update is already the native installer's, and installs on restart", () => {
     const ready = state({ stage: "ready", version: "1.0.0" })
-    const result = reduceUpdateState(ready, concluded(null, available("1.1.0")))
-    expect(projectUpdateState(result)).toEqual({ phase: "available", version: "1.1.0" })
+    expect(reduceUpdateState(ready, concluded(null, available("1.1.0")))).toBe(ready)
+    // A check the reducer saw start is still consumed — it concluded.
+    const readyWithCheck = { ...reduceUpdateState(ready, started(2)) }
+    const result = reduceUpdateState(readyWithCheck, concluded(2, available("1.1.0")))
+    expect(result.update).toBe(ready.update)
+    expect(result.activeCheckId).toBeNull()
   })
 
   it("a stale 'not-available' racing behind a successful check does not clobber it", () => {
@@ -665,25 +669,22 @@ describe("reduceUpdateState — invariant: conclusions are gated on operation id
  */
 describe("reduceUpdateState — update outcomes are gated on update-operation identity (G1)", () => {
   it("a superseded update's stamped failure is dropped whole — it cannot invalidate its successor", () => {
-    // v1 downloads and reaches ready; on macOS its native install prep now
-    // runs asynchronously.
-    let s = run([started(1), concluded(1, available("1.0.0")), progress(100), downloaded("1.0.0")])
+    // v1 is offered but not downloaded (autoDownload off). Since 2026-09-03
+    // a READY update can no longer be superseded (see applyCheckOutcome), so
+    // "available" is the only stage a newer release replaces.
+    let s = run([started(1), concluded(1, available("1.0.0"))])
     const v1Op = s.updateOpId
     expect(v1Op).not.toBeNull()
 
-    // A recheck supersedes ready(v1) with available(v2) — a NEW operation.
+    // A recheck supersedes available(v1) with available(v2) — a NEW operation.
     s = reduceUpdateState(s, started(2))
     s = reduceUpdateState(s, concluded(2, available("2.0.0")))
     expect(s.updateOpId).not.toBe(v1Op)
 
-    // v1's delayed native-prep error finally arrives, stamped with v1's
-    // operation (updater.ts's `nativePrepOp` tracking). v1's artifact is
-    // gone — the outcome has nothing left to invalidate, and must not
-    // invalidate v2.
-    const after = reduceUpdateState(
-      s,
-      updateFailed("SQRLCodeSignatureErrorDomain: code signature did not pass validation", v1Op),
-    )
+    // A late failure stamped with v1's operation (a manual download of v1
+    // that was still running) arrives. v1's artifact is gone — the outcome
+    // has nothing left to invalidate, and must not invalidate v2.
+    const after = reduceUpdateState(s, updateFailed("ECONNRESET: download stream reset", v1Op))
     expect(after).toBe(s)
     expect(projectUpdateState(after)).toEqual({ phase: "available", version: "2.0.0" })
   })
@@ -718,9 +719,17 @@ describe("reduceUpdateState — update outcomes are gated on update-operation id
     s = reduceUpdateState(s, concluded(2, available("1.0.0")))
     expect(s.updateOpId).toBe(op)
 
-    // A different version replaces the artifact: a NEW operation begins.
+    // A different version while READY is dropped (the ready update is the
+    // native installer's now — see applyCheckOutcome): same operation.
     s = reduceUpdateState(s, started(3))
     s = reduceUpdateState(s, concluded(3, available("2.0.0")))
+    expect(s.updateOpId).toBe(op)
+
+    // Once that operation ends (its install prep failed) and a different
+    // version is offered, a NEW operation begins.
+    s = reduceUpdateState(s, updateFailed("SQRLCodeSignatureErrorDomain: did not pass validation", op))
+    s = reduceUpdateState(s, started(4))
+    s = reduceUpdateState(s, concluded(4, available("2.0.0")))
     expect(s.updateOpId).not.toBe(op)
   })
 })
