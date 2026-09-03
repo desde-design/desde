@@ -241,6 +241,14 @@ describe("InspectorPanel", () => {
     fireEvent.change(rowKeyInput, { target: { value: "uuid" } })
     fireEvent.blur(rowKeyInput)
     expect(onPropEdit).toHaveBeenCalledWith("rowKey", "uuid")
+
+    // The explanatory note sits beside sections that carry `px-3`, so it
+    // takes the same inset; it printed flush against the rail's border
+    // before (Mo, 2026-09-02). And it names what is missing in the reader's
+    // terms, not ours: no "manifest".
+    const note = screen.getByText(/No prop definitions were found for this component/)
+    expect(note).toHaveClass("px-3")
+    expect(note.textContent).not.toMatch(/manifest/i)
   })
 
   it("shows the Detach action only for prototype-authored components (componentFile outside node_modules)", async () => {

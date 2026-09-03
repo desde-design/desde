@@ -793,9 +793,13 @@ function InspectorPanelImpl({
             </>
           ) : null}
           {!manifest && selection && !selection.selectedAsElement ? (
-            <p className="text-xs text-muted-foreground">
-              No manifest available for this component, so only DOM
-              properties are editable.
+            // Sits beside sections that carry their own `px-3`, so it needs
+            // the same inset or it prints flush against the rail's border
+            // (Mo, 2026-09-02). "Manifest" is our word, not the reader's: say
+            // what is missing and what that changes.
+            <p className="px-3 text-xs text-muted-foreground">
+              No prop definitions were found for this component, so only
+              element properties can be edited.
             </p>
           ) : null}
         </div>
@@ -1158,7 +1162,7 @@ function CurrentPropsSection({
     <section aria-label="Props" className="px-3 space-y-3">
       <SectionHeader
         title="Props"
-        description="Live prop values. No manifest for this component, so types and unset props aren't available."
+        description="Live prop values. No prop definitions were found, so types and unset props aren't shown."
       />
       <div className="space-y-3">
         {editable.map(([name, value]) => (
@@ -1227,7 +1231,9 @@ function AttributeRow({
  * the bridge's fields, but it has the same "do not clobber what I am typing"
  * requirement, and a field id can never collide with it.
  */
-const CLASSES_FIELD_ID = " classes"
+// Written as an escape, not a literal NUL byte: the same string at runtime,
+// but a raw NUL makes git and grep treat this whole file as binary.
+const CLASSES_FIELD_ID = "\u0000classes"
 
 function DomSection({
   selection,
