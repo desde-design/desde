@@ -47,18 +47,6 @@
     "file recreated the same 36 errors returned. Only `exclude` outranks the",
     "glob."
   ],
-  "_excludeNote_editorCliDemo": [
-    "`editor-cli/demo` is the bundled demo prototype: a STANDALONE Vite app with",
-    "its own tsconfig, whose `@/*` alias points at its OWN src/. This config's",
-    "alias points at the repo's src/, so without this exclude the root checker",
-    "resolves the demo's imports against the wrong components and reports",
-    "whichever ones the repo happens not to have. MEASURED: it passed on button,",
-    "badge, card and switch (which exist in both trees) and failed only on",
-    "table — i.e. it was silently checking the demo against the wrong files and",
-    "would have kept doing so. Same category as viewer/, website/ and desktop/.",
-    "`editor-cli/self-host` is deliberately NOT excluded: its alias points at the",
-    "repo's src/ on purpose, so the root checker is correct there."
-  ],
   "include": ["**/*.ts", "**/*.tsx", "**/*.mts"],
   "exclude": [
     "node_modules",
@@ -70,7 +58,6 @@
     "src/editor/adapters/storybook/__fixtures__",
     "src/editor/adapters/local-vue/__fixtures__",
     "ai-gateway-prototype",
-    "editor-cli/demo",
     "tasks/_archive",
     "viewer",
     "website",

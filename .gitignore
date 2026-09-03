@@ -83,7 +83,7 @@ next-env.d.ts
 # patch goes wrong. Pruned manually; .desde/ is .gitignore'd in
 # every prototype that this composer touches.
 #
-# ONE exception is tracked anyway: `editor-cli/demo/.desde/config.json`, the
+# ONE exception is tracked anyway: `viewer/fixtures/demo-react/.desde/config.json`, the
 # bundled demo's pre-filled viewer link, which is what makes "Open in viewer"
 # and "Copy link" work on first launch with no setup. It is tracked via
 # `git add -f`, NOT via a negation here. A negation cannot work: the CLI's own

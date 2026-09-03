@@ -149,7 +149,7 @@ export function devPathsFrom(modulePath: string): {
     stampersDir: resolvePath(repoRoot, "editor-cli", "src", "attach", "stampers"),
     editorCliPackageJson: resolvePath(repoRoot, "editor-cli", "package.json"),
     iconPreviewDir: resolvePath(repoRoot, "src", "editor", "icon-preview"),
-    demoFixtureDir: resolvePath(repoRoot, "editor-cli", "demo"),
+    demoFixtureDir: resolvePath(repoRoot, "viewer", "fixtures", "demo-react"),
   }
 }
 
@@ -232,12 +232,15 @@ export function resolveIconPreviewDir(): string {
 }
 
 /**
- * `<payload>/demo`, or `<repo>/editor-cli/demo` in a checkout.
+ * `<payload>/demo`, or `<repo>/viewer/fixtures/demo-react` in a checkout.
  *
  * The bundled demo prototype: a standalone Vite + React app the launcher copies
- * to `~/.desde/demo/` on first click. Source is tracked; its `node_modules` are
- * installed into the staged payload at packaging time, which is what keeps the
- * `lightningcss` native binary correct per architecture.
+ * to `~/.desde-demo/` on first launch. It is the SAME app the viewer seeds and
+ * demo.desde.design serves, on purpose: the Editor used to carry its own copy
+ * under `editor-cli/demo`, and by 2026-09-03 it had drifted into a different
+ * prototype from the one every screenshot and the marketing story showed.
+ * Source is tracked; its `node_modules` are installed into the staged payload
+ * at packaging time.
  *
  * A missing directory is not this function's problem — it returns a path, and
  * the materializer decides what to do when nothing is there. That matters

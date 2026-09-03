@@ -220,9 +220,9 @@ describe("resolvers — EDITOR_PAYLOAD_ROOT unset (dev checkout)", () => {
     })
   })
 
-  it("resolveDemoFixtureDir -> <repo>/editor-cli/demo", () => {
+  it("resolveDemoFixtureDir -> <repo>/viewer/fixtures/demo-react", () => {
     withEnv(undefined, () => {
-      expect(resolveDemoFixtureDir()).toBe(resolvePath(REPO_ROOT, "editor-cli", "demo"))
+      expect(resolveDemoFixtureDir()).toBe(resolvePath(REPO_ROOT, "viewer", "fixtures", "demo-react"))
     })
   })
 
@@ -271,7 +271,7 @@ describe("depth invariance — the check that protects the bundle", () => {
       stampersDir: resolvePath(REPO_ROOT, "editor-cli", "src", "attach", "stampers"),
       editorCliPackageJson: resolvePath(REPO_ROOT, "editor-cli", "package.json"),
       iconPreviewDir: resolvePath(REPO_ROOT, "src", "editor", "icon-preview"),
-      demoFixtureDir: resolvePath(REPO_ROOT, "editor-cli", "demo"),
+      demoFixtureDir: resolvePath(REPO_ROOT, "viewer", "fixtures", "demo-react"),
     })
   })
 })

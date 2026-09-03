@@ -303,17 +303,17 @@ async function copyArtifacts(out: string): Promise<CopyResult> {
   // separately would risk interleaving two different builds.
   await copyDir(join(EDITOR_CLI_ROOT, "ui-src", "dist"), join(out, "ui"))
 
-  // The bundled demo prototype — SOURCE only. Its own node_modules are
-  // installed into the staged copy below rather than copied, which is what
-  // keeps its `lightningcss` native binary matched to the architecture the
-  // payload is being staged for. `resolveDemoFixtureDir` (payload-paths.ts)
+  // The bundled demo prototype — SOURCE only, and the same app the viewer
+  // seeds (`viewer/fixtures/demo-react`; see `resolveDemoFixtureDir` in
+  // payload-paths.ts for why there is one copy). Its own node_modules are
+  // installed into the staged copy below rather than copied, so a native
+  // binary in its tree can never be the host's. `resolveDemoFixtureDir`
   // expects it at `<out>/demo`.
   //
   // node_modules and dist are removed after the copy rather than filtered
-  // during it: `editor-cli/demo/.gitignore` keeps both out of git, so a clean
-  // checkout has neither, but a checkout where the demo has been run locally
-  // has both and would otherwise ship a host-architecture install.
-  await copyDir(join(EDITOR_CLI_ROOT, "demo"), join(out, "demo"))
+  // during it: the viewer tracks `dist/` (it is what the viewer serves) and a
+  // checkout where the demo has been run locally has node_modules too.
+  await copyDir(join(REPO_ROOT, "viewer", "fixtures", "demo-react"), join(out, "demo"))
   await fs.rm(join(out, "demo", "node_modules"), { recursive: true, force: true })
   await fs.rm(join(out, "demo", "dist"), { recursive: true, force: true })
   // `.desde/config.json` MUST ship — it is the pre-filled viewer link, and the
@@ -639,13 +639,11 @@ function runNpmInstall(out: string): void {
  * tree: the demo is a standalone prototype, and resolving its dependencies the
  * way any user repo would is the whole point of shipping it.
  *
- * `--omit=dev` is correct here, but only because the demo's package.json puts
- * Tailwind in `dependencies` rather than `devDependencies`. Its vite.config
- * loads the PostCSS plugin at SERVE time, so a supervised prototype needs it at
- * runtime; classifying it as build-only would install a demo that cannot boot.
- * `vite` itself stays a devDependency and is deliberately absent, because the
- * Editor supplies its own — which is why that config must not import
- * `defineConfig` (see editor-cli/demo/vite.config.ts).
+ * `--omit=dev` is correct here because the demo's runtime needs are its
+ * `dependencies` alone (React). `vite` stays a devDependency and is
+ * deliberately absent, because the Editor supplies its own — which is why that
+ * config must not import `defineConfig` (see
+ * viewer/fixtures/demo-react/vite.config.ts).
  */
 function runDemoNpmInstall(out: string): void {
   const demoDir = join(out, "demo")
