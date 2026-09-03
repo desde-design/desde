@@ -231,7 +231,7 @@ it("seeds comments and replies when a page prefix is given", async () => {
   // Every seeded author, on comments and replies alike, carries a portrait,
   // so no pin or rail row falls back to an initial (Mo, 2026-09-02).
   const authors = [...comments.map((c) => c.author), ...comments.flatMap((c) => c.replies.map((r) => r.author))]
-  for (const a of authors) expect(a.photoURL.startsWith("data:image/svg+xml;base64,")).toBe(true)
+  for (const a of authors) expect(a.photoURL.startsWith("data:image/webp;base64,")).toBe(true)
 })
 
 it("seeds nothing when no page prefix is given", async () => {
