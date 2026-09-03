@@ -60,12 +60,14 @@ export function Button({
     // click itself, leave the tab order, and say so to assistive tech.
     return (
       <a
+        {...(rest as ComponentPropsWithoutRef<"a">)}
         className={className}
         href={href}
         onClick={disabled ? (event) => event.preventDefault() : onClick}
+        // After the spread, so a caller's tabIndex or aria-disabled cannot
+        // contradict a disabled link (review finding, 2026-09-03).
         aria-disabled={disabled || undefined}
         tabIndex={disabled ? -1 : undefined}
-        {...(rest as ComponentPropsWithoutRef<"a">)}
       >
         {children}
       </a>
