@@ -366,6 +366,7 @@ const REACT_HOST_FIBER_TAGS = new Set([5, 26, 27])
 const REACT_HOST_ROOT_TAG = 3
 const REACT_PORTAL_TAG = 4
 const REACT_HOST_TEXT_TAG = 6
+const REACT_OFFSCREEN_TAG = 22
 
 type ReactFiber = Record<string, unknown>
 
@@ -462,14 +463,29 @@ export function getReactComponentMountRoot(fiber: ReactFiber): Element | null {
   return only.stateNode instanceof Element ? only.stateNode : null
 }
 
-/** Push the hosts that begin the output of `first` and its siblings; give up past the second. */
+/**
+ * Push the hosts that begin the output of `first` and its siblings; give up
+ * past the second.
+ *
+ * Two subtrees are not part of the output and are stepped over rather than
+ * descended into. A portal's content is mounted elsewhere in the DOM. And a
+ * HIDDEN Offscreen subtree is the stale content React keeps behind a
+ * Suspense fallback: a boundary that re-suspends with existing content lays
+ * out as `Suspense.child = Offscreen(hidden, the old tree)` with the
+ * fallback as its SIBLING, so counting both made every component wrapping a
+ * re-suspending boundary look multi-root and lose its label (codex,
+ * 2026-09-03). React marks an Offscreen fiber hidden by giving it a
+ * `memoizedState`; a visible one (a shown Activity boundary) has null there
+ * and is descended into like any other wrapper.
+ */
 function collectOutputRoots(first: ReactFiber | null | undefined, out: ReactFiber[], budget: { n: number }): void {
   let cur = first
   while (cur && out.length < 2 && budget.n-- > 0) {
     const tag = cur.tag as number | undefined
+    const hidden = tag === REACT_OFFSCREEN_TAG && cur.memoizedState != null
     if (typeof tag === "number" && (REACT_HOST_FIBER_TAGS.has(tag) || tag === REACT_HOST_TEXT_TAG)) {
       out.push(cur)
-    } else if (tag !== REACT_PORTAL_TAG) {
+    } else if (tag !== REACT_PORTAL_TAG && !hidden) {
       collectOutputRoots(cur.child as ReactFiber | null | undefined, out, budget)
     }
     cur = cur.sibling as ReactFiber | null | undefined
@@ -578,16 +594,23 @@ export function buildReactComponentTree(el: Element): ComponentTreeNode[] {
         } catch { /* ignore */ }
 
         // `React.memo(fn, compare)` is a MemoComponent fiber (tag 14) whose
-        // child is the inner FunctionComponent fiber for the same component:
-        // one component, two fibers, and the inner one was pushed just
-        // before. Only that shape is a duplicate. Two DIFFERENT components
-        // that share a name and a root are both real: the bundled Acme demo
-        // has a first-party Button wrapping base-ui's Button at one
-        // <button>, and dropping the wrapper handed the rail the library's
-        // props (measured, 2026-09-02).
+        // child is the inner fiber for the same component: one component,
+        // two fibers. `memo(memo(fn))` is three, so the check walks the
+        // whole wrapper chain rather than one link, and a skipped wrapper
+        // takes the place of the node it wrapped (codex, 2026-09-03).
+        //
+        // The name has to match too. Two DIFFERENT components can share a
+        // root: the bundled Acme demo has a first-party Button wrapping
+        // base-ui's Button at one <button>, and dropping the wrapper handed
+        // the rail the library's props (measured, 2026-09-02).
         const memoWrapperOfLast =
-          fiber.tag === 14 && lastPushed !== null && lastPushed.return === fiber
-        if (!memoWrapperOfLast) {
+          fiber.tag === 14 &&
+          lastPushed !== null &&
+          lastPushed.return === fiber &&
+          reactComponentName(lastPushed.type) === name
+        if (memoWrapperOfLast) {
+          lastPushed = fiber
+        } else {
           lastPushed = fiber
           chain.push({
             name,

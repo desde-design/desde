@@ -289,6 +289,47 @@ describe("React mount roots", () => {
     expect(reactComponentName("div")).toBeNull()
   })
 
+  it("a re-suspending Suspense boundary: the hidden primary content is not a root, so the visible fallback is", () => {
+    // React lays out a boundary that re-suspends with existing content as
+    // Suspense.child = an Offscreen fiber (hidden, carrying the stale
+    // primary tree) whose SIBLING is the fallback fragment. Counting both
+    // gave two roots and so no root at all, and the component that wraps
+    // the boundary lost its label (codex, 2026-09-03).
+    const chart = el("div", "chart"); const spinner = el("div", "spinner")
+    document.body.replaceChildren(chart, spinner)
+    const Panel = componentFiber("Panel")
+    const suspense: FakeFiber = { tag: 13, type: null, stateNode: null, child: null, sibling: null, return: null }
+    // `memoizedState !== null` on an Offscreen fiber is React's "hidden".
+    const offscreen: FakeFiber = { tag: 22, type: null, stateNode: null, child: null, sibling: null, return: null, memoizedState: { baseLanes: 0 } }
+    const fallback: FakeFiber = { tag: 7, type: null, stateNode: null, child: null, sibling: null, return: null }
+    under(Panel, suspense); under(suspense, offscreen)
+    offscreen.sibling = fallback; fallback.return = suspense
+    under(offscreen, hostFiber(chart)); under(fallback, hostFiber(spinner))
+    expect(getReactComponentMountRoot(Panel)).toBe(spinner)
+    expect(detectReactOutlineComponent(spinner)?.name).toBe("Panel")
+  })
+
+  it("a visible Offscreen subtree still counts (an Activity boundary that is showing)", () => {
+    const shown = el("div", "shown"); document.body.replaceChildren(shown)
+    const Holder = componentFiber("Holder")
+    const offscreen: FakeFiber = { tag: 22, type: null, stateNode: null, child: null, sibling: null, return: null, memoizedState: null }
+    under(under(Holder, offscreen), hostFiber(shown))
+    expect(getReactComponentMountRoot(Holder)).toBe(shown)
+  })
+
+  it("memo(memo(fn)) is one node: the dedupe follows the whole wrapper chain, not one link", () => {
+    // Two comparator memos give two MemoComponent fibers above the function's
+    // own, and a dedupe that only compared against the node just pushed
+    // collapsed one of them and left the other (codex, 2026-09-03).
+    const span = el("span", "twice-memo"); document.body.replaceChildren(span)
+    const inner = { Chip: function () {} }.Chip
+    const innerMemo: FakeFiber = { tag: 14, type: { $$typeof: Symbol.for("react.memo"), type: inner, compare: () => false }, stateNode: null, child: null, sibling: null, return: null, memoizedProps: { tone: "info" } }
+    const outerMemo: FakeFiber = { tag: 14, type: { $$typeof: Symbol.for("react.memo"), type: { $$typeof: Symbol.for("react.memo"), type: inner, compare: () => false }, compare: () => false }, stateNode: null, child: null, sibling: null, return: null, memoizedProps: { tone: "info" } }
+    const fn: FakeFiber = { tag: 0, type: inner, stateNode: null, child: null, sibling: null, return: null, memoizedProps: { tone: "info" } }
+    under(under(under(outerMemo, innerMemo), fn), hostFiber(span))
+    expect(buildReactComponentTree(span).map((n) => n.name)).toEqual(["Chip"])
+  })
+
   it("internal and anonymous wrappers are skipped, not reported", () => {
     const div = el("div"); document.body.replaceChildren(div)
     const Named = componentFiber("Named")
