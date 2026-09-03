@@ -1136,14 +1136,21 @@ describe("createUpdater — the five doors (one bug class, five orderings)", () 
     const v1DownloadPromise = new Promise((_resolve, reject) => {
       rejectV1Download = reject
     })
+    source.downloadUpdate.mockImplementationOnce(() => v1DownloadPromise)
     source.checkForUpdates.mockImplementationOnce(() => {
       source.emit("checking-for-update")
       source.emit("update-available", { version: "1.0.0" })
-      return Promise.resolve({ downloadPromise: v1DownloadPromise })
+      // Same shape as the v2 conclusion below, for the same reason (codex,
+      // round four): 6.8.9 reads `autoDownload` AFTER the emit and only then
+      // calls `downloadUpdate()`. With nothing in hand yet the flag is still
+      // on, so v1's own download starts — and a regression that forced the
+      // flag off here would hand back `null` and fail this test.
+      return Promise.resolve({ downloadPromise: source.autoDownload ? source.downloadUpdate() : null })
     })
     updater.checkForUpdates()
     await Promise.resolve()
     await Promise.resolve()
+    expect(source.downloadUpdate).toHaveBeenCalledTimes(1)
     source.emit("download-progress", { percent: 40 })
 
     // A recheck starts mid-download and reports v2 after v1 reached ready.
