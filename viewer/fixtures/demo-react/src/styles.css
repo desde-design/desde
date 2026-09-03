@@ -138,7 +138,10 @@ body {
   border-radius: 7px;
 }
 
-.actions { display: flex; gap: 10px; margin-top: 20px; }
+/* The action sits at the card's right edge, beside the rail, so a zoomed
+   screenshot shows the button and the panel editing it in one frame (Mo,
+   2026-09-02). */
+.actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 
 .button {
   padding: 8px 16px;
