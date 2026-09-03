@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { access, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises"
+import { access, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
@@ -88,7 +88,7 @@ describe("materializeDemo", () => {
     await mkdir(join(staged, "left-pad"), { recursive: true })
     await mkdir(join(staged, ".bin"), { recursive: true })
     await writeFile(join(staged, "left-pad", "index.js"), "module.exports = (s) => s\n", "utf8")
-    await execFileAsync("ln", ["-s", "../left-pad/index.js", join(staged, ".bin", "left-pad")])
+    await symlink("../left-pad/index.js", join(staged, ".bin", "left-pad"))
     await execFileAsync("tar", ["-czf", join(fixtureDir, DEMO_NODE_MODULES_ARCHIVE), "-C", fixtureDir, "node_modules"])
     await rm(staged, { recursive: true, force: true })
 

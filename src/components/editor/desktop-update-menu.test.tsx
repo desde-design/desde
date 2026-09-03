@@ -66,6 +66,22 @@ describe("describeUpdateCheck", () => {
     expect(describeUpdateCheck({ status: "performed" }, { phase: "ready", version: "1.5.0" }, "0.1.1", true)).toEqual({
       kind: "restarting",
     })
+    // …and if that ready update then fails its native prep, the failure is
+    // shown, not "checks aren't available" (codex, 2026-09-02).
+    expect(
+      describeUpdateCheck({ status: "not-performed" }, { phase: "error", version: "1.5.0", error: "ditto: lstat" }, "0.1.1"),
+    ).toEqual({ kind: "error", scope: "update", message: "ditto: lstat" })
+    // A restart that stood down leaves no click result; the update in hand
+    // is the view, never a permanent "Checking for updates".
+    expect(describeUpdateCheck(undefined, { phase: "ready", version: "1.5.0" }, "0.1.1", false)).toEqual({
+      kind: "ready",
+      version: "1.5.0",
+    })
+    expect(describeUpdateCheck(undefined, { phase: "error", version: "1.5.0", error: "deadline" }, "0.1.1")).toEqual({
+      kind: "error",
+      scope: "update",
+      message: "deadline",
+    })
     expect(describeUpdateCheck({ status: "not-performed" }, idle, "0.1.1")).toEqual({
       kind: "not-performed",
     })

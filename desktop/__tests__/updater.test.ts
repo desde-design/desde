@@ -688,6 +688,60 @@ describe("createUpdater — setAutoDownload", () => {
     updater.setAutoDownload(true)
     expect(source.autoDownload).toBe(true)
   })
+
+  /**
+   * electron-updater reads `autoDownload` when a check CONCLUDES. A check
+   * that starts mid-download and concludes after the zip was handed to
+   * Squirrel.Mac would otherwise start a second download from cache — the
+   * second native run that deletes the first one's unzip directory (the
+   * 2026-09-02 field failure's other ordering). So the live flag is forced
+   * off while an update is downloading or ready, and restored after.
+   */
+  it("forces the live flag off while an update is downloading or ready, and restores it when the update leaves those phases", () => {
+    const source = fakeSource()
+    const updater = createUpdater({ autoDownload: true, source, scheduleCheck: fakeScheduler().schedule })
+    source.emit("checking-for-update")
+    source.emit("update-available", { version: "1.2.0" })
+    expect(source.autoDownload).toBe(true) // the first download must still start
+    source.emit("download-progress", { percent: 40 })
+    expect(source.autoDownload).toBe(false)
+    source.emit("update-downloaded", { version: "1.2.0" })
+    expect(source.autoDownload).toBe(false)
+    // A late-concluding recheck finds the same version: nothing new to download.
+    source.emit("checking-for-update")
+    source.emit("update-available", { version: "1.2.0" })
+    expect(source.autoDownload).toBe(false)
+    // The ready update fails its native prep: the flag comes back for the retry.
+    source.emit("error", new Error("ditto: Could not lstat …: No such file or directory"))
+    expect(updater.getState().phase).toBe("error")
+    expect(source.autoDownload).toBe(true)
+  })
+
+  it("remembers a toggle made while the flag is forced off, and applies it once the update is gone", () => {
+    const source = fakeSource()
+    const updater = createUpdater({ autoDownload: true, source, scheduleCheck: fakeScheduler().schedule })
+    source.emit("checking-for-update")
+    source.emit("update-available", { version: "1.2.0" })
+    source.emit("download-progress", { percent: 40 })
+    expect(source.autoDownload).toBe(false)
+    updater.setAutoDownload(true)
+    expect(source.autoDownload).toBe(false) // still in hand
+    updater.setAutoDownload(false)
+    source.emit("error", new Error("ECONNRESET"))
+    expect(source.autoDownload).toBe(false) // the user's latest setting, not the boot value
+    updater.setAutoDownload(true)
+    expect(source.autoDownload).toBe(true)
+  })
+
+  it("leaves the flag off while ready even when the download was manual, so its native prep is protected too", () => {
+    const source = fakeSource()
+    createUpdater({ autoDownload: false, source, scheduleCheck: fakeScheduler().schedule })
+    source.emit("checking-for-update")
+    source.emit("update-available", { version: "1.2.0" })
+    source.emit("download-progress", { percent: 100 })
+    source.emit("update-downloaded", { version: "1.2.0" })
+    expect(source.autoDownload).toBe(false)
+  })
 })
 
 /**

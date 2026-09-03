@@ -286,7 +286,9 @@ function failureMessage(err: unknown): string {
 
 export function createUpdater(options: CreateUpdaterOptions): Updater {
   const source = options.source ?? (autoUpdater as unknown as UpdaterEventSource)
-  source.autoDownload = options.autoDownload
+  /** The user's setting. What `source.autoDownload` is allowed to be when no update is in hand — see `applyAutoDownload`. */
+  let desiredAutoDownload = options.autoDownload
+  source.autoDownload = desiredAutoDownload
   source.autoInstallOnAppQuit = true
   if (options.forceDevUpdateConfig) source.forceDevUpdateConfig = true
 
@@ -315,6 +317,27 @@ export function createUpdater(options: CreateUpdaterOptions): Updater {
    *  prep error is stamped with ITS operation, not the successor's. */
   let nativePrepOp: UpdateOpId | null = null
 
+  /**
+   * The library reads `autoDownload` at the moment a check CONCLUDES
+   * (`doCheckForUpdates`: `this.autoDownload ? this.downloadUpdate() : null`),
+   * not when it starts. So the start-time gate in `runCheck()` (below) is
+   * not enough on macOS: a check that begins while a download is running
+   * and concludes after that download was handed to Squirrel.Mac would
+   * start a SECOND download from cache — which re-runs
+   * `MacUpdater.updateDownloaded()`, replaces Electron's SQRLUpdater, and
+   * has the replacement's housekeeping delete the directory the first one
+   * is still unzipping (the 2026-09-02 field failure; codex found this
+   * ordering after the start-time gate shipped). While an update is being
+   * downloaded or is ready, the live flag is therefore forced off, whatever
+   * the user's setting says; it is restored the moment the update leaves
+   * those phases (fails, or the artifact goes away). The user's setting is
+   * kept in `desiredAutoDownload` so a toggle during a download is not lost.
+   */
+  function applyAutoDownload(): void {
+    const inHand = wireState.phase === "downloading" || wireState.phase === "ready"
+    source.autoDownload = desiredAutoDownload && !inHand
+  }
+
   function apply(event: UpdaterEvent): void {
     const next = reduceUpdateState(reducerState, event)
     // Reference-equal means the reducer judged this a no-op (stale/duplicate/
@@ -322,6 +345,10 @@ export function createUpdater(options: CreateUpdaterOptions): Updater {
     if (next === reducerState) return
     reducerState = next
     const nextWire = projectUpdateState(next)
+    // Kept in step with the phase BEFORE the visible-change filter below:
+    // the flag depends on the phase alone, and a phase change is always a
+    // visible change, but this ordering keeps the two from ever drifting.
+    const phaseChanged = nextWire.phase !== wireState.phase
     // Only a VISIBLE change notifies: internal bookkeeping (a check starting
     // while an update stays displayed) must not spam subscribers with
     // identical states.
@@ -334,6 +361,7 @@ export function createUpdater(options: CreateUpdaterOptions): Updater {
       return
     }
     wireState = nextWire
+    if (phaseChanged) applyAutoDownload()
     for (const cb of listeners) cb(wireState)
   }
 
@@ -605,7 +633,12 @@ export function createUpdater(options: CreateUpdaterOptions): Updater {
     // stays ready; the caller sees `performed: false` and the UI reads the
     // state machine ("ready") for the truth. Once the ready update FAILS
     // (a native-prep error flips it to "error"), checking is open again —
-    // that is the recovery path.
+    // that is the recovery path. This gate only covers checks that START
+    // while ready; `applyAutoDownload()` covers the ones that start earlier
+    // and conclude later. The gate is deliberately not macOS-only: a ready
+    // update that the feed has since replaced installs on the next restart
+    // and the newer one is found on the boot after — a tolerable cost for
+    // one rule on every platform.
     if (wireState.phase === "ready") {
       return Promise.resolve({ performed: false })
     }
@@ -751,7 +784,8 @@ export function createUpdater(options: CreateUpdaterOptions): Updater {
     // knows precisely when THIS click's check has settled.
     checkForUpdates: () => runCheck(),
     setAutoDownload: (value) => {
-      source.autoDownload = value
+      desiredAutoDownload = value
+      applyAutoDownload()
     },
     dispose: () => {
       timer.stop()

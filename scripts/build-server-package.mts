@@ -43,7 +43,7 @@
  */
 import { execFileSync, spawnSync } from "node:child_process"
 import { existsSync, readFileSync, promises as fs } from "node:fs"
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 // `editor-cli/package.json` declares `"type": "module"`, so files under
 // `editor-cli/src/**` compile as real ESM (module format is decided by the
@@ -491,12 +491,19 @@ async function generatePackageJson(out: string): Promise<Record<string, string>>
  *     KEPT whatever their extension: `desktop/scripts/generate-notices.mjs`
  *     resolves them by name for the shipped notices, and they are the legal
  *     reason a package may be redistributed at all.
- *   - `test/`, `tests/`, `__tests__/` directories — a package's own suite.
+ *   - `test/`, `tests/`, `__tests__/` directories at a PACKAGE'S ROOT — a
+ *     package's own suite. Nested ones are left alone: `playwright/lib/mcp/
+ *     test` is runtime code its CLI requires at load (codex, 2026-09-02).
  *   - `*.d.ts` / `*.d.mts` / `*.d.cts` — type declarations, read only by a
- *     TypeScript checker. The ONE exception is `typescript/` itself: its
- *     `lib/*.d.ts` are the default libraries the checker loads at runtime
- *     when the manifest extractor (vue-dts-meta) analyses a user's project,
- *     so that package is left whole.
+ *     TypeScript checker. EXCEPT in the packages that checker runs against
+ *     at runtime, which are left whole: `typescript/` (its `lib/*.d.ts` are
+ *     the default libraries), and the Vue toolchain the manifest extractor
+ *     drives — `@vue/language-core` emits `/// <reference types="…/types/
+ *     vue-3.4-shims.d.ts">` lines pointing at ITS OWN `types/*.d.ts`
+ *     (codex reproduced a Vue 3.4 component dropping from 14 props to 0
+ *     once they were gone), and `vue` / `@vue/*` / `vue-component-meta` are
+ *     what those shims and the extractor resolve from beside it. About 210
+ *     of the 1,670 declarations stay for that.
  *
  * Deliberately NOT removed: `.ts` sources that ship beside compiled output
  * (some packages point bundler-facing `exports` conditions at them), and
@@ -511,7 +518,12 @@ export async function pruneNodeModules(
 ): Promise<{ files: number; dirs: number; bytes: number }> {
   const result = { files: 0, dirs: 0, bytes: 0 }
   if (!existsSync(nodeModulesDir)) return result
-  const keepWhole = new Set([join(nodeModulesDir, "typescript")])
+  const keepWhole = new Set([
+    join(nodeModulesDir, "typescript"),
+    join(nodeModulesDir, "vue"),
+    join(nodeModulesDir, "@vue"),
+    join(nodeModulesDir, "vue-component-meta"),
+  ])
   const isLicenseLike = (name: string) => /^(licen[cs]e|notice|copying)/i.test(name)
   const isDeclaration = (name: string) => /\.d\.(ts|mts|cts)$/.test(name)
   const isTestDir = (name: string) => name === "test" || name === "tests" || name === "__tests__"
@@ -531,13 +543,23 @@ export async function pruneNodeModules(
     await fs.rm(dir, { recursive: true, force: true })
   }
 
+  /** `<nm>/<pkg>` or `<nm>/@scope/<pkg>` (at any nesting of node_modules) — where a package's own `test/` lives. */
+  function isPackageRoot(dir: string): boolean {
+    // A scope directory (`<nm>/@scope`) holds packages; it is not one, so
+    // `<nm>/@scope/test` is the package `@scope/test`, never a suite.
+    if (basename(dir).startsWith("@")) return false
+    const parent = dirname(dir)
+    if (basename(parent) === "node_modules") return true
+    return basename(parent).startsWith("@") && basename(dirname(parent)) === "node_modules"
+  }
+
   async function walk(dir: string, insideKeptPackage: boolean): Promise<void> {
     const entries = await fs.readdir(dir, { withFileTypes: true })
     for (const entry of entries) {
       const full = join(dir, entry.name)
       if (entry.isDirectory()) {
         const kept = insideKeptPackage || keepWhole.has(full)
-        if (!kept && isTestDir(entry.name) && dir !== nodeModulesDir && !dir.endsWith(`${sep}node_modules`)) {
+        if (!kept && isTestDir(entry.name) && isPackageRoot(dir)) {
           await removeTree(full)
           result.dirs += 1
           continue

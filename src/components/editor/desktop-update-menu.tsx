@@ -353,16 +353,23 @@ export function describeUpdateCheck(
   // with no state on screen it read as "nothing happened", so the app was
   // relaunched by hand mid-install and the installer aborted.
   if (restarting) return { kind: "restarting" }
-  if (lastCheck === undefined || lastCheck.status === "checking") return { kind: "checking" }
+  if (lastCheck?.status === "checking") return { kind: "checking" }
+  // No click's result to go on: the dialog was opened by a "Restart to
+  // update" click that then stood down (shutdown could not be confirmed, or
+  // nothing was ready after all), or it is about to receive one. With an
+  // update in hand the state machine is the answer; only idle/checking read
+  // as "still looking", which is also what an about-to-arrive click shows.
+  if (lastCheck === undefined && (state.phase === "idle" || state.phase === "checking")) {
+    return { kind: "checking" }
+  }
   // A check is refused, not just skipped, while an update is already
   // downloaded (`updater.ts`'s `runCheck()`: re-checking then would destroy
-  // the native install prep on macOS). The state machine is unambiguous
-  // there, so it is the answer; "can't check for updates" would be false.
-  if (lastCheck.status === "not-performed" && state.phase === "ready") {
-    return { kind: "ready", version: state.version }
-  }
-  if (lastCheck.status === "not-performed") return { kind: "not-performed" }
-  if (lastCheck.status === "failed") return { kind: "error", scope: "check", message: lastCheck.error }
+  // the native install prep on macOS). Everything the state machine says
+  // about that update — ready, and any failure it runs into afterwards —
+  // is the answer; "can't check for updates" is only true when there is
+  // nothing in hand at all (no feed configured, or unpackaged dev).
+  if (lastCheck?.status === "not-performed" && state.phase === "idle") return { kind: "not-performed" }
+  if (lastCheck?.status === "failed") return { kind: "error", scope: "check", message: lastCheck.error }
   switch (state.phase) {
     case "idle":
       return { kind: "up-to-date", version: appVersion }

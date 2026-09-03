@@ -200,6 +200,16 @@ describe("pruneNodeModules", () => {
       file(nm, "typescript/README.md"),
       file(nm, "typescript/lib/typescript.js.map"),
       file(nm, "@scope/pkg/dist/index.cjs"),
+      // The Vue toolchain the manifest extractor drives at runtime stays whole.
+      file(nm, "@vue/language-core/types/vue-3.4-shims.d.ts"),
+      file(nm, "vue/dist/vue.d.ts"),
+      file(nm, "vue-component-meta/out/index.d.ts"),
+      // Only a package-ROOT test dir is a suite; nested ones can be runtime code.
+      file(nm, "playwright/lib/mcp/test/testBackend.js"),
+      file(nm, "zod/src/v4/core/tests/x.js"),
+      // A package that is itself named test, or scoped @scope/test, is a package.
+      file(nm, "test/index.js"),
+      file(nm, "@scope/test/index.js"),
     ]
     const dropped = [
       file(nm, "zod/index.js.map"),
@@ -209,15 +219,16 @@ describe("pruneNodeModules", () => {
       file(nm, "zod/index.d.mts"),
       file(nm, "zod/index.d.cts"),
       file(nm, "zod/test/a.test.js"),
-      file(nm, "zod/lib/__tests__/b.js"),
+      file(nm, "zod/__tests__/b.js"),
       file(nm, "@scope/pkg/tests/c.js"),
       file(nm, "@scope/pkg/dist/index.d.ts"),
+      file(nm, "playwright/node_modules/nested/test/n.js"),
     ]
     const result = await pruneNodeModules(nm)
     for (const p of kept) expect(existsSync(p), p).toBe(true)
     for (const p of dropped) expect(existsSync(p), p).toBe(false)
     expect(result.files).toBe(dropped.length)
-    expect(result.dirs).toBe(3)
+    expect(result.dirs).toBe(4)
     rmSync(root, { recursive: true, force: true })
   })
 
