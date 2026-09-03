@@ -33,6 +33,7 @@
  * halves of it.
  */
 
+import { useRef } from "react"
 import { MessageCircleMore, Plus } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -81,6 +82,9 @@ export function ChatSessionMenu({
     !sessions.some((s) => s.sessionId === currentSessionId)
   const totalCount = sessions.length + (currentIsUnsaved ? 1 : 0)
 
+  // Whether the menu's current open came from a pointer; see the trigger.
+  const openedByPointer = useRef(false)
+
   return (
     <div
       className={cn(
@@ -93,6 +97,19 @@ export function ChatSessionMenu({
         <DropdownMenuTrigger asChild>
           <Button
             type="button"
+            // Radix restores focus to the trigger when the menu closes, and a
+            // programmatic focus after a click still matches `:focus-visible`,
+            // so a teal ring sat on the history button for the rest of the
+            // session after one click (Mo, 2026-09-03). Recording that the
+            // menu was opened by pointer lets `onCloseAutoFocus` below skip
+            // the restore for that case only; a keyboard user still gets the
+            // focus back, and the ring with it.
+            onPointerDown={() => {
+              openedByPointer.current = true
+            }}
+            onKeyDown={() => {
+              openedByPointer.current = false
+            }}
             variant="ghost"
             size="sm"
             className="relative shrink-0 gap-1 px-1.5 text-muted-foreground"
@@ -120,7 +137,13 @@ export function ChatSessionMenu({
             ) : null}
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-72 p-1">
+        <DropdownMenuContent
+          align="end"
+          className="w-72 p-1"
+          onCloseAutoFocus={(event) => {
+            if (openedByPointer.current) event.preventDefault()
+          }}
+        >
           <DropdownMenuLabel className="px-2 py-1">
             <Eyebrow as="span" size="sm">
               Recents
