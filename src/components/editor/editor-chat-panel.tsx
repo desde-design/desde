@@ -418,7 +418,10 @@ function ComposerTextInput() {
       // +4px vertical padding (py-0.5) -> 8 * 19 + 4 = 156px <= 160px, so
       // the CSS cap and the library's own sizing agree instead of fighting.
       maxRows={8}
-      placeholder="Ask about this page, this component, or a file…"
+      // An edit first, a question second (Mo, 2026-09-02): the field is for
+      // changing the prototype, and "ask about" read as read-only. No
+      // trailing ellipsis, per the copy rules.
+      placeholder="Describe an edit, or ask about the prototype"
       className="max-h-40 min-h-0 w-full resize-none bg-transparent px-1 py-0.5 text-base font-normal leading-snug outline-none placeholder:text-muted-foreground/70 disabled:opacity-50"
       data-testid="editor-chat-input"
       onKeyDown={handleKeyDown}
