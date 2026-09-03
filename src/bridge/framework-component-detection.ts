@@ -540,6 +540,7 @@ export function buildReactComponentTree(el: Element): ComponentTreeNode[] {
   // Walk up the fiber tree, collecting all function components
   const chain: ComponentTreeNode[] = []
   const seen = new Set<Record<string, unknown>>()
+  let lastPushed: Record<string, unknown> | null = null
 
   while (fiber) {
     if (seen.has(fiber)) break
@@ -576,12 +577,18 @@ export function buildReactComponentTree(el: Element): ComponentTreeNode[] {
           if (root) selector = generateSelector(root)
         } catch { /* ignore */ }
 
-        // `React.memo(fn, compare)` is a MemoComponent fiber wrapping an inner
-        // FunctionComponent fiber of the same name at the same root: one
-        // component, two fibers. The inner one was pushed just before.
-        const previous = chain[chain.length - 1]
-        const duplicate = !!previous && previous.name === name && previous.elementSelector === selector
-        if (!duplicate) {
+        // `React.memo(fn, compare)` is a MemoComponent fiber (tag 14) whose
+        // child is the inner FunctionComponent fiber for the same component:
+        // one component, two fibers, and the inner one was pushed just
+        // before. Only that shape is a duplicate. Two DIFFERENT components
+        // that share a name and a root are both real: the bundled Acme demo
+        // has a first-party Button wrapping base-ui's Button at one
+        // <button>, and dropping the wrapper handed the rail the library's
+        // props (measured, 2026-09-02).
+        const memoWrapperOfLast =
+          fiber.tag === 14 && lastPushed !== null && lastPushed.return === fiber
+        if (!memoWrapperOfLast) {
+          lastPushed = fiber
           chain.push({
             name,
             file,

@@ -228,6 +228,28 @@ describe("React mount roots", () => {
     expect(detectReactOutlineComponent(span)).toBeNull()
   })
 
+  it("two different components with the same name rooted at one element are both in the tree (the Acme demo's Button over base-ui's Button)", () => {
+    const button = el("button", "group"); document.body.replaceChildren(button)
+    const wrapper = componentFiber("Button", { size: "sm", "data-desde-src": "src/App.tsx:26:8" })
+    const inner = { Button: function () {} }.Button
+    const library: FakeFiber = { tag: 0, type: inner, stateNode: null, child: null, sibling: null, return: null, memoizedProps: { type: "button" } }
+    under(under(wrapper, library), hostFiber(button))
+    const tree = buildReactComponentTree(button)
+    expect(tree.map((n) => [n.name, n.callsite ?? null, n.props])).toEqual([
+      ["Button", "src/App.tsx:26:8", { size: "sm" }],
+      ["Button", null, { type: "button" }],
+    ])
+  })
+
+  it("React.memo with a comparator: the MemoComponent wrapper and its inner function fiber are one node", () => {
+    const span = el("span", "memo"); document.body.replaceChildren(span)
+    const innerFn = { Chip: function () {} }.Chip
+    const memoWrapper: FakeFiber = { tag: 14, type: { $$typeof: Symbol.for("react.memo"), type: innerFn, compare: () => false }, stateNode: null, child: null, sibling: null, return: null, memoizedProps: { tone: "info" } }
+    const innerFiber: FakeFiber = { tag: 0, type: innerFn, stateNode: null, child: null, sibling: null, return: null, memoizedProps: { tone: "info" } }
+    under(under(memoWrapper, innerFiber), hostFiber(span))
+    expect(buildReactComponentTree(span).map((n) => n.name)).toEqual(["Chip"])
+  })
+
   it("event handlers, ref and key never reach the props, matching the Vue side and the runtime adapter", () => {
     const a = el("a", "button"); document.body.replaceChildren(a)
     const Button = componentFiber("Button", { variant: "ghost", onClick: () => {}, onMouseEnter: () => {}, ref: {}, key: "k", once: true })
