@@ -298,6 +298,136 @@ export function extractPackageName(filePath: string): string | undefined {
   return afterNm.split("/")[0] || undefined
 }
 
+// ── React mount roots ─────────────────────────────────────────────────
+//
+// React never marks a DOM element with the component that rendered it the
+// way Vue's `__vueParentComponent` does. The only link is the fiber tree: a
+// host element's fiber (`__reactFiber$<random>` on the element) walks UP
+// through `return` to the component fibers above it, and a component fiber
+// reaches its rendered DOM only by walking DOWN `child` to the first
+// HostComponent in its subtree. That first host is the component's MOUNT
+// ROOT, and it is the one fact both consumers below need:
+//
+//   - `buildReactComponentTree` reports it as `elementSelector`. The shell
+//     compares that against the clicked element's selector to decide whether
+//     a click landed on the component itself (Variants & Props, Detach) or
+//     on an element inside it. A function component's `stateNode` is null,
+//     so before this walk existed the selector read "" for every React node
+//     and no first-party React component could reach the component view —
+//     only library-rooted ones, rescued by the `selfStamped: false`
+//     carve-out in `inspection-conversion.ts`. MEASURED on the Northwind
+//     demo's `Button` (2026-09-02): the bridge named the component and its
+//     `variant`, the rail showed a bare `<a>`.
+//   - `detectOutlineComponent` labels a Structure row as a component only
+//     when the row's element IS a component's mount root, the same
+//     `subTree.el === el` rule the Vue branch applies. Without it every
+//     React row was a tag name.
+//
+// Tags are React's `WorkTag` numbers: FunctionComponent 0, ClassComponent 1,
+// HostComponent 5, ForwardRef 11, MemoComponent 14, SimpleMemoComponent 15 —
+// the set the runtime adapter in `comment-bridge.ts` keys on.
+const REACT_COMPONENT_FIBER_TAGS = new Set([0, 1, 11, 14, 15])
+const REACT_HOST_FIBER_TAG = 5
+
+type ReactFiber = Record<string, unknown>
+
+export function getReactFiberOf(el: Element): ReactFiber | null {
+  const key = Object.keys(el).find((k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"))
+  if (!key) return null
+  return ((el as Record<string, unknown>)[key] as ReactFiber | undefined) ?? null
+}
+
+/** The component's function/class name, unwrapping one level of memo/forwardRef. */
+export function reactComponentName(type: unknown): string | null {
+  const candidates: unknown[] = [type]
+  if (type && typeof type === "object") {
+    candidates.push((type as Record<string, unknown>).type, (type as Record<string, unknown>).render)
+  }
+  for (const c of candidates) {
+    if (!c) continue
+    const rec = c as { displayName?: unknown; name?: unknown }
+    for (const v of [rec.displayName, rec.name]) {
+      if (typeof v === "string" && v.length > 0) return v
+    }
+  }
+  return null
+}
+
+/**
+ * First HostComponent in `fiber`'s subtree — the DOM element the component
+ * mounts as. Seeded with `fiber.child`, never `fiber.sibling` (outside the
+ * subtree), and capped so a pathological tree cannot run away. The same
+ * walk as `findFirstReactHostFiber` in the runtime adapter.
+ */
+export function getReactComponentMountRoot(fiber: ReactFiber): Element | null {
+  const firstChild = fiber.child as ReactFiber | null | undefined
+  if (!firstChild) return null
+  const stack: ReactFiber[] = [firstChild]
+  let budget = 256
+  while (stack.length > 0 && budget-- > 0) {
+    const cur = stack.pop()!
+    if (cur.tag === REACT_HOST_FIBER_TAG && cur.stateNode instanceof Element) return cur.stateNode
+    const sibling = cur.sibling as ReactFiber | null | undefined
+    const child = cur.child as ReactFiber | null | undefined
+    if (sibling) stack.push(sibling)
+    if (child) stack.push(child)
+  }
+  return null
+}
+
+function isNamedReactComponent(name: string | null): name is string {
+  return !!name && name !== "Anonymous" && !name.startsWith("_") && !REACT_INTERNAL_NAMES.has(name)
+}
+
+function reactPropsOf(fiber: ReactFiber): Record<string, unknown> {
+  const memoized = fiber.memoizedProps as Record<string, unknown> | undefined
+  const props: Record<string, unknown> = {}
+  if (memoized) {
+    for (const key of Object.keys(memoized)) {
+      if (key === "children") continue
+      props[key] = serializePropValue(memoized[key])
+    }
+  }
+  return props
+}
+
+/**
+ * React half of {@link detectOutlineComponent}: `el` is labeled with the
+ * OUTERMOST named component whose mount root is `el`. Walking `return` from
+ * the host fiber, every component fiber that mounts as `el` is a transparent
+ * wrapper of the one below it (`Card` rendering `<Panel/>` rendering
+ * `<div>`), so the chain keeps climbing while the mount root still is `el`.
+ * The first host fiber above ends it: past that the DOM changes. A
+ * component whose first host is some OTHER element ends it too — and so
+ * does every ancestor, since an ancestor's first host is found through that
+ * same subtree.
+ */
+export function detectReactOutlineComponent(el: Element): FrameworkComponentInfo | null {
+  const hostFiber = getReactFiberOf(el)
+  if (!hostFiber) return null
+  let best: ReactFiber | null = null
+  let cur = hostFiber.return as ReactFiber | null | undefined
+  let budget = 64
+  while (cur && budget-- > 0) {
+    const tag = cur.tag as number | undefined
+    if (tag === REACT_HOST_FIBER_TAG) break
+    if (typeof tag === "number" && REACT_COMPONENT_FIBER_TAGS.has(tag)) {
+      if (getReactComponentMountRoot(cur) !== el) break
+      if (isNamedReactComponent(reactComponentName(cur.type))) best = cur
+    }
+    cur = cur.return as ReactFiber | null | undefined
+  }
+  if (!best) return null
+  const source = best._debugSource as { fileName?: unknown; lineNumber?: unknown } | undefined
+  return {
+    framework: "react",
+    name: reactComponentName(best.type)!,
+    file: typeof source?.fileName === "string" ? source.fileName : undefined,
+    line: typeof source?.lineNumber === "number" ? source.lineNumber : undefined,
+    props: reactPropsOf(best),
+  }
+}
+
 export function buildReactComponentTree(el: Element): ComponentTreeNode[] {
   const fiberKey = Object.keys(el).find((k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"))
   if (!fiberKey) return []
@@ -336,13 +466,14 @@ export function buildReactComponentTree(el: Element): ComponentTreeNode[] {
         const isLibrary = file ? file.includes("node_modules") : false
         const packageName = file && isLibrary ? extractPackageName(file) : undefined
 
-        // Try to get a selector for the fiber's DOM node
+        // The component's mount root — see "React mount roots" above. This
+        // used to read `fiber.stateNode`, which is null for a function
+        // component, so every node carried "" and the shell could never
+        // match a click to the component.
         let selector = ""
         try {
-          const stateNode = fiber.stateNode as Element | null
-          if (stateNode && stateNode instanceof Element) {
-            selector = generateSelector(stateNode)
-          }
+          const root = getReactComponentMountRoot(fiber)
+          if (root) selector = generateSelector(root)
         } catch { /* ignore */ }
 
         chain.push({
@@ -507,6 +638,11 @@ export function detectOutlineComponent(el: Element): FrameworkComponentInfo | nu
       if (info) return info
     }
   }
+  // React: label `el` only when it is a component's mount root, the same
+  // rule the Vue branch applies through `subTree.el` — see "React mount
+  // roots" above.
+  const reactInfo = detectReactOutlineComponent(el)
+  if (reactInfo) return reactInfo
   // Vue 2 / Angular / Svelte / WebComponent fall back to the strict
   // detector — none of these expose a usable parent-chain analog here.
   return detectDirectComponent(el)
