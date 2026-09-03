@@ -373,6 +373,17 @@ function ToolFallback({ toolName, args, result, isError, status }: ToolFallbackP
 
 // ---------------------------------------------------------------------------
 // Per-role message components
+//
+// Vertical rhythm (Mo, 2026-09-03: the transcript read "pretty tight"). Two
+// steps, and the gap between turns is deliberately the larger of the two so a
+// long agent turn still reads as one object rather than as a run of loose rows:
+//
+//   between messages   `mb-5` (20px) — user bubble → reply → next bubble
+//   within one reply   `space-y-4` (16px) — prose, tool cards, reasoning
+//
+// A run of consecutive tool cards is the exception and stays fused with no gap
+// at all; `ChatDisclosure` cancels this container's margin itself, so both
+// numbers can move without touching that rule.
 // ---------------------------------------------------------------------------
 
 /**
@@ -380,7 +391,7 @@ function ToolFallback({ toolName, args, result, isError, status }: ToolFallbackP
  * "you vs. agent" stays color-coded without a heavy fill.
  */
 const UserMessage: FC = () => (
-  <MessagePrimitive.Root className="mb-3 flex justify-end">
+  <MessagePrimitive.Root className="mb-5 flex justify-end">
     <div className="max-w-[88%] break-words rounded-lg bg-primary/8 px-3 py-1.5 text-base font-normal leading-snug text-foreground">
       <MessagePrimitive.Content
         components={{
@@ -397,8 +408,8 @@ const UserMessage: FC = () => (
  * automatically via context).
  */
 const AssistantMessage: FC = () => (
-  <MessagePrimitive.Root className="mb-3 flex">
-    <div className="min-w-0 flex-1 space-y-3 text-base font-normal">
+  <MessagePrimitive.Root className="mb-5 flex">
+    <div className="min-w-0 flex-1 space-y-4 text-base font-normal">
       <MessagePrimitive.Content
         components={{
           Text: AssistantMarkdownPart,
@@ -421,7 +432,7 @@ const AssistantMessage: FC = () => (
  * legible as "it's working, and here's on what".
  */
 const WorkingIndicator: FC<{ label?: string }> = ({ label }) => (
-  <div className="mb-3 flex" data-testid="editor-chat-working">
+  <div className="mb-5 flex" data-testid="editor-chat-working">
     {/*
       No spinner (Mo, 2026-08-18). The animated dots ARE the activity, and a
       spinner beside them was a second object saying the same thing.

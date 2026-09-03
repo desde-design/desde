@@ -285,6 +285,15 @@ function EditorChatPanelImpl({
                         had one. The button chrome is gone and the icon fills
                         the control, which is why it can be the same 24px as
                         Send without nesting two circles.
+
+                        `strokeWidth` is set because the icon is drawn at 24px
+                        while Send's arrow is drawn at 14px. lucide's default
+                        stroke of 2 is measured on a 24px grid, so at 24px it
+                        lands as a literal 2px line while Send's same stroke
+                        scales down to ~1.2px. Side by side that made Stop the
+                        heavier of the two (Mo, 2026-09-03: "really thick
+                        lines"). 1.25 puts the two glyphs on the same optical
+                        weight.
                       */}
                       <Button
                         type="button"
@@ -294,7 +303,7 @@ function EditorChatPanelImpl({
                         aria-label="Stop"
                         data-testid="editor-chat-stop"
                       >
-                        <StopCircle className="size-6" />
+                        <StopCircle className="size-6" strokeWidth={1.25} />
                       </Button>
                     </ComposerPrimitive.Cancel>
                   </ThreadPrimitive.If>
