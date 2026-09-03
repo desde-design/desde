@@ -1,3 +1,5 @@
+import { Button } from "../components/Button"
+
 /**
  * The form page.
  *
@@ -35,8 +37,8 @@ export function Settings() {
           </select>
         </div>
         <div className="actions">
-          <button className="button button--primary" type="button">Save changes</button>
-          <button className="button" type="button">Discard</button>
+          <Button variant="primary">Save changes</Button>
+          <Button variant="secondary">Discard</Button>
         </div>
       </section>
 

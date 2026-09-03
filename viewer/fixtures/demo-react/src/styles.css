@@ -169,18 +169,6 @@ button:focus-visible {
   font-size: 14px;
 }
 
-.panel-link {
-  display: inline-block;
-  margin-top: 16px;
-  color: #2563eb;
-  font-size: 14px;
-  font-weight: 500;
-  text-decoration: none;
-}
-
-.panel-link:hover {
-  text-decoration: underline;
-}
 
 .attention-list {
   margin: 0;
@@ -243,3 +231,23 @@ button:focus-visible {
   color: #6b7280;
   font-size: 13px;
 }
+
+/* ── Button variants and sizes ──────────────────────────────────────────────
+   `.button` and `.button--primary` above are the originals; these complete
+   the set the `Button` component's `variant` and `size` props enumerate.
+   Same tokens, no new colours. */
+
+.button--secondary { background: var(--surface); color: var(--ink); border-color: var(--line); }
+.button--secondary:hover { background: color-mix(in srgb, var(--surface) 92%, var(--ink)); }
+
+.button--ghost { background: transparent; color: var(--accent); border-color: transparent; }
+.button--ghost:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+.button--danger { background: #dc2626; border-color: #dc2626; color: #fff; }
+.button--danger:hover { background: #b91c1c; }
+
+.button--sm { padding: 5px 10px; font-size: 13px; }
+.button--md { /* the base .button size */ }
+.button--lg { padding: 11px 18px; font-size: 15px; }
+
+a.button { text-decoration: none; display: inline-flex; align-items: center; }

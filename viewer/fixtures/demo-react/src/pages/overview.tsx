@@ -1,4 +1,5 @@
 import { METRICS, ROWS } from "../data"
+import { Button } from "../components/Button"
 import { href, type Route } from "../router"
 
 /**
@@ -50,16 +51,18 @@ export function Overview({ navigate }: { navigate: (route: Route) => void }) {
             ))}
           </ul>
         )}
-        <a
-          className="panel-link"
-          href={href("workspaces")}
-          onClick={(e) => {
-            e.preventDefault()
-            navigate("workspaces")
-          }}
-        >
-          View all workspaces
-        </a>
+        <div className="actions" data-demo-anchor="view-all">
+          <Button
+            variant="secondary"
+            href={href("workspaces")}
+            onClick={(e) => {
+              e.preventDefault()
+              navigate("workspaces")
+            }}
+          >
+            View all workspaces
+          </Button>
+        </div>
       </section>
     </>
   )
