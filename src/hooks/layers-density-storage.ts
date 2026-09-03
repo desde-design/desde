@@ -21,7 +21,7 @@ import {
 /**
  * Same `desde.editor.<name>.v1` convention as the rail width
  * (`desde.editor.right-rail-width.v1`) and the edit/layers split
- * (`desde.editor.edit-layers-split.v1`).
+ * (`desde.editor.edit-layers-split.v2`).
  */
 export const LAYERS_DENSITY_STORAGE_KEY = "desde.editor.layers-density.v1"
 

@@ -445,10 +445,14 @@ export function EditorRightRail({
           forceMount
           className="min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden"
         >
+          {/* Structure takes a quarter, the selection's details the rest
+              (Mo, 2026-09-02: "it should be 25/75"). The key is bumped from
+              v1 so a ratio dragged under the old 45% default does not keep
+              the old split alive on this machine. */}
           {editing.editorSelection ? (
             <ResizableVerticalSplit
-              storageKey="desde.editor.edit-layers-split.v1"
-              defaultRatio={0.45}
+              storageKey="desde.editor.edit-layers-split.v2"
+              defaultRatio={0.25}
               top={layersPanel}
               bottom={inspectorPanel}
             />
