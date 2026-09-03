@@ -20,6 +20,7 @@ import type {
   PendingMutation,
   Selection,
   SelectionAncestor,
+  SourceLocation,
 } from '../../core'
 import type {
   BridgeMutation,
@@ -40,6 +41,7 @@ export function inspectionDataToSelection(data: InspectionData): Selection {
   // edit-dispatch on the same component.
   const editTarget = data.editTargetComponent
   let primaryIndex = componentTree.length - 1
+  let primaryEditTarget: SourceLocation | undefined
   if (editTarget) {
     const matchIdx = componentTree.findIndex(
       (n) => n.name === editTarget.name && n.file === editTarget.file,
@@ -62,6 +64,17 @@ export function inspectionDataToSelection(data: InspectionData): Selection {
     const outermostStamped = componentTree.findIndex((n) => rootedHere(n) && !!n.callsite)
     const outermost = outermostStamped >= 0 ? outermostStamped : componentTree.findIndex(rootedHere)
     if (outermost >= 0) primaryIndex = outermost
+    // The edit target follows the component the rail shows. The bridge's
+    // `editTarget` is the callsite of the INNERMOST owning instance; for a
+    // first-party wrapper over a library component that is the library
+    // tag inside the wrapper's own file (Acme demo, measured: the rail
+    // showed Button at App.tsx:26 while editTarget said
+    // components/ui/button.tsx:50, the <ButtonPrimitive> tag). A prop edit
+    // on the shown component belongs at that component's own tag, which
+    // is exactly what its callsite stamp records.
+    if (outermostStamped >= 0) {
+      primaryEditTarget = parseCallsite(componentTree[outermostStamped])
+    }
   }
   const primary = primaryIndex >= 0 ? componentTree[primaryIndex] : null
   // Distinguish "user clicked the component's render root" from "user
@@ -144,7 +157,7 @@ export function inspectionDataToSelection(data: InspectionData): Selection {
     componentLine: primary?.line ?? data.component?.line,
     packageName: primary?.packageName,
     authoredAt: data.authoredAt,
-    editTarget: data.editTarget,
+    editTarget: primaryEditTarget ?? data.editTarget,
     domAnchor: data.domAnchor,
     isLibrary: data.isLibrary,
     iterationContext: data.iterationContext,
@@ -267,5 +280,24 @@ export function bridgeMutationDraftToCore(
           siblingClasses: payload.context.siblingClasses.slice(),
         }
       : undefined,
+  }
+}
+
+/**
+ * A tree node's callsite stamp (`file:line:col`, the column as the stamp
+ * carries it, which is what the bridge's own `editTarget` passes through)
+ * as a {@link SourceLocation}, with the paired file version as `fileHash`
+ * so the stale-target guard still applies.
+ */
+function parseCallsite(node: ComponentTreeNode): SourceLocation | undefined {
+  const raw = node.callsite
+  if (!raw) return undefined
+  const match = /^(.+):(\d+):(\d+)$/.exec(raw)
+  if (!match) return undefined
+  return {
+    file: match[1],
+    line: Number(match[2]),
+    column: Number(match[3]),
+    fileHash: node.callsiteVersion,
   }
 }

@@ -134,6 +134,29 @@ describe("inspectionDataToSelection: which node is the component, on React (no e
     expect(selection.ancestry.map((a) => a.componentName)).toEqual(["App"])
   })
 
+  it("the edit target follows the shown component: its own callsite, not the library tag inside its file", () => {
+    const selection = inspectionDataToSelection(
+      makeInspectionData({
+        selector: clicked,
+        selfStamped: true,
+        editTargetComponent: undefined,
+        // What the bridge resolves for the Acme shape: the innermost owning
+        // instance's callsite, the <ButtonPrimitive> tag in button.tsx.
+        editTarget: { file: "src/components/ui/button.tsx", line: 50, column: 4, fileHash: "d14549ab3ba7" },
+        componentTree: [
+          { name: "App", elementSelector: "body > div#app", callsite: "src/main.tsx:8:4", callsiteVersion: "45f162812201" },
+          { name: "Button", elementSelector: clicked, callsite: "src/App.tsx:26:8", callsiteVersion: "45901a2bc66f", props: { size: "sm" } },
+          { name: "Button", elementSelector: clicked, callsite: "src/components/ui/button.tsx:50:4", callsiteVersion: "d14549ab3ba7", props: { type: "button" } },
+        ],
+      }),
+    )
+    expect(selection.componentName).toBe("Button")
+    expect(selection.currentProps).toEqual({ size: "sm" })
+    expect(selection.editTarget).toEqual({ file: "src/App.tsx", line: 26, column: 8, fileHash: "45901a2bc66f" })
+    // The element's own bytes are still the element's.
+    expect(selection.authoredAt).toEqual(makeInspectionData({}).authoredAt)
+  })
+
   it("transparent first-party wrappers: the outermost stamped one wins, matching the Structure panel's label", () => {
     const selection = inspectionDataToSelection(
       makeInspectionData({
