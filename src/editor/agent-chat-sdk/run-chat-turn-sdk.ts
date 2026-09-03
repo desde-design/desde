@@ -293,6 +293,14 @@ export interface RunChatTurnSdkOpts {
    */
   effort?: EffortLevel
   /**
+   * Whether `model` takes adaptive thinking, when the catalog that offered
+   * it knows (`ModelOption.adaptiveThinking`). A live list can offer aliases
+   * such as `default` or `sonnet`, whose family the id does not name, and a
+   * fixed thinking budget on a current-generation model is a 400. Omitted →
+   * decided from the id's family, as before.
+   */
+  adaptiveThinking?: boolean
+  /**
    * Session-cumulative dollar ceiling. Translated to a per-query
    * `maxBudgetUsd` after subtracting prior-turn costs from this
    * session. Undefined → no ceiling.
@@ -921,7 +929,7 @@ async function runChatTurnSdkInner(
         // trivial turns, so there's no fixed per-turn overhead); other models
         // get a bounded fixed budget. `summarized` keeps the surfaced reasoning
         // concise rather than dumping the full raw chain.
-        thinking: resolveThinkingConfig(model),
+        thinking: resolveThinkingConfig(model, opts.adaptiveThinking),
         ...(opts.effort ? { effort: opts.effort } : {}),
         systemPrompt: { type: 'preset', preset: 'claude_code', append: sdkAppend },
         // `tools` only filters built-in tools (sdk.d.ts:1257 — "the
@@ -1516,6 +1524,7 @@ const ADAPTIVE_THINKING_MODELS: readonly string[] = [
   'claude-sonnet-4-6',
   'claude-sonnet-5',
   'claude-fable-5',
+  'claude-fable-5-1',
 ]
 
 /**
@@ -1539,10 +1548,13 @@ export function supportsAdaptiveThinking(model: string): boolean {
  */
 export function resolveThinkingConfig(
   model: string,
+  adaptiveHint?: boolean,
 ):
   | { type: 'adaptive'; display: 'summarized' }
   | { type: 'enabled'; budgetTokens: number; display: 'summarized' } {
-  if (supportsAdaptiveThinking(model)) {
+  // The catalog's own answer wins over the family rule: a live source that
+  // says `sonnet` thinks adaptively knows which Sonnet it means.
+  if (adaptiveHint ?? supportsAdaptiveThinking(model)) {
     return { type: 'adaptive', display: 'summarized' }
   }
   return { type: 'enabled', budgetTokens: 4000, display: 'summarized' }

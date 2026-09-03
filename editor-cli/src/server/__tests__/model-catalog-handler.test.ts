@@ -18,8 +18,9 @@ describe('buildModelCatalogResponse', () => {
     expect(body.default.model).toBe(defaultModel?.id)
   })
 
-  it('defaults lastChosenModel to null', () => {
+  it('defaults lastChosenModel to null and the source to static', () => {
     expect(buildModelCatalogResponse().lastChosenModel).toBeNull()
+    expect(buildModelCatalogResponse().source).toBe('static')
   })
 })
 

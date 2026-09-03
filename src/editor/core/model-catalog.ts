@@ -35,6 +35,16 @@ export interface ModelOption {
   effortLevels: EffortLevel[] | null
   /** Marks the provider's default model (exactly one per catalog). */
   isDefault?: boolean
+  /**
+   * Whether the model takes adaptive thinking (the model decides when and
+   * how much to think) rather than a fixed thinking budget. Set from a live
+   * source when it says; absent means "decide from the id", which the chat
+   * runtime does by model family. A live list can offer ALIASES (`default`,
+   * `sonnet`) whose family the id does not name, and on a current-generation
+   * model a fixed budget is rejected outright, so the source's own answer
+   * has to travel with the option.
+   */
+  adaptiveThinking?: boolean
 }
 
 export interface ProviderModelCatalog {

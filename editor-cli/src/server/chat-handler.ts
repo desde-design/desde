@@ -48,7 +48,7 @@ import {
   validateSessionModelConfig,
   type SessionModelConfig,
 } from "../../../src/editor/core/model-catalog.js"
-import { ANTHROPIC_MODEL_CATALOG } from "../../../src/editor/llm-providers/anthropic-model-catalog.js"
+import { modelCatalogResolver } from "./model-catalog-source.js"
 import { resolveCostCeilingUsd } from "../../../src/editor/core/chat-cost-ceiling.js"
 import { acquireFileEditLock, acquireTreeGateShared } from "./session-lock.js"
 import { openSseStream } from "./sse.js"
@@ -509,7 +509,12 @@ export async function handleChatRequest(
   let requestModelConfig: SessionModelConfig | undefined
   const modelNotes: string[] = []
   if (body.modelConfig !== undefined) {
-    const v = validateSessionModelConfig(body.modelConfig, [ANTHROPIC_MODEL_CATALOG])
+    // The SAME list the picker was served (live when reachable, static
+    // otherwise), so a model the picker offered is never refused here.
+    const v = validateSessionModelConfig(
+      body.modelConfig,
+      (await modelCatalogResolver.get()).catalogs,
+    )
     if (!v.ok) {
       res.statusCode = 400
       res.setHeader("Content-Type", "application/json")
@@ -656,9 +661,10 @@ export async function handleChatRequest(
     // on the stream so the fallback isn't silent.
     let effectiveModelConfig = requestModelConfig
     if (!effectiveModelConfig && session.modelConfig) {
-      const pv = validateSessionModelConfig(session.modelConfig, [
-        ANTHROPIC_MODEL_CATALOG,
-      ])
+      const pv = validateSessionModelConfig(
+        session.modelConfig,
+        (await modelCatalogResolver.get()).catalogs,
+      )
       if (pv.ok) {
         // Forward the validator's SANITIZED config, not the raw
         // persisted object: a hand-edited session file carrying an
@@ -1010,6 +1016,9 @@ export async function handleChatRequest(
         ? {
             model: effectiveModelConfig.model,
             ...(effectiveModelConfig.effort ? { effort: effectiveModelConfig.effort } : {}),
+            // The picker's catalog knows whether this model (or alias) thinks
+            // adaptively; the turn cannot always tell from the id alone.
+            ...(await adaptiveThinkingFor(effectiveModelConfig.model)),
           }
         : {}),
     })
@@ -1670,4 +1679,21 @@ const MAX_BODY_BYTES = 64 * 1024 * 1024
 // call site below already handles via its own try/catch → 400.
 async function readBody(req: IncomingMessage): Promise<string> {
   return readRawBody(req, { maxBytes: MAX_BODY_BYTES })
+}
+
+/**
+ * `{ adaptiveThinking }` from the served catalog's entry for `model`, or
+ * `{}` when the catalog does not say, so the turn falls back to the family
+ * rule. Read through the resolver, which is cached, so this costs nothing
+ * after the picker's own request.
+ */
+async function adaptiveThinkingFor(model: string): Promise<{ adaptiveThinking?: boolean }> {
+  const { catalogs } = await modelCatalogResolver.get()
+  for (const catalog of catalogs) {
+    const option = catalog.models.find((m) => m.id === model)
+    if (option && typeof option.adaptiveThinking === "boolean") {
+      return { adaptiveThinking: option.adaptiveThinking }
+    }
+  }
+  return {}
 }

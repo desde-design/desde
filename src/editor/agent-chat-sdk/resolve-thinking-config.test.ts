@@ -26,6 +26,7 @@ import { ANTHROPIC_MODEL_CATALOG } from '../llm-providers/anthropic-model-catalo
  * still takes a fixed thinking budget.
  */
 const EXPECTED_ADAPTIVE: Record<string, boolean> = {
+  'claude-fable-5-1': true,
   'claude-opus-5': true,
   'claude-opus-4-8': true,
   'claude-sonnet-5': true,
@@ -83,6 +84,7 @@ describe('supportsAdaptiveThinking', () => {
       'claude-sonnet-4-6',
       'claude-sonnet-5',
       'claude-fable-5',
+      'claude-fable-5-1',
     ]) {
       expect(supportsAdaptiveThinking(id), id).toBe(true)
     }
@@ -98,6 +100,17 @@ describe('supportsAdaptiveThinking', () => {
     ]) {
       expect(supportsAdaptiveThinking(id), id).toBe(false)
     }
+  })
+
+  it('lets a catalog hint override the family rule, in both directions', () => {
+    // A live alias the family rule cannot place, and a family the rule
+    // would call adaptive that the source says is not.
+    expect(resolveThinkingConfig('default', true)).toEqual(ADAPTIVE_CONFIG)
+    expect(resolveThinkingConfig('sonnet', true)).toEqual(ADAPTIVE_CONFIG)
+    expect(resolveThinkingConfig('claude-opus-5', false)).toEqual(FIXED_BUDGET_CONFIG)
+    // No hint: the family rule, as before.
+    expect(resolveThinkingConfig('haiku', undefined)).toEqual(FIXED_BUDGET_CONFIG)
+    expect(resolveThinkingConfig('claude-opus-5', undefined)).toEqual(ADAPTIVE_CONFIG)
   })
 
   it('tolerates a dated-snapshot suffix', () => {

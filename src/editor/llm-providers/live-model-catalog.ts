@@ -1,0 +1,216 @@
+/**
+ * Live model lists for the chat picker, folded into the static catalog.
+ *
+ * The picker used to be the static `ANTHROPIC_MODEL_CATALOG` and nothing
+ * else, so a model Anthropic shipped was invisible here until someone edited
+ * that file. Since 2026-09-02 (Mo: "add the live functionality and have the
+ * hard coded as a back up") the CLI asks for the live list on demand and
+ * merges it over the static one; the static catalog is the fallback when
+ * nothing live can be reached, and the source of the per-model detail the
+ * live lists do not carry.
+ *
+ * Two live sources, matching the two ways the editor can be credentialed:
+ *
+ *  - The Anthropic Models API (`GET /v1/models`), when an API key is active.
+ *    It reports ids, display names, and a per-level effort capability tree.
+ *  - The bundled `claude` binary, through the Agent SDK's `supportedModels()`
+ *    control request, when dev mode / the subscription opt-in is active and
+ *    there is no key to call the API with. It reports ids, display names,
+ *    descriptions, and a single "supports effort" flag.
+ *
+ * This module is the PURE half: shaping either list into `LiveModel`s and
+ * merging them into a catalog. The I/O (clients, the process spawn, caching,
+ * which source applies) lives in `editor-cli/src/server/model-catalog-source.ts`.
+ *
+ * Merge rules, in order of who knows best:
+ *  - Membership and order come from the live list. A model the API no longer
+ *    lists is gone from the picker even if the static file still names it.
+ *  - Effort levels: an explicit live ladder wins (the Models API says per
+ *    level); otherwise the static entry's ladder (it records what the API
+ *    tree does not, such as Sonnet 4.6 lacking `xhigh`); otherwise the live
+ *    "supports effort" flag; otherwise a caller-supplied fallback, since a
+ *    brand-new model nobody has described yet still needs an answer.
+ *  - Labels and descriptions: static first for the ones it knows, because a
+ *    hand-written "Fast, near-Opus quality on coding" beats "Claude Sonnet 5".
+ *  - The default is the static default when the live list has it, otherwise
+ *    the first live entry. The picker never opens on a model that cannot be
+ *    used.
+ */
+
+import type { EffortLevel, ModelOption, ProviderModelCatalog } from '../core/model-catalog'
+import { EFFORT_LEVELS } from '../core/model-catalog'
+
+export interface LiveModel {
+  id: string
+  label?: string
+  description?: string
+  /**
+   * `EffortLevel[]` when the source enumerated levels, `null` when it said
+   * effort is unsupported, `undefined` when it did not say per level.
+   */
+  effortLevels?: EffortLevel[] | null
+  /** The coarse flag some sources carry instead of a ladder. */
+  supportsEffort?: boolean
+  /** Adaptive thinking, when the source says. See `ModelOption.adaptiveThinking`. */
+  adaptiveThinking?: boolean
+}
+
+/** The Models API shape this module reads. A structural subset of the SDK's `ModelInfo`. */
+export interface ModelsApiModel {
+  id: string
+  display_name: string
+  created_at: string
+  capabilities?: {
+    effort?: {
+      supported: boolean
+      low?: { supported: boolean } | null
+      medium?: { supported: boolean } | null
+      high?: { supported: boolean } | null
+      xhigh?: { supported: boolean } | null
+      max?: { supported: boolean } | null
+    } | null
+    thinking?: {
+      supported: boolean
+      types?: { adaptive?: { supported: boolean } | null } | null
+    } | null
+  } | null
+}
+
+/**
+ * The Agent SDK's `ModelInfo`, structurally. The declared type stops at
+ * `supportsEffort`; the binary actually answers with more (MEASURED
+ * 2026-09-02 against SDK 0.3.143: `supportedEffortLevels` and
+ * `supportsAdaptiveThinking` ride along), and both are read when present.
+ */
+export interface AgentSdkModel {
+  value: string
+  displayName: string
+  description?: string
+  supportsEffort?: boolean
+  supportedEffortLevels?: readonly string[]
+  supportsAdaptiveThinking?: boolean
+}
+
+const FULL_EFFORT_LADDER: EffortLevel[] = [...EFFORT_LEVELS]
+
+/**
+ * `claude-<family>-<major>[-<minor>][-<yyyymmdd>]`. Families the editor knows
+ * how to drive; the major version is what the generation filter reads.
+ */
+const CLAUDE_ID = /^claude-(fable|opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:-(\d{8}))?$/
+
+/** Models older than this generation predate everything the chat runtime tunes for. */
+const MIN_MAJOR_VERSION = 4
+
+/**
+ * Shape the Models API list. Keeps Claude 4+ models, drops a dated snapshot
+ * when its bare alias is also listed (the picker shows `claude-haiku-4-5`,
+ * not both it and `claude-haiku-4-5-20251001`), newest first.
+ */
+export function fromModelsApi(models: readonly ModelsApiModel[]): LiveModel[] {
+  const ids = new Set(models.map((m) => m.id))
+  return [...models]
+    .filter((m) => {
+      const match = CLAUDE_ID.exec(m.id)
+      if (!match) return false
+      if (Number(match[2]) < MIN_MAJOR_VERSION) return false
+      const dated = match[4] !== undefined
+      if (dated) {
+        const bare = m.id.slice(0, -(match[4]!.length + 1))
+        if (ids.has(bare)) return false
+      }
+      return true
+    })
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .map((m) => {
+      const adaptive = m.capabilities?.thinking?.types?.adaptive?.supported
+      return {
+        id: m.id,
+        label: m.display_name.replace(/^Claude\s+/, ''),
+        effortLevels: effortLadderFromCapabilities(m),
+        ...(typeof adaptive === 'boolean' ? { adaptiveThinking: adaptive } : {}),
+      }
+    })
+}
+
+function effortLadderFromCapabilities(m: ModelsApiModel): EffortLevel[] | null | undefined {
+  const effort = m.capabilities?.effort
+  if (!effort) return undefined
+  if (!effort.supported) return null
+  const ladder = EFFORT_LEVELS.filter((level) => effort[level]?.supported === true)
+  return ladder.length > 0 ? [...ladder] : null
+}
+
+/** Shape the Agent SDK's list. Everything it offers is usable as a `model`. */
+export function fromAgentSdk(models: readonly AgentSdkModel[]): LiveModel[] {
+  return models
+    .filter((m) => typeof m.value === 'string' && m.value.length > 0)
+    .map((m) => {
+      const ladder = Array.isArray(m.supportedEffortLevels)
+        ? EFFORT_LEVELS.filter((level) => m.supportedEffortLevels!.includes(level))
+        : undefined
+      return {
+        id: m.value,
+        label: m.displayName || m.value,
+        ...(m.description ? { description: m.description } : {}),
+        ...(m.supportsEffort === false
+          ? { effortLevels: null }
+          : ladder && ladder.length > 0
+            ? { effortLevels: [...ladder] }
+            : {}),
+        ...(typeof m.supportsEffort === 'boolean' ? { supportsEffort: m.supportsEffort } : {}),
+        ...(typeof m.supportsAdaptiveThinking === 'boolean'
+          ? { adaptiveThinking: m.supportsAdaptiveThinking }
+          : {}),
+      }
+    })
+}
+
+export interface MergeLiveOptions {
+  /** What a live model with no effort information of any kind gets. */
+  effortFallback: (id: string) => EffortLevel[] | null
+}
+
+/**
+ * Fold a live list over the static catalog. Returns `null` when the live
+ * list is empty, which callers treat as "nothing live: use the static one";
+ * a picker with no entries is worse than a stale picker.
+ */
+export function mergeLiveModels(
+  catalog: ProviderModelCatalog,
+  live: readonly LiveModel[],
+  opts: MergeLiveOptions,
+): ProviderModelCatalog | null {
+  if (live.length === 0) return null
+  const staticById = new Map(catalog.models.map((m) => [m.id, m]))
+  const staticDefault = catalog.models.find((m) => m.isDefault)
+  const seen = new Set<string>()
+  const models: ModelOption[] = []
+  for (const entry of live) {
+    if (seen.has(entry.id)) continue
+    seen.add(entry.id)
+    const known = staticById.get(entry.id)
+    const effortLevels =
+      entry.effortLevels !== undefined
+        ? entry.effortLevels
+        : known
+          ? known.effortLevels
+          : entry.supportsEffort === true
+            ? FULL_EFFORT_LADDER
+            : opts.effortFallback(entry.id)
+    const description = known?.description ?? entry.description
+    const adaptiveThinking = entry.adaptiveThinking ?? known?.adaptiveThinking
+    models.push({
+      id: entry.id,
+      label: known?.label ?? entry.label ?? entry.id,
+      ...(description ? { description } : {}),
+      effortLevels,
+      ...(typeof adaptiveThinking === 'boolean' ? { adaptiveThinking } : {}),
+    })
+  }
+  const defaultId = staticDefault && seen.has(staticDefault.id) ? staticDefault.id : models[0]!.id
+  return {
+    providerId: catalog.providerId,
+    models: models.map((m) => (m.id === defaultId ? { ...m, isDefault: true } : m)),
+  }
+}

@@ -35,7 +35,12 @@ import {
   type ProviderModelCatalog,
   type SessionModelConfig,
 } from "../../../src/editor/core/model-catalog.js"
-import { ANTHROPIC_MODEL_CATALOG } from "../../../src/editor/llm-providers/anthropic-model-catalog.js"
+import {
+  STATIC_MODEL_CATALOGS,
+  modelCatalogResolver,
+  type ModelCatalogSource,
+  type ResolvedModelCatalogs,
+} from "./model-catalog-source.js"
 
 export interface ModelCatalogResponse {
   catalogs: ProviderModelCatalog[]
@@ -48,15 +53,25 @@ export interface ModelCatalogResponse {
    * chip renders for a `null` value.
    */
   lastChosenModel: SessionModelConfig | null
+  /**
+   * Where the catalogs came from: the Models API on the active key, the
+   * `claude` binary in dev mode, or the built-in list when neither could be
+   * reached. See `model-catalog-source.ts`.
+   */
+  source: ModelCatalogSource
 }
 
 export function buildModelCatalogResponse(
   lastChosenModel: SessionModelConfig | null = null,
+  resolved: ResolvedModelCatalogs = STATIC_MODEL_CATALOGS,
 ): ModelCatalogResponse {
+  const primary = resolved.catalogs[0]
+  if (!primary) throw new Error("Model catalog resolver returned no catalogs.")
   return {
-    catalogs: [ANTHROPIC_MODEL_CATALOG],
-    default: defaultModelConfig(ANTHROPIC_MODEL_CATALOG),
+    catalogs: resolved.catalogs,
+    default: defaultModelConfig(primary),
     lastChosenModel,
+    source: resolved.source,
   }
 }
 
@@ -79,6 +94,7 @@ export function buildModelCatalogResponse(
  */
 async function resolveLastChosenModel(
   repoRoot: string,
+  catalogs: ProviderModelCatalog[],
 ): Promise<SessionModelConfig | null> {
   try {
     const { listSessionsForProject } = await import(
@@ -88,9 +104,7 @@ async function resolveLastChosenModel(
     const sessions = await listSessionsForProject(repoRoot)
     for (const summary of sessions) {
       if (!summary.modelConfig) continue
-      const reconciled = reconcileSessionModelConfig(summary.modelConfig, [
-        ANTHROPIC_MODEL_CATALOG,
-      ])
+      const reconciled = reconcileSessionModelConfig(summary.modelConfig, catalogs)
       if (reconciled) return reconciled
     }
     return null
@@ -105,10 +119,11 @@ export async function handleModelCatalogRequest(
   repoRoot: string,
 ): Promise<void> {
   try {
-    const lastChosenModel = await resolveLastChosenModel(repoRoot)
+    const resolved = await modelCatalogResolver.get()
+    const lastChosenModel = await resolveLastChosenModel(repoRoot, resolved.catalogs)
     res.statusCode = 200
     res.setHeader("Content-Type", "application/json")
-    res.end(JSON.stringify(buildModelCatalogResponse(lastChosenModel)))
+    res.end(JSON.stringify(buildModelCatalogResponse(lastChosenModel, resolved)))
   } catch (err) {
     // `defaultModelConfig` throws on an empty catalog (a broken build).
     // Answer with a diagnosable 500 rather than letting an opaque

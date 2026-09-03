@@ -55,15 +55,16 @@ const RATE_CARDS: Record<string, ModelRateCard> = {
   'claude-opus-4-7': { inputPerM: 15, outputPerM: 75 },
   // Bare catalog ids used by ANTHROPIC_MODEL_CATALOG /
   // ChatSession.modelConfig.model — see anthropic-model-catalog.ts.
-  // Not separately published by the repo; priced by family tier.
-  // family-tier estimate, verify against published pricing
+  // Published first-party rates as of 2026-06-24 (Anthropic's model table):
+  // Fable 5.1 $10/$50, Opus 5 and 4.8 $5/$25, Sonnet 5 $2/$10, Haiku 4.5
+  // $1/$5 per million input/output tokens. The estimates that sat here
+  // before were the older Opus tier ($15/$75) applied to every Opus id.
+  'claude-fable-5-1': { inputPerM: 10, outputPerM: 50 },
+  'claude-fable-5': { inputPerM: 10, outputPerM: 50 },
   'claude-haiku-4-5': { inputPerM: 1, outputPerM: 5 },
-  // family-tier estimate, verify against published pricing
-  'claude-sonnet-5': { inputPerM: 3, outputPerM: 15 },
-  // family-tier estimate, verify against published pricing
-  'claude-opus-4-8': { inputPerM: 15, outputPerM: 75 },
-  // family-tier estimate, verify against published pricing
-  'claude-opus-5': { inputPerM: 15, outputPerM: 75 },
+  'claude-sonnet-5': { inputPerM: 2, outputPerM: 10 },
+  'claude-opus-4-8': { inputPerM: 5, outputPerM: 25 },
+  'claude-opus-5': { inputPerM: 5, outputPerM: 25 },
   // OpenAI — guesses based on the gpt-5.x family. Update when pricing
   // is published. The "unknown model" fallback is intentionally
   // identical to Opus so cost estimates stay conservative.
