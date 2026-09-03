@@ -1,4 +1,5 @@
 import type { StoredCommentInput, StoredCommentReplyInput } from "../storage/types"
+import { DEMO_AVATARS } from "./demo-avatars"
 
 /**
  * The conversation the demo prototype ships with.
@@ -50,14 +51,17 @@ interface SeedAuthor {
 }
 
 /**
- * `email` and `photoURL` are empty strings, which the validator accepts and
- * which are the honest values: these people do not exist, so there is no
- * address to notify, and the viewer's CSP forbids a remote avatar anyway. The
- * pin falls back to a coloured initial (`comment-pins.ts`).
+ * `email` is the empty string, which the validator accepts and which is the
+ * honest value: these people do not exist, so there is no address to notify.
+ * `photoURL` is a drawn portrait as an inline data URI (`demo-avatars.ts`):
+ * the pin renders inside the prototype's origin, whose CSP allows `data:`
+ * images and no host the shell could offer, and an empty photoURL would fall
+ * back to a coloured initial (`comment-pins.ts`), which is what these showed
+ * until 2026-09-02.
  */
-const PRIYA: SeedAuthor = { uid: "user:demo-priya", displayName: "Priya Raman", email: "", photoURL: "" }
-const ANA: SeedAuthor = { uid: "user:demo-ana", displayName: "Ana Whitfield", email: "", photoURL: "" }
-const TOMAS: SeedAuthor = { uid: "user:demo-tomas", displayName: "Tomas Iversen", email: "", photoURL: "" }
+const PRIYA: SeedAuthor = { uid: "user:demo-priya", displayName: "Priya Raman", email: "", photoURL: DEMO_AVATARS.priya }
+const ANA: SeedAuthor = { uid: "user:demo-ana", displayName: "Ana Whitfield", email: "", photoURL: DEMO_AVATARS.ana }
+const TOMAS: SeedAuthor = { uid: "user:demo-tomas", displayName: "Tomas Iversen", email: "", photoURL: DEMO_AVATARS.tomas }
 
 export interface DemoCommentSeed {
   comment: StoredCommentInput
