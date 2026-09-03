@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ProviderModelCatalog } from '../core/model-catalog'
-import { fromAgentSdk, fromModelsApi, mergeLiveModels } from './live-model-catalog'
+import { fromAgentSdk, fromModelsApi, mergeLiveModels, versionedNameFrom } from './live-model-catalog'
 
 const STATIC: ProviderModelCatalog = {
   providerId: 'anthropic',
@@ -54,7 +54,7 @@ describe('fromAgentSdk', () => {
       { value: '', displayName: 'broken' },
     ])
     expect(live).toEqual([
-      { id: 'default', label: 'Default (recommended)', description: 'Opus 4.8', supportsEffort: true },
+      { id: 'default', label: 'Opus 4.8', description: 'Opus 4.8', supportsEffort: true },
       { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest', effortLevels: null, supportsEffort: false },
       { id: 'claude-opus-5', label: 'Opus 5' },
     ])
@@ -76,13 +76,24 @@ describe('fromAgentSdk', () => {
     ])
     expect(live[0]).toEqual({
       id: 'sonnet',
-      label: 'Sonnet',
+      label: 'Sonnet 4.6',
       description: 'Sonnet 4.6 · Best for everyday tasks',
       effortLevels: ['low', 'medium', 'high', 'max'],
       supportsEffort: true,
       adaptiveThinking: true,
     })
-    expect(live[1]).toEqual({ id: 'haiku', label: 'Haiku', description: 'Haiku 4.5 · Fastest for quick answers' })
+    expect(live[1]).toEqual({ id: 'haiku', label: 'Haiku 4.5', description: 'Haiku 4.5 · Fastest for quick answers' })
+  })
+})
+
+describe('versionedNameFrom', () => {
+  it('reads the leading family and version, and nothing else', () => {
+    expect(versionedNameFrom('Opus 4.7 with 1M context · Most capable for complex work')).toBe('Opus 4.7')
+    expect(versionedNameFrom('Sonnet 4.6 · Best for everyday tasks')).toBe('Sonnet 4.6')
+    expect(versionedNameFrom('Fable 5.1')).toBe('Fable 5.1')
+    expect(versionedNameFrom('Custom model')).toBeUndefined()
+    expect(versionedNameFrom('')).toBeUndefined()
+    expect(versionedNameFrom(undefined)).toBeUndefined()
   })
 })
 

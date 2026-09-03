@@ -299,14 +299,11 @@ export function ModelPickerChip({
               className="text-sm"
               data-testid={`editor-model-option-${m.id}`}
             >
-              <span className="flex min-w-0 flex-col">
-                <span>{m.label}</span>
-                {m.description ? (
-                  <span className="truncate text-xs text-muted-foreground">
-                    {m.description}
-                  </span>
-                ) : null}
-              </span>
+              {/* Name and version, nothing else (Mo, 2026-09-02: "this menu
+                  is unnecessarily complex"). The description stays on the
+                  catalog entry for anything that wants it; the menu does
+                  not. */}
+              <span className="truncate">{m.label}</span>
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>

@@ -141,6 +141,21 @@ function effortLadderFromCapabilities(m: ModelsApiModel): EffortLevel[] | null |
   return ladder.length > 0 ? [...ladder] : null
 }
 
+/**
+ * The binary names its entries by ALIAS ("Default (recommended)", "Sonnet")
+ * and puts the versioned model in the description ("Opus 4.7 with 1M context
+ * · Most capable for complex work", "Sonnet 4.6 · Best for everyday tasks").
+ * The picker shows name and version and nothing else (Mo, 2026-09-02), so
+ * the label is the description's leading "<Family> <version>" when it has
+ * one, and the display name otherwise (a custom model says "Custom model").
+ */
+const VERSIONED_NAME = /^((?:Fable|Opus|Sonnet|Haiku)\s+\d+(?:\.\d+)*)\b/
+
+export function versionedNameFrom(description: string | undefined): string | undefined {
+  if (!description) return undefined
+  return VERSIONED_NAME.exec(description.trim())?.[1]
+}
+
 /** Shape the Agent SDK's list. Everything it offers is usable as a `model`. */
 export function fromAgentSdk(models: readonly AgentSdkModel[]): LiveModel[] {
   return models
@@ -151,7 +166,7 @@ export function fromAgentSdk(models: readonly AgentSdkModel[]): LiveModel[] {
         : undefined
       return {
         id: m.value,
-        label: m.displayName || m.value,
+        label: versionedNameFrom(m.description) ?? (m.displayName || m.value),
         ...(m.description ? { description: m.description } : {}),
         ...(m.supportsEffort === false
           ? { effortLevels: null }
