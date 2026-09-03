@@ -40,11 +40,33 @@ export interface ButtonProps extends Omit<ComponentPropsWithoutRef<"button">, "t
   children: ReactNode
 }
 
-export function Button({ variant = "primary", size = "md", href, type = "button", disabled, onClick, children, ...rest }: ButtonProps) {
-  const className = `button button--${variant} button--${size}`
+export function Button({
+  variant = "primary",
+  size = "md",
+  href,
+  type = "button",
+  disabled,
+  onClick,
+  children,
+  className: extraClassName,
+  ...rest
+}: ButtonProps) {
+  // A caller's className is ADDED to the variant classes, never a
+  // replacement: spreading it after `className` would silently strip the
+  // variant and size styling (review finding, 2026-09-02).
+  const className = ["button", `button--${variant}`, `button--${size}`, extraClassName].filter(Boolean).join(" ")
   if (href) {
+    // An <a> has no disabled attribute, so a disabled link has to refuse the
+    // click itself, leave the tab order, and say so to assistive tech.
     return (
-      <a className={className} href={href} onClick={onClick} aria-disabled={disabled || undefined} {...(rest as ComponentPropsWithoutRef<"a">)}>
+      <a
+        className={className}
+        href={href}
+        onClick={disabled ? (event) => event.preventDefault() : onClick}
+        aria-disabled={disabled || undefined}
+        tabIndex={disabled ? -1 : undefined}
+        {...(rest as ComponentPropsWithoutRef<"a">)}
+      >
         {children}
       </a>
     )

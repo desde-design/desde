@@ -237,6 +237,13 @@ button:focus-visible {
    the set the `Button` component's `variant` and `size` props enumerate.
    Same tokens, no new colours. */
 
+.button:disabled,
+.button[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 .button--secondary { background: var(--surface); color: var(--ink); border-color: var(--line); }
 .button--secondary:hover { background: color-mix(in srgb, var(--surface) 92%, var(--ink)); }
 
