@@ -19,7 +19,7 @@ export function Workspaces() {
   })
 
   return (
-    <div className="page">
+    <div className="page-content">
         <section className="intro">
           <h1>Workspaces</h1>
           <p className="lede">

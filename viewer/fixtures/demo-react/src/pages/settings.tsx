@@ -13,7 +13,7 @@ import { Button } from "../components/Button"
  */
 export function Settings() {
   return (
-    <div className="page">
+    <div className="page-content">
         <section className="intro">
           <h1>Settings</h1>
           <p className="lede">

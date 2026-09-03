@@ -15,7 +15,7 @@ import { href, type Route } from "../router"
 export function Overview({ navigate }: { navigate: (route: Route) => void }) {
   const degraded = ROWS.filter((r) => r.status !== "Healthy")
   return (
-    <div className="page">
+    <div className="page-content">
         <section className="intro">
           <h1>Overview</h1>
           <p className="lede">
