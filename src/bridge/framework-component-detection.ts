@@ -337,20 +337,52 @@ export function getReactFiberOf(el: Element): ReactFiber | null {
   return ((el as Record<string, unknown>)[key] as ReactFiber | undefined) ?? null
 }
 
-/** The component's function/class name, unwrapping one level of memo/forwardRef. */
+/**
+ * The component's function/class name, unwrapping `memo` / `forwardRef`
+ * wrappers to any depth. `memo(forwardRef(fn))` is the common design-system
+ * shape, and one level of unwrapping reads the forwardRef object (no name)
+ * and stops (review finding, 2026-09-02). Each wrapper exposes the inner
+ * component on `.type` (memo) or `.render` (forwardRef); `displayName` on
+ * any layer wins, then the innermost function's own `name`.
+ */
 export function reactComponentName(type: unknown): string | null {
-  const candidates: unknown[] = [type]
-  if (type && typeof type === "object") {
-    candidates.push((type as Record<string, unknown>).type, (type as Record<string, unknown>).render)
-  }
-  for (const c of candidates) {
-    if (!c) continue
-    const rec = c as { displayName?: unknown; name?: unknown }
+  let cur: unknown = type
+  for (let depth = 0; depth < 6 && cur; depth++) {
+    const rec = cur as { displayName?: unknown; name?: unknown; type?: unknown; render?: unknown }
     for (const v of [rec.displayName, rec.name]) {
       if (typeof v === "string" && v.length > 0) return v
     }
+    if (typeof cur !== "object") break
+    cur = rec.type ?? rec.render
   }
   return null
+}
+
+/**
+ * Props the source-tag plugin writes onto every JSX element, component tags
+ * included (`data-desde-src` callsite, `data-desde-v` file version, and any
+ * future `data-desde-*`). They ride on the component fiber's `memoizedProps`
+ * like a real prop, and the shell renders whatever arrives here as editable
+ * rows when a component has no manifest. The Vue side strips its stamps in
+ * `serializeInstanceMap` for the same reason; MEASURED on the Northwind
+ * Button (2026-09-02): two stamp rows above `variant` in the rail.
+ */
+function isDesdeStampProp(key: string): boolean {
+  return key.startsWith("data-desde-")
+}
+
+/**
+ * Component fibers by TAG, not by `typeof fiber.type === "function"`: a
+ * `forwardRef` or `memo` component's `type` is a wrapper OBJECT, so the old
+ * test dropped every such component from the tree and from `detectReact`,
+ * which is the pre-fix symptom (no component view) for exactly the
+ * components design systems are made of. Falls back to the function test
+ * for a fiber-shaped object with no tag (older fabricated inputs).
+ */
+function isReactComponentFiber(fiber: ReactFiber): boolean {
+  const tag = fiber.tag
+  if (typeof tag === "number") return REACT_COMPONENT_FIBER_TAGS.has(tag)
+  return typeof fiber.type === "function"
 }
 
 /**
@@ -384,7 +416,7 @@ function reactPropsOf(fiber: ReactFiber): Record<string, unknown> {
   const props: Record<string, unknown> = {}
   if (memoized) {
     for (const key of Object.keys(memoized)) {
-      if (key === "children") continue
+      if (key === "children" || isDesdeStampProp(key)) continue
       props[key] = serializePropValue(memoized[key])
     }
   }
@@ -443,19 +475,11 @@ export function buildReactComponentTree(el: Element): ComponentTreeNode[] {
     seen.add(fiber)
 
     const type = fiber.type as ((...args: unknown[]) => unknown) | Record<string, unknown> | string | undefined
-    if (type && typeof type === "function") {
-      const name = (type as { displayName?: string; name?: string }).displayName ||
-        (type as { name?: string }).name || "Anonymous"
+    if (type && isReactComponentFiber(fiber)) {
+      const name = reactComponentName(type) ?? "Anonymous"
 
       if (!REACT_INTERNAL_NAMES.has(name) && name !== "Anonymous" && !name.startsWith("_")) {
-        const pendingProps = fiber.memoizedProps as Record<string, unknown> | undefined
-        const props: Record<string, unknown> = {}
-        if (pendingProps) {
-          for (const key of Object.keys(pendingProps)) {
-            if (key === "children") continue
-            props[key] = serializePropValue(pendingProps[key])
-          }
-        }
+        const props = reactPropsOf(fiber)
 
         const typeSource = (type as Record<string, unknown>).__source as Record<string, unknown> | undefined
         const fiberSource = fiber._debugSource as Record<string, unknown> | undefined
@@ -524,16 +548,13 @@ export function detectReact(el: Element): FrameworkComponentInfo | null {
   let fiber = (el as Record<string, unknown>)[fiberKey] as Record<string, unknown> | null
   while (fiber) {
     const type = fiber.type as ((...args: unknown[]) => unknown) | Record<string, unknown> | string | undefined
-    if (type && typeof type === "function") {
-      const name = (type as { displayName?: string; name?: string }).displayName || (type as { name?: string }).name || "Anonymous"
-      const pendingProps = fiber.memoizedProps as Record<string, unknown> | undefined
-      const props: Record<string, unknown> = {}
-      if (pendingProps) {
-        for (const key of Object.keys(pendingProps)) {
-          if (key === "children") continue
-          props[key] = serializePropValue(pendingProps[key])
-        }
-      }
+    // An unnamed wrapper (anonymous forwardRef/memo) keeps the walk going to
+    // the named component above it, as the old function-only test did by
+    // accident; naming it "Anonymous" would stop the walk one level short.
+    const wrapperName = type && isReactComponentFiber(fiber) ? reactComponentName(type) : null
+    if (type && wrapperName) {
+      const name = wrapperName
+      const props = reactPropsOf(fiber)
       const typeSource = (type as Record<string, unknown>).__source as Record<string, unknown> | undefined
       const fiberSource = fiber._debugSource as Record<string, unknown> | undefined
       const source = typeSource || fiberSource

@@ -17,6 +17,7 @@ import {
   detectReactOutlineComponent,
   findOutermostInstanceRootedAt,
   getReactComponentMountRoot,
+  reactComponentName,
 } from "./framework-component-detection"
 import { generateSelector } from "./selector-engine"
 
@@ -223,6 +224,33 @@ describe("React mount roots", () => {
     expect(getReactComponentMountRoot(Page)).toBe(span)
     expect(detectReactOutlineComponent(a)?.name).toBe("Child")
     expect(detectReactOutlineComponent(span)?.name).toBe("Layout")
+  })
+
+  it("forwardRef and memo components are in the tree and label their mount root (their type is an object, not a function)", () => {
+    const a = el("a", "button"); document.body.replaceChildren(a)
+    const render = { Field: function () {} }.Field
+    const forwardRef: FakeFiber = { tag: 11, type: { $$typeof: Symbol.for("react.forward_ref"), render }, stateNode: null, child: null, sibling: null, return: null, memoizedProps: { variant: "ghost", "data-desde-src": "src/App.tsx:3:4", "data-desde-v": "abc" } }
+    under(forwardRef, hostFiber(a))
+    const tree = buildReactComponentTree(a)
+    expect(tree.map((n) => n.name)).toEqual(["Field"])
+    expect(tree[0].elementSelector).toBe(generateSelector(a))
+    // The plugin's stamps ride on memoizedProps like real props; the shell
+    // renders whatever arrives as editable rows, so they never leave here.
+    expect(tree[0].props).toEqual({ variant: "ghost" })
+    expect(detectOutlineComponent(a)).toMatchObject({ framework: "react", name: "Field", props: { variant: "ghost" } })
+  })
+
+  it("memo(forwardRef(fn)) resolves to the inner function's name; displayName on any layer wins", () => {
+    const inner = { Chip: function () {} }.Chip
+    const nested = { $$typeof: Symbol.for("react.memo"), type: { $$typeof: Symbol.for("react.forward_ref"), render: inner } }
+    expect(reactComponentName(nested)).toBe("Chip")
+    expect(reactComponentName({ ...nested, displayName: "Tag" })).toBe("Tag")
+    // A function passed straight into forwardRef() has no inferred name; an
+    // array element is the one literal position that also infers none.
+    const anonymous = [function () {}][0]
+    expect(anonymous.name).toBe("")
+    expect(reactComponentName({ $$typeof: Symbol.for("react.memo"), type: { render: anonymous } })).toBeNull()
+    expect(reactComponentName("div")).toBeNull()
   })
 
   it("internal and anonymous wrappers are skipped, not reported", () => {
