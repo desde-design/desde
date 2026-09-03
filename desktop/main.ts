@@ -480,8 +480,12 @@ function registerIpcHandlers(updater: Updater, claudeRuntime: ClaudeRuntimeContr
   // instead of guessing a timeout window against electron-updater's HTTP
   // layer — see updater.ts's `checkForUpdates()` doc comment.
   ipcMain.handle("desktop:updates:check", () => updater.checkForUpdates())
-  ipcMain.on("desktop:updates:restart-and-install", () => {
-    void performRestartAndInstall({
+  // `handle`, not `on`: the renderer's "Restarting to update" dialog state
+  // needs to know when NOTHING is restarting after all (shutdown could not
+  // be confirmed, or the install was refused), so it can stand down. On the
+  // success path the app quits before the reply matters.
+  ipcMain.handle("desktop:updates:restart-and-install", () => {
+    return performRestartAndInstall({
       getPhase: () => updater.getState().phase,
       isQuitting: () => quitting,
       markQuitting: () => {

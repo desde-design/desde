@@ -23,10 +23,10 @@
  */
 import { execFile } from "node:child_process"
 import { access, cp, mkdir, rm, stat } from "node:fs/promises"
-import { dirname } from "node:path"
+import { dirname, join } from "node:path"
 import { promisify } from "node:util"
 import { resolveDemoFixtureDir } from "../../payload-paths.js"
-import { demoRepoPath, markDemoTried } from "./paths.js"
+import { DEMO_NODE_MODULES_ARCHIVE, demoRepoPath, markDemoTried } from "./paths.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -67,7 +67,17 @@ export async function materializeDemo(
 
   try {
     await mkdir(dirname(dest), { recursive: true })
-    await cp(fixtureDir, dest, { recursive: true })
+    // A packaged fixture ships its node_modules as one tarball (see
+    // DEMO_NODE_MODULES_ARCHIVE); it is unpacked into the copy rather than
+    // copied along. `tar` is on every supported OS (macOS, Linux, Windows
+    // 10+), and it keeps the `.bin/` symlinks the way `npm install` made
+    // them. A dev fixture has no archive and its real node_modules/ is
+    // copied like everything else.
+    const archive = join(fixtureDir, DEMO_NODE_MODULES_ARCHIVE)
+    await cp(fixtureDir, dest, { recursive: true, filter: (src) => src !== archive })
+    if (await exists(archive)) {
+      await execFileAsync("tar", ["-xzf", archive, "-C", dest])
+    }
     const git = (args: string[]) => execFileAsync("git", ["-C", dest, ...args])
     await git(["init", "--quiet"])
     await git(["add", "-A"])

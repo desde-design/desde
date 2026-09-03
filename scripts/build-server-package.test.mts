@@ -22,9 +22,15 @@
 import { execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { cleanDestination, currentGitCommit, isWorkingTreeDirty, MANIFEST_FILENAME } from "./build-server-package.mjs"
+import {
+  cleanDestination,
+  currentGitCommit,
+  isWorkingTreeDirty,
+  MANIFEST_FILENAME,
+  pruneNodeModules,
+} from "./build-server-package.mjs"
 
 describe("cleanDestination", () => {
   let scratch: string
@@ -170,5 +176,56 @@ describe("isWorkingTreeDirty / currentGitCommit", () => {
     const sha = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
     writeFileSync(join(repo, "committed.txt"), "modified")
     expect(currentGitCommit(repo)).toBe(`${sha}-dirty`)
+  })
+})
+
+describe("pruneNodeModules", () => {
+  function file(root: string, rel: string): string {
+    const full = join(root, rel)
+    mkdirSync(dirname(full), { recursive: true })
+    writeFileSync(full, "x", "utf8")
+    return full
+  }
+
+  it("drops maps, docs, test dirs and declarations, keeps licenses, code, and typescript/ whole", async () => {
+    const root = mkdtempSync(join(tmpdir(), "prune-"))
+    const nm = join(root, "node_modules")
+    const kept = [
+      file(nm, "zod/index.js"),
+      file(nm, "zod/LICENSE"),
+      file(nm, "zod/LICENSE.md"),
+      file(nm, "zod/NOTICE.txt"),
+      file(nm, "zod/src/types.ts"),
+      file(nm, "typescript/lib/lib.dom.d.ts"),
+      file(nm, "typescript/README.md"),
+      file(nm, "typescript/lib/typescript.js.map"),
+      file(nm, "@scope/pkg/dist/index.cjs"),
+    ]
+    const dropped = [
+      file(nm, "zod/index.js.map"),
+      file(nm, "zod/README.md"),
+      file(nm, "zod/CHANGELOG.markdown"),
+      file(nm, "zod/index.d.ts"),
+      file(nm, "zod/index.d.mts"),
+      file(nm, "zod/index.d.cts"),
+      file(nm, "zod/test/a.test.js"),
+      file(nm, "zod/lib/__tests__/b.js"),
+      file(nm, "@scope/pkg/tests/c.js"),
+      file(nm, "@scope/pkg/dist/index.d.ts"),
+    ]
+    const result = await pruneNodeModules(nm)
+    for (const p of kept) expect(existsSync(p), p).toBe(true)
+    for (const p of dropped) expect(existsSync(p), p).toBe(false)
+    expect(result.files).toBe(dropped.length)
+    expect(result.dirs).toBe(3)
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it("is a no-op for a missing directory (--skip-install payloads)", async () => {
+    await expect(pruneNodeModules(join(tmpdir(), "does-not-exist-prune"))).resolves.toEqual({
+      files: 0,
+      dirs: 0,
+      bytes: 0,
+    })
   })
 })

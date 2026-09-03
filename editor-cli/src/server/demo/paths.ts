@@ -37,6 +37,18 @@ import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
+/**
+ * The demo's `node_modules`, shipped as ONE gzipped tarball beside the demo
+ * source instead of as ~4,900 loose files. Every file in the app bundle is
+ * a file Squirrel.Mac has to unzip, verify and move on every update, and
+ * the demo's dependency tree was a third of the bundle's file count for 6%
+ * of its bytes (measured 2026-09-02). `build-server-package.mts` packs it
+ * after the staged `npm install`; `materialize.ts` unpacks it into the
+ * user's copy on first open. A dev checkout's fixture has a real
+ * `node_modules/` and no archive, and is copied as-is.
+ */
+export const DEMO_NODE_MODULES_ARCHIVE = "node_modules.tgz"
+
 export interface DemoState {
   /** ISO timestamp of the first time the demo was materialized. */
   triedAt?: string

@@ -11,7 +11,13 @@
  *
  *   <out>/dist/cli.js, dist/cli.js.map, dist/mcp.js, dist/mcp.js.map
  *   <out>/package.json           ← generated here, see generatePackageJson()
- *   <out>/node_modules/          ← `npm install --omit=dev` runs IN <out>
+ *   <out>/node_modules/          ← `npm install --omit=dev` runs IN <out>, then
+ *                                   pruneNodeModules() drops what nothing runs
+ *                                   (source maps, docs, tests, .d.ts outside
+ *                                   typescript/) — see its doc comment
+ *   <out>/demo/                  ← the bundled demo's source, plus its dependency
+ *                                   tree packed as ONE `node_modules.tgz`
+ *                                   (materialize.ts unpacks it on first open)
  *   <out>/ui/                    ← editor-cli/ui-src/dist, copied as one set
  *   <out>/assets/bridge-bundle.js, assets/html2canvas.min.js
  *   <out>/attach/stampers/*.entry.ts  ← raw source, fed to a live Vite build at boot
@@ -37,7 +43,7 @@
  */
 import { execFileSync, spawnSync } from "node:child_process"
 import { existsSync, readFileSync, promises as fs } from "node:fs"
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 // `editor-cli/package.json` declares `"type": "module"`, so files under
 // `editor-cli/src/**` compile as real ESM (module format is decided by the
@@ -46,6 +52,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 // resolvers all re-read `process.env.EDITOR_PAYLOAD_ROOT` fresh on every
 // call rather than caching it at import time, so importing this before
 // EDITOR_PAYLOAD_ROOT is set is safe; only the later CALLS need it set.
+import { DEMO_NODE_MODULES_ARCHIVE } from "../editor-cli/src/server/demo/paths.js"
 import {
   resolveBridgeBundlePath,
   resolveEditorCliPackageJson,
@@ -468,6 +475,115 @@ async function generatePackageJson(out: string): Promise<Record<string, string>>
   return dependencies
 }
 
+/**
+ * Drops the parts of an installed dependency tree that nothing executes.
+ * Every file shipped is a file the desktop updater has to download, unzip,
+ * signature-verify and move on EVERY update, and the user's first launch of a
+ * fresh install pays for it again in Gatekeeper's scan — measured
+ * 2026-09-02: the payload's node_modules were 8,494 of the bundle's 14,706
+ * files, and about 3,500 of those were source maps, README/CHANGELOG-style
+ * docs, test directories and type declarations.
+ *
+ * What goes, and why each is safe:
+ *   - `*.map` — consulted only by a debugger or a source-map-aware stack
+ *     trace, never by the running code.
+ *   - `*.md` / `*.markdown` — docs. LICENSE/LICENCE/NOTICE/COPYING files are
+ *     KEPT whatever their extension: `desktop/scripts/generate-notices.mjs`
+ *     resolves them by name for the shipped notices, and they are the legal
+ *     reason a package may be redistributed at all.
+ *   - `test/`, `tests/`, `__tests__/` directories — a package's own suite.
+ *   - `*.d.ts` / `*.d.mts` / `*.d.cts` — type declarations, read only by a
+ *     TypeScript checker. The ONE exception is `typescript/` itself: its
+ *     `lib/*.d.ts` are the default libraries the checker loads at runtime
+ *     when the manifest extractor (vue-dts-meta) analyses a user's project,
+ *     so that package is left whole.
+ *
+ * Deliberately NOT removed: `.ts` sources that ship beside compiled output
+ * (some packages point bundler-facing `exports` conditions at them), and
+ * anything under the demo (`<out>/demo/node_modules` is a USER project as
+ * far as the Editor is concerned — its `.d.ts` files are exactly what the
+ * manifest extractor reads).
+ *
+ * Exported for `build-server-package.test.mts`.
+ */
+export async function pruneNodeModules(
+  nodeModulesDir: string,
+): Promise<{ files: number; dirs: number; bytes: number }> {
+  const result = { files: 0, dirs: 0, bytes: 0 }
+  if (!existsSync(nodeModulesDir)) return result
+  const keepWhole = new Set([join(nodeModulesDir, "typescript")])
+  const isLicenseLike = (name: string) => /^(licen[cs]e|notice|copying)/i.test(name)
+  const isDeclaration = (name: string) => /\.d\.(ts|mts|cts)$/.test(name)
+  const isTestDir = (name: string) => name === "test" || name === "tests" || name === "__tests__"
+
+  async function removeTree(dir: string): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        await removeTree(full)
+      } else {
+        const st = await fs.lstat(full)
+        result.files += 1
+        result.bytes += st.size
+      }
+    }
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+
+  async function walk(dir: string, insideKeptPackage: boolean): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        const kept = insideKeptPackage || keepWhole.has(full)
+        if (!kept && isTestDir(entry.name) && dir !== nodeModulesDir && !dir.endsWith(`${sep}node_modules`)) {
+          await removeTree(full)
+          result.dirs += 1
+          continue
+        }
+        await walk(full, kept)
+        continue
+      }
+      if (insideKeptPackage || !entry.isFile()) continue
+      const name = entry.name
+      const drop =
+        name.endsWith(".map") ||
+        ((name.endsWith(".md") || name.endsWith(".markdown")) && !isLicenseLike(name)) ||
+        isDeclaration(name)
+      if (!drop) continue
+      const st = await fs.lstat(full)
+      await fs.rm(full, { force: true })
+      result.files += 1
+      result.bytes += st.size
+    }
+  }
+
+  await walk(nodeModulesDir, false)
+  return result
+}
+
+/**
+ * Packs `<out>/demo/node_modules` into `<out>/demo/node_modules.tgz` and
+ * removes the loose tree — see DEMO_NODE_MODULES_ARCHIVE (paths.ts) for why,
+ * and materialize.ts for the unpack. `tar` rather than a JS tar library:
+ * symlinks (`.bin/*`) and modes round-trip exactly, and the same `tar` is
+ * what unpacks it on the user's machine.
+ */
+export async function packDemoNodeModules(out: string): Promise<{ files: number; bytes: number }> {
+  const demoDir = join(out, "demo")
+  const loose = join(demoDir, "node_modules")
+  const { files } = await directorySizeAndCount(loose)
+  const archive = join(demoDir, DEMO_NODE_MODULES_ARCHIVE)
+  const result = spawnSync("tar", ["-czf", archive, "-C", demoDir, "node_modules"], { stdio: "inherit" })
+  if (result.status !== 0) {
+    throw new Error(`tar failed (exit ${String(result.status)}) packing ${loose}`)
+  }
+  await fs.rm(loose, { recursive: true, force: true })
+  const { size } = await fs.stat(archive)
+  return { files, bytes: size }
+}
+
 /** Runs `npm install --omit=dev` inside `<out>`, streaming output. */
 function runNpmInstall(out: string): void {
   console.log("\n▸ npm install --omit=dev (in the staging dir)")
@@ -843,7 +959,13 @@ async function main(): Promise<void> {
       )
     }
     await assertClaudeRuntimeAnchor(args.out)
+    console.log("\n▸ Pruning the payload's node_modules")
+    const pruned = await pruneNodeModules(join(args.out, "node_modules"))
+    console.log(`  Removed ${pruned.files} file(s) and ${pruned.dirs} test director(ies) (${humanBytes(pruned.bytes)})`)
     runDemoNpmInstall(args.out)
+    console.log("\n▸ Packing the demo's node_modules")
+    const packed = await packDemoNodeModules(args.out)
+    console.log(`  ${packed.files} files → ${DEMO_NODE_MODULES_ARCHIVE} (${humanBytes(packed.bytes)})`)
   } else {
     console.log("\n▸ --skip-install: skipping npm install — node_modules/ will be absent")
   }

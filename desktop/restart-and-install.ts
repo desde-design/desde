@@ -99,18 +99,35 @@ export interface RestartAndInstallDeps {
   onInstallNoLongerAuthorized: () => void
 }
 
-export async function performRestartAndInstall(deps: RestartAndInstallDeps): Promise<void> {
-  if (deps.getPhase() !== "ready") return
-  if (deps.isQuitting()) return
+/**
+ * What the routine did, returned to the renderer through the IPC handler so
+ * the "Restarting to update" dialog state can stand down when nothing is
+ * actually restarting: `"installing"` means the child is confirmed down and
+ * `quitAndInstall()` was triggered (the app quits next, so the renderer may
+ * never see this one); `"failed"` means the shutdown could not be confirmed
+ * (`onShutdownFailed` has already shown the native error box); `"ignored"`
+ * means there was nothing ready to install, a quit was already under way,
+ * or the ready update evaporated during the wait (`onInstallNoLongerAuthorized`
+ * quits the app in that last case).
+ */
+export type RestartAndInstallOutcome = "installing" | "failed" | "ignored"
+
+export async function performRestartAndInstall(
+  deps: RestartAndInstallDeps,
+): Promise<RestartAndInstallOutcome> {
+  if (deps.getPhase() !== "ready") return "ignored"
+  if (deps.isQuitting()) return "ignored"
   deps.markQuitting()
   try {
     await deps.shutdownChildren()
   } catch (err) {
     deps.onShutdownFailed(err)
-    return
+    return "failed"
   }
   const installed = deps.restartAndInstall()
   if (!installed) {
     deps.onInstallNoLongerAuthorized()
+    return "ignored"
   }
+  return "installing"
 }

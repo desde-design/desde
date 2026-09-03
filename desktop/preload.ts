@@ -19,7 +19,12 @@
  */
 
 import { contextBridge, ipcRenderer } from "electron"
-import type { DesktopBridge, DesktopClaudeRuntimeState, DesktopUpdateState } from "../src/types/desktop-bridge.js"
+import type {
+  DesktopBridge,
+  DesktopClaudeRuntimeState,
+  DesktopRestartOutcome,
+  DesktopUpdateState,
+} from "../src/types/desktop-bridge.js"
 
 const APP_VERSION_ARG_PREFIX = "--app-version="
 
@@ -70,9 +75,12 @@ export function buildDesktopBridge(ipc: IpcRendererLike, argv: readonly string[]
         return () => ipc.removeListener(UPDATE_STATE_CHANNEL, listener as (event: unknown, ...args: unknown[]) => void)
       },
       download: () => ipc.invoke("desktop:updates:download") as Promise<void>,
-      restartAndInstall: () => {
-        ipc.send("desktop:updates:restart-and-install")
-      },
+      // `invoke`, not `send`: the reply is what lets the renderer's
+      // "Restarting to update" state stand down when nothing is restarting
+      // after all (see main.ts's handler). On success the app quits before
+      // any reply, which is fine — the promise simply never settles.
+      restartAndInstall: () =>
+        ipc.invoke("desktop:updates:restart-and-install") as Promise<DesktopRestartOutcome>,
       // `invoke`, not `send` (F3, whole-branch review, P2 fix): the caller
       // needs to know precisely when ITS OWN triggered check has settled —
       // see main.ts's handler and updater.ts's `checkForUpdates()`. The

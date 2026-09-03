@@ -157,12 +157,19 @@ export function EditorSettingsMenu({
   const updateReady =
     updates?.state.phase === "available" || updates?.state.phase === "ready"
 
+  // The dialog is what shows "Restarting to update" between the click and
+  // the window closing — opened here because the dropdown that held the
+  // click is already gone.
+  const startRestart = () => {
+    setCheckDialogOpen(true)
+    updates?.restartAndInstall()
+  }
   const handleRestartClick = () => {
     if (chatSubmitting) {
       setRestartConfirmOpen(true)
       return
     }
-    updates?.restartAndInstall()
+    startRestart()
   }
 
   return (
@@ -353,7 +360,7 @@ export function EditorSettingsMenu({
       <DesktopUpdateRestartConfirmDialog
         open={restartConfirmOpen}
         onOpenChange={setRestartConfirmOpen}
-        onConfirm={() => updates?.restartAndInstall()}
+        onConfirm={startRestart}
       />
     </>
   )

@@ -35,7 +35,7 @@ function installBridge(overrides: Partial<DesktopBridge["updates"]> = {}): {
         return () => listeners.delete(cb)
       },
       download: vi.fn(async () => {}),
-      restartAndInstall: vi.fn(),
+      restartAndInstall: vi.fn(() => new Promise<never>(() => {})),
       checkForUpdates: vi.fn(async () => ({ performed: true })),
       getAutoDownload: vi.fn(async () => true),
       setAutoDownload: vi.fn(async () => {}),
@@ -129,6 +129,43 @@ describe("useDesktopUpdates — bridge present", () => {
     await waitFor(() => expect(result.current).not.toBeUndefined())
     await result.current?.download()
     expect(bridge.updates.download).toHaveBeenCalledTimes(1)
+  })
+
+  describe("restartAndInstall() drives the 'restarting' flag the check dialog shows", () => {
+    it("is false before the click and true right after it, while the bridge call is still pending (the normal path: the app quits before it settles)", async () => {
+      installBridge()
+      const { result } = renderHook(() => useDesktopUpdates())
+      await waitFor(() => expect(result.current?.autoDownload).toBe(true))
+      expect(result.current?.restarting).toBe(false)
+      act(() => result.current?.restartAndInstall())
+      await waitFor(() => expect(result.current?.restarting).toBe(true))
+    })
+
+    it("goes back to false when the main process reports nothing is restarting after all", async () => {
+      installBridge({ restartAndInstall: vi.fn(async () => "failed" as const) })
+      const { result } = renderHook(() => useDesktopUpdates())
+      await waitFor(() => expect(result.current?.autoDownload).toBe(true))
+      act(() => result.current?.restartAndInstall())
+      await waitFor(() => expect(result.current?.restarting).toBe(false))
+    })
+
+    it("stays true on 'installing' — the window is about to close", async () => {
+      installBridge({ restartAndInstall: vi.fn(async () => "installing" as const) })
+      const { result } = renderHook(() => useDesktopUpdates())
+      await waitFor(() => expect(result.current?.autoDownload).toBe(true))
+      act(() => result.current?.restartAndInstall())
+      await waitFor(() => expect(result.current?.restarting).toBe(true))
+      await new Promise((r) => setTimeout(r, 10))
+      expect(result.current?.restarting).toBe(true)
+    })
+
+    it("goes back to false on an IPC-layer failure, instead of an unhandled rejection", async () => {
+      installBridge({ restartAndInstall: vi.fn(async () => { throw new Error("IPC channel closed") }) })
+      const { result } = renderHook(() => useDesktopUpdates())
+      await waitFor(() => expect(result.current?.autoDownload).toBe(true))
+      act(() => result.current?.restartAndInstall())
+      await waitFor(() => expect(result.current?.restarting).toBe(false))
+    })
   })
 
   it("restartAndInstall() delegates to the bridge", async () => {

@@ -126,10 +126,10 @@ describe("buildDesktopBridge — the rest of the updates API delegates to the ri
     expect(ipc.invoke).toHaveBeenCalledWith("desktop:updates:download")
   })
 
-  it("restartAndInstall() sends (not invokes) desktop:updates:restart-and-install — fire-and-forget, since the app may quit before a reply", () => {
+  it("restartAndInstall() invokes desktop:updates:restart-and-install — the reply is what lets the 'Restarting to update' state stand down when nothing restarts", () => {
     const ipc = fakeIpc()
-    buildDesktopBridge(ipc, []).updates.restartAndInstall()
-    expect(ipc.send).toHaveBeenCalledWith("desktop:updates:restart-and-install")
+    void buildDesktopBridge(ipc, []).updates.restartAndInstall()
+    expect(ipc.invoke).toHaveBeenCalledWith("desktop:updates:restart-and-install")
   })
 
   it("checkForUpdates() invokes (not sends) desktop:updates:check — the caller awaits its own check settling (F3, P2 fix), not just the pushed state", () => {

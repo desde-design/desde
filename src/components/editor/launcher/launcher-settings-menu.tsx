@@ -69,7 +69,9 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
 
   const handleRestartClick = useCallback(() => {
     // Straight through. The launcher has no chat turn to interrupt, which is
-    // the only reason the project menu confirms first.
+    // the only reason the project menu confirms first. The dialog opens to
+    // show "Restarting to update" until the window closes.
+    setCheckDialogOpen(true)
     updates?.restartAndInstall()
   }, [updates])
 

@@ -145,7 +145,7 @@ describe("performRestartAndInstall — F9: shutdownChildren() failing aborts the
       }),
     })
 
-    await expect(performRestartAndInstall(deps)).resolves.toBeUndefined()
+    await expect(performRestartAndInstall(deps)).resolves.toBe("failed")
   })
 })
 
@@ -178,5 +178,29 @@ describe("performRestartAndInstall — F10: an install that's no longer authoriz
     await performRestartAndInstall(deps)
 
     expect(deps.onInstallNoLongerAuthorized).not.toHaveBeenCalled()
+  })
+})
+
+describe("performRestartAndInstall — the outcome the renderer's 'Restarting to update' state reads", () => {
+  it("reports 'installing' once shutdown resolved and restartAndInstall() accepted", async () => {
+    await expect(performRestartAndInstall(baseDeps())).resolves.toBe("installing")
+  })
+
+  it("reports 'failed' when shutdownChildren() rejects — the app stays open, so the dialog must stand down", async () => {
+    const deps = baseDeps({
+      shutdownChildren: vi.fn(async () => {
+        throw new Error("deadline")
+      }),
+    })
+    await expect(performRestartAndInstall(deps)).resolves.toBe("failed")
+    expect(deps.onShutdownFailed).toHaveBeenCalledTimes(1)
+  })
+
+  it("reports 'ignored' outside phase 'ready', while already quitting, and when the install was no longer authorized", async () => {
+    await expect(performRestartAndInstall(baseDeps({ getPhase: () => "available" }))).resolves.toBe("ignored")
+    await expect(performRestartAndInstall(baseDeps({ isQuitting: () => true }))).resolves.toBe("ignored")
+    const deps = baseDeps({ restartAndInstall: vi.fn(() => false) })
+    await expect(performRestartAndInstall(deps)).resolves.toBe("ignored")
+    expect(deps.onInstallNoLongerAuthorized).toHaveBeenCalledTimes(1)
   })
 })

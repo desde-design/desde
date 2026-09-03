@@ -1,11 +1,11 @@
 import { execFile } from "node:child_process"
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { access, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { materializeDemo } from "../materialize.js"
-import { demoRepoPath, readDemoState } from "../paths.js"
+import { DEMO_NODE_MODULES_ARCHIVE, demoRepoPath, readDemoState } from "../paths.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -74,5 +74,34 @@ describe("materializeDemo", () => {
     await rm(fixtureDir, { recursive: true, force: true })
     await expect(materializeDemo({ home, fixtureDir })).rejects.toThrow()
     expect(await readDemoState(home)).toEqual({})
+  })
+
+  /**
+   * A packaged fixture ships its dependency tree as one tarball (see
+   * DEMO_NODE_MODULES_ARCHIVE in paths.ts): the archive must be unpacked into
+   * the copy, symlinks intact, and must not itself land in the copy. The
+   * `.bin/` symlink is the part `cp` would have preserved and a naive
+   * archive round-trip loses.
+   */
+  it("unpacks a shipped node_modules archive into the copy instead of copying the archive", async () => {
+    const staged = join(fixtureDir, "node_modules")
+    await mkdir(join(staged, "left-pad"), { recursive: true })
+    await mkdir(join(staged, ".bin"), { recursive: true })
+    await writeFile(join(staged, "left-pad", "index.js"), "module.exports = (s) => s\n", "utf8")
+    await execFileAsync("ln", ["-s", "../left-pad/index.js", join(staged, ".bin", "left-pad")])
+    await execFileAsync("tar", ["-czf", join(fixtureDir, DEMO_NODE_MODULES_ARCHIVE), "-C", fixtureDir, "node_modules"])
+    await rm(staged, { recursive: true, force: true })
+
+    const { path } = await materializeDemo({ home, fixtureDir })
+    expect(await readFile(join(path, "node_modules", "left-pad", "index.js"), "utf8")).toContain("module.exports")
+    expect(await readlink(join(path, "node_modules", ".bin", "left-pad"))).toBe("../left-pad/index.js")
+    await expect(access(join(path, DEMO_NODE_MODULES_ARCHIVE))).rejects.toThrow()
+  })
+
+  it("copies a dev fixture's real node_modules as-is when there is no archive", async () => {
+    await mkdir(join(fixtureDir, "node_modules", "left-pad"), { recursive: true })
+    await writeFile(join(fixtureDir, "node_modules", "left-pad", "index.js"), "module.exports = 1\n", "utf8")
+    const { path } = await materializeDemo({ home, fixtureDir })
+    expect(await readFile(join(path, "node_modules", "left-pad", "index.js"), "utf8")).toBe("module.exports = 1\n")
   })
 })

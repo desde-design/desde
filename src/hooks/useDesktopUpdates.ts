@@ -27,8 +27,24 @@ export interface DesktopUpdatesApi {
   setAutoDownload: (value: boolean) => Promise<void>
   /** Manual download when autoDownload is off. No-op outside phase "available" (enforced main-process side). */
   download: () => Promise<void>
-  /** Only valid in phase "ready" (enforced main-process side) — fire-and-forget, the app may quit before any reply. */
+  /**
+   * Only valid in phase "ready" (enforced main-process side). Flips
+   * `restarting` on for the caller; the app normally quits before the
+   * bridge call ever settles. When it does settle with anything other than
+   * `"installing"` (shutdown could not be confirmed, or nothing was ready
+   * after all), `restarting` goes back off — the main process has already
+   * shown its own native error box for the failure.
+   */
   restartAndInstall: () => void
+  /**
+   * True from the moment "Restart to update" was clicked until the app
+   * quits, or until the main process reports that nothing is restarting.
+   * The check dialog shows its "Restarting to update" view on it, so the
+   * seconds between the click and the window closing are not silence (Mo,
+   * 2026-09-02: a wait with no visible state read as "it did nothing", and
+   * a relaunch mid-install then aborted the install).
+   */
+  restarting: boolean
   /**
    * On-demand "Check for updates" — same effect as the periodic 4h timer
    * firing once, right now. Fire-and-forget: the click's own outcome lands
@@ -122,6 +138,7 @@ export function useDesktopUpdates(): DesktopUpdatesApi | undefined {
   // one has already landed.
   const autoDownloadCallSeq = useRef(0)
   const [lastCheck, setLastCheck] = useState<DesktopUpdateCheckResult | undefined>(undefined)
+  const [restarting, setRestarting] = useState(false)
   /** Same job as `autoDownloadCallSeq`, for the on-demand check: only the newest click's settle may write `lastCheck`. */
   const checkCallSeq = useRef(0)
 
@@ -259,7 +276,19 @@ export function useDesktopUpdates(): DesktopUpdatesApi | undefined {
   }, [bridge])
 
   const restartAndInstall = useCallback(() => {
-    bridge?.updates.restartAndInstall()
+    if (!bridge) return
+    setRestarting(true)
+    void (async () => {
+      try {
+        const outcome = await bridge.updates.restartAndInstall()
+        if (outcome !== "installing") setRestarting(false)
+      } catch (err) {
+        // An IPC-layer failure: the main-process handler itself threw.
+        // Nothing is restarting, so the dialog must not keep saying it is.
+        console.error("[editor] restartAndInstall failed:", err)
+        setRestarting(false)
+      }
+    })()
   }, [bridge])
 
   // Every hook above still ran unconditionally on every render (this is the
@@ -274,6 +303,7 @@ export function useDesktopUpdates(): DesktopUpdatesApi | undefined {
     setAutoDownload,
     download,
     restartAndInstall,
+    restarting,
     checkForUpdates,
     lastCheck,
   }

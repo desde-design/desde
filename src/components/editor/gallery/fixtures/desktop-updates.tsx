@@ -79,7 +79,12 @@ function makeBridge(
       getState: async () => state,
       onState: () => () => {},
       download: async () => ctx.log("download"),
-      restartAndInstall: () => ctx.log("restartAndInstall"),
+      // Never settles: the real app quits before the reply, so the dialog
+      // holds its "Restarting to update" view — exactly the state on screen.
+      restartAndInstall: () => {
+        ctx.log("restartAndInstall")
+        return new Promise(() => {})
+      },
       checkForUpdates: () => {
         ctx.log("checkForUpdates")
         if (check.pending) return new Promise<{ performed: boolean }>(() => {})
@@ -260,6 +265,16 @@ export const DESKTOP_UPDATES_SURFACE: SurfaceEntry = {
       {},
     ),
     checkDialogState("ready", "Check dialog: ready to restart", "ready", { phase: "ready", version: "1.5.0" }, {}),
+    {
+      // "Restart to update" clicked from the menu row: the dialog opens by
+      // itself in its restarting view and stays until the window closes.
+      id: "desktop-updates/check-dialog-restarting",
+      label: "Check dialog: restarting to update",
+      readyWhen: '[data-testid="desktop-update-check-dialog"][data-view="restarting"]',
+      render: (ctx: SurfaceRenderContext) => (
+        <SettingsMenuFixture bridge={makeBridge(ctx, { phase: "ready", version: "1.5.0" })} thenClickRestart />
+      ),
+    },
     checkDialogState(
       "error",
       "Check dialog: check failed",

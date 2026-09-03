@@ -19,6 +19,9 @@
  * interface, not a re-derivation of it.
  */
 
+/** What one "Restart to update" click did — see `DesktopBridge.updates.restartAndInstall`. */
+export type DesktopRestartOutcome = "installing" | "failed" | "ignored"
+
 export interface DesktopUpdateState {
   phase: "idle" | "checking" | "available" | "downloading" | "ready" | "error"
   /** The update's version, once known. */
@@ -51,8 +54,16 @@ export interface DesktopBridge {
     onState: (cb: (state: DesktopUpdateState) => void) => () => void
     /** Manual download when auto-download is off. */
     download: () => Promise<void>
-    /** Only valid in phase `"ready"`. */
-    restartAndInstall: () => void
+    /**
+     * Only valid in phase `"ready"`. Resolves with what the main process
+     * did: `"installing"` once the payload child is confirmed down and the
+     * native installer has been handed the update (the app quits right
+     * after, so this resolution may never be observed); `"failed"` when the
+     * child shutdown could not be confirmed (main shows a native error box
+     * and the app stays open); `"ignored"` when nothing was ready to
+     * install or a quit was already under way.
+     */
+    restartAndInstall: () => Promise<DesktopRestartOutcome>
     /**
      * On-demand check — the "Check for updates" settings-menu item. Same
      * effect as the periodic 4h timer firing once, right now; the resulting
