@@ -227,6 +227,14 @@ export interface ComponentTreeNode {
   elementSelector: string
   isLibrary?: boolean
   packageName?: string
+  /**
+   * The source-tag plugin's callsite stamp on this component's tag
+   * (`file:line:col`), present when the tag was written in a stamped
+   * first-party file and absent for a component instantiated inside
+   * library code. See the bridge's `ComponentTreeNode` for why the shell
+   * uses it to pick the selection's component on React.
+   */
+  callsite?: string
 }
 
 /**

@@ -105,6 +105,84 @@ describe("inspectionDataToSelection", () => {
   })
 })
 
+describe("inspectionDataToSelection: which node is the component, on React (no editTargetComponent)", () => {
+  // React fibers carry no file, so the bridge cannot resolve an
+  // editTargetComponent there. Every node whose elementSelector is the
+  // clicked selector is rooted at the clicked element; the outermost one
+  // that carries a callsite stamp is the tag the user wrote. MEASURED on the
+  // bundled Acme demo (2026-09-02): the tree was [App, Button, Button], the
+  // last being base-ui's internal, and the old last-node rule picked it.
+  const clicked = "body > div#app > button.group\\/button"
+
+  it("prefers the outermost stamped node rooted at the clicked element over the library internal beneath it", () => {
+    const selection = inspectionDataToSelection(
+      makeInspectionData({
+        selector: clicked,
+        selfStamped: true,
+        editTargetComponent: undefined,
+        componentTree: [
+          { name: "App", elementSelector: "body > div#app", callsite: "src/main.tsx:8:4" },
+          { name: "Button", elementSelector: clicked, callsite: "src/App.tsx:26:8", props: { size: "sm" } },
+          { name: "ButtonPrimitive", elementSelector: clicked, props: { type: "button" } },
+        ],
+      }),
+    )
+    expect(selection.selectedAsElement).toBeUndefined()
+    expect(selection.componentName).toBe("Button")
+    expect(selection.currentProps).toEqual({ size: "sm" })
+    // The ancestry is what sits ABOVE the chosen node, leaf-first.
+    expect(selection.ancestry.map((a) => a.componentName)).toEqual(["App"])
+  })
+
+  it("transparent first-party wrappers: the outermost stamped one wins, matching the Structure panel's label", () => {
+    const selection = inspectionDataToSelection(
+      makeInspectionData({
+        selector: clicked,
+        selfStamped: true,
+        editTargetComponent: undefined,
+        componentTree: [
+          { name: "Owner", elementSelector: "body > div#app", callsite: "src/main.tsx:8:4" },
+          { name: "Card", elementSelector: clicked, callsite: "src/Owner.tsx:5:6" },
+          { name: "Panel", elementSelector: clicked, callsite: "src/Card.tsx:3:10" },
+        ],
+      }),
+    )
+    expect(selection.componentName).toBe("Card")
+  })
+
+  it("with no stamped node rooted there, the outermost rooted node still beats the last-node default", () => {
+    const selection = inspectionDataToSelection(
+      makeInspectionData({
+        selector: clicked,
+        selfStamped: false,
+        editTargetComponent: undefined,
+        componentTree: [
+          { name: "App", elementSelector: "body > div#app" },
+          { name: "LibButton", elementSelector: clicked },
+          { name: "LibButtonInner", elementSelector: clicked },
+        ],
+      }),
+    )
+    expect(selection.componentName).toBe("LibButton")
+  })
+
+  it("with no node rooted at the clicked element, the last node is still the primary and the click is an element", () => {
+    const selection = inspectionDataToSelection(
+      makeInspectionData({
+        selector: clicked,
+        selfStamped: true,
+        editTargetComponent: undefined,
+        componentTree: [
+          { name: "App", elementSelector: "body > div#app", callsite: "src/main.tsx:8:4" },
+          { name: "Page", elementSelector: "body > div#app > main", callsite: "src/App.tsx:9:6" },
+        ],
+      }),
+    )
+    expect(selection.selectedAsElement).toBe(true)
+    expect(selection.ancestry.map((a) => a.componentName)).toEqual(["Page", "App"])
+  })
+})
+
 describe("bridgeMutationToCore", () => {
   function makeBridgeMutation(
     overrides: Partial<BridgeMutation> = {},

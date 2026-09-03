@@ -237,6 +237,10 @@ describe("React mount roots", () => {
     // The plugin's stamps ride on memoizedProps like real props; the shell
     // renders whatever arrives as editable rows, so they never leave here.
     expect(tree[0].props).toEqual({ variant: "ghost" })
+    // The callsite stamp is kept as its own field: it is how the shell tells
+    // a tag the user wrote from a library-internal instance rooted at the
+    // same element.
+    expect(tree[0].callsite).toBe("src/App.tsx:3:4")
     expect(detectOutlineComponent(a)).toMatchObject({ framework: "react", name: "Field", props: { variant: "ghost" } })
   })
 

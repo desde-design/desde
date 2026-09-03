@@ -24,6 +24,7 @@ import type {
 import type {
   BridgeMutation,
   BridgePendingMutation,
+  ComponentTreeNode,
   InspectionData,
 } from '@/types/bridge'
 
@@ -44,6 +45,23 @@ export function inspectionDataToSelection(data: InspectionData): Selection {
       (n) => n.name === editTarget.name && n.file === editTarget.file,
     )
     if (matchIdx >= 0) primaryIndex = matchIdx
+  } else {
+    // No edit-target component (React: the bridge resolves one through Vue
+    // instances only). The tree is root-first, and every node whose
+    // elementSelector is the clicked selector is rooted at the clicked
+    // element: a transparent-wrapper stack. The innermost of those is the
+    // library internal or the inner half of a wrapper; the OUTERMOST that
+    // carries a callsite stamp is the tag the user wrote, which is what
+    // the Structure panel labels the element with (`detectOutlineComponent`
+    // picks the outermost) and what the Vue lane's editTargetComponent
+    // means. Measured on the bundled Acme demo: `[App, Button, Button]`
+    // with the last being base-ui's internal. Prefer a stamped match, then
+    // any match, then the old last-node default.
+    const rootedHere = (n: ComponentTreeNode) =>
+      n.elementSelector.length > 0 && n.elementSelector === data.selector
+    const outermostStamped = componentTree.findIndex((n) => rootedHere(n) && !!n.callsite)
+    const outermost = outermostStamped >= 0 ? outermostStamped : componentTree.findIndex(rootedHere)
+    if (outermost >= 0) primaryIndex = outermost
   }
   const primary = primaryIndex >= 0 ? componentTree[primaryIndex] : null
   // Distinguish "user clicked the component's render root" from "user

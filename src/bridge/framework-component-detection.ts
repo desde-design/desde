@@ -114,6 +114,20 @@ export interface ComponentTreeNode {
   elementSelector: string
   isLibrary?: boolean
   packageName?: string
+  /**
+   * The `data-desde-src` callsite stamp the source-tag plugin put on this
+   * component's tag (`file:line:col`, repo-relative), when the tag was
+   * written in a stamped first-party file. A component instantiated inside
+   * library code has none. This is what tells a first-party wrapper apart
+   * from the library internals rooted at the same element on React, where
+   * fibers carry no file: the shell prefers the OUTERMOST stamped node
+   * rooted at the clicked element as the selection's component. MEASURED on
+   * the bundled Acme demo (2026-09-02): the tree for its button was
+   * `[App, Button, Button]`, the second being base-ui's internal, and the
+   * old last-node rule picked the internal; it looked right only because
+   * both are named Button.
+   */
+  callsite?: string
 }
 
 export interface OutlineNode {
@@ -480,6 +494,9 @@ export function buildReactComponentTree(el: Element): ComponentTreeNode[] {
 
       if (!REACT_INTERNAL_NAMES.has(name) && name !== "Anonymous" && !name.startsWith("_")) {
         const props = reactPropsOf(fiber)
+        const memoized = fiber.memoizedProps as Record<string, unknown> | undefined
+        const stamp = memoized?.["data-desde-src"]
+        const callsite = typeof stamp === "string" && stamp.length > 0 ? stamp : undefined
 
         const typeSource = (type as Record<string, unknown>).__source as Record<string, unknown> | undefined
         const fiberSource = fiber._debugSource as Record<string, unknown> | undefined
@@ -508,6 +525,7 @@ export function buildReactComponentTree(el: Element): ComponentTreeNode[] {
           elementSelector: selector,
           isLibrary: isLibrary || undefined,
           packageName,
+          callsite,
         })
       }
     }
