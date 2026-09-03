@@ -53,7 +53,7 @@ export function Overview({ navigate }: { navigate: (route: Route) => void }) {
           )}
           <div className="actions" data-demo-anchor="view-all">
             <Button
-              variant="primary"
+              variant="secondary"
               href={href("workspaces")}
               onClick={(e) => {
                 e.preventDefault()

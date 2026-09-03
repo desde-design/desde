@@ -2,10 +2,10 @@ import { useState } from "react"
 import { ROWS } from "../data"
 
 /**
- * The card-grid page, plus the one control that makes it a page rather than a
- * screenshot: a filter that actually narrows the cards.
+ * The table page, plus the one control that makes it a page rather than a
+ * screenshot: a filter that actually narrows the rows.
  *
- * `northwind-eu` is Degraded on purpose and is the card most reviewers comment
+ * `northwind-eu` is Degraded on purpose and is the row most reviewers comment
  * on first. It carries its own anchor so a seeded comment can land on it.
  */
 export function Workspaces() {
@@ -48,28 +48,32 @@ export function Workspaces() {
             </label>
           </div>
 
-          <div className="card-grid">
-            {visible.map((row) => (
-              <article key={row.name} className="workspace-card" data-demo-anchor={`workspace-${row.name}`}>
-                <div className="workspace-card__head">
-                  <h3 className="workspace-card__name">{row.name}</h3>
-                  <span className={row.status === "Healthy" ? "pill pill--ok" : "pill pill--warn"}>
-                    {row.status}
-                  </span>
-                </div>
-                <dl className="workspace-card__facts">
-                  <div className="workspace-fact">
-                    <dt>Region</dt>
-                    <dd>{row.region}</dd>
-                  </div>
-                  <div className="workspace-fact">
-                    <dt>Requests today</dt>
-                    <dd className="numeric">{row.requests}</dd>
-                  </div>
-                </dl>
-              </article>
-            ))}
-          </div>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Region</th>
+                <th>Owner</th>
+                <th>Status</th>
+                <th className="numeric">Requests</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((row) => (
+                <tr key={row.name} data-demo-anchor={`workspace-${row.name}`}>
+                  <td className="table-name">{row.name}</td>
+                  <td>{row.region}</td>
+                  <td>{row.owner}</td>
+                  <td>
+                    <span className={row.status === "Healthy" ? "pill pill--ok" : "pill pill--warn"}>
+                      {row.status}
+                    </span>
+                  </td>
+                  <td className="numeric">{row.requests}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
 
           {visible.length === 0 ? <p className="empty">No workspaces match that filter.</p> : null}
         </section>
