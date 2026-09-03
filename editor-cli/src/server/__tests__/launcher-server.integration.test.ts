@@ -145,6 +145,43 @@ describe("startLauncher — ephemeral port", () => {
       await h.close()
     }
   })
+
+  /**
+   * A busy requested port falls back to a free one. This is what a per-project
+   * editor already does (`core.ts`'s `pickTwoPorts`); the launcher used to be
+   * the one boot path that did not, so a desktop app opened while a terminal
+   * `desde` held 4321 died with EADDRINUSE before its window had a URL.
+   */
+  it("falls back to a free port when the requested one is already in use", async () => {
+    const net = await import("node:net")
+    const blocker = net.createServer()
+    await new Promise<void>((resolve, reject) => {
+      blocker.once("error", reject)
+      blocker.listen(0, "127.0.0.1", () => resolve())
+    })
+    const addr = blocker.address()
+    const busyPort = typeof addr === "object" && addr ? addr.port : 0
+    expect(busyPort).toBeGreaterThan(0)
+
+    let h: LauncherHandle | undefined
+    try {
+      h = await startLauncher({
+        port: busyPort,
+        spawnEditor: spawnStub,
+        pickFolder: pickFolderStub,
+        uiBundleRoot: bundleRoot,
+      })
+      const boundPort = Number(new URL(h.url).port)
+      expect(boundPort).toBeGreaterThan(0)
+      expect(boundPort).not.toBe(busyPort)
+      // The fallback port is the one that actually serves.
+      const boot = await fetch(`${h.url}/__desde/bootstrap.js`)
+      expect(boot.status).toBe(200)
+    } finally {
+      await h?.close()
+      await new Promise<void>((resolve) => blocker.close(() => resolve()))
+    }
+  })
 })
 
 /** The bootstrap script carries the per-session token; pull it out. */

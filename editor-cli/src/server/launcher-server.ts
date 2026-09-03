@@ -244,17 +244,36 @@ export async function startLauncher(
   */
   let boundPort = port
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject)
-    server.listen(port, host, () => {
-      const addr = server.address()
-      if (addr && typeof addr === "object") {
-        boundPort = addr.port
-        ctx.listenOrigin = listenOriginFor(host, addr.port)
-      }
-      resolve()
+  const listenOn = (p: number) =>
+    new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => reject(err)
+      server.once("error", onError)
+      server.listen(p, host, () => {
+        server.off("error", onError)
+        const addr = server.address()
+        if (addr && typeof addr === "object") {
+          boundPort = addr.port
+          ctx.listenOrigin = listenOriginFor(host, addr.port)
+        }
+        resolve()
+      })
     })
-  })
+
+  // A busy requested port falls back to an OS-picked free one, the same
+  // trade a per-project editor makes in `core.ts` (`pickTwoPorts`). Until
+  // now the launcher was the one boot path without it: a terminal `desde`
+  // holding 4321 made the desktop app die with EADDRINUSE before its window
+  // had a URL to show. The requested port is still tried first so a bookmark
+  // survives when only one instance is running; the ready line carries the
+  // port that was really bound, which is what every caller reads.
+  try {
+    await listenOn(port)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code !== "EADDRINUSE" || port === 0) throw err
+    console.warn(`[launcher] port ${port} is in use; picking a free one instead`)
+    await listenOn(0)
+  }
 
   // Safe to assign after `listen`: nothing reads `security` until a request
   // arrives, and no request can arrive before this point.
