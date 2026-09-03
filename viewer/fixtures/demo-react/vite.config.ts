@@ -13,4 +13,8 @@ import { defineConfig } from "vite"
 export default defineConfig({
   base: "./",
   plugins: [react()],
+  // Component names survive minification. The Viewer's inspector names a
+  // component from its function name at runtime, and the production bundle
+  // was showing the demo's Button as "di" (review finding, 2026-09-02).
+  esbuild: { keepNames: true },
 })

@@ -13,39 +13,39 @@ import { Button } from "../components/Button"
  */
 export function Settings() {
   return (
-    <>
-      <section className="intro">
-        <h1>Settings</h1>
-        <p className="lede">
-          Alerting and retention for this account. Changes apply to every workspace.
-        </p>
-      </section>
+    <div className="page">
+        <section className="intro">
+          <h1>Settings</h1>
+          <p className="lede">
+            Alerting and retention for this account. Changes apply to every workspace.
+          </p>
+        </section>
 
-      <section className="panel" data-demo-anchor="alert-settings">
-        <h2>Alerts</h2>
-        <div className="field">
-          <label htmlFor="threshold">Error rate threshold</label>
-          <input id="threshold" type="text" defaultValue="0.50%" data-demo-anchor="threshold" />
-          <p className="field-hint">Current error rate is 0.42%.</p>
-        </div>
-        <div className="field">
-          <label htmlFor="channel">Notify</label>
-          <select id="channel" defaultValue="email" data-demo-anchor="notify">
-            <option value="email">Email</option>
-            <option value="slack">Slack</option>
-            <option value="none">Nobody</option>
-          </select>
-        </div>
-        <div className="actions">
-          <Button variant="primary">Save changes</Button>
-          <Button variant="secondary">Discard</Button>
-        </div>
-      </section>
+        <section className="panel" data-demo-anchor="alert-settings">
+          <h2>Alerts</h2>
+          <div className="field">
+            <label htmlFor="threshold">Error rate threshold</label>
+            <input id="threshold" type="text" defaultValue="0.50%" data-demo-anchor="threshold" />
+            <p className="field-hint">Current error rate is 0.42%.</p>
+          </div>
+          <div className="field">
+            <label htmlFor="channel">Notify</label>
+            <select id="channel" defaultValue="email" data-demo-anchor="notify">
+              <option value="email">Email</option>
+              <option value="slack">Slack</option>
+              <option value="none">Nobody</option>
+            </select>
+          </div>
+          <div className="actions">
+            <Button variant="primary">Save changes</Button>
+            <Button variant="secondary">Discard</Button>
+          </div>
+        </section>
 
-      <section className="panel" data-demo-anchor="retention">
-        <h2>Retention</h2>
-        <p className="empty">Retention controls are not built yet.</p>
-      </section>
-    </>
+        <section className="panel" data-demo-anchor="retention">
+          <h2>Retention</h2>
+          <p className="empty">Retention controls are not built yet.</p>
+        </section>
+    </div>
   )
 }

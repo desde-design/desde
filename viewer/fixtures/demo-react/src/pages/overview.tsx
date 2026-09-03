@@ -15,55 +15,55 @@ import { href, type Route } from "../router"
 export function Overview({ navigate }: { navigate: (route: Route) => void }) {
   const degraded = ROWS.filter((r) => r.status !== "Healthy")
   return (
-    <>
-      <section className="intro">
-        <h1>Overview</h1>
-        <p className="lede">
-          This is a demo prototype served by your viewer. Try the comment tool in the
-          toolbar, then click anything on this page to leave a note on it.
-        </p>
-      </section>
+    <div className="page">
+        <section className="intro">
+          <h1>Overview</h1>
+          <p className="lede">
+            This is a demo prototype served by your viewer. Try the comment tool in the
+            toolbar, then click anything on this page to leave a note on it.
+          </p>
+        </section>
 
-      <section className="metrics" data-demo-anchor="metrics">
-        {METRICS.map((metric) => (
-          <article className="metric" key={metric.label} data-demo-anchor={`metric-${metric.label.toLowerCase().replace(/\s+/g, "-")}`}>
-            <p className="metric-label">{metric.label}</p>
-            <p className="metric-value">{metric.value}</p>
-            <p className={metric.positive ? "metric-delta metric-delta--up" : "metric-delta metric-delta--down"}>
-              {metric.delta}
-            </p>
-          </article>
-        ))}
-      </section>
+        <section className="metrics" data-demo-anchor="metrics">
+          {METRICS.map((metric) => (
+            <article className="metric" key={metric.label} data-demo-anchor={`metric-${metric.label.toLowerCase().replace(/\s+/g, "-")}`}>
+              <p className="metric-label">{metric.label}</p>
+              <p className="metric-value">{metric.value}</p>
+              <p className={metric.positive ? "metric-delta metric-delta--up" : "metric-delta metric-delta--down"}>
+                {metric.delta}
+              </p>
+            </article>
+          ))}
+        </section>
 
-      <section className="panel" data-demo-anchor="attention">
-        <h2>Needs attention</h2>
-        {degraded.length === 0 ? (
-          <p className="empty">Everything is healthy.</p>
-        ) : (
-          <ul className="attention-list">
-            {degraded.map((row) => (
-              <li key={row.name}>
-                <span className="pill pill--warn">{row.status}</span>
-                <span className="table-name">{row.name}</span>
-                <span className="attention-meta">{row.region}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-        <div className="actions" data-demo-anchor="view-all">
-          <Button
-            variant="ghost"
-            href={href("workspaces")}
-            onClick={(e) => {
-              e.preventDefault()
-              navigate("workspaces")
-            }}
-          >
-            View all workspaces
-          </Button>
-        </div>
-      </section>
-    </>
+        <section className="panel" data-demo-anchor="attention">
+          <h2>Needs attention</h2>
+          {degraded.length === 0 ? (
+            <p className="empty">Everything is healthy.</p>
+          ) : (
+            <ul className="attention-list">
+              {degraded.map((row) => (
+                <li key={row.name}>
+                  <span className="pill pill--warn">{row.status}</span>
+                  <span className="table-name">{row.name}</span>
+                  <span className="attention-meta">{row.region}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="actions" data-demo-anchor="view-all">
+            <Button
+              variant="ghost"
+              href={href("workspaces")}
+              onClick={(e) => {
+                e.preventDefault()
+                navigate("workspaces")
+              }}
+            >
+              View all workspaces
+            </Button>
+          </div>
+        </section>
+    </div>
   )
 }
