@@ -1126,10 +1126,12 @@ describe("createUpdater — the five doors (one bug class, five orderings)", () 
     })
   })
 
-  it("G1-P1 (frozen ready): v1's reused downloadPromise rejecting after a v2 conclusion is v1's outcome, on v1", async () => {
+  it("G1-P1 (frozen ready): v1's own downloadPromise rejecting after a v2 conclusion is v1's outcome, on v1 — the recheck hands back no promise at all", async () => {
     const source = fakeSource()
     const updater = createUpdater({ autoDownload: true, source, scheduleCheck: fakeScheduler().schedule })
 
+    // v1 found; autoDownload starts; v1's check result carries its
+    // downloadPromise, which stays PENDING through native preparation.
     let rejectV1Download: ((err: Error) => void) | undefined
     const v1DownloadPromise = new Promise((_resolve, reject) => {
       rejectV1Download = reject
@@ -1144,27 +1146,34 @@ describe("createUpdater — the five doors (one bug class, five orderings)", () 
     await Promise.resolve()
     source.emit("download-progress", { percent: 40 })
 
-    // A recheck starts mid-download and reports v2 after v1 reached ready,
-    // handing v1's EXISTING promise back inside its result (6.8.9 reuses a
-    // pending downloadPromise).
+    // A recheck starts mid-download and reports v2 after v1 reached ready.
+    // Faithful to 6.8.9 with the flag forced off by then: `doCheckForUpdates`
+    // reads `autoDownload` AFTER the emit and returns `downloadPromise: null`
+    // — it never hands v1's existing promise back (codex, round three: the
+    // earlier version of this test fabricated exactly that).
     let concludeCheck: (() => void) | undefined
     source.checkForUpdates.mockImplementationOnce(() => {
       source.emit("checking-for-update")
       return new Promise((resolve) => {
         concludeCheck = () => {
           source.emit("update-available", { version: "2.0.0" })
-          resolve({ downloadPromise: v1DownloadPromise })
+          resolve({ downloadPromise: source.autoDownload ? source.downloadUpdate() : null })
         }
       })
     })
     updater.checkForUpdates()
     source.emit("download-progress", { percent: 100 })
     source.emit("update-downloaded", { version: "1.0.0" })
+    source.downloadUpdate.mockClear()
     concludeCheck?.()
     await Promise.resolve()
     await Promise.resolve()
     expect(updater.getState()).toEqual({ phase: "ready", version: "1.0.0" })
+    expect(source.downloadUpdate).not.toHaveBeenCalled()
 
+    // v1's native preparation fails: MacUpdater forwards the native "error"
+    // AND v1's still-pending download promise (owned by v1 since its first
+    // observation) rejects. Both are v1's, and land on v1.
     const prepError = new Error("SQRLCodeSignatureErrorDomain: code signature did not pass validation")
     source.emit("error", prepError)
     rejectV1Download?.(prepError)
