@@ -274,4 +274,23 @@ describe("promptDismissed", () => {
     })
     expect(await readPromptDismissed(home)).toBe(false)
   })
+
+  describe("the store never guesses the home directory", () => {
+    it("refuses a two-argument write at the type level", () => {
+      // A two-argument call is exactly the shape that wrote test fixtures into
+      // a real ~/.config/desde/llm-credentials.json on 2026-09-04 (the old
+      // signature was (apiKey, home); the new one is (providerId, apiKey, home)
+      // and `home` used to default to homedir()). Pinning the error keeps the
+      // third argument mandatory.
+      // @ts-expect-error home is required
+      const call = () => writeLlmApiKey("anthropic", "sk-ant-two-args")
+      expect(call).toBeTypeOf("function")
+    })
+
+    it("refuses a read with no home at the type level", () => {
+      // @ts-expect-error home is required
+      const call = () => readLlmCredentials()
+      expect(call).toBeTypeOf("function")
+    })
+  })
 })

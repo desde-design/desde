@@ -27,6 +27,10 @@ import type {
  * Every read degrades to typed defaults — absent, unreadable, malformed, or
  * shaped wrong. A credential read must never be the reason the CLI fails to
  * start; the cost of a corrupt file is re-entering a key, not a crash.
+ *
+ * Every reader and writer takes an explicit `home`: a defaulted home let a
+ * test with the wrong argument order write into a real user's file on
+ * 2026-09-04.
  */
 
 const CONFIG_DIR_RELATIVE = join(".config", "desde")
@@ -177,19 +181,19 @@ function serialize<T>(work: () => Promise<T>): Promise<T> {
 }
 
 /** The probe-shaped view. Never exposes the schema version to callers. */
-export async function readLlmCredentials(home = homedir()): Promise<StoredCredentials> {
+export async function readLlmCredentials(home: string): Promise<StoredCredentials> {
   const file = await readFile(llmCredentialFilePath(home))
   return { providers: file.providers, devMode: file.devMode }
 }
 
 /** Whether the first-run prompt has been dismissed on this machine. */
-export async function readPromptDismissed(home = homedir()): Promise<boolean> {
+export async function readPromptDismissed(home: string): Promise<boolean> {
   return (await readFile(llmCredentialFilePath(home))).promptDismissed
 }
 
 export async function setPromptDismissed(
   dismissed: boolean,
-  home = homedir(),
+  home: string,
 ): Promise<void> {
   const path = llmCredentialFilePath(home)
   await serialize(async () => {
@@ -198,7 +202,7 @@ export async function setPromptDismissed(
   })
 }
 
-export async function setLlmDevMode(devMode: boolean, home = homedir()): Promise<void> {
+export async function setLlmDevMode(devMode: boolean, home: string): Promise<void> {
   const path = llmCredentialFilePath(home)
   await serialize(async () => {
     const file = await readFile(path)
@@ -231,14 +235,14 @@ async function updateProvider(
 export async function writeLlmApiKey(
   providerId: string,
   apiKey: string,
-  home = homedir(),
+  home: string,
 ): Promise<void> {
   await updateProvider(providerId, home, (slot) => ({ ...slot, apiKey }))
 }
 
 export async function clearLlmApiKey(
   providerId: string,
-  home = homedir(),
+  home: string,
 ): Promise<void> {
   await updateProvider(providerId, home, ({ apiKey: _drop, ...rest }) => rest)
 }
@@ -246,7 +250,7 @@ export async function clearLlmApiKey(
 export async function writeLlmBaseUrl(
   providerId: string,
   baseUrl: string | undefined,
-  home = homedir(),
+  home: string,
 ): Promise<void> {
   await updateProvider(providerId, home, ({ baseUrl: _drop, ...rest }) =>
     baseUrl === undefined ? rest : { ...rest, baseUrl },
