@@ -25,6 +25,7 @@
  *   5. it is framework-neutral, not a React special case
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest"
+import { execFileSync } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -268,12 +269,14 @@ const propEditBodyThatRefuses: EditRequestBody = {
 } as EditRequestBody
 
 /**
- * Gate at both ends, applied to a LANE rather than a flag. The mini-turn runs
- * on the Claude Agent SDK and nothing else until the neutral runtime ships, so
- * an OpenAI-only project must be told that rather than have the CLI reach for
- * Anthropic credentials the customer never provided.
+ * The interim behaviour was an inline capability refusal keyed on
+ * `llmProviderId`, because reaching for Anthropic credentials the user never
+ * gave is worse than declining. That trade is over: the mini-turn now
+ * resolves the same runtime chat does, for ANY project provider, rather than
+ * refusing everything but Anthropic (see Task 43,
+ * `src/editor/agent-chat-sdk/edit-fix-mini-turn.ts`'s module doc).
  */
-describe("the edit-fix mini-turn refuses a non-Anthropic default provider", () => {
+describe("the edit-fix mini-turn runs on the project's own provider", () => {
   let dir: string
   const applicatorLoaders: ApplicatorLoaders = {
     ...APPLICATORS,
@@ -289,28 +292,46 @@ describe("the edit-fix mini-turn refuses a non-Anthropic default provider", () =
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "editor-mini-turn-provider-gate-"))
     writeFileSync(join(dir, "App.vue"), PROP_EDIT_ORIGINAL_SOURCE)
+    // Branch mode is git-native, and the mini-turn refuses to run when the
+    // working state can't be snapshotted (its cross-file writes would be
+    // unverifiable) — the fixture must be a real repo like every prototype.
+    execFileSync("git", ["init", "-q"], { cwd: dir })
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+      { cwd: dir },
+    )
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"],
+      { cwd: dir },
+    )
   })
   afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
-  it("refuses with a capability message instead of spawning the claude binary", async () => {
-    const loadRunEditFixMiniTurn = vi.fn()
+  it("runs for an OpenAI project instead of refusing with a capability message", async () => {
+    const seen: Array<{ model?: string; providerId?: string }> = []
+    const loadRunEditFixMiniTurn = vi.fn(async () => ({
+      runEditFixMiniTurn: async (input: { model?: string; providerId?: string }) => {
+        seen.push({ model: input.model, providerId: input.providerId })
+        return { outcome: "refused" as const, notes: "not the point of this test" }
+      },
+    }))
     const result = await applyEdit(
       propEditBodyThatRefuses,
       dir,
-      { ...applicatorLoaders, loadRunEditFixMiniTurn },
+      { ...applicatorLoaders, loadRunEditFixMiniTurn } as unknown as ApplicatorLoaders,
       undefined,
       { llmProviderId: "openai" },
     )
-    expect(loadRunEditFixMiniTurn).not.toHaveBeenCalled()
-    expect(result.ok).toBe(false)
-    if (result.ok) return
-    expect(result.reason).toContain("Anthropic")
-    expect(result.status).toBe(422)
+    expect(loadRunEditFixMiniTurn).toHaveBeenCalled()
+    expect(seen).toEqual([{ model: "gpt-5.6", providerId: "openai" }])
+    expect(JSON.stringify(result)).not.toMatch(/capability/i)
   })
 
   it("still runs for an Anthropic project", async () => {
     const loadRunEditFixMiniTurn = vi.fn(async () => ({
-      runEditFixMiniTurn: async () => ({ ok: false as const, reason: "no change" }),
+      runEditFixMiniTurn: async () => ({ outcome: "refused" as const, notes: "no change" }),
     }))
     await applyEdit(
       propEditBodyThatRefuses,

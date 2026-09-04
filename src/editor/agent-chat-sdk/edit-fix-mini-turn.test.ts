@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { runEditFixMiniTurn } from './edit-fix-mini-turn'
 import type { EditFixMiniTurnInput } from './edit-fix-mini-turn'
 import type { RunChatTurnSdkOpts, RunChatTurnSdkResult } from './run-chat-turn-sdk'
+import { makeEmptySession } from '../agent-chat/types'
 
 function makeInput(repoRoot: string, overrides: Partial<EditFixMiniTurnInput> = {}): EditFixMiniTurnInput {
   return {
@@ -124,5 +125,58 @@ describe('runEditFixMiniTurn', () => {
     await new Promise((r) => setTimeout(r, 50))
     expect(existsSync(join(dir, '.desde', 'chat-sessions', sessionId))).toBe(false)
     rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('runEditFixMiniTurn — provider awareness', () => {
+  it('threads the model and provider id into the injected runtime', async () => {
+    const seen: Array<{ model?: string; providerId?: string }> = []
+    await runEditFixMiniTurn(
+      {
+        repoRoot: '/tmp/does-not-matter',
+        file: 'src/Panel.vue',
+        line: 2,
+        column: 5,
+        propName: 'title',
+        newValue: 'New',
+        fallback: { kind: 'bound-binding', expression: 'title' },
+        deterministicReason: 'not a literal',
+        model: 'gpt-5.6',
+        providerId: 'openai',
+      },
+      {
+        runTurn: async (opts) => {
+          seen.push({ model: opts.model, providerId: opts.providerId })
+          return { session: makeEmptySession('x'), turn: { assistantContent: [{ text: 'EDIT_APPLIED: done' }] } } as never
+        },
+      },
+    )
+    // Without both, the mini-turn runs DEFAULT_SDK_MODEL on whatever runtime it
+    // imported, which for an OpenAI-only user means spending Anthropic
+    // credentials they never provided, or failing for want of them.
+    expect(seen).toEqual([{ model: 'gpt-5.6', providerId: 'openai' }])
+  })
+
+  it('passes no model when the caller supplies none, so the runtime default stands', async () => {
+    const seen: Array<string | undefined> = []
+    await runEditFixMiniTurn(
+      {
+        repoRoot: '/tmp/does-not-matter',
+        file: 'src/Panel.vue',
+        line: 2,
+        column: 5,
+        propName: 'title',
+        newValue: 'New',
+        fallback: { kind: 'v-model' },
+        deterministicReason: 'v-model',
+      },
+      {
+        runTurn: async (opts) => {
+          seen.push(opts.model)
+          return { session: makeEmptySession('x'), turn: { assistantContent: [] } } as never
+        },
+      },
+    )
+    expect(seen).toEqual([undefined])
   })
 })

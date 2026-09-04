@@ -20,6 +20,10 @@ import {
 } from "./resolve-editable-path"
 import { checkExtensionGate } from "./edit-extension-gate"
 import { dormantLaneRefusal, type DormantLaneId } from "./enabled-lanes"
+import { resolveLlmConfig } from "./llm-config.js"
+import { resolveChatRuntime } from "./chat-runtime-dispatch.js"
+import type { ChatHandlerLoaders } from "./chat-handler.js"
+import { getDescriptor } from "../../../src/editor/llm-providers/provider-registry.js"
 
 export type { EditRequestBody } from "../../../src/editor/edit-service/validate-edit-request"
 
@@ -304,6 +308,14 @@ export interface ApplyEditOpts {
    * failure with a different message).
    */
   llmProviderId?: string
+  /**
+   * Loaders `resolveChatRuntime` needs to dispatch the mini-turn to the
+   * project's actual provider (Claude Agent SDK vs the neutral runtime).
+   * Absent in older callers/tests, which keeps the mini-turn's own built-in
+   * default (the Claude Agent SDK runtime) — the same behavior this project
+   * had before per-provider dispatch existed.
+   */
+  chatLoaders?: ChatHandlerLoaders
 }
 
 export async function applyEdit(
@@ -1366,6 +1378,7 @@ async function handleApplicatorRefusal(args: {
           // `tryPropEditLLMFallback`'s own doc comment on this param.
           correlationId: body.correlationId,
           llmProviderId: opts.llmProviderId,
+          chatLoaders: opts.chatLoaders,
         })
         if (fallbackResult !== null) return fallbackResult
       } else if (body.edit.llmFallback === "chat") {
@@ -1745,6 +1758,8 @@ async function tryPropEditLLMFallback(args: {
   correlationId?: string
   /** See `ApplyEditOpts.llmProviderId`. */
   llmProviderId?: string
+  /** See `ApplyEditOpts.chatLoaders`. */
+  chatLoaders?: ChatHandlerLoaders
 }): Promise<EditResult | null> {
   const escalateToChatOnRefusal = (reason: string): EditResult => ({
     ok: false,
@@ -1752,22 +1767,6 @@ async function tryPropEditLLMFallback(args: {
     reason,
     ...(args.llmFallbackMode === "chat" ? { needsChat: true as const } : {}),
   })
-
-  // Gate at both ends, applied to a lane. The mini-turn runs on the Claude
-  // Agent SDK, so a project whose default provider is something else must be
-  // told that rather than have the CLI reach for Anthropic credentials the
-  // customer never provided. `claude_code` IS the Anthropic lane (the bundled
-  // binary), so it passes.
-  const miniTurnProvider = args.llmProviderId
-  if (
-    miniTurnProvider !== undefined &&
-    miniTurnProvider !== "anthropic" &&
-    miniTurnProvider !== "claude_code"
-  ) {
-    return escalateToChatOnRefusal(
-      `${args.deterministicReason} The automatic fix runs on Anthropic models only for now, and this project's default provider is ${miniTurnProvider}.`,
-    )
-  }
 
   if (!args.applicatorLoaders.loadRunEditFixMiniTurn) {
     // Loader not configured (e.g. older test stubs) — skip gracefully.
@@ -1809,21 +1808,43 @@ async function tryPropEditLLMFallback(args: {
     reviewSurface = await args.createReviewSurface().catch(() => null)
   }
 
+  // The mini-turn now runs on the SAME provider chat does for this project,
+  // instead of being refused for anything but Anthropic. `args.llmProviderId`
+  // is the id the route already resolved (`resolveLlmConfig` at the CLI
+  // route) — trust it when present rather than re-resolving from scratch.
+  const providerId = args.llmProviderId ?? resolveLlmConfig(undefined, process.env).provider
+  const descriptor = getDescriptor(providerId)
+  // The default model of the provider that will actually run, not the SDK's.
+  // `undefined` when a descriptor somehow has no default: the runtime then
+  // picks, which is better than pinning a model id from another vendor.
+  const model = descriptor?.staticCatalog.models.find((m) => m.isDefault)?.id
+  // `chatLoaders` is absent for older callers/tests — they keep getting the
+  // mini-turn's own built-in default (the Claude Agent SDK runtime), same as
+  // before this change.
+  const runTurn = args.chatLoaders
+    ? await resolveChatRuntime(providerId, args.chatLoaders)
+    : undefined
+
   let miniResult: Awaited<ReturnType<typeof runEditFixMiniTurn>>
   try {
-    miniResult = await runEditFixMiniTurn({
-      repoRoot: args.rootReal,
-      file: args.file,
-      line: args.line,
-      column: args.column,
-      propName: args.propName,
-      newValue: args.newValue,
-      fallback: args.fallback,
-      deterministicReason: args.deterministicReason,
-      projectKnowledge,
-      getGrounding: args.getGrounding,
-      ...(reviewSurface ? { reviewSurface } : {}),
-    })
+    miniResult = await runEditFixMiniTurn(
+      {
+        repoRoot: args.rootReal,
+        file: args.file,
+        line: args.line,
+        column: args.column,
+        propName: args.propName,
+        newValue: args.newValue,
+        fallback: args.fallback,
+        deterministicReason: args.deterministicReason,
+        projectKnowledge,
+        getGrounding: args.getGrounding,
+        model,
+        providerId,
+        ...(reviewSurface ? { reviewSurface } : {}),
+      },
+      { runTurn },
+    )
   } finally {
     await reviewSurface?.dispose().catch(() => {})
   }

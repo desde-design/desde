@@ -4,11 +4,16 @@
  * Replaces the one-shot source-aware LLM fallback for refused prop edits.
  * When a deterministic applicator refuses with a PropEditFallbackHint
  * (bound-binding / v-model / dynamic-vbind), the edit handler runs a
- * budget-bounded turn on the SAME SDK runtime chat uses — Read/Grep to
- * trace the binding (cross-file included), the manifest/token tools for
- * design-system grounding, Edit/Write to land the fix. This closes the
- * "the fallback failed but asking chat worked" gap by construction: it IS
- * chat, minus the chat.
+ * budget-bounded turn — Read/Grep to trace the binding (cross-file
+ * included), the manifest/token tools for design-system grounding,
+ * Edit/Write to land the fix.
+ *
+ * Runs on the SAME runtime chat uses for the project's default provider —
+ * the CLI caller resolves it through `resolveChatRuntime` and hands it in
+ * as `deps.runTurn`. That closes the "the fallback failed but asking chat
+ * worked" gap by construction, and it closes a second one: an OpenAI-only
+ * customer's prop-edit fallback no longer reaches for Anthropic
+ * credentials they never provided.
  *
  * Headless mechanics (proven by tasks/scripts/agent-live-smoke.mts):
  *  - stub BridgeClient (no shell round-trips; selection/page reads return
@@ -48,8 +53,8 @@ import { randomUUID } from 'node:crypto'
 import { makeEmptySession } from '../agent-chat/types'
 import type { PropEditFallbackHint } from '../edit-service/apply-prop-edit'
 import type { ProjectKnowledge } from '../core/project-knowledge'
+import type { RunChatTurn, RunChatTurnOpts, RunChatTurnResult } from '../agent-chat/run-chat-turn'
 import { runChatTurnSdk } from './run-chat-turn-sdk'
-import type { RunChatTurnSdkOpts, RunChatTurnSdkResult } from './run-chat-turn-sdk'
 
 export interface EditFixMiniTurnInput {
   repoRoot: string
@@ -64,7 +69,7 @@ export interface EditFixMiniTurnInput {
   deterministicReason: string
   projectKnowledge?: ProjectKnowledge
   /** Design-system grounding provider — same object the chat route uses. */
-  getGrounding?: RunChatTurnSdkOpts['getGrounding']
+  getGrounding?: RunChatTurnOpts['getGrounding']
   /**
    * Headless Playwright review surface (process-local, driven against the
    * CLI's own prototype URL). When present, the agent's verify_edit does a
@@ -72,13 +77,28 @@ export interface EditFixMiniTurnInput {
    * honest post-fix verification the one-shot lane never had. Caller owns
    * dispose().
    */
-  reviewSurface?: RunChatTurnSdkOpts['reviewSurface']
+  reviewSurface?: RunChatTurnOpts['reviewSurface']
   /** Wall-clock cap. Default 90s. */
   timeoutMs?: number
   /** SDK conversation-turn cap. Default 12. */
   maxTurns?: number
   /** Dollar ceiling for the turn. Default 1.0. */
   costCeilingUsd?: number
+  /**
+   * Model for the mini-turn. Omitted lets the resolved runtime pick its own
+   * default, which is the right answer when the caller has no opinion. The CLI
+   * caller DOES have one: it passes the default model of the project's default
+   * provider, because a Claude model id sent to OpenAI is a 400 deep inside a
+   * save flow.
+   */
+  model?: string
+  /**
+   * Provider the resolved runtime belongs to. Carried so the runtime can reach
+   * its own descriptor for effort mapping and error copy. Purely informational
+   * to this module: WHICH runtime runs is decided by `deps.runTurn`, and this
+   * field never picks one.
+   */
+  providerId?: string
 }
 
 export interface EditFixMiniTurnResult {
@@ -151,15 +171,15 @@ function buildPrompt(input: EditFixMiniTurnInput): string {
 
 /** Stub bridge: no shell attached — selection/page reads return null and
  *  anything else resolves null (verify_edit degrades to skipped). */
-function makeStubBridge(): RunChatTurnSdkOpts['bridge'] {
+function makeStubBridge(): RunChatTurnOpts['bridge'] {
   return {
     send: async () => null,
-  } as unknown as RunChatTurnSdkOpts['bridge']
+  } as unknown as RunChatTurnOpts['bridge']
 }
 
 export async function runEditFixMiniTurn(
   input: EditFixMiniTurnInput,
-  deps: { runTurn?: (opts: RunChatTurnSdkOpts) => Promise<RunChatTurnSdkResult> } = {},
+  deps: { runTurn?: RunChatTurn } = {},
 ): Promise<EditFixMiniTurnResult> {
   const runTurn = deps.runTurn ?? runChatTurnSdk
   const sessionId = `mini-edit-fix-${randomUUID().slice(0, 8)}`
@@ -184,13 +204,15 @@ export async function runEditFixMiniTurn(
       costCeilingUsd: input.costCeilingUsd ?? 1.0,
       builtinTools: MINI_TURN_BUILTIN_TOOLS,
       disallowedTools: MINI_TURN_DISALLOWED_TOOLS,
+      model: input.model,
+      providerId: input.providerId,
       // The write guard must NOT record undo history for this lane's writes
       // — they're provisional until the CLI handler's post-turn validation
       // passes; a refused/unparseable outcome rolls them back via
       // `cleanupAllWrites`, which would leave a guard-recorded step whose
       // "after" bytes never existed durably. The handler records its own
       // consolidated step on success instead (see `recordHistory` on
-      // `RunChatTurnSdkOpts`).
+      // `RunChatTurnOpts`).
       recordHistory: false,
     })
     const text = finalAssistantText(result)
@@ -224,7 +246,7 @@ export async function runEditFixMiniTurn(
   }
 }
 
-function finalAssistantText(result: RunChatTurnSdkResult): string {
+function finalAssistantText(result: RunChatTurnResult): string {
   // ChatTurn.assistantContent interleaves text and tool-use blocks in
   // stream order; the sentinel line is in the trailing text blocks.
   const blocks = (result.turn.assistantContent ?? []) as Array<{ text?: unknown }>

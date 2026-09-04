@@ -1428,3 +1428,96 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
     expect(readFileSync(join(dir, "App.vue"), "utf8")).toBe(ORIGINAL_SOURCE)
   })
 })
+
+/**
+ * Task 43. Part A left an INLINE refusal in the mini-turn fallback for
+ * anything but Anthropic — reaching for Anthropic credentials an OpenAI-only
+ * project never provided was worse than declining. That was the honest
+ * interim. Now the mini-turn resolves the same runtime chat does
+ * (`resolveChatRuntime`), and threads the resolved provider's default model
+ * in alongside — a Claude model id sent to OpenAI is a 400 deep inside a
+ * save flow.
+ */
+describe("the edit-fix mini-turn runs on the project's default provider (Task 43)", () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "editor-mini-turn-provider-dispatch-"))
+    execFileSync("git", ["init", "-q"], { cwd: dir })
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"],
+      { cwd: dir },
+    )
+    writeFileSync(
+      join(dir, "App.vue"),
+      [
+        "<template>",
+        "  <UiInput :placeholder=\"filterPlaceholder\" />",
+        "</template>",
+        "<script setup>",
+        "const filterPlaceholder = 'Search...'",
+        "</script>",
+        "",
+      ].join("\n"),
+    )
+  })
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  const boundBindingPropEdit: EditRequestBody = {
+    edit: {
+      kind: "prop",
+      file: "App.vue",
+      line: 2,
+      column: 3,
+      propName: "placeholder",
+      value: "Filter results",
+    },
+  }
+
+  const APPLICATORS_REFUSING_BOUND_BINDING: Pick<ApplicatorLoaders, "loadApplyPropEdit"> = {
+    loadApplyPropEdit: async () => ({
+      applyPropEdit: () => ({
+        ok: false,
+        reason: 'Cannot overwrite bound prop "placeholder" — source uses v-bind.',
+        fallback: { kind: "bound-binding" as const, expression: "filterPlaceholder" },
+      }),
+    }),
+  }
+
+  // Minimal `ChatHandlerLoaders` stub — `resolveChatRuntime` only needs the
+  // loader shape to dispatch; this test cares about what edit-handler.ts
+  // hands the mini-turn, not what the loaded runtime itself does.
+  const STUB_CHAT_LOADERS = {
+    loadSessionStore: async () => ({}) as never,
+    loadRunChatTurnSdk: async () => ({ runChatTurnSdk: async () => ({}) }) as never,
+    loadRunChatTurnNeutral: async () => ({ runChatTurnNeutral: async () => ({}) }) as never,
+  }
+
+  it("runs the mini-turn on the project's default provider instead of refusing", async () => {
+    // The interim behaviour was an inline capability refusal keyed on
+    // args.llmProviderId, because reaching for Anthropic credentials the user
+    // never gave is worse than declining. That trade is over: the mini-turn now
+    // resolves the same runtime chat does.
+    const seen: Array<{ model?: string; providerId?: string }> = []
+    const loaders: ApplicatorLoaders = {
+      ...APPLICATORS_REFUSING_BOUND_BINDING,
+      loadRunEditFixMiniTurn: async () =>
+        ({
+          runEditFixMiniTurn: async (input: { model?: string; providerId?: string }) => {
+            seen.push({ model: input.model, providerId: input.providerId })
+            return { outcome: "refused", notes: "not the point of this test" }
+          },
+        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+    } as ApplicatorLoaders
+
+    const result = await applyEdit(boundBindingPropEdit, dir, loaders, undefined, {
+      llmProviderId: "openai",
+      chatLoaders: STUB_CHAT_LOADERS,
+    })
+
+    expect(seen).toEqual([{ model: "gpt-5.6", providerId: "openai" }])
+    expect(JSON.stringify(result)).not.toMatch(/capability/i)
+  })
+})

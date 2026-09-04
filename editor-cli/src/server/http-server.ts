@@ -4950,6 +4950,7 @@ async function runEditAndAutoCommit(
       // missing key, and most edits never reach an LLM lane at all.
       getLlmProvider: () => getProvider({ config: llmConfigFor(ctx) }),
       llmProviderId: llmConfigFor(ctx).provider,
+      chatLoaders: ctx.chatLoaders,
     },
   )
   if (!result.ok) {
@@ -5083,6 +5084,7 @@ async function handleEditStreaming(
           // a missing key, and most edits never reach an LLM lane at all.
           getLlmProvider: () => getProvider({ config: llmConfigFor(ctx) }),
           llmProviderId: llmConfigFor(ctx).provider,
+          chatLoaders: ctx.chatLoaders,
         },
       )
       if (!r.ok) return { result: r, autoCommit: NO_OP_AUTO_COMMIT }
