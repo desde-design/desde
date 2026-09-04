@@ -633,9 +633,13 @@ async function runInner(
     if (opts.signal?.aborted) {
       errorMessage = 'turn aborted'
     } else {
-      const retryAfter = extractRetryAfterFromError(err)
+      // Unwrapped first: the SDK's `RetryError` envelope carries no headers,
+      // and its message prefixes the vendor's own wording with "Failed after
+      // N attempts", which is this loop's business and not the user's.
+      const cause = unwrapProviderError(err)
+      const retryAfter = extractRetryAfterFromError(cause)
       const hint = retryAfter !== undefined ? ` (retry after ${retryAfter}s)` : ''
-      const raw = err instanceof Error ? err.message : String(err)
+      const raw = cause instanceof Error ? cause.message : String(cause)
       errorMessage = isAuthError(raw, { errorPatterns: descriptor.errorPatterns })
         ? (descriptor.errorPatterns?.reauthMessage ?? AUTH_REAUTH_MESSAGE)
         : `${raw}${hint}`
@@ -769,7 +773,8 @@ async function* streamStepWithRetry(
       const retriable =
         isRetryableError(err) || status === 429 || (status !== null && status >= 500)
       if (yielded || !retriable || attempt >= API_RETRY_MAX_ATTEMPTS) throw err
-      const requestedMs = (extractRetryAfterFromError(err) ?? 2 ** attempt) * 1000
+      const requestedMs =
+        (extractRetryAfterFromError(unwrapProviderError(err)) ?? 2 ** attempt) * 1000
       const retryDelayMs = Math.min(requestedMs, MAX_RETRY_SLEEP_MS)
       emit({
         kind: 'api_retry',
@@ -805,21 +810,58 @@ function waitOrAbort(ms: number, signal: AbortSignal | undefined): Promise<void>
   })
 }
 
+/** Guard against a cyclic `lastError` chain parking the unwrap in a loop. */
+const MAX_ERROR_UNWRAP_DEPTH = 8
+
+/**
+ * The error a provider actually failed with, dug out of any envelope wrapped
+ * around it.
+ *
+ * The AI SDK's own retry loop replaces the vendor's `APICallError` with a
+ * `RetryError` once its attempts run out, and that envelope carries no
+ * `statusCode`, no `status`, no `headers` and no `isRetryable` — only
+ * `lastError` and `errors`. Classifying the envelope therefore answered "not
+ * retriable, no status" for every 429 and 5xx, which is the whole class of
+ * failure the retry path exists for. `maxRetries: 0` in
+ * `ai-sdk-provider.ts` stops that envelope being built on the chat lane at
+ * all; this unwrap is what makes the classification correct anyway, for a
+ * gateway or a future transport that still wraps.
+ *
+ * Structural on purpose: reading `lastError` / `errors` costs nothing and
+ * needs no import of the SDK, which this file is fenced out of.
+ */
+function unwrapProviderError(err: unknown): unknown {
+  let current = err
+  for (let depth = 0; depth < MAX_ERROR_UNWRAP_DEPTH; depth++) {
+    if (current === null || typeof current !== 'object') return current
+    const envelope = current as { lastError?: unknown; errors?: unknown }
+    const inner =
+      envelope.lastError ??
+      (Array.isArray(envelope.errors) && envelope.errors.length > 0
+        ? envelope.errors[envelope.errors.length - 1]
+        : undefined)
+    if (inner === undefined || inner === null || inner === current) return current
+    current = inner
+  }
+  return current
+}
+
 /**
  * The HTTP status inside a provider error, when there is one.
  *
- * The AI SDK's `APICallError` (the shape every provider in this lane throws)
- * exposes `statusCode`, not `status` — reading `status` left this always
- * `null` for a real OpenAI error and fell through to a message-text regex
- * that a typical 429 body does not match (final review I4). `status` stays
- * as a fallback for a hand-shaped or third-party error that happens to use
- * the more common field name.
+ * The AI SDK's `APICallError` exposes `statusCode`, not `status` — reading
+ * `status` left this always `null` for a real OpenAI error and fell through
+ * to a message-text regex that a typical 429 body does not match (final
+ * review I4). `status` stays as a fallback for a hand-shaped or third-party
+ * error that happens to use the more common field name. The error is
+ * unwrapped first, because the envelope carries neither field.
  */
 function httpStatusOf(err: unknown): number | null {
-  const candidate = err as { statusCode?: unknown; status?: unknown } | null
+  const cause = unwrapProviderError(err)
+  const candidate = cause as { statusCode?: unknown; status?: unknown } | null
   const status = candidate?.statusCode ?? candidate?.status
   if (typeof status === 'number') return status
-  const message = err instanceof Error ? err.message : ''
+  const message = cause instanceof Error ? cause.message : ''
   const match = /\b(4\d\d|5\d\d)\b/.exec(message)
   return match ? Number(match[1]) : null
 }
@@ -828,10 +870,10 @@ function httpStatusOf(err: unknown): number | null {
  * `APICallError.isRetryable`, when the error carries one. A gateway can mark
  * an error retriable at a status this code would not otherwise recognize
  * (or without a status at all), and that flag is more authoritative than the
- * regex fallback in `httpStatusOf`.
+ * regex fallback in `httpStatusOf`. Unwrapped first, for the same reason.
  */
 function isRetryableError(err: unknown): boolean {
-  return (err as { isRetryable?: unknown } | null)?.isRetryable === true
+  return (unwrapProviderError(err) as { isRetryable?: unknown } | null)?.isRetryable === true
 }
 
 function providerOptionsFor(

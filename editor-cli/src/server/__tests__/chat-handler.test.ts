@@ -28,7 +28,7 @@ import {
 import { newSecurityContext } from "../auth.js"
 import { startHttpServer, type HttpServerHandle } from "../http-server.js"
 import { pickFreePort } from "../launcher-server.js"
-import { setModelCatalogLiveSourcesForTests } from "../model-catalog-source.js"
+import { modelCatalogResolver, setModelCatalogLiveSourcesForTests } from "../model-catalog-source.js"
 import { assertChatCredentials } from "../../../../src/editor/llm-providers/assert-chat-credentials.js"
 
 // The BYO-key cutover: chat dispatch now refuses without a model credential,
@@ -1356,14 +1356,25 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
     expect(capturedRunOpts.value?.effort).toBeUndefined()
   })
 
-  it("passes no model when neither request nor session has a config", async () => {
+  it("dispatches the catalog default when neither request nor session has a config", async () => {
+    // This used to assert `model` was UNDEFINED, leaving the runtime to fall
+    // back to the STATIC catalog's default. That is the divergence: the
+    // picker's default comes from the merged live catalog, so on an account
+    // whose live list lacks the static id the two disagreed and the first
+    // turn 404'd on a model the UI said was in use. The turn now carries the
+    // same default the picker shows. Effort still travels only when chosen.
     const capturedRunOpts: { value?: Record<string, unknown> } = {}
     const mock = makeMockReqRes()
     mock.setBody({ userMessage: "hi" })
     const loaders = makeModelConfigLoaders({ saved: [], capturedRunOpts })
     await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
 
-    expect(capturedRunOpts.value?.model).toBeUndefined()
+    const { catalogs } = await modelCatalogResolver.get()
+    const expected = catalogs
+      .find((c) => c.providerId === "anthropic")
+      ?.models.find((m) => m.isDefault)?.id
+    expect(expected).toBeTruthy()
+    expect(capturedRunOpts.value?.model).toBe(expected)
     expect(capturedRunOpts.value?.effort).toBeUndefined()
   })
 
@@ -1381,7 +1392,10 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
     const loaders = makeModelConfigLoaders({ saved: [], capturedRunOpts, seedSession })
     await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
 
-    expect(capturedRunOpts.value?.model).toBeUndefined() // falls back to runtime default
+    // Falls back to the default the picker shows, not to the retired id and
+    // not to whatever the runtime would have guessed.
+    expect(capturedRunOpts.value?.model).not.toBe("claude-retired-1")
+    expect(capturedRunOpts.value?.model).toBeTruthy()
   })
 
   // M3 — the spec requires the silent fallback above to announce itself
@@ -1412,8 +1426,9 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
       )
     expect(note).toBeDefined()
     expect(note?.reason).toMatch(/default model for this turn/i)
-    // Still non-blocking: the turn ran on the runtime default.
-    expect(capturedRunOpts.value?.model).toBeUndefined()
+    // Still non-blocking: the turn ran on the catalog's default.
+    expect(capturedRunOpts.value?.model).not.toBe("claude-retired-1")
+    expect(capturedRunOpts.value?.model).toBeTruthy()
   })
 
   // M3 — the spec calls for a ONE-TIME notice. The notes ride the
@@ -2939,5 +2954,113 @@ describe("the both-ends gate, from the route", () => {
       )
     expect(note).toBeDefined()
     vi.unstubAllEnvs()
+  })
+})
+
+describe("the model a turn dispatches on when the request carries no modelConfig", () => {
+  /**
+   * The runtime used to fall back to the STATIC catalog's default, while the
+   * picker showed the MERGED live catalog's. The two agree only while the
+   * bare static default id is in the account's live list. On an account
+   * without it — tiered access is routine — the picker showed a model that
+   * works and the very first turn requested one that 404s.
+   *
+   * It also defeated the `defaultAlias` rule: with `gpt-5.6` retired and
+   * `gpt-5.6-sol` still served, the picker followed the alias and the
+   * dispatch did not.
+   */
+  async function modelDispatchedFor(liveOpenAiIds: string[]): Promise<string | undefined> {
+    setModelCatalogLiveSourcesForTests({
+      listViaApi: {
+        anthropic: async () => [],
+        openai: async () => liveOpenAiIds.map((id) => ({ id, label: id })),
+      },
+      listViaCli: async () => [],
+    })
+    let dispatched: string | undefined
+    const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: (async (callOpts: {
+          model?: string
+          emit: (
+            ev: import("../../../../src/editor/agent-chat/chat-stream-events").ChatStreamEvent,
+          ) => void
+        }) => {
+          dispatched = callOpts.model
+          const { makeEmptySession } = await import(
+            "../../../../src/editor/agent-chat/types.js"
+          )
+          callOpts.emit({ kind: "turn_complete", turnId: "t", stopReason: "end_turn" })
+          return {
+            session: makeEmptySession("p"),
+            turn: {
+              id: "t",
+              startedAt: "",
+              userMessage: "",
+              assistantContent: [],
+              toolResults: {},
+              editProposals: [],
+            },
+          }
+        }) as never,
+      }),
+      loadRunChatTurnSdk: async () =>
+        ({
+          runChatTurnSdk: async () => {
+            throw new Error("this case must take the neutral lane, not the SDK one")
+          },
+        }) as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>>,
+      loadSessionStore: async () => {
+        const { makeEmptySession } = await import(
+          "../../../../src/editor/agent-chat/types.js"
+        )
+        return {
+          loadSession: async () =>
+            ({ session: makeEmptySession("p"), fresh: true }) as never,
+          saveSession: async (_root: string, session: unknown) => session,
+        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadSessionStore"]>>
+      },
+    }
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi" })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    return dispatched
+  }
+
+  let repoRoot: string
+  beforeEach(async () => {
+    repoRoot = await mkdtemp(join(tmpdir(), "desde-chat-default-model-"))
+    __resetPendingBridgeRequestsForTest()
+    __resetActiveTurnsForTest()
+    // OpenAI is the only credentialed provider, so it is the default one and
+    // the turn takes the neutral lane.
+    vi.stubEnv("ANTHROPIC_API_KEY", "")
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key-for-dispatch")
+  })
+
+  afterEach(async () => {
+    await rm(repoRoot, { recursive: true, force: true })
+    __resetPendingBridgeRequestsForTest()
+    __resetActiveTurnsForTest()
+    setModelCatalogLiveSourcesForTests({
+      listViaApi: { anthropic: async () => [], openai: async () => [] },
+      listViaCli: async () => [],
+    })
+  })
+
+  it("dispatches the live catalog's default, not a static id the account cannot call", async () => {
+    // No `gpt-5.6` and no `gpt-5.6-sol`: the merged catalog's default is what
+    // the picker shows, and it is what the turn must request.
+    expect(await modelDispatchedFor(["gpt-5.4", "gpt-5.4-mini"])).toBe("gpt-5.4")
+  })
+
+  it("follows the defaultAlias the picker follows when the bare default id retires", async () => {
+    expect(await modelDispatchedFor(["gpt-5.6-cyber", "gpt-5.6-sol", "gpt-5.4"])).toBe(
+      "gpt-5.6-sol",
+    )
+  })
+
+  it("still dispatches the static default when the live list carries it", async () => {
+    expect(await modelDispatchedFor(["gpt-5.6", "gpt-5.4"])).toBe("gpt-5.6")
   })
 })

@@ -23,6 +23,7 @@ import { checkExtensionGate } from "./edit-extension-gate"
 import { dormantLaneRefusal, type DormantLaneId } from "./enabled-lanes"
 import { resolveLlmConfig } from "./llm-config.js"
 import { resolveChatRuntime, type RunChatTurn } from "./chat-runtime-dispatch.js"
+import { resolvedDefaultModelFor } from "./model-catalog-source.js"
 import type { ChatHandlerLoaders } from "./chat-handler.js"
 import { getDescriptor } from "../../../src/editor/llm-providers/provider-registry.js"
 
@@ -1825,10 +1826,16 @@ async function tryPropEditLLMFallback(args: {
   // `args.llmProviderId` already carries for other callers.
   const runtimeProviderId = providerId === "claude_code" ? "anthropic" : providerId
   const descriptor = getDescriptor(runtimeProviderId)
-  // The default model of the provider that will actually run, not the SDK's.
-  // `undefined` when a descriptor somehow has no default: the runtime then
-  // picks, which is better than pinning a model id from another vendor.
-  const model = descriptor?.staticCatalog.models.find((m) => m.isDefault)?.id
+  // The default model of the provider that will actually run, not the SDK's,
+  // and the one the PICKER would show rather than the static catalog's —
+  // those two disagree whenever the account's live list has dropped the bare
+  // static default id, and the mini-turn then requested a model the account
+  // cannot call. See `resolvedDefaultModelFor`. `undefined` when the provider
+  // has no default at all: the runtime then picks, which is better than
+  // pinning a model id from another vendor.
+  const model = descriptor
+    ? await resolvedDefaultModelFor(runtimeProviderId)
+    : undefined
   // `chatLoaders` is absent for older callers/tests — they keep getting the
   // mini-turn's own built-in default (the Claude Agent SDK runtime), same as
   // before this change.

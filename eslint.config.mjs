@@ -48,6 +48,20 @@ const eslintConfig = defineConfig([
           ],
         },
       ],
+      // `no-restricted-imports` does not see an `import()` EXPRESSION, so
+      // `const { streamText } = await import('ai')` walked straight through
+      // the rule above. That is the shape most likely to be reached for,
+      // because the rest of this codebase already loads runtimes lazily.
+      // `ai-sdk-import-boundary.test.ts` covers the same gap at test time.
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "ImportExpression > Literal[value=/^(ai|ai\\u002F[a-z]+|@ai-sdk\\u002F.+)$/]",
+          message:
+            "Import the AI SDK only from src/editor/llm-providers/ai-sdk-*.ts. A dynamic import() is still an import. Elsewhere, depend on the vendor-neutral LLMProvider in src/editor/llm-providers/types.ts.",
+        },
+      ],
     },
   },
   // Dev-only live smoke / probe harnesses. They drive Playwright `page.evaluate`,

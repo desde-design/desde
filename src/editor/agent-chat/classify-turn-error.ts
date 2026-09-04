@@ -166,21 +166,28 @@ function toMessage(value: unknown): string {
  * Defensive: doesn't assume the SDK class name (which could change
  * between versions). Looks for `err.headers` shaped like a Fetch
  * Headers (with a `.get()` method) OR a plain record.
+ *
+ * `responseHeaders` is read as well, because that is what the AI SDK's
+ * `APICallError` actually calls the field — a Vercel-lane 429 carries its
+ * `retry-after` there and nowhere else, so reading only `headers` returned
+ * `undefined` for every one of them and the retry backoff fell through to
+ * its exponential guess.
  */
 export function extractRetryAfterFromError(err: unknown): number | undefined {
   if (!err || typeof err !== 'object') return undefined
-  const e = err as { headers?: unknown }
-  if (!e.headers) return undefined
+  const e = err as { headers?: unknown; responseHeaders?: unknown }
+  const headers = e.headers ?? e.responseHeaders
+  if (!headers) return undefined
   let raw: unknown = undefined
-  if (typeof e.headers === 'object' && e.headers !== null) {
-    const h = e.headers as { get?: (k: string) => string | null }
+  if (typeof headers === 'object' && headers !== null) {
+    const h = headers as { get?: (k: string) => string | null }
     if (typeof h.get === 'function') {
       raw = h.get('retry-after')
     } else {
       // Plain record shape — accept lowercase, mixed-case, and
       // capitalised header names (Node's `http` IncomingMessage
       // headers are lowercased; Fetch Headers normalise too).
-      const r = e.headers as Record<string, unknown>
+      const r = headers as Record<string, unknown>
       raw = r['retry-after'] ?? r['Retry-After'] ?? r['retryAfter']
     }
   }

@@ -8,6 +8,10 @@ import {
 } from "./classify-turn-error"
 import { ANTHROPIC_DESCRIPTOR } from "../llm-providers/descriptors/anthropic"
 import { OPENAI_DESCRIPTOR } from "../llm-providers/descriptors/openai"
+// Real SDK error classes, re-exported from the one file allowed to import
+// the AI SDK. A hand-shaped stand-in is what let an earlier fix pass while
+// being wrong.
+import { APICallError, RetryError } from "../llm-providers/ai-sdk-provider"
 
 describe("classifyTurnError", () => {
   describe("rate-limited detection", () => {
@@ -287,5 +291,97 @@ describe('classifyTurnError — provider error patterns', () => {
     // patterns it must stay generic, or a shared classifier becomes a place
     // where vendors quietly inherit each other's error vocabulary.
     expect(classifyTurnError('insufficient_quota').message).toBe('insufficient_quota')
+  })
+})
+
+describe("the OpenAI descriptor's copy, against errors OpenAI actually produces", () => {
+  /**
+   * The point of these cases: the descriptor's first patterns matched OpenAI
+   * error CODES (`insufficient_quota`, `invalid_api_key`,
+   * `rate_limit_exceeded`), and a code never reaches the classifier. The AI
+   * SDK builds `APICallError.message` from `data.error.message` alone, so
+   * only the vendor's PROSE is ever matched against. An exhausted quota
+   * therefore classified as generic `other` and the user never saw the
+   * billing-page remediation the descriptor exists to give.
+   *
+   * Each error below is a real `APICallError` built from the body OpenAI
+   * sends, not a hand-written string containing the code.
+   */
+  const patterns = { errorPatterns: OPENAI_DESCRIPTOR.errorPatterns }
+
+  function openAiError(body: {
+    message: string
+    code: string
+    type: string
+    status: number
+  }): APICallError {
+    return new APICallError({
+      message: body.message,
+      url: "https://api.openai.com/v1/responses",
+      requestBodyValues: {},
+      statusCode: body.status,
+      responseBody: JSON.stringify({
+        error: { message: body.message, type: body.type, code: body.code, param: null },
+      }),
+      data: { error: { message: body.message, type: body.type, code: body.code } },
+      isRetryable: body.status === 429,
+    })
+  }
+
+  it("sends an exhausted quota to the billing-page copy, not to a generic failure", () => {
+    const err = openAiError({
+      message:
+        "You exceeded your current quota, please check your plan and billing details.",
+      code: "insufficient_quota",
+      type: "insufficient_quota",
+      status: 429,
+    })
+    expect(classifyTurnError(err, patterns).message).toBe(
+      OPENAI_DESCRIPTOR.errorPatterns?.reauthMessage,
+    )
+  })
+
+  it("reaches the same copy through the SDK's RetryError envelope", () => {
+    const inner = openAiError({
+      message:
+        "You exceeded your current quota, please check your plan and billing details.",
+      code: "insufficient_quota",
+      type: "insufficient_quota",
+      status: 429,
+    })
+    const wrapped = new RetryError({
+      message: `Failed after 3 attempts. Last error: ${inner.message}`,
+      reason: "maxRetriesExceeded",
+      errors: [inner],
+    })
+    expect(classifyTurnError(wrapped, patterns).message).toBe(
+      OPENAI_DESCRIPTOR.errorPatterns?.reauthMessage,
+    )
+  })
+
+  it("sends a rejected key to the same copy", () => {
+    const err = openAiError({
+      message:
+        "Incorrect API key provided: sk-***. You can find your API key at https://platform.openai.com/account/api-keys.",
+      code: "invalid_api_key",
+      type: "invalid_request_error",
+      status: 401,
+    })
+    expect(classifyTurnError(err, patterns).message).toBe(
+      OPENAI_DESCRIPTOR.errorPatterns?.reauthMessage,
+    )
+  })
+
+  it("still classifies a real TPM rate limit as recoverable, not as an auth failure", () => {
+    const err = openAiError({
+      message:
+        "Rate limit reached for gpt-5.6 in organization org-x on tokens per min (TPM): Limit 30000, Used 29000, Requested 5000. Please try again in 2s.",
+      code: "rate_limit_exceeded",
+      type: "requests",
+      status: 429,
+    })
+    const out = classifyTurnError(err, patterns)
+    expect(out.kind).toBe("rate-limited")
+    expect(out.retryAfterSeconds).toBe(2)
   })
 })

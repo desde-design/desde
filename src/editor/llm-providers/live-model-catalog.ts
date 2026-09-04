@@ -161,7 +161,25 @@ export function mergeLiveModels(
   const defaultId =
     staticDefault && seen.has(staticDefault.id)
       ? staticDefault.id
-      : (staticDefault && findDefaultAlias(catalog, models, staticDefault, opts.defaultAlias)?.id) ??
+      : // Last resort: the newest live id. This CAN land on a pricier tier —
+        // with `gpt-5.6` and `gpt-5.6-sol` both gone and `gpt-5.6-cyber`
+        // live, the picker opens on $12.5/$75 rather than $4/$20, and no UI
+        // says the default moved (reviewed 2026-09-04, P3-5).
+        //
+        // Two alternatives were tried and are worse. Preferring the cheapest
+        // live entry with a known rate card opens the picker on a nano-class
+        // model, which is a bad default for an agent that edits code.
+        // Preferring the first live id the STATIC catalog also describes
+        // demotes a dated flagship snapshot (`claude-opus-4-8-20260315`, the
+        // vendor's own stand-in) to Sonnet, because the snapshot id is not
+        // itself a static entry. Both trade a rare over-spend for a routine
+        // under-capability.
+        //
+        // The narrow fix is the one already shipped: give the provider a
+        // `defaultAlias` rule, which is explicit and cannot be fooled by
+        // live-list order. This arm only runs when that rule names nothing
+        // live either.
+        (staticDefault && findDefaultAlias(catalog, models, staticDefault, opts.defaultAlias)?.id) ??
         models[0]!.id
   return {
     providerId: catalog.providerId,

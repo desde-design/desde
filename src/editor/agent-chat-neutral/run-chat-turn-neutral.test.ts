@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // Re-exported from the one file allowed to import the AI SDK, rather than
 // importing `ai` here directly — see the fence in `ai-sdk-provider.ts`.
-import { APICallError } from '../llm-providers/ai-sdk-provider'
+import { APICallError, RetryError } from '../llm-providers/ai-sdk-provider'
 
 import type { BridgeClient } from '../agent-tools/types'
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
@@ -482,6 +482,110 @@ describe('runChatTurnNeutral: failures', () => {
     )
     expect(attempts).toBe(2)
     expect(result.turn.error).toBeUndefined()
+  })
+
+  it('retries a 429 that arrives wrapped in the SDK\'s own RetryError', async () => {
+    // The SECOND attempt at this defect. An earlier wave fixed `status` vs
+    // `statusCode` and retries still never fired, because a 429 that survives
+    // the SDK's own retry loop does not reach this code as an `APICallError`
+    // at all: it arrives wrapped in `RetryError`, which carries neither
+    // `statusCode`, nor `status`, nor `headers`, nor `isRetryable`. Its
+    // message ("Failed after 3 attempts. Last error: ...") also defeats the
+    // status-number regex fallback, because the OpenAI 429 body has no
+    // standalone three-digit run.
+    //
+    // Both errors here are REAL instances of the installed package's classes.
+    // A hand-shaped object with a `lastError` property would pass this test
+    // against a wrong fix, which is exactly how the first attempt shipped.
+    let attempts = 0
+    const inner = new APICallError({
+      message:
+        'Rate limit reached for gpt-5.6 in organization org-x on tokens per min (TPM): Limit 30000, Used 29000, Requested 5000.',
+      url: 'https://api.openai.com/v1/responses',
+      requestBodyValues: {},
+      statusCode: 429,
+      responseHeaders: { 'retry-after': '3' },
+      isRetryable: true,
+    })
+    const wrapped = new RetryError({
+      message: `Failed after 3 attempts. Last error: ${inner.message}`,
+      reason: 'maxRetriesExceeded',
+      errors: [inner],
+    })
+    // Guard the premise: if the SDK ever starts carrying a status on the
+    // envelope, this test stops proving what it was written to prove.
+    expect((wrapped as unknown as { statusCode?: unknown }).statusCode).toBeUndefined()
+    expect((wrapped as unknown as { status?: unknown }).status).toBeUndefined()
+    expect((wrapped as unknown as { headers?: unknown }).headers).toBeUndefined()
+
+    const provider: LLMProvider = {
+      name: 'flaky',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () => {
+        const firstAttempt = ++attempts === 1
+        return (async function* () {
+          if (firstAttempt) throw wrapped
+          for (const ev of textStep('recovered')) yield ev
+        })()
+      },
+    }
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(attempts).toBe(2)
+    expect(events.find((e) => e.kind === 'api_retry')).toMatchObject({
+      attempt: 1,
+      errorStatus: 429,
+      // The vendor's own `retry-after`, read off the wrapped error, not the
+      // exponential-backoff guess.
+      retryDelayMs: 3000,
+    })
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it('reports the vendor\'s own wording, not the RetryError envelope, when a wrapped error is fatal', async () => {
+    const inner = new APICallError({
+      message: 'The model `gpt-5.6` does not exist or you do not have access to it.',
+      url: 'https://api.openai.com/v1/responses',
+      requestBodyValues: {},
+      statusCode: 404,
+      isRetryable: false,
+    })
+    const provider: LLMProvider = {
+      name: 'boom',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () =>
+        (async function* () {
+          throw new RetryError({
+            message: `Failed after 3 attempts. Last error: ${inner.message}`,
+            reason: 'errorNotRetryable',
+            errors: [inner],
+          })
+        })(),
+    }
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        emit: () => {},
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(result.turn.error).toBe(inner.message)
   })
 
   it('turns a provider throw into an error event and an errored turn', async () => {

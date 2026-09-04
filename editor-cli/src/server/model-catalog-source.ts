@@ -437,3 +437,35 @@ export function setModelCatalogLiveSourcesForTests(
 ): void {
   inner = createModelCatalogResolver(deps ?? {})
 }
+
+/**
+ * The default model for `providerId` as the PICKER computes it: the merged
+ * live catalog's default, read through this same cached resolver.
+ *
+ * It exists because the two chat dispatch sites used to fall back to the
+ * STATIC catalog's default instead, and the two agree only while the bare
+ * static default id is in the account's live list. On an account without it
+ * — tiered access is routine — the picker showed a model that works while
+ * the very first turn requested one the account cannot call, and the user's
+ * first message failed with a 404. It also defeated the `defaultAlias` rule:
+ * with the bare default id retired and the vendor still serving its named
+ * alias, the picker followed the alias and the dispatch did not.
+ *
+ * The resolver only serves CREDENTIALED providers, so a provider with no key
+ * has no merged catalog here at all. That falls back to the descriptor's
+ * static default rather than to `undefined`: it is the old behaviour, and it
+ * is the right floor — this function should only ever improve on the static
+ * answer, never withdraw it.
+ *
+ * `undefined` only when the provider is unknown or its catalog names no
+ * default. The runtime then picks, which is what it did before this existed.
+ */
+export async function resolvedDefaultModelFor(
+  providerId: string,
+): Promise<string | undefined> {
+  const { catalogs } = await modelCatalogResolver.get()
+  const catalog =
+    catalogs.find((c) => c.providerId === providerId) ??
+    getDescriptor(providerId)?.staticCatalog
+  return catalog?.models.find((m) => m.isDefault)?.id
+}

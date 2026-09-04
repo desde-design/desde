@@ -12,6 +12,16 @@
  * mis-enforces a spending limit. That is why every descriptor's static catalog
  * is covered by a rate-card assertion, and why an id with no card prices at
  * the conservative fallback rather than at zero.
+ *
+ * A third thing is lost and CANNOT be replaced here: an ABORTED step costs
+ * nothing against the ceiling. Usage only arrives on the vendor's `finish`
+ * message, and an abort closes the stream before one is sent, so the tokens
+ * the vendor has already billed for the partial generation are never
+ * recorded. Repeatedly starting and stopping long steps therefore accrues
+ * real spend and no ceiling pressure. This is inherent to the wire format —
+ * the vendor has not reported the usage yet, so there is nothing to record —
+ * and it is written down here rather than fixed, next to the step-boundary
+ * overshoot above.
  */
 
 import { estimateUsageCost } from '../llm-providers/rate-cards'

@@ -401,7 +401,15 @@ describe('AiSdkProvider.streamConversation', () => {
     )
     const prompt = model.doStreamCalls[0]!.prompt
     const toolMessage = prompt[2] as { content: Array<{ output: unknown }> }
-    expect(toolMessage.content[0]!.output).toEqual({ type: 'error-text', value: 'no such file' })
+    // The value is MARKED, not just typed: the Responses mapping flattens
+    // `error-text` and `text` to the same `function_call_output`, so the type
+    // alone does not reach the model (P3-2). Anthropic's `is_error` does
+    // survive, so without this the two lanes disagreed about whether a denied
+    // edit was distinguishable from an applied one.
+    expect(toolMessage.content[0]!.output).toEqual({
+      type: 'error-text',
+      value: 'Error: no such file',
+    })
   })
 
   it('emits reasoning deltas as reasoning_delta', async () => {

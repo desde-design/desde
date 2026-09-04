@@ -19,9 +19,11 @@
  * and nothing here sends `previous_response_id` or asks for
  * `reasoning.encrypted_content`. Each step re-derives its own plan today.
  *
- * Every OTHER vendor runs on Chat Completions through
- * `ai-sdk-openai-compatible.ts`, because that is the only shape they all
- * speak.
+ * The design has every OTHER vendor running on Chat Completions through an
+ * `ai-sdk-openai-compatible.ts`. That file is NOT on this branch, and neither
+ * is its package any more: `@ai-sdk/openai-compatible` was pinned here with
+ * no importer but a test, so it was removed and belongs to the branch that
+ * actually lands the transport.
  */
 
 import { createOpenAI } from '@ai-sdk/openai'

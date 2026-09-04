@@ -56,7 +56,7 @@ import {
   validateSessionModelConfig,
   type SessionModelConfig,
 } from "../../../src/editor/core/model-catalog.js"
-import { modelCatalogResolver } from "./model-catalog-source.js"
+import { modelCatalogResolver, resolvedDefaultModelFor } from "./model-catalog-source.js"
 import { resolveCostCeilingUsd } from "../../../src/editor/core/chat-cost-ceiling.js"
 import { acquireFileEditLock, acquireTreeGateShared } from "./session-lock.js"
 import { openSseStream } from "./sse.js"
@@ -1110,6 +1110,9 @@ export async function handleChatRequest(
       }
     }
 
+    const turnModel =
+      effectiveModelConfig?.model ?? (await resolvedDefaultModelFor(turnProviderId))
+
     const result = await runChatTurn({
       bridge,
       providerId: turnProviderId,
@@ -1186,13 +1189,18 @@ export async function handleChatRequest(
       inputChannel: turnChannel,
       signal: abort.signal,
       costCeilingUsd: resolveCostCeilingUsd(ctx.quotas?.costCeilingUsd),
-      ...(effectiveModelConfig
+      // The model for this turn: the chosen one when there is one, otherwise
+      // the default the PICKER would have shown for this provider. Falling
+      // back inside the runtime instead sent the static catalog's default,
+      // which is not always a model the account can call — see
+      // `resolvedDefaultModelFor`.
+      ...(turnModel
         ? {
-            model: effectiveModelConfig.model,
-            ...(effectiveModelConfig.effort ? { effort: effectiveModelConfig.effort } : {}),
+            model: turnModel,
+            ...(effectiveModelConfig?.effort ? { effort: effectiveModelConfig.effort } : {}),
             // The picker's catalog knows whether this model (or alias) thinks
             // adaptively; the turn cannot always tell from the id alone.
-            ...(await adaptiveThinkingFor(effectiveModelConfig.model)),
+            ...(await adaptiveThinkingFor(turnModel)),
           }
         : {}),
     })

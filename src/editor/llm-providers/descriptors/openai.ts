@@ -93,16 +93,37 @@ export const OPENAI_DESCRIPTOR: ProviderDescriptor = {
       return effort === undefined ? {} : { reasoningEffort: effort }
     },
   },
+  // These are matched against the error MESSAGE, and the message OpenAI's
+  // errors carry is `data.error.message` alone — the AI SDK builds
+  // `APICallError.message` from it and nothing else. So a pattern written
+  // against an OpenAI error CODE (`insufficient_quota`, `invalid_api_key`,
+  // `rate_limit_exceeded`) can never match, and the first version of this
+  // block was three such patterns plus one that worked. An exhausted quota
+  // classified as a generic failure and the user with a dead account never
+  // saw the billing-page remediation this exists to give.
+  //
+  // The codes are kept alongside the prose only for a gateway that echoes
+  // them into its message text; the prose patterns are the ones that fire on
+  // OpenAI itself. See `classify-turn-error.test.ts`, which asserts against
+  // real `APICallError`s built from OpenAI's own response bodies.
   errorPatterns: {
     auth: [
       // An exhausted quota is not a rate limit even though it arrives as a 429:
       // waiting does not fix it, so it belongs on the auth arm where the copy
-      // sends the user to their billing page.
+      // sends the user to their billing page. Auth is checked before the rate
+      // arm in `classifyTurnError`, which is what keeps this from being read
+      // as "recoverable, try again shortly".
+      /exceeded your current quota/i,
+      /check your plan and billing/i,
       /\binsufficient_quota\b/i,
-      /\binvalid_api_key\b/i,
+      // 401s. OpenAI's own wording for a bad key, plus the wording it uses
+      // when the key is absent or the project is wrong.
       /incorrect api key/i,
+      /you did not provide an api key/i,
+      /\binvalid_api_key\b/i,
+      /\binvalid authorization header\b/i,
     ],
-    rateLimited: [/\brate_limit_exceeded\b/i],
+    rateLimited: [/rate limit reached/i, /\brate_limit_exceeded\b/i],
     reauthMessage:
       'OpenAI rejected the request (401 or 429). The key Editor is using looks ' +
       'invalid, or the account has no remaining quota. Add or replace your OpenAI ' +

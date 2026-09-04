@@ -1,21 +1,23 @@
 /**
  * Two things this test guards:
  *
- * 1. The three AI SDK packages are actually importable and export what the
- *    rest of `ai-sdk-*.ts` will need. `npx knip` treats a test import as real
- *    usage, so this is also what keeps the packages out of knip's "unused
- *    dependency" list before Task 35's `ai-sdk-provider.ts` exists to import
- *    them for real.
+ * 1. The AI SDK packages are actually importable and export what
+ *    `ai-sdk-*.ts` needs.
  * 2. The installed version of each package still matches the exact pin in
  *    root `package.json`. `ai` and `@ai-sdk/*` shipped two breaking majors in
  *    a year; a version drifting out from under the pin (a stray `npm install
  *    ai@latest`, a lockfile regenerated against a looser range) should fail
  *    a test, not surface as a silent runtime behavior change.
+ *
+ * `@ai-sdk/openai-compatible` used to be pinned and covered here, with this
+ * test as its ONLY importer — a dependency shipped for
+ * `ai-sdk-openai-compatible.ts`, a file that does not exist. It was removed
+ * 2026-09-04 rather than left behind a knip-silencing import. The branch that
+ * lands the Chat Completions transport for other vendors adds it back.
  */
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createOpenAI } from '@ai-sdk/openai'
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { generateText, streamText } from 'ai'
 import { describe, expect, it } from 'vitest'
 
@@ -57,13 +59,11 @@ describe('AI SDK package pins', () => {
     expect(typeof streamText).toBe('function')
     expect(typeof generateText).toBe('function')
     expect(typeof createOpenAI).toBe('function')
-    expect(typeof createOpenAICompatible).toBe('function')
   })
 
   it.each([
     ['ai', 'ai'],
     ['@ai-sdk/openai', join('@ai-sdk', 'openai')],
-    ['@ai-sdk/openai-compatible', join('@ai-sdk', 'openai-compatible')],
   ])('%s is installed at the exact version pinned in package.json', async (dependencyName, packageDir) => {
     const [installed, pinned] = await Promise.all([
       installedVersion(packageDir),

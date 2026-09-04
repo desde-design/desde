@@ -26,7 +26,14 @@
  *    assistant message. They are display-only; replaying a reasoning summary
  *    as assistant text on the next step would corrupt the transcript.
  *  - A stream `error` part is rethrown rather than swallowed, so
- *    `classify-turn-error.ts` sees the vendor's own wording.
+ *    `classify-turn-error.ts` sees the vendor's own wording. `onError` is
+ *    silenced for the same reason: the SDK's default writes the raw vendor
+ *    error to stderr before the classifier can sanitise it.
+ *  - An errored tool result keeps its marker in the TEXT (`markAsError`),
+ *    because the Responses mapping flattens `error-text` and `text` to the
+ *    same `function_call_output` and the flag itself does not reach the
+ *    model. Anthropic's `is_error` does survive, so without the marker the
+ *    two lanes disagreed.
  *  - `result.stream` is used, not `result.fullStream`, and `result.usage`, not
  *    `result.totalUsage`: both of the latter are deprecated in ai@7. The one
  *    surviving `totalUsage` is the field name on the `finish` stream part,
@@ -39,6 +46,7 @@ import {
   jsonSchema,
   NoObjectGeneratedError,
   Output,
+  RetryError,
   streamText,
   tool,
   type FinishReason,
@@ -54,8 +62,14 @@ import {
  * SDK throws (`run-chat-turn-neutral.test.ts`, final review I4) without
  * itself importing `ai` and stepping outside the fence this file's header
  * describes.
+ *
+ * `RetryError` is the envelope the SDK's own retry loop puts around the
+ * vendor's `APICallError` once its attempts are exhausted, and it carries
+ * neither a status nor headers. A hand-shaped stand-in for it is what let a
+ * first attempt at the retry-classification fix pass while being wrong, so
+ * the test builds the real class.
  */
-export { APICallError }
+export { APICallError, RetryError }
 
 import type {
   AssistantContent,
@@ -190,6 +204,7 @@ export class AiSdkProvider implements LLMProvider {
       prompt: flattenToString(opts.user),
       maxOutputTokens: opts.maxTokens ?? 8000,
       abortSignal: opts.signal,
+      onError: silenceSdkDefaultLogging,
       ...this.providerOptionsFor(),
       ...(opts.responseFormat?.kind === 'json_schema'
         ? {
@@ -232,6 +247,16 @@ export class AiSdkProvider implements LLMProvider {
       // The SDK wants JSON, and a wrong value is a 400 with the vendor's own
       // message, which is the error we want the user to read.
       ...this.providerOptionsFor(opts.providerOptions),
+      // The whole retry budget for a chat step belongs to
+      // `streamStepWithRetry` in the neutral runtime, which emits `api_retry`
+      // with real numbers and honours the vendor's `retry-after` header.
+      // Leaving the SDK's own default of 2 in place nested 3 attempts inside
+      // each of ours, and — worse — replaced the vendor's `APICallError` with
+      // a `RetryError` carrying neither a status nor headers, which is what
+      // made retry classification unreachable. `complete` and
+      // `streamComplete` keep the SDK's retries: no loop of ours wraps them.
+      maxRetries: 0,
+      onError: silenceSdkDefaultLogging,
       abortSignal: opts.signal,
     })
 
@@ -295,6 +320,19 @@ export class AiSdkProvider implements LLMProvider {
 }
 
 // ─── translation helpers ─────────────────────────────────────────────────
+
+/**
+ * `streamText`'s `onError` default is `({ error }) => console.error(error)`,
+ * which writes the vendor's whole error object — url, status, response
+ * headers and response body — to the process log before this adapter has
+ * rethrown it and `classify-turn-error.ts` has had the chance to replace it
+ * with the sanitised remediation copy. The stream's `error` part is already
+ * handled (it is rethrown), so the default logger has nothing to add and one
+ * unsanitised copy to leak.
+ */
+function silenceSdkDefaultLogging(): void {
+  /* intentionally empty — see the doc comment */
+}
 
 function isJsonRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -424,6 +462,16 @@ function dropSyntheticNulls(value: unknown, schema: unknown): unknown {
   return out
 }
 
+/**
+ * Prefix a tool result the caller marked as an error, so the marker survives
+ * a wire format that drops the flag. Already-marked text is left alone: an
+ * `edit-ack` denial that opens with "Error:" or "Refused:" reads worse with a
+ * second one stapled on.
+ */
+function markAsError(value: string): string {
+  return /^\s*(error|failed|refused|denied)\b/i.test(value) ? value : `Error: ${value}`
+}
+
 function flattenToString(content: SystemContent | UserContent): string {
   if (typeof content === 'string') return content
   // Cache hints are dropped here. See the file header.
@@ -544,7 +592,17 @@ function toModelMessages(messages: readonly Message[]): ModelMessage[] {
           type: 'tool-result',
           toolCallId: block.toolUseId,
           toolName: toolNameById.get(block.toolUseId) ?? block.toolUseId,
-          output: block.isError ? { type: 'error-text', value } : { type: 'text', value },
+          // `error-text` is the right neutral shape, but the Responses
+          // mapping flattens BOTH variants to a plain
+          // `{ type: 'function_call_output', call_id, output }` — the flag
+          // does not survive the wire, so on this lane the model could only
+          // tell a denied edit from an applied one by reading the prose.
+          // Anthropic's `is_error` does survive, so the two lanes disagreed.
+          // Marking the text is what closes that gap without inventing a
+          // field the vendor does not have.
+          output: block.isError
+            ? { type: 'error-text', value: markAsError(value) }
+            : { type: 'text', value },
         })
       }
     }
