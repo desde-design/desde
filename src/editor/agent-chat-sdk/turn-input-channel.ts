@@ -190,6 +190,26 @@ export interface TurnInputChannel {
    */
   takeUndeliveredSteers(): SteeredMessage[]
   /**
+   * Declare that every steer already pulled out of this channel is recorded
+   * somewhere durable, so {@link takeUndeliveredSteers} must stop reporting
+   * them however the turn ends.
+   *
+   * For the SELF-DRIVEN lane only, and it is not a weakening of the evidence
+   * rule above — it is a different kind of evidence. That lane appends a
+   * drained steer into the request itself and records it on the turn it
+   * returns, and the turn is persisted even when the step then fails, so
+   * `history-replay.ts` replays the steer as a user message on the very next
+   * turn. The message is therefore not lost, and asking the user to send it
+   * again would put it in the transcript twice (2026-09-04 adversarial review,
+   * P3-4). Steers still QUEUED are untouched: nothing recorded those, and they
+   * are still reported.
+   *
+   * The SDK lane must never call this. There, "pulled" only means the bytes
+   * reached the child process, which is exactly the ambiguity the rule above
+   * resolves toward reporting.
+   */
+  noteSteersRecorded(): void
+  /**
    * Take every message currently queued, without blocking and without closing.
    *
    * The generator in {@link stream} is the SDK lane's way in: the SDK pulls,
@@ -408,6 +428,11 @@ export function createTurnInputChannel(): TurnInputChannel {
         text: s.text,
         ...(s.images ? { images: s.images } : {}),
       }))
+    },
+    noteSteersRecorded(): void {
+      for (let i = steers.length - 1; i >= 0; i--) {
+        if (steers[i]!.handedOffAtMessageCount !== null) steers.splice(i, 1)
+      }
     },
     drainSteers(): SteeredMessage[] {
       const out: SteeredMessage[] = []

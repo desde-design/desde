@@ -603,7 +603,20 @@ async function reconstructWrite(
     return { ok: false, reason: protectedPathDenial(safeRel) }
   }
   if (existsSync(safe.absolute)) {
-    const current = await readFile(safe.absolute, 'utf8')
+    // Guarded the way `reconstructEdit` below already guards its read. The
+    // path exists but need not be a readable FILE: `Write src/components`
+    // instead of `Write src/components/Foo.vue` is an ordinary model slip and
+    // used to throw EISDIR out of the permission gate, which on the neutral
+    // lane ended the whole turn (2026-09-04 adversarial review, P2-1).
+    let current: string
+    try {
+      current = await readFile(safe.absolute, 'utf8')
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `Write denied: cannot read '${safeRel}': ${(err as Error).message}`,
+      }
+    }
     if (current === content) {
       return { ok: false, reason: `Write produces no change to '${safeRel}'` }
     }

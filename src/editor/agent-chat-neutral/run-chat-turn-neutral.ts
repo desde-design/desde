@@ -515,6 +515,13 @@ async function runInner(
             imageCount: steer.images?.length ?? 0,
           })
         }
+        // Everything just drained is now in `messages` AND in `steerRecords`,
+        // which is persisted on the turn even if this step then fails, and
+        // replayed as a user message on the next turn. So the channel must
+        // stop reporting these for resubmission: the user acting on that
+        // prompt would send the same message a second time (2026-09-04
+        // adversarial review, P3-4). Anything still queued is untouched.
+        turnChannel.noteSteersRecorded()
       }
 
       const pending: Array<{ id: string; name: string; input: unknown }> = []
@@ -703,20 +710,27 @@ async function runOneTool(
       `There is no tool named '${call.name}' in this session. Use one of the tools listed in your instructions.`,
     )
   }
-  const decision = await gate(call.name, input, {
-    ...(signal ? { signal } : {}),
-    toolUseId: call.id,
-  })
-  if (decision.behavior === 'deny') return errResult(decision.message)
-  const parsed = z.object(spec.inputShape).safeParse(input)
-  if (!parsed.success) {
-    return errResult(
-      `${call.name} was called with invalid arguments: ${parsed.error.issues
-        .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
-        .join('; ')}`,
-    )
-  }
+  // The gate is INSIDE the same try as the handler, and that is the contract
+  // above rather than tidiness. It reconstructs the write to decide, so it
+  // touches the filesystem, and a `Write` whose `file_path` names a directory
+  // used to throw EISDIR straight out of here and end the whole turn with a
+  // raw errno string in the banner (2026-09-04 adversarial review, P2-1).
+  // Aiming Write at a directory is an ordinary model slip, not an attack, and
+  // the model can correct from a tool result.
   try {
+    const decision = await gate(call.name, input, {
+      ...(signal ? { signal } : {}),
+      toolUseId: call.id,
+    })
+    if (decision.behavior === 'deny') return errResult(decision.message)
+    const parsed = z.object(spec.inputShape).safeParse(input)
+    if (!parsed.success) {
+      return errResult(
+        `${call.name} was called with invalid arguments: ${parsed.error.issues
+          .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+          .join('; ')}`,
+      )
+    }
     return await spec.handler(parsed.data as Record<string, unknown>, {
       ...(signal ? { signal } : {}),
       toolUseId: call.id,

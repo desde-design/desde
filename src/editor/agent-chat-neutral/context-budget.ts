@@ -116,6 +116,39 @@ export function applyContextBudget(
     working = withoutOrphans
   }
 
+  // Anthropic's Messages API rejects a request whose FIRST message is an
+  // assistant message: `messages: first message must use the "user" role`.
+  // Nothing above enforces that — the drop loop slices on size alone, and the
+  // orphan pass can empty a leading user message and remove it, exposing the
+  // assistant message behind it. Anthropic reaches this lane whenever
+  // `chatRuntimeOverride(env) === 'neutral'`, which is how the lane is
+  // exercised today, and the failure would be PERMANENT for that session:
+  // every later turn replays the same over-budget history. OpenAI accepts the
+  // shape, so this rule is one vendor's and is applied to both.
+  //
+  // A loop rather than a single slice: dropping a leading assistant message
+  // strands the `tool_result` blocks in the user message behind it, since
+  // nothing precedes them any more. Those are stripped, and stripping can
+  // empty that message in turn.
+  while (working.length > 1) {
+    const head = working[0]
+    if (head.role !== 'user') {
+      working = working.slice(1)
+      dropped++
+      continue
+    }
+    if (typeof head.content === 'string') break
+    const content = head.content.filter((block) => block.type !== 'tool_result')
+    if (content.length === head.content.length) break
+    if (content.length === 0) {
+      working = working.slice(1)
+      dropped++
+      continue
+    }
+    working = [{ ...head, content } as Message, ...working.slice(1)]
+    break
+  }
+
   const parts: string[] = []
   if (elided > 0) parts.push(`${elided} older tool result${elided === 1 ? '' : 's'} replaced with a placeholder`)
   if (dropped > 0) parts.push(`${dropped} older message${dropped === 1 ? '' : 's'} dropped`)

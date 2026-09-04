@@ -121,6 +121,7 @@ describe('applyContextBudget', () => {
     for (let max = 50; max < total; max += 37) {
       const out = applyContextBudget(messages, { maxChars: max })
       expect(orphanedToolResultIds(out.messages)).toEqual([])
+      expect(out.messages[0]!.role, `maxChars=${max}`).toBe('user')
       for (const m of out.messages) {
         expect(typeof m.content === 'string' || m.content.length > 0).toBe(true)
       }
@@ -154,11 +155,49 @@ describe('applyContextBudget', () => {
     ]
     const out = applyContextBudget(messages, { maxChars: 300 })
     expect(firstUnpairedToolResult(out.messages)).toBeUndefined()
+    // The surviving `tool_use` / `tool_result` pair went too, because the pair
+    // would have put an ASSISTANT message at the head of the request and
+    // Anthropic refuses that (see the leading-user case below). Before that
+    // rule existed this case ended at
+    // `[toolUse('call_1', 20), <elided tool_result>, 'final ask']`, which is
+    // correctly paired and still a 400.
     expect(out.messages).toEqual([
-      toolUse('call_1', 20),
-      { role: 'user', content: [{ type: 'tool_result', toolUseId: 'call_1', content: ELIDED_TOOL_OUTPUT }] },
       { role: 'user', content: [{ type: 'text', text: 'final ask' }] },
     ])
+  })
+
+  it('never leaves an ASSISTANT message at the head, which Anthropic rejects', () => {
+    // 2026-09-04 adversarial review, P2-3. The drop loop slices on size alone,
+    // so roughly half its stopping points left the request starting with an
+    // assistant message. Anthropic's Messages API answers that with
+    // `messages: first message must use the "user" role`; OpenAI accepts it,
+    // so the rule is Anthropic's and both lanes now satisfy it. Anthropic
+    // reaches this runtime through `EDITOR_CHAT_RUNTIME_OVERRIDE=neutral`, and
+    // the 400 would be permanent for the session, because every later turn
+    // replays the same over-budget history.
+    const messages: Message[] = []
+    for (let i = 0; i < 12; i++) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: `ask ${i} ${'u'.repeat(400)}` }] })
+      messages.push(toolUse(`tu_${i}`, 400))
+      messages.push(toolResult(`tu_${i}`, 400))
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: `said ${i}` }] })
+    }
+    messages.push({ role: 'user', content: [{ type: 'text', text: 'the turn the user just sent' }] })
+
+    const total = messages.reduce((n, m) => n + JSON.stringify(m.content).length, 0)
+    let sawTrim = false
+    for (let max = 200; max < total; max += 311) {
+      const out = applyContextBudget(messages, { maxChars: max })
+      if (out.trimmed) sawTrim = true
+      expect(out.messages[0]!.role, `maxChars=${max}`).toBe('user')
+      // The other two invariants must survive the new slicing.
+      expect(orphanedToolResultIds(out.messages), `maxChars=${max}`).toEqual([])
+      expect(firstUnpairedToolResult(out.messages), `maxChars=${max}`).toBeUndefined()
+      for (const m of out.messages) {
+        expect(typeof m.content === 'string' || m.content.length > 0).toBe(true)
+      }
+    }
+    expect(sawTrim).toBe(true)
   })
 
   it('returns a notice naming what was dropped, for the model to read', () => {

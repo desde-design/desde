@@ -248,6 +248,27 @@ describe('runChatTurnNeutral: the tool loop', () => {
     expect(res.error).toMatch(/no tool named 'Bash'/)
   })
 
+  it('survives a Write aimed at a directory, and hands the model the reason', async () => {
+    // 2026-09-04 adversarial review, P2-1. The permission gate sat OUTSIDE
+    // `runOneTool`'s try, and the gate reconstructs the write to decide, so a
+    // `file_path` naming a directory threw EISDIR out of the gate, out of the
+    // loop, and ended the turn with the raw errno string in the error banner.
+    // `Write src/components` instead of `Write src/components/Foo.vue` is an
+    // ordinary model slip, so a user hits this with no adversary at all.
+    const { events, calls, result } = await run([
+      toolStep('tu_1', 'Write', { file_path: 'src', content: 'oops' }),
+      textStep('sorry, that is a directory'),
+    ])
+    const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; error: string }
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/EISDIR|illegal operation on a directory|cannot read/i)
+    // The turn kept going: the model got the result and answered.
+    expect(calls).toHaveLength(2)
+    expect(events.at(-1)).toMatchObject({ kind: 'turn_complete', stopReason: 'end_turn' })
+    expect(result.turn.error).toBeUndefined()
+    expect(events.some((e) => e.kind === 'error')).toBe(false)
+  })
+
   it('stops at the step cap rather than looping forever', async () => {
     const forever = Array.from({ length: 60 }, (_, i) => toolStep(`tu_${i}`, 'Read', { file_path: 'src/App.vue' }))
     const { events, result } = await run(forever)
@@ -682,6 +703,48 @@ describe('runChatTurnNeutral: steering', () => {
     expect(result.turn.steers).toEqual([
       { text: 'actually the sidebar', afterAssistantBlocks: 1 },
     ])
+  })
+
+  it('does not ask the user to resend a steer it already delivered into a step that then failed', async () => {
+    // 2026-09-04 adversarial review, P3-4. The steer is appended to the
+    // request AND recorded on the turn, and the turn is persisted even when
+    // the step fails, so `history-replay.ts` replays it as a user message on
+    // the next turn. Reporting it for resubmission on top of that puts the
+    // same message in the transcript twice.
+    const channel = createTurnInputChannel()
+    const { provider } = scriptedProvider([toolStep('tu_1', 'Read', { file_path: 'src/App.vue' })])
+    const original = provider.streamConversation.bind(provider)
+    let step = 0
+    provider.streamConversation = (o) => {
+      if (step++ === 1) {
+        return (async function* (): AsyncGenerator<ProviderEvent> {
+          throw new Error('the provider fell over')
+        })()
+      }
+      return original(o)
+    }
+    const events: ChatStreamEvent[] = []
+    channel.push('actually the sidebar')
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'change the header',
+        providerId: 'anthropic',
+        inputChannel: channel,
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    // Delivered and announced once.
+    expect(events.filter((e) => e.kind === 'steered')).toHaveLength(1)
+    // Persisted on the failed turn, which is what makes it replayable.
+    expect(result.turn.steers).toEqual([
+      { text: 'actually the sidebar', afterAssistantBlocks: 1 },
+    ])
+    // And therefore NOT handed back for the user to send again.
+    expect(events.filter((e) => e.kind === 'resubmit_required')).toEqual([])
   })
 
   it('reports a steer that arrived after the last step for resubmission', async () => {
