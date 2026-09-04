@@ -27,6 +27,42 @@ const MAX_MENTION_MATCHES = 8
  */
 const PICKER_HEIGHT_ESTIMATE = 190
 
+/**
+ * Everything that decides where a character lands, copied from the textarea
+ * onto the highlight layer so the two wrap identically.
+ *
+ * Copied at runtime rather than restated as classes: the layer has to track
+ * whatever the call site passed AND whatever `Textarea` itself sets, and a
+ * hand-kept list of classes would drift the first time either changed. A drift
+ * here is a highlight sitting beside its word rather than on it.
+ */
+const MIRRORED_STYLE_PROPS = [
+  "font-family",
+  "font-size",
+  "font-weight",
+  "font-style",
+  "font-variant",
+  "font-feature-settings",
+  "line-height",
+  "letter-spacing",
+  "word-spacing",
+  "text-indent",
+  "text-transform",
+  "white-space",
+  "overflow-wrap",
+  "word-break",
+  "tab-size",
+  "box-sizing",
+  "padding-top",
+  "padding-right",
+  "padding-bottom",
+  "padding-left",
+  "border-top-width",
+  "border-right-width",
+  "border-bottom-width",
+  "border-left-width",
+] as const
+
 interface MentionInputProps {
   value: string
   onChange: (value: string) => void
@@ -264,6 +300,7 @@ export function MentionInput({
   // that degrades a mention, projects back to the characters already on screen,
   // so React's write-back is a no-op and the caret is left alone.
   const pendingCaretRef = useRef<number | null>(null)
+  const highlightRef = useRef<HTMLDivElement>(null)
   const listId = useId()
   // Cursor tracked as state rather than read off the ref during render (the
   // refs rule), refreshed on every event that can move the caret.
@@ -424,6 +461,97 @@ export function MentionInput({
 
   useLayoutEffect(applyPendingCaret)
 
+  /** The display string cut into runs, so live mentions can be painted. */
+  const highlightPieces = useMemo(() => {
+    const pieces: Array<{ text: string; mention: boolean }> = []
+    let at = 0
+    for (const m of projection.mentions) {
+      if (m.displayStart > at) pieces.push({ text: display.slice(at, m.displayStart), mention: false })
+      pieces.push({ text: display.slice(m.displayStart, m.displayEnd), mention: true })
+      at = m.displayEnd
+    }
+    if (at < display.length) pieces.push({ text: display.slice(at), mention: false })
+    // A textarea gives a trailing newline its own empty caret line; a
+    // `pre-wrap` div rendering the same string does not. Left alone, the layer
+    // is one line shorter, so its scroll range is smaller and syncing
+    // `scrollTop` clamps and shifts every highlight. A zero-width character
+    // restores the line box without touching where anything wraps.
+    if (display.endsWith("\n")) pieces.push({ text: "\u200b", mention: false })
+    return pieces
+  }, [display, projection.mentions])
+
+  // The layer only exists once there is something to paint, so this is also
+  // the signal that its ref has become non-null. The style sync MUST depend on
+  // it: keyed on `className` alone, the sync ran once at mount while the ref
+  // was still null and never again, and the highlight rendered as one bar
+  // across the whole line because the layer had no padding and no `pre-wrap`.
+  const hasHighlight = highlightPieces.some((piece) => piece.mention)
+
+  // Keeps the highlight layer's metrics identical to the textarea's. Runs on
+  // mount and when the caller restyles, not per keystroke: a `getComputedStyle`
+  // on every character would force a style recalc for no gain, since none of
+  // these properties changes as text is typed.
+  useLayoutEffect(() => {
+    const field = textareaRef.current
+    const layer = highlightRef.current
+    if (!field || !layer) return
+    const sync = () => {
+      const computed = window.getComputedStyle(field)
+      for (const prop of MIRRORED_STYLE_PROPS) {
+        layer.style.setProperty(prop, computed.getPropertyValue(prop))
+      }
+      // A classic (non-overlay) scrollbar eats into the field's text width,
+      // and the layer has no scrollbar of its own, so without this the two
+      // wrap at different places for exactly the long drafts that scroll.
+      // Windows and Linux browsers are where this bites.
+      const borders =
+        parseFloat(computed.borderLeftWidth || "0") + parseFloat(computed.borderRightWidth || "0")
+      const gutter = field.offsetWidth - field.clientWidth - borders
+      if (gutter > 0) {
+        const padded = parseFloat(computed.paddingRight || "0") + gutter
+        layer.style.setProperty("padding-right", `${padded}px`)
+      }
+    }
+    sync()
+    // A web font landing after first paint changes every metric at once.
+    document.fonts?.ready?.then(sync).catch(() => {})
+
+    // `Textarea` is `text-base md:text-sm`, so crossing that breakpoint
+    // changes the font size, the line height and every wrap point. Two
+    // listeners, because neither is enough alone: a ResizeObserver reports
+    // box changes but not pure restyles, and these composers are a fixed
+    // width with a min-height, so a short draft can cross the breakpoint
+    // without the box ever changing.
+    window.addEventListener("resize", sync)
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(sync)
+    observer?.observe(field)
+    return () => {
+      window.removeEventListener("resize", sync)
+      observer?.disconnect()
+    }
+  }, [className, hasHighlight])
+
+  /**
+   * Keeps the layer scrolled with the field.
+   *
+   * `field-sizing-content` grows the textarea instead of scrolling it, but it
+   * is Chromium-only: in Safari and Firefox the field stays at its min-height
+   * and scrolls as soon as the reply runs past two lines. The field's own text
+   * is transparent while the layer is up, so an unsynced layer does not merely
+   * look wrong there, it shows the wrong part of the draft.
+   */
+  const syncScroll = useCallback(() => {
+    const field = textareaRef.current
+    const layer = highlightRef.current
+    if (!field || !layer) return
+    layer.scrollTop = field.scrollTop
+    layer.scrollLeft = field.scrollLeft
+  }, [])
+
+  // Typing moves the caret, which scrolls the field without firing `scroll`
+  // in every browser, so this runs after each render as well as on scroll.
+  useLayoutEffect(syncScroll)
+
   const trackCursor = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
     setCursor(e.currentTarget.selectionStart ?? e.currentTarget.value.length)
   }
@@ -477,7 +605,12 @@ export function MentionInput({
     : undefined
 
   return (
-    <>
+    /* This wrapper is new, and it is what the highlight layer is positioned
+       against. It cannot go on the caller's own `relative` box: that one also
+       holds an absolutely-positioned Send button, and the layer has to line up
+       with the TEXTAREA, not with whatever else the card put beside it. The
+       wrapper's height is the textarea's, so the button does not move. */
+    <div className="relative">
       {open ? (
         <MentionPicker
           query={token.query}
@@ -511,6 +644,7 @@ export function MentionInput({
         onKeyDown={handleKeyDown}
         onKeyUp={trackCursor}
         onClick={trackCursor}
+        onScroll={syncScroll}
         placeholder={composedPlaceholder}
         className={className}
         autoFocus={autoFocus}
@@ -522,6 +656,47 @@ export function MentionInput({
           open && matches.length > 0 ? `${listId}-option-${boundedIndex}` : undefined
         }
       />
-    </>
+      {/* The live-mention colour, painted OVER the textarea.
+          It exists because the projection took a signal away. While the id was
+          in the field, a live mention looked different from text that merely
+          reads like one; showing the name alone made them identical, and only
+          one of them notifies anybody.
+
+          A textarea's contents are one plain string, and CSS cannot colour
+          part of one, so the colour has to come from somewhere else. This
+          layer sits exactly on top and re-renders the same text, where a
+          resolved mention IS its own element and can take `--primary`, the
+          same aqua a primary button uses.
+
+          It paints ONLY the mention runs: everything else here is transparent,
+          and the words you read are still the textarea's own. That is
+          deliberate. The alternative, handing the field's text over wholesale
+          and drawing all of it here, renders a shade cleaner, because an
+          opaque aqua glyph drawn over the dark one beneath it darkens its
+          antialiased edges by about a quarter. But it makes the whole draft
+          depend on this layer lining up, in browsers there is no way to test
+          from here. This way a misalignment shows as a slightly offset tint
+          over text that is still correct and still readable, and the caret,
+          the selection and the placeholder are never anything but native. */}
+      {hasHighlight ? (
+        <div
+          ref={highlightRef}
+          aria-hidden
+          data-slot="mention-highlight"
+          /* `border-transparent` matters. The metrics sync copies the
+             field's border WIDTHS so the text starts in the same place, and
+             Tailwind's preflight gives every element `border-style: solid`
+             with the theme border colour, so without this the layer painted
+             its own square 1px border on top of the field's rounded one. */
+          className="pointer-events-none absolute inset-0 overflow-hidden border-transparent text-transparent select-none"
+        >
+          {highlightPieces.map((piece, index) => (
+            <span key={index} className={cn(piece.mention && "text-primary")}>
+              {piece.text}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
   )
 }

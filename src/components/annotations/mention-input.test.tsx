@@ -555,6 +555,105 @@ describe("what the writer sees", () => {
   })
 })
 
+// The projection took a signal away: while the id was in the field, a live
+// mention looked different from text that merely reads like one. Showing the
+// name alone made them identical, and only one of them notifies anybody.
+describe("the live-mention highlight", () => {
+  function layer() {
+    return document.querySelector('[data-slot="mention-highlight"]') as HTMLElement | null
+  }
+  function highlighted() {
+    return [...(layer()?.querySelectorAll("span") ?? [])]
+      .filter((el) => el.className.includes("text-primary"))
+      .map((el) => el.textContent)
+  }
+
+  it("marks a resolved mention and leaves lookalike text alone", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    fireEvent.click(screen.getByRole("option"))
+    type("@Rin Adeyemi and @Rin Adeyemi typed by hand")
+
+    // The first is a real mention; the second is the same characters, typed.
+    expect(highlighted()).toEqual(["@Rin Adeyemi"])
+  })
+
+  it("is not rendered at all when there is nothing live to mark", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("no mentions here")
+    expect(layer()).toBeNull()
+    type("@Rin Adeyemi by hand only")
+    expect(layer()).toBeNull()
+  })
+
+  it("marks every mention when there are several", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    fireEvent.click(screen.getByRole("option"))
+    type("@Rin Adeyemi and @sam")
+    fireEvent.click(screen.getByRole("option"))
+    expect(highlighted()).toEqual(["@Rin Adeyemi", "@Sam Okafor"])
+  })
+
+  it("is hidden from assistive tech and from the pointer", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    fireEvent.click(screen.getByRole("option"))
+    const el = layer()!
+    // The textarea already carries this text; announcing it twice is noise.
+    expect(el.getAttribute("aria-hidden")).toBe("true")
+    // It sits ON TOP of the field, so it must not swallow clicks.
+    expect(el.className).toContain("pointer-events-none")
+  })
+
+  // The layer paints ONLY the mention runs. The words the writer reads stay
+  // the textarea's own, so a layer that ever failed to line up would misplace
+  // a tint rather than garble the draft, and the caret, the selection and the
+  // placeholder are never anything but native.
+  it("never takes the field's own text away from it", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    const field = screen.getByRole("combobox")
+    type("@rin")
+    fireEvent.click(screen.getByRole("option"))
+
+    expect(field.className).not.toContain("text-transparent")
+    // Only the mention runs carry a colour; everything else is invisible here.
+    const runs = [...layer()!.querySelectorAll("span")]
+    expect(runs.filter((el) => el.className.includes("text-primary"))).toHaveLength(1)
+    expect(layer()!.className).toContain("text-transparent")
+  })
+
+  // `field-sizing-content` is Chromium-only. In Safari and Firefox the field
+  // stays at its min-height and scrolls, and since its own text is transparent
+  // while the layer is up, an unsynced layer shows the wrong part of the draft
+  // rather than merely looking off.
+  it("follows the field when it scrolls", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    fireEvent.click(screen.getByRole("option"))
+    const field = screen.getByRole("combobox")
+
+    field.scrollTop = 24
+    fireEvent.scroll(field)
+    expect(layer()!.scrollTop).toBe(24)
+  })
+
+  // The metrics sync is keyed on the layer EXISTING, not just on `className`.
+  // Keyed on className alone it ran once at mount while the ref was still
+  // null and never again, and the highlight rendered as one bar across the
+  // whole line because the layer had no padding and no `pre-wrap`.
+  it("copies the field's metrics once the layer appears", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    fireEvent.click(screen.getByRole("option"))
+    // Whatever the environment computes, the sync must have written it here.
+    expect(layer()!.style.getPropertyValue("white-space")).toBe(
+      window.getComputedStyle(screen.getByRole("combobox")).getPropertyValue("white-space"),
+    )
+    expect(layer()!.style.length).toBeGreaterThan(0)
+  })
+})
+
 describe("Escape", () => {
   it("dismisses the picker and does not reach the parent", () => {
     const onKeyDown = vi.fn()
