@@ -534,71 +534,87 @@ function handleExtensionTool(
  * sufficient — a new lane must not need to remember anything.
  */
 
-async function handleWrite(
+/**
+ * What a `Write` or `Edit` call would produce on disk, with every refusal
+ * this module can decide from the input and the file alone already applied:
+ * containment, the protected-path list, the new-file extension allowlist, the
+ * `old_string` uniqueness rule and the no-op guard.
+ *
+ * Extracted so the permission gate and the neutral lane's OWN write tools run
+ * one implementation rather than two. On the SDK lane the gate reconstructs
+ * `newSource` for the `edit_proposed` carrier and the SDK then performs the
+ * write; on the neutral lane the tool needs the same string to hand to
+ * `brokeredWrite`. Two copies of an Edit splice is exactly the kind of drift
+ * that ends with the diff card and the file disagreeing.
+ *
+ * What it deliberately does NOT do: emit, detect conflicts, journal, lock or
+ * write. Those belong to the caller, and they differ per lane.
+ */
+export type WriteReconstruction =
+  | {
+      ok: true
+      /** Repo-relative POSIX path. */
+      repoRel: string
+      /** Absolute path inside the worktree. */
+      absPath: string
+      /** The file's full content after the call. */
+      newSource: string
+      /** sha256 of the current on-disk content. Absent when creating. */
+      baseHash?: string
+      /** Bytes currently on disk, for the backup journal. Null when creating. */
+      priorContent: string | null
+      isNew: boolean
+    }
+  | { ok: false; reason: string }
+
+export async function reconstructWriteEdit(
+  toolName: 'Write' | 'Edit',
   toolInput: Record<string, unknown>,
-  opts: BuildCanUseToolOpts,
-): Promise<PermissionDecision> {
+  worktreeRoot: string,
+): Promise<WriteReconstruction> {
+  return toolName === 'Write'
+    ? reconstructWrite(toolInput, worktreeRoot)
+    : reconstructEdit(toolInput, worktreeRoot)
+}
+
+async function reconstructWrite(
+  toolInput: Record<string, unknown>,
+  worktreeRoot: string,
+): Promise<WriteReconstruction> {
   const rawPath = toolInput.file_path
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
-    return deny('Write requires a non-empty file_path')
+    return { ok: false, reason: 'Write requires a non-empty file_path' }
   }
   const content = toolInput.content
   if (typeof content !== 'string') {
-    return deny('Write requires a string `content` field')
+    return { ok: false, reason: 'Write requires a string `content` field' }
   }
 
   // resolveRepoPath validates containment (with realpath where the
   // leaf exists) and produces an absolute path inside the worktree.
   // It returns ok even when the leaf doesn't exist — we still need
   // to branch on whether this is a Write-overwrite or a Write-create.
-  const safe = await resolveRepoPath(opts.worktreeRoot, rawPath)
+  const safe = await resolveRepoPath(worktreeRoot, rawPath)
   if (!safe.ok) {
-    return deny(`Write denied: ${safe.reason}`)
+    return { ok: false, reason: `Write denied: ${safe.reason}` }
   }
-  if (isProtectedAgentPath(toRel(opts.worktreeRoot, safe.absolute))) {
-    return deny(protectedPathDenial(toRel(opts.worktreeRoot, safe.absolute)))
+  const safeRel = toRel(worktreeRoot, safe.absolute)
+  if (isProtectedAgentPath(safeRel)) {
+    return { ok: false, reason: protectedPathDenial(safeRel) }
   }
   if (existsSync(safe.absolute)) {
-    const repoRel = toRel(opts.worktreeRoot, safe.absolute)
     const current = await readFile(safe.absolute, 'utf8')
     if (current === content) {
-      return deny(`Write produces no change to '${repoRel}'`)
+      return { ok: false, reason: `Write produces no change to '${safeRel}'` }
     }
-    const currentHash = sha256(current)
-    await detectOverwriteConflict({
-      file: repoRel,
-      absolutePath: safe.absolute,
-      currentHash,
-      opts,
-    })
-    return emit({
-      type: 'overwrite',
-      file: repoRel,
+    return {
+      ok: true,
+      repoRel: safeRel,
+      absPath: safe.absolute,
       newSource: content,
-      baseHash: currentHash,
-      appliedByAgent: true,
-    }, opts, { absPath: safe.absolute, nextHash: sha256(content) })
-  }
-
-  // Phase 4a — codex round-1 fix for finding #3 (write-after-delete
-  // is missed). If the session previously read this path but it no
-  // longer exists, another writer deleted it between Read and Write.
-  // Surface the conflict before going down the new-file branch.
-  // `hashAtWrite` is sha256 of empty content since "the file is gone"
-  // is morally an empty-file state.
-  const priorReads = opts.getFileReads?.()
-  const priorReadForDeleted = priorReads?.[safe.absolute]
-  if (priorReadForDeleted) {
-    const repoRel = toRel(opts.worktreeRoot, safe.absolute)
-    try {
-      await opts.onConflictDetected?.({
-        file: repoRel,
-        absolutePath: safe.absolute,
-        hashAtRead: priorReadForDeleted.hashAtRead,
-        hashAtWrite: sha256(''),
-      })
-    } catch {
-      // Telemetry must never break the edit-ack lane.
+      baseHash: sha256(current),
+      priorContent: current,
+      isNew: false,
     }
   }
 
@@ -606,98 +622,175 @@ async function handleWrite(
   // and refuses creation through a symlink (catches pre-staged
   // links pointing outside the repo — the attack the legacy
   // edit-handler defends against).
-  const create = await resolveSafeCreatePath(opts.worktreeRoot, rawPath)
+  const create = await resolveSafeCreatePath(worktreeRoot, rawPath)
   if (!create.ok) {
-    return deny(`Write denied: ${create.reason}`)
+    return { ok: false, reason: `Write denied: ${create.reason}` }
   }
-  const repoRel = toRel(opts.worktreeRoot, create.absolute)
+  const repoRel = toRel(worktreeRoot, create.absolute)
   const ext = extensionOf(repoRel)
   if (!ALLOWED_NEW_FILE_EXTENSIONS.has(ext)) {
-    return deny(
-      `Only ${[...ALLOWED_NEW_FILE_EXTENSIONS].join('/')} files can be created; '${repoRel}' has extension '${ext || '(none)'}'`,
-    )
+    return {
+      ok: false,
+      reason: `Only ${[...ALLOWED_NEW_FILE_EXTENSIONS].join('/')} files can be created; '${repoRel}' has extension '${ext || '(none)'}'`,
+    }
   }
-  return emit({
-    type: 'overwrite',
-    file: repoRel,
+  return {
+    ok: true,
+    repoRel,
+    absPath: create.absolute,
     newSource: content,
-    allowCreate: true,
-    appliedByAgent: true,
-  }, opts, { absPath: create.absolute, nextHash: sha256(content) })
+    priorContent: null,
+    isNew: true,
+  }
+}
+
+async function reconstructEdit(
+  toolInput: Record<string, unknown>,
+  worktreeRoot: string,
+): Promise<WriteReconstruction> {
+  const rawPath = toolInput.file_path
+  if (typeof rawPath !== 'string' || rawPath.length === 0) {
+    return { ok: false, reason: 'Edit requires a non-empty file_path' }
+  }
+  const oldString = typeof toolInput.old_string === 'string' ? toolInput.old_string : null
+  const newString = typeof toolInput.new_string === 'string' ? toolInput.new_string : null
+  if (oldString === null || newString === null) {
+    return { ok: false, reason: 'Edit requires `old_string` and `new_string` as strings' }
+  }
+  if (oldString.length === 0) {
+    // Match the SDK — empty old_string is a creation pattern, not an
+    // edit. Refuse so the carrier shape stays unambiguous.
+    return {
+      ok: false,
+      reason: 'Edit `old_string` must be non-empty; use Write to create new files',
+    }
+  }
+
+  const safe = await resolveRepoPath(worktreeRoot, rawPath)
+  if (!safe.ok) {
+    return { ok: false, reason: `Edit denied: ${safe.reason}` }
+  }
+  const repoRel = toRel(worktreeRoot, safe.absolute)
+  if (isProtectedAgentPath(repoRel)) {
+    return { ok: false, reason: protectedPathDenial(repoRel) }
+  }
+  if (!existsSync(safe.absolute)) {
+    return {
+      ok: false,
+      reason: `Edit denied: file not found '${repoRel}'. Use Write to create new files`,
+    }
+  }
+  let current: string
+  try {
+    current = await readFile(safe.absolute, 'utf8')
+  } catch (err) {
+    return { ok: false, reason: `Edit denied: cannot read '${repoRel}': ${(err as Error).message}` }
+  }
+  const replaceAll = toolInput.replace_all === true
+  let newSource: string
+  if (replaceAll) {
+    if (!current.includes(oldString)) {
+      return { ok: false, reason: `Edit old_string not found in '${repoRel}'` }
+    }
+    newSource = current.split(oldString).join(newString)
+  } else {
+    const idx = current.indexOf(oldString)
+    if (idx < 0) {
+      return { ok: false, reason: `Edit old_string not found in '${repoRel}'` }
+    }
+    if (current.indexOf(oldString, idx + oldString.length) >= 0) {
+      return {
+        ok: false,
+        reason: `Edit old_string is not unique in '${repoRel}'; expand the match or set replace_all`,
+      }
+    }
+    newSource = current.slice(0, idx) + newString + current.slice(idx + oldString.length)
+  }
+  if (newSource === current) {
+    return { ok: false, reason: `Edit produces no change to '${repoRel}'` }
+  }
+  return {
+    ok: true,
+    repoRel,
+    absPath: safe.absolute,
+    newSource,
+    baseHash: sha256(current),
+    priorContent: current,
+    isNew: false,
+  }
+}
+
+async function handleWrite(
+  toolInput: Record<string, unknown>,
+  opts: BuildCanUseToolOpts,
+): Promise<PermissionDecision> {
+  const built = await reconstructWriteEdit('Write', toolInput, opts.worktreeRoot)
+  if (!built.ok) return deny(built.reason)
+  if (!built.isNew) {
+    await detectOverwriteConflict({
+      file: built.repoRel,
+      absolutePath: built.absPath,
+      currentHash: built.baseHash!,
+      opts,
+    })
+  } else {
+    // Phase 4a — codex round-1 fix for finding #3 (write-after-delete
+    // is missed). If the session previously read this path but it no
+    // longer exists, another writer deleted it between Read and Write.
+    // `hashAtWrite` is sha256 of empty content since "the file is gone"
+    // is morally an empty-file state.
+    const prior = opts.getFileReads?.()?.[built.absPath]
+    if (prior) {
+      try {
+        await opts.onConflictDetected?.({
+          file: built.repoRel,
+          absolutePath: built.absPath,
+          hashAtRead: prior.hashAtRead,
+          hashAtWrite: sha256(''),
+        })
+      } catch {
+        // Telemetry must never break the edit-ack lane.
+      }
+    }
+  }
+  return emit(
+    {
+      type: 'overwrite',
+      file: built.repoRel,
+      newSource: built.newSource,
+      ...(built.baseHash ? { baseHash: built.baseHash } : {}),
+      ...(built.isNew ? { allowCreate: true } : {}),
+      appliedByAgent: true,
+    },
+    opts,
+    { absPath: built.absPath, nextHash: sha256(built.newSource) },
+  )
 }
 
 async function handleEdit(
   toolInput: Record<string, unknown>,
   opts: BuildCanUseToolOpts,
 ): Promise<PermissionDecision> {
-  const rawPath = toolInput.file_path
-  if (typeof rawPath !== 'string' || rawPath.length === 0) {
-    return deny('Edit requires a non-empty file_path')
-  }
-  const oldString = typeof toolInput.old_string === 'string' ? toolInput.old_string : null
-  const newString = typeof toolInput.new_string === 'string' ? toolInput.new_string : null
-  if (oldString === null || newString === null) {
-    return deny('Edit requires `old_string` and `new_string` as strings')
-  }
-  if (oldString.length === 0) {
-    // Match the SDK — empty old_string is a creation pattern, not an
-    // edit. Refuse so the carrier shape stays unambiguous.
-    return deny('Edit `old_string` must be non-empty; use Write to create new files')
-  }
-
-  const safe = await resolveRepoPath(opts.worktreeRoot, rawPath)
-  if (!safe.ok) {
-    return deny(`Edit denied: ${safe.reason}`)
-  }
-  if (isProtectedAgentPath(toRel(opts.worktreeRoot, safe.absolute))) {
-    return deny(protectedPathDenial(toRel(opts.worktreeRoot, safe.absolute)))
-  }
-  const repoRel = toRel(opts.worktreeRoot, safe.absolute)
-  if (!existsSync(safe.absolute)) {
-    return deny(`Edit denied: file not found '${repoRel}'. Use Write to create new files`)
-  }
-  let current: string
-  try {
-    current = await readFile(safe.absolute, 'utf8')
-  } catch (err) {
-    return deny(`Edit denied: cannot read '${repoRel}': ${(err as Error).message}`)
-  }
-  const replaceAll = toolInput.replace_all === true
-  let newSource: string
-  if (replaceAll) {
-    if (!current.includes(oldString)) {
-      return deny(`Edit old_string not found in '${repoRel}'`)
-    }
-    newSource = current.split(oldString).join(newString)
-  } else {
-    const idx = current.indexOf(oldString)
-    if (idx < 0) {
-      return deny(`Edit old_string not found in '${repoRel}'`)
-    }
-    if (current.indexOf(oldString, idx + oldString.length) >= 0) {
-      return deny(
-        `Edit old_string is not unique in '${repoRel}'; expand the match or set replace_all`,
-      )
-    }
-    newSource = current.slice(0, idx) + newString + current.slice(idx + oldString.length)
-  }
-  if (newSource === current) {
-    return deny(`Edit produces no change to '${repoRel}'`)
-  }
-  const currentHash = sha256(current)
+  const built = await reconstructWriteEdit('Edit', toolInput, opts.worktreeRoot)
+  if (!built.ok) return deny(built.reason)
+  // Edit never creates, so `baseHash` is always present here.
   await detectOverwriteConflict({
-    file: repoRel,
-    absolutePath: safe.absolute,
-    currentHash,
+    file: built.repoRel,
+    absolutePath: built.absPath,
+    currentHash: built.baseHash!,
     opts,
   })
-  return emit({
-    type: 'overwrite',
-    file: repoRel,
-    newSource,
-    baseHash: currentHash,
-    appliedByAgent: true,
-  }, opts, { absPath: safe.absolute, nextHash: sha256(newSource) })
+  return emit(
+    {
+      type: 'overwrite',
+      file: built.repoRel,
+      newSource: built.newSource,
+      ...(built.baseHash ? { baseHash: built.baseHash } : {}),
+      appliedByAgent: true,
+    },
+    opts,
+    { absPath: built.absPath, nextHash: sha256(built.newSource) },
+  )
 }
 
 /**

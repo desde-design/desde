@@ -30,6 +30,10 @@ export interface NeutralToolCatalogOpts extends BuiltinToolOpts {
    * Restrict the BUILT-INS to this list, by bare name. Mirrors the SDK's
    * `tools` option, which filters built-ins only and is a no-op for
    * MCP-namespaced names.
+   *
+   * `Write` and `Edit` are built-ins here, so a caller that narrows this list
+   * must name them to keep them. That is the same rule the SDK lane already
+   * lives by: `MINI_TURN_BUILTIN_TOOLS` in `edit-fix-mini-turn.ts` lists both.
    */
   builtinTools?: readonly string[]
   /**

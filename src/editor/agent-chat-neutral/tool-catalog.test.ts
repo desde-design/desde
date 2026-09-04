@@ -38,6 +38,33 @@ describe('buildNeutralToolCatalog', () => {
     expect(names).not.toContain('Edit')
   })
 
+  it('offers Write and Edit once write tools are enabled', () => {
+    const names = buildNeutralToolCatalog({
+      ...base,
+      writeToolsEnabled: true,
+      writeOpts: {
+        worktreeRoot: '/tmp/whatever',
+        emitEdit: async () => ({ ok: true as const, editId: 'e1' }),
+      },
+    } as never).map((s) => s.name)
+    expect(names).toContain('Write')
+    expect(names).toContain('Edit')
+  })
+
+  it('drops Write and Edit when the caller narrows the built-ins without naming them', () => {
+    const names = buildNeutralToolCatalog({
+      ...base,
+      writeToolsEnabled: true,
+      writeOpts: {
+        worktreeRoot: '/tmp/whatever',
+        emitEdit: async () => ({ ok: true as const, editId: 'e1' }),
+      },
+      builtinTools: ['Read'],
+    } as never).map((s) => s.name)
+    expect(names).not.toContain('Write')
+    expect(names).not.toContain('Edit')
+  })
+
   it('narrows the built-ins to the caller s list when one is given', () => {
     const names = buildNeutralToolCatalog({ ...base, builtinTools: ['Read', 'Grep'] } as never).map(
       (s) => s.name,

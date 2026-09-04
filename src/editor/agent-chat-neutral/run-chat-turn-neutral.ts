@@ -188,6 +188,27 @@ async function runInner(
   const rootCommitSha = (await branchModeRootCommitSha(opts.worktreeRoot)) ?? undefined
   const groundingDigest = opts.getGrounding ? await buildGroundingDigest(opts.getGrounding) : null
 
+  // Hoisted above the catalog because the editor tools and the built-in write
+  // tools must fire the SAME closure: one turn's `editProposals` list, one
+  // `edit_proposed` event shape, one ack round-trip.
+  const emitEditProposal = async (
+    payload: EditProposalPayload,
+  ): Promise<{ ok: true; editId: string } | { ok: false; reason: string }> => {
+    const editId = randomUUID()
+    opts.emit({ kind: 'edit_proposed', turnId, editId, edit: payload })
+    if (opts.awaitEditAck) {
+      const ack = await opts.awaitEditAck(editId)
+      if (!ack.ok) return { ok: false, reason: ack.reason }
+    }
+    editProposalRefs.push({
+      editId,
+      kind: payload.type,
+      files: filesOf(payload),
+      proposedAt: new Date().toISOString(),
+    })
+    return { ok: true, editId }
+  }
+
   const catalog = buildNeutralToolCatalog({
     worktreeRoot: opts.worktreeRoot,
     onFileRead: (r) => {
@@ -197,24 +218,55 @@ async function runInner(
         readAt: r.readAt,
       }
     },
+    writeToolsEnabled: true,
+    writeOpts: {
+      worktreeRoot: opts.worktreeRoot,
+      emitEdit: emitEditProposal,
+      ...(opts.invalidateFiles ? { invalidateFiles: opts.invalidateFiles } : {}),
+      ...(opts.acquireTreeGate ? { acquireTreeGate: opts.acquireTreeGate } : {}),
+      ...(opts.recordHistory !== undefined ? { recordHistory: opts.recordHistory } : {}),
+      // acquireWriteLock is NOT threaded here, on purpose.
+      //
+      // On the SDK lane it is the ONLY serialization available: the SDK
+      // performs the write inside its own runtime, so `sdk-write-guard.ts` has
+      // to bracket the tool call with the CLI's own lock. This lane performs
+      // the write itself, and `brokeredWrite` already takes a FileLockManager
+      // lock per path, keyed on the REAL resolved path, held across the whole
+      // batch. The CLI edit route funnels through the same `brokeredWrite`, so
+      // its writes and ours serialize against each other at that inner layer
+      // regardless of what either one holds outside it. `session-lock.ts` says
+      // as much about its own coarser key namespace: "the worst case for a
+      // divergent spelling is losing the outer (coarse) serialization while
+      // the inner write lock still prevents interleaved writes to the same
+      // bytes."
+      //
+      // Adding it would not merely be redundant, it would deadlock. The CLI's
+      // `acquireFileEditLock` takes the repo's tree gate SHARED (see the
+      // "Parallel batch + a concurrent tree op" note in `sdk-write-guard.ts`),
+      // and `acquireTreeGate` above is already holding the shared gate across
+      // this entire call. Under session-lock's anti-starvation rule a PENDING
+      // exclusive blocks new shared acquisitions, so a Commit or Publish
+      // arriving between the two acquisitions parks the second one behind an
+      // exclusive that is waiting on the first, which we hold. The SDK lane
+      // survives that shape because its guard has a 15s watchdog. This lane
+      // has none, and should not grow one to make an unnecessary lock safe.
+      //
+      // What the outer lock would have bought and how it is bought instead: a
+      // stale read between reconstruction and the write is closed by the
+      // `preconditions` entry in `builtin-edit.ts`, checked under the batch's
+      // OWN locks; ordering against Commit, Publish and branch mutation,
+      // including the ledger append, is `acquireTreeGate`.
+      //
+      // The edit-fix mini-turn is the one caller that supplies neither: it
+      // already runs inside `withTreeLock`'s EXCLUSIVE hold, so acquiring the
+      // shared gate from within it would self-deadlock for the same reason. It
+      // needs nothing here, because an exclusive holder is a strictly stronger
+      // guarantee than either lock.
+    },
     editorToolOpts: {
       bridge: opts.bridge,
       signal: opts.signal,
-      emitEdit: async (payload) => {
-        const editId = randomUUID()
-        opts.emit({ kind: 'edit_proposed', turnId, editId, edit: payload })
-        if (opts.awaitEditAck) {
-          const ack = await opts.awaitEditAck(editId)
-          if (!ack.ok) return { ok: false, reason: ack.reason }
-        }
-        editProposalRefs.push({
-          editId,
-          kind: payload.type,
-          files: filesOf(payload),
-          proposedAt: new Date().toISOString(),
-        })
-        return { ok: true, editId }
-      },
+      emitEdit: emitEditProposal,
       readRoots: opts.readRoots,
       rootCommitSha,
       verificationAdapter: opts.verificationAdapter,
