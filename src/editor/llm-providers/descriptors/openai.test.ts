@@ -90,3 +90,36 @@ describe('OPENAI_DESCRIPTOR.validateKey', () => {
     expect(result.message).toContain('Could not reach OpenAI')
   })
 })
+
+describe('OPENAI_DESCRIPTOR.buildProvider on the AI SDK adapter', () => {
+  it('builds an AI SDK provider, not the retired fetch client', () => {
+    const provider = OPENAI_DESCRIPTOR.buildProvider({ apiKey: 'sk-test' })
+    expect(provider.name).toBe('openai')
+    expect(provider.constructor.name).toBe('AiSdkProvider')
+  })
+
+  it('exposes streamComplete, so apply-llm-patch opens an SSE route for OpenAI', () => {
+    // The fetch provider deliberately omitted this and apply-llm-patch branches
+    // on the method's presence. Phase 1 pinned `=== undefined`; this is the
+    // deliberate flip of that pin, and the reason the pin existed.
+    const provider = OPENAI_DESCRIPTOR.buildProvider({ apiKey: 'sk-test' })
+    expect(typeof provider.streamComplete).toBe('function')
+  })
+
+  it('maps every offered effort level onto a reasoningEffort the API accepts', () => {
+    const accepted = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+    for (const level of OPENAI_DESCRIPTOR.effort.levels ?? []) {
+      const request = OPENAI_DESCRIPTOR.effort.toRequest(level)
+      expect(accepted.has(String(request.reasoningEffort)), level).toBe(true)
+    }
+    // Omitted effort means "let the model decide", which is `medium` by default
+    // at OpenAI, so nothing is put on the wire.
+    expect(OPENAI_DESCRIPTOR.effort.toRequest(undefined)).toEqual({})
+  })
+
+  it('never offers `none`, which the gpt-5.6 family rejects with a 400', () => {
+    for (const level of OPENAI_DESCRIPTOR.effort.levels ?? []) {
+      expect(OPENAI_DESCRIPTOR.effort.toRequest(level).reasoningEffort).not.toBe('none')
+    }
+  })
+})

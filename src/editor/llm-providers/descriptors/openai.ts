@@ -5,14 +5,13 @@
  * binary. `hasSubscriptionRuntime` is therefore absent, which is what makes
  * the credential ladder's dev-mode rungs unreachable here by construction.
  *
- * `buildProvider` wraps the EXISTING fetch-based `OpenAIProvider`, which has
- * been implemented and tested since before this work and reaches any
- * OpenAI-compatible endpoint through `baseUrl`. Phase 4 decides whether it is
- * replaced by the AI SDK transport adapter.
+ * `buildProvider` builds an `AiSdkProvider` on the Responses API (see
+ * `ai-sdk-openai.ts` for why Responses rather than Chat Completions). The
+ * earlier fetch-based `OpenAIProvider` is retired.
  */
 import { EFFORT_LEVELS } from '../../core/model-catalog'
 import { OPENAI_MODEL_CATALOG } from '../openai-model-catalog'
-import { OpenAIProvider, OPENAI_DEFAULT_MODEL } from '../openai-provider'
+import { buildOpenAiProvider } from '../ai-sdk-openai'
 import type { ProviderDescriptor } from '../provider-descriptor'
 
 const DEFAULT_BASE_URL = 'https://api.openai.com'
@@ -46,12 +45,7 @@ export const OPENAI_DESCRIPTOR: ProviderDescriptor = {
     consoleUrl: 'https://platform.openai.com/api-keys',
   },
   buildProvider(input) {
-    return new OpenAIProvider({
-      ...(input.apiKey ? { apiKey: input.apiKey } : {}),
-      ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}),
-      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-      defaultModel: input.model ?? OPENAI_DEFAULT_MODEL,
-    })
+    return buildOpenAiProvider(input)
   },
   staticCatalog: OPENAI_MODEL_CATALOG,
   async validateKey(input) {
@@ -78,8 +72,11 @@ export const OPENAI_DESCRIPTOR: ProviderDescriptor = {
   },
   effort: {
     levels: [...EFFORT_LEVELS],
-    // OpenAI accepts none|minimal|low|medium|high|xhigh|max; the five we share
-    // with Anthropic are what the picker offers, so one ladder serves both.
-    toRequest: (effort) => (effort ? { reasoningEffort: effort } : {}),
+    toRequest(effort) {
+      // Omitted means "let the model decide", which is OpenAI's own default of
+      // `medium`. Sending nothing is honest; sending 'medium' would claim the
+      // user chose it.
+      return effort === undefined ? {} : { reasoningEffort: effort }
+    },
   },
 }

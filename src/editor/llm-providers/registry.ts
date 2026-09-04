@@ -31,7 +31,6 @@ import {
   CLAUDE_AGENT_SDK_DEFAULT_MODEL,
 } from './claude-agent-sdk-provider'
 import { CLAUDE_SUBSCRIPTION_ENV, isClaudeSubscriptionOptIn } from './claude-subscription'
-import { OpenAIProvider, OPENAI_DEFAULT_MODEL } from './openai-provider'
 import {
   PROVIDER_DESCRIPTORS,
   getDescriptor,
@@ -183,9 +182,9 @@ function buildProvider(config: LLMConfig, env: NodeJS.ProcessEnv): LLMProvider {
     case 'claude_code':
       return new ClaudeAgentSdkProvider({ defaultModel: config.model })
     case 'openai':
-      return new OpenAIProvider({
+      return getDescriptor('openai')!.buildProvider({
         apiKey: apiKey ?? env.OPENAI_API_KEY,
-        defaultModel: config.model ?? OPENAI_DEFAULT_MODEL,
+        model: config.model,
         baseUrl: config.baseUrl,
       })
     default:
