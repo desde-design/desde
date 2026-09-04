@@ -108,6 +108,17 @@ interface ApiResult {
   removed?: boolean
 }
 
+/**
+ * How long to wait for a top-level navigation to actually take this document
+ * away before concluding it never will. See `openPath`.
+ *
+ * Generous on purpose: the target is a localhost server that has already
+ * reported itself ready, so a real navigation commits in well under a second.
+ * The only cost of being wrong is showing an error for a moment before the
+ * page unloads anyway.
+ */
+const NAVIGATION_DEADLINE_MS = 15_000
+
 async function callApi(
   path: string,
   init?: RequestInit,
@@ -310,7 +321,34 @@ export function useLauncherApi(): UseLauncherApi {
     // is swallowed rather than surfaced as an error banner: worst case the
     // guard still blocks the navigation and opens it externally instead,
     // which is a degraded outcome, not a broken one.
-    await navigateTopLevel(res.url)
+    //
+    // "Degraded, not broken" was too generous, and this is where it was paid
+    // for. `navigateTopLevel` resolves as soon as it has ASSIGNED
+    // `location.href`; it carries no information about whether the navigation
+    // committed. When the desktop guard blocks it, the renderer is told
+    // nothing — no exception, no event — so falling off the end here left
+    // `busy` set forever. The overlay it drives is full-viewport with no
+    // cancel and no Esc, so the window was locked until the user found Cmd+R.
+    // Until 2026-09-04 that overlay also held 99.3% of a CPU while it sat
+    // there, which is how this was found.
+    try {
+      await navigateTopLevel(res.url)
+    } catch (err) {
+      // The `location.href` setter throws a SyntaxError for a value it cannot
+      // parse as a URL, and `res.url` is only ever validated as `\S+` when the
+      // CLI's ready line is scraped.
+      setError(err instanceof Error ? err.message : "Couldn't open the project.")
+      setBusy(null)
+      return
+    }
+    // Nothing above proves this document is leaving, so give it a deadline. On
+    // a real navigation the document unloads and this timer goes with it; if
+    // it ever fires, the navigation was blocked or dropped, and releasing the
+    // overlay is strictly better than locking the window.
+    window.setTimeout(() => {
+      setBusy(null)
+      setError("The project started, but this window could not open it. Try again.")
+    }, NAVIGATION_DEADLINE_MS)
   }, [])
 
   const inspectPath = useCallback(async (path: string): Promise<InspectPathResult> => {

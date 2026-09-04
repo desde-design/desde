@@ -464,10 +464,14 @@ export function LauncherPage({
       ) : null}
 
       {api.busy && !dialogOpen ? (
-        <ProjectLoader
-          label={api.busy}
-          className="fixed inset-0 z-50 bg-background/90 backdrop-blur-sm"
-        />
+        // No `backdrop-blur`: the scrim is already opaque enough to separate
+        // the wait from the list behind it, and the blur was not free. A
+        // full-viewport backdrop-filter re-rasterizes the whole window on
+        // every frame of whatever animates above it, which MEASURED as an
+        // extra 25 CPU points on top of the loader itself (74.6% -> 99.3%
+        // with the old Lottie cat; 5.2% -> 6.5% with the WebP that replaced
+        // it). Dropped 2026-09-04 (Mo: "No need for blur").
+        <ProjectLoader label={api.busy} className="fixed inset-0 z-50 bg-background/90" />
       ) : null}
 
       <NewProjectPage

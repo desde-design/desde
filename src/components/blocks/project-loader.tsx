@@ -1,6 +1,5 @@
-"use client"
-
-import { LottieAnimation } from "./lottie-animation"
+import { ArtImage } from "./art-image"
+import { LOADING_CAT_SRC } from "@/assets/cat-art"
 import { cn } from "@/lib/utils"
 
 /**
@@ -24,33 +23,27 @@ import { cn } from "@/lib/utils"
  * list of projects. The exception existed only here, in prose, while the two
  * surfaces showed different waits for the same act.
  *
- * ## Why Lottie and not the WebM
+ * ## Why an animated WebP and not Lottie
  *
- * Both were supplied. MEASURED on the two files:
+ * This shipped as a Lottie animation until 2026-09-04, when it was measured
+ * as the single most expensive thing in the product: **99.3% CPU**, sustained,
+ * for as long as the loader was on screen. See `art-image.tsx` for the full
+ * matrix and the mechanism. The replacement costs 5.2%.
  *
- * | | WebM | Lottie |
- * | --- | --- | --- |
- * | over the wire | 320KB | **44KB** gzipped |
- * | copies in the repo | two | **one** |
- * | Safari transparency | **broken** | fine |
+ * The artwork and its timing are unchanged — same 45 frames at 33fps, from the
+ * vendor's own 800×800 export, downscaled to 240px (2x the 120px default) with
+ * its transparent margin trimmed so the cat fills the box at the size it used
+ * to. Downscaling from 800px is also what recovers a real alpha channel from
+ * the export's 1-bit transparency: 211 distinct alpha levels at 240px,
+ * measured.
  *
- * The transparency is what decided it rather than the size. The WebM carries
- * a real alpha channel (its corner pixels sample `[0,0,0,0]`), and Safari
- * does not support alpha in WebM — the cat would render inside a black square
- * for anyone opening a review link in Safari, which is not a browser this
- * product gets to opt out of.
- *
- * The packaging followed: a Lottie is JSON, and both bundlers import JSON
- * natively, so it is ONE tracked file that Vite (Editor) and Next (Viewer)
- * share. The WebM would have needed a copy in each bundler's static
- * directory — two binaries that can drift apart with nothing to catch it.
- *
- * The cost is a runtime dependency, which this repo does not take lightly.
- * It is the `lottie_light` build (SVG renderer only, no canvas/HTML
- * renderers) for that reason.
- *
- * The loading mechanics — why the player and the JSON are both pulled in
- * lazily, and why that alone was not enough — live in `LottieAnimation`.
+ * The old header argued Lottie over a WebM on three counts — 44KB gzipped vs
+ * 320KB, one file rather than two, and Safari's missing WebM alpha channel.
+ * Only the size count still stands, and it now costs 305KB rather than 43KB.
+ * That was accepted deliberately (Mo, 2026-09-04) in exchange for the CPU:
+ * full frame rate, no visual compromise. The Safari count is answered rather
+ * than ignored — animated WebP has full alpha and Safari has supported it
+ * since 14, which is exactly what WebM could not offer.
  */
 export interface ProjectLoaderProps {
   /**
@@ -71,6 +64,9 @@ export interface ProjectLoaderProps {
    * 120, not 160 (Mo, 2026-09-01: "a little large ... let's make it a little
    * smaller"). Not 80: a full-screen overlay and a row inside a settings card
    * should not wear the same size.
+   *
+   * The asset is 240px, so 120 is exactly 1:1 on a 2x display and every
+   * smaller call site is oversampled. Going ABOVE 120 starts to soften it.
    */
   size?: number
   className?: string
@@ -85,18 +81,13 @@ export function ProjectLoader({ label, size = 120, className }: ProjectLoaderPro
       data-testid="project-loader"
       className={cn("flex flex-col items-center justify-center gap-3", className)}
     >
-      <LottieAnimation load={loadCat} size={size} />
+      <ArtImage src={LOADING_CAT_SRC} size={size} />
       {label ? <p className="text-base text-muted-foreground">{label}</p> : null}
+      {/* With no visible label there is still something to announce, or a
+          screen-reader user gets silence while the surface goes inert. The
+          gallery's `project-loader/bare` state also asserts this block renders
+          SOME content with no label — an image-only loader fails it. */}
       {label ? null : <span className="sr-only">Loading</span>}
     </div>
   )
 }
-
-/**
- * Hoisted out of the render so its identity is stable.
- *
- * `LottieAnimation` lists `load` in its effect deps, so an inline arrow would
- * be a new function every render, tearing down and rebuilding the animation
- * on each one.
- */
-const loadCat = () => import("@/assets/loading-cat.json")

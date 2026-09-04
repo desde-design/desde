@@ -141,6 +141,13 @@ const eslintConfig = defineConfig([
     // editor-cli/ui-src/dist, ai-gateway-prototype/dist, and the
     // tracked-but-generated dist/bridge-bundle.js).
     "**/dist/**",
+    // The desktop app's payload cache: a full copy of the built Editor UI that
+    // `npm run desktop` writes on first boot. Gitignored (desktop/.gitignore:16)
+    // but not ignored here, so the lint gate CRASHED — not failed, crashed —
+    // on any machine that had ever run the desktop app in dev:
+    // "RangeError: Invalid string length" out of eslint's own stylish
+    // formatter, trying to table a bundle it should never have parsed.
+    "desktop/.payload-cache/**",
     // The website's static export. `out/**` above is anchored at the repo
     // root, so it does not cover website/out — which holds Next's minified
     // chunks and produced ~1,800 warnings the moment the site was added.
