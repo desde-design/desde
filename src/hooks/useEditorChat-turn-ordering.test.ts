@@ -126,6 +126,8 @@ import type { ChatTurn } from "@/editor/agent-chat/types"
 import { makeEmptySession } from "@/editor/agent-chat/types"
 import { runChatTurnSdk } from "@/editor/agent-chat-sdk/run-chat-turn-sdk"
 import { createTurnInputChannel } from "@/editor/agent-chat-sdk/turn-input-channel"
+import { runChatTurnNeutral } from "@/editor/agent-chat-neutral/run-chat-turn-neutral"
+import type { LLMProvider, ProviderEvent } from "@/editor/llm-providers/types"
 
 import {
   useEditorChat,
@@ -336,6 +338,93 @@ async function runServer(script: ScriptStep[], repoRoot: string): Promise<Server
   return { events, turn: result.turn }
 }
 
+/**
+ * The neutral lane over the same script DSL.
+ *
+ * Two shapes cannot occur on this lane, and the table says so by not carrying
+ * rows for them rather than by carrying rows that assert something false:
+ *
+ *  - `{ part: "steer" }` inside a message. On this lane a steer cannot land
+ *    mid-generation; it lands at the next step boundary. A mid-message row
+ *    would be testing a delivery mode that does not exist here.
+ *  - `{ part: "reasoning" }` interleaved with a steer. Same reason.
+ *
+ * `{ step: "steer" }` BETWEEN messages is the boundary case and is covered.
+ */
+function neutralProvider(script: ScriptStep[], channel: ReturnType<typeof createTurnInputChannel>): LLMProvider {
+  const steps: ScriptStep[][] = []
+  let current: ScriptStep[] = []
+  for (const step of script) {
+    if (step.step === "steer") {
+      // Unlike the SDK lane's `steerNow`, this does NOT also synthesize a
+      // `steered` event. On this lane `steered` is emitted by the RUNTIME
+      // ITSELF, only at the step boundary where it actually drains the
+      // channel (`run-chat-turn-neutral.ts`: "nothing is drained until step
+      // 1"). Faking the event here would desync `live` from `hydrated` for
+      // any steer this lane cannot yet deliver within the turn — exactly the
+      // divergence this test exists to catch, not paper over.
+      channel.push(step.text)
+      continue
+    }
+    current.push(step)
+    if (step.step === "message" && step.parts.some((p) => p.part === "tool")) {
+      steps.push(current)
+      current = []
+    }
+  }
+  if (current.length > 0) steps.push(current)
+  let i = 0
+  return {
+    name: "scripted",
+    defaultModel: "x",
+    complete: async () => ({ text: "", stopReason: "end_turn" }),
+    streamConversation: () =>
+      (async function* (): AsyncGenerator<ProviderEvent> {
+        const group = steps[i++] ?? []
+        const content: Array<Record<string, unknown>> = []
+        let sawTool = false
+        for (const step of group) {
+          if (step.step !== "message") continue
+          for (const part of step.parts) {
+            if (part.part === "delta") {
+              yield { kind: "text_delta", delta: part.text }
+              content.push({ type: "text", text: part.text })
+            } else if (part.part === "reasoning") {
+              yield { kind: "reasoning_delta", delta: part.text }
+            } else if (part.part === "tool") {
+              sawTool = true
+              yield { kind: "tool_use", id: part.id, name: part.name, input: {} }
+              content.push({ type: "tool_use", id: part.id, name: part.name, input: {} })
+            }
+          }
+        }
+        yield {
+          kind: "message_complete",
+          stopReason: sawTool ? "tool_use" : "end_turn",
+          message: { role: "assistant", content: content as never },
+        }
+      })(),
+  }
+}
+
+async function runNeutralServer(script: ScriptStep[], repoRoot: string): Promise<ServerRun> {
+  const channel = createTurnInputChannel()
+  const events: ChatStreamEvent[] = []
+  const result = await runChatTurnNeutral(
+    {
+      bridge: { send: vi.fn(async () => null) } satisfies BridgeClient,
+      worktreeRoot: repoRoot,
+      session: makeEmptySession("proj-1"),
+      userMessage: "first",
+      providerId: "anthropic",
+      inputChannel: channel,
+      emit: (e: ChatStreamEvent) => events.push(e),
+    } as never,
+    { buildProvider: () => neutralProvider(script, channel) },
+  )
+  return { events, turn: result.turn }
+}
+
 // ---------------------------------------------------------------------------
 // Client half — replay those events through the real hook
 // ---------------------------------------------------------------------------
@@ -485,8 +574,12 @@ interface RunResult {
   hydratedEmpties: ChatMessage[]
 }
 
-async function runScript(script: ScriptStep[], repoRoot: string): Promise<RunResult> {
-  const { events, turn } = await runServer(script, repoRoot)
+async function runScript(
+  script: ScriptStep[],
+  repoRoot: string,
+  server: (script: ScriptStep[], repoRoot: string) => Promise<ServerRun> = runServer,
+): Promise<RunResult> {
+  const { events, turn } = await server(script, repoRoot)
 
   // The resubmit ledger is a different concern (see the file header): a
   // `resubmit_required` would start a SECOND turn and append its messages
@@ -881,5 +974,63 @@ describe("known divergences: live and hydrated already disagree", () => {
     // Divergence is not licence. Neither path may render a blank bubble.
     expect(run.liveEmpties).toEqual([])
     expect(run.hydratedEmpties).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Table 3 — the neutral lane, over the same invariant
+// ---------------------------------------------------------------------------
+
+const NEUTRAL_EQUAL_CASES: Array<{ name: string; script: ScriptStep[] }> = [
+  {
+    name: "control: one message, text only",
+    script: [{ step: "message", id: "m1", parts: [{ part: "delta", text: "done" }] }],
+  },
+  {
+    name: "control: text, a tool call, its result, then a second message",
+    script: [
+      {
+        step: "message",
+        id: "m1",
+        parts: [
+          { part: "delta", text: "reading the file" },
+          { part: "tool", id: "tu_1", name: "Read" },
+        ],
+      },
+      { step: "toolResult", id: "tu_1" },
+      { step: "message", id: "m2", parts: [{ part: "delta", text: "found it" }] },
+    ],
+  },
+  {
+    name: "steer before any output",
+    script: [
+      { step: "steer", text: "actually use the sidebar" },
+      { step: "message", id: "m1", parts: [{ part: "delta", text: "on it" }] },
+    ],
+  },
+  {
+    name: "steer at a tool boundary",
+    script: [
+      {
+        step: "message",
+        id: "m1",
+        parts: [
+          { part: "delta", text: "reading the file" },
+          { part: "tool", id: "tu_1", name: "Read" },
+        ],
+      },
+      { step: "steer", text: "stop, wrong file" },
+      { step: "toolResult", id: "tu_1" },
+      { step: "message", id: "m2", parts: [{ part: "delta", text: "understood" }] },
+    ],
+  },
+]
+
+describe("neutral lane: live stream === re-hydrated transcript", () => {
+  it.each(NEUTRAL_EQUAL_CASES)("$name", async ({ script }) => {
+    const run = await runScript(script, root, runNeutralServer)
+    expect(run.liveEmpties).toEqual([])
+    expect(run.hydratedEmpties).toEqual([])
+    expect(run.hydrated).toEqual(run.live)
   })
 })

@@ -396,3 +396,88 @@ export type ChatStreamEvent =
       errorStatus: number | null
     }
   | { kind: 'error'; turnId?: string; reason: string }
+
+/**
+ * Every declared kind, as data.
+ *
+ * Hand-maintained, and `event-kind-coverage.test.ts` is what stops it going
+ * stale: a kind added to the union above but not to this list is a kind the
+ * coverage test cannot account for, and it fails.
+ */
+export const CHAT_STREAM_EVENT_KINDS: readonly ChatStreamEvent['kind'][] = [
+  'session',
+  'capability_gap',
+  'queued',
+  'steered',
+  'resubmit_required',
+  'turn_start',
+  'text_delta',
+  'reasoning_delta',
+  'tool_use_start',
+  'tool_result',
+  'bridge_request',
+  'edit_proposed',
+  'edit_overwrite_warning',
+  'usage',
+  'turn_complete',
+  'rate_limit_warning',
+  'api_retry',
+  'error',
+]
+
+/**
+ * Kinds excluded from `event-kind-coverage.test.ts`'s script-driven parity
+ * check, for a reason other than being Anthropic-only.
+ *
+ * Two different reasons live in this one list, and both mean the same thing
+ * for the test: neither runtime can be missing the kind, so a happy-path
+ * script that never produces it proves nothing either way.
+ *
+ *  - `session`, `capability_gap`, `queued`, `bridge_request` are emitted by
+ *    the chat handler itself (`editor-cli/src/server/chat-handler.ts`), not
+ *    by either runtime. Both lanes go through the same handler, so there is
+ *    no per-lane code to drift.
+ *  - `steered`, `resubmit_required`, `edit_proposed`, `edit_overwrite_warning`,
+ *    `api_retry`, `error` DO come from the runtimes, but only under a
+ *    scenario this file's script deliberately does not build: a steer
+ *    mid-turn, an aborted turn, a file-writing tool call, or a failure.
+ *    Confirmed by reading both `run-chat-turn-sdk.ts` and
+ *    `run-chat-turn-neutral.ts`: each carries the emit call for every one of
+ *    these six kinds, so their absence from the coverage script is a gap in
+ *    the script, not a gap in either runtime. Each already has its own
+ *    dedicated test: steering in `useEditorChat-turn-ordering.test.ts` and
+ *    the live harnesses under `tasks/scripts/`, edits in the `edit-service`
+ *    applicator suites, retries and errors in `classify-turn-error.test.ts`
+ *    and the neutral loop's own tests.
+ */
+export const HANDLER_OWNED_EVENT_KINDS: readonly ChatStreamEvent['kind'][] = [
+  'session',
+  'capability_gap',
+  'queued',
+  'bridge_request',
+  'steered',
+  'resubmit_required',
+  'edit_proposed',
+  'edit_overwrite_warning',
+  'api_retry',
+  'error',
+]
+
+/**
+ * Kinds only the Claude Agent SDK lane can emit. Exactly one, and that is the
+ * decision this constant exists to hold still.
+ *
+ * `rate_limit_warning`'s fields model Anthropic's rate-limit API and its
+ * subscription overage credit pool (`status`, `overageStatus`, `utilization`),
+ * and `RateLimitWarningBanner` renders copy about "this Claude account" off
+ * them. There is nothing to translate a different vendor's 429 into: on the
+ * neutral lane a 429 goes through `classify-turn-error.ts` to the generic
+ * error banner, and the loop's own backoff surfaces as `api_retry`.
+ *
+ * Adding an entry here is not a shortcut past a parity gap. It is a claim that
+ * the kind is MEANINGLESS off the Anthropic lane, and it needs the same
+ * argument this one carries.
+ */
+export const ANTHROPIC_ONLY_EVENT_KINDS: readonly ChatStreamEvent['kind'][] = [
+  'rate_limit_warning',
+]
