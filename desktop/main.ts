@@ -30,6 +30,8 @@ import { createAutoDownloadMutationQueue } from "./auto-download-mutation-queue.
 import { createChildShutdownCoordinator } from "./child-shutdown-coordinator.js"
 import { createClaudeRuntimeController, type ClaudeRuntimeController } from "./claude-runtime-controller.js"
 import { ClaudeRuntimeInstallError } from "./claude-runtime-installer.js"
+import { shouldDownloadClaudeRuntime } from "./claude-runtime-gate.js"
+import { readStoredDevMode, readStoredProviderKeys } from "./llm-credentials-read.js"
 import { COPYRIGHT_LINE } from "./copyright.js"
 import { openExternalIfSafe } from "./external-url-guard.js"
 import { shouldPromptMoveToApplications } from "./first-launch.js"
@@ -165,6 +167,20 @@ function buildPayload(payloadRoot: string): Promise<void> {
  * to recover short of deleting `.payload-cache` by hand.
  */
 const PAYLOAD_MANIFEST_FILENAME = "payload-manifest.json"
+
+/**
+ * Read the credential state fresh at EVERY call, never once at boot. The
+ * settings-menu retry exists precisely for the user who just changed something,
+ * and a cached answer would tell them the app still refuses to fetch what they
+ * now need.
+ */
+function claudeRuntimeWanted(): boolean {
+  return shouldDownloadClaudeRuntime({
+    stored: readStoredProviderKeys(),
+    devMode: readStoredDevMode(),
+    env: process.env,
+  })
+}
 
 /** `ms` rendered as the coarsest whole unit that reads naturally — "3 minutes", "2 hours", "5 days" — not a precise duration. Good enough for a diagnostic log line, not meant for anything that parses it back. */
 function formatAge(ms: number): string {
@@ -551,6 +567,7 @@ function registerIpcHandlers(updater: Updater, claudeRuntime: ClaudeRuntimeContr
   // there's nothing meaningful to return synchronously from a "kick off a
   // background install" call.
   ipcMain.on("desktop:claude-runtime:retry", () => {
+    if (!claudeRuntimeWanted()) return
     claudeRuntime.ensure()
   })
 }
@@ -755,7 +772,7 @@ async function boot(): Promise<void> {
   claudeRuntime.onState((state) => {
     broadcastUpdateState(CLAUDE_RUNTIME_STATE_CHANNEL, state, BrowserWindow.getAllWindows())
   })
-  claudeRuntime.ensure()
+  if (claudeRuntimeWanted()) claudeRuntime.ensure()
 
   childHandle = await spawnPayloadChild({
     execPath: process.execPath,
