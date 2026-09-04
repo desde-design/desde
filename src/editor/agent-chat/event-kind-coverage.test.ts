@@ -48,30 +48,43 @@ describe('ChatStreamEvent kind coverage', () => {
     expect([...ANTHROPIC_ONLY_EVENT_KINDS]).toEqual(['rate_limit_warning'])
   })
 
-  it('emits `steered` from the steer route only, never from a runtime', () => {
-    // The steer route (`chat-handler.ts`, at accept time) emits `steered`
-    // for both lanes already. The neutral runtime used to emit a second one
-    // at boundary delivery, which drew a duplicate user bubble on the
-    // OpenAI lane (final review I1) — the SDK runtime never emitted one at
-    // all. `run-chat-turn-neutral.test.ts` drives the runtime alone and
-    // never sees the route's frame, so it cannot catch a regression here;
-    // this greps the actual sources the way the finding's evidence was
-    // gathered, so a re-added emitter in either runtime fails this test
-    // regardless of what any single runtime's own script asserts.
+  it('emits `steered` exactly once per steer, from the side that knows the position', () => {
+    // One frame per steer must reach the client: it draws the user bubble on
+    // that frame AND cuts the transcript there, so two frames mean a duplicate
+    // bubble and a double cut (final review I1), while zero means the live
+    // transcript never cuts at all and stops matching the re-hydrated one
+    // (`useEditorChat-turn-ordering.test.ts`, the "steer at a tool boundary"
+    // row, which is how deleting the neutral emitter was caught).
+    //
+    // Which side emits is decided by which side knows WHERE the steer landed.
+    // The SDK runtime cannot observe delivery, so the route emits at accept
+    // time for that lane. The neutral runtime appends the message itself at a
+    // step boundary and stamps `afterAssistantBlocks` there, so it emits, and
+    // the route stands down for that lane via `LiveTurn.runtimeEmitsSteered`.
+    //
+    // Each runtime's own script drives one lane in isolation and never sees
+    // the other side's frame, so neither can catch a regression here; this
+    // greps the three sources the way the finding's evidence was gathered.
     const neutralSrc = readFileSync(
       join(__dirname, '../agent-chat-neutral/run-chat-turn-neutral.ts'),
       'utf8',
     )
     const sdkSrc = readFileSync(join(__dirname, '../agent-chat-sdk/run-chat-turn-sdk.ts'), 'utf8')
-    expect(neutralSrc).not.toMatch(/kind:\s*['"]steered['"]/)
-    expect(sdkSrc).not.toMatch(/kind:\s*['"]steered['"]/)
-
     const routeSrc = readFileSync(
       join(__dirname, '../../../editor-cli/src/server/chat-handler.ts'),
       'utf8',
     )
-    const routeEmitters = routeSrc.match(/kind:\s*['"]steered['"]/g) ?? []
-    expect(routeEmitters).toHaveLength(1)
+    const emitters = (src: string): number => (src.match(/kind:\s*['"]steered['"]/g) ?? []).length
+
+    // The neutral lane's emitter, and the route's, and no third one.
+    expect(emitters(neutralSrc)).toBe(1)
+    expect(emitters(sdkSrc)).toBe(0)
+    expect(emitters(routeSrc)).toBe(1)
+
+    // The route's single emitter is guarded, so a neutral turn gets the
+    // runtime's frame and only that one. A guard that stopped matching this
+    // would put two frames back on the OpenAI lane.
+    expect(routeSrc).toMatch(/if\s*\(!live\.runtimeEmitsSteered\)\s*\{/)
   })
 
   it('accounts for every declared kind', async () => {

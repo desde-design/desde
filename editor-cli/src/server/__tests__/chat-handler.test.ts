@@ -1935,9 +1935,11 @@ describe("handleSteerRequest — mid-turn steering", () => {
     beforeStart?: Promise<void>
   }): ChatHandlerLoaders {
     const base = makeLoaders({ scriptedEvents: [] })
-    return {
-      ...base,
-      loadRunChatTurnSdk: async () => {
+    // The same steerable stub serves BOTH lanes, so a test can flip the lane
+    // with `EDITOR_CHAT_RUNTIME_OVERRIDE` and still get a turn that accepts a
+    // steer. It emits no `steered` frame of its own on either lane, which is
+    // what lets a test see whether the ROUTE emitted one.
+    const makeRuntime = async () => {
         // Awaited HERE, where the real handler awaits session load, project
         // knowledge, web policy and the concurrency-cap queue: after the lock
         // is taken and before the turn runtime runs.
@@ -1990,7 +1992,19 @@ describe("handleSteerRequest — mid-turn steering", () => {
               },
             }
           },
-        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>>
+        }
+    }
+    return {
+      ...base,
+      loadRunChatTurnSdk: async () =>
+        (await makeRuntime()) as unknown as Awaited<
+          ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>
+        >,
+      loadRunChatTurnNeutral: async () => {
+        const { runChatTurnSdk } = await makeRuntime()
+        return { runChatTurnNeutral: runChatTurnSdk } as unknown as Awaited<
+          ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>
+        >
       },
     }
   }
@@ -2145,6 +2159,40 @@ describe("handleSteerRequest — mid-turn steering", () => {
       userMessage: "actually, use the other component",
       imageCount: 0,
     })
+  })
+
+  it("stands down and lets the neutral runtime announce the steer itself", async () => {
+    // Exactly one `steered` frame must reach the client per steer: the client
+    // draws the bubble on that frame AND cuts the transcript there. On the
+    // neutral lane the RUNTIME emits, at the boundary where it delivers the
+    // steer and stamps its position, so the route must not emit a second one
+    // (final review I1: the duplicate drew two bubbles and cut twice). The
+    // stub runtime here emits nothing, so any `steered` on this stream could
+    // only have come from the route.
+    vi.stubEnv("EDITOR_CHAT_RUNTIME_OVERRIDE", "neutral")
+    try {
+      const received: DeliveredMessage[] = []
+      const { turn, done, release } = await startLiveTurn("s-neutral", received)
+
+      const { status, result } = await steer({
+        sessionId: "s-neutral",
+        userMessage: "actually, use the other component",
+      })
+      expect(status).toBe(200)
+      expect(result).toEqual({ accepted: true })
+
+      release()
+      await done
+
+      // Delivery still happens; only the announcement moved lanes.
+      expect(received.map((m) => m.text)).toEqual([
+        "start the work",
+        "actually, use the other component",
+      ])
+      expect(turn.events().filter((e) => e.kind === "steered")).toEqual([])
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   it("delivers TWO steers into one live turn", async () => {

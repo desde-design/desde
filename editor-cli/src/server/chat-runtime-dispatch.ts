@@ -46,23 +46,40 @@ import type { ChatHandlerLoaders } from "./chat-handler.js"
 
 export type { RunChatTurn }
 
-export async function resolveChatRuntime(
+/**
+ * Which lane will serve this turn, decided the same way {@link resolveChatRuntime}
+ * decides it and exported so a caller can know the lane WITHOUT loading either
+ * runtime.
+ *
+ * The steer route needs this: `steered` must be emitted exactly once per steer,
+ * by whichever side knows where the steer actually landed in the transcript.
+ * On the SDK lane that is the route, at accept time (the SDK runtime emits
+ * none). On the neutral lane it is the runtime, at the step boundary where it
+ * drains the channel and stamps `afterAssistantBlocks` — the route would cut
+ * the live transcript at accept time, which is a different moment from the
+ * position hydration replays, and the two then disagree.
+ */
+export function resolveChatRuntimeKind(
   providerId: string,
-  loaders: ChatHandlerLoaders,
-): Promise<RunChatTurn> {
+  env: NodeJS.ProcessEnv,
+): "neutral" | "claude-agent-sdk" {
   const descriptor = getDescriptor(providerId)
   if (!descriptor) {
-    throw new Error(
-      `resolveChatRuntime: no provider named '${providerId}'`,
-    )
+    throw new Error(`resolveChatRuntimeKind: no provider named '${providerId}'`)
   }
   // The dev override forces the neutral loop onto a provider whose descriptor
   // says otherwise. It is how phase 3 proves the loop against Anthropic before
   // any OpenAI code exists, and how the parity matrix runs both lanes over the
   // same prompts. It is subject to the same gate as any other neutral
   // dispatch: an override is not an exemption.
-  const kind =
-    chatRuntimeOverride(process.env) === "neutral" ? "neutral" : descriptor.chatRuntime
+  return chatRuntimeOverride(env) === "neutral" ? "neutral" : descriptor.chatRuntime
+}
+
+export async function resolveChatRuntime(
+  providerId: string,
+  loaders: ChatHandlerLoaders,
+): Promise<RunChatTurn> {
+  const kind = resolveChatRuntimeKind(providerId, process.env)
   if (kind === "neutral") {
     // The dispatch half of the gate. Refused BEFORE any loader runs, so a
     // refusal never pays for a module import.

@@ -30,7 +30,7 @@ import {
   resolveDefaultProviderId,
 } from "../../../src/editor/llm-providers/provider-registry.js"
 import { resolveLlmConfig } from "./llm-config.js"
-import { resolveChatRuntime } from "./chat-runtime-dispatch.js"
+import { resolveChatRuntime, resolveChatRuntimeKind } from "./chat-runtime-dispatch.js"
 import type { IncomingMessage, ServerResponse } from "node:http"
 
 import { projectIdForRepoRoot, withSessionStatus } from "../../../src/editor/agent-chat/session-store.js"
@@ -230,6 +230,27 @@ interface LiveTurn {
    * position there is.
    */
   steers: ChatSteeredMessage[]
+  /**
+   * True when this turn's runtime emits `steered` itself, so the `/steer`
+   * route must NOT emit one.
+   *
+   * Exactly one `steered` frame must reach the client per steer: the client
+   * draws the bubble on it AND cuts the transcript there, so a second frame
+   * duplicates the bubble and cuts twice. Which side emits is not a style
+   * choice — it has to be the side that knows where the steer landed. The SDK
+   * runtime emits none, and accept time is the only position it has, so the
+   * route emits for that lane. The neutral runtime appends the message itself
+   * at a step boundary and stamps `afterAssistantBlocks` there, so it emits
+   * for its own lane and the route stands down; emitting from the route would
+   * cut the live transcript at accept time while hydration replays the
+   * delivery position, and the two would disagree.
+   *
+   * Set once the lane is known (`resolveChatRuntimeKind`, below), which is
+   * after this entry is registered. A steer accepted in that window is the
+   * pre-dispatch case: `false` is right for it, because no runtime has started
+   * to emit anything yet.
+   */
+  runtimeEmitsSteered: boolean
 }
 const liveTurns = new Map<string, LiveTurn>()
 
@@ -629,6 +650,7 @@ export async function handleChatRequest(
         stream!.send(ev)
       },
       steers: acceptedSteers,
+      runtimeEmitsSteered: false,
     })
 
     const abort = new AbortController()
@@ -767,6 +789,14 @@ export async function handleChatRequest(
     // rather than a hardcoded import. Only the RESOLUTION happens here — the
     // actual call is below, once `reviewSurface` exists.
     const runChatTurn = await resolveChatRuntime(turnProviderId, loaders)
+    // The lane decides who emits `steered` — see `LiveTurn.runtimeEmitsSteered`.
+    // Read through the same function the dispatch above used, so the route and
+    // the runtime can never disagree about which lane is serving this turn.
+    const liveEntry = liveTurns.get(lockKey)
+    if (liveEntry) {
+      liveEntry.runtimeEmitsSteered =
+        resolveChatRuntimeKind(turnProviderId, process.env) === "neutral"
+    }
 
     // Phase 5 — mark the session in-flight BEFORE the orchestrator
     // runs. Persisted now so a CLI crash mid-turn leaves an
@@ -1725,12 +1755,19 @@ export async function handleSteerRequest(
   // that did not happen. Like the HTTP answer, this event says the turn took
   // the message on — the same turn will emit `resubmit_required` if it later
   // cannot show the model saw it.
-  live.emit({
-    kind: "steered",
-    sessionId: body.sessionId,
-    userMessage: body.userMessage,
-    imageCount: validatedImages.length,
-  })
+  //
+  // Skipped when this turn's runtime emits its own frame at delivery: exactly
+  // one `steered` must reach the client per steer, and on that lane the
+  // runtime is the side that knows the position the client should cut at. See
+  // `LiveTurn.runtimeEmitsSteered`.
+  if (!live.runtimeEmitsSteered) {
+    live.emit({
+      kind: "steered",
+      sessionId: body.sessionId,
+      userMessage: body.userMessage,
+      imageCount: validatedImages.length,
+    })
+  }
   sendSteerResult(res, 200, { accepted: true })
 }
 

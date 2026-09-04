@@ -492,14 +492,27 @@ async function runInner(
           // it can report is exact, not an approximation from whenever the
           // steer was accepted.
           //
-          // No emit of the steered event kind here: the steer route
-          // (`chat-handler.ts`, at accept time) already emits one such frame
-          // per steer, for both lanes. Emitting a second one here drew a
-          // duplicate user bubble on the OpenAI lane (final review I1).
+          // This lane emits `steered` ITSELF, and the steer route suppresses
+          // its own frame for a neutral turn (`chat-handler.ts`, keyed on
+          // `LiveTurn.runtimeEmitsSteered`) so exactly one frame reaches the
+          // client per steer. The emitter has to be the side that knows WHERE
+          // the steer landed: the client cuts its transcript on this frame,
+          // and the position recorded a line above is stamped at this same
+          // moment. Emitting from the route instead moves the live cut to
+          // accept time, which is a different moment from the position
+          // hydration replays — the live transcript then disagrees with the
+          // re-hydrated one, which `useEditorChat-turn-ordering.test.ts`
+          // catches as the "steer at a tool boundary" row.
           steerRecords.push({
             text: steer.text,
             ...(steer.images?.length ? { hadImages: true } : {}),
             afterAssistantBlocks: assistantContent.length,
+          })
+          opts.emit({
+            kind: 'steered',
+            sessionId: opts.session.id.sessionId,
+            userMessage: steer.text,
+            imageCount: steer.images?.length ?? 0,
           })
         }
       }
