@@ -29,12 +29,21 @@ import type { ChatStreamEvent } from "@/editor/agent-chat/chat-stream-events"
 
 const PROJECT_ID = "self-host-harness"
 
+/**
+ * The model the example transcript claims to have run on. Named rather than
+ * inline because the picker groups by provider now, and a fixture that can only
+ * ever say "Anthropic" cannot show that.
+ */
+export const MOCK_CHAT_MODEL = "claude-opus-4-8"
+export const MOCK_CHAT_PROVIDER = "anthropic"
+
 /** A completed turn with assistant text + a Grep tool-use container. */
 function exampleTurn(
   id: string,
   userMessage: string,
   assistantText: string,
   grepPattern: string,
+  model: string = MOCK_CHAT_MODEL,
 ): ChatTurn {
   const toolUseId = `toolu_${id}`
   return {
@@ -65,15 +74,23 @@ function exampleTurn(
     },
     editProposals: [],
     usage: { inputTokens: 4120, outputTokens: 388 },
-    model: "claude-opus-4-8",
+    model,
   }
 }
+
+/**
+ * Sessions whose turns should carry an OpenAI fixture model instead of the
+ * default Anthropic one, so switching between sessions in the self-host page
+ * shows the picker's provider grouping rather than a single vendor.
+ */
+const OPENAI_SESSION_IDS = new Set(["sess-bbbb2222"])
 
 /**
  * Build the example persisted session for a given sessionId. Every tab
  * resolves to a transcript so switching sessions always shows content.
  */
 export function mockChatSession(sessionId: string): ChatSession {
+  const model = OPENAI_SESSION_IDS.has(sessionId) ? "gpt-5.6" : MOCK_CHAT_MODEL
   return {
     schemaVersion: 1,
     id: { projectId: PROJECT_ID, sessionId },
@@ -86,12 +103,14 @@ export function mockChatSession(sessionId: string): ChatSession {
         "Where does the commit button live?",
         "Let me search the editor chrome for the commit controls.",
         "Commit|commitPush",
+        model,
       ),
       exampleTurn(
         `${sessionId}-t2`,
         "Tighten the spacing on the commit dialog",
         "I'll find the commit dialog markup before adjusting its padding.",
         "commit-dialog|CommitDialog",
+        model,
       ),
     ],
   }

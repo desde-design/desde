@@ -54,10 +54,11 @@ npm --prefix viewer install
 
 ### Environment
 
-The root `.env.example` documents one variable, `ANTHROPIC_API_KEY`. The Editor's AI
-features (chat, the edit-repair lane) need it; everything else, including the inspector,
-direct edits, comments, Commit and Publish, works without one. You can also add the key
-from the settings gear inside the app. Viewer configuration is in `viewer/.env.example`.
+The root `.env.example` documents the model-provider keys: `ANTHROPIC_API_KEY` and
+`OPENAI_API_KEY`. The Editor's AI features (chat, the edit-repair lane) need one of them;
+everything else, including the inspector, direct edits, comments, Commit and Publish, works
+without any. You can also add a key from the settings gear inside the app. Viewer
+configuration is in `viewer/.env.example`.
 
 For the **viewer**, copy `viewer/.env.example` to `viewer/.env.local` and fill in the
 GitHub App credentials. Then:
