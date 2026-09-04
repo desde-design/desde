@@ -9,10 +9,39 @@
  * That is what lets a request-shaping assertion survive the move off `fetch`:
  * the old tests read a JSON body, these read the call options one layer up.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { MockLanguageModelV4 } from 'ai/test'
 import { AiSdkProvider } from './ai-sdk-provider'
 import type { ProviderEvent } from './types'
+
+/**
+ * `streamText` itself, mocked so ONE test (the mid-stream abort case below)
+ * can hand `ai-sdk-provider.ts` a `result.stream` built by hand, carrying an
+ * explicit `{ type: 'abort' }` part. Every other test never touches this —
+ * `streamTextMock`'s default implementation just delegates to the real
+ * `streamText`, so `MockLanguageModelV4` keeps driving them exactly as
+ * before.
+ *
+ * Why this is necessary at all: `{ type: 'abort' }` is not something a
+ * provider's raw stream (what `MockLanguageModelV4`'s `doStream` returns)
+ * can ever contain — it is SYNTHESIZED by `streamText`'s own internal
+ * step/timeout orchestration when its `abortSignal` fires mid-generation.
+ * Reproducing that faithfully through `MockLanguageModelV4` alone means
+ * fighting undocumented internal timing (measured: a plain `pull()`-timed
+ * `controller.abort()`, and even a thrown `AbortError` from the raw stream,
+ * both got swallowed by that orchestration before `ai-sdk-provider.ts` ever
+ * saw the partial text — the whole step gets discarded, not just the
+ * chunk after the abort). `ai-sdk-provider.ts`'s OWN `case 'abort':` branch
+ * is what this test exists to cover, not `streamText`'s abort machinery
+ * (which is the SDK's own concern, not ours) — so this mocks exactly at
+ * that boundary instead.
+ */
+const { streamTextMock } = vi.hoisted(() => ({ streamTextMock: vi.fn() }))
+vi.mock('ai', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ai')>()
+  streamTextMock.mockImplementation(actual.streamText)
+  return { ...actual, streamText: streamTextMock }
+})
 
 type StreamChunk = Record<string, unknown>
 
@@ -450,6 +479,54 @@ describe('AiSdkProvider.streamConversation', () => {
   })
 
   it('reports an aborted stream as an error stop with the work so far preserved', async () => {
+    // `controller.abort()` used to run BEFORE `streamConversation` was even
+    // called, which only ever exercised the `opts.signal?.aborted` fallback
+    // check AFTER the loop (kept as its own case below). The `case 'abort':`
+    // branch INSIDE the loop — for a `{ type: 'abort' }` part arriving
+    // mid-stream — never fired, and `done.message.content` was never
+    // inspected, so the accumulated "partial" text was never actually
+    // proven to survive.
+    //
+    // `streamTextMock` (see the top of this file) hands `ai-sdk-provider.ts`
+    // a hand-built `result.stream` here: a text delta, THEN an explicit
+    // `{ type: 'abort' }` part instead of `finish` — the exact shape
+    // `streamText`'s own internal orchestration produces on a real
+    // mid-generation abort, one layer up from anything `MockLanguageModelV4`
+    // can express.
+    streamTextMock.mockImplementationOnce(() => ({
+      stream: (async function* () {
+        yield { type: 'text-delta', id: '1', text: 'partial' }
+        yield { type: 'abort' }
+      })(),
+    }))
+    const events = await collect(
+      new AiSdkProvider({
+        name: 'openai',
+        defaultModel: 'gpt-5.6',
+        languageModel: () => new MockLanguageModelV4(),
+        providerOptionsKey: 'openai',
+      }).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [],
+      }),
+    )
+    const done = events.find((e) => e.kind === 'message_complete')
+    if (done?.kind !== 'message_complete') throw new Error('expected message_complete')
+    expect(done.stopReason).toBe('error')
+    expect(done.vendorStopReason).toBe('aborted')
+    // The point of the test's own name: the text generated before the abort
+    // is kept, not discarded, so the transcript shows what the model had
+    // said when the user pressed Stop.
+    expect(done.message.content).toEqual([{ type: 'text', text: 'partial' }])
+  })
+
+  it('falls back to the post-loop signal check when the stream ends with no abort part', async () => {
+    // The OTHER path `aborted` can take: the caller's signal was already
+    // aborted (e.g. Stop was pressed just as the turn was being built) and
+    // the stream never emits an explicit `{ type: 'abort' }` part at all —
+    // it just ends normally. `opts.signal?.aborted` after the loop is what
+    // still reports this as aborted rather than a clean finish.
     const model = new MockLanguageModelV4({
       doStream: streamOf([
         { type: 'stream-start', warnings: [] },

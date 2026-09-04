@@ -110,9 +110,42 @@ describe('buildNeutralSystemPrompt', () => {
   })
 
   it('is byte-stable for the same options', () => {
+    // A pure builder called twice with identical input is deterministic by
+    // construction — this guards only against something sneaking in that
+    // ISN'T pure (a timestamp, `Math.random()`, iteration over a `Set`/`Map`
+    // in an order that isn't guaranteed). It says nothing about the prefix
+    // staying stable across DIFFERENT options — see the next test for that.
     expect(buildNeutralSystemPrompt({ writeToolsEnabled: true })).toBe(
       buildNeutralSystemPrompt({ writeToolsEnabled: true }),
     )
+  })
+
+  it('the stable prefix is unaffected by a change in disabledCapabilities', () => {
+    // The regression this guards: `disabledCapabilities` sits LAST (pinned
+    // above, "puts disabled capabilities last") specifically so that a
+    // volatile, per-turn block cannot invalidate anything earlier — a
+    // vendor prompt cache keyed on a stable prefix survives a turn where
+    // only which capabilities are disabled has changed. Comparing the
+    // builder with itself (the previous test) cannot catch a regression
+    // where some OTHER option's formatting accidentally depends on
+    // `disabledCapabilities` too; only a comparison across two DIFFERENT
+    // values can.
+    const shortSuffix = '# Off right now\nNothing.'
+    const longerSuffix =
+      '# Off right now\nSomething else entirely, deliberately a different length.'
+    const a = buildNeutralSystemPrompt({
+      writeToolsEnabled: true,
+      disabledCapabilities: shortSuffix,
+    })
+    const b = buildNeutralSystemPrompt({
+      writeToolsEnabled: true,
+      disabledCapabilities: longerSuffix,
+    })
+    expect(a.endsWith(shortSuffix)).toBe(true)
+    expect(b.endsWith(longerSuffix)).toBe(true)
+    const prefixA = a.slice(0, a.length - shortSuffix.length)
+    const prefixB = b.slice(0, b.length - longerSuffix.length)
+    expect(prefixA).toBe(prefixB)
   })
 
   it('uses no em dash and no first person in the blocks this lane authors', () => {

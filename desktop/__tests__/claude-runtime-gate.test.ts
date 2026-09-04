@@ -1,9 +1,17 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { readStoredDevMode, readStoredProviderKeys } from "../llm-credentials-read.js"
 import { credentialed, isSubscriptionOptIn, shouldDownloadClaudeRuntime } from "../claude-runtime-gate.js"
+
+// `readFileSync` is spied, not stubbed — every OTHER test in this file
+// still hits the real filesystem via `homeWith()`. Only the "no explicit
+// home" test below reads the spy; everything else runs through untouched.
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>()
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync) }
+})
 
 function homeWith(contents: unknown): string {
   const home = mkdtempSync(join(tmpdir(), "desde-cred-"))
@@ -60,9 +68,22 @@ describe("readStoredProviderKeys", () => {
   })
 
   it("requires an explicit home — a defaulted home is the footgun a prior fix removed", () => {
+    vi.mocked(readFileSync).mockClear()
     // @ts-expect-error — `home` has no default; every caller must say whose
-    // credentials it means.
-    readStoredProviderKeys()
+    // credentials it means. That is a COMPILE-time guard only — this test
+    // is what pins the RUNTIME behavior when it is bypassed anyway (a `.js`
+    // caller, or a cast).
+    const result = readStoredProviderKeys()
+    // "Fails toward nothing configured" (see the module doc comment) means
+    // the missing `home` throws inside `path.join(undefined, ...)` and that
+    // throw is swallowed the same way an unreadable file's is, above.
+    expect(result).toEqual({})
+    // The property this test actually exists to pin: nothing beneath it
+    // ever resolved a path and asked the filesystem for it. If `home` ever
+    // gained a default of `homedir()`, this assertion is what would catch
+    // it — `readFileSync` would be called, against a REAL user's file,
+    // instead of `path.join` throwing before any read is attempted.
+    expect(readFileSync).not.toHaveBeenCalled()
   })
 })
 
