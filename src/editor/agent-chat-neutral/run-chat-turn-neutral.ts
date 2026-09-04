@@ -80,6 +80,8 @@ import type {
 } from '../llm-providers/types'
 import { branchModeRootCommitSha } from '../worktree/git-branches'
 
+import { applyContextBudget } from './context-budget'
+import { replayHistory } from './history-replay'
 import {
   createNeutralEventAdapter,
   toolResultContent,
@@ -250,12 +252,20 @@ async function runInner(
   })
   const tools = toToolDefs(catalog)
 
-  const messages: Message[] = [
-    {
-      role: 'user',
-      content: buildOpeningContent(opts.userMessage, opts.selection, opts.page, opts.images),
-    },
-  ]
+  const history = await replayHistory({
+    session: opts.session,
+    repoRoot: opts.worktreeRoot,
+  })
+  const opening: Message = {
+    role: 'user',
+    content: buildOpeningContent(opts.userMessage, opts.selection, opts.page, opts.images),
+  }
+  const budgeted = applyContextBudget([...history, opening])
+  const messages: Message[] = budgeted.messages
+  // The notice rides on the SYSTEM prompt rather than as a message, because a
+  // synthetic user message would replay into the next turn's history as
+  // something the user said.
+  const systemWithNotice = budgeted.notice ? `${system}\n\n${budgeted.notice}` : system
 
   const adapter = createNeutralEventAdapter(turnId)
   const assistantContent: ChatAssistantBlock[] = []
@@ -274,7 +284,7 @@ async function runInner(
   // once so the stable prefix is byte-identical across steps, which is what a
   // provider with automatic prompt caching needs to keep hitting.
   const stepRequest = {
-    system,
+    system: systemWithNotice,
     tools,
     ...(model ? { model } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),

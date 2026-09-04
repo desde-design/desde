@@ -389,3 +389,27 @@ describe('runChatTurnNeutral: failures', () => {
     expect(result.turn.error).toBe('turn aborted')
   })
 })
+
+describe('runChatTurnNeutral: history replay', () => {
+  it('replays a prior turn so a follow-up question has context', async () => {
+    const prior = {
+      ...makeEmptySession('p1'),
+      turns: [
+        {
+          id: 't0',
+          startedAt: '2026-09-03T00:00:00.000Z',
+          userMessage: 'make it blue',
+          assistantContent: [{ type: 'text' as const, text: 'done' }],
+          toolResults: {},
+          editProposals: [],
+        },
+      ],
+    }
+    const { calls } = await run([textStep('sure')], { session: prior })
+    expect(calls[0].messages).toHaveLength(3)
+    expect(calls[0].messages[0]).toEqual({
+      role: 'user',
+      content: [{ type: 'text', text: 'make it blue' }],
+    })
+  })
+})
