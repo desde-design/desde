@@ -22,7 +22,7 @@
  */
 import { useEffect, useState } from "react"
 import type { DesktopClaudeRuntimeState } from "@/types/desktop-bridge"
-import { notifyClaudeRuntimeState } from "./claude-runtime-notice"
+import { notifyClaudeRuntimeState, notifyClaudeRuntimeRetrySkipped } from "./claude-runtime-notice"
 
 /**
  * A `"downloading"` phase shorter than this never surfaces a toast at all —
@@ -52,16 +52,28 @@ export function useClaudeRuntimeStatus(): void {
       }
     }
 
+    // Retry only ever changes STATE (pushed back through `onState`) when it
+    // actually starts an install. A refused retry has nothing to push — the
+    // gate decided before anything happened — so the toast for that case is
+    // fired here, off the retry call's own reply, not off a state update.
+    const retryAndReportSkip = () => {
+      void claudeRuntime.retry().then(({ started, skippedReason }) => {
+        if (!cancelled && !started && skippedReason) {
+          notifyClaudeRuntimeRetrySkipped(skippedReason)
+        }
+      })
+    }
+
     const handle = (state: DesktopClaudeRuntimeState) => {
       if (cancelled) return
       clearDownloadingTimer()
       if (state.phase === "downloading") {
         downloadingTimer = setTimeout(() => {
-          if (!cancelled) notifyClaudeRuntimeState(state, claudeRuntime.retry)
+          if (!cancelled) notifyClaudeRuntimeState(state, retryAndReportSkip)
         }, DOWNLOADING_TOAST_DELAY_MS)
         return
       }
-      notifyClaudeRuntimeState(state, claudeRuntime.retry)
+      notifyClaudeRuntimeState(state, retryAndReportSkip)
     }
 
     void claudeRuntime.getState().then(handle)

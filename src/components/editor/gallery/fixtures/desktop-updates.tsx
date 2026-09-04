@@ -123,7 +123,10 @@ function makeBridge(
     claudeRuntime: {
       getState: async () => ({ phase: "ready" }),
       onState: () => () => {},
-      retry: () => ctx.log("claudeRuntime.retry"),
+      retry: async () => {
+        ctx.log("claudeRuntime.retry")
+        return { started: true }
+      },
     },
     pickFolder: async () => null,
   }

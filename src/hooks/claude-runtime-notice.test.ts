@@ -6,6 +6,7 @@ import {
   CLAUDE_RUNTIME_ERROR_FALLBACK_DESCRIPTION,
   CLAUDE_RUNTIME_ERROR_TITLE,
   CLAUDE_RUNTIME_TOAST_ID,
+  notifyClaudeRuntimeRetrySkipped,
   notifyClaudeRuntimeState,
 } from "./claude-runtime-notice"
 
@@ -13,6 +14,7 @@ vi.mock("sonner", () => ({
   toast: {
     loading: vi.fn(),
     error: vi.fn(),
+    info: vi.fn(),
     dismiss: vi.fn(),
   },
 }))
@@ -21,6 +23,7 @@ describe("notifyClaudeRuntimeState", () => {
   beforeEach(() => {
     vi.mocked(toast.loading).mockClear()
     vi.mocked(toast.error).mockClear()
+    vi.mocked(toast.info).mockClear()
     vi.mocked(toast.dismiss).mockClear()
   })
 
@@ -72,5 +75,19 @@ describe("notifyClaudeRuntimeState", () => {
     expect(toast.dismiss).toHaveBeenCalledWith(CLAUDE_RUNTIME_TOAST_ID)
     expect(toast.loading).not.toHaveBeenCalled()
     expect(toast.error).not.toHaveBeenCalled()
+  })
+})
+
+describe("notifyClaudeRuntimeRetrySkipped", () => {
+  beforeEach(() => {
+    vi.mocked(toast.info).mockClear()
+  })
+
+  it("shows the gate's own reason, keyed on the same stable id as every other phase", () => {
+    notifyClaudeRuntimeRetrySkipped("AI chat runtime install skipped: a configured provider does not need it.")
+    expect(toast.info).toHaveBeenCalledWith(
+      "AI chat runtime install skipped: a configured provider does not need it.",
+      { id: CLAUDE_RUNTIME_TOAST_ID },
+    )
   })
 })

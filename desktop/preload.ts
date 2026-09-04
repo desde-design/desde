@@ -100,9 +100,11 @@ export function buildDesktopBridge(ipc: IpcRendererLike, argv: readonly string[]
         return () =>
           ipc.removeListener(CLAUDE_RUNTIME_STATE_CHANNEL, listener as (event: unknown, ...args: unknown[]) => void)
       },
-      retry: () => {
-        ipc.send("desktop:claude-runtime:retry")
-      },
+      retry: () =>
+        ipc.invoke("desktop:claude-runtime:retry") as Promise<{
+          started: boolean
+          skippedReason?: string
+        }>,
     },
     pickFolder: () => ipc.invoke("desktop:pick-folder") as Promise<string | null>,
     // `invoke`, not `send` — the caller (useLauncherApi's openPath) awaits

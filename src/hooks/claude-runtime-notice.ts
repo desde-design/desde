@@ -59,3 +59,15 @@ export function notifyClaudeRuntimeState(
       return
   }
 }
+
+/**
+ * Retry was clicked, but the gate now says the runtime is not wanted (a
+ * provider that doesn't need it got configured since the error toast
+ * appeared) — the install never starts, so `notifyClaudeRuntimeState` never
+ * fires again to say why. Same stable id as every other phase, so this
+ * replaces the error toast in place rather than leaving it sitting there
+ * looking unaddressed.
+ */
+export function notifyClaudeRuntimeRetrySkipped(reason: string): void {
+  toast.info(reason, { id: CLAUDE_RUNTIME_TOAST_ID })
+}

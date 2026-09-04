@@ -5,6 +5,7 @@ vi.mock("sonner", () => ({
   toast: {
     loading: vi.fn(),
     error: vi.fn(),
+    info: vi.fn(),
     dismiss: vi.fn(),
   },
 }))
@@ -13,12 +14,15 @@ import { toast } from "sonner"
 import { useClaudeRuntimeStatus, DOWNLOADING_TOAST_DELAY_MS } from "./useClaudeRuntimeStatus"
 import type { DesktopBridge, DesktopClaudeRuntimeState, DesktopUpdateState } from "@/types/desktop-bridge"
 
-function installBridge(initialState: DesktopClaudeRuntimeState): {
+function installBridge(
+  initialState: DesktopClaudeRuntimeState,
+  retryResult: { started: boolean; skippedReason?: string } = { started: true },
+): {
   emit: (state: DesktopClaudeRuntimeState) => void
   retry: ReturnType<typeof vi.fn>
 } {
   const listeners = new Set<(state: DesktopClaudeRuntimeState) => void>()
-  const retry = vi.fn()
+  const retry = vi.fn(async () => retryResult)
   const bridge: DesktopBridge = {
     appVersion: "0.1.0",
     updates: {
@@ -47,6 +51,7 @@ function installBridge(initialState: DesktopClaudeRuntimeState): {
 beforeEach(() => {
   vi.mocked(toast.loading).mockClear()
   vi.mocked(toast.error).mockClear()
+  vi.mocked(toast.info).mockClear()
   vi.mocked(toast.dismiss).mockClear()
 })
 
@@ -115,6 +120,29 @@ describe("useClaudeRuntimeStatus — error and retry", () => {
     const action = options?.action as { label: string; onClick: () => void } | undefined
     action?.onClick?.()
     expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it("a retry the gate refuses shows the gate's reason, not silence", async () => {
+    const { retry } = installBridge(
+      { phase: "error", error: "Couldn't reach the npm registry" },
+      { started: false, skippedReason: "AI chat runtime install skipped: a configured provider does not need it." },
+    )
+    renderHook(() => useClaudeRuntimeStatus())
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledTimes(1)
+    })
+    const [, options] = vi.mocked(toast.error).mock.calls[0]
+    const action = options?.action as { label: string; onClick: () => void } | undefined
+    action?.onClick?.()
+    expect(retry).toHaveBeenCalledTimes(1)
+
+    await waitFor(() => {
+      expect(toast.info).toHaveBeenCalledWith(
+        "AI chat runtime install skipped: a configured provider does not need it.",
+        expect.objectContaining({ id: expect.any(String) }),
+      )
+    })
   })
 })
 

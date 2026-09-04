@@ -576,17 +576,20 @@ function registerIpcHandlers(
   )
 
   ipcMain.handle("desktop:claude-runtime:get-state", () => claudeRuntime.getState())
-  // `on`, not `handle` — fire-and-forget, matching restart-and-install's own
-  // one-way channel. The result reaches the caller via the SAME `onState`
-  // push every other trigger (boot, a prior failed attempt) already uses;
-  // there's nothing meaningful to return synchronously from a "kick off a
-  // background install" call.
-  ipcMain.on("desktop:claude-runtime:retry", () => {
+  // `handle`, not `on`: an install actually kicked off still reaches every
+  // subscriber through the SAME `onState` push every other trigger (boot, a
+  // prior failed attempt) uses, but a REFUSED retry has nothing else to tell
+  // the caller — no state change happens, so nothing is pushed through
+  // `onState` either. The reply is what lets the renderer show the same
+  // short notice `boot.log` gets, instead of the click doing nothing a
+  // second time.
+  ipcMain.handle("desktop:claude-runtime:retry", () => {
     if (!claudeRuntimeWanted()) {
       bootLog(CLAUDE_RUNTIME_NOT_WANTED_NOTICE)
-      return
+      return { started: false, skippedReason: CLAUDE_RUNTIME_NOT_WANTED_NOTICE }
     }
     claudeRuntime.ensure()
+    return { started: true }
   })
 }
 

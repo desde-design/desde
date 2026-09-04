@@ -155,7 +155,7 @@ describe("EditorSettingsMenu", () => {
       claudeRuntime: {
         getState: async () => ({ phase: "ready" }),
         onState: () => () => {},
-        retry: () => {},
+        retry: async () => ({ started: true }),
       },
       pickFolder: async () => null,
     }
@@ -186,7 +186,7 @@ describe("EditorSettingsMenu", () => {
       claudeRuntime: {
         getState: async () => ({ phase: "ready" }),
         onState: () => () => {},
-        retry: () => {},
+        retry: async () => ({ started: true }),
       },
       pickFolder: async () => null,
     }
@@ -363,7 +363,7 @@ describe("EditorSettingsMenu gear indicator", () => {
       claudeRuntime: {
         getState: async () => ({ phase: "ready" }),
         onState: () => () => {},
-        retry: () => {},
+        retry: async () => ({ started: true }),
       },
       pickFolder: async () => null,
     }
@@ -405,7 +405,7 @@ describe("EditorSettingsMenu — Check for updates opens the check dialog", () =
       claudeRuntime: {
         getState: async () => ({ phase: "ready" }),
         onState: () => () => {},
-        retry: () => {},
+        retry: async () => ({ started: true }),
       },
       pickFolder: async () => null,
     }
