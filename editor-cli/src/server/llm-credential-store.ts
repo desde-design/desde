@@ -204,14 +204,25 @@ interface CredentialFileSnapshot {
   /** The on-disk `version` was GREATER than {@link SCHEMA_VERSION}. */
   newerThanUs: boolean
   /**
+   * The RAW `version` read off disk, before `file.version` is normalised to
+   * {@link SCHEMA_VERSION}. Only meaningful when `newerThanUs` is true — it
+   * is what {@link CredentialFileNewerError} reports, so the refusal names
+   * the version that was actually on disk (a hypothetical v99 file) rather
+   * than the version this build understands (2).
+   */
+  onDiskVersion: number
+  /**
    * Top-level fields this version did not author, kept so a write from this
    * build does not silently drop what another build stored beside it.
    */
   unknownFields: Record<string, unknown>
 }
 
-function snapshot(file: LlmCredentialFile): CredentialFileSnapshot {
-  return { file, newerThanUs: false, unknownFields: {} }
+function snapshot(
+  file: LlmCredentialFile,
+  unknownFields: Record<string, unknown> = {},
+): CredentialFileSnapshot {
+  return { file, newerThanUs: false, onDiskVersion: file.version, unknownFields }
 }
 
 /**
@@ -233,16 +244,24 @@ async function readSnapshot(path: string): Promise<CredentialFileSnapshot> {
     // The migration branch sits BEFORE the mismatch discard. Reversed, the
     // discard would delete every existing user's key on first read.
     if (file.version === 1) {
-      return { file: migrateV1(file as LlmCredentialFileV1), newerThanUs: false, unknownFields }
+      return {
+        file: migrateV1(file as LlmCredentialFileV1),
+        newerThanUs: false,
+        onDiskVersion: 1,
+        unknownFields,
+      }
     }
     const newerThanUs = typeof file.version === "number" && file.version > SCHEMA_VERSION
     // An OLDER unrecognised schema is still ignored: there is no shape to
-    // salvage from it, and the cost is re-entering a key rather than the CLI
-    // refusing to start. A NEWER one is different — its `providers` shape is
-    // this one plus whatever was added — so read what we understand and mark
-    // it, rather than degrading to empty defaults and letting a later write
-    // serialise that emptiness over the user's keys.
-    if (!newerThanUs && file.version !== SCHEMA_VERSION) return snapshot(defaults())
+    // salvage `providers` from, and the cost is re-entering a key rather
+    // than the CLI refusing to start. A top-level field neither build
+    // claims still survives (`unknownFields`, passed through here) — only
+    // `providers` itself has nothing to salvage. A NEWER one is different —
+    // its `providers` shape is this one plus whatever was added — so read
+    // what we understand and mark it, rather than degrading to empty
+    // defaults and letting a later write serialise that emptiness over the
+    // user's keys.
+    if (!newerThanUs && file.version !== SCHEMA_VERSION) return snapshot(defaults(), unknownFields)
     if (newerThanUs && !warnedNewerFile) {
       warnedNewerFile = true
       console.warn(
@@ -264,6 +283,7 @@ async function readSnapshot(path: string): Promise<CredentialFileSnapshot> {
         promptDismissed: typeof file.promptDismissed === "boolean" ? file.promptDismissed : false,
       },
       newerThanUs,
+      onDiskVersion: typeof file.version === "number" ? file.version : SCHEMA_VERSION,
       unknownFields,
     }
   } catch {
@@ -354,7 +374,7 @@ async function mutate(
   const path = llmCredentialFilePath(home)
   await serialize(async () => {
     const snap = await readSnapshot(path)
-    if (snap.newerThanUs) throw new CredentialFileNewerError(snap.file.version)
+    if (snap.newerThanUs) throw new CredentialFileNewerError(snap.onDiskVersion)
     await writeFile(path, { ...apply(snap.file), version: SCHEMA_VERSION }, snap.unknownFields)
   })
 }

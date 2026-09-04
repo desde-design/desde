@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
+  CredentialFileNewerError,
   clearLlmApiKey,
   llmCredentialFilePath,
   readLlmCredentials,
@@ -461,6 +462,23 @@ describe("FX4 item 4: a file written by a newer Desde", () => {
     expect((err as Error).message).not.toContain("sk-openai-newer")
     expect((err as Error).message).not.toContain("sk-ant-mine")
   })
+
+  it("FX6 item 4: names the version actually on disk, not this build's own", async () => {
+    // `readSnapshot` normalises `file.version` to `SCHEMA_VERSION` (2) so the
+    // rest of the reader never has to think about what is really on disk.
+    // Before this fix, `mutate()` built the error from that NORMALISED
+    // value, so a file written by a hypothetical v99 Desde reported "2" —
+    // itself, not the file it refused to overwrite.
+    await writeRawFile(home, {
+      version: 99,
+      providers: { openai: { apiKey: "sk-openai-newer" } },
+      devMode: false,
+      promptDismissed: false,
+    })
+    const err = await writeLlmApiKey("anthropic", "sk-ant-mine", home).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(CredentialFileNewerError)
+    expect((err as CredentialFileNewerError).onDiskVersion).toBe(99)
+  })
 })
 
 describe("FX4 item 4: unknown top-level fields", () => {
@@ -480,6 +498,29 @@ describe("FX4 item 4: unknown top-level fields", () => {
     expect(onDisk.fieldFromAnotherRelease).toEqual({ keep: "me" })
     expect(onDisk.devMode).toBe(true)
     expect(onDisk.providers).toEqual({ anthropic: { apiKey: "sk-ant-keep" } })
+  })
+
+  it("FX6 item 3: also survive a write after reading an unrecognised OLDER version", async () => {
+    // The v99 (newer) case above already proves fields survive. This is the
+    // OTHER branch that also lands on `snapshot(...)`: a version this build
+    // does not recognise and is not newer than — there is no shape to
+    // salvage `providers` from, so those are correctly discarded to
+    // defaults, but a top-level field neither this nor that build claims
+    // must still round-trip, the same as it does on every other read path.
+    await writeRawFile(home, {
+      version: 0,
+      providers: { anthropic: { apiKey: "ignored-unrecognised-shape" } },
+      fieldFromAnotherRelease: { keep: "me" },
+    })
+    expect(await readLlmCredentials(home)).toEqual({ providers: {}, devMode: false })
+    await setLlmDevMode(true, home)
+    const onDisk = JSON.parse(await fs.readFile(llmCredentialFilePath(home), "utf8")) as Record<
+      string,
+      unknown
+    >
+    expect(onDisk.fieldFromAnotherRelease).toEqual({ keep: "me" })
+    expect(onDisk.devMode).toBe(true)
+    expect(onDisk.providers).toEqual({})
   })
 })
 

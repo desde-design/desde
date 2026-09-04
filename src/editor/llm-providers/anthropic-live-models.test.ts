@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { fromAgentSdk, fromModelsApi, versionedNameFrom, versionedNameFromId } from './anthropic-live-models'
+import { mergeLiveModels } from './live-model-catalog'
+import { ANTHROPIC_DESCRIPTOR } from './descriptors/anthropic'
 
 const yes = { supported: true }
 const no = { supported: false }
@@ -136,5 +138,37 @@ describe('fromModelsApi adaptive thinking', () => {
       ['claude-opus-4-8', undefined],
       ['claude-haiku-4-5', false],
     ])
+  })
+})
+
+describe('fromModelsApi + mergeLiveModels, through the real ANTHROPIC_DESCRIPTOR', () => {
+  it('serves the dated snapshot of claude-opus-4-8 as the default when the bare id is retired', () => {
+    // FX6 item 1: the OpenAI half of this proof already existed
+    // (`openai-live-models.test.ts`). This is the Anthropic half the FX5
+    // brief asked for and the FX4/FX5 review found missing: delete
+    // `defaultAlias: { kind: 'dated-snapshot' }` from `ANTHROPIC_DESCRIPTOR`
+    // and every existing suite stays green, while a live list shaped like
+    // Anthropic's own rollover (only the dated snapshot survives) would
+    // hand the default to whichever live entry sorts first instead of the
+    // flagship.
+    const live = fromModelsApi([
+      { id: 'claude-opus-5', display_name: 'Claude Opus 5', created_at: '2026-06-01T00:00:00Z' },
+      {
+        id: 'claude-opus-4-8-20260315',
+        display_name: 'Claude Opus 4.8',
+        created_at: '2026-03-15T00:00:00Z',
+      },
+      { id: 'claude-sonnet-4-6', display_name: 'Claude Sonnet 4.6', created_at: '2026-01-01T00:00:00Z' },
+    ])
+    expect(live.map((m) => m.id)).toEqual([
+      'claude-opus-5',
+      'claude-opus-4-8-20260315',
+      'claude-sonnet-4-6',
+    ])
+    const merged = mergeLiveModels(ANTHROPIC_DESCRIPTOR.staticCatalog, live, {
+      effortFallback: () => null,
+      defaultAlias: ANTHROPIC_DESCRIPTOR.defaultAlias,
+    })!
+    expect(merged.models.find((m) => m.isDefault)?.id).toBe('claude-opus-4-8-20260315')
   })
 })

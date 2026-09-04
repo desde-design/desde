@@ -56,6 +56,7 @@ import { reconcileSessionModelConfig } from "@/editor/core/model-catalog"
 import type { EffortLevel, SessionModelConfig } from "@/editor/core/model-catalog"
 import {
   getCatalogCache,
+  getCatalogEpoch,
   getCatalogVersion,
   getPickedThisLoad,
   setCatalogCacheIfVersion,
@@ -189,6 +190,12 @@ export function ModelPickerChip({
     // filled it. Nothing to do: `catalog` above already reflects it.
     if (getCatalogCache()) return
     let cancelled = false
+    // Captured synchronously, at the moment this effect run starts — not
+    // `catalogVersion` above, which only tells this effect WHEN to rerun.
+    // `setCatalogCacheIfVersion` gates on the narrower epoch counter so a
+    // second mounted chip's concurrent, equally-fresh fetch does not get
+    // discarded just because a sibling's write already bumped `version`.
+    const epochAtStart = getCatalogEpoch()
     void (async () => {
       setCatalogFailed(false)
       try {
@@ -215,12 +222,12 @@ export function ModelPickerChip({
           if (!cancelled) setCatalogFailed(true)
           return
         }
-        // A version-checked write, not a plain `setCatalogCache`: if
+        // An epoch-checked write, not a plain `setCatalogCache`: if
         // `invalidateModelCatalogCache()` ran while this fetch was in
-        // flight, `catalogVersion` (captured when this effect started) no
-        // longer matches the live version, and the stale body is discarded
+        // flight, `epochAtStart` (captured when this effect started) no
+        // longer matches the live epoch, and the stale body is discarded
         // instead of repopulating the cache the invalidation just cleared.
-        if (!cancelled) setCatalogCacheIfVersion(catalogVersion, body)
+        if (!cancelled) setCatalogCacheIfVersion(epochAtStart, body)
       } catch {
         // Catalog unavailable — chip stays hidden, chat uses defaults.
         if (!cancelled) setCatalogFailed(true)

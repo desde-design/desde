@@ -111,8 +111,28 @@ export function setPickedThisLoad(value: SessionModelConfig | null): void {
 }
 
 /**
- * Sets the cache only when `version` still equals `expectedVersion`. A write
- * carrying a stale version is discarded instead of applied.
+ * Bumped ONLY by `invalidateModelCatalogCache` — the one event that means a
+ * fetch already in flight is answering a question that no longer applies (a
+ * credential save, remove, or dev-mode toggle changed what the catalog
+ * should be). `version` above bumps on every write, including an ordinary
+ * successful one, because `useSyncExternalStore` needs a change signal even
+ * for a null-to-null invalidation (see its doc comment). `setCatalogCacheIfVersion`
+ * used to gate on `version` for that same counter, which meant two chips
+ * fetching concurrently would discard the SECOND one's write purely because
+ * the first one's write had already bumped `version` — not because
+ * anything about the catalog had actually gone stale. `epoch` is the
+ * narrower signal: it only moves when the answer a fetch was chasing has
+ * actually changed underneath it.
+ */
+let epoch = 0
+
+export function getCatalogEpoch(): number {
+  return epoch
+}
+
+/**
+ * Sets the cache only when `epoch` still equals `expectedEpoch`. A write
+ * carrying a stale epoch is discarded instead of applied.
  *
  * This closes a race the plain `setCatalogCache` cannot: a catalog fetch can
  * still be in flight when `invalidateModelCatalogCache()` runs (the user
@@ -122,15 +142,18 @@ export function setPickedThisLoad(value: SessionModelConfig | null): void {
  * would repopulate the cache with the PRE-invalidation catalog. The rerender
  * this causes then sees a non-null cache and never issues the refetch —
  * exactly the case invalidation exists to trigger. The caller captures
- * `getCatalogVersion()` when the fetch starts and passes it back here; if
- * `invalidateModelCatalogCache()` bumped the version in between, this no-ops
- * and the stale body is dropped on the floor.
+ * `getCatalogEpoch()` when the fetch starts and passes it back here; if
+ * `invalidateModelCatalogCache()` bumped the epoch in between, this no-ops
+ * and the stale body is dropped on the floor. A second fetch that started
+ * at the same epoch as a first one that already landed is NOT stale by this
+ * rule, even though `version` moved when that first write applied — the
+ * question both fetches were answering never changed.
  */
 export function setCatalogCacheIfVersion(
-  expectedVersion: number,
+  expectedEpoch: number,
   value: ModelCatalogResponse | null,
 ): void {
-  if (version !== expectedVersion) return
+  if (epoch !== expectedEpoch) return
   setCatalogCache(value)
 }
 
@@ -152,5 +175,6 @@ export function invalidateModelCatalogCache(): void {
   catalogCache = null
   pickedThisLoad = null
   version += 1
+  epoch += 1
   notify()
 }
