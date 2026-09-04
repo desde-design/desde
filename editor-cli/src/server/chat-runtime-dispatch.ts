@@ -6,11 +6,11 @@
  * `@anthropic-ai/claude-agent-sdk`. That laziness is the reason this is a
  * function taking loaders rather than two top-level imports.
  *
- * `RunChatTurn` is declared locally against the SDK runtime's own option and
- * result types. Phase 3 moves those verbatim into
- * `src/editor/agent-chat/run-chat-turn.ts` as `RunChatTurnOpts` /
- * `RunChatTurnResult` and re-points this alias; the shape does not change,
- * which is what lets both runtimes satisfy one function type.
+ * `RunChatTurn` imports the shared contract type from
+ * `src/editor/agent-chat/run-chat-turn.ts` (`RunChatTurnOpts` /
+ * `RunChatTurnResult`, Phase 3 Task 18) and re-exports it, so this file's
+ * existing consumers see the same name they always did. The shape does not
+ * change, which is what lets both runtimes satisfy one function type.
  *
  * The `isNeutralChatEnabled({})` call reads env only, never the caller's
  * project config, even though `chat-handler.ts` has `ctx` in scope. That is
@@ -25,15 +25,12 @@
  * to also export `EDITOR_NEUTRAL_CHAT=1` to see the group at all, until
  * phase 4 flips the default.
  */
-import type {
-  RunChatTurnSdkOpts,
-  RunChatTurnSdkResult,
-} from "../../../src/editor/agent-chat-sdk/run-chat-turn-sdk.js"
+import type { RunChatTurn } from "../../../src/editor/agent-chat/run-chat-turn.js"
 import { getDescriptor } from "../../../src/editor/llm-providers/provider-registry.js"
 import { chatRuntimeOverride, isNeutralChatEnabled } from "./dormant-surfaces.js"
 import type { ChatHandlerLoaders } from "./chat-handler.js"
 
-export type RunChatTurn = (opts: RunChatTurnSdkOpts) => Promise<RunChatTurnSdkResult>
+export type { RunChatTurn }
 
 export async function resolveChatRuntime(
   providerId: string,
