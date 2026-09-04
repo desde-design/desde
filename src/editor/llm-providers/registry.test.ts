@@ -100,11 +100,11 @@ describe('getProvider', () => {
   // covers the corrected behavior.)
 
   it('honors a custom apiKeyEnv for OpenAI', () => {
-    // The wire-level "which key reached the request" assertion moved to
-    // ai-sdk-provider.test.ts, against the SDK's own mock model. What the
-    // registry owes is reading the NAMED env var rather than the
+    // What the registry owes is reading the NAMED env var rather than the
     // descriptor's default one — proven here by the missing-key guard NOT
-    // firing.
+    // firing. The wire-level "does that key reach createOpenAI" assertion
+    // lives in ai-sdk-openai.test.ts, which stubs createOpenAI directly;
+    // this file only owns which env var the registry reads.
     delete process.env.OPENAI_API_KEY
     process.env.MY_OPENAI_KEY = 'sk-openai-overridden'
     const provider = getProvider({
@@ -114,6 +114,9 @@ describe('getProvider', () => {
   })
 
   it('forwards baseUrl from config to the OpenAI provider', () => {
+    // Same split as above: this proves the registry passes `baseUrl` through
+    // to `buildProvider`, not that createOpenAI receives it as `baseURL` —
+    // that forwarding is asserted directly in ai-sdk-openai.test.ts.
     process.env.OPENAI_API_KEY = 'sk-test'
     const p = getProvider({
       config: {
