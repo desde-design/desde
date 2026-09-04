@@ -7,6 +7,7 @@ import type { BridgeClient } from '../agent-tools/types'
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
 import { makeEmptySession } from '../agent-chat/types'
 import { createTurnInputChannel } from '../agent-chat-sdk/turn-input-channel'
+import { OPENAI_DESCRIPTOR } from '../llm-providers/descriptors/openai'
 import type { LLMProvider, ProviderEvent, StreamOpts } from '../llm-providers/types'
 import {
   API_RETRY_MAX_ATTEMPTS,
@@ -361,6 +362,34 @@ describe('runChatTurnNeutral: failures', () => {
       { buildProvider: () => provider },
     )
     expect(result.turn.error).not.toMatch(/invalid x-api-key/)
+  })
+
+  it('swaps in the OpenAI re-auth guidance for an OpenAI quota failure', async () => {
+    // insufficient_quota is OpenAI's own vocabulary, not one of the generic
+    // patterns, so this only classifies as auth when the descriptor's own
+    // errorPatterns reach isAuthError.
+    const provider: LLMProvider = {
+      name: 'boom',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () =>
+        (async function* () {
+          throw new Error('OpenAI answered 429: insufficient_quota')
+        })(),
+    }
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'openai',
+        emit: () => {},
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(result.turn.error).not.toMatch(/insufficient_quota/)
+    expect(result.turn.error).toBe(OPENAI_DESCRIPTOR.errorPatterns!.reauthMessage)
   })
 
   it('reports an aborted turn as aborted', async () => {

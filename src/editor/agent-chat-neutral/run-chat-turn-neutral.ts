@@ -560,7 +560,9 @@ async function runInner(
       const retryAfter = extractRetryAfterFromError(err)
       const hint = retryAfter !== undefined ? ` (retry after ${retryAfter}s)` : ''
       const raw = err instanceof Error ? err.message : String(err)
-      errorMessage = isAuthError(raw) ? AUTH_REAUTH_MESSAGE : `${raw}${hint}`
+      errorMessage = isAuthError(raw, { errorPatterns: descriptor.errorPatterns })
+        ? (descriptor.errorPatterns?.reauthMessage ?? AUTH_REAUTH_MESSAGE)
+        : `${raw}${hint}`
     }
   } finally {
     // Backstop for every path that reaches neither the abort listener nor a
