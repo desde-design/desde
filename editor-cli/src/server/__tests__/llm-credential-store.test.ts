@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   clearLlmApiKey,
   llmCredentialFilePath,
@@ -25,6 +25,12 @@ afterEach(async () => {
 })
 
 const configDir = () => join(home, ".config", "desde")
+
+/** Writes an arbitrary raw JSON object at the store path, mode 0600. */
+async function writeRawFile(homeDir: string, value: unknown): Promise<void> {
+  await fs.mkdir(join(homeDir, ".config", "desde"), { recursive: true })
+  await fs.writeFile(llmCredentialFilePath(homeDir), JSON.stringify(value), { mode: 0o600 })
+}
 
 describe("llm-credential-store", () => {
   it("returns typed defaults when the file is absent", async () => {
@@ -244,6 +250,47 @@ describe("concurrent writes do not lose fields", () => {
       setPromptDismissed(true, home),
     ])
     expect(await fs.readdir(configDir())).toEqual(["llm-credentials.json"])
+  })
+})
+
+describe("cx1: independent field migration and per-slot sanitization", () => {
+  it("keeps a v1 key when devMode is missing, and the next write persists it as v2", async () => {
+    await writeRawFile(home, { version: 1, apiKey: "sk-ant-keep-me" }) // no devMode, no promptDismissed
+    expect((await readLlmCredentials(home)).providers.anthropic?.apiKey).toBe("sk-ant-keep-me")
+    await setPromptDismissed(true, home)
+    const onDisk = JSON.parse(await fs.readFile(llmCredentialFilePath(home), "utf8")) as Record<
+      string,
+      unknown
+    >
+    expect(onDisk.version).toBe(2)
+    expect(
+      (onDisk.providers as Record<string, { apiKey?: string }>).anthropic.apiKey,
+    ).toBe("sk-ant-keep-me")
+    expect(onDisk.devMode).toBe(false)
+  })
+
+  it("keeps a valid slot when another slot is malformed, and warns naming only the provider id", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    await writeRawFile(home, {
+      version: 2,
+      providers: { anthropic: { apiKey: "sk-ant-keep-me" }, openai: { apiKey: 42 } },
+      devMode: false,
+      promptDismissed: true,
+    })
+    const read = await readLlmCredentials(home)
+    expect(read.providers.anthropic?.apiKey).toBe("sk-ant-keep-me")
+    expect(read.providers.openai).toBeUndefined()
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/openai/)
+    expect(warn.mock.calls.flat().join(" ")).not.toMatch(/sk-ant-keep-me|42/)
+    await writeLlmApiKey("openai", "sk-new", home)
+    const onDisk = JSON.parse(await fs.readFile(llmCredentialFilePath(home), "utf8")) as Record<
+      string,
+      unknown
+    >
+    expect(
+      (onDisk.providers as Record<string, { apiKey?: string }>).anthropic.apiKey,
+    ).toBe("sk-ant-keep-me")
+    warn.mockRestore()
   })
 })
 

@@ -59,16 +59,44 @@ export interface LlmCredentialsStatus {
  * `undefined` off it. The map-shaped status would throw instead, in render,
  * on every page. Checking here turns that into `error` and a null status.
  */
+const CREDENTIAL_SOURCES: readonly CredentialSource[] = ["subscription", "env", "stored", "none"]
+
+/** Every row must carry a real source and the required strings, or the whole status is rejected. */
+function isProviderCredentialStatus(value: unknown): value is ProviderCredentialStatus {
+  if (typeof value !== "object" || value === null) return false
+  const p = value as Record<string, unknown>
+  if (
+    typeof p.id !== "string" ||
+    typeof p.label !== "string" ||
+    typeof p.apiKeyEnvVar !== "string" ||
+    typeof p.consoleUrl !== "string" ||
+    typeof p.maskPrefix !== "string"
+  ) {
+    return false
+  }
+  if (!CREDENTIAL_SOURCES.includes(p.source as CredentialSource)) return false
+  if (typeof p.hasStoredKey !== "boolean" || typeof p.hasSubscriptionRuntime !== "boolean") {
+    return false
+  }
+  for (const key of ["maskedHint", "storedHint", "baseUrl", "baseUrlEnvVar"] as const) {
+    if (p[key] !== undefined && typeof p[key] !== "string") return false
+  }
+  return true
+}
+
 export function isLlmCredentialsStatus(value: unknown): value is LlmCredentialsStatus {
   if (typeof value !== "object" || value === null) return false
   const v = value as Record<string, unknown>
-  return (
-    typeof v.providers === "object" &&
-    v.providers !== null &&
-    !Array.isArray(v.providers) &&
-    typeof v.devMode === "boolean" &&
-    typeof v.promptDismissed === "boolean"
-  )
+  if (
+    typeof v.providers !== "object" ||
+    v.providers === null ||
+    Array.isArray(v.providers) ||
+    typeof v.devMode !== "boolean" ||
+    typeof v.promptDismissed !== "boolean"
+  ) {
+    return false
+  }
+  return Object.values(v.providers as Record<string, unknown>).every(isProviderCredentialStatus)
 }
 
 /**
@@ -171,7 +199,11 @@ export function useLlmCredentials(): UseLlmCredentials {
     (providerId: string, apiKey: string, baseUrl?: string) =>
       mutate(`${ROUTE}/${encodeURIComponent(providerId)}`, "PUT", {
         apiKey,
-        ...(baseUrl ? { baseUrl } : {}),
+        // Forward `baseUrl` whenever the caller passed a string, INCLUDING
+        // "": that is how a cleared field reaches the server as "clear the
+        // stored value" rather than "leave it as it was". Only an actually
+        // `undefined` argument (the field was never touched) omits it.
+        ...(baseUrl !== undefined ? { baseUrl } : {}),
       }),
     [mutate],
   )

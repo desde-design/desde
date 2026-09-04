@@ -150,7 +150,12 @@ export function LlmCredentialDialog({
     if (!active) return
     const generation = openGeneration.current
     setBusy(true)
-    const ok = await saveKey(active.id, draft, baseUrlDrafts[active.id] || undefined)
+    // `baseUrlDrafts[active.id]` is only present once the user has typed into
+    // the field. An untouched field is `undefined` (preserve the stored
+    // value); a field the user cleared is `""` (clear the stored value).
+    // A falsy check here (`|| undefined`) would collapse those two cases,
+    // which is exactly the bug this line fixes.
+    const ok = await saveKey(active.id, draft, baseUrlDrafts[active.id])
     setBusy(false)
     // Only close the instance that started this save. Validation is a network
     // round-trip, and Close, Escape and the backdrop all stay live during it.

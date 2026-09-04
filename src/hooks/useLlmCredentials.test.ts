@@ -193,6 +193,22 @@ describe("useLlmCredentials: provider-scoped mutations", () => {
     expect(JSON.parse(init.body as string)).toEqual({ apiKey: "sk-ant-new" })
   })
 
+  it("saveKey forwards an explicit empty base URL so the server can clear it", async () => {
+    const impl = stubFetch(bothNone)
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    await act(async () => {
+      await result.current.saveKey("openai", "sk-new", "")
+    })
+    const [, cleared] = impl.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(JSON.parse(cleared.body as string)).toEqual({ apiKey: "sk-new", baseUrl: "" })
+    await act(async () => {
+      await result.current.saveKey("openai", "sk-new")
+    })
+    const [, untouched] = impl.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(JSON.parse(untouched.body as string)).toEqual({ apiKey: "sk-new" })
+  })
+
   it("removes from the named provider's route", async () => {
     const impl = stubFetch(bothNone)
     const { result } = renderHook(() => useLlmCredentials())
@@ -257,5 +273,40 @@ describe("a status the hook does not recognise", () => {
     expect(isLlmCredentialsStatus({ providers: {}, devMode: false, promptDismissed: false })).toBe(true)
     expect(isLlmCredentialsStatus({ ok: true })).toBe(false)
     expect(isLlmCredentialsStatus(null)).toBe(false)
+  })
+
+  it("rejects a status whose provider row is null or missing its source", () => {
+    expect(
+      isLlmCredentialsStatus({
+        providers: { anthropic: null },
+        devMode: false,
+        promptDismissed: false,
+      }),
+    ).toBe(false)
+    expect(
+      isLlmCredentialsStatus({
+        providers: { anthropic: { id: "anthropic", label: "Anthropic" } },
+        devMode: false,
+        promptDismissed: false,
+      }),
+    ).toBe(false)
+    expect(
+      isLlmCredentialsStatus({
+        providers: {
+          anthropic: {
+            id: "anthropic",
+            label: "Anthropic",
+            source: "bogus",
+            hasStoredKey: false,
+            apiKeyEnvVar: "ANTHROPIC_API_KEY",
+            consoleUrl: "https://x",
+            maskPrefix: "sk-ant-",
+            hasSubscriptionRuntime: true,
+          },
+        },
+        devMode: false,
+        promptDismissed: false,
+      }),
+    ).toBe(false)
   })
 })

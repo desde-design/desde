@@ -110,33 +110,42 @@ describe("useFirstRunCredentialPrompt", () => {
   })
 })
 
+const OPENAI_BASE: Omit<ProviderCredentialStatus, "source" | "hasStoredKey"> = {
+  id: "openai",
+  label: "OpenAI",
+  apiKeyEnvVar: "OPENAI_API_KEY",
+  consoleUrl: "https://platform.openai.com/api-keys",
+  maskPrefix: "sk-",
+  hasSubscriptionRuntime: false,
+}
+
 describe("first run across providers", () => {
   it("does not prompt when only OpenAI is configured", () => {
-    const status = {
+    const twoProviderStatus: LlmCredentialsStatus = {
       providers: {
-        anthropic: { id: "anthropic", source: "none", hasStoredKey: false },
-        openai: { id: "openai", source: "stored", hasStoredKey: true },
+        anthropic: { ...ANTHROPIC_BASE, source: "none", hasStoredKey: false },
+        openai: { ...OPENAI_BASE, source: "stored", hasStoredKey: true },
       },
       devMode: false,
       promptDismissed: false,
     }
     const { result } = renderHook(() =>
-      useFirstRunCredentialPrompt(status as never, async () => {}),
+      useFirstRunCredentialPrompt(twoProviderStatus, async () => {}),
     )
     expect(result.current.shouldPrompt).toBe(false)
   })
 
   it("prompts when every provider reports none", () => {
-    const status = {
+    const twoProviderStatus: LlmCredentialsStatus = {
       providers: {
-        anthropic: { id: "anthropic", source: "none", hasStoredKey: false },
-        openai: { id: "openai", source: "none", hasStoredKey: false },
+        anthropic: { ...ANTHROPIC_BASE, source: "none", hasStoredKey: false },
+        openai: { ...OPENAI_BASE, source: "none", hasStoredKey: false },
       },
       devMode: false,
       promptDismissed: false,
     }
     const { result } = renderHook(() =>
-      useFirstRunCredentialPrompt(status as never, async () => {}),
+      useFirstRunCredentialPrompt(twoProviderStatus, async () => {}),
     )
     expect(result.current.shouldPrompt).toBe(true)
   })

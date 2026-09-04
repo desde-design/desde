@@ -324,6 +324,51 @@ describe("LlmCredentialDialog: one tab per provider", () => {
     expect(screen.getByLabelText("Base URL")).toBeInTheDocument()
   })
 
+  const openaiStoredWithBaseUrl = {
+    ...twoProviders,
+    providers: {
+      ...twoProviders.providers,
+      openai: {
+        ...twoProviders.providers.openai,
+        baseUrl: "https://gateway.internal/v1",
+      },
+    },
+  }
+
+  it("sends no baseUrl when a provider with a stored one goes untouched", () => {
+    const saveKey = vi.fn().mockResolvedValue(true)
+    render(
+      <LlmCredentialDialog
+        open
+        onOpenChange={() => {}}
+        credentials={credentials({ status: openaiStoredWithBaseUrl, saveKey })}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: "sk-new" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }))
+    // Synchronous, deliberately: `saveKey` is called at the top of
+    // `handleSave`, before its first `await` suspends the function, so the
+    // call already happened by the time `fireEvent.click` returns.
+    expect(saveKey).toHaveBeenLastCalledWith("openai", "sk-new", undefined)
+  })
+
+  it("sends an explicit empty baseUrl when the user clears a previously stored value", () => {
+    const saveKey = vi.fn().mockResolvedValue(true)
+    render(
+      <LlmCredentialDialog
+        open
+        onOpenChange={() => {}}
+        credentials={credentials({ status: openaiStoredWithBaseUrl, saveKey })}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: "sk-new" } })
+    fireEvent.change(screen.getByLabelText(/Base URL/), { target: { value: "" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }))
+    expect(saveKey).toHaveBeenLastCalledWith("openai", "sk-new", "")
+  })
+
   it("names the provider's own environment variable when it manages the key", () => {
     const envManaged = {
       ...twoProviders,

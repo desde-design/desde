@@ -174,6 +174,48 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
     })
   })
 
+  it("cx1: an explicit empty baseUrl clears a previously stored one", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }))
+    const res1 = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res1),
+      url("/api/editor/llm-credentials/openai"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        readBody: async () => ({ apiKey: "sk-first1234", baseUrl: "https://gateway.internal" }),
+      },
+    )
+    expect(res1.statusCode).toBe(200)
+    expect((await readLlmCredentials(home)).providers.openai).toEqual({
+      apiKey: "sk-first1234",
+      baseUrl: "https://gateway.internal",
+    })
+
+    // A PUT that resends the key with an explicit empty baseUrl clears it,
+    // distinct from omitting baseUrl entirely (which preserves it, above).
+    const res2 = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res2),
+      url("/api/editor/llm-credentials/openai"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        readBody: async () => ({ apiKey: "sk-first1234", baseUrl: "" }),
+      },
+    )
+    expect(res2.statusCode).toBe(200)
+    expect((await readLlmCredentials(home)).providers.openai).toEqual({
+      apiKey: "sk-first1234",
+    })
+  })
+
   it("refuses to persist a key the provider rejects", async () => {
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 401 }))
     const res = fakeRes()

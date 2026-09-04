@@ -81,25 +81,47 @@ function defaults(): LlmCredentialFile {
  * fresh read anyway.
  */
 function migrateV1(file: LlmCredentialFileV1): LlmCredentialFile {
-  if (file.apiKey !== undefined && typeof file.apiKey !== "string") return defaults()
-  if (typeof file.devMode !== "boolean") return defaults()
+  // Each field migrates on its own. A v1 file with a valid key and a missing
+  // or malformed `devMode`/`promptDismissed` must still keep the key: the old
+  // code discarded the WHOLE file (via `return defaults()`) the moment any
+  // one field looked wrong, which silently deleted a real user's key on the
+  // very next read after upgrade.
+  const apiKey =
+    typeof file.apiKey === "string" && file.apiKey.trim().length > 0 ? file.apiKey : undefined
   return {
     version: SCHEMA_VERSION,
-    providers: file.apiKey === undefined ? {} : { anthropic: { apiKey: file.apiKey } },
-    devMode: file.devMode,
-    promptDismissed: typeof file.promptDismissed === "boolean" ? file.promptDismissed : false,
+    providers: apiKey === undefined ? {} : { anthropic: { apiKey } },
+    devMode: file.devMode === true,
+    promptDismissed: file.promptDismissed === true,
   }
 }
 
-/** Every slot must be an object of optional strings, or the file is not trusted. */
+/**
+ * Every slot must be an object of optional strings. A malformed slot is
+ * dropped on its own, not treated as a reason to discard the whole file: one
+ * corrupt provider must not destroy every other provider's valid key. Only
+ * the top-level shape (not an object, or an array) still fails the whole
+ * read, since there is no per-slot structure to salvage from that.
+ */
 function sanitizeProviders(raw: unknown): Record<string, StoredProviderCredentials> | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null
   const out: Record<string, StoredProviderCredentials> = {}
   for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return null
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      // Never log the value itself, only the provider id: this warning can
+      // reach a real user's terminal, and the value may be (a fragment of) a
+      // secret.
+      console.warn(`[llm-credentials] ignoring a malformed entry for provider '${id}'`)
+      continue
+    }
     const slot = value as Record<string, unknown>
-    if (slot.apiKey !== undefined && typeof slot.apiKey !== "string") return null
-    if (slot.baseUrl !== undefined && typeof slot.baseUrl !== "string") return null
+    if (
+      (slot.apiKey !== undefined && typeof slot.apiKey !== "string") ||
+      (slot.baseUrl !== undefined && typeof slot.baseUrl !== "string")
+    ) {
+      console.warn(`[llm-credentials] ignoring a malformed entry for provider '${id}'`)
+      continue
+    }
     out[id] = {
       ...(typeof slot.apiKey === "string" ? { apiKey: slot.apiKey } : {}),
       ...(typeof slot.baseUrl === "string" ? { baseUrl: slot.baseUrl } : {}),
