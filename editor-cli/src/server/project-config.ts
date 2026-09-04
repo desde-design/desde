@@ -189,7 +189,7 @@ export interface ProjectConfig {
    * anywhere inside `retention` (same as anywhere inside `chat` /
    * `conventions` / `editor`) fails `readProjectConfig` entirely,
    * which degrades the WHOLE project association — `projectSlug`,
-   * `chatQuotas`, `conventions`, `editor`, AND `retention` all fall
+   * `chatQuotas`, `conventions`, `editor`, `retention`, AND `llm` all fall
    * back to "unset"/degraded mode, not just the offending block. A
    * scoped-degrade (keep the rest of the config, drop only the bad
    * `retention` sub-block with a warning) was considered and rejected:
@@ -219,6 +219,26 @@ export interface ProjectConfig {
       /** Max turns kept in the head session file. Default 500. */
       maxTurns?: number
     }
+  }
+  /**
+   * Which model provider the NON-CHAT lanes use, and per-provider overrides.
+   *
+   * Chat is not configured here: the model picker's choice is per chat
+   * session. These lanes (the LLM patch, repair, iteration-data, goal
+   * translation and hint-generation lanes) run outside any session, so they
+   * need a project-level answer.
+   *
+   * `defaultProvider` is honoured only when that provider is actually
+   * credentialed, so naming a provider whose key is missing degrades to the
+   * one that works instead of failing every save.
+   *
+   * Note the file: this is `.desde/config.json`, the config Desde actually
+   * reads. `tasks/NEXT.md` names `desde.config.json` for this block and is
+   * wrong there.
+   */
+  llm?: {
+    defaultProvider?: string
+    providers?: Record<string, { model?: string; baseUrl?: string; apiKeyEnv?: string }>
   }
 }
 
@@ -665,6 +685,69 @@ export async function readProjectConfig(
     retention = Object.keys(out).length > 0 ? out : undefined
   }
 
+  let llm: ProjectConfig['llm']
+  if (obj.llm !== undefined) {
+    if (typeof obj.llm !== 'object' || obj.llm === null || Array.isArray(obj.llm)) {
+      return {
+        ok: false,
+        reason: 'malformed',
+        message: `${configPath}: 'llm' must be an object when provided.`,
+      }
+    }
+    const l = obj.llm as Record<string, unknown>
+    const out: NonNullable<ProjectConfig['llm']> = {}
+    if (l.defaultProvider !== undefined) {
+      if (typeof l.defaultProvider !== 'string' || l.defaultProvider.length === 0) {
+        return {
+          ok: false,
+          reason: 'malformed',
+          message: `${configPath}: 'llm.defaultProvider' must be a non-empty string.`,
+        }
+      }
+      out.defaultProvider = l.defaultProvider
+    }
+    if (l.providers !== undefined) {
+      if (
+        typeof l.providers !== 'object' ||
+        l.providers === null ||
+        Array.isArray(l.providers)
+      ) {
+        return {
+          ok: false,
+          reason: 'malformed',
+          message: `${configPath}: 'llm.providers' must be an object when provided.`,
+        }
+      }
+      const providers: NonNullable<NonNullable<ProjectConfig['llm']>['providers']> = {}
+      for (const [id, raw] of Object.entries(l.providers as Record<string, unknown>)) {
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+          return {
+            ok: false,
+            reason: 'malformed',
+            message: `${configPath}: 'llm.providers.${id}' must be an object.`,
+          }
+        }
+        const entry = raw as Record<string, unknown>
+        const parsed: { model?: string; baseUrl?: string; apiKeyEnv?: string } = {}
+        for (const key of ['model', 'baseUrl', 'apiKeyEnv'] as const) {
+          const v = entry[key]
+          if (v === undefined) continue
+          if (typeof v !== 'string' || v.length === 0) {
+            return {
+              ok: false,
+              reason: 'malformed',
+              message: `${configPath}: 'llm.providers.${id}.${key}' must be a non-empty string.`,
+            }
+          }
+          parsed[key] = v
+        }
+        providers[id] = parsed
+      }
+      if (Object.keys(providers).length > 0) out.providers = providers
+    }
+    llm = Object.keys(out).length > 0 ? out : undefined
+  }
+
   return {
     ok: true,
     config: {
@@ -680,6 +763,7 @@ export async function readProjectConfig(
       ...(conventions !== undefined ? { conventions } : {}),
       ...(editor !== undefined ? { editor } : {}),
       ...(retention !== undefined ? { retention } : {}),
+      ...(llm !== undefined ? { llm } : {}),
     },
   }
 }
