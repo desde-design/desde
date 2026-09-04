@@ -1,33 +1,28 @@
 /**
  * Provider registry. Single entry point for resolving the active
- * `LLMProvider` at runtime.
+ * `LLMProvider` for the NON-CHAT lanes.
  *
  * Config sources, in order of precedence:
  *   1. Explicit `override` argument (test/dev convenience).
- *   2. `LLMConfig` passed in by the caller.
- *   3. Built-in default from `pickDefaultConfig(env)`: Anthropic.
+ *   2. `LLMConfig` passed in by the caller. The CLI builds one per request
+ *      with `resolveLlmConfig` (`editor-cli/src/server/llm-config.ts`) from
+ *      the `llm` block in `.desde/config.json`.
+ *   3. `pickDefaultConfig(env)`, which reads the descriptor table.
  *
- * ⚠️ **Precedence 2 is currently unreachable, so `case 'openai'` below is
- * dead code.** Every call site — `apply-llm-patch.ts`, `repair-edit.ts`,
- * `verification/translate-goal.ts`, `hints/llm-generate-hints.ts` — calls
- * `getProvider()` with NO arguments, and nothing anywhere loads an
- * `LLMConfig` from disk. An earlier version of this comment claimed "CLI
- * bootstrap loads it from `.desde/config.json` and hands it through";
- * that loader was never written. So the provider is always whatever
- * `pickDefaultConfig` returns, which is Anthropic or `claude_code` — never
- * OpenAI.
+ * Precedence 2 used to be unreachable and `case 'openai'` used to be dead
+ * code: every call site called `getProvider()` with no argument and nothing
+ * anywhere loaded an `LLMConfig`. Both are live now.
  *
- * `OpenAIProvider` itself is real and tested; only the wiring is missing.
- * Reaching it means loading an `llm` block from
- * `desde.config.json` and threading it into those four calls.
- * Deferred past initial distribution — see tasks/NEXT.md § "Out of active
- * scope". Note this registry is NOT the chat lane: chat runs on the Claude
- * Agent SDK (`src/editor/agent-chat-sdk/`) and never calls `getProvider()`.
+ * This registry is still NOT the chat lane. Chat dispatches on the session's
+ * provider through `editor-cli/src/server/chat-runtime-dispatch.ts`.
  *
- * The registry deliberately does NOT touch the filesystem itself —
- * config loading is the caller's responsibility. This keeps the
- * registry pure and testable, and keeps the per-runtime config policy
- * (CLI vs. web app vs. tests) in the runtime that owns it.
+ * Import direction: this file reads `provider-registry.ts`, never the reverse.
+ * The subscription flag both need lives lower still, in
+ * `claude-subscription.ts`, which is what keeps that arrow one-way.
+ *
+ * The registry deliberately does NOT touch the filesystem — config loading is
+ * the caller's responsibility, which keeps the per-runtime config policy in
+ * the runtime that owns it.
  */
 
 import { AnthropicProvider, ANTHROPIC_DEFAULT_MODEL } from './anthropic-provider'
@@ -37,6 +32,12 @@ import {
 } from './claude-agent-sdk-provider'
 import { CLAUDE_SUBSCRIPTION_ENV, isClaudeSubscriptionOptIn } from './claude-subscription'
 import { OpenAIProvider, OPENAI_DEFAULT_MODEL } from './openai-provider'
+import {
+  PROVIDER_DESCRIPTORS,
+  getDescriptor,
+  resolveDefaultProviderId,
+  isCredentialedFromEnv,
+} from './provider-registry'
 import type { LLMProvider } from './types'
 
 export { CLAUDE_SUBSCRIPTION_ENV, isClaudeSubscriptionOptIn }
@@ -105,46 +106,82 @@ export function getProvider(opts: GetProviderOpts = {}): LLMProvider {
 }
 
 /**
+ * The `LLMConfig` a provider id implies, before any project overrides.
+ *
+ * The subscription special case lives HERE and nowhere else: with no Anthropic
+ * key but an explicit opt-in, the config routes through the bundled `claude`
+ * binary instead. Duplicating that rule in `resolveLlmConfig` is how the two
+ * would come to disagree about what "no key" means.
+ */
+export function configForProvider(
+  providerId: string,
+  env: NodeJS.ProcessEnv,
+): LLMConfig {
+  const descriptor = getDescriptor(providerId)
+  if (!descriptor) return DEFAULT_LLM_CONFIG
+  const { apiKeyEnvVar, baseUrlEnvVar, hasSubscriptionRuntime } = descriptor.credentials
+  if (
+    hasSubscriptionRuntime === true &&
+    !env[apiKeyEnvVar]?.trim() &&
+    isClaudeSubscriptionOptIn(env)
+  ) {
+    return CLAUDE_CODE_LLM_CONFIG
+  }
+  const baseUrl = baseUrlEnvVar ? env[baseUrlEnvVar]?.trim() : undefined
+  return {
+    provider: descriptor.id,
+    apiKeyEnv: apiKeyEnvVar,
+    ...(baseUrl ? { baseUrl } : {}),
+  }
+}
+
+/**
  * Pick a default config from environment auth.
  *
- * Order, and why: an explicit `ANTHROPIC_API_KEY` always wins (a key-holder
- * is never silently routed elsewhere). Otherwise the subscription path is
- * used ONLY when explicitly opted into. With neither, the API config is
- * returned and `buildProvider` refuses with an actionable message — a
- * deliberate failure, because the alternative is quietly billing a user's
- * personal subscription.
+ * Order, and why: a credentialed provider in precedence order wins, an
+ * explicit key always beating a subscription. With nothing credentialed the
+ * first descriptor's API config is returned and `buildProvider` refuses with
+ * an actionable message — a deliberate failure, because the alternative is
+ * quietly billing a user's personal subscription.
  */
 export function pickDefaultConfig(env: NodeJS.ProcessEnv): LLMConfig {
-  if (env.ANTHROPIC_API_KEY) return DEFAULT_LLM_CONFIG
-  if (isClaudeSubscriptionOptIn(env)) return CLAUDE_CODE_LLM_CONFIG
-  return DEFAULT_LLM_CONFIG
+  return configForProvider(
+    resolveDefaultProviderId({
+      env,
+      isCredentialed: (d) => isCredentialedFromEnv(d, env),
+    }),
+    env,
+  )
 }
 
 function buildProvider(config: LLMConfig, env: NodeJS.ProcessEnv): LLMProvider {
-  // `apiKeyEnv` (Phase 0 punchlist item): read the named env var
-  // explicitly and pass to the provider INSTANCE. Each provider binds
-  // to its own key — no `process.env` mutation, so two providers with
-  // different keys can coexist in the same process without cross-wiring.
-  const apiKey = config.apiKeyEnv ? env[config.apiKeyEnv] : undefined
-  if (config.provider === 'anthropic' && !apiKey) {
-    // Fail here, with instructions, rather than at the first turn with a
-    // provider-internal 401 that reads like a bug in Editor.
+  // `apiKeyEnv`: read the named env var explicitly and pass it to the provider
+  // INSTANCE, so two providers with different keys coexist in one process
+  // without cross-wiring. Falls back to the provider's own descriptor env var
+  // when the caller's config left `apiKeyEnv` unset.
+  const descriptor = getDescriptor(config.provider)
+  const apiKeyEnvVar = config.apiKeyEnv ?? descriptor?.credentials.apiKeyEnvVar
+  const apiKey = apiKeyEnvVar ? env[apiKeyEnvVar] : undefined
+  // Fail here, with instructions, rather than at the first call with a
+  // provider-internal 401 that reads like a bug in Editor. This used to fire
+  // only for 'anthropic', so an OpenAI misconfiguration surfaced lazily inside
+  // complete() — the inconsistent failure the descriptor table removes.
+  if (descriptor && !apiKey?.trim()) {
+    const envVar = apiKeyEnvVar ?? descriptor.credentials.apiKeyEnvVar
+    const subscriptionHint =
+      descriptor.credentials.hasSubscriptionRuntime === true
+        ? ` Or set ${CLAUDE_SUBSCRIPTION_ENV}=1 to use the Claude subscription of the bundled \`claude\` CLI (only appropriate when you are running Editor for yourself. See the README).`
+        : ''
     throw new Error(
-      `Missing ${config.apiKeyEnv ?? 'ANTHROPIC_API_KEY'}. Set it to use Editor's AI features, ` +
-        `or set ${CLAUDE_SUBSCRIPTION_ENV}=1 to use the Claude subscription of the bundled \`claude\` CLI ` +
-        `(only appropriate when you are running Editor for yourself. See the README).`,
+      `Missing ${envVar}. Set it to use Editor's AI features with ${descriptor.label}, ` +
+        `or add a key from the settings gear in the top bar.${subscriptionHint}`,
     )
   }
   switch (config.provider) {
     case 'anthropic':
-      return new AnthropicProvider({
-        defaultModel: config.model,
-        apiKey,
-      })
+      return new AnthropicProvider({ defaultModel: config.model, apiKey })
     case 'claude_code':
-      return new ClaudeAgentSdkProvider({
-        defaultModel: config.model,
-      })
+      return new ClaudeAgentSdkProvider({ defaultModel: config.model })
     case 'openai':
       return new OpenAIProvider({
         apiKey: apiKey ?? env.OPENAI_API_KEY,
@@ -153,7 +190,10 @@ function buildProvider(config: LLMConfig, env: NodeJS.ProcessEnv): LLMProvider {
       })
     default:
       throw new Error(
-        `Unknown LLM provider '${config.provider}'. Supported: anthropic, claude_code, openai.`,
+        `Unknown LLM provider '${config.provider}'. Supported: ${[
+          ...PROVIDER_DESCRIPTORS.map((d) => d.id),
+          'claude_code',
+        ].join(', ')}.`,
       )
   }
 }

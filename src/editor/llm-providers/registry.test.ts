@@ -5,7 +5,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getProvider, type LLMConfig } from './registry'
+import {
+  getProvider,
+  pickDefaultConfig,
+  DEFAULT_LLM_CONFIG,
+  CLAUDE_CODE_LLM_CONFIG,
+  type LLMConfig,
+} from './registry'
 import { AnthropicProvider } from './anthropic-provider'
 import { ClaudeAgentSdkProvider } from './claude-agent-sdk-provider'
 import { OpenAIProvider } from './openai-provider'
@@ -147,5 +153,69 @@ describe('getProvider', () => {
     expect(process.env.ANTHROPIC_API_KEY).toBeUndefined()
     expect(a).toBeInstanceOf(AnthropicProvider)
     expect(b).toBeInstanceOf(AnthropicProvider)
+  })
+})
+
+describe('pickDefaultConfig consults the descriptor table', () => {
+  it('still prefers an Anthropic key over everything', () => {
+    expect(
+      pickDefaultConfig({ ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }),
+    ).toMatchObject({ provider: 'anthropic', apiKeyEnv: 'ANTHROPIC_API_KEY' })
+  })
+
+  it('picks openai when it is the only credentialed provider', () => {
+    expect(pickDefaultConfig({ OPENAI_API_KEY: 'sk-y' })).toMatchObject({
+      provider: 'openai',
+      apiKeyEnv: 'OPENAI_API_KEY',
+    })
+  })
+
+  it("carries a base URL from the provider's own env var", () => {
+    expect(
+      pickDefaultConfig({ OPENAI_API_KEY: 'sk-y', OPENAI_BASE_URL: 'https://gw.internal' }),
+    ).toMatchObject({ provider: 'openai', baseUrl: 'https://gw.internal' })
+  })
+
+  it('still routes to claude_code on the explicit subscription opt-in', () => {
+    expect(pickDefaultConfig({ EDITOR_USE_CLAUDE_SUBSCRIPTION: '1' })).toEqual(
+      CLAUDE_CODE_LLM_CONFIG,
+    )
+  })
+
+  it('falls back to the Anthropic API config when nothing is credentialed', () => {
+    // Deliberate: `buildProvider` then refuses with an actionable message
+    // rather than quietly billing someone's personal subscription.
+    expect(pickDefaultConfig({})).toMatchObject({ provider: 'anthropic' })
+  })
+})
+
+describe('buildProvider refuses a missing key for ANY provider', () => {
+  it('refuses openai up front instead of failing inside complete()', () => {
+    expect(() =>
+      getProvider({ config: { provider: 'openai', apiKeyEnv: 'OPENAI_API_KEY' }, env: {} }),
+    ).toThrow(/OPENAI_API_KEY/)
+  })
+
+  it('names the provider whose key is missing', () => {
+    expect(() =>
+      getProvider({ config: { provider: 'openai', apiKeyEnv: 'OPENAI_API_KEY' }, env: {} }),
+    ).toThrow(/OpenAI/)
+  })
+
+  it('still mentions the subscription escape hatch only for anthropic', () => {
+    expect(() => getProvider({ config: DEFAULT_LLM_CONFIG, env: {} })).toThrow(
+      /EDITOR_USE_CLAUDE_SUBSCRIPTION/,
+    )
+    expect(() =>
+      getProvider({ config: { provider: 'openai', apiKeyEnv: 'OPENAI_API_KEY' }, env: {} }),
+    ).not.toThrow(/EDITOR_USE_CLAUDE_SUBSCRIPTION/)
+  })
+
+  it('builds openai when the key is present', () => {
+    const provider = getProvider({
+      config: { provider: 'openai', apiKeyEnv: 'OPENAI_API_KEY' },
+      env: { OPENAI_API_KEY: 'sk-y' },
+    })
+    expect(provider.name).toBe('openai')
   })
 })

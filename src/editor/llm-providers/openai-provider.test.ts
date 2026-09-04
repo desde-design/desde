@@ -7,7 +7,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { OpenAIProvider } from './openai-provider'
-import type { ProviderEvent } from './types'
+import type { LLMProvider, ProviderEvent } from './types'
 
 function makeJsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -395,5 +395,20 @@ describe('OpenAIProvider.streamConversation', () => {
     const tu = events.find((e) => e.kind === 'tool_use')
     if (tu?.kind !== 'tool_use') throw new Error('expected tool_use')
     expect((tu.input as { __parseError: string }).__parseError).toBe('{"oops')
+  })
+})
+
+/**
+ * MEASURED contract, pinned because it is load-bearing and unguarded until
+ * now: `apply-llm-patch.ts` decides SSE-vs-blocking on this method's PRESENCE,
+ * and `types.ts` warns against shipping a no-op stub. An OpenAI-backed save
+ * therefore shows no live tokens today, which is correct behaviour rather than
+ * a bug. Phase 4 replaces this with a real Chat Completions stream and this
+ * test with its inverse.
+ */
+describe('streamComplete is deliberately absent', () => {
+  it('has no streamComplete method at all', () => {
+    const provider: LLMProvider = new OpenAIProvider({})
+    expect(provider.streamComplete).toBeUndefined()
   })
 })
