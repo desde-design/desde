@@ -35,12 +35,14 @@
 
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 
 import type {
   BridgeClient,
   EditProposalPayload,
 } from '../agent-tools/types'
+import type { ToolHandlerResult, ToolSpec } from '../agent-chat/tool-spec'
 import { saveScreenshotPlanHandler } from './save-screenshot-plan-tool'
 import { healPlanStepHandler } from './heal-plan-step-tool'
 import type { ScreenshotPlanStep } from '../core'
@@ -66,6 +68,12 @@ import {
   searchExternalFiles,
   sessionDiff,
   sessionStatus,
+  type DiffFileInput,
+  type ListCommitsInput,
+  type ReadFileAtCommitInput,
+  type RunVerificationInput,
+  type SearchExternalFilesInput,
+  type SessionDiffInput,
 } from './read-root-tools'
 import { LIVE_SURFACE_CAPABILITIES } from './live-surface-registry'
 import {
@@ -198,13 +206,14 @@ export interface BuildEditorToolServerOpts {
 }
 
 /**
- * Build the in-process MCP server. Each tool's description is the same
- * as the legacy registry so the model's tool-selection prompt context
- * stays identical across the migration.
+ * Declare every editor tool as a vendor-neutral {@link ToolSpec}. Each
+ * description is the same as the legacy registry so the model's
+ * tool-selection prompt context stays identical across the migration.
+ *
+ * `buildEditorToolServer` below is the SDK binding on top of this list —
+ * the neutral chat lane consumes the identical specs via `toToolDefs`.
  */
-export function buildEditorToolServer(
-  opts: BuildEditorToolServerOpts,
-): McpSdkServerConfigWithInstance {
+export function buildEditorToolSpecs(opts: BuildEditorToolServerOpts): ToolSpec[] {
   const {
     bridge,
     signal,
@@ -228,38 +237,46 @@ export function buildEditorToolServer(
   // GroundingService resolver is available (CLI/worktree-session mode). The
   // agent uses these to enumerate real components/props/variants/tokens rather
   // than guessing. Spread into the tools array below.
-  const groundingTools = getGrounding
+  const groundingTools: ToolSpec[] = getGrounding
     ? [
-        tool(
-          'list_components',
-          "List the design-system components available in this prototype (name, design system, description). Call this to discover what you can build with before writing markup — prefer real catalog components over inventing raw HTML/CSS.",
-          {},
-          () => listComponentsTool(getGrounding),
-        ),
-        tool(
-          'get_component',
-          "Get a component's full manifest: its props (name, type, required, default, description, and `control.options` — the allowed VARIANT values), slots, events, import path, and rendering hints. Call this before setting a prop or choosing a variant so you use real prop names and valid values, not guesses.",
-          {
+        {
+          name: 'list_components',
+          description:
+            "List the design-system components available in this prototype (name, design system, description). Call this to discover what you can build with before writing markup — prefer real catalog components over inventing raw HTML/CSS.",
+          kind: 'editor',
+          inputShape: {},
+          handler: () => listComponentsTool(getGrounding),
+        },
+        {
+          name: 'get_component',
+          description:
+            "Get a component's full manifest: its props (name, type, required, default, description, and `control.options` — the allowed VARIANT values), slots, events, import path, and rendering hints. Call this before setting a prop or choosing a variant so you use real prop names and valid values, not guesses.",
+          kind: 'editor',
+          inputShape: {
             name: z
               .string()
               .describe(
                 'Exact component name (e.g. "UiButton"). Use list_components / search_components first if unsure.',
               ),
           },
-          (input) => getComponentTool(getGrounding, input),
-        ),
-        tool(
-          'search_components',
-          'Find components whose name or description matches a substring. Use to locate the right component when you only know roughly what you want (e.g. "modal", "select").',
-          {
+          handler: (input) => getComponentTool(getGrounding, input as { name: string }),
+        },
+        {
+          name: 'search_components',
+          description:
+            'Find components whose name or description matches a substring. Use to locate the right component when you only know roughly what you want (e.g. "modal", "select").',
+          kind: 'editor',
+          inputShape: {
             query: z.string().describe('Case-insensitive substring to match.'),
           },
-          (input) => searchComponentsTool(getGrounding, input),
-        ),
-        tool(
-          'get_design_tokens',
-          "List the prototype's design tokens (name, value, category, subcategory, description). Optionally filter by category. Use a token (e.g. `--acme-color-background-primary`) instead of hardcoding a hex/px value whenever one exists.",
-          {
+          handler: (input) => searchComponentsTool(getGrounding, input as { query: string }),
+        },
+        {
+          name: 'get_design_tokens',
+          description:
+            "List the prototype's design tokens (name, value, category, subcategory, description). Optionally filter by category. Use a token (e.g. `--acme-color-background-primary`) instead of hardcoding a hex/px value whenever one exists.",
+          kind: 'editor',
+          inputShape: {
             category: z
               .string()
               .optional()
@@ -267,20 +284,23 @@ export function buildEditorToolServer(
                 'Optional category filter: color | space | font-size | font-weight | line-height | border-radius | border-width | shadow | other.',
               ),
           },
-          (input) => getDesignTokensTool(getGrounding, input),
-        ),
+          handler: (input) =>
+            getDesignTokensTool(getGrounding, input as { category?: string }),
+        },
       ]
     : []
 
   // Grounded WRITE tool — insert a catalog component. Gated on grounding for
   // the same reason as the query tools above: without a manifest it can only
   // refuse, so don't surface it. Spread into the tools array below.
-  const insertComponentTools = getGrounding
+  const insertComponentTools: ToolSpec[] = getGrounding
     ? [
-        tool(
-          'insert_component',
-          "Insert a design-system component as a child of a target element. Goes through the deterministic edit pipeline and AUTO-ADDS the component's import — prefer this over rewriting the whole SFC with Edit/Write when adding a component instance. First resolve the component with list_components / search_components / get_component (so you use a real catalog component), then identify the DESTINATION PARENT element (the container the new node goes inside) with get_selection and pass its source file + line + column. The change is written to the working tree immediately (uncommitted — the user commits it). For complex/bound props or restructuring, insert plainly here then refine with propose_prop_edit or Edit.",
-          {
+        {
+          name: 'insert_component',
+          description:
+            "Insert a design-system component as a child of a target element. Goes through the deterministic edit pipeline and AUTO-ADDS the component's import — prefer this over rewriting the whole SFC with Edit/Write when adding a component instance. First resolve the component with list_components / search_components / get_component (so you use a real catalog component), then identify the DESTINATION PARENT element (the container the new node goes inside) with get_selection and pass its source file + line + column. The change is written to the working tree immediately (uncommitted — the user commits it). For complex/bound props or restructuring, insert plainly here then refine with propose_prop_edit or Edit.",
+          kind: 'editor',
+          inputShape: {
             componentName: z
               .string()
               .describe('Exact catalog component name (e.g. "UiButton"). Must exist in the design system — check with get_component first; insertion is refused otherwise.'),
@@ -309,16 +329,26 @@ export function buildEditorToolServer(
               .optional()
               .describe('Optional default-slot text content. Omit for a self-closing element.'),
           },
-          ({ componentName, file, line, column, destIndex, props, text }) =>
-            insertComponentHandler({
+          handler: (input) => {
+            const { componentName, file, line, column, destIndex, props, text } = input as {
+              componentName: string
+              file: string
+              line: number
+              column: number
+              destIndex?: number
+              props?: Record<string, string | number | boolean>
+              text?: string
+            }
+            return insertComponentHandler({
               worktreeRoot,
               invalidateFiles,
               emitEdit,
               getGrounding,
               input: { componentName, file, line, column, destIndex, props, text },
               acquireTreeGate,
-            }),
-        ),
+            })
+          },
+        },
       ]
     : []
 
@@ -331,12 +361,14 @@ export function buildEditorToolServer(
   // restore — the handlers (`saveScreenshotPlanHandler`,
   // `healPlanStepHandler`), replay/heal plumbing, and their tests are
   // untouched; only registration is skipped.
-  const screenshotPlanTools = canvasEnabled
+  const screenshotPlanTools: ToolSpec[] = canvasEnabled
     ? [
-        tool(
-          'save_screenshot_plan',
-          "Save a durable SCREENSHOT PLAN after walking a flow live. Use this when the user asks to 'capture/snapshot a flow' or 'make screenshots of going through X'. First WALK the flow with navigate + interact + capture_screenshot to confirm each step works and to capture the resolved targets; THEN call this once with the full ordered steps. Each step is one of: navigate {kind:'navigate', route}, interact {kind:'interact', action, target:{role,name,text,description,resolvedSelector}}, or capture {kind:'capture', capture:{scope:'viewport'|'selector', selector?, label}}. The plan is validated and written to .desde/screenshot-plans/<id>.json so it can be replayed deterministically later (no LLM); the shell then replays it and persists the captured screens as frames on the workspace Canvas. Put the resolvedSelector each interact tool returned into that step's target so replay is fast.",
-          {
+        {
+          name: 'save_screenshot_plan',
+          description:
+            "Save a durable SCREENSHOT PLAN after walking a flow live. Use this when the user asks to 'capture/snapshot a flow' or 'make screenshots of going through X'. First WALK the flow with navigate + interact + capture_screenshot to confirm each step works and to capture the resolved targets; THEN call this once with the full ordered steps. Each step is one of: navigate {kind:'navigate', route}, interact {kind:'interact', action, target:{role,name,text,description,resolvedSelector}}, or capture {kind:'capture', capture:{scope:'viewport'|'selector', selector?, label}}. The plan is validated and written to .desde/screenshot-plans/<id>.json so it can be replayed deterministically later (no LLM); the shell then replays it and persists the captured screens as frames on the workspace Canvas. Put the resolvedSelector each interact tool returned into that step's target so replay is fast.",
+          kind: 'editor',
+          inputShape: {
             name: z.string().describe("Short human name for the plan, e.g. 'Create a model'."),
             baseUrl: z
               .string()
@@ -375,8 +407,14 @@ export function buildEditorToolServer(
               )
               .describe('The ordered flow steps (navigate / interact / capture).'),
           },
-          ({ name, baseUrl, prompt, steps }) =>
-            saveScreenshotPlanHandler({
+          handler: (input) => {
+            const { name, baseUrl, prompt, steps } = input as {
+              name: string
+              baseUrl: string
+              prompt?: string
+              steps: unknown[]
+            }
+            return saveScreenshotPlanHandler({
               worktreeRoot,
               input: {
                 name,
@@ -384,13 +422,16 @@ export function buildEditorToolServer(
                 prompt,
                 steps: steps as unknown as ScreenshotPlanStep[],
               },
-            }),
-        ),
+            })
+          },
+        },
 
-        tool(
-          'heal_plan_step',
-          "Repair a BROKEN interact step in a saved screenshot plan (its cached element no longer resolves during replay). First navigate to the step's page and re-find the element the step's `description` refers to; then call this with `planId`, `stepIndex`, and the re-identified semantic `target` (role + name). The tool INDEPENDENTLY resolves your target on the live page and VALIDATES it matches the step's original intent before writing the new selector back — it does NOT trust your word. If it REJECTS (role mismatch / unrelated element / not found), your target was wrong: pick the element the description actually means, or tell the user the element is gone. Don't call it more than ~3 times for the same step.",
-          {
+        {
+          name: 'heal_plan_step',
+          description:
+            "Repair a BROKEN interact step in a saved screenshot plan (its cached element no longer resolves during replay). First navigate to the step's page and re-find the element the step's `description` refers to; then call this with `planId`, `stepIndex`, and the re-identified semantic `target` (role + name). The tool INDEPENDENTLY resolves your target on the live page and VALIDATES it matches the step's original intent before writing the new selector back — it does NOT trust your word. If it REJECTS (role mismatch / unrelated element / not found), your target was wrong: pick the element the description actually means, or tell the user the element is gone. Don't call it more than ~3 times for the same step.",
+          kind: 'editor',
+          inputShape: {
             planId: z.string().describe('The screenshot plan id (the <id> in .desde/screenshot-plans/<id>.json).'),
             stepIndex: z.number().int().describe('0-based index of the broken interact step in the plan.'),
             target: z
@@ -401,462 +442,583 @@ export function buildEditorToolServer(
               })
               .describe('The semantic target you re-found for the broken step.'),
           },
-          ({ planId, stepIndex, target }) =>
-            healPlanStepHandler({
+          handler: (input) => {
+            const { planId, stepIndex, target } = input as {
+              planId: string
+              stepIndex: number
+              target: { role?: string; name?: string; text?: string }
+            }
+            return healPlanStepHandler({
               worktreeRoot,
               bridge,
               signal,
               input: { planId, stepIndex, target },
-            }),
-        ),
+            })
+          },
+        },
       ]
     : []
 
+  return [
+    // Live-surface (bridge round-trip) tools — selection / page-info / pin,
+    // registered from the registry rail (live-surface-registry.ts) so a new
+    // bridge tool (screenshot, navigate) is a single entry there, not an
+    // inline wire + a hand-added name.
+    ...LIVE_SURFACE_CAPABILITIES.map(
+      (cap): ToolSpec => ({
+        name: cap.name,
+        description: cap.description,
+        kind: 'editor',
+        inputShape: cap.inputSchema,
+        handler: (input) =>
+          cap.run({ bridge, signal, worktreeRoot, reviewSurface }, input) as Promise<ToolHandlerResult>,
+      }),
+    ),
+
+    {
+      name: 'propose_prop_edit',
+      description:
+        "Propose a prop/attribute change on the currently-selected component. Live-previews in the iframe immediately via a DOM overlay; flushed to the worktree on Save. Use this for simple value changes that don't require rewriting source code. For complex shape changes, use the Edit tool to rewrite the source file directly.",
+      kind: 'editor',
+      inputShape: {
+        selector: z
+          .string()
+          .describe(
+            'CSS selector for the target element. Use `get_selection` first and pass its `selector` back here verbatim.',
+          ),
+        targetId: z
+          .string()
+          .optional()
+          .describe(
+            'Stable bridge target id from `get_selection.targetId`. Optional but recommended — drift detection prefers this over the selector when both are present.',
+          ),
+        propName: z
+          .string()
+          .describe(
+            'Name of the prop or attribute to set on the component (e.g. "variant", "size", "disabled").',
+          ),
+        value: z
+          .union([z.string(), z.number(), z.boolean(), z.null()])
+          .describe(
+            'New value for the prop. Must be a string, number, boolean, or null. For complex props or template restructuring use the Edit tool on the source file instead.',
+          ),
+      },
+      handler: async (input) => {
+        const { selector, targetId, propName, value } = input as {
+          selector: string
+          targetId?: string
+          propName: string
+          value: string | number | boolean | null
+        }
+        const ack = await emitEdit({
+          type: 'prop_edit',
+          selector,
+          targetId,
+          propName,
+          value,
+        })
+        if (!ack.ok) {
+          return {
+            content: [
+              { type: 'text', text: `rejected: ${ack.reason}` },
+            ],
+            isError: true,
+          }
+        }
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                editId: ack.editId,
+                summary: `Buffered prop edit: ${propName} = ${JSON.stringify(value)}`,
+              }),
+            },
+          ],
+        }
+      },
+    },
+
+    {
+      name: 'list_read_roots',
+      description:
+        'List every readable root for this session — the implicit "worktree" plus any externals declared in desde.config.json. Returns names + descriptions only, never raw filesystem paths. Call this first if you plan to use list_commits / read_file_at_commit / diff_file / search_external_files with a non-worktree root.',
+      kind: 'editor',
+      inputShape: {},
+      handler: () => listReadRoots(rootCtx),
+    },
+
+    {
+      name: 'list_commits',
+      description:
+        'List commits in a read root (default "worktree"). Returns oldest-to-newest, up to 100 entries. Use this to see what\'s changed recently, find the commit that introduced a bug, or browse history before drilling in with diff_file / read_file_at_commit. For external repos (declared in desde.config.json) this is how you discover refs to read at.',
+      kind: 'editor',
+      inputShape: {
+        root: z
+          .string()
+          .optional()
+          .describe('Read root name (default "worktree"). Call list_read_roots to see what is available.'),
+        limit: z
+          .number()
+          .optional()
+          .describe('Max commits to return. Default 30, hard cap 100.'),
+        sinceRef: z
+          .string()
+          .optional()
+          .describe(
+            'Only return commits reachable from HEAD but NOT from this ref. E.g. "main" to see commits the current branch has that main does not.',
+          ),
+        path: z
+          .string()
+          .optional()
+          .describe('Restrict to commits that touched this repo-relative path.'),
+        grep: z.string().optional().describe('Filter by commit-message substring.'),
+        author: z.string().optional().describe('Filter by author substring.'),
+      },
+      handler: (input) => listCommits(rootCtx, input as ListCommitsInput),
+    },
+
+    {
+      name: 'read_file_at_commit',
+      description:
+        'Read a file\'s contents at a specific commit in a read root. Use sha="HEAD" to read the current state of an external repo. Up to 200KB; oversized files return an error with the actual size so you can decide whether to drill in with diff_file instead. This is the ONLY way to read files outside the worktree — the built-in Read tool is worktree-scoped.',
+      kind: 'editor',
+      inputShape: {
+        root: z
+          .string()
+          .optional()
+          .describe('Read root name (default "worktree").'),
+        path: z.string().describe('Repo-relative path to read.'),
+        sha: z
+          .string()
+          .describe('Commit sha or named ref (HEAD, HEAD~1, branch name, tag).'),
+      },
+      handler: (input) => readFileAtCommit(rootCtx, input as unknown as ReadFileAtCommitInput),
+    },
+
+    {
+      name: 'diff_file',
+      description:
+        'Single-file unified diff between two refs in a read root. Defaults: fromRef = previous commit (HEAD~1), toRef = HEAD. Use this to see what changed in a file across a commit, branch, or arbitrary range. Output is capped at 500 lines; longer diffs are truncated with a marker.',
+      kind: 'editor',
+      inputShape: {
+        root: z
+          .string()
+          .optional()
+          .describe('Read root name (default "worktree").'),
+        path: z.string().describe('Repo-relative path of the file to diff.'),
+        fromRef: z
+          .string()
+          .optional()
+          .describe('Starting ref (default "HEAD~1").'),
+        toRef: z.string().optional().describe('Ending ref (default "HEAD").'),
+      },
+      handler: (input) => diffFile(rootCtx, input as unknown as DiffFileInput),
+    },
+
+    {
+      name: 'search_external_files',
+      description:
+        'Search files in a declared external read root for a regex pattern (uses `git grep`, scoped to the root\'s tracked files at HEAD). For the worktree, use the built-in Grep tool instead — it already works. Use this when you want to find how a component is used in production source, or pull patterns from a reference codebase.',
+      kind: 'editor',
+      inputShape: {
+        root: z
+          .string()
+          .describe('Read root name (must NOT be "worktree" — use the built-in Grep for that).'),
+        query: z.string().describe('Regex pattern to search for.'),
+        paths: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Optional pathspec list to narrow the search (e.g. ["src/components/**"]). Repo-relative.',
+          ),
+      },
+      handler: (input) => searchExternalFiles(rootCtx, input as unknown as SearchExternalFilesInput),
+    },
+
+    {
+      name: 'session_status',
+      description:
+        "Snapshot of the current editing session's worktree: branch, base commit, HEAD, how many commits the session has accumulated, and any uncommitted dirty files. Use this to see what you have changed so far — auto-commit usually keeps the tree clean, but iteration-data edits and bridge mutations can land uncommitted, and this is the only way to see them. Read-only.",
+      kind: 'editor',
+      inputShape: {},
+      handler: () => sessionStatus(rootCtx),
+    },
+
+    {
+      name: 'session_diff',
+      description:
+        'Unified diff of what the current editing session has changed against its base commit (committed + uncommitted). Pass no `path` for the full session diff across all files; pass a worktree-relative path to scope it. Use this when you need to see exactly what code has changed during this session before making related edits.',
+      kind: 'editor',
+      inputShape: {
+        path: z
+          .string()
+          .optional()
+          .describe('Optional worktree-relative path to limit the diff to a single file.'),
+        maxLines: z
+          .number()
+          .optional()
+          .describe('Override the default 500-line cap. Hard ceiling 2000.'),
+      },
+      handler: (input) => sessionDiff(rootCtx, input as SessionDiffInput),
+    },
+
+    {
+      name: 'delete_file',
+      description:
+        "Delete a file from the repo. The unlink happens immediately as an uncommitted working-tree change; the prior content is saved to the backup journal (.desde/backups/) so it can be recovered. Use when refactoring requires removing an obsolete file — extracting a component out, removing dead code, etc. The path MUST live inside the repo; absolute paths or `..` traversal are rejected. If you also need to keep the contents under a different name, use rename_file instead.",
+      kind: 'editor',
+      inputShape: {
+        path: z
+          .string()
+          .describe(
+            'Worktree-relative path of the file to delete (e.g. "src/components/Old.vue").',
+          ),
+      },
+      handler: (input) => {
+        const { path } = input as { path: string }
+        return deleteFileHandler({
+          worktreeRoot,
+          invalidateFiles,
+          emitEdit,
+          input: { path },
+          acquireTreeGate,
+        })
+      },
+    },
+
+    {
+      name: 'download_asset',
+      description:
+        "Download an image from the web into the repo (e.g. a photo or logo the user linked). Writes the bytes as an uncommitted working-tree change. ONLY image types are allowed (.png/.jpg/.jpeg/.gif/.webp/.avif/.svg/.ico), and ONLY from a host the user has already allowlisted for WebFetch in desde.config.json — the same trust boundary, no wider. Private and loopback addresses are always refused. The destination must be inside the repo and must NOT already exist. Use this instead of telling the user to save a file by hand.",
+      kind: 'editor',
+      inputShape: {
+        url: z.string().describe('Absolute https:// URL of the image.'),
+        destPath: z
+          .string()
+          .describe('Worktree-relative destination (e.g. "public/hero.png"). Must not exist.'),
+      },
+      handler: (input) => {
+        const { url, destPath } = input as { url: string; destPath: string }
+        return downloadAssetHandler({
+          worktreeRoot,
+          invalidateFiles,
+          emitEdit,
+          ...(webPolicy ? { webPolicy } : {}),
+          input: { url, destPath },
+          acquireTreeGate,
+        })
+      },
+    },
+
+    {
+      name: 'rename_file',
+      description:
+        "Rename or move a file inside the repo. The rename happens immediately as an uncommitted working-tree change; the prior content is saved to the backup journal (.desde/backups/). The destination MUST live inside the repo, MUST NOT already exist, and MUST either share the source's extension or have an allowed new-file extension. Use when restructuring — moving a component into a subdirectory, renaming for clarity, etc.",
+      kind: 'editor',
+      inputShape: {
+        from: z
+          .string()
+          .describe('Worktree-relative path of the source file.'),
+        to: z
+          .string()
+          .describe('Worktree-relative path of the destination file.'),
+      },
+      handler: (input) => {
+        const { from, to } = input as { from: string; to: string }
+        return renameFileHandler({
+          worktreeRoot,
+          invalidateFiles,
+          emitEdit,
+          input: { from, to },
+          acquireTreeGate,
+        })
+      },
+    },
+
+    {
+      name: 'insert_element',
+      description:
+        "Insert a plain/primitive element (e.g. <div>, <p>, <img>, <ul><li>…, <button>) OR bare text as a child of a target element. Goes through the deterministic edit pipeline (written to the working tree immediately, uncommitted) — prefer this over rewriting the whole SFC with Edit/Write when adding a primitive element or text. For a DESIGN-SYSTEM catalog component (a Button, Card, … from the prototype's design system) use insert_component instead — it resolves the tag and AUTO-ADDS the import; insert_element does NOT add imports. Identify the DESTINATION PARENT (the container the new node goes inside) with get_selection and pass its source file + line + column. For complex/bound props, insert plainly then refine with Edit.",
+      kind: 'editor',
+      inputShape: {
+        snippet: z
+          .string()
+          .describe(
+            'For contentKind "element" (default): a SINGLE template element, e.g. \'<div class="card"></div>\', \'<p>Hello</p>\', \'<img src="/logo.png" alt="Logo" />\'. For contentKind "text": the plain text to insert (HTML-escaped automatically; no {{ }} interpolation).',
+          ),
+        file: z
+          .string()
+          .describe('Worktree-relative path of the SFC that contains the destination parent (from get_selection).'),
+        line: z
+          .number()
+          .int()
+          .describe("1-based source line of the DESTINATION PARENT element (the container the new node becomes a child of), from get_selection's source location."),
+        column: z
+          .number()
+          .int()
+          .describe('1-based source column of the destination parent element (from get_selection).'),
+        destIndex: z
+          .number()
+          .int()
+          .optional()
+          .describe("0-based index among the parent's element children. Omit or pass -1 to append at the end."),
+        contentKind: z
+          .enum(['element', 'text'])
+          .optional()
+          .describe("'element' (default) inserts a single template element; 'text' inserts bare text content into the container."),
+      },
+      handler: (input) => {
+        const { snippet, file, line, column, destIndex, contentKind } = input as {
+          snippet: string
+          file: string
+          line: number
+          column: number
+          destIndex?: number
+          contentKind?: 'element' | 'text'
+        }
+        return insertElementHandler({
+          worktreeRoot,
+          invalidateFiles,
+          emitEdit,
+          input: { snippet, file, line, column, destIndex, contentKind },
+          acquireTreeGate,
+        })
+      },
+    },
+
+    {
+      name: 'scaffold_route',
+      description:
+        "Create a NEW page and register its route in one step. Use this to add a page that doesn't exist yet (e.g. \"add an /about page\", \"create a settings screen\") — it writes a minimal page component AND wires it into the router (via a lazy import, so no manual import edit). Both files are written to the working tree immediately (uncommitted — the user commits them). After scaffolding, call navigate to the new path to view it, then flesh out the page with insert_component / insert_element / Edit. Refuses (with a reason) rather than guess when the routing setup is unrecognized, the path duplicates an existing route, or the path has no nameable segment (e.g. '/' or '/:id').",
+      kind: 'editor',
+      inputShape: {
+        path: z
+          .string()
+          .describe(
+            "The route path to create, e.g. '/about' or '/settings/profile'. Must have at least one static segment to name the page after. A leading slash is added if missing.",
+          ),
+        name: z
+          .string()
+          .optional()
+          .describe("Optional vue-router route name. Derived from the path (e.g. 'settings-profile') when omitted."),
+        heading: z
+          .string()
+          .optional()
+          .describe('Optional <h1> heading for the scaffolded page. Defaults to the humanized page name.'),
+        routerFile: z
+          .string()
+          .optional()
+          .describe('Optional worktree-relative path to the router config. Auto-detected (src/router/index.ts, …) when omitted; pass it if auto-detection reports it could not find or disambiguate the router.'),
+      },
+      handler: (input) => {
+        const { path, name, heading, routerFile } = input as {
+          path: string
+          name?: string
+          heading?: string
+          routerFile?: string
+        }
+        return scaffoldRouteHandler({
+          worktreeRoot,
+          invalidateFiles,
+          emitEdit,
+          input: { path, name, heading, routerFile },
+          acquireTreeGate,
+        })
+      },
+    },
+
+    // Canvas + screenshot-plan surface — dormant by default (see the
+    // `screenshotPlanTools` doc comment above); empty array when
+    // `canvasEnabled` is falsy.
+    ...screenshotPlanTools,
+
+    {
+      name: 'manage_package',
+      description:
+        "Add or remove an npm package dependency. The package.json edit lands as an uncommitted working-tree change, then the substrate's install command runs to sync node_modules + lockfile. Use this instead of editing package.json by hand — going through the package manager avoids drift between manifest and lockfile. The installed dependency is available to the prototype on the next dev-server reload (which usually happens automatically). Long-running: install can take 20–60s for fresh deps.",
+      kind: 'editor',
+      inputShape: {
+        operation: z
+          .enum(['add', 'remove'])
+          .describe('Whether to add or remove a package.'),
+        packageName: z
+          .string()
+          .describe(
+            'NPM package name (e.g. "lodash", "@acme/design-system"). Scoped names are allowed.',
+          ),
+        versionSpec: z
+          .string()
+          .optional()
+          .describe(
+            'Version spec for `add` (defaults to "latest"). Use semver ranges ("^1.2.3"), exact versions ("1.2.3"), or tags ("latest", "next").',
+          ),
+        dev: z
+          .boolean()
+          .optional()
+          .describe(
+            'When true, `add` lands in devDependencies. Ignored for `remove` (the operation scans both). Defaults to false.',
+          ),
+      },
+      handler: (input) => {
+        const { operation, packageName, versionSpec, dev } = input as {
+          operation: 'add' | 'remove'
+          packageName: string
+          versionSpec?: string
+          dev?: boolean
+        }
+        return managePackageHandler({
+          worktreeRoot,
+          invalidateFiles,
+          emitEdit,
+          packageManagerAdapter,
+          signal,
+          input: { operation, packageName, versionSpec, dev },
+          acquireTreeGate,
+        })
+      },
+    },
+
+    // insert_component is grounding-dependent (it resolves the component →
+    // tag + import path from the manifest), so it's gated on getGrounding
+    // exactly like the read-only grounding query tools below — never expose
+    // a write tool the agent can pick but that can't succeed.
+    ...insertComponentTools,
+
+    {
+      name: 'run_verification',
+      description:
+        "Run a verification command (typecheck / lint / test / build) in the worktree. Returns the substrate label (e.g. 'npm'), exit code, stdout, stderr, duration, and the exact command that ran. Output is capped at 32KB each on stdout and stderr — the TAIL is preserved on overflow because failure summaries usually appear at the bottom. When the script is missing and no builtin fallback exists, returns ok=false with noScript=true plus the list of available scripts so you can suggest the right one. Use this BEFORE telling the user a change is correct — type errors and lint failures often catch regressions you missed.",
+      kind: 'editor',
+      inputShape: {
+        check: z
+          .enum(['typecheck', 'lint', 'test', 'build'])
+          .describe(
+            'Which verification verb to run. Mapped to a substrate-specific command by the adapter (e.g. `npm run typecheck`).',
+          ),
+      },
+      handler: (input) => runVerification(rootCtx, input as unknown as RunVerificationInput),
+    },
+
+    {
+      name: 'verify_edit',
+      description:
+        "Confirm a VALUE edit (a text or attribute change) actually took effect in the LIVE DOM, and — if it didn't — find out WHY. Call this right after a value edit instead of assuming it worked: pass the source file + line you edited, a CSS selector for the element the value renders into (from get_selection), the value you expect to see, and how it surfaces (`field`). Returns `{ pass, observed, expected, cause?, hint? }`. On `pass:false` the `cause` tells you the failure mode (e.g. `bound-binding`, `v-model`, `dynamic-vbind`, `conditional`, `selector-missing`) and `hint` says how to fix it — make the TARGETED correction it suggests (edit the binding/ref, not the literal) and re-verify. May instead return `{ skipped: true, reason }` when the prototype's bridge is too old to read live values — then fall back to capture_screenshot. For STYLE / layout / color and any other 'does it look right' change, use capture_screenshot instead (computed styles can't be string-compared reliably).",
+      kind: 'editor',
+      inputShape: {
+        file: z
+          .string()
+          .describe('Worktree-relative path of the SFC the edit rewrote (from get_selection / the file you edited).'),
+        line: z
+          .number()
+          .int()
+          .describe('1-based source line you edited — used to classify why a mismatch happened (bound vs literal).'),
+        selector: z
+          .string()
+          .describe('CSS selector for the element the value renders into (from get_selection — pass its `selector` verbatim).'),
+        expectedValue: z
+          .string()
+          .describe('The value you expect to observe in the live DOM, stringified exactly as it should appear.'),
+        field: z
+          .enum(['textContent', 'attribute'])
+          .describe("How the value surfaces: 'textContent' (the element's text) or 'attribute' (a DOM attribute — pass `attribute`). For computed styles, use capture_screenshot instead."),
+        attribute: z
+          .string()
+          .optional()
+          .describe("Attribute name to read — required when field is 'attribute' (e.g. \"placeholder\", \"href\")."),
+      },
+      handler: (input) => {
+        const { file, line, selector, expectedValue, field, attribute } = input as {
+          file: string
+          line: number
+          selector: string
+          expectedValue: string
+          field: 'textContent' | 'attribute'
+          attribute?: string
+        }
+        return verifyEdit(
+          { bridge, signal, worktreeRoot, reviewSurface },
+          { file, line, selector, expectedValue, field, attribute },
+        )
+      },
+    },
+
+    {
+      name: 'verify_goal',
+      description:
+        "Confirm a MEASURABLE layout/sizing goal actually holds in the LIVE DOM — judged deterministically, not by eye. Use this for goals that compile to a measurable check: \"fit the content width\" / \"no overflow\", \"fit on screen\", \"align this with <selector>\", \"match the size of <selector>\", \"enough contrast\". Pass the natural-language `goal` and a `selector` for the element it's about (from get_selection); name any SECOND element in the goal text as a real CSS selector (e.g. \"align with .header\") so it can be measured. Returns `{ pass, status, detail }` — `detail` lists each predicate's verdict. Returns `{ skipped, reason }` when the goal is purely aesthetic (no measurable predicate) or the element can't be measured (then use capture_screenshot), or when the bridge is too old to read measurements. This is for GEOMETRY/contrast you can measure; for exact text/attribute use verify_edit, and for subjective 'does it look right' use capture_screenshot.",
+      kind: 'editor',
+      inputShape: {
+        goal: z
+          .string()
+          .describe('The natural-language layout/sizing goal to verify, e.g. "make this fit the content width" or "align this with .header".'),
+        selector: z
+          .string()
+          .describe('CSS selector for the primary element the goal is about (from get_selection — pass its `selector` verbatim).'),
+      },
+      handler: (input) => {
+        const { goal, selector } = input as { goal: string; selector: string }
+        return verifyGoalTool({ bridge, signal, reviewSurface, resolveLlmProvider }, { goal, selector })
+      },
+    },
+
+    {
+      name: 'ask_user_question',
+      description:
+        'Ask the user to choose among options when you need a decision you cannot infer from the codebase or context. Present a clear question and a concise list of options. Prefer this over guessing — the user\'s explicit choice prevents a wrong assumption from cascading into several incorrect edits. Single-select by default; pass multiSelect: true when multiple choices are valid simultaneously.',
+      kind: 'editor',
+      inputShape: {
+        question: z
+          .string()
+          .describe('The question to ask the user. Be specific about what decision is needed and why you need their input.'),
+        options: z
+          .array(z.string())
+          .min(1)
+          .describe('The list of options to present to the user. Each should be a concise, actionable choice.'),
+        multiSelect: z
+          .boolean()
+          .optional()
+          .describe('When true, the user can select multiple options. Defaults to false (single-select).'),
+      },
+      handler: (input) => {
+        const { question, options, multiSelect } = input as {
+          question: string
+          options: string[]
+          multiSelect?: boolean
+        }
+        return askUserQuestion({ bridge, signal }, { question, options, multiSelect })
+      },
+    },
+
+    // Design-system grounding query tools (only when a GroundingService is
+    // available — see `groundingTools` above).
+    ...groundingTools,
+  ]
+}
+
+/**
+ * The SDK binding. One line per spec; the declaration lives in
+ * `buildEditorToolSpecs` so the neutral lane can consume the identical list.
+ *
+ * `tool()` validates `input` against `inputShape` before calling, so the
+ * handler's cast in each spec is checked on this lane. The neutral lane does
+ * the same validation itself, against the same shape, before it calls the
+ * handler (see `run-chat-turn-neutral.ts`).
+ */
+export function buildEditorToolServer(
+  opts: BuildEditorToolServerOpts,
+): McpSdkServerConfigWithInstance {
   return createSdkMcpServer({
     name: 'editor',
     version: '1',
-    tools: [
-      // Live-surface (bridge round-trip) tools — selection / page-info / pin,
-      // registered from the registry rail (live-surface-registry.ts) so a new
-      // bridge tool (screenshot, navigate) is a single entry there, not an
-      // inline wire + a hand-added name.
-      ...LIVE_SURFACE_CAPABILITIES.map((cap) =>
-        tool(cap.name, cap.description, cap.inputSchema, (input) =>
-          cap.run({ bridge, signal, worktreeRoot, reviewSurface }, input),
-        ),
+    tools: buildEditorToolSpecs(opts).map((spec) =>
+      tool(spec.name, spec.description, spec.inputShape, (input) =>
+        // `ToolHandlerResult` is structurally a subset of the SDK's
+        // `CallToolResult` (see tool-spec.ts) but lacks its forward-compat
+        // index signature; the runtime shape is identical.
+        spec.handler(input as Record<string, unknown>, { signal: opts.signal }) as Promise<CallToolResult>,
       ),
-
-      tool(
-        'propose_prop_edit',
-        "Propose a prop/attribute change on the currently-selected component. Live-previews in the iframe immediately via a DOM overlay; flushed to the worktree on Save. Use this for simple value changes that don't require rewriting source code. For complex shape changes, use the Edit tool to rewrite the source file directly.",
-        {
-          selector: z
-            .string()
-            .describe(
-              'CSS selector for the target element. Use `get_selection` first and pass its `selector` back here verbatim.',
-            ),
-          targetId: z
-            .string()
-            .optional()
-            .describe(
-              'Stable bridge target id from `get_selection.targetId`. Optional but recommended — drift detection prefers this over the selector when both are present.',
-            ),
-          propName: z
-            .string()
-            .describe(
-              'Name of the prop or attribute to set on the component (e.g. "variant", "size", "disabled").',
-            ),
-          value: z
-            .union([z.string(), z.number(), z.boolean(), z.null()])
-            .describe(
-              'New value for the prop. Must be a string, number, boolean, or null. For complex props or template restructuring use the Edit tool on the source file instead.',
-            ),
-        },
-        async ({ selector, targetId, propName, value }) => {
-          const ack = await emitEdit({
-            type: 'prop_edit',
-            selector,
-            targetId,
-            propName,
-            value,
-          })
-          if (!ack.ok) {
-            return {
-              content: [
-                { type: 'text', text: `rejected: ${ack.reason}` },
-              ],
-              isError: true,
-            }
-          }
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  editId: ack.editId,
-                  summary: `Buffered prop edit: ${propName} = ${JSON.stringify(value)}`,
-                }),
-              },
-            ],
-          }
-        },
-      ),
-
-      tool(
-        'list_read_roots',
-        'List every readable root for this session — the implicit "worktree" plus any externals declared in desde.config.json. Returns names + descriptions only, never raw filesystem paths. Call this first if you plan to use list_commits / read_file_at_commit / diff_file / search_external_files with a non-worktree root.',
-        {},
-        () => listReadRoots(rootCtx),
-      ),
-
-      tool(
-        'list_commits',
-        'List commits in a read root (default "worktree"). Returns oldest-to-newest, up to 100 entries. Use this to see what\'s changed recently, find the commit that introduced a bug, or browse history before drilling in with diff_file / read_file_at_commit. For external repos (declared in desde.config.json) this is how you discover refs to read at.',
-        {
-          root: z
-            .string()
-            .optional()
-            .describe('Read root name (default "worktree"). Call list_read_roots to see what is available.'),
-          limit: z
-            .number()
-            .optional()
-            .describe('Max commits to return. Default 30, hard cap 100.'),
-          sinceRef: z
-            .string()
-            .optional()
-            .describe(
-              'Only return commits reachable from HEAD but NOT from this ref. E.g. "main" to see commits the current branch has that main does not.',
-            ),
-          path: z
-            .string()
-            .optional()
-            .describe('Restrict to commits that touched this repo-relative path.'),
-          grep: z.string().optional().describe('Filter by commit-message substring.'),
-          author: z.string().optional().describe('Filter by author substring.'),
-        },
-        (input) => listCommits(rootCtx, input),
-      ),
-
-      tool(
-        'read_file_at_commit',
-        'Read a file\'s contents at a specific commit in a read root. Use sha="HEAD" to read the current state of an external repo. Up to 200KB; oversized files return an error with the actual size so you can decide whether to drill in with diff_file instead. This is the ONLY way to read files outside the worktree — the built-in Read tool is worktree-scoped.',
-        {
-          root: z
-            .string()
-            .optional()
-            .describe('Read root name (default "worktree").'),
-          path: z.string().describe('Repo-relative path to read.'),
-          sha: z
-            .string()
-            .describe('Commit sha or named ref (HEAD, HEAD~1, branch name, tag).'),
-        },
-        (input) => readFileAtCommit(rootCtx, input),
-      ),
-
-      tool(
-        'diff_file',
-        'Single-file unified diff between two refs in a read root. Defaults: fromRef = previous commit (HEAD~1), toRef = HEAD. Use this to see what changed in a file across a commit, branch, or arbitrary range. Output is capped at 500 lines; longer diffs are truncated with a marker.',
-        {
-          root: z
-            .string()
-            .optional()
-            .describe('Read root name (default "worktree").'),
-          path: z.string().describe('Repo-relative path of the file to diff.'),
-          fromRef: z
-            .string()
-            .optional()
-            .describe('Starting ref (default "HEAD~1").'),
-          toRef: z.string().optional().describe('Ending ref (default "HEAD").'),
-        },
-        (input) => diffFile(rootCtx, input),
-      ),
-
-      tool(
-        'search_external_files',
-        'Search files in a declared external read root for a regex pattern (uses `git grep`, scoped to the root\'s tracked files at HEAD). For the worktree, use the built-in Grep tool instead — it already works. Use this when you want to find how a component is used in production source, or pull patterns from a reference codebase.',
-        {
-          root: z
-            .string()
-            .describe('Read root name (must NOT be "worktree" — use the built-in Grep for that).'),
-          query: z.string().describe('Regex pattern to search for.'),
-          paths: z
-            .array(z.string())
-            .optional()
-            .describe(
-              'Optional pathspec list to narrow the search (e.g. ["src/components/**"]). Repo-relative.',
-            ),
-        },
-        (input) => searchExternalFiles(rootCtx, input),
-      ),
-
-      tool(
-        'session_status',
-        "Snapshot of the current editing session's worktree: branch, base commit, HEAD, how many commits the session has accumulated, and any uncommitted dirty files. Use this to see what you have changed so far — auto-commit usually keeps the tree clean, but iteration-data edits and bridge mutations can land uncommitted, and this is the only way to see them. Read-only.",
-        {},
-        () => sessionStatus(rootCtx),
-      ),
-
-      tool(
-        'session_diff',
-        'Unified diff of what the current editing session has changed against its base commit (committed + uncommitted). Pass no `path` for the full session diff across all files; pass a worktree-relative path to scope it. Use this when you need to see exactly what code has changed during this session before making related edits.',
-        {
-          path: z
-            .string()
-            .optional()
-            .describe('Optional worktree-relative path to limit the diff to a single file.'),
-          maxLines: z
-            .number()
-            .optional()
-            .describe('Override the default 500-line cap. Hard ceiling 2000.'),
-        },
-        (input) => sessionDiff(rootCtx, input),
-      ),
-
-      tool(
-        'delete_file',
-        "Delete a file from the repo. The unlink happens immediately as an uncommitted working-tree change; the prior content is saved to the backup journal (.desde/backups/) so it can be recovered. Use when refactoring requires removing an obsolete file — extracting a component out, removing dead code, etc. The path MUST live inside the repo; absolute paths or `..` traversal are rejected. If you also need to keep the contents under a different name, use rename_file instead.",
-        {
-          path: z
-            .string()
-            .describe(
-              'Worktree-relative path of the file to delete (e.g. "src/components/Old.vue").',
-            ),
-        },
-        ({ path }) =>
-          deleteFileHandler({
-            worktreeRoot,
-            invalidateFiles,
-            emitEdit,
-            input: { path },
-            acquireTreeGate,
-          }),
-      ),
-
-      tool(
-        'download_asset',
-        "Download an image from the web into the repo (e.g. a photo or logo the user linked). Writes the bytes as an uncommitted working-tree change. ONLY image types are allowed (.png/.jpg/.jpeg/.gif/.webp/.avif/.svg/.ico), and ONLY from a host the user has already allowlisted for WebFetch in desde.config.json — the same trust boundary, no wider. Private and loopback addresses are always refused. The destination must be inside the repo and must NOT already exist. Use this instead of telling the user to save a file by hand.",
-        {
-          url: z.string().describe('Absolute https:// URL of the image.'),
-          destPath: z
-            .string()
-            .describe('Worktree-relative destination (e.g. "public/hero.png"). Must not exist.'),
-        },
-        ({ url, destPath }) =>
-          downloadAssetHandler({
-            worktreeRoot,
-            invalidateFiles,
-            emitEdit,
-            ...(webPolicy ? { webPolicy } : {}),
-            input: { url, destPath },
-            acquireTreeGate,
-          }),
-      ),
-
-      tool(
-        'rename_file',
-        "Rename or move a file inside the repo. The rename happens immediately as an uncommitted working-tree change; the prior content is saved to the backup journal (.desde/backups/). The destination MUST live inside the repo, MUST NOT already exist, and MUST either share the source's extension or have an allowed new-file extension. Use when restructuring — moving a component into a subdirectory, renaming for clarity, etc.",
-        {
-          from: z
-            .string()
-            .describe('Worktree-relative path of the source file.'),
-          to: z
-            .string()
-            .describe('Worktree-relative path of the destination file.'),
-        },
-        ({ from, to }) =>
-          renameFileHandler({
-            worktreeRoot,
-            invalidateFiles,
-            emitEdit,
-            input: { from, to },
-            acquireTreeGate,
-          }),
-      ),
-
-      tool(
-        'insert_element',
-        "Insert a plain/primitive element (e.g. <div>, <p>, <img>, <ul><li>…, <button>) OR bare text as a child of a target element. Goes through the deterministic edit pipeline (written to the working tree immediately, uncommitted) — prefer this over rewriting the whole SFC with Edit/Write when adding a primitive element or text. For a DESIGN-SYSTEM catalog component (a Button, Card, … from the prototype's design system) use insert_component instead — it resolves the tag and AUTO-ADDS the import; insert_element does NOT add imports. Identify the DESTINATION PARENT (the container the new node goes inside) with get_selection and pass its source file + line + column. For complex/bound props, insert plainly then refine with Edit.",
-        {
-          snippet: z
-            .string()
-            .describe(
-              'For contentKind "element" (default): a SINGLE template element, e.g. \'<div class="card"></div>\', \'<p>Hello</p>\', \'<img src="/logo.png" alt="Logo" />\'. For contentKind "text": the plain text to insert (HTML-escaped automatically; no {{ }} interpolation).',
-            ),
-          file: z
-            .string()
-            .describe('Worktree-relative path of the SFC that contains the destination parent (from get_selection).'),
-          line: z
-            .number()
-            .int()
-            .describe("1-based source line of the DESTINATION PARENT element (the container the new node becomes a child of), from get_selection's source location."),
-          column: z
-            .number()
-            .int()
-            .describe('1-based source column of the destination parent element (from get_selection).'),
-          destIndex: z
-            .number()
-            .int()
-            .optional()
-            .describe("0-based index among the parent's element children. Omit or pass -1 to append at the end."),
-          contentKind: z
-            .enum(['element', 'text'])
-            .optional()
-            .describe("'element' (default) inserts a single template element; 'text' inserts bare text content into the container."),
-        },
-        ({ snippet, file, line, column, destIndex, contentKind }) =>
-          insertElementHandler({
-            worktreeRoot,
-            invalidateFiles,
-            emitEdit,
-            input: { snippet, file, line, column, destIndex, contentKind },
-            acquireTreeGate,
-          }),
-      ),
-
-      tool(
-        'scaffold_route',
-        "Create a NEW page and register its route in one step. Use this to add a page that doesn't exist yet (e.g. \"add an /about page\", \"create a settings screen\") — it writes a minimal page component AND wires it into the router (via a lazy import, so no manual import edit). Both files are written to the working tree immediately (uncommitted — the user commits them). After scaffolding, call navigate to the new path to view it, then flesh out the page with insert_component / insert_element / Edit. Refuses (with a reason) rather than guess when the routing setup is unrecognized, the path duplicates an existing route, or the path has no nameable segment (e.g. '/' or '/:id').",
-        {
-          path: z
-            .string()
-            .describe(
-              "The route path to create, e.g. '/about' or '/settings/profile'. Must have at least one static segment to name the page after. A leading slash is added if missing.",
-            ),
-          name: z
-            .string()
-            .optional()
-            .describe("Optional vue-router route name. Derived from the path (e.g. 'settings-profile') when omitted."),
-          heading: z
-            .string()
-            .optional()
-            .describe('Optional <h1> heading for the scaffolded page. Defaults to the humanized page name.'),
-          routerFile: z
-            .string()
-            .optional()
-            .describe('Optional worktree-relative path to the router config. Auto-detected (src/router/index.ts, …) when omitted; pass it if auto-detection reports it could not find or disambiguate the router.'),
-        },
-        ({ path, name, heading, routerFile }) =>
-          scaffoldRouteHandler({
-            worktreeRoot,
-            invalidateFiles,
-            emitEdit,
-            input: { path, name, heading, routerFile },
-            acquireTreeGate,
-          }),
-      ),
-
-      // Canvas + screenshot-plan surface — dormant by default (see the
-      // `screenshotPlanTools` doc comment above); empty array when
-      // `canvasEnabled` is falsy.
-      ...screenshotPlanTools,
-
-      tool(
-        'manage_package',
-        "Add or remove an npm package dependency. The package.json edit lands as an uncommitted working-tree change, then the substrate's install command runs to sync node_modules + lockfile. Use this instead of editing package.json by hand — going through the package manager avoids drift between manifest and lockfile. The installed dependency is available to the prototype on the next dev-server reload (which usually happens automatically). Long-running: install can take 20–60s for fresh deps.",
-        {
-          operation: z
-            .enum(['add', 'remove'])
-            .describe('Whether to add or remove a package.'),
-          packageName: z
-            .string()
-            .describe(
-              'NPM package name (e.g. "lodash", "@acme/design-system"). Scoped names are allowed.',
-            ),
-          versionSpec: z
-            .string()
-            .optional()
-            .describe(
-              'Version spec for `add` (defaults to "latest"). Use semver ranges ("^1.2.3"), exact versions ("1.2.3"), or tags ("latest", "next").',
-            ),
-          dev: z
-            .boolean()
-            .optional()
-            .describe(
-              'When true, `add` lands in devDependencies. Ignored for `remove` (the operation scans both). Defaults to false.',
-            ),
-        },
-        ({ operation, packageName, versionSpec, dev }) =>
-          managePackageHandler({
-            worktreeRoot,
-            invalidateFiles,
-            emitEdit,
-            packageManagerAdapter,
-            signal,
-            input: { operation, packageName, versionSpec, dev },
-            acquireTreeGate,
-          }),
-      ),
-
-      // insert_component is grounding-dependent (it resolves the component →
-      // tag + import path from the manifest), so it's gated on getGrounding
-      // exactly like the read-only grounding query tools below — never expose
-      // a write tool the agent can pick but that can't succeed.
-      ...insertComponentTools,
-
-      tool(
-        'run_verification',
-        "Run a verification command (typecheck / lint / test / build) in the worktree. Returns the substrate label (e.g. 'npm'), exit code, stdout, stderr, duration, and the exact command that ran. Output is capped at 32KB each on stdout and stderr — the TAIL is preserved on overflow because failure summaries usually appear at the bottom. When the script is missing and no builtin fallback exists, returns ok=false with noScript=true plus the list of available scripts so you can suggest the right one. Use this BEFORE telling the user a change is correct — type errors and lint failures often catch regressions you missed.",
-        {
-          check: z
-            .enum(['typecheck', 'lint', 'test', 'build'])
-            .describe(
-              'Which verification verb to run. Mapped to a substrate-specific command by the adapter (e.g. `npm run typecheck`).',
-            ),
-        },
-        (input) => runVerification(rootCtx, input),
-      ),
-
-      tool(
-        'verify_edit',
-        "Confirm a VALUE edit (a text or attribute change) actually took effect in the LIVE DOM, and — if it didn't — find out WHY. Call this right after a value edit instead of assuming it worked: pass the source file + line you edited, a CSS selector for the element the value renders into (from get_selection), the value you expect to see, and how it surfaces (`field`). Returns `{ pass, observed, expected, cause?, hint? }`. On `pass:false` the `cause` tells you the failure mode (e.g. `bound-binding`, `v-model`, `dynamic-vbind`, `conditional`, `selector-missing`) and `hint` says how to fix it — make the TARGETED correction it suggests (edit the binding/ref, not the literal) and re-verify. May instead return `{ skipped: true, reason }` when the prototype's bridge is too old to read live values — then fall back to capture_screenshot. For STYLE / layout / color and any other 'does it look right' change, use capture_screenshot instead (computed styles can't be string-compared reliably).",
-        {
-          file: z
-            .string()
-            .describe('Worktree-relative path of the SFC the edit rewrote (from get_selection / the file you edited).'),
-          line: z
-            .number()
-            .int()
-            .describe('1-based source line you edited — used to classify why a mismatch happened (bound vs literal).'),
-          selector: z
-            .string()
-            .describe('CSS selector for the element the value renders into (from get_selection — pass its `selector` verbatim).'),
-          expectedValue: z
-            .string()
-            .describe('The value you expect to observe in the live DOM, stringified exactly as it should appear.'),
-          field: z
-            .enum(['textContent', 'attribute'])
-            .describe("How the value surfaces: 'textContent' (the element's text) or 'attribute' (a DOM attribute — pass `attribute`). For computed styles, use capture_screenshot instead."),
-          attribute: z
-            .string()
-            .optional()
-            .describe("Attribute name to read — required when field is 'attribute' (e.g. \"placeholder\", \"href\")."),
-        },
-        ({ file, line, selector, expectedValue, field, attribute }) =>
-          verifyEdit(
-            { bridge, signal, worktreeRoot, reviewSurface },
-            { file, line, selector, expectedValue, field, attribute },
-          ),
-      ),
-
-      tool(
-        'verify_goal',
-        "Confirm a MEASURABLE layout/sizing goal actually holds in the LIVE DOM — judged deterministically, not by eye. Use this for goals that compile to a measurable check: \"fit the content width\" / \"no overflow\", \"fit on screen\", \"align this with <selector>\", \"match the size of <selector>\", \"enough contrast\". Pass the natural-language `goal` and a `selector` for the element it's about (from get_selection); name any SECOND element in the goal text as a real CSS selector (e.g. \"align with .header\") so it can be measured. Returns `{ pass, status, detail }` — `detail` lists each predicate's verdict. Returns `{ skipped, reason }` when the goal is purely aesthetic (no measurable predicate) or the element can't be measured (then use capture_screenshot), or when the bridge is too old to read measurements. This is for GEOMETRY/contrast you can measure; for exact text/attribute use verify_edit, and for subjective 'does it look right' use capture_screenshot.",
-        {
-          goal: z
-            .string()
-            .describe('The natural-language layout/sizing goal to verify, e.g. "make this fit the content width" or "align this with .header".'),
-          selector: z
-            .string()
-            .describe('CSS selector for the primary element the goal is about (from get_selection — pass its `selector` verbatim).'),
-        },
-        ({ goal, selector }) =>
-          verifyGoalTool({ bridge, signal, reviewSurface, resolveLlmProvider }, { goal, selector }),
-      ),
-
-      tool(
-        'ask_user_question',
-        'Ask the user to choose among options when you need a decision you cannot infer from the codebase or context. Present a clear question and a concise list of options. Prefer this over guessing — the user\'s explicit choice prevents a wrong assumption from cascading into several incorrect edits. Single-select by default; pass multiSelect: true when multiple choices are valid simultaneously.',
-        {
-          question: z
-            .string()
-            .describe('The question to ask the user. Be specific about what decision is needed and why you need their input.'),
-          options: z
-            .array(z.string())
-            .min(1)
-            .describe('The list of options to present to the user. Each should be a concise, actionable choice.'),
-          multiSelect: z
-            .boolean()
-            .optional()
-            .describe('When true, the user can select multiple options. Defaults to false (single-select).'),
-        },
-        ({ question, options, multiSelect }) =>
-          askUserQuestion({ bridge, signal }, { question, options, multiSelect }),
-      ),
-
-      // Design-system grounding query tools (only when a GroundingService is
-      // available — see `groundingTools` above).
-      ...groundingTools,
-    ],
+    ),
   })
 }
 
