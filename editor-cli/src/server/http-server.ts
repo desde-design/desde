@@ -2173,7 +2173,10 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     method: "GET",
     path: "/api/editor/chat/model-catalog",
     authPolicy: "bearer-origin-if-present",
-    handler: (req, res, ctx) => handleModelCatalogRequest(req, res, ctx.repoRoot),
+    handler: (req, res, ctx) =>
+      handleModelCatalogRequest(req, res, ctx.repoRoot, {
+        configuredDefaultProvider: ctx.llm?.defaultProvider,
+      }),
   },
   // LLM credentials. The GET is a same-origin browser poll that often omits
   // `Origin`, so it takes the lenient policy the other read-only GETs use — it

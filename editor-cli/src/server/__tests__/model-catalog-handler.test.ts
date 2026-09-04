@@ -7,6 +7,67 @@ import {
   buildModelCatalogResponse,
   handleModelCatalogRequest,
 } from '../model-catalog-handler'
+import { ANTHROPIC_MODEL_CATALOG } from '../../../../src/editor/llm-providers/anthropic-model-catalog'
+import { OPENAI_MODEL_CATALOG } from '../../../../src/editor/llm-providers/openai-model-catalog'
+
+const twoCatalogs = {
+  catalogs: [ANTHROPIC_MODEL_CATALOG, OPENAI_MODEL_CATALOG],
+  source: 'static' as const,
+}
+
+describe('buildModelCatalogResponse: the default is a decision, not an index', () => {
+  it('names the default provider and defaults to its model', () => {
+    const body = buildModelCatalogResponse(null, twoCatalogs, {
+      env: { OPENAI_API_KEY: 'sk-y' },
+    })
+    expect(body.defaultProviderId).toBe('openai')
+    expect(body.default.provider).toBe('openai')
+    expect(body.default.model).toBe('gpt-5.2')
+  })
+
+  it('prefers anthropic when both are credentialed', () => {
+    const body = buildModelCatalogResponse(null, twoCatalogs, {
+      env: { ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' },
+    })
+    expect(body.defaultProviderId).toBe('anthropic')
+  })
+
+  it('honours a configured default that is credentialed', () => {
+    const body = buildModelCatalogResponse(null, twoCatalogs, {
+      env: { ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' },
+      configuredDefaultProvider: 'openai',
+    })
+    expect(body.defaultProviderId).toBe('openai')
+  })
+
+  it('falls back to a served catalog when the default provider serves none', () => {
+    // Nothing credentialed resolves to 'anthropic'; if only OpenAI's catalog
+    // were served, the response must still default to a model the client can
+    // actually pick rather than throwing.
+    const body = buildModelCatalogResponse(
+      null,
+      { catalogs: [OPENAI_MODEL_CATALOG], source: 'static' },
+      { env: {} },
+    )
+    expect(body.defaultProviderId).toBe('openai')
+    expect(body.default.provider).toBe('openai')
+  })
+
+  it("carries each catalog's capabilities so the client can gate", () => {
+    const body = buildModelCatalogResponse(null, twoCatalogs, { env: {} })
+    const anthropic = body.catalogs.find((c) => c.providerId === 'anthropic')
+    const openai = body.catalogs.find((c) => c.providerId === 'openai')
+    expect(anthropic?.capabilities.midTurnSteering).toBe(true)
+    expect(openai?.capabilities.midTurnSteering).toBe(false)
+    expect(openai?.capabilities.vendorRateLimitEvents).toBe(false)
+  })
+
+  it('still carries the models and the source untouched', () => {
+    const body = buildModelCatalogResponse(null, twoCatalogs, { env: {} })
+    expect(body.catalogs[0]?.models).toEqual(ANTHROPIC_MODEL_CATALOG.models)
+    expect(body.source).toBe('static')
+  })
+})
 
 describe('buildModelCatalogResponse', () => {
   it('returns the anthropic catalog and its default', () => {
