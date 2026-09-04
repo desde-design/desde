@@ -88,16 +88,19 @@ export function LlmCredentialDialog({
    */
   const openGeneration = useRef(0)
 
+  // Task 7 turns this into per-provider tabs. For now the dialog still
+  // manages Anthropic only, reading it out of the map.
+  const provider = status?.providers.anthropic
   const devMode = status?.devMode ?? false
-  const source = status?.source ?? "none"
+  const source = provider?.source ?? "none"
   const envManaged = source === "env"
   const toggleVisible = devMode || revealed
   // Keyed off the STORE, not the active source. In dev mode `source` is
   // `subscription` even with a key stored behind it, and gating on the source
   // stranded that key: it could be neither seen nor removed until dev mode
   // was switched off. Spec §5 requires management to stay available.
-  const hasStoredKey = status?.hasStoredKey ?? false
-  const storedHint = status?.storedHint
+  const hasStoredKey = provider?.hasStoredKey ?? false
+  const storedHint = provider?.storedHint
 
   /**
    * Closing resets the easter egg, so a reveal never survives into the next
@@ -129,7 +132,7 @@ export function LlmCredentialDialog({
   const handleSave = useCallback(async () => {
     const generation = openGeneration.current
     setBusy(true)
-    const ok = await saveKey(draft)
+    const ok = await saveKey("anthropic", draft)
     setBusy(false)
     // Only close the instance that started this save. Validation is a network
     // round-trip, and Close, Escape and the backdrop all stay live during it.
@@ -138,7 +141,7 @@ export function LlmCredentialDialog({
 
   const handleRemove = useCallback(async () => {
     setBusy(true)
-    await removeKey()
+    await removeKey("anthropic")
     setBusy(false)
   }, [removeKey])
 
@@ -169,10 +172,10 @@ export function LlmCredentialDialog({
                 A key is already set by the{" "}
                 <span className="font-mono text-code-lg">ANTHROPIC_API_KEY</span>{" "}
                 environment variable
-                {status?.maskedHint ? (
+                {provider?.maskedHint ? (
                   <>
                     {" ("}
-                    <span className="font-mono text-code-lg">{status.maskedHint}</span>
+                    <span className="font-mono text-code-lg">{provider.maskedHint}</span>
                     {")"}
                   </>
                 ) : null}

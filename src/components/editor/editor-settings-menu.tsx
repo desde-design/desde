@@ -62,7 +62,7 @@ import { SettingsStatusDot } from "@/components/editor/settings-status-dot"
 import { useProjectKnowledge } from "@/hooks/useProjectKnowledge"
 import { useDesktopUpdates } from "@/hooks/useDesktopUpdates"
 import { useClaudeRuntimeStatus } from "@/hooks/useClaudeRuntimeStatus"
-import { useLlmCredentials } from "@/hooks/useLlmCredentials"
+import { everyProviderUncredentialed, useLlmCredentials } from "@/hooks/useLlmCredentials"
 import { useViewerAuthStatus } from "@/hooks/useViewerAuthStatus"
 import { YourViewerDialog } from "@/components/editor/your-viewer-dialog"
 import { ConnectViewerDialog } from "@/components/editor/connect-viewer-dialog"
@@ -131,7 +131,7 @@ export function EditorSettingsMenu({
     useFirstRunCredentialPrompt(credentialStatus, credentials.dismissPrompt)
   const [credentialDialogManuallyOpen, setCredentialDialogManuallyOpen] =
     useState(false)
-  const credentialMissing = credentialStatus?.source === "none"
+  const credentialMissing = everyProviderUncredentialed(credentialStatus)
   // The first-run prompt opens the SAME dialog the gear opens, because they
   // ask for the same thing. `manuallyOpen` only has to override the auto-open
   // once it has been dismissed.

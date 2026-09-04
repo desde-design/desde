@@ -1,6 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { useLlmCredentials } from "@/hooks/useLlmCredentials"
+import {
+  useLlmCredentials,
+  type LlmCredentialsStatus,
+  type ProviderCredentialStatus,
+} from "@/hooks/useLlmCredentials"
 import { LlmCredentialDialog, shouldRevealDevMode } from "./llm-credential-dialog"
 
 /** The dialog takes credential state from its caller; this supplies it. */
@@ -12,6 +16,35 @@ function Harness() {
 afterEach(() => {
   vi.unstubAllGlobals()
 })
+
+/**
+ * Builds the `{ providers: { anthropic: ... } }` map the hook now returns,
+ * from just the Anthropic fields a given test cares about. The dialog reads
+ * Anthropic's row out of the map (Task 7 adds tabs for the rest).
+ */
+function anthropicStatus(
+  provider: Pick<ProviderCredentialStatus, "source"> &
+    Partial<Omit<ProviderCredentialStatus, "id" | "label" | "source">>,
+  rest: Partial<Pick<LlmCredentialsStatus, "devMode" | "promptDismissed">> = {},
+): LlmCredentialsStatus {
+  return {
+    providers: {
+      anthropic: {
+        id: "anthropic",
+        label: "Anthropic",
+        hasStoredKey: false,
+        apiKeyEnvVar: "ANTHROPIC_API_KEY",
+        consoleUrl: "https://console.anthropic.com/settings/keys",
+        maskPrefix: "sk-ant-",
+        hasSubscriptionRuntime: true,
+        ...provider,
+      },
+    },
+    devMode: false,
+    promptDismissed: false,
+    ...rest,
+  }
+}
 
 function stubStatus(status: unknown) {
   vi.stubGlobal(
@@ -67,26 +100,20 @@ describe("shouldRevealDevMode", () => {
 
 describe("LlmCredentialDialog", () => {
   it("hides the dev mode toggle until it is revealed", async () => {
-    stubStatus({ source: "none", devMode: false, hasStoredKey: false, promptDismissed: false })
+    stubStatus(anthropicStatus({ source: "none" }))
     render(<Harness />)
     await waitFor(() => expect(screen.getByText("Anthropic API key")).toBeInTheDocument())
     expect(screen.queryByLabelText("Dev mode")).toBeNull()
   })
 
   it("always shows the dev mode toggle when dev mode is on", async () => {
-    stubStatus({ source: "subscription", devMode: true, hasStoredKey: false, promptDismissed: false })
+    stubStatus(anthropicStatus({ source: "subscription" }, { devMode: true }))
     render(<Harness />)
     await waitFor(() => expect(screen.getByLabelText("Dev mode")).toBeInTheDocument())
   })
 
   it("offers no key controls when the key comes from the environment", async () => {
-    stubStatus({
-      source: "env",
-      maskedHint: "sk-ant-…4f2a",
-      devMode: false,
-      hasStoredKey: false,
-      promptDismissed: false,
-    })
+    stubStatus(anthropicStatus({ source: "env", maskedHint: "sk-ant-…4f2a" }))
     render(<Harness />)
     await waitFor(() =>
       expect(screen.getByText(/environment variable/i)).toBeInTheDocument(),
@@ -99,14 +126,14 @@ describe("LlmCredentialDialog", () => {
   })
 
   it("offers Remove only when a key is stored", async () => {
-    stubStatus({
-      source: "stored",
-      maskedHint: "sk-ant-…4f2a",
-      storedHint: "sk-ant-…4f2a",
-      devMode: false,
-      hasStoredKey: true,
-      promptDismissed: false,
-    })
+    stubStatus(
+      anthropicStatus({
+        source: "stored",
+        maskedHint: "sk-ant-…4f2a",
+        storedHint: "sk-ant-…4f2a",
+        hasStoredKey: true,
+      }),
+    )
     render(<Harness />)
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Remove key" })).toBeInTheDocument(),
@@ -114,14 +141,14 @@ describe("LlmCredentialDialog", () => {
   })
 
   it("renders the masked hint and never a full key", async () => {
-    stubStatus({
-      source: "stored",
-      maskedHint: "sk-ant-…4f2a",
-      storedHint: "sk-ant-…4f2a",
-      devMode: false,
-      hasStoredKey: true,
-      promptDismissed: false,
-    })
+    stubStatus(
+      anthropicStatus({
+        source: "stored",
+        maskedHint: "sk-ant-…4f2a",
+        storedHint: "sk-ant-…4f2a",
+        hasStoredKey: true,
+      }),
+    )
     const { container } = render(<Harness />)
     await waitFor(() => expect(screen.getByText(/sk-ant-…4f2a/)).toBeInTheDocument())
     expect(container.ownerDocument.body.textContent).not.toMatch(/sk-ant-api/)
@@ -135,13 +162,12 @@ describe("LlmCredentialDialog", () => {
  */
 describe("LlmCredentialDialog in dev mode with a key stored", () => {
   it("still offers Remove, and labels the stored key as unused", async () => {
-    stubStatus({
-      source: "subscription",
-      devMode: true,
-      hasStoredKey: true,
-      storedHint: "sk-ant-…4f2a",
-      promptDismissed: false,
-    })
+    stubStatus(
+      anthropicStatus(
+        { source: "subscription", hasStoredKey: true, storedHint: "sk-ant-…4f2a" },
+        { devMode: true },
+      ),
+    )
     render(<Harness />)
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Remove key" })).toBeInTheDocument(),
@@ -164,12 +190,7 @@ describe("LlmCredentialDialog save race", () => {
       vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
         if (!init?.method || init.method === "GET") {
           return new Response(
-            JSON.stringify({
-              source: "none",
-              devMode: false,
-              hasStoredKey: false,
-              promptDismissed: false,
-            }),
+            JSON.stringify(anthropicStatus({ source: "none" })),
             { status: 200 },
           )
         }
@@ -178,14 +199,14 @@ describe("LlmCredentialDialog save race", () => {
           releaseSave = resolve
         })
         return new Response(
-          JSON.stringify({
-            source: "stored",
-            maskedHint: "sk-ant-…1111",
-            storedHint: "sk-ant-…1111",
-            devMode: false,
-            hasStoredKey: true,
-            promptDismissed: false,
-          }),
+          JSON.stringify(
+            anthropicStatus({
+              source: "stored",
+              maskedHint: "sk-ant-…1111",
+              storedHint: "sk-ant-…1111",
+              hasStoredKey: true,
+            }),
+          ),
           { status: 200 },
         )
       }),

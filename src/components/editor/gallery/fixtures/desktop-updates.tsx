@@ -7,6 +7,33 @@ import { useDesktopUpdates } from "@/hooks/useDesktopUpdates"
 import type { DesktopBridge, DesktopUpdateState } from "@/types/desktop-bridge"
 import type { SurfaceEntry, SurfaceRenderContext } from "../types"
 import { clickLikeUser, runDrivenInteraction, waitForElement } from "./dom-interaction"
+import { jsonOverride, useFetchOverride } from "./fetch-override"
+
+/**
+ * `EditorSettingsMenu` and `LauncherSettingsMenu` both mount
+ * `useLlmCredentials`, which fetches `/api/editor/llm-credentials` on mount.
+ * This surface is about update state, not credentials, so every fixture below
+ * answers with one configured provider: enough that the credential dot never
+ * appears and steals the update badge's corner.
+ */
+const LLM_CREDENTIALS_CONFIGURED = {
+  providers: {
+    anthropic: {
+      id: "anthropic",
+      label: "Anthropic",
+      source: "stored",
+      maskedHint: "sk-ant-…4f2a",
+      hasStoredKey: true,
+      storedHint: "sk-ant-…4f2a",
+      apiKeyEnvVar: "ANTHROPIC_API_KEY",
+      consoleUrl: "https://console.anthropic.com/settings/keys",
+      maskPrefix: "sk-ant-",
+      hasSubscriptionRuntime: true,
+    },
+  },
+  devMode: false,
+  promptDismissed: false,
+}
 
 /**
  * Desktop auto-update surfaces: the badge + top section in
@@ -145,6 +172,12 @@ function SettingsMenuFixture({
   thenClickCheck?: boolean
 }) {
   useDesktopBridgeOverride(bridge)
+  useFetchOverride(
+    jsonOverride(
+      (url) => url.includes("/api/editor/llm-credentials"),
+      LLM_CREDENTIALS_CONFIGURED,
+    ),
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -183,6 +216,12 @@ function SettingsMenuFixture({
 /** The launcher's standalone nav button, dropdown opened. */
 function LauncherNavFixture({ bridge }: { bridge: DesktopBridge }) {
   useDesktopBridgeOverride(bridge)
+  useFetchOverride(
+    jsonOverride(
+      (url) => url.includes("/api/editor/llm-credentials"),
+      LLM_CREDENTIALS_CONFIGURED,
+    ),
+  )
   const updates = useDesktopUpdates()
 
   useEffect(() => {

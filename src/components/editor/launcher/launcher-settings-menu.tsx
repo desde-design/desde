@@ -47,7 +47,7 @@ import {
 } from "@/components/editor/desktop-update-menu"
 import { SettingsStatusDot } from "@/components/editor/settings-status-dot"
 import { LlmCredentialDialog } from "@/components/editor/llm-credential-dialog"
-import { useLlmCredentials } from "@/hooks/useLlmCredentials"
+import { everyProviderUncredentialed, useLlmCredentials } from "@/hooks/useLlmCredentials"
 import type { DesktopUpdatesApi } from "@/hooks/useDesktopUpdates"
 import { cn } from "@/lib/utils"
 
@@ -59,7 +59,7 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
   const [checkDialogOpen, setCheckDialogOpen] = useState(false)
 
   const status = credentials.status
-  const credentialMissing = status?.source === "none"
+  const credentialMissing = everyProviderUncredentialed(status)
   // Same rule as the project gear: an actionable update makes the button say
   // its own name, because it is the one thing behind here worth interrupting
   // for. Downloading and error keep the quiet dot — progress and problems are

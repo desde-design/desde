@@ -1,16 +1,32 @@
 import { act, renderHook } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 import { useFirstRunCredentialPrompt } from "./useFirstRunCredentialPrompt"
-import type { LlmCredentialsStatus } from "./useLlmCredentials"
+import type { LlmCredentialsStatus, ProviderCredentialStatus } from "./useLlmCredentials"
 
-/** Fills the fields each case does not care about. */
-function status(overrides: Partial<LlmCredentialsStatus>): LlmCredentialsStatus {
+const ANTHROPIC_BASE: Omit<ProviderCredentialStatus, "source" | "hasStoredKey"> = {
+  id: "anthropic",
+  label: "Anthropic",
+  apiKeyEnvVar: "ANTHROPIC_API_KEY",
+  consoleUrl: "https://console.anthropic.com/settings/keys",
+  maskPrefix: "sk-ant-",
+  hasSubscriptionRuntime: true,
+}
+
+/** Fills the fields each case does not care about, on a single Anthropic provider. */
+function status(
+  overrides: Partial<Pick<ProviderCredentialStatus, "source" | "hasStoredKey">> &
+    Partial<Pick<LlmCredentialsStatus, "devMode" | "promptDismissed">> = {},
+): LlmCredentialsStatus {
   return {
-    source: "none",
-    devMode: false,
-    hasStoredKey: false,
-    promptDismissed: false,
-    ...overrides,
+    providers: {
+      anthropic: {
+        ...ANTHROPIC_BASE,
+        source: overrides.source ?? "none",
+        hasStoredKey: overrides.hasStoredKey ?? false,
+      },
+    },
+    devMode: overrides.devMode ?? false,
+    promptDismissed: overrides.promptDismissed ?? false,
   }
 }
 
@@ -91,5 +107,37 @@ describe("useFirstRunCredentialPrompt", () => {
     )
     act(() => result.current.dismiss())
     expect(result.current.shouldPrompt).toBe(false)
+  })
+})
+
+describe("first run across providers", () => {
+  it("does not prompt when only OpenAI is configured", () => {
+    const status = {
+      providers: {
+        anthropic: { id: "anthropic", source: "none", hasStoredKey: false },
+        openai: { id: "openai", source: "stored", hasStoredKey: true },
+      },
+      devMode: false,
+      promptDismissed: false,
+    }
+    const { result } = renderHook(() =>
+      useFirstRunCredentialPrompt(status as never, async () => {}),
+    )
+    expect(result.current.shouldPrompt).toBe(false)
+  })
+
+  it("prompts when every provider reports none", () => {
+    const status = {
+      providers: {
+        anthropic: { id: "anthropic", source: "none", hasStoredKey: false },
+        openai: { id: "openai", source: "none", hasStoredKey: false },
+      },
+      devMode: false,
+      promptDismissed: false,
+    }
+    const { result } = renderHook(() =>
+      useFirstRunCredentialPrompt(status as never, async () => {}),
+    )
+    expect(result.current.shouldPrompt).toBe(true)
   })
 })

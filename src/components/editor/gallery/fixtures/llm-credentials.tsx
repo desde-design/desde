@@ -12,7 +12,11 @@
  */
 
 import { LlmCredentialDialog } from "@/components/editor/llm-credential-dialog"
-import { useLlmCredentials, type LlmCredentialsStatus } from "@/hooks/useLlmCredentials"
+import {
+  useLlmCredentials,
+  type LlmCredentialsStatus,
+  type ProviderCredentialStatus,
+} from "@/hooks/useLlmCredentials"
 import type { SurfaceEntry } from "../types"
 import { useFetchOverride } from "./fetch-override"
 
@@ -30,17 +34,38 @@ function CredentialDialogFixture({ status }: { status: LlmCredentialsStatus }) {
 /** Every state settles on the dialog title, which renders for all of them. */
 const READY_WHEN = "[data-slot='dialog-content']"
 
-/** Fills the fields every state shares, so each case names only its own. */
+/** Fields every Anthropic fixture state shares. */
+const ANTHROPIC_BASE = {
+  id: "anthropic",
+  label: "Anthropic",
+  apiKeyEnvVar: "ANTHROPIC_API_KEY",
+  consoleUrl: "https://console.anthropic.com/settings/keys",
+  maskPrefix: "sk-ant-",
+  hasSubscriptionRuntime: true,
+} as const
+
+/**
+ * Fills the fields every state shares, so each case names only its own. The
+ * dialog reads Anthropic's row out of the map today (Task 7 adds tabs), so
+ * every fixture state builds the map shape with a single `anthropic` entry.
+ */
 function state(
   id: string,
   label: string,
-  status: Omit<LlmCredentialsStatus, "hasStoredKey" | "promptDismissed"> &
-    Partial<Pick<LlmCredentialsStatus, "hasStoredKey" | "promptDismissed">>,
+  anthropic: Omit<ProviderCredentialStatus, "hasStoredKey" | keyof typeof ANTHROPIC_BASE> &
+    Partial<Pick<ProviderCredentialStatus, "hasStoredKey">>,
+  overrides: Partial<Pick<LlmCredentialsStatus, "devMode" | "promptDismissed">> = {},
 ) {
+  const providerStatus: ProviderCredentialStatus = {
+    ...ANTHROPIC_BASE,
+    hasStoredKey: anthropic.storedHint !== undefined,
+    ...anthropic,
+  }
   const full: LlmCredentialsStatus = {
-    hasStoredKey: status.storedHint !== undefined,
+    providers: { anthropic: providerStatus },
+    devMode: false,
     promptDismissed: false,
-    ...status,
+    ...overrides,
   }
   return {
     id: `llm-credentials/${id}`,
@@ -56,30 +81,29 @@ export const LLM_CREDENTIALS_SURFACE: SurfaceEntry = {
   kind: "modal",
   sourceFile: "src/components/editor/llm-credential-dialog.tsx",
   states: [
-    state("none", "No credential (first run)", { source: "none", devMode: false }),
-    state("stored", "Stored key", {
-      source: "stored",
-      maskedHint: "sk-ant-…4f2a",
-      storedHint: "sk-ant-…4f2a",
-      devMode: false,
-    }),
-    state("env", "Set by environment variable", {
-      source: "env",
-      maskedHint: "sk-ant-…4f2a",
-      devMode: false,
-    }),
-    state("subscription", "Claude subscription", {
-      source: "subscription",
-      devMode: false,
-    }),
-    state("dev-mode", "Dev mode on, no key", {
-      source: "subscription",
-      devMode: true,
-    }),
-    state("dev-mode-with-key", "Dev mode on, key stored", {
-      source: "subscription",
-      storedHint: "sk-ant-…4f2a",
-      devMode: true,
-    }),
+    state("none", "No credential (first run)", { source: "none" }),
+    state(
+      "stored",
+      "Stored key",
+      { source: "stored", maskedHint: "sk-ant-…4f2a", storedHint: "sk-ant-…4f2a" },
+    ),
+    state(
+      "env",
+      "Set by environment variable",
+      { source: "env", maskedHint: "sk-ant-…4f2a" },
+    ),
+    state("subscription", "Claude subscription", { source: "subscription" }),
+    state(
+      "dev-mode",
+      "Dev mode on, no key",
+      { source: "subscription" },
+      { devMode: true },
+    ),
+    state(
+      "dev-mode-with-key",
+      "Dev mode on, key stored",
+      { source: "subscription", storedHint: "sk-ant-…4f2a" },
+      { devMode: true },
+    ),
   ],
 }

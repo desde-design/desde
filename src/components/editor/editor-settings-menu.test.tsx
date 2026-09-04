@@ -63,16 +63,47 @@ function stubCredentials(status: unknown) {
   )
 }
 
+/**
+ * Builds the `{ providers: { anthropic: ... } }` map shape from just the
+ * Anthropic fields a given test cares about.
+ */
+function anthropicStatus(fields: {
+  source: string
+  maskedHint?: string
+  storedHint?: string
+  hasStoredKey?: boolean
+  devMode?: boolean
+  promptDismissed?: boolean
+}) {
+  const { devMode = false, promptDismissed = false, ...provider } = fields
+  return {
+    providers: {
+      anthropic: {
+        id: "anthropic",
+        label: "Anthropic",
+        hasStoredKey: false,
+        apiKeyEnvVar: "ANTHROPIC_API_KEY",
+        consoleUrl: "https://console.anthropic.com/settings/keys",
+        maskPrefix: "sk-ant-",
+        hasSubscriptionRuntime: true,
+        ...provider,
+      },
+    },
+    devMode,
+    promptDismissed,
+  }
+}
+
 beforeEach(() => {
   window.localStorage.clear()
-  stubCredentials({
-    source: "stored",
-    maskedHint: "sk-ant-…4f2a",
-    storedHint: "sk-ant-…4f2a",
-    devMode: false,
-    hasStoredKey: true,
-    promptDismissed: false,
-  })
+  stubCredentials(
+    anthropicStatus({
+      source: "stored",
+      maskedHint: "sk-ant-…4f2a",
+      storedHint: "sk-ant-…4f2a",
+      hasStoredKey: true,
+    }),
+  )
 })
 
 afterEach(() => {
@@ -226,12 +257,7 @@ describe("ProjectConventionsDialog", () => {
 describe("EditorSettingsMenu — API key section", () => {
   it("marks the gear when no credential is configured", async () => {
     mockResponse = response()
-    stubCredentials({
-      source: "none",
-      devMode: false,
-      hasStoredKey: false,
-      promptDismissed: false,
-    })
+    stubCredentials(anthropicStatus({ source: "none" }))
     render(<EditorSettingsMenu />)
     await waitFor(() =>
       expect(
@@ -242,12 +268,7 @@ describe("EditorSettingsMenu — API key section", () => {
 
   it("does not mark the gear when a credential exists", async () => {
     mockResponse = response()
-    stubCredentials({
-      source: "subscription",
-      devMode: false,
-      hasStoredKey: false,
-      promptDismissed: false,
-    })
+    stubCredentials(anthropicStatus({ source: "subscription" }))
     render(<EditorSettingsMenu />)
     await waitFor(() => expect(screen.getByTestId("editor-settings")).toBeInTheDocument())
     expect(screen.queryByTestId("editor-settings-credential-marker")).toBeNull()
@@ -255,12 +276,7 @@ describe("EditorSettingsMenu — API key section", () => {
 
   it("auto-opens the credential dialog when nothing is configured", async () => {
     mockResponse = response()
-    stubCredentials({
-      source: "none",
-      devMode: false,
-      hasStoredKey: false,
-      promptDismissed: false,
-    })
+    stubCredentials(anthropicStatus({ source: "none" }))
     render(<EditorSettingsMenu />)
     await waitFor(() =>
       expect(screen.getByText("Anthropic API key")).toBeInTheDocument(),
@@ -271,12 +287,7 @@ describe("EditorSettingsMenu — API key section", () => {
     mockResponse = response()
     // Server-side now, not localStorage: the editor's port (and so its origin)
     // changes per project, which made a browser-scoped flag forgettable.
-    stubCredentials({
-      source: "none",
-      devMode: false,
-      hasStoredKey: false,
-      promptDismissed: true,
-    })
+    stubCredentials(anthropicStatus({ source: "none", promptDismissed: true }))
     render(<EditorSettingsMenu />)
     await waitFor(() =>
       expect(
@@ -308,12 +319,7 @@ describe("EditorSettingsMenu — API key section", () => {
  */
 describe("EditorSettingsMenu gear indicator", () => {
   const noCredentials = () =>
-    stubCredentials({
-      source: "none",
-      devMode: false,
-      hasStoredKey: false,
-      promptDismissed: false,
-    })
+    stubCredentials(anthropicStatus({ source: "none" }))
 
   it("puts the credential dot in the top-right corner", async () => {
     mockResponse = response()
