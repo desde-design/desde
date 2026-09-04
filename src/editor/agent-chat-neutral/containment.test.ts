@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { buildToolPermissionGate } from '../agent-chat-sdk/edit-ack'
+import { buildGlobToolSpec, buildGrepToolSpec } from './builtin-glob-grep'
 import { buildReadToolSpec } from './builtin-read'
 import { buildEditToolSpec, buildWriteToolSpec } from './builtin-edit'
 
@@ -143,5 +144,56 @@ describe('containment battery', () => {
     expect(readFileSync(join(root, 'src/App.vue'), 'utf8')).toBe(before)
     expect(existsSync(join(outside, 'backups'))).toBe(false)
     expect(existsSync(join(outside, 'edit-log.jsonl'))).toBe(false)
+  })
+})
+
+/**
+ * Glob's own description promises "Build output, dependencies and
+ * version-control internals are never returned" and Read's promises "This tool
+ * only sees files inside the repository". A pattern is model input, and the
+ * model reads the prototype repo, which is untrusted (2026-08-09 doctrine), so
+ * a pattern that walks out of the tree has to come back empty rather than
+ * enumerate the machine. Path NAMES are the leak here: Grep never returned
+ * outside CONTENT because it re-checks each path before reading it.
+ */
+describe('search containment', () => {
+  const globText = async (pattern: string): Promise<string> => {
+    const out = await buildGlobToolSpec({ worktreeRoot: root }).handler({ pattern }, {})
+    return out.content[0].text
+  }
+
+  it('returns nothing for an absolute pattern outside the worktree', async () => {
+    const text = await globText(join(outside, '*'))
+    expect(text).toBe('No files matched.')
+    expect(text).not.toContain('secret.txt')
+  })
+
+  it('returns nothing for a parent-directory pattern', async () => {
+    const text = await globText('../outside/*')
+    expect(text).toBe('No files matched.')
+    expect(text).not.toContain('secret.txt')
+  })
+
+  it('returns nothing through a symlink inside the repo pointing out of it', async () => {
+    symlinkSync(outside, join(root, 'src/link'))
+    for (const pattern of ['src/link/*', 'src/**/*']) {
+      const text = await globText(pattern)
+      expect(text).not.toContain('secret.txt')
+      expect(text).not.toContain('link')
+    }
+  })
+
+  it('still returns files that are genuinely inside the repository', async () => {
+    expect(await globText('src/*.vue')).toBe('src/App.vue')
+  })
+
+  it("does not leak an outside path through Grep's own scope argument", async () => {
+    symlinkSync(outside, join(root, 'src/link'))
+    const out = await buildGrepToolSpec({ worktreeRoot: root }).handler(
+      { pattern: 'SECRET', glob: 'src/link/*' },
+      {},
+    )
+    expect(out.content[0].text).not.toContain('ORIGINAL SECRET')
+    expect(out.content[0].text).not.toContain('secret.txt')
   })
 })

@@ -58,6 +58,17 @@ async function matchingPaths(
   for await (const entry of globFn(pattern, { cwd: worktreeRoot })) {
     const repoRel = String(entry).split(pathSep).join('/')
     if (isExcluded(repoRel)) continue
+    // The pattern is model input, and the model reads an untrusted repo
+    // (2026-08-09 doctrine), so it can be `/etc/*`, `../../*`, or a path
+    // through a symlink the repo itself planted. `fs.glob` honours all
+    // three: `cwd` is a starting point, not a boundary. Re-checking every
+    // enumerated path is what makes the tool description ("only sees files
+    // inside the repository") true, and it is the same check Grep already
+    // runs before reading a file — the difference being that an unchecked
+    // Glob leaks path NAMES, which is a directory listing of the user's
+    // machine handed to the provider.
+    const safe = await resolveRepoPath(worktreeRoot, repoRel)
+    if (!safe.ok) continue
     out.push(repoRel)
     if (out.length >= cap) break
   }
