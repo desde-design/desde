@@ -181,6 +181,22 @@ describe('Write', () => {
     expect(text).not.toMatch(/refused: .*denied:/)
     expect(text).toMatch(/^(Write|Edit) (refused|denied)/)
   })
+
+  it('on an ack failure for a NEW file, says the change is on disk and does not name a backup', async () => {
+    const out = await buildWriteToolSpec({
+      worktreeRoot: root,
+      emitEdit: async () => ({ ok: false as const, reason: 'proposal store unavailable' }),
+      invalidateFiles: (files: string[]) => invalidated.push(files),
+    }).handler({ file_path: 'docs/new.md', content: '# New\n' }, {})
+
+    expect(out.isError).toBe(true)
+    const text = out.content[0].type === 'text' ? out.content[0].text : ''
+    expect(text).toContain('The change IS on disk')
+    expect(text).not.toContain('backup at')
+    // No backup directory was ever created — the new file had no prior
+    // content to journal.
+    expect(existsSync(join(root, '.desde/backups'))).toBe(false)
+  })
 })
 
 /**

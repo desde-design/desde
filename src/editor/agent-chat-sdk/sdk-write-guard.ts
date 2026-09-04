@@ -179,6 +179,7 @@ import {
   type BackupEntry,
 } from './backup-journal'
 import { isRootEscape } from './root-escape'
+import { DesdeDirSymlinkError } from './desde-dir'
 import type { HistoryRecorder, HistoryFileState } from './write-broker'
 import { appendLedgerEntry, hashContent, resolveBranchCached } from '../ledger/edit-ledger'
 
@@ -589,7 +590,7 @@ export function createSdkWriteGuard(opts: SdkWriteGuardOptions): SdkWriteGuard {
     try {
       result = await journal(canonicalRoot, [{ file: repoRel, content }])
     } catch (err) {
-      if (err instanceof BackupJournalPathEscapeError) {
+      if (err instanceof BackupJournalPathEscapeError || err instanceof DesdeDirSymlinkError) {
         return { ok: false, reason: err.message }
       }
       throw err

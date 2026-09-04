@@ -128,4 +128,20 @@ describe('containment battery', () => {
     await buildWriteToolSpec(writeOpts()).handler({ file_path: '../outside/x.md', content: 'x' }, {})
     expect(existsSync(join(root, '.desde/backups'))).toBe(false)
   })
+
+  it('refuses a write when .desde is a symlink out of the worktree, and leaves the target file and the symlink target untouched', async () => {
+    symlinkSync(outside, join(root, '.desde'))
+    const before = readFileSync(join(root, 'src/App.vue'), 'utf8')
+
+    const out = await buildEditToolSpec(writeOpts()).handler(
+      { file_path: 'src/App.vue', old_string: '<div/>', new_string: '<div>PWNED</div>' },
+      {},
+    )
+
+    expect(out.isError).toBe(true)
+    expect(out.content[0].text).toContain('.desde')
+    expect(readFileSync(join(root, 'src/App.vue'), 'utf8')).toBe(before)
+    expect(existsSync(join(outside, 'backups'))).toBe(false)
+    expect(existsSync(join(outside, 'edit-log.jsonl'))).toBe(false)
+  })
 })

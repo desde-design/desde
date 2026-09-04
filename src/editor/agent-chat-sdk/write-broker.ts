@@ -71,6 +71,7 @@ import { lstat, mkdir, open, readFile, realpath, rename as fsRename, unlink, wri
 import { dirname, sep as pathSep } from 'node:path'
 
 import { isProtectedAgentPath, protectedPathDenial } from './protected-paths'
+import { DesdeDirSymlinkError } from './desde-dir'
 
 import {
   getSharedFileLockManager,
@@ -296,8 +297,15 @@ export interface BrokeredWriteOptions<E = void> {
 export type BrokeredWriteResult<E = void> =
   | {
       ok: true
-      /** Repo-relative backup directory (`.desde/backups/…`). */
-      backupDir: string
+      /**
+       * Repo-relative backup directory (`.desde/backups/…`). Absent when
+       * the batch's `journal` was empty (an allowCreate write of a brand-
+       * new file has no prior content to back up), because
+       * `writeBackupJournal` never creates the directory on disk in that
+       * case — reporting the never-created path here would send an ack-
+       * failure message, and Undo, looking for a backup that isn't there.
+       */
+      backupDir?: string
       emitted: E
     }
   | { ok: false; stage: 'backup'; reason: string }
@@ -801,7 +809,7 @@ async function brokeredWriteImpl<E = void>(
   try {
     backup = await writeBackupJournal(opts.canonicalRoot, opts.journal)
   } catch (err) {
-    if (err instanceof BackupJournalPathEscapeError) {
+    if (err instanceof BackupJournalPathEscapeError || err instanceof DesdeDirSymlinkError) {
       return { ok: false, stage: 'backup', reason: err.message }
     }
     throw err
@@ -1223,7 +1231,11 @@ async function brokeredWriteImpl<E = void>(
   }
 
   const emitted = (opts.emit ? await opts.emit() : undefined) as E
-  return { ok: true, backupDir: backup.backupDir, emitted }
+  return {
+    ok: true,
+    ...(opts.journal.length > 0 ? { backupDir: backup.backupDir } : {}),
+    emitted,
+  }
 }
 
 /** Repo-relative label for one of an op's paths (renames own two). */

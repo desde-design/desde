@@ -2945,7 +2945,7 @@ async function writePatchedFilesThroughBroker(args: {
   /** See `EditRequestBody.correlationId`. */
   correlationId?: string
 }): Promise<
-  { ok: true; backupDir: string } | { ok: false; error: EditResult }
+  { ok: true; backupDir?: string } | { ok: false; error: EditResult }
 > {
   // Journal + op keys use `repoRelOf` (derived from each file's already-
   // resolved absolute target path), NEVER the raw sourceLoc-derived

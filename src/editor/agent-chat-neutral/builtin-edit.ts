@@ -179,11 +179,12 @@ async function applyWrite(
   }
   const ack = result.emitted
   if (ack && ack.ok === false) {
+    const backupClause = result.backupDir ? ` (backup at '${result.backupDir}')` : ''
     return {
       content: [
         {
           type: 'text',
-          text: `${toolName}: '${built.repoRel}' was written, but the chat record of it failed: ${ack.reason}. The change IS on disk (backup at '${result.backupDir}').`,
+          text: `${toolName}: '${built.repoRel}' was written, but the chat record of it failed: ${ack.reason}. The change IS on disk${backupClause}.`,
         },
       ],
       isError: true,

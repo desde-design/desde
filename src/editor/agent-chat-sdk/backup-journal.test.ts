@@ -15,13 +15,14 @@
  */
 
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   writeBackupJournal,
   BackupJournalPathEscapeError,
 } from './backup-journal'
+import { DesdeDirSymlinkError } from './desde-dir'
 
 describe('writeBackupJournal', () => {
   let root: string
@@ -88,6 +89,18 @@ describe('writeBackupJournal', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(readFileSync(join(root, result.backupDir, '..foo/Bar.vue'), 'utf8')).toBe('OK')
+  })
+
+  it('rejects a symlinked .desde and writes nothing outside the worktree', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'backup-journal-outside-'))
+    symlinkSync(outside, join(root, '.desde'))
+
+    await expect(
+      writeBackupJournal(root, [{ file: 'App.vue', content: 'ORIGINAL' }]),
+    ).rejects.toThrow(DesdeDirSymlinkError)
+
+    expect(existsSync(join(outside, 'backups'))).toBe(false)
+    rmSync(outside, { recursive: true, force: true })
   })
 
   it('the error names the offending key', async () => {

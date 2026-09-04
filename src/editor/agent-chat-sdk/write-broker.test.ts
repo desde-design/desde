@@ -12,7 +12,7 @@
 
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, symlinkSync } from 'node:fs'
 import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -91,7 +91,7 @@ describe('brokeredWrite', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(readFileSync(join(root, 'App.vue'), 'utf8')).toBe('AFTER')
-    expect(readFileSync(join(root, result.backupDir, 'App.vue'), 'utf8')).toBe('BEFORE')
+    expect(readFileSync(join(root, result.backupDir!, 'App.vue'), 'utf8')).toBe('BEFORE')
     expect(invalidated).toEqual([['App.vue']])
     // invalidate strictly before emit.
     expect(order).toEqual(['invalidate', 'emit'])
@@ -114,7 +114,7 @@ describe('brokeredWrite', () => {
         // .desde/backups/<iso-timestamp>-<uuid v4>
         /^\.desde[/\\]backups[/\\][\dTZ_:.-]+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       )
-      dirs.add(result.backupDir)
+      dirs.add(result.backupDir!)
     }
     // Five back-to-back ops (same millisecond on a fast machine) never
     // share a directory, so none can clobber another's originals.
@@ -142,6 +142,43 @@ describe('brokeredWrite', () => {
     // Nothing written, no lock even taken.
     expect(readFileSync(join(root, 'App.vue'), 'utf8')).toBe('BEFORE')
     expect(acquiredPaths()).toEqual([])
+  })
+
+  it('refuses every write when .desde is a symlink out of the worktree, before touching disk', async () => {
+    writeFileSync(join(root, 'App.vue'), 'original')
+    const outside = mkdtempSync(join(tmpdir(), 'desde-outside-'))
+    symlinkSync(outside, join(root, '.desde'))
+
+    const result = await brokeredWrite({
+      canonicalRoot: root,
+      journal: [{ file: 'App.vue', content: 'original' }],
+      ops: [{ kind: 'write', repoRel: 'App.vue', absPath: join(root, 'App.vue'), content: 'changed' }],
+      lockManager,
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.stage).toBe('backup')
+    expect(result.reason).toMatch(/\.desde.*symlink|symlink.*\.desde/i)
+    expect(existsSync(join(outside, 'backups'))).toBe(false)
+    expect(existsSync(join(outside, 'edit-log.jsonl'))).toBe(false)
+    expect(readFileSync(join(root, 'App.vue'), 'utf8')).toBe('original')
+
+    rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('reports no backupDir for a write whose journal is empty', async () => {
+    const result = await brokeredWrite({
+      canonicalRoot: root,
+      journal: [],
+      ops: [
+        { kind: 'write', repoRel: 'New.vue', absPath: join(root, 'New.vue'), ensureDir: true, isNew: true, content: 'new' },
+      ],
+      lockManager,
+    })
+
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.backupDir).toBeUndefined()
   })
 
   it('acquires per-file locks in sorted absolute-path order', async () => {
@@ -837,7 +874,7 @@ describe('brokeredWrite', () => {
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(readFileSync(join(root, result.backupDir, 'package-lock.json'), 'utf8')).toBe('LOCK')
+    expect(readFileSync(join(root, result.backupDir!, 'package-lock.json'), 'utf8')).toBe('LOCK')
     expect(readFileSync(join(root, 'package-lock.json'), 'utf8')).toBe('LOCK')
   })
 

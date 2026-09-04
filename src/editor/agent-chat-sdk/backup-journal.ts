@@ -21,6 +21,8 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 
+import { assertDesdeDirIsNotASymlink } from './desde-dir'
+
 export interface BackupEntry {
   /** Repo-relative path the original content lived at. */
   file: string
@@ -85,6 +87,7 @@ export async function writeBackupJournal(
   canonicalRoot: string,
   entries: ReadonlyArray<BackupEntry>,
 ): Promise<BackupJournalResult> {
+  assertDesdeDirIsNotASymlink(canonicalRoot)
   const timestamp = new Date()
     .toISOString()
     .replace(/[:.]/g, '-')

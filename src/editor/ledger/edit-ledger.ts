@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto'
 import { appendFile, mkdir, open, readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve as resolvePath, sep } from 'node:path'
 
+import { assertDesdeDirIsNotASymlink } from '../agent-chat-sdk/desde-dir'
 import { currentBranch } from '../worktree/git-branches'
 import type { LedgerEditEntry, LedgerEntry } from './entry'
 import { resolveCommitState } from './commit-state'
@@ -62,6 +63,7 @@ export async function appendLedgerEntry(
   entry: LedgerEntry,
 ): Promise<void> {
   try {
+    assertDesdeDirIsNotASymlink(canonicalRoot)
     const path = ledgerPath(canonicalRoot)
     await mkdir(dirname(path), { recursive: true })
     const prefix = (await endsWithNewlineOrAbsent(path)) ? '' : '\n'
