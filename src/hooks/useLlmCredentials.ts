@@ -53,17 +53,37 @@ export interface LlmCredentialsStatus {
 }
 
 /**
+ * The server's status shape, checked at the boundary. A CLI older than this
+ * UI (or the self-host harness, whose mock backend answers unlisted routes
+ * with `{ ok: true }`) returns something else, and the old hook simply read
+ * `undefined` off it. The map-shaped status would throw instead, in render,
+ * on every page. Checking here turns that into `error` and a null status.
+ */
+export function isLlmCredentialsStatus(value: unknown): value is LlmCredentialsStatus {
+  if (typeof value !== "object" || value === null) return false
+  const v = value as Record<string, unknown>
+  return (
+    typeof v.providers === "object" &&
+    v.providers !== null &&
+    !Array.isArray(v.providers) &&
+    typeof v.devMode === "boolean" &&
+    typeof v.promptDismissed === "boolean"
+  )
+}
+
+/**
  * The single boolean the settings dot and the first-run prompt both need.
  *
  * Defined once because two definitions is how "Anthropic is unconfigured" and
  * "nothing is configured" drift apart, and the first of those would ask a
- * working OpenAI user for a key they do not need. `null` (not yet loaded)
- * reports false so nothing flashes on load.
+ * working OpenAI user for a key they do not need. `null` (not yet loaded) and
+ * a status this shape check does not recognise both report false, so nothing
+ * flashes on load or throws on a stale server's answer.
  */
 export function everyProviderUncredentialed(
   status: LlmCredentialsStatus | null,
 ): boolean {
-  if (status === null) return false
+  if (status === null || !isLlmCredentialsStatus(status)) return false
   return Object.values(status.providers).every((p) => p.source === "none")
 }
 
@@ -90,7 +110,13 @@ export function useLlmCredentials(): UseLlmCredentials {
     try {
       const res = await fetch(ROUTE)
       if (!res.ok) throw new Error(`Status request failed (${res.status}).`)
-      setStatus((await res.json()) as LlmCredentialsStatus)
+      const json: unknown = await res.json()
+      if (!isLlmCredentialsStatus(json)) {
+        throw new Error(
+          "The credentials status had an unexpected shape. Restart the editor after updating.",
+        )
+      }
+      setStatus(json)
       setError(null)
     } catch (err) {
       setError((err as Error).message)
@@ -116,12 +142,22 @@ export function useLlmCredentials(): UseLlmCredentials {
           headers: body ? { "Content-Type": "application/json" } : undefined,
           body: body ? JSON.stringify(body) : undefined,
         })
-        const json = (await res.json()) as Record<string, unknown>
+        const json: unknown = await res.json()
+        const record = (typeof json === "object" && json !== null ? json : {}) as Record<
+          string,
+          unknown
+        >
         if (!res.ok) {
-          setError((json.error as string) ?? `Request failed (${res.status}).`)
+          setError((record.error as string) ?? `Request failed (${res.status}).`)
           return false
         }
-        setStatus(json as unknown as LlmCredentialsStatus)
+        if (!isLlmCredentialsStatus(json)) {
+          setError(
+            "The credentials status had an unexpected shape. Restart the editor after updating.",
+          )
+          return false
+        }
+        setStatus(json)
         return true
       } catch (err) {
         setError((err as Error).message)

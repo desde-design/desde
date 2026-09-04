@@ -1,6 +1,11 @@
 import { act, renderHook, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { everyProviderUncredentialed, useLlmCredentials } from "./useLlmCredentials"
+import {
+  everyProviderUncredentialed,
+  isLlmCredentialsStatus,
+  useLlmCredentials,
+  type LlmCredentialsStatus,
+} from "./useLlmCredentials"
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -232,5 +237,25 @@ describe("everyProviderUncredentialed", () => {
 
   it("is false while the status has not loaded, so nothing flashes", () => {
     expect(everyProviderUncredentialed(null)).toBe(false)
+  })
+})
+
+describe("a status the hook does not recognise", () => {
+  it("everyProviderUncredentialed reports false rather than throwing", () => {
+    expect(everyProviderUncredentialed({ ok: true } as unknown as LlmCredentialsStatus)).toBe(false)
+  })
+
+  it("refresh keeps status null and records an error when the server answers an unknown shape", async () => {
+    stubFetch({ ok: true })
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.status).toBeNull()
+    expect(result.current.error).toMatch(/unexpected|shape|update/i)
+  })
+
+  it("isLlmCredentialsStatus accepts the real shape and rejects the generic one", () => {
+    expect(isLlmCredentialsStatus({ providers: {}, devMode: false, promptDismissed: false })).toBe(true)
+    expect(isLlmCredentialsStatus({ ok: true })).toBe(false)
+    expect(isLlmCredentialsStatus(null)).toBe(false)
   })
 })

@@ -287,7 +287,7 @@ export function LlmCredentialDialog({
                 rel="noreferrer"
                 className="text-xs text-muted-foreground underline underline-offset-2"
               >
-                Get a {p.label} key
+                Get a key from {p.label}
               </a>
             </TabsContent>
           ))}

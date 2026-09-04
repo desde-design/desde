@@ -345,6 +345,15 @@ describe("LlmCredentialDialog: one tab per provider", () => {
   })
 })
 
+describe("the console link names the provider without an article", () => {
+  it("names the console link without an article that can disagree with the provider", () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    expect(screen.getByRole("link", { name: "Get a key from Anthropic" })).toBeInTheDocument()
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    expect(screen.getByRole("link", { name: "Get a key from OpenAI" })).toBeInTheDocument()
+  })
+})
+
 describe("dev mode stays inside the Anthropic tab", () => {
   it("does not reveal the toggle from a tab with no subscription runtime", async () => {
     render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
