@@ -14,6 +14,7 @@ import {
   ANTHROPIC_ONLY_EVENT_KINDS,
   CHAT_STREAM_EVENT_KINDS,
   HANDLER_OWNED_EVENT_KINDS,
+  SCRIPT_EXEMPT_EVENT_KINDS,
   type ChatStreamEvent,
 } from './chat-stream-events'
 import { makeEmptySession } from './types'
@@ -51,6 +52,7 @@ describe('ChatStreamEvent kind coverage', () => {
     const { sdk, neutral } = await runtimeKinds()
     const accounted = new Set<string>([
       ...HANDLER_OWNED_EVENT_KINDS,
+      ...SCRIPT_EXEMPT_EVENT_KINDS,
       ...ANTHROPIC_ONLY_EVENT_KINDS,
       ...sdk,
       ...neutral,
