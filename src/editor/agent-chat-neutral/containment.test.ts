@@ -125,6 +125,40 @@ describe('containment battery', () => {
     }
   })
 
+  it('refuses a protected path spelled with a different case, and creates nothing on disk', async () => {
+    // 2026-09-04 adversarial review P1-1, reproduced on disk: the guard
+    // compared case-sensitively, and macOS resolves case-insensitively, so
+    // `.Claude/settings.local.json` landed real agent hooks in the real
+    // `.claude/`. `resolveRepoPath`'s realpath only canonicalises the case of
+    // a path whose LEAF exists, and a new file's leaf never does.
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    writeFileSync(join(root, '.claude/settings.json'), '{}\n', 'utf8')
+
+    for (const path of [
+      '.Claude/settings.local.json',
+      '.Claude/agents/x.md',
+      '.DESDE/config.json',
+      'Vite.config.ts',
+      'Claude.md',
+    ]) {
+      const decision = await gate()('Write', { file_path: path, content: 'PWNED' }, {})
+      expect(decision.behavior, path).toBe('deny')
+      const out = await buildWriteToolSpec(writeOpts()).handler(
+        { file_path: path, content: 'PWNED' },
+        {},
+      )
+      expect(out.isError, path).toBe(true)
+    }
+
+    // One `.claude/` on disk, with only the file the fixture put there.
+    expect(existsSync(join(root, '.claude/settings.local.json'))).toBe(false)
+    expect(existsSync(join(root, '.claude/agents'))).toBe(false)
+    expect(existsSync(join(root, '.desde/config.json'))).toBe(false)
+    expect(readFileSync(join(root, 'vite.config.ts'), 'utf8')).toBe('export default {}\n')
+    expect(existsSync(join(root, 'CLAUDE.md'))).toBe(false)
+    expect(existsSync(join(root, 'Claude.md'))).toBe(false)
+  })
+
   it('leaves no backup directory behind for a refused write', async () => {
     await buildWriteToolSpec(writeOpts()).handler({ file_path: '../outside/x.md', content: 'x' }, {})
     expect(existsSync(join(root, '.desde/backups'))).toBe(false)

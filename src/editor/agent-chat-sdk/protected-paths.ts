@@ -127,7 +127,17 @@ const PROTECTED_ROOT_CONFIGS: ReadonlySet<string> = new Set(
 
 /**
  * Normalize a repo-relative path for comparison: Windows separators to POSIX,
- * and a leading `./` stripped.
+ * a leading `./` stripped, and Unicode composed to NFC.
+ *
+ * NFC is here because macOS stores filenames decomposed (`e` + a combining
+ * acute) while a model, a JSON body, or a Linux checkout will usually spell
+ * the same name composed (`é`). Those are one file on disk and must be one
+ * string here, or a protected name carrying any non-ASCII character could be
+ * spelled past the guard.
+ *
+ * This function does NOT fold case: it is also the display normalizer for
+ * `protectedPathDenial`, which has to echo the path the model actually asked
+ * for. Case folding happens in `isProtectedAgentPath`, on a private copy.
  *
  * Callers must pass a path that has ALREADY been through `resolveRepoPath` /
  * `resolve-editable-path.ts`, so `..` segments and symlinks are resolved and
@@ -136,17 +146,50 @@ const PROTECTED_ROOT_CONFIGS: ReadonlySet<string> = new Set(
  * invite callers to skip the real one.
  */
 export function normalizeRepoRelative(repoRelative: string): string {
-  const posix = repoRelative.split('\\').join('/')
+  const posix = repoRelative.split('\\').join('/').normalize('NFC')
   return posix.startsWith('./') ? posix.slice(2) : posix
 }
 
-/** True when `repoRelative` names a path the agent may never write. */
+/**
+ * True when `repoRelative` names a path the agent may never write.
+ *
+ * **The comparison is case-INSENSITIVE**, and that is a security property, not
+ * a convenience (2026-09-04 adversarial review, P1-1). macOS and Windows
+ * resolve paths case-insensitively. `resolveRepoPath` canonicalises the case
+ * of a path whose LEAF already exists — which is why `claude.md` refused — but
+ * a file the model is CREATING has no leaf yet, so `realpath` throws `ENOENT`
+ * and the model's own spelling survives into this predicate. A case-sensitive
+ * match then let `Write .Claude/settings.local.json` install agent hooks in
+ * the real `.claude/` (reproduced on disk), along with `.DESDE/config.json`,
+ * `.Claude/agents/*.md` and `Vite.config.ts`.
+ *
+ * The cost is that on a genuinely case-SENSITIVE filesystem (most Linux
+ * checkouts), a real `.Claude/` directory distinct from `.claude/` is refused
+ * too. That is the safe failure and it is deliberate: refusing a directory
+ * almost nobody has beats writing into an execution sink on the two platforms
+ * that do. `toLowerCase` rather than `toLocaleLowerCase`, so a Turkish locale
+ * cannot change what the guard blocks.
+ */
 export function isProtectedAgentPath(repoRelative: string): boolean {
-  const p = normalizeRepoRelative(repoRelative)
-  if (PROTECTED_EXACT.has(p)) return true
-  if (PROTECTED_ROOT_CONFIGS.has(p)) return true
-  return PROTECTED_PREFIXES.some((prefix) => p.startsWith(prefix))
+  const p = normalizeRepoRelative(repoRelative).toLowerCase()
+  if (PROTECTED_EXACT_LOWER.has(p)) return true
+  if (PROTECTED_ROOT_CONFIGS_LOWER.has(p)) return true
+  return PROTECTED_PREFIXES_LOWER.some((prefix) => p.startsWith(prefix))
 }
+
+// Folded once at module load. Every entry above is already lowercase except
+// the rule files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`), so this is mostly a
+// guard against a future entry being added in mixed case and silently only
+// matching itself.
+const PROTECTED_EXACT_LOWER: ReadonlySet<string> = new Set(
+  [...PROTECTED_EXACT].map((p) => p.toLowerCase()),
+)
+const PROTECTED_ROOT_CONFIGS_LOWER: ReadonlySet<string> = new Set(
+  [...PROTECTED_ROOT_CONFIGS].map((p) => p.toLowerCase()),
+)
+const PROTECTED_PREFIXES_LOWER: readonly string[] = PROTECTED_PREFIXES.map((p) =>
+  p.toLowerCase(),
+)
 
 /**
  * The refusal text. Deliberately tells the model NOT to route around the

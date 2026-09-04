@@ -116,6 +116,64 @@ describe('isProtectedAgentPath', () => {
       expect(normalizeRepoRelative('./src/App.vue')).toBe('src/App.vue')
     })
   })
+
+  describe('case variants (2026-09-04 adversarial review, P1-1)', () => {
+    // The guard compared case-sensitively while macOS and Windows resolve
+    // case-insensitively. `resolveRepoPath` canonicalises the case of a path
+    // whose LEAF already exists, which is why `claude.md` refused; for a NEW
+    // leaf the realpath throws ENOENT and the model's own spelling survives.
+    // Every row below was reproduced writing into the real directory on disk.
+    it('protects a directory prefix spelled with different case', () => {
+      for (const p of [
+        '.Claude/settings.local.json',
+        '.CLAUDE/settings.json',
+        '.Claude/agents/x.md',
+        '.DESDE/config.json',
+        '.Desde/backups/abc/App.vue',
+        '.GIT/config',
+        'NODE_MODULES/.bin/vite',
+        '.Cursor/Rules/style.mdc',
+      ]) {
+        expect(isProtectedAgentPath(p), p).toBe(true)
+      }
+    })
+
+    it('protects an exact path spelled with different case', () => {
+      for (const p of ['claude.md', 'AGENTS.MD', 'Agents.md', '.MCP.json', 'Desde.Config.json']) {
+        expect(isProtectedAgentPath(p), p).toBe(true)
+      }
+    })
+
+    it('protects a root build config spelled with different case, extension included', () => {
+      for (const p of ['Vite.config.ts', 'VITE.CONFIG.TS', 'vite.config.TS', 'Tailwind.Config.Js']) {
+        expect(isProtectedAgentPath(p), p).toBe(true)
+      }
+    })
+
+    it('folds Unicode to NFC before comparing, because macOS stores names decomposed', () => {
+      // Not a protected name today, but the normalisation has to be in place
+      // before one ever carries a non-ASCII character: macOS stores names
+      // decomposed, so the two spellings below are the same file on disk.
+      const composed = '.claude/\u00e9.md'
+      const decomposed = '.claude/e\u0301.md'
+      expect(decomposed).not.toBe(composed)
+      expect(normalizeRepoRelative(decomposed)).toBe(normalizeRepoRelative(composed))
+    })
+
+    it('still leaves ordinary source editable whatever its case', () => {
+      for (const p of [
+        'src/App.vue',
+        'README.md',
+        'src/Components/Button.tsx',
+        'Package.json',
+        '.claudette/notes.md',
+        'src/fixtures/Vite.config.ts',
+        'src/Claude/index.ts',
+      ]) {
+        expect(isProtectedAgentPath(p), p).toBe(false)
+      }
+    })
+  })
 })
 
 describe('protectedPathDenial', () => {
