@@ -83,4 +83,20 @@ export const OPENAI_DESCRIPTOR: ProviderDescriptor = {
       return effort === undefined ? {} : { reasoningEffort: effort }
     },
   },
+  errorPatterns: {
+    auth: [
+      // An exhausted quota is not a rate limit even though it arrives as a 429:
+      // waiting does not fix it, so it belongs on the auth arm where the copy
+      // sends the user to their billing page.
+      /\binsufficient_quota\b/i,
+      /\binvalid_api_key\b/i,
+      /incorrect api key/i,
+    ],
+    rateLimited: [/\brate_limit_exceeded\b/i],
+    reauthMessage:
+      'OpenAI rejected the request (401 or 429). The key Editor is using looks ' +
+      'invalid, or the account has no remaining quota. Add or replace your OpenAI ' +
+      'API key from the settings gear, or check your billing at ' +
+      'platform.openai.com. Then start a new chat turn.',
+  },
 }

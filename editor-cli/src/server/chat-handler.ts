@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto"
 import { assertChatCredentials } from "../../../src/editor/llm-providers/assert-chat-credentials.js"
 import { getProvider } from "../../../src/editor/llm-providers/registry.js"
 import {
+  getDescriptor,
   isCredentialedFromEnv,
   resolveDefaultProviderId,
 } from "../../../src/editor/llm-providers/provider-registry.js"
@@ -602,6 +603,11 @@ export async function handleChatRequest(
   // written and something after that threw", so it can't double-append.
   const turnStartedAt = new Date().toISOString()
   let completedTurnId: string | undefined
+  // Hoisted so the outer catch's turn-recovery write (below) can pass the
+  // same provider's error patterns to `classifyTurnError` that the turn
+  // itself ran on — the `const` inside the try is a sibling block scope
+  // to the catch, not a parent, so the catch can't see it otherwise.
+  let turnProviderId: string | undefined
   try {
     stream = openSseStream(req, res)
     // Surface the resolved sessionId as the very first SSE event so the
@@ -735,7 +741,7 @@ export async function handleChatRequest(
     // surface below, so a turn the gate refuses never pays for any of that
     // setup (project knowledge is a filesystem walk, review surface can
     // launch a headless Chromium).
-    const turnProviderId =
+    turnProviderId =
       effectiveModelConfig?.provider ??
       resolveDefaultProviderId({
         env: process.env,
@@ -1085,7 +1091,9 @@ export async function handleChatRequest(
         : undefined
     let finalized: import("../../../src/editor/agent-chat/types").ChatSession
     if (turnError) {
-      const classified = classifyTurnError(turnError)
+      const classified = classifyTurnError(turnError, {
+        errorPatterns: getDescriptor(turnProviderId)?.errorPatterns,
+      })
       finalized = withSessionStatus(
         result.session,
         "failed",
@@ -1147,7 +1155,11 @@ export async function handleChatRequest(
         // sync, and nothing reads the return value after this.
         const { loadSession, saveSession } = await loaders.loadSessionStore()
         const { session: latest } = await loadSession(ctx.repoRoot, { sessionId })
-        const classified = classifyTurnError(err)
+        const classified = classifyTurnError(err, {
+          errorPatterns: turnProviderId
+            ? getDescriptor(turnProviderId)?.errorPatterns
+            : undefined,
+        })
         const reason = `Chat handler failed: ${classified.message}`
         // Record the submission that died here.
         //

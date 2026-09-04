@@ -6,6 +6,8 @@ import {
   extractRetryAfterFromError,
   isAuthError,
 } from "./classify-turn-error"
+import { ANTHROPIC_DESCRIPTOR } from "../llm-providers/descriptors/anthropic"
+import { OPENAI_DESCRIPTOR } from "../llm-providers/descriptors/openai"
 
 describe("classifyTurnError", () => {
   describe("rate-limited detection", () => {
@@ -80,14 +82,16 @@ describe("classifyTurnError", () => {
       )
     })
 
-    it("rate-limit takes precedence over auth when both markers present", () => {
-      // Defensive: a message that somehow carries both should classify
-      // as recoverable (rate-limited) rather than swap to the auth hint.
+    it("auth takes precedence over rate-limit when both markers present", () => {
+      // Task 39: auth is checked FIRST now. OpenAI answers an exhausted
+      // quota with a 429, so if rate-limit won this race a dead account
+      // would badge "recoverable, try again shortly" and the user would
+      // wait for a window that never opens.
       const out = classifyTurnError(
         "429 rate_limit_exceeded; failed to authenticate",
       )
-      expect(out.kind).toBe("rate-limited")
-      expect(out.message).not.toBe(AUTH_REAUTH_MESSAGE)
+      expect(out.kind).toBe("other")
+      expect(out.message).toBe(AUTH_REAUTH_MESSAGE)
     })
 
     it("does not throw on nullish / non-string input", () => {
@@ -229,5 +233,59 @@ describe("extractRetryAfterFromError (codex round-1 #1)", () => {
     expect(() => extractRetryAfterFromError(42)).not.toThrow()
     expect(() => extractRetryAfterFromError({})).not.toThrow()
     expect(() => extractRetryAfterFromError({ headers: null })).not.toThrow()
+  })
+})
+
+describe('classifyTurnError — provider error patterns', () => {
+  it('classifies an OpenAI quota failure as auth, with OpenAI remediation copy', () => {
+    const result = classifyTurnError('OpenAI answered 429: insufficient_quota', {
+      errorPatterns: OPENAI_DESCRIPTOR.errorPatterns,
+    })
+    expect(result.kind).toBe('other')
+    expect(result.message).toBe(OPENAI_DESCRIPTOR.errorPatterns!.reauthMessage)
+    // An exhausted quota is not a wait-and-retry, so it must not wear the
+    // rate-limit badge even though the vendor answered 429.
+    expect(result.retryAfterSeconds).toBeUndefined()
+  })
+
+  it('classifies an OpenAI bad key as auth', () => {
+    for (const message of [
+      'OpenAI answered 401: invalid_api_key',
+      'Incorrect API key provided: sk-abc***',
+    ]) {
+      const result = classifyTurnError(message, { errorPatterns: OPENAI_DESCRIPTOR.errorPatterns })
+      expect(result.message, message).toBe(OPENAI_DESCRIPTOR.errorPatterns!.reauthMessage)
+    }
+  })
+
+  it('classifies an OpenAI rate limit as rate-limited', () => {
+    const result = classifyTurnError('rate_limit_exceeded, retry after 12', {
+      errorPatterns: OPENAI_DESCRIPTOR.errorPatterns,
+    })
+    expect(result.kind).toBe('rate-limited')
+    expect(result.retryAfterSeconds).toBe(12)
+  })
+
+  it('still uses the Anthropic copy for the Anthropic descriptor', () => {
+    const result = classifyTurnError('Failed to authenticate. API Error: 401', {
+      errorPatterns: ANTHROPIC_DESCRIPTOR.errorPatterns,
+    })
+    expect(result.message).toBe(AUTH_REAUTH_MESSAGE)
+  })
+
+  it('keeps its old behaviour when no patterns are supplied', () => {
+    // Every existing call site passes nothing, so the generic sets must stay
+    // the whole answer for them.
+    expect(classifyTurnError('Failed to authenticate. API Error: 401').message).toBe(
+      AUTH_REAUTH_MESSAGE,
+    )
+    expect(classifyTurnError('429 Too Many Requests').kind).toBe('rate-limited')
+  })
+
+  it('does not let one provider\'s patterns leak into another\'s classification', () => {
+    // `insufficient_quota` is OpenAI's word. Classified without OpenAI's
+    // patterns it must stay generic, or a shared classifier becomes a place
+    // where vendors quietly inherit each other's error vocabulary.
+    expect(classifyTurnError('insufficient_quota').message).toBe('insufficient_quota')
   })
 })

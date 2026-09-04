@@ -99,9 +99,12 @@ export interface ProviderDescriptor {
     toRequest(effort: EffortLevel | undefined): Record<string, unknown>
   }
   /** Patterns merged into classify-turn-error's generic sets, plus the remediation copy. */
-  readonly errorPatterns?: {
-    auth?: RegExp[]
-    rateLimited?: RegExp[]
-    reauthMessage: string
-  }
+  readonly errorPatterns?: ProviderErrorPatterns
+}
+
+/** Patterns merged into classify-turn-error's generic sets, plus the remediation copy. */
+export interface ProviderErrorPatterns {
+  auth?: RegExp[]
+  rateLimited?: RegExp[]
+  reauthMessage: string
 }

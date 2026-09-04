@@ -14,6 +14,7 @@ import { ANTHROPIC_MODEL_CATALOG } from '../anthropic-model-catalog'
 import { AnthropicProvider, ANTHROPIC_DEFAULT_MODEL } from '../anthropic-provider'
 import { listAnthropicLiveModels } from '../anthropic-live-models'
 import type { ProviderDescriptor } from '../provider-descriptor'
+import { AUTH_REAUTH_MESSAGE } from '../../agent-chat/classify-turn-error'
 
 const VALIDATE_URL = 'https://api.anthropic.com/v1/models?limit=1'
 const ANTHROPIC_VERSION = '2023-06-01'
@@ -82,5 +83,9 @@ export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
     // The SDK lane resolves thinking from the model id
     // (`resolveAnthropicThinkingConfig`), so nothing rides provider options.
     toRequest: () => ({}),
+  },
+  errorPatterns: {
+    auth: [/invalid authentication credentials/i, /\bauthentication_error\b/i, /failed to authenticate/i],
+    reauthMessage: AUTH_REAUTH_MESSAGE,
   },
 }

@@ -6,8 +6,16 @@
  * "Chat handler failed: <message>" string into `ChatSession.statusReason`.
  * The chat tab strip renders this verbatim as a tooltip; the toast
  * surface renders it as a description. Both are correct for generic
- * errors, but they're noisy for the most-common-cause case: Anthropic
+ * errors, but they're noisy for the most-common-cause case: provider
  * API rate limits.
+ *
+ * Multi-provider: the mechanism stays pure pattern-matching over the
+ * message. What varies per vendor is the vocabulary and the remediation
+ * copy, so each provider's descriptor can contribute its own `auth` /
+ * `rateLimited` patterns and its own `reauthMessage` via the optional
+ * `errorPatterns` opt (see `ProviderErrorPatterns` in
+ * `../llm-providers/provider-descriptor`). A call site with no provider
+ * in scope passes nothing and gets exactly the generic behaviour.
  *
  * Anthropic responses with HTTP 429 (rate limited) bubble up through
  * the SDK with an error message containing "429" and/or "rate_limit".
@@ -28,6 +36,7 @@
  * change could break detection — but the worst case is degrading to
  * generic "failed", which is what we have today.
  */
+import type { ProviderErrorPatterns } from '../llm-providers/provider-descriptor'
 
 /**
  * Classification kind. `rate-limited` covers Anthropic 429s + similar
@@ -187,9 +196,9 @@ export function extractRetryAfterFromError(err: unknown): number | undefined {
  * rewrite the LIVE streamed error event (not just the persisted status)
  * with the same detection logic. Pure; never throws.
  */
-export function isAuthError(rawError: unknown): boolean {
+export function isAuthError(rawError: unknown, opts: ClassifyTurnErrorOpts = {}): boolean {
   const raw = toMessage(rawError)
-  return AUTH_ERROR_PATTERNS.some((p) => p.test(raw))
+  return [...AUTH_ERROR_PATTERNS, ...(opts.errorPatterns?.auth ?? [])].some((p) => p.test(raw))
 }
 
 function stripNoise(message: string): string {
@@ -213,6 +222,15 @@ function parseRetryAfter(message: string): number | undefined {
   return undefined
 }
 
+export interface ClassifyTurnErrorOpts {
+  /**
+   * The active provider's own patterns and remediation copy, from its
+   * descriptor. Omitted means "generic only", which is what every pre-
+   * multi-provider call site wants and gets unchanged.
+   */
+  errorPatterns?: ProviderErrorPatterns
+}
+
 /**
  * Classify a chat-turn error. Pure: no I/O, no provider calls,
  * deterministic from the input message.
@@ -221,19 +239,24 @@ function parseRetryAfter(message: string): number | undefined {
  * coerces to `{ kind: 'other', message: '' }` so the tab strip /
  * toast renders SOMETHING and the route can persist a record.
  */
-export function classifyTurnError(rawError: unknown): ClassifiedTurnError {
+export function classifyTurnError(
+  rawError: unknown,
+  opts: ClassifyTurnErrorOpts = {},
+): ClassifiedTurnError {
   const raw = toMessage(rawError)
   const message = stripNoise(raw)
-  const isRateLimited = RATE_LIMITED_PATTERNS.some((p) => p.test(raw))
-  if (!isRateLimited) {
-    // Auth failures stay `kind: 'other'` (they're not recoverable by
-    // waiting, so the rate-limit badge/retry UI doesn't apply) but get
-    // an actionable message instead of the raw 401 string.
-    if (isAuthError(raw)) {
-      return { kind: 'other', message: AUTH_REAUTH_MESSAGE }
-    }
-    return { kind: 'other', message }
+  const authPatterns = [...AUTH_ERROR_PATTERNS, ...(opts.errorPatterns?.auth ?? [])]
+  const ratePatterns = [...RATE_LIMITED_PATTERNS, ...(opts.errorPatterns?.rateLimited ?? [])]
+  // Auth is checked FIRST now, where it used to be checked only after the
+  // rate-limit arm declined. OpenAI answers an exhausted quota with a 429, so
+  // the generic `\b429\b` pattern would otherwise badge a dead account as
+  // "recoverable, try again shortly" and the user would wait forever.
+  const isAuth = authPatterns.some((p) => p.test(raw))
+  if (isAuth) {
+    return { kind: 'other', message: opts.errorPatterns?.reauthMessage ?? AUTH_REAUTH_MESSAGE }
   }
+  const isRateLimited = ratePatterns.some((p) => p.test(raw))
+  if (!isRateLimited) return { kind: 'other', message }
   const retryAfterSeconds = parseRetryAfter(raw)
   return retryAfterSeconds !== undefined
     ? { kind: 'rate-limited', retryAfterSeconds, message }
