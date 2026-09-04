@@ -76,23 +76,35 @@ export function applyContextBudget(
   // unconditionally would also "fix" an elision-only history whose fixture
   // never had a matching `tool_use` in the first place, changing a case
   // that was never broken.
+  //
+  // The set of "available" ids is built POSITIONALLY, walking `working` in
+  // the order the messages actually appear, and each id is consumed the
+  // moment a `tool_result` claims it. That is deliberate: a vendor id can in
+  // principle be reused by a LATER assistant message, and a `tool_result`
+  // must only survive by pairing with the `tool_use` immediately before it,
+  // not with a same-valued id that happens to show up further down the
+  // transcript. A global "was this id ever produced" set (the earlier
+  // shape) cannot tell those apart, and would let a `tool_result` whose own
+  // `tool_use` was dropped survive on a stranger's id.
   if (dropped > 0) {
-    const producedToolUseIds = new Set<string>()
-    for (const message of working) {
-      if (message.role !== 'assistant') continue
-      for (const block of message.content) {
-        if (block.type === 'tool_use') producedToolUseIds.add(block.id)
-      }
-    }
+    const availableToolUseIds = new Set<string>()
     const withoutOrphans: Message[] = []
     for (const message of working) {
-      if (message.role !== 'user' || typeof message.content === 'string') {
+      if (message.role === 'assistant') {
+        for (const block of message.content) {
+          if (block.type === 'tool_use') availableToolUseIds.add(block.id)
+        }
         withoutOrphans.push(message)
         continue
       }
-      const content = message.content.filter(
-        (block) => block.type !== 'tool_result' || producedToolUseIds.has(block.toolUseId),
-      )
+      if (typeof message.content === 'string') {
+        withoutOrphans.push(message)
+        continue
+      }
+      const content = message.content.filter((block) => {
+        if (block.type !== 'tool_result') return true
+        return availableToolUseIds.delete(block.toolUseId)
+      })
       if (content.length === 0) {
         dropped++
         continue
