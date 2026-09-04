@@ -696,7 +696,18 @@ export async function handleChatRequest(
         session.modelConfig,
         (await modelCatalogResolver.get()).catalogs,
       )
-      if (pv.ok) {
+      // The catalog above can be a few minutes stale (it is cached), so a
+      // provider whose key was JUST removed can still validate against it.
+      // Checking credentials directly here, instead of trusting the cached
+      // catalog alone, is what makes a lost key take effect on the very
+      // next turn rather than waiting out the cache.
+      const persistedProviderCredentialed =
+        pv.ok &&
+        (() => {
+          const persistedDescriptor = getDescriptor(pv.config.provider)
+          return persistedDescriptor !== undefined && isCredentialedFromEnv(persistedDescriptor, process.env)
+        })()
+      if (pv.ok && persistedProviderCredentialed) {
         // Forward the validator's SANITIZED config, not the raw
         // persisted object: a hand-edited session file carrying an
         // effort value on a model that has no effort parameter would
@@ -705,7 +716,9 @@ export async function handleChatRequest(
         modelNotes.push(...pv.warnings)
       } else {
         modelNotes.push(
-          `Saved model for this chat is no longer available. ${pv.error} Using the default model for this turn.`,
+          pv.ok
+            ? "Saved model for this chat is no longer available. Its provider's credentials were removed. Using the default model for this turn."
+            : `Saved model for this chat is no longer available. ${pv.error} Using the default model for this turn.`,
         )
         // Drop the dead choice so the notice is ONE-TIME (design spec)
         // rather than an every-turn nag. These notes ride the `error`

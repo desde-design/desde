@@ -7,8 +7,14 @@ import {
   type LlmCredentialsStatus,
 } from "./useLlmCredentials"
 
+const invalidateModelCatalogCache = vi.fn()
+vi.mock("@/lib/model-catalog-cache", () => ({
+  invalidateModelCatalogCache: () => invalidateModelCatalogCache(),
+}))
+
 afterEach(() => {
   vi.unstubAllGlobals()
+  invalidateModelCatalogCache.mockClear()
 })
 
 /** Answers the mount GET with `status`, and any mutation with `onMutate`. */
@@ -275,6 +281,89 @@ describe("a status the hook does not recognise", () => {
     expect(isLlmCredentialsStatus(null)).toBe(false)
   })
 
+})
+
+describe("useLlmCredentials: invalidates the picker's catalog cache on a credential change", () => {
+  it("saveKey invalidates the catalog cache on success, and not on failure", async () => {
+    const impl = stubFetch(
+      bothNone,
+      () =>
+        new Response(
+          JSON.stringify({ ...bothNone, providers: { ...bothNone.providers, openai: { ...bothNone.providers.openai, source: "stored" } } }),
+          { status: 200 },
+        ),
+    )
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.saveKey("openai", "sk-new")
+    })
+    expect(invalidateModelCatalogCache).toHaveBeenCalledTimes(1)
+
+    invalidateModelCatalogCache.mockClear()
+    impl.mockImplementationOnce(
+      async () => new Response(JSON.stringify({ error: "bad key" }), { status: 400 }),
+    )
+    await act(async () => {
+      await result.current.saveKey("openai", "sk-bad")
+    })
+    expect(invalidateModelCatalogCache).not.toHaveBeenCalled()
+  })
+
+  it("removeKey invalidates the catalog cache on success, and not on failure", async () => {
+    const impl = stubFetch(bothNone, () => new Response(JSON.stringify(bothNone), { status: 200 }))
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.removeKey("openai")
+    })
+    expect(invalidateModelCatalogCache).toHaveBeenCalledTimes(1)
+
+    invalidateModelCatalogCache.mockClear()
+    impl.mockImplementationOnce(
+      async () => new Response(JSON.stringify({ error: "nope" }), { status: 500 }),
+    )
+    await act(async () => {
+      await result.current.removeKey("openai")
+    })
+    expect(invalidateModelCatalogCache).not.toHaveBeenCalled()
+  })
+
+  it("setDevMode invalidates the catalog cache on success, and not on failure", async () => {
+    const impl = stubFetch(bothNone, () => new Response(JSON.stringify(bothNone), { status: 200 }))
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.setDevMode(true)
+    })
+    expect(invalidateModelCatalogCache).toHaveBeenCalledTimes(1)
+
+    invalidateModelCatalogCache.mockClear()
+    impl.mockImplementationOnce(
+      async () => new Response(JSON.stringify({ error: "nope" }), { status: 500 }),
+    )
+    await act(async () => {
+      await result.current.setDevMode(false)
+    })
+    expect(invalidateModelCatalogCache).not.toHaveBeenCalled()
+  })
+
+  it("dismissPrompt does not invalidate the catalog cache — it changes no credential", async () => {
+    stubFetch(bothNone, () => new Response(JSON.stringify(bothNone), { status: 200 }))
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.dismissPrompt()
+    })
+    expect(invalidateModelCatalogCache).not.toHaveBeenCalled()
+  })
+})
+
+describe("a status the hook does not recognise — malformed shape", () => {
   it("rejects a status whose provider row is null or missing its source", () => {
     expect(
       isLlmCredentialsStatus({

@@ -16,6 +16,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react"
+import { invalidateModelCatalogCache } from "@/lib/model-catalog-cache"
 
 export type CredentialSource = "subscription" | "env" | "stored" | "none"
 
@@ -195,25 +196,40 @@ export function useLlmCredentials(): UseLlmCredentials {
     [],
   )
 
+  // The three mutations below change which provider is credentialed, so a
+  // success invalidates the model catalog cache the chip reads — otherwise
+  // the picker keeps offering (or hiding) a provider based on the
+  // credential state from BEFORE this save, for as long as its ten-minute
+  // cache lives. `dismissPrompt` changes no credential, so it does not.
   const saveKey = useCallback(
-    (providerId: string, apiKey: string, baseUrl?: string) =>
-      mutate(`${ROUTE}/${encodeURIComponent(providerId)}`, "PUT", {
+    async (providerId: string, apiKey: string, baseUrl?: string) => {
+      const ok = await mutate(`${ROUTE}/${encodeURIComponent(providerId)}`, "PUT", {
         apiKey,
         // Forward `baseUrl` whenever the caller passed a string, INCLUDING
         // "": that is how a cleared field reaches the server as "clear the
         // stored value" rather than "leave it as it was". Only an actually
         // `undefined` argument (the field was never touched) omits it.
         ...(baseUrl !== undefined ? { baseUrl } : {}),
-      }),
+      })
+      if (ok) invalidateModelCatalogCache()
+      return ok
+    },
     [mutate],
   )
   const removeKey = useCallback(
-    (providerId: string) =>
-      mutate(`${ROUTE}/${encodeURIComponent(providerId)}`, "DELETE"),
+    async (providerId: string) => {
+      const ok = await mutate(`${ROUTE}/${encodeURIComponent(providerId)}`, "DELETE")
+      if (ok) invalidateModelCatalogCache()
+      return ok
+    },
     [mutate],
   )
   const setDevMode = useCallback(
-    (value: boolean) => mutate(`${ROUTE}/dev-mode`, "PUT", { devMode: value }),
+    async (value: boolean) => {
+      const ok = await mutate(`${ROUTE}/dev-mode`, "PUT", { devMode: value })
+      if (ok) invalidateModelCatalogCache()
+      return ok
+    },
     [mutate],
   )
   const dismissPrompt = useCallback(

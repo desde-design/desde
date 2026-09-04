@@ -31,8 +31,15 @@
  *    tolerates a stale PERSISTED value but hard-400s a stale REQUEST
  *    override, so resending one would brick every send while the chip
  *    hid itself.
+ *
+ * The module-level cache itself (and `invalidateModelCatalogCache`, re-
+ * exported below) lives in `src/lib/model-catalog-cache.ts` — see that
+ * file's doc comment for why. Saving, removing or toggling a credential
+ * invalidates it (`useLlmCredentials.ts`); this component reads the cache
+ * through `useSyncExternalStore`, so every mounted chip sees the cache go
+ * back to empty and the fetch effect below refetches it.
  */
-import { Fragment, useEffect, useRef, useState } from "react"
+import { Fragment, useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { ChevronDown } from "lucide-react"
 import { editorFetch } from "@/lib/editor-fetch"
 import { Button } from "@/components/ui/button"
@@ -46,46 +53,18 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { reconcileSessionModelConfig } from "@/editor/core/model-catalog"
-import type {
-  EffortLevel,
-  ProviderModelCatalog,
-  SessionModelConfig,
-} from "@/editor/core/model-catalog"
+import type { EffortLevel, SessionModelConfig } from "@/editor/core/model-catalog"
+import {
+  getCatalogCache,
+  getPickedThisLoad,
+  setCatalogCache,
+  setPickedThisLoad,
+  subscribeCatalogCache,
+  invalidateModelCatalogCache,
+  type ModelCatalogResponse as CatalogResponse,
+} from "@/lib/model-catalog-cache"
 
-/**
- * The capability fields this component reads, structurally.
- *
- * Declared here rather than imported from
- * `src/editor/llm-providers/provider-descriptor.ts` because this module ships
- * in the browser bundle and that directory reaches node-only code. It is a
- * SUBSET on purpose: the chip gates on nothing else today, and a structural
- * subset cannot go stale against the server's fuller record the way a
- * hand-copied full duplicate would.
- */
-interface ProviderCapabilitiesLike {
-  midTurnSteering: boolean
-  vendorRateLimitEvents: boolean
-}
-
-interface CatalogResponse {
-  catalogs: Array<ProviderModelCatalog & { capabilities?: ProviderCapabilitiesLike }>
-  default: SessionModelConfig
-  /**
-   * Which provider is THE default, per the server's own rule
-   * (`resolveDefaultProviderId`) rather than array position. The chip does
-   * not read this today — `catalog.default` already names the right pair —
-   * but it is declared here so the response type matches what the server
-   * actually sends, and so a future gate has it without another round-trip
-   * through the server response shape.
-   */
-  defaultProviderId?: string
-  /**
-   * The model the user last chose in this project, already reconciled
-   * server-side. `null` = no chat has ever carried a choice (or every
-   * saved one is gone) → runtime default.
-   */
-  lastChosenModel?: SessionModelConfig | null
-}
+export { invalidateModelCatalogCache }
 
 /** One radio value has to identify BOTH halves: two providers may reuse an id. */
 const OPTION_VALUE_SEPARATOR = "::"
@@ -112,28 +91,22 @@ function providerLabel(providerId: string): string {
   )
 }
 
-let catalogCache: CatalogResponse | null = null
-
 /**
- * What the user picked through this chip since the page loaded.
- *
- * MODULE scope, deliberately, and it has to match `catalogCache`'s lifetime
- * exactly. This value exists to outrank `catalog.lastChosenModel`, which is
- * only current as of the one fetch that filled that cache: pick Opus, then
- * hit "+ New", and the new chat has no choice of its own while the cached
+ * `pickedThisLoad` (what the user picked through this chip since the page
+ * loaded) exists to outrank `catalog.lastChosenModel`, which is only
+ * current as of the one fetch that filled the cache: pick Opus, then hit
+ * "+ New", and the new chat has no choice of its own while the cached
  * catalog still names whatever ran before Opus.
  *
  * It was a `useRef`, which is per-MOUNT. Hiding and re-showing the right rail
  * unmounts the chip and wipes the memory, while the module-level catalog
  * survives untouched, so the very next "+ New" adopted the stale value and
  * silently undid the user's most recent pick. Two lifetimes for one
- * correction is the bug; one lifetime is the fix.
- *
- * Both are plain module state, reset the same way the tests already reset the
- * catalog: `vi.resetModules()` and a fresh dynamic import.
+ * correction is the bug; one lifetime is the fix — both it and the catalog
+ * cache now live in `src/lib/model-catalog-cache.ts`, reset the same way the
+ * tests already reset the catalog: `vi.resetModules()` and a fresh dynamic
+ * import.
  */
-let pickedThisLoad: SessionModelConfig | null = null
-
 const NO_EFFORT_SENTINEL = "__default__"
 
 export interface ModelPickerChipProps {
@@ -173,7 +146,12 @@ export function ModelPickerChip({
   sessionId = null,
   onAdoptLastChosenModel,
 }: ModelPickerChipProps) {
-  const [catalog, setCatalog] = useState<CatalogResponse | null>(catalogCache)
+  // Read straight from the shared store rather than local state: a fetch
+  // (by this chip OR another mounted one) and `invalidateModelCatalogCache`
+  // both go through `setCatalogCache`, which notifies this subscription, so
+  // every mounted chip renders the same catalog without a `useEffect` ever
+  // having to call `setState` for a value that already changed elsewhere.
+  const catalog = useSyncExternalStore(subscribeCatalogCache, getCatalogCache, getCatalogCache)
   const [catalogFailed, setCatalogFailed] = useState(false)
   // The rail passes an inline arrow, so `onChange`'s identity changes
   // every render. Hold it in a ref so it stays out of the sync effect's
@@ -194,9 +172,13 @@ export function ModelPickerChip({
   const canAdoptLastChosenModel = onAdoptLastChosenModel !== undefined
 
   useEffect(() => {
-    if (catalogCache) return
+    // Already cached — either the first mount saw a warm cache, or another
+    // mounted chip's fetch (or this effect's own previous run) already
+    // filled it. Nothing to do: `catalog` above already reflects it.
+    if (getCatalogCache()) return
     let cancelled = false
     void (async () => {
+      setCatalogFailed(false)
       try {
         const res = await editorFetch("/api/editor/chat/model-catalog")
         if (!res.ok) {
@@ -221,8 +203,7 @@ export function ModelPickerChip({
           if (!cancelled) setCatalogFailed(true)
           return
         }
-        catalogCache = body
-        if (!cancelled) setCatalog(body)
+        if (!cancelled) setCatalogCache(body)
       } catch {
         // Catalog unavailable — chip stays hidden, chat uses defaults.
         if (!cancelled) setCatalogFailed(true)
@@ -231,7 +212,7 @@ export function ModelPickerChip({
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [catalog])
 
   // Keep session state in agreement with what the server will run.
   // Idempotent by construction: every branch either leaves `value`
@@ -289,7 +270,7 @@ export function ModelPickerChip({
     //
     // A pick made during this page-load outranks the catalog's copy,
     // which was resolved at mount and cannot know about it.
-    const lastChosen = pickedThisLoad ?? catalog.lastChosenModel
+    const lastChosen = getPickedThisLoad() ?? catalog.lastChosenModel
     if (!lastChosen) return
     if (sessionId === null) {
       onChangeRef.current(lastChosen)
@@ -318,7 +299,7 @@ export function ModelPickerChip({
   // can never miss one. The config is built from the catalog, so it is
   // valid by construction and needs no reconciling before it is stored.
   const choose = (config: SessionModelConfig): void => {
-    pickedThisLoad = config
+    setPickedThisLoad(config)
     onChange(config)
   }
 

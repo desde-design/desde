@@ -279,20 +279,24 @@ describe("handleChatRequest", () => {
     // at it, so an OpenAI-configured session was checked against
     // ANTHROPIC_API_KEY instead of OPENAI_API_KEY.
     //
-    // Neutral chat has to be turned on for the request validator to accept
-    // an `openai` modelConfig at all — otherwise this would 400 before ever
-    // reaching the credential gate under test.
+    // Since the codex fix (model-catalog-source.ts only serving credentialed
+    // providers), an uncredentialed provider named on the REQUEST never
+    // reaches this gate at all — the catalog resolver excludes it and the
+    // request 400s at model-config validation instead, which checks OpenAI's
+    // own credential state (it is what decides whether OpenAI is even in the
+    // catalog), not Anthropic's. That is the same assertion this test always
+    // made, one step earlier.
     vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
-    // Anthropic is credentialed; OpenAI is not. The old provider-blind gate
-    // would have let this turn proceed.
+    // Anthropic is credentialed; OpenAI is not.
     const mock = makeMockReqRes()
     mock.setBody({
       userMessage: "hi",
       modelConfig: { provider: "openai", model: "gpt-5.6" },
     })
     await handleChatRequest(mock.req, mock.res, { repoRoot } as ChatHandlerContext)
-    const error = mock.events().find((e) => e.kind === "error")
-    expect(error?.reason).toMatch(/OpenAI/)
+    expect((mock.res as unknown as { statusCode: number }).statusCode).toBe(400)
+    const body = JSON.parse(mock.endBody() ?? "{}")
+    expect(body.error).toMatch(/openai/i)
   })
 
   it("forwards orchestrator events to the SSE stream", async () => {
@@ -2570,14 +2574,93 @@ describe("the both-ends gate, from the route", () => {
   })
 
   it("checks the credentials of the provider the session actually names", async () => {
+    // With no OPENAI_API_KEY, OpenAI is not in the catalog at all (codex
+    // fix), so a request naming it 400s at model-config validation rather
+    // than reaching `assertChatCredentials` — still gated on OpenAI's own
+    // credential state, not Anthropic's, one step earlier than before.
     const { loaders } = makeGateLoaders()
     vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
     vi.stubEnv("OPENAI_API_KEY", "")
     const mock = makeMockReqRes()
     mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.6" } })
     await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
-    const error = mock.events().find((e) => e.kind === "error")
-    expect(error?.reason).toMatch(/OpenAI/)
+    expect((mock.res as unknown as { statusCode: number }).statusCode).toBe(400)
+    const body = JSON.parse(mock.endBody() ?? "{}")
+    expect(body.error).toMatch(/openai/i)
+    vi.unstubAllEnvs()
+  })
+
+  // codex fix (Task cx3): a provider id supplied by the CURRENT request
+  // stays a hard 400 when uncredentialed — unchanged from before this fix,
+  // just via the catalog exclusion rather than a dispatch-time refusal.
+  it("a provider supplied by the request itself is still refused when uncredentialed", async () => {
+    const { loaders, loadRunChatTurnSdk, loadRunChatTurnNeutral } = makeGateLoaders()
+    vi.stubEnv("OPENAI_API_KEY", "")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.6" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    expect((mock.res as unknown as { statusCode: number }).statusCode).toBe(400)
+    const body = JSON.parse(mock.endBody() ?? "{}")
+    expect(body.error).toMatch(/unknown provider/i)
+    expect(loadRunChatTurnSdk).not.toHaveBeenCalled()
+    expect(loadRunChatTurnNeutral).not.toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  // codex fix (Task cx3): a persisted provider whose key has since been
+  // removed degrades the SESSION to the credentialed default with a note,
+  // rather than refusing the turn outright — the opposite of the request
+  // case above, and the whole point of the distinction: a stale persisted
+  // choice must never brick the chat.
+  it("a persisted provider whose key is gone falls back to the credentialed default with a note, and runs", async () => {
+    const { makeEmptySession } = await import(
+      "../../../../src/editor/agent-chat/types.js"
+    )
+    const seedSession = makeEmptySession("test-proj") as import(
+      "../../../../src/editor/agent-chat/types"
+    ).ChatSession
+    seedSession.modelConfig = { provider: "openai", model: "gpt-5.6" }
+    vi.stubEnv("OPENAI_API_KEY", "")
+
+    const runTurnSpy = vi.fn(async (_opts: { providerId?: string }) => ({
+      session: seedSession,
+      turn: {
+        id: "test-turn",
+        startedAt: "x",
+        userMessage: "ignored",
+        assistantContent: [],
+        toolResults: {},
+        editProposals: [],
+      },
+    }))
+    const loadRunChatTurnSdk = vi.fn(async () => ({ runChatTurnSdk: runTurnSpy }))
+    const loadRunChatTurnNeutral = vi.fn(async () => ({ runChatTurnNeutral: runTurnSpy }))
+    const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnSdk: loadRunChatTurnSdk as unknown as ChatHandlerLoaders["loadRunChatTurnSdk"],
+      loadRunChatTurnNeutral: loadRunChatTurnNeutral as unknown as ChatHandlerLoaders["loadRunChatTurnNeutral"],
+      loadSessionStore: async () => {
+        return {
+          loadSession: async () => ({ session: seedSession, fresh: false }),
+          saveSession: async (_root: string, session: unknown) => session,
+        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadSessionStore"]>>
+      },
+    }
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi" })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+
+    expect((mock.res as unknown as { statusCode: number }).statusCode).toBe(200)
+    expect(loadRunChatTurnSdk).toHaveBeenCalled()
+    expect(loadRunChatTurnNeutral).not.toHaveBeenCalled()
+    const note = mock
+      .events()
+      .find(
+        (e) =>
+          e.kind === "error" &&
+          typeof e.reason === "string" &&
+          /no longer available/i.test(e.reason as string),
+      )
+    expect(note).toBeDefined()
     vi.unstubAllEnvs()
   })
 })

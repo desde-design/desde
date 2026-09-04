@@ -52,7 +52,10 @@ let shellOrigin: string
 // offline, and logs a fallback error on every run.
 beforeAll(() => {
   setModelCatalogLiveSourcesForTests({
-    listViaApi: async () => [], // the static catalog is what this suite needs
+    // Keyed per provider (not the legacy bare-function/Anthropic-only
+    // shape) so a fake OpenAI key in this suite can never fall through to
+    // the real `listOpenAiLiveModels` and reach the network.
+    listViaApi: { anthropic: async () => [], openai: async () => [] }, // the static catalog is what this suite needs
     listViaCli: async () => [],
   })
 })
@@ -203,10 +206,15 @@ describe("POST /api/editor/chat with a neutral provider", () => {
     expect(await readSse(res)).toContain("Unknown provider 'openai'")
   })
 
-  it("accepts a request naming the OpenAI provider with no configuration at all", async () => {
-    // The default this task shipped: absence means on, so an OpenAI request
-    // is servable (even though `gpt-5.2` itself is not a real model id, so
-    // catalog validation refuses it for THAT reason instead).
+  it("accepts a request naming the OpenAI provider once it is credentialed", async () => {
+    // The default this task shipped: absence means the neutral gate is ON,
+    // so an OpenAI request is servable — but only once OpenAI is actually
+    // credentialed (codex fix: an uncredentialed provider is not served at
+    // all, so `provider: "openai"` with NO configuration 400s with "Unknown
+    // provider", not "Unknown model" — see the case above this one). With a
+    // key set, `gpt-5.2` itself is still not a real model id, so catalog
+    // validation refuses it for THAT reason instead.
+    process.env.OPENAI_API_KEY = "sk-openai-test-only"
     const res = await fetch(`${handle.url}/api/editor/chat`, {
       method: "POST",
       headers: {

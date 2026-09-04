@@ -692,3 +692,51 @@ describe("ModelPickerChip — the pick survives a remount", () => {
     })
   })
 })
+
+/**
+ * `invalidateModelCatalogCache` is what a credential save/remove calls
+ * (`useLlmCredentials.ts`) once the app's set of credentialed providers
+ * changes. This chip must forget its cache and reconcile against the fresh
+ * one — the same invariant as `catalog.lastChosenModel` going stale, just
+ * triggered by a different event.
+ */
+describe("ModelPickerChip — forgets its catalog when invalidated", () => {
+  it("refetches after the catalog cache is invalidated and drops a value the fresh catalogs no longer serve", async () => {
+    vi.resetModules()
+    const { ModelPickerChip, invalidateModelCatalogCache } = await import(
+      "./model-picker-chip"
+    )
+    const { editorFetch } = await import("@/lib/editor-fetch")
+    vi.mocked(editorFetch)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => TWO_PROVIDER_CATALOG,
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ANTHROPIC_ONLY_CATALOG,
+      } as unknown as Response)
+
+    const Harness = makeHarness(ModelPickerChip)
+    const spy = vi.fn()
+    render(
+      <Harness
+        sessionId="session-b"
+        initial={{ provider: "openai", model: "gpt-5.2" }}
+        spy={spy}
+      />,
+    )
+    await waitFor(() => {
+      expect(screen.getByTestId("editor-model-chip")).toHaveTextContent("GPT-5.2")
+    })
+
+    invalidateModelCatalogCache()
+
+    // The fresh catalog no longer serves openai, so the chip must drop the
+    // value and fall back to the served (anthropic) default.
+    await waitFor(() => expect(spy).toHaveBeenCalledWith(null))
+    await waitFor(() => {
+      expect(screen.getByTestId("editor-model-chip")).toHaveTextContent("Opus 4.8")
+    })
+  })
+})

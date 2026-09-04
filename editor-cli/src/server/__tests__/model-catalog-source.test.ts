@@ -64,15 +64,16 @@ describe('createModelCatalogResolver', () => {
     expect(listViaCli).not.toHaveBeenCalled()
   })
 
-  it('answers static without calling anything when there are no credentials', async () => {
-    // The neutral gate is opt-OUT by default (Task 40), so OpenAI's own
-    // static catalog is served alongside Anthropic's even with no key for
-    // either — it is still `static`, and still calls nothing.
+  it('serves only the precedence default, static, when there are no credentials at all', async () => {
+    // An uncredentialed provider is not served (codex fix): the picker must
+    // never offer a provider the chat gate then refuses every turn. With
+    // NOTHING credentialed the picker still needs a default to show on
+    // first run, so the precedence default (Anthropic) is served alone.
     const { resolver, listViaApi, listViaCli } = makeResolver({})
     const result = await resolver.get()
     expect(result.source).toBe('static')
     expect(result.catalogs[0]).toEqual(ANTHROPIC_MODEL_CATALOG)
-    expect(result.catalogs.map((c) => c.providerId)).toEqual(['anthropic', 'openai'])
+    expect(result.catalogs.map((c) => c.providerId)).toEqual(['anthropic'])
     expect(listViaApi).not.toHaveBeenCalled()
     expect(listViaCli).not.toHaveBeenCalled()
   })
@@ -145,10 +146,12 @@ describe("the resolver loops the descriptor table", () => {
 
   it("serves every provider whose chat runtime can dispatch, by default", async () => {
     // The neutral gate is opt-OUT now (Task 40), so with no configuration at
-    // all the OpenAI group is servable and appears alongside Anthropic's.
+    // all the OpenAI group is servable and appears alongside Anthropic's —
+    // both are credentialed here. Keyed per provider so neither call ever
+    // reaches a real vendor.
     const resolver = createModelCatalogResolver({
       env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }),
-      listViaApi: async () => [],
+      listViaApi: { anthropic: async () => [], openai: async () => [] },
       listViaCli: async () => [],
     })
     const resolved = await resolver.get()
@@ -172,7 +175,7 @@ describe("the resolver loops the descriptor table", () => {
   it("serves a second provider's static catalog once it is included", async () => {
     const resolver = createModelCatalogResolver({
       env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }),
-      listViaApi: async () => [],
+      listViaApi: { anthropic: async () => [], openai: async () => [] },
       listViaCli: async () => [],
       includeDescriptor: () => true,
     })
@@ -199,9 +202,14 @@ describe("the resolver loops the descriptor table", () => {
     let calls = 0
     const resolver = createModelCatalogResolver({
       env: () => env,
-      listViaApi: async () => {
-        calls += 1
-        return [{ id: 'claude-opus-9', label: 'Opus 9' }]
+      listViaApi: {
+        anthropic: async () => {
+          calls += 1
+          return [{ id: 'claude-opus-9', label: 'Opus 9' }]
+        },
+        // Only servable once the second get() adds an OpenAI key; keyed so
+        // that call never reaches the real vendor.
+        openai: async () => [],
       },
       listViaCli: async () => [],
       includeDescriptor: () => true,
@@ -218,7 +226,7 @@ describe("the resolver loops the descriptor table", () => {
     // itself is asserted directly, elsewhere.
     const resolver = createModelCatalogResolver({
       env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-test', OPENAI_API_KEY: 'sk-test' }),
-      listViaApi: async () => [],
+      listViaApi: { anthropic: async () => [], openai: async () => [] },
       listViaCli: async () => [],
       includeDescriptor: () => true,
     })
@@ -231,7 +239,7 @@ describe("the resolver loops the descriptor table", () => {
     expect(openai.models.filter((m) => m.isDefault).map((m) => m.id)).toEqual(['gpt-5.6'])
   })
 
-  it("falls back to every provider's static catalog when a live source throws", async () => {
+  it("falls back to the credentialed provider's static catalog when its live source throws", async () => {
     const resolver = createModelCatalogResolver({
       env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x' }),
       listViaApi: async () => {
@@ -242,10 +250,44 @@ describe("the resolver loops the descriptor table", () => {
     })
     const resolved = await resolver.get()
     expect(resolved.source).toBe('static')
-    // OpenAI is servable by default (Task 40) and has no key here, so it
-    // rides along on its own static catalog even though only Anthropic's
-    // live source was made to fail.
+    // OpenAI has no key here, so it is not served at all (credentialed-only,
+    // codex fix) — only Anthropic's static fallback appears.
+    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic'])
+  })
+
+  it("caches a partial fallback for the failure TTL, and reports the weakest source", async () => {
+    // Anthropic's live source answers; OpenAI's throws. The aggregate
+    // `source` has to read as the WEAKEST one served, not the strongest —
+    // otherwise a struggling OpenAI would silently buy the whole response
+    // the long success TTL instead of the short failure one.
+    let t = 1_000_000
+    let openaiCalls = 0
+    const resolver = createModelCatalogResolver({
+      env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }),
+      listViaApi: {
+        anthropic: async () => [{ id: 'claude-opus-9', label: 'Opus 9' }],
+        openai: async () => {
+          openaiCalls += 1
+          throw new Error('openai down')
+        },
+      },
+      listViaCli: async () => [],
+      includeDescriptor: () => true,
+      now: () => t,
+      failureTtlMs: 1_000,
+      ttlMs: 10 * 60_000,
+      log: () => {},
+    })
+    const resolved = await resolver.get()
+    expect(resolved.source).toBe('static')
     expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic', 'openai'])
+    // Held for the failure TTL, not the (much longer) success one.
+    t += 500
+    await resolver.get()
+    expect(openaiCalls).toBe(1)
+    t += 600
+    await resolver.get()
+    expect(openaiCalls).toBe(2)
   })
 })
 
@@ -259,20 +301,24 @@ describe('chatRuntimeServable', () => {
     // production passes nothing, so the gate flipping to opt-OUT (Task 40)
     // is the whole mechanism by which an OpenAI group appears in the
     // picker. No handler edit, and no second switch to keep in step with
-    // this one.
+    // this one. No ANTHROPIC_API_KEY here, so Anthropic is uncredentialed
+    // and does not appear — only OpenAI, which does.
     expect(chatRuntimeServable(OPENAI_DESCRIPTOR)).toBe(true)
     const resolver = createModelCatalogResolver({
       env: () => ({ OPENAI_API_KEY: 'sk-test' }),
-      listViaApi: async () => [],
+      listViaApi: { openai: async () => [] },
       listViaCli: async () => [],
     })
     const resolved = await resolver.get()
-    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic', 'openai'])
+    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['openai'])
   })
 
   it('does not serve it while the gate is explicitly off', async () => {
     process.env.EDITOR_NEUTRAL_CHAT = '0'
     expect(chatRuntimeServable(OPENAI_DESCRIPTOR)).toBe(false)
+    // OpenAI is excluded before credentials are even considered (the gate),
+    // and Anthropic has no key here either, so nothing is credentialed and
+    // the precedence default's static catalog is served alone.
     const resolver = createModelCatalogResolver({
       env: () => ({ OPENAI_API_KEY: 'sk-test' }),
       listViaApi: async () => [],
@@ -280,5 +326,76 @@ describe('chatRuntimeServable', () => {
     })
     const resolved = await resolver.get()
     expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic'])
+  })
+})
+
+describe('every provider is injectable, so no unit test reaches a real vendor', () => {
+  afterEach(() => {
+    delete process.env.EDITOR_NEUTRAL_CHAT
+  })
+
+  it('never reaches the network from a unit test, for any provider', async () => {
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      throw new Error('network reached: ' + String(input))
+    }) as typeof fetch
+    try {
+      const resolver = createModelCatalogResolver({
+        env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }),
+        listViaApi: { anthropic: async () => [], openai: async () => [] },
+        listViaCli: async () => [],
+        log: () => {},
+      })
+      const r = await resolver.get()
+      expect(r.catalogs).toHaveLength(2)
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  it('keys the cache on the base URL and passes it to the live lookup', async () => {
+    const seen: Array<{ baseUrl?: string }> = []
+    const env: NodeJS.ProcessEnv = {
+      OPENAI_API_KEY: 'sk-y',
+      OPENAI_BASE_URL: 'https://gateway.internal/v1',
+    }
+    const resolver = createModelCatalogResolver({
+      env: () => env,
+      listViaApi: {
+        openai: async (input) => {
+          seen.push({ baseUrl: input.baseUrl })
+          return []
+        },
+      },
+      listViaCli: async () => [],
+      log: () => {},
+    })
+    await resolver.get()
+    expect(seen[0]?.baseUrl).toBe('https://gateway.internal/v1')
+    // A changed base URL is a different provider identity — a cache miss,
+    // not a stale hit.
+    env.OPENAI_BASE_URL = 'https://other.internal/v1'
+    await resolver.get()
+    expect(seen).toHaveLength(2)
+    expect(seen[1]?.baseUrl).toBe('https://other.internal/v1')
+  })
+
+  it('logs once per (provider, model) when a served model has no rate card', async () => {
+    const logged: string[] = []
+    const resolver = createModelCatalogResolver({
+      env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x' }),
+      listViaApi: {
+        anthropic: async () => [{ id: 'claude-mystery-9', label: 'Mystery 9' }],
+      },
+      listViaCli: async () => [],
+      log: (message) => logged.push(message),
+    })
+    await resolver.get()
+    // Force a second real resolution (not a cache hit) so the dedup is
+    // proven by the log-once guard, not by the cache alone.
+    resolver.invalidate()
+    await resolver.get()
+    const rateCardLines = logged.filter((m) => m.includes('no rate card for anthropic/claude-mystery-9'))
+    expect(rateCardLines).toHaveLength(1)
   })
 })

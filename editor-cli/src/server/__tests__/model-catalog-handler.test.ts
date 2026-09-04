@@ -254,7 +254,9 @@ describe('handleModelCatalogRequest — lastChosenModel', () => {
     expect(state.statusCode).toBe(200)
     const body = JSON.parse(state.body)
     expect(body.lastChosenModel).toBeNull()
-    // Anthropic plus OpenAI, servable by default since Task 40.
-    expect(body.catalogs).toHaveLength(2)
+    // No credentials in this test's env, so only the precedence default
+    // (Anthropic) is served, static (codex fix: an uncredentialed provider
+    // is not served at all, even when its chat runtime is servable).
+    expect(body.catalogs).toHaveLength(1)
   })
 })
