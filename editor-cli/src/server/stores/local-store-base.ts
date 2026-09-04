@@ -16,7 +16,7 @@ import { mkdir, readFile, rename, writeFile, unlink, readdir, stat } from "node:
 import { dirname, join } from "node:path"
 import { randomUUID } from "node:crypto"
 
-import { desdePath } from "../../../../src/editor/worktree/desde-dir.js"
+import { desdePath, desdeRemovalPath } from "../../../../src/editor/worktree/desde-dir.js"
 
 /** Default subdirectory under the user's repo root. */
 export const DESDE_DIR = ".desde"
@@ -37,6 +37,18 @@ export const DESDE_DIR = ".desde"
  */
 export function resolveStorePath(repoRoot: string, ...segments: string[]): string {
   return desdePath(repoRoot, ...segments)
+}
+
+/**
+ * Resolve a path inside `<repoRoot>/.desde/` that the caller is about to
+ * `rm(..., { recursive: true })`. Use this instead of {@link resolveStorePath}
+ * for a RECURSIVE delete — `desdeRemovalPath` re-resolves the target with
+ * `realpath` immediately before the caller's `rm`, closing the window where
+ * `.desde` (or a directory beneath it) was swapped for a symlink between the
+ * segment-walk check and the write. See `src/editor/worktree/desde-dir.ts`.
+ */
+export function resolveStoreRemovalPath(repoRoot: string, ...segments: string[]): string {
+  return desdeRemovalPath(repoRoot, ...segments)
 }
 
 /**

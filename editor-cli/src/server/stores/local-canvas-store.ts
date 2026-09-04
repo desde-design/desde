@@ -36,6 +36,7 @@ import {
   nowIso,
   readJsonFile,
   resolveStorePath,
+  resolveStoreRemovalPath,
   writeJsonFile,
 } from "./local-store-base.js"
 
@@ -45,8 +46,10 @@ function canvasesPath(repoRoot: string): string {
   return resolveStorePath(repoRoot, "canvases.json")
 }
 
+// Only ever `rm(..., { recursive: true })`'d — resolved through the
+// removal-time guard rather than `resolveStorePath`.
 function canvasDir(repoRoot: string, canvasId: string): string {
-  return resolveStorePath(repoRoot, "canvases", canvasId)
+  return resolveStoreRemovalPath(repoRoot, "canvases", canvasId)
 }
 
 function framesPath(repoRoot: string, canvasId: string): string {

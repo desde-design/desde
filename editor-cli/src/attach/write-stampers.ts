@@ -146,6 +146,18 @@ export async function writeStamperFiles(
     // that will not start.
     const target = guardedTarget(req.destDir, file.path)
     if (target === null) {
+      // Deliberately soft, even though it means edits will not attribute
+      // (no source-tag stamps ⇒ every edit dispatch is refused): the
+      // Next-loader lane's write, by contrast, throws and stops the CLI
+      // from booting at all (`loader-cache.ts`) — but that failure is the
+      // CLI's own cache directory being unwritable, unrelated to the
+      // repository's content and no different on a retry. This one is
+      // caused by the (untrusted) prototype repo itself, and refusing to
+      // boot would hand a hostile `.desde` symlink the power to lock the
+      // user out of the Editor entirely. An editor that boots with edits
+      // refused, and says why in this warning, is the boot path's version
+      // of "read a credential file you cannot parse as no credentials"
+      // rather than "cannot start at all" — see `desde-dir.ts`'s header.
       warnings.push(
         `Refusing to write '${file.path}': '.desde' in this project is a symbolic link, so Desde cannot install its source-tag helpers.`,
       )

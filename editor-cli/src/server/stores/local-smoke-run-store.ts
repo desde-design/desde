@@ -18,6 +18,7 @@ import { rm } from "node:fs/promises"
 import { resolve as resolvePath, dirname } from "node:path"
 import {
   resolveStorePath,
+  resolveStoreRemovalPath,
   readJsonFile,
   writeJsonFile,
   mutate,
@@ -100,9 +101,13 @@ export async function addSmokeRun(
     for (const old of prune) {
       const dir = resolvePath(smokeRunsDir, old.id)
       // Require a DIRECT child of smoke-runs/: rejects "" (the dir itself),
-      // "../escape", and nested "a/b" ids alike.
+      // "../escape", and nested "a/b" ids alike. Once that holds, `old.id`
+      // is safe to hand to the removal-time guard as its own path segment.
       if (dirname(dir) !== smokeRunsDir) continue
-      await rm(dir, { recursive: true, force: true }).catch(() => {})
+      await rm(resolveStoreRemovalPath(root, "smoke-runs", old.id), {
+        recursive: true,
+        force: true,
+      }).catch(() => {})
     }
   })
 

@@ -109,6 +109,35 @@
  *    log rather than proceed when the guard throws: `backups-gc.ts`
  *    (`.desde/backups/`), `proposal-blob-gc.ts` (`.desde/chat-sessions/`),
  *    `read-snapshot-gc.ts` (`.desde/chat-sessions/<id>/bases/`).
+ *  - The local artifact stores' own per-item recursive deletes:
+ *    `local-canvas-store.ts` (`.desde/canvases/<id>/`),
+ *    `local-screenshot-plan-store.ts`
+ *    (`.desde/screenshot-plans/<id>/`), and `local-smoke-run-store.ts`
+ *    (`.desde/smoke-runs/<id>/`, after its own defense-in-depth check that
+ *    the persisted run id names a direct child — see that file for why the
+ *    id cannot be trusted on its own). All three route through
+ *    `resolveStoreRemovalPath` (`local-store-base.ts`), which is
+ *    {@link desdeRemovalPath} under the store layer's own naming.
+ *
+ * **The two removals this guard does NOT cover, and why not.** The
+ * onboarding ingest scratch wipes — `ingest/npm-package.ts`
+ * (`ingestNpmPackage`) and `ingest/git-repo.ts` (`ingestRepo`, both its
+ * pre-clone staging wipe and its final swap-in wipe) — `rm(...,
+ * { recursive: true })` a subdirectory of `.desde/ingested/` without going
+ * through {@link desdeRemovalPath}. They cannot: both modules receive an
+ * already-resolved `scratchRoot` (computed once, through this guard, by
+ * `onboarding/orchestrator.ts`'s `ingestScratchRoot`) and join a
+ * self-computed slug onto it — they have no `repoRoot` of their own to
+ * re-check the removal against, and threading one through would couple two
+ * modules whose whole design is deliberately location-agnostic (they only
+ * know "a scratch dir", not "a repository") to this one's shape. This is
+ * safe rather than merely tolerated: the segment walk already ran once
+ * when `ingestScratchRoot` built the root these paths descend from, and
+ * `fs.rm(path, { recursive: true })` unlinks a symlink AT the leaf rather
+ * than following it, same as every other unrouted recursive delete in the
+ * "safe but inconsistent" class the 2026-09-04 review found. If either
+ * module ever gains a `repoRoot`, route these through
+ * {@link desdeRemovalPath} too.
  *
  * **What this guard does NOT close, and why.**
  *
@@ -121,7 +150,9 @@
  * traversal this module does not have. What is done instead:
  * {@link desdeRemovalPath} re-resolves the target with `realpath` and
  * refuses when it lands outside the repository, and every recursive
- * deleter calls it immediately before its `rm`. That narrows the window to
+ * deleter that has a `repoRoot` of its own to check against calls it
+ * immediately before its `rm` — see the inventory above for the two ingest
+ * wipes that are the named exception, and why. That narrows the window to
  * the microseconds between that call and the `rm` itself, on the
  * operations where the damage is unrecoverable. It needs a process running
  * concurrently inside the prototype repo to matter at all.
