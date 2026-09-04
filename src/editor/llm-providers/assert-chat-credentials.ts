@@ -1,4 +1,4 @@
-import { CLAUDE_SUBSCRIPTION_ENV, isClaudeSubscriptionOptIn } from './registry'
+import { CLAUDE_SUBSCRIPTION_ENV, isClaudeSubscriptionOptIn } from './claude-subscription'
 
 /**
  * Refuse a chat turn that would otherwise run on someone's Claude

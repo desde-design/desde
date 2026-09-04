@@ -35,8 +35,11 @@ import {
   ClaudeAgentSdkProvider,
   CLAUDE_AGENT_SDK_DEFAULT_MODEL,
 } from './claude-agent-sdk-provider'
+import { CLAUDE_SUBSCRIPTION_ENV, isClaudeSubscriptionOptIn } from './claude-subscription'
 import { OpenAIProvider, OPENAI_DEFAULT_MODEL } from './openai-provider'
 import type { LLMProvider } from './types'
+
+export { CLAUDE_SUBSCRIPTION_ENV, isClaudeSubscriptionOptIn }
 
 /**
  * Vendor-neutral provider configuration. The shape is intentionally
@@ -102,18 +105,6 @@ export function getProvider(opts: GetProviderOpts = {}): LLMProvider {
 }
 
 /**
- * Opt-in for the bundled-`claude` subscription path.
- *
- * This USED to be the default whenever `ANTHROPIC_API_KEY` was unset, which
- * was fine while Editor was a single-user internal tool and wrong the
- * moment it ships to anyone else: it would silently spend the end user's own
- * Claude subscription, which the Agent SDK terms do not permit for
- * distributed software. Requiring an explicit flag makes that a decision
- * someone takes rather than one they inherit.
- */
-export const CLAUDE_SUBSCRIPTION_ENV = 'EDITOR_USE_CLAUDE_SUBSCRIPTION'
-
-/**
  * Pick a default config from environment auth.
  *
  * Order, and why: an explicit `ANTHROPIC_API_KEY` always wins (a key-holder
@@ -125,30 +116,8 @@ export const CLAUDE_SUBSCRIPTION_ENV = 'EDITOR_USE_CLAUDE_SUBSCRIPTION'
  */
 export function pickDefaultConfig(env: NodeJS.ProcessEnv): LLMConfig {
   if (env.ANTHROPIC_API_KEY) return DEFAULT_LLM_CONFIG
-  if (isTruthyFlag(env[CLAUDE_SUBSCRIPTION_ENV])) return CLAUDE_CODE_LLM_CONFIG
+  if (isClaudeSubscriptionOptIn(env)) return CLAUDE_CODE_LLM_CONFIG
   return DEFAULT_LLM_CONFIG
-}
-
-/**
- * Has the user explicitly opted into routing through the bundled `claude`
- * binary's Claude subscription?
- *
- * Exported because CHAT needs the same answer this registry has always used
- * for the non-chat lanes, and the two must not drift. Chat used to have no
- * such gate: it inherited whatever the `claude` binary was signed in with, so
- * a signed-in subscription made the product work with nothing set. Anthropic's
- * Agent SDK terms do not permit a distributed product to offer claude.ai login
- * that way, so chat now consults this too, via `probeCredential`'s
- * `subscriptionOptIn`.
- */
-export function isClaudeSubscriptionOptIn(env: NodeJS.ProcessEnv): boolean {
-  return isTruthyFlag(env[CLAUDE_SUBSCRIPTION_ENV])
-}
-
-function isTruthyFlag(v: string | undefined): boolean {
-  if (!v) return false
-  const s = v.trim().toLowerCase()
-  return s === '1' || s === 'true' || s === 'yes' || s === 'on'
 }
 
 function buildProvider(config: LLMConfig, env: NodeJS.ProcessEnv): LLMProvider {

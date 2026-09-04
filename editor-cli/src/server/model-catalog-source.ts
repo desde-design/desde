@@ -39,7 +39,7 @@ import {
   mergeLiveModels,
   type LiveModel,
 } from "../../../src/editor/llm-providers/live-model-catalog.js"
-import { isClaudeSubscriptionOptIn } from "../../../src/editor/llm-providers/registry.js"
+import { isClaudeSubscriptionOptIn } from "../../../src/editor/llm-providers/claude-subscription.js"
 import {
   assertClaudeRuntimeReady,
   resolveClaudeExecutablePath,

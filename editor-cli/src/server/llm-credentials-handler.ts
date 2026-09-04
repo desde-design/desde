@@ -5,7 +5,7 @@ import {
   probeCredential,
   type CredentialSource,
 } from "../../../src/editor/llm-providers/credential-probe.js"
-import { isClaudeSubscriptionOptIn } from "../../../src/editor/llm-providers/registry.js"
+import { isClaudeSubscriptionOptIn } from "../../../src/editor/llm-providers/claude-subscription.js"
 import { applyLlmCredentialsToEnv } from "./apply-llm-credentials.js"
 import { inheritedLlmEnv, type InheritedLlmEnv } from "./inherited-llm-env.js"
 import { readJsonBody } from "./http-body.js"
