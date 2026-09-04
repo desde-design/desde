@@ -10,6 +10,7 @@ import type { LLMProvider, ProviderEvent, StreamOpts } from '../llm-providers/ty
 import {
   API_RETRY_MAX_ATTEMPTS,
   MAX_NEUTRAL_STEPS,
+  MAX_RETRY_SLEEP_MS,
   runChatTurnNeutral,
 } from './run-chat-turn-neutral'
 
@@ -194,6 +195,28 @@ describe('runChatTurnNeutral: the tool loop', () => {
   })
 })
 
+/** A provider that always fails with a 429 carrying the given `retry-after`. */
+function alwaysRateLimited(retryAfter: string): {
+  provider: LLMProvider
+  attempts: () => number
+} {
+  let attempts = 0
+  const provider: LLMProvider = {
+    name: 'limited',
+    defaultModel: 'x',
+    complete: async () => ({ text: '', stopReason: 'end_turn' }),
+    streamConversation: () => {
+      attempts++
+      return (async function* () {
+        throw Object.assign(new Error('429 too many requests'), {
+          headers: { 'retry-after': retryAfter },
+        })
+      })()
+    },
+  }
+  return { provider, attempts: () => attempts }
+}
+
 describe('runChatTurnNeutral: failures', () => {
   it('retries a transient failure that produced no output, and reports the wait', async () => {
     let attempts = 0
@@ -235,6 +258,57 @@ describe('runChatTurnNeutral: failures', () => {
     })
     expect(result.turn.error).toBeUndefined()
     expect(result.turn.assistantContent).toEqual([{ type: 'text', text: 'recovered' }])
+  })
+
+  it('caps the retry wait, so a large retry-after cannot park the turn', async () => {
+    const controller = new AbortController()
+    const provider = alwaysRateLimited('3600')
+    const events: ChatStreamEvent[] = []
+    await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        signal: controller.signal,
+        emit: (e: ChatStreamEvent) => {
+          events.push(e)
+          // End the wait the moment it starts, so the test does not sit out the
+          // capped delay to observe what the cap was.
+          if (e.kind === 'api_retry') controller.abort()
+        },
+      } as never,
+      { buildProvider: () => provider.provider },
+    )
+    expect(events.find((e) => e.kind === 'api_retry')).toMatchObject({
+      retryDelayMs: MAX_RETRY_SLEEP_MS,
+    })
+  })
+
+  it('abandons the retry wait when the turn is aborted', async () => {
+    const controller = new AbortController()
+    const provider = alwaysRateLimited('3600')
+    let startedWaitingAt = 0
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        signal: controller.signal,
+        emit: (e: ChatStreamEvent) => {
+          if (e.kind !== 'api_retry') return
+          startedWaitingAt = Date.now()
+          controller.abort()
+        },
+      } as never,
+      { buildProvider: () => provider.provider },
+    )
+    expect(result.turn.error).toBe('turn aborted')
+    expect(provider.attempts()).toBe(1)
+    expect(Date.now() - startedWaitingAt).toBeLessThan(2000)
   })
 
   it('turns a provider throw into an error event and an errored turn', async () => {

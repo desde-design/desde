@@ -99,6 +99,15 @@ export const MAX_NEUTRAL_STEPS = 40
 /** Retries per step on a transient failure, before the turn fails. */
 export const API_RETRY_MAX_ATTEMPTS = 3
 
+/**
+ * Ceiling on one retry wait. `extractRetryAfterFromError` reports a vendor's
+ * own `retry-after` up to an hour, and sleeping that literally would park the
+ * turn with nothing on screen for an hour. Waiting a minute and trying again is
+ * behaviour a user can sit through, and the emitted `api_retry` reports the
+ * capped number, because that is the wait that actually happens.
+ */
+export const MAX_RETRY_SLEEP_MS = 60_000
+
 export interface RunChatTurnNeutralDeps {
   /**
    * Build the provider for this turn. Defaults to the descriptor's own
@@ -501,7 +510,8 @@ async function* streamStepWithRetry(
       const status = httpStatusOf(err)
       const retriable = status === 429 || (status !== null && status >= 500)
       if (yielded || !retriable || attempt >= API_RETRY_MAX_ATTEMPTS) throw err
-      const retryDelayMs = (extractRetryAfterFromError(err) ?? 2 ** attempt) * 1000
+      const requestedMs = (extractRetryAfterFromError(err) ?? 2 ** attempt) * 1000
+      const retryDelayMs = Math.min(requestedMs, MAX_RETRY_SLEEP_MS)
       emit({
         kind: 'api_retry',
         retryDelayMs,
@@ -509,9 +519,31 @@ async function* streamStepWithRetry(
         maxRetries: API_RETRY_MAX_ATTEMPTS,
         errorStatus: status,
       })
-      await new Promise((resolve) => setTimeout(resolve, retryDelayMs))
+      await waitOrAbort(retryDelayMs, streamOpts.signal)
+      // The wait is the one blocking point long enough for a user to give up
+      // during, so it ends on abort and the turn stops here rather than paying
+      // for another request.
+      if (streamOpts.signal?.aborted) throw err
     }
   }
+}
+
+/**
+ * Sleep for `ms`, or return the moment the turn is aborted, whichever is first.
+ * The listener is removed either way, so a long turn cannot accumulate one per
+ * retry on the caller's signal.
+ */
+function waitOrAbort(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
 }
 
 /** The HTTP status inside a provider error, when there is one. */
