@@ -51,7 +51,7 @@ import {
   type StalenessResult,
 } from "../../../src/editor/onboarding/index.js"
 import type { ComponentManifest, ComponentManifestSource, GroundingHealth } from "../../../src/editor/core"
-import { desdePath } from "../../../src/editor/worktree/desde-dir.js"
+import { desdePath, desdePathOrNull } from "../../../src/editor/worktree/desde-dir.js"
 import {
   loadDesignSystemDeclarations,
   appendDesignSystemDeclaration,
@@ -60,7 +60,7 @@ import {
 } from "../../../src/editor/core/design-system-declarations.js"
 import { CONFIG_FILENAME } from "../../../src/editor/core/read-roots.js"
 import { withFileEditLocks } from "./session-lock.js"
-import { CACHE_DIR_NAME, resolveHintsCacheVersion } from "../../../src/editor/adapters/cached/index.js"
+import { resolveHintsCacheVersion } from "../../../src/editor/adapters/cached/index.js"
 import { readHintCache, hintCacheFilePath } from "../../../src/editor/adapters/hints-cache/index.js"
 import {
   generateHintsRun,
@@ -550,7 +550,11 @@ async function loadDeclaredIdentities(
  */
 function readHintCoverage(root: string, entry: RegisteredDesignSystem): HintCoverage | null {
   const packageVersion = resolveHintsCacheVersion(resolve(root), entry)
-  const file = hintCacheFilePath(join(root, CACHE_DIR_NAME), entry.package, packageVersion)
+  // Through the `.desde` guard: a linked-away `.desde` has no coverage to
+  // report, rather than coverage read from outside the working tree.
+  const cacheDir = desdePathOrNull(root, "manifests")
+  if (cacheDir === null) return null
+  const file = hintCacheFilePath(cacheDir, entry.package, packageVersion)
   const cache = readHintCache(file)
   if (!cache) return null
   return computeHintCoverage(cache.hints)
@@ -845,7 +849,11 @@ async function runGenerateHintsFor(
     designSystem: entry.designSystem,
     importPath: entry.importPath,
   }
-  const cacheDir = join(root, CACHE_DIR_NAME)
+  // Throws `DesdeDirSymlinkError` on a repo whose `.desde` is a symbolic
+  // link, which this route reports like any other run failure. A generate
+  // run WRITES the hint cache, so skipping quietly would report success
+  // with nothing written.
+  const cacheDir = desdePath(root, "manifests")
 
   const packageRootForDist = resolvePackageRootForDist(root, entry)
   const llm = useLlm

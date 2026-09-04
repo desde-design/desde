@@ -51,6 +51,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { desdePathOrNull } from '../../worktree/desde-dir'
 import type {
   ComponentManifest,
   ComponentManifestSource,
@@ -79,6 +80,21 @@ export const EXTRACTOR_VERSION = 2
 
 /** Subdir under the prototype root where caches live. */
 export const CACHE_DIR_NAME = '.desde/manifests'
+
+/**
+ * `<prototypeRoot>/.desde/manifests`, through the `.desde` guard, or `null`
+ * when `.desde` (or `manifests` under it) is a symbolic link.
+ *
+ * Every caller that used to `join(root, CACHE_DIR_NAME)` builds the path
+ * here instead, because a plain join follows a hostile symlink and drops
+ * the cache outside the working tree. Non-throwing on purpose: this runs on
+ * the serving and onboarding paths, and the cache is an optimization —
+ * `null` disables caching for that run (extraction still happens) rather
+ * than failing manifest serving outright.
+ */
+export function manifestCacheDir(prototypeRoot: string): string | null {
+  return desdePathOrNull(prototypeRoot, 'manifests')
+}
 
 /**
  * Resolve a package's installed version by reading its `package.json`.

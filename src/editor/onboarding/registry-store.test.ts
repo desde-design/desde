@@ -1,8 +1,10 @@
+import { existsSync, symlinkSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { DesdeDirSymlinkError } from '@/editor/worktree/desde-dir'
 import { LocalRegistryStore, REGISTRY_FILE_PATH } from './registry-store'
 import type { RegisteredDesignSystem } from './types'
 
@@ -115,5 +117,33 @@ describe('LocalRegistryStore', () => {
     const store = new LocalRegistryStore(root)
     const list = await store.list()
     expect(list.map((e) => e.id)).toEqual(['good'])
+  })
+})
+
+describe('FX4 item 2: a symlinked .desde', () => {
+  it('refuses the write and leaves nothing outside the working tree', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'pt-registry-outside-'))
+    try {
+      symlinkSync(outside, join(root, '.desde'))
+      const store = new LocalRegistryStore(root)
+      await expect(store.add(entry())).rejects.toThrow(DesdeDirSymlinkError)
+      expect(existsSync(join(outside, 'design-systems.json'))).toBe(false)
+    } finally {
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('reads as an empty registry rather than throwing on the serving path', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'pt-registry-outside-'))
+    try {
+      await writeFile(
+        join(outside, 'design-systems.json'),
+        JSON.stringify({ version: 1, designSystems: [entry()] }),
+      )
+      symlinkSync(outside, join(root, '.desde'))
+      expect(await new LocalRegistryStore(root).list()).toEqual([])
+    } finally {
+      await rm(outside, { recursive: true, force: true })
+    }
   })
 })

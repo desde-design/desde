@@ -49,7 +49,7 @@ export interface BuildRegisteredSourcesArgs {
   /** Required for both extractors; when null the registry contributes nothing. */
   tsconfigPath: string | null
   /** `.desde/manifests` dir (cache root). */
-  cacheDir: string
+  cacheDir: string | null
   deps: RegisteredSourceDeps
   /** Optional sink for skip reasons (a registered package that yields nothing). */
   onSkip?: (packageName: string, reason: string) => void
@@ -146,7 +146,7 @@ export function buildRegisteredSources(
         ? entry.version
         : (deps.resolvePackageVersion(packageRoot) ?? entry.version)
       sources.push(
-        packageVersion
+        packageVersion && cacheDir
           ? new deps.CachedManifestSource({
               inner: reactInner,
               cacheDir,
@@ -188,7 +188,7 @@ export function buildRegisteredSources(
     })
     onSource?.({ packageName: entry.package, sourceId: vueSourceId, discovered: components.length })
     sources.push(
-      packageVersion
+      packageVersion && cacheDir
         ? new deps.CachedManifestSource({
             inner: vueInner,
             cacheDir,

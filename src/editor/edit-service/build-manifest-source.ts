@@ -280,7 +280,7 @@ export async function buildManifestSource(
     { scanInstalledVueLibraries },
     { PACKAGE_OVERRIDES },
     {
-      CACHE_DIR_NAME,
+      manifestCacheDir,
       resolvePackageVersion,
       resolveHintsCacheVersion,
       CachedManifestSource,
@@ -379,7 +379,10 @@ export async function buildManifestSource(
   // registered entry wins over the auto-scan of the same package (ordered
   // first below; the auto-scan loop skips registered packages). A missing /
   // malformed registry file reads as empty (never breaks serving).
-  const cacheDirForRegistry = path.join(realRoot, CACHE_DIR_NAME)
+  // `null` when `.desde` (or `manifests` under it) is a symbolic link: the
+  // registry's sources then run uncached rather than writing outside the
+  // working tree. See `manifestCacheDir`.
+  const cacheDirForRegistry = manifestCacheDir(realRoot)
   const registry = await createLocalRegistryStore(realRoot).list()
   const { sources: registeredSources, registeredPackages } = buildRegisteredSources({
     registry,
@@ -431,7 +434,7 @@ export async function buildManifestSource(
   // Shared by both the Vue and React auto-scan loops below: all these
   // sources share the same prototype tsconfig, so hashing it once and
   // reusing it for every wrap avoids wasted per-package work.
-  const cacheDir = path.join(realRoot, CACHE_DIR_NAME)
+  const cacheDir = manifestCacheDir(realRoot)
   // A null tsconfig contributes a distinct, stable context key rather than a
   // fingerprint. That is what makes the React loop's no-config fallback safe to
   // cache: a prototype that later ADDS a tsconfig moves off this key and
@@ -506,7 +509,7 @@ export async function buildManifestSource(
         status: 'ok',
       })
       libraryDtsSources.push(
-        packageVersion
+        packageVersion && cacheDir
           ? new CachedManifestSource({
               inner,
               cacheDir,
@@ -606,7 +609,7 @@ export async function buildManifestSource(
         status: 'ok',
       })
       reactDtsSources.push(
-        packageVersion
+        packageVersion && cacheDir
           ? new CachedManifestSource({
               inner,
               cacheDir,
@@ -663,6 +666,9 @@ export async function buildManifestSource(
   // a "skip," just nothing to report.
   const hintsCacheSources: ComponentManifestSource[] = []
   for (const entry of hintsCacheEntries) {
+    // No cache directory (a linked-away `.desde`) means no hint files to
+    // read, and nothing this loop can do.
+    if (cacheDir === null) break
     hintsCacheSources.push(new HintsCacheManifestSource({ cacheDir, entry }))
     const file = hintCacheFilePath(cacheDir, entry.packageName, entry.packageVersion)
     const hintFile = readHintCache(file)

@@ -8,7 +8,8 @@
  * up in a snapshot of the bytes.
  */
 import { execFile } from "node:child_process"
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
@@ -310,5 +311,21 @@ describe("writeStamperFiles — the one external", () => {
     const root = await mkRoot()
     const result = await writeStamperFiles({ destDir: root, files: vitePluginFiles("react") })
     expect(result.warnings).toEqual([])
+  })
+})
+
+describe("writeStamperFiles — a symlinked .desde", () => {
+  it("FX4 item 2: writes nothing outside the working tree, and says why in a warning", async () => {
+    const root = await mkRoot()
+    const outside = await mkdtemp(join(tmpdir(), "editor-cli-stamp-outside-"))
+    roots.push(outside)
+    await symlink(outside, join(root, ".desde"))
+
+    const result = await writeStamperFiles({ destDir: root, files: vitePluginFiles("react") })
+
+    expect(result.written).toEqual([])
+    expect(result.warnings.join(" ")).toMatch(/symbolic link/i)
+    expect(await readdir(outside)).toEqual([])
+    expect(existsSync(join(outside, "stamp"))).toBe(false)
   })
 })

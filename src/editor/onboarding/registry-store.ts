@@ -11,7 +11,7 @@
  */
 
 import { promises as fs } from 'node:fs'
-import path from 'node:path'
+import { desdePath, desdePathOrNull } from '@/editor/worktree/desde-dir'
 import type { RegisteredDesignSystem, RegistryStore } from './types'
 
 /** Prototype-root-relative path of the registry file. */
@@ -24,16 +24,30 @@ interface RegistryFile {
 }
 
 export class LocalRegistryStore implements RegistryStore {
-  private readonly filePath: string
+  private readonly prototypeRoot: string
 
   constructor(prototypeRoot: string) {
-    this.filePath = path.join(prototypeRoot, REGISTRY_FILE_PATH)
+    this.prototypeRoot = prototypeRoot
+  }
+
+  /**
+   * The registry file, through the `.desde` guard (see
+   * `src/editor/worktree/desde-dir.ts`). Resolved per call rather than in
+   * the constructor: this store is built on the serving path, and a
+   * constructor that threw there would take manifest serving down with it.
+   * `null` means `.desde` (or the file itself) is a symbolic link — the
+   * read then reports an empty registry, its documented fail-soft.
+   */
+  private pathOrNull(): string | null {
+    return desdePathOrNull(this.prototypeRoot, 'design-systems.json')
   }
 
   async list(): Promise<RegisteredDesignSystem[]> {
+    const filePath = this.pathOrNull()
+    if (filePath === null) return [] // linked away → empty registry
     let raw: string
     try {
-      raw = await fs.readFile(this.filePath, 'utf8')
+      raw = await fs.readFile(filePath, 'utf8')
     } catch {
       return [] // no file yet → empty registry
     }
@@ -62,12 +76,19 @@ export class LocalRegistryStore implements RegistryStore {
     if (next.length !== existing.length) await this.write(next)
   }
 
+  /**
+   * Throws `DesdeDirSymlinkError` when `.desde` is a symbolic link, rather
+   * than writing the registry outside the working tree. The read above
+   * fails soft; a WRITE cannot, and every caller of `add`/`remove` is a
+   * route that reports the refusal.
+   */
   private async write(entries: RegisteredDesignSystem[]): Promise<void> {
+    const filePath = desdePath(this.prototypeRoot, 'design-systems.json')
     const body: RegistryFile = { version: 1, designSystems: entries }
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true })
-    const tmp = `${this.filePath}.${process.pid}.tmp`
+    await fs.mkdir(desdePath(this.prototypeRoot), { recursive: true })
+    const tmp = `${filePath}.${process.pid}.tmp`
     await fs.writeFile(tmp, `${JSON.stringify(body, null, 2)}\n`, 'utf8')
-    await fs.rename(tmp, this.filePath)
+    await fs.rename(tmp, filePath)
   }
 }
 

@@ -5,7 +5,15 @@
  * guarantee, and the swallow-on-error contract.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+  mkdirSync,
+} from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -184,5 +192,21 @@ describe("getLockEventsFileSize", () => {
     await appendLockEvent(root, "s1", ev())
     const size = await getLockEventsFileSize(root, "s1")
     expect(size).toBeGreaterThan(0)
+  })
+})
+
+describe("FX4 item 2: a symlinked .desde", () => {
+  it("writes no audit log outside the working tree, and reports the refusal", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "lock-event-outside-"))
+    try {
+      symlinkSync(outside, join(root, ".desde"))
+      const errors: unknown[] = []
+      await appendLockEvent(root, "session-a", ev(), { onError: (e) => errors.push(e) })
+      expect(errors).toHaveLength(1)
+      expect((errors[0] as Error).message).toMatch(/symbolic link/i)
+      expect(existsSync(join(outside, "chat-sessions"))).toBe(false)
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
   })
 })

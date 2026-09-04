@@ -22,7 +22,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http"
-import { join, resolve, sep } from "node:path"
+import { resolve, sep } from "node:path"
 import {
   DRIFT_KINDS,
   type ComponentManifest,
@@ -38,7 +38,7 @@ import {
   createLocalRegistryStore,
   type RegisteredDesignSystem,
 } from "../../../src/editor/onboarding/index.js"
-import { CACHE_DIR_NAME, resolveHintsCacheVersion } from "../../../src/editor/adapters/cached/index.js"
+import { resolveHintsCacheVersion } from "../../../src/editor/adapters/cached/index.js"
 import { generateHintsRun, type GenerateHintsRunResult } from "../../../src/editor/hints/generate-hints-run.js"
 import { probeComponent, type ProbePage } from "../../../src/editor/hints/probe-driver.js"
 import {
@@ -355,7 +355,9 @@ async function handleRegenerateHints(
     designSystem: found.designSystem,
     importPath: found.importPath,
   }
-  const cacheDir = join(canonicalRoot, CACHE_DIR_NAME)
+  // Throws `DesdeDirSymlinkError` on a repo whose `.desde` is a symbolic
+  // link; this route reports it like any other run failure.
+  const cacheDir = desdePath(canonicalRoot, "manifests")
   const components = [target]
 
   const disconnect = watchClientDisconnect(req, res)

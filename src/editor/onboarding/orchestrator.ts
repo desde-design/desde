@@ -300,7 +300,7 @@ export async function createDefaultOnboardDeps(prototypeRoot: string): Promise<O
     { ReactDtsMetaManifestSource },
     { ingestNpmPackage },
     { ingestRepo },
-    { CACHE_DIR_NAME, resolvePackageVersion, CachedManifestSource, fingerprintFile },
+    { manifestCacheDir, resolvePackageVersion, CachedManifestSource, fingerprintFile },
   ] = await Promise.all([
     import('./detect-framework'),
     import('./coverage'),
@@ -314,7 +314,9 @@ export async function createDefaultOnboardDeps(prototypeRoot: string): Promise<O
     import('@/editor/ingest/git-repo'),
     import('@/editor/adapters/cached'),
   ])
-  const cacheDir = path.join(prototypeRoot, CACHE_DIR_NAME)
+  // `null` when `.desde` is a symbolic link — the built sources then run
+  // uncached instead of writing outside the working tree.
+  const cacheDir = manifestCacheDir(prototypeRoot)
 
   return {
     detectFramework,

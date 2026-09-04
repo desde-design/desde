@@ -23,18 +23,16 @@
  * `lstat`s `.desde` and then each segment the caller asks for, and refuses
  * on the first symbolic link.
  *
- * This is the one place that check lives. Every writer and deleter listed
- * below builds its whole path here — including the subpath, not just the
- * `.desde` prefix — so a caller cannot accidentally join onto
- * `canonicalRoot` (or onto a guarded `.desde`) and skip the check.
- *
- * **The list is not the same thing as complete coverage.** Four writers
- * still build `<repoRoot>/.desde/…` by plain `join` and follow a hostile
- * symlink: the manifest cache (`adapters/cached/index.ts`), the
- * design-system registry (`onboarding/registry-store.ts`), the attach-mode
- * stampers (`editor-cli/src/attach-preflight/stamper-files.ts`) and the
- * lock-event audit log (`edit-service/lock-event-persistence.ts`). They are
- * the next commit, not an oversight.
+ * This is the one place that check lives. Every writer and deleter under
+ * `.desde/` builds its whole path here — including the subpath, not just
+ * the `.desde` prefix — so a caller cannot accidentally join onto
+ * `canonicalRoot` (or onto a guarded `.desde`) and skip the check. There is
+ * no exception list any more: the four writers that carried one until
+ * 2026-09-04 (the manifest cache, the design-system registry, the
+ * attach-mode stampers and the lock-event audit log) are in the inventory
+ * below like everything else. Each was deferred because the only guard on
+ * offer threw, and a throw on a boot or serving path is an outage;
+ * {@link desdePathOrNull} is what let them in.
  *
  *  - `backup-journal.ts` (`writeBackupJournal`) — the per-edit backup
  *    journal under `.desde/backups/`.
@@ -77,6 +75,24 @@
  *    or git clone an ingested design system lands in, under
  *    `.desde/ingested/`. Throws, which `ingest` surfaces the way it
  *    surfaces every other unusable source.
+ *  - `onboarding/registry-store.ts` — `.desde/design-systems.json`. The
+ *    read degrades to an empty registry (its documented fail-soft); the
+ *    write throws, because every caller of `add`/`remove` is a route that
+ *    can report a refusal.
+ *  - `adapters/cached/index.ts` (`manifestCacheDir`) — `.desde/manifests`.
+ *    Non-throwing: a refusal disables the manifest cache for that run
+ *    (extraction still happens, it just is not cached), because this runs
+ *    on the serving path. The two hint-GENERATING routes are the exception
+ *    and use the throwing form, since a run that wrote nothing must not
+ *    report success.
+ *  - `editor-cli/src/attach/write-stampers.ts` — `.desde/stamp`, the
+ *    generated source-tag plugins. Non-throwing: a refusal is reported
+ *    through the `warnings` channel that function already returns, so a
+ *    boot degrades to an editor without stamping instead of failing.
+ *  - `edit-service/lock-event-persistence.ts` — the per-session lock-event
+ *    audit log, `.desde/chat-sessions/<id>/lock-events.jsonl`. The append
+ *    is best-effort by contract, so a refusal reaches the caller's
+ *    `onError` and nothing else.
  *  - `editor-cli/src/server/stores/local-store-base.ts`
  *    (`resolveStorePath`) — every local artifact store: notes, comments,
  *    canvases, page statuses, screenshot plans, smoke runs.

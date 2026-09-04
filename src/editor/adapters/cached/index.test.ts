@@ -22,6 +22,7 @@ import type {
 } from '../../core'
 import {
   CACHE_DIR_NAME,
+  manifestCacheDir,
   CachedManifestSource,
   EXTRACTOR_VERSION,
   fingerprintFile,
@@ -327,6 +328,23 @@ describe('patchCachedComponent / readCachedComponent', () => {
 describe('resolvePackageVersion / CACHE_DIR_NAME / fingerprintFile', () => {
   it('exports CACHE_DIR_NAME', () => {
     expect(CACHE_DIR_NAME).toBe('.desde/manifests')
+  })
+  it('FX4 item 2: manifestCacheDir resolves through the .desde guard', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cached-guard-'))
+    expect(manifestCacheDir(root)).toBe(path.join(root, '.desde', 'manifests'))
+  })
+  it('FX4 item 2: manifestCacheDir is null when .desde is a symlink, so nothing is cached', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cached-guard-'))
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'cached-outside-'))
+    await fs.symlink(outside, path.join(root, '.desde'))
+    expect(manifestCacheDir(root)).toBeNull()
+  })
+  it('FX4 item 2: manifestCacheDir is null when only .desde/manifests is a symlink', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cached-guard-'))
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'cached-outside-'))
+    await fs.mkdir(path.join(root, '.desde'), { recursive: true })
+    await fs.symlink(outside, path.join(root, '.desde', 'manifests'))
+    expect(manifestCacheDir(root)).toBeNull()
   })
   it('resolves a package version from package.json', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cached-'))

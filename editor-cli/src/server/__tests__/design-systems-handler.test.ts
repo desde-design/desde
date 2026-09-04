@@ -1147,17 +1147,21 @@ describe("handleDesignSystemsRequest", () => {
 
       /**
        * `.desde` is inside the prototype repo, which is untrusted input, so it
-       * can be a symlink. The containment check is anchored on
-       * `<root>/.desde/ingested`; with `.desde` linked elsewhere there is no
-       * containment left to check, so the entry must resolve to nothing rather
-       * than to a directory outside the working tree.
+       * — or any directory under it — can be a symlink. The containment check
+       * is anchored on `<root>/.desde/ingested`; with `ingested` linked
+       * elsewhere there is no containment left to check, so the entry must
+       * resolve to nothing rather than to a directory outside the working
+       * tree.
+       *
+       * The symlink sits on `ingested` rather than on `.desde` itself because
+       * a `.desde` that is linked away no longer has a readable registry at
+       * all (the store reads empty, its documented fail-soft), so there would
+       * be no registered entry left for this route to run.
        */
-      it("infers nothing when .desde itself is a symlink out of the prototype", async () => {
+      it("infers nothing when .desde/ingested is a symlink out of the prototype", async () => {
         const outside = mkdtempSync(join(tmpdir(), "ds-outside-"))
         try {
-          symlinkSync(outside, join(root, ".desde"))
           const relRoot = ".desde/ingested/@acme-ui-deadbeef/repo"
-          writeIngestedVueSource(root, relRoot, "KButton", "<div>{{ label }}</div>")
           await createLocalRegistryStore(root).add(
             entry({
               id: "@acme/ui",
@@ -1167,6 +1171,8 @@ describe("handleDesignSystemsRequest", () => {
               packageRoot: relRoot,
             }),
           )
+          symlinkSync(outside, join(root, ".desde", "ingested"))
+          writeIngestedVueSource(root, relRoot, "KButton", "<div>{{ label }}</div>")
           const r = mockRes()
           await handleDesignSystemsRequest(
             mockReq("POST"),
