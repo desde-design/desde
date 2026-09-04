@@ -121,14 +121,14 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
         env: {},
         claudeRuntimeResolvable: false,
         fetchImpl: fetchImpl as unknown as typeof fetch,
-        readBody: async () => ({ apiKey: "sk-new1234", baseUrl: "https://gateway.internal" }),
+        readBody: async () => ({ apiKey: "sk-new1234", baseUrl: "https://gateway.internal/v1" }),
       },
     )
     expect(res.statusCode).toBe(200)
     expect((fetchImpl.mock.calls[0] as unknown[] | undefined)?.[0]).toBe("https://gateway.internal/v1/models")
     expect((await readLlmCredentials(home)).providers.openai).toEqual({
       apiKey: "sk-new1234",
-      baseUrl: "https://gateway.internal",
+      baseUrl: "https://gateway.internal/v1",
     })
   })
 
@@ -214,6 +214,74 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
     expect((await readLlmCredentials(home)).providers.openai).toEqual({
       apiKey: "sk-first1234",
     })
+  })
+
+  it("ledger #28: a base-URL-only PUT (apiKey omitted) reuses the stored key", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }))
+    const res1 = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res1),
+      url("/api/editor/llm-credentials/openai"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        readBody: async () => ({ apiKey: "sk-first1234", baseUrl: "https://wrong.internal" }),
+      },
+    )
+    expect(res1.statusCode).toBe(200)
+
+    // Fix the base URL WITHOUT resending the key: `apiKey` is absent from
+    // the body entirely, the way the dialog now sends a base-URL-only save.
+    fetchImpl.mockClear()
+    const res2 = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res2),
+      url("/api/editor/llm-credentials/openai"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        readBody: async () => ({ baseUrl: "https://gateway.internal/v1" }),
+      },
+    )
+    expect(res2.statusCode).toBe(200)
+    // Validated the FIXED base URL against the EXISTING key, not an empty one.
+    expect((fetchImpl.mock.calls[0] as unknown[] | undefined)?.[0]).toBe(
+      "https://gateway.internal/v1/models",
+    )
+    const authHeader = (
+      (fetchImpl.mock.calls[0] as unknown[] | undefined)?.[1] as { headers: Record<string, string> }
+    ).headers.Authorization
+    expect(authHeader).toBe("Bearer sk-first1234")
+    expect((await readLlmCredentials(home)).providers.openai).toEqual({
+      apiKey: "sk-first1234",
+      baseUrl: "https://gateway.internal/v1",
+    })
+  })
+
+  it("ledger #28: an omitted apiKey with no stored key still 400s", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }))
+    const res = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res),
+      url("/api/editor/llm-credentials/openai"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        readBody: async () => ({ baseUrl: "https://gateway.internal" }),
+      },
+    )
+    expect(res.statusCode).toBe(400)
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect((await readLlmCredentials(home)).providers.openai).toBeUndefined()
   })
 
   it("refuses to persist a key the provider rejects", async () => {

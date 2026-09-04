@@ -369,6 +369,54 @@ describe("LlmCredentialDialog: one tab per provider", () => {
     expect(saveKey).toHaveBeenLastCalledWith("openai", "sk-new", "")
   })
 
+  const openaiStoredKeyAndBaseUrl = {
+    ...twoProviders,
+    providers: {
+      ...twoProviders.providers,
+      openai: {
+        ...twoProviders.providers.openai,
+        hasStoredKey: true,
+        storedHint: "sk-…9999",
+        baseUrl: "https://wrong.internal",
+      },
+    },
+  }
+
+  it("ledger #28: Save is disabled with a stored key and no draft touched", () => {
+    render(
+      <LlmCredentialDialog
+        open
+        onOpenChange={() => {}}
+        credentials={credentials({ status: openaiStoredKeyAndBaseUrl })}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    expect(screen.getByRole("button", { name: "Save key" })).toBeDisabled()
+  })
+
+  it("ledger #28: Save is enabled and sends no apiKey for a base-URL-only fix", () => {
+    const saveKey = vi.fn().mockResolvedValue(true)
+    render(
+      <LlmCredentialDialog
+        open
+        onOpenChange={() => {}}
+        credentials={credentials({ status: openaiStoredKeyAndBaseUrl, saveKey })}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    // The API key field is left untouched. Only the base URL changes.
+    fireEvent.change(screen.getByLabelText(/Base URL/), {
+      target: { value: "https://gateway.internal/v1" },
+    })
+    expect(screen.getByRole("button", { name: "Save key" })).not.toBeDisabled()
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }))
+    expect(saveKey).toHaveBeenLastCalledWith(
+      "openai",
+      undefined,
+      "https://gateway.internal/v1",
+    )
+  })
+
   it("names the provider's own environment variable when it manages the key", () => {
     const envManaged = {
       ...twoProviders,

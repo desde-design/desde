@@ -242,10 +242,31 @@ export async function handleLlmCredentialsRoute(
       }
       if (req.method === "PUT") {
         const body = await readBody(req)
-        const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : ""
-        if (!apiKey) {
+        // `apiKey` follows the SAME omitted-means-untouched convention
+        // `baseUrl` already uses below. An omitted `apiKey` (the field was
+        // never in the request body) reuses the key already on disk, so a
+        // user fixing only a wrong base URL is not forced to retype their
+        // key — the store never hands the plaintext back to the client, so
+        // resending it is not something the client could do anyway. An
+        // EXPLICIT empty string is still rejected: there is no "clear the
+        // key" meaning for this route, that is what DELETE is for.
+        const apiKeyProvided = typeof body.apiKey === "string"
+        const apiKeyFromBody = apiKeyProvided ? (body.apiKey as string).trim() : ""
+        if (apiKeyProvided && !apiKeyFromBody) {
           sendJson(res, 400, { error: "`apiKey` must be a non-empty string." })
           return
+        }
+        let apiKey: string
+        if (apiKeyProvided) {
+          apiKey = apiKeyFromBody
+        } else {
+          const stored = await readLlmCredentials(home)
+          const existing = stored.providers[descriptor.id]?.apiKey?.trim()
+          if (!existing) {
+            sendJson(res, 400, { error: "`apiKey` must be a non-empty string." })
+            return
+          }
+          apiKey = existing
         }
         let baseUrl: string | undefined
         if (body.baseUrl !== undefined && body.baseUrl !== "") {
@@ -270,7 +291,12 @@ export async function handleLlmCredentialsRoute(
           sendJson(res, 400, { error: validation.message ?? "That key was not accepted." })
           return
         }
-        await writeLlmApiKey(descriptor.id, apiKey, home)
+        // Only rewrite the stored key when this request actually supplied a
+        // new one. Rewriting the same plaintext we just read back on a
+        // base-URL-only PUT would be a needless disk write of a secret.
+        if (apiKeyProvided) {
+          await writeLlmApiKey(descriptor.id, apiKey, home)
+        }
         // Only touch the stored base URL when this request actually supplied
         // one (a real value to set, or "" to clear it). A key-only PUT
         // (`body.baseUrl === undefined`) must leave any previously stored

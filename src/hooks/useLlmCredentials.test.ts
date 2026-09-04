@@ -188,6 +188,19 @@ describe("useLlmCredentials: provider-scoped mutations", () => {
     })
   })
 
+  it("ledger #28: omits apiKey entirely when undefined, sending only baseUrl", async () => {
+    const impl = stubFetch(bothNone)
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    await act(async () => {
+      await result.current.saveKey("openai", undefined, "https://gateway.internal/v1")
+    })
+    const [, init] = impl.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({
+      baseUrl: "https://gateway.internal/v1",
+    })
+  })
+
   it("omits baseUrl entirely when none is given", async () => {
     const impl = stubFetch(bothNone)
     const { result } = renderHook(() => useLlmCredentials())

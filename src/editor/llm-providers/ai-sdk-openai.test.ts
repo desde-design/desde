@@ -93,3 +93,27 @@ describe('buildOpenAiProvider', () => {
     expect(() => buildOpenAiProvider({})).toThrow(/OPENAI_API_KEY|API key/)
   })
 })
+
+describe("@ai-sdk/openai's own default base URL (I2 convention pin)", () => {
+  // The REAL package, not the mock above: `vi.importActual` reaches past the
+  // `vi.mock('@ai-sdk/openai', ...)` at the top of this file. This is the one
+  // test in the repo that measures the installed package's actual default
+  // rather than asserting what this codebase assumes it is — see
+  // `openai-base-url-convention.test.ts`, which pins the other two call
+  // sites (`validateKey`, `listOpenAiLiveModels`) to the SAME value. If
+  // `@ai-sdk/openai` ever changes its default, this is the test that should
+  // fail first.
+  it('defaults to https://api.openai.com/v1, matching this repo\'s convention', async () => {
+    const savedEnv = process.env.OPENAI_BASE_URL
+    delete process.env.OPENAI_BASE_URL
+    try {
+      const real = await vi.importActual<typeof import('@ai-sdk/openai')>('@ai-sdk/openai')
+      const model = real.createOpenAI({ apiKey: 'sk-test' }).responses('gpt-5.6')
+      const config = (model as unknown as { config: { baseURL: string } }).config
+      expect(config.baseURL).toBe('https://api.openai.com/v1')
+    } finally {
+      if (savedEnv === undefined) delete process.env.OPENAI_BASE_URL
+      else process.env.OPENAI_BASE_URL = savedEnv
+    }
+  })
+})

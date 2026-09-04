@@ -58,11 +58,11 @@ describe('OPENAI_DESCRIPTOR.validateKey', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer sk-good')
   })
 
-  it('validates against a custom base URL when one is given', async () => {
+  it('validates against a custom base URL when one is given, /v1 included', async () => {
     const fetchImpl = vi.fn(async () => new Response('{}', { status: 200 }))
     await OPENAI_DESCRIPTOR.validateKey({
       apiKey: 'sk-good',
-      baseUrl: 'https://gateway.internal/',
+      baseUrl: 'https://gateway.internal/v1/',
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })
     const [url] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]

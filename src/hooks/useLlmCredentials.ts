@@ -122,7 +122,7 @@ export interface UseLlmCredentials {
   status: LlmCredentialsStatus | null
   loading: boolean
   error: string | null
-  saveKey: (providerId: string, apiKey: string, baseUrl?: string) => Promise<boolean>
+  saveKey: (providerId: string, apiKey: string | undefined, baseUrl?: string) => Promise<boolean>
   removeKey: (providerId: string) => Promise<boolean>
   setDevMode: (value: boolean) => Promise<boolean>
   dismissPrompt: () => Promise<boolean>
@@ -202,13 +202,16 @@ export function useLlmCredentials(): UseLlmCredentials {
   // credential state from BEFORE this save, for as long as its ten-minute
   // cache lives. `dismissPrompt` changes no credential, so it does not.
   const saveKey = useCallback(
-    async (providerId: string, apiKey: string, baseUrl?: string) => {
+    async (providerId: string, apiKey: string | undefined, baseUrl?: string) => {
       const ok = await mutate(`${ROUTE}/${encodeURIComponent(providerId)}`, "PUT", {
-        apiKey,
-        // Forward `baseUrl` whenever the caller passed a string, INCLUDING
-        // "": that is how a cleared field reaches the server as "clear the
-        // stored value" rather than "leave it as it was". Only an actually
-        // `undefined` argument (the field was never touched) omits it.
+        // Forward `apiKey` and `baseUrl` the SAME way: only when the caller
+        // actually passed a value, INCLUDING "" for baseUrl (that is how a
+        // cleared field reaches the server as "clear the stored value"
+        // rather than "leave it as it was"). An `undefined` `apiKey` means
+        // the draft was never touched, so the server reuses the key already
+        // on disk — this hook never holds the plaintext key itself, so
+        // there is nothing else it could resend.
+        ...(apiKey !== undefined ? { apiKey } : {}),
         ...(baseUrl !== undefined ? { baseUrl } : {}),
       })
       if (ok) invalidateModelCatalogCache()

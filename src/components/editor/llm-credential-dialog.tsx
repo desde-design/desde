@@ -109,6 +109,12 @@ export function LlmCredentialDialog({
   // stranded that key: it could be neither seen nor removed until dev mode
   // was switched off. Spec §5 requires management to stay available.
   const hasStoredKey = active?.hasStoredKey ?? false
+  // A typed key always qualifies. Without one, saving is still meaningful
+  // when there is a stored key AND the user touched the base URL field
+  // (`baseUrlDrafts[active.id]` is only set once they have) — that is the
+  // "fix a wrong base URL without retyping the key" case.
+  const baseUrlTouched = active ? baseUrlDrafts[active.id] !== undefined : false
+  const canSave = draft.trim().length > 0 || (hasStoredKey && baseUrlTouched)
 
   /**
    * Closing resets the easter egg and both draft maps, so a reveal or a
@@ -155,7 +161,14 @@ export function LlmCredentialDialog({
     // value); a field the user cleared is `""` (clear the stored value).
     // A falsy check here (`|| undefined`) would collapse those two cases,
     // which is exactly the bug this line fixes.
-    const ok = await saveKey(active.id, draft, baseUrlDrafts[active.id])
+    //
+    // The key draft gets the same treatment: an empty draft against a
+    // STORED key means "keep the key, apply only the base-URL fix", so it
+    // is sent as `undefined` rather than `""`. `canSave` below only allows
+    // that combination through, so this is never reached with an empty
+    // draft and no stored key.
+    const apiKeyToSave = draft.trim().length > 0 ? draft : undefined
+    const ok = await saveKey(active.id, apiKeyToSave, baseUrlDrafts[active.id])
     setBusy(false)
     // Only close the instance that started this save. Validation is a network
     // round-trip, and Close, Escape and the backdrop all stay live during it.
@@ -272,13 +285,13 @@ export function LlmCredentialDialog({
                 <Field
                   label="Base URL"
                   htmlFor={`llm-base-url-${p.id}`}
-                  hint={`Optional. Point this at an OpenAI-compatible endpoint, or set ${p.baseUrlEnvVar}. Leave it blank for ${p.label}.`}
+                  hint={`Optional. Point this at an OpenAI-compatible endpoint, including /v1, or set ${p.baseUrlEnvVar}. Leave it blank for ${p.label}.`}
                 >
                   <Input
                     id={`llm-base-url-${p.id}`}
                     autoComplete="off"
                     spellCheck={false}
-                    placeholder="https://api.openai.com"
+                    placeholder="https://api.openai.com/v1"
                     value={baseUrlDrafts[p.id] ?? p.baseUrl ?? ""}
                     onChange={(e) =>
                       setBaseUrlDrafts((prev) => ({ ...prev, [p.id]: e.target.value }))
@@ -333,10 +346,7 @@ export function LlmCredentialDialog({
             Close
           </Button>
           {envManaged ? null : (
-            <Button
-              disabled={busy || draft.trim().length === 0}
-              onClick={() => void handleSave()}
-            >
+            <Button disabled={busy || !canSave} onClick={() => void handleSave()}>
               {busy ? "Checking" : "Save key"}
             </Button>
           )}

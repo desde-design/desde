@@ -15,12 +15,16 @@ import { listOpenAiLiveModels } from '../openai-live-models'
 import { buildOpenAiProvider } from '../ai-sdk-openai'
 import type { ProviderDescriptor } from '../provider-descriptor'
 
-const DEFAULT_BASE_URL = 'https://api.openai.com'
+// Convention: `OPENAI_BASE_URL` (and the dialog's base-URL field) INCLUDES
+// `/v1`, matching `listOpenAiLiveModels` and the AI SDK's `createOpenAI`
+// default. All three sites must agree, or no single value works for a
+// gateway user — see `openai-base-url-convention.test.ts`.
+const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 const VALIDATE_TIMEOUT_MS = 10_000
 
-/** `https://host/` and `https://host` both have to produce one `/v1/models`. */
+/** `https://host/v1/` and `https://host/v1` both have to produce one `/v1/models`. */
 function modelsUrl(baseUrl: string | undefined): string {
-  return `${(baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')}/v1/models`
+  return `${(baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')}/models`
 }
 
 export const OPENAI_DESCRIPTOR: ProviderDescriptor = {
