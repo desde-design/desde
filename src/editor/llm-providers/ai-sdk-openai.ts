@@ -28,8 +28,13 @@ export interface BuildOpenAiProviderInput {
 }
 
 export function buildOpenAiProvider(input: BuildOpenAiProviderInput): LLMProvider {
+  if (!input.apiKey) {
+    throw new Error(
+      'OpenAI needs an API key: none was supplied. Set OPENAI_API_KEY or add a key from the settings gear.',
+    )
+  }
   const openai = createOpenAI({
-    apiKey: input.apiKey ?? '',
+    apiKey: input.apiKey,
     ...(input.baseUrl ? { baseURL: input.baseUrl } : {}),
     ...(input.fetchImpl ? { fetch: input.fetchImpl } : {}),
   })

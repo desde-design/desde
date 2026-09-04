@@ -88,4 +88,8 @@ describe('buildOpenAiProvider', () => {
     const provider = buildOpenAiProvider({ apiKey: 'sk-test' })
     expect(provider.name).toBe('openai')
   })
+
+  it('refuses to build a provider without a key rather than sending an empty bearer token', () => {
+    expect(() => buildOpenAiProvider({})).toThrow(/OPENAI_API_KEY|API key/)
+  })
 })

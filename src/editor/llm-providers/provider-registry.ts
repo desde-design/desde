@@ -53,6 +53,24 @@ export function isCredentialedFromEnv(
 }
 
 /**
+ * The credentials a descriptor is owed, read from the ONE place boot puts
+ * them: `applyLlmCredentialsToEnv` injects the stored key into the
+ * descriptor's own variable, and a shell export lands in the same variable.
+ * Both chat lanes and the non-chat registry read through here, so "which
+ * variable" is decided once, on the descriptor.
+ */
+export function credentialsFromEnv(
+  descriptor: ProviderDescriptor,
+  env: NodeJS.ProcessEnv,
+): { apiKey?: string; baseUrl?: string } {
+  const key = env[descriptor.credentials.apiKeyEnvVar]?.trim()
+  const url = descriptor.credentials.baseUrlEnvVar
+    ? env[descriptor.credentials.baseUrlEnvVar]?.trim()
+    : undefined
+  return { ...(key ? { apiKey: key } : {}), ...(url ? { baseUrl: url } : {}) }
+}
+
+/**
  * `llm.defaultProvider` if set and credentialed; else the first credentialed
  * id in precedence order, then registration order; else the first descriptor.
  *

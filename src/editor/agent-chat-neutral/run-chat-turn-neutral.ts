@@ -72,10 +72,12 @@ import type { EffortLevel } from '../core/model-catalog'
 import { runWithChatSession } from '../edit-service/chat-session-context'
 import type { ProviderDescriptor } from '../llm-providers/provider-descriptor'
 import {
+  credentialsFromEnv,
   getDescriptor,
   isCredentialedFromEnv,
   resolveDefaultProviderId,
 } from '../llm-providers/provider-registry'
+import { chatCredentialsMessage } from '../llm-providers/assert-chat-credentials'
 import type {
   AssistantContent,
   ChatUserContent,
@@ -120,10 +122,11 @@ export const MAX_RETRY_SLEEP_MS = 60_000
 
 export interface RunChatTurnNeutralDeps {
   /**
-   * Build the provider for this turn. Defaults to the descriptor's own
-   * `buildProvider`, reading the key from the environment that
-   * `applyLlmCredentialsToEnv` already populated. Injected by tests and by the
-   * parity harness, never in production.
+   * Build the provider for this turn. Defaults to reading the descriptor's
+   * key and base URL from the environment through `credentialsFromEnv` and
+   * calling the descriptor's own `buildProvider` with them. Only tests inject
+   * this, so they can drive a scripted provider without touching the real
+   * environment; production never sets it.
    */
   buildProvider?: (input: { providerId: string; model?: string }) => LLMProvider
 }
@@ -159,9 +162,18 @@ async function runInner(
     return failFast(opts, turnId, startedAt, `No provider named '${providerId}' is configured.`)
   }
   const model = opts.model ?? descriptor.staticCatalog.models.find((m) => m.isDefault)?.id
+  // The Anthropic descriptor only reaches this default path under the dev
+  // subscription override, where `hasSubscriptionRuntime` covers a missing
+  // key. Every other provider needs its own key: fail fast with the
+  // provider's own remediation message rather than build a provider with an
+  // empty bearer token.
+  const credentials = credentialsFromEnv(descriptor, process.env)
+  if (!credentials.apiKey && !descriptor.credentials.hasSubscriptionRuntime && !deps.buildProvider) {
+    return failFast(opts, turnId, startedAt, chatCredentialsMessage(descriptor))
+  }
   const provider =
     deps.buildProvider?.({ providerId, ...(model ? { model } : {}) }) ??
-    descriptor.buildProvider({ ...(model ? { model } : {}) })
+    descriptor.buildProvider({ ...credentials, ...(model ? { model } : {}) })
 
   // ── Cost ceiling (pre-turn) ───────────────────────────────────────
   // Refuse before spending a single token if the session is already over.

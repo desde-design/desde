@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { BridgeClient } from '../agent-tools/types'
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
@@ -89,6 +89,71 @@ async function run(
   )
   return { events, result, calls }
 }
+
+function minimalOpts(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    bridge,
+    worktreeRoot: root,
+    session: makeEmptySession('p1'),
+    userMessage: 'hello',
+    providerId: 'anthropic',
+    emit: () => {},
+    ...overrides,
+  }
+}
+
+function fakeProviderThatEndsTheTurn(): LLMProvider {
+  return scriptedProvider([textStep('done')]).provider
+}
+
+describe('the default provider path', () => {
+  it('hands the descriptor the key and base URL from the environment', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-from-env')
+    vi.stubEnv('OPENAI_BASE_URL', 'https://gateway.internal/v1')
+    const spy = vi
+      .spyOn(OPENAI_DESCRIPTOR, 'buildProvider')
+      .mockReturnValue(fakeProviderThatEndsTheTurn())
+    try {
+      await runChatTurnNeutral(
+        minimalOpts({ providerId: 'openai', model: 'gpt-5.6' }) as never,
+      ) // NO deps
+      expect(spy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiKey: 'sk-from-env',
+          baseUrl: 'https://gateway.internal/v1',
+          model: 'gpt-5.6',
+        }),
+      )
+    } finally {
+      spy.mockRestore()
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it("fails fast with the provider's own message when no key is present, and builds nothing", async () => {
+    vi.unstubAllEnvs()
+    delete process.env.OPENAI_API_KEY
+    const spy = vi.spyOn(OPENAI_DESCRIPTOR, 'buildProvider')
+    const events: ChatStreamEvent[] = []
+    try {
+      const result = await runChatTurnNeutral(
+        minimalOpts({ providerId: 'openai', emit: (e: ChatStreamEvent) => events.push(e) }) as never,
+      )
+      expect(spy).not.toHaveBeenCalled()
+      expect(result.turn.error).toMatch(/OpenAI API key/i)
+      expect(
+        events.some(
+          (e) => e.kind === 'turn_complete' && e.stopReason === 'error',
+        ),
+      ).toBe(true)
+      expect(
+        events.some((e) => e.kind === 'error' && /OpenAI API key/i.test(e.reason)),
+      ).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
 
 describe('runChatTurnNeutral: one text turn', () => {
   it('emits turn_start, the deltas, usage and turn_complete, in that order', async () => {

@@ -33,6 +33,7 @@ import {
 import { CLAUDE_SUBSCRIPTION_ENV, isClaudeSubscriptionOptIn } from './claude-subscription'
 import {
   PROVIDER_DESCRIPTORS,
+  credentialsFromEnv,
   getDescriptor,
   resolveDefaultProviderId,
   isCredentialedFromEnv,
@@ -118,7 +119,7 @@ export function configForProvider(
 ): LLMConfig {
   const descriptor = getDescriptor(providerId)
   if (!descriptor) return DEFAULT_LLM_CONFIG
-  const { apiKeyEnvVar, baseUrlEnvVar, hasSubscriptionRuntime } = descriptor.credentials
+  const { apiKeyEnvVar, hasSubscriptionRuntime } = descriptor.credentials
   if (
     hasSubscriptionRuntime === true &&
     !env[apiKeyEnvVar]?.trim() &&
@@ -126,7 +127,7 @@ export function configForProvider(
   ) {
     return CLAUDE_CODE_LLM_CONFIG
   }
-  const baseUrl = baseUrlEnvVar ? env[baseUrlEnvVar]?.trim() : undefined
+  const { baseUrl } = credentialsFromEnv(descriptor, env)
   return {
     provider: descriptor.id,
     apiKeyEnv: apiKeyEnvVar,
@@ -160,7 +161,11 @@ function buildProvider(config: LLMConfig, env: NodeJS.ProcessEnv): LLMProvider {
   // when the caller's config left `apiKeyEnv` unset.
   const descriptor = getDescriptor(config.provider)
   const apiKeyEnvVar = config.apiKeyEnv ?? descriptor?.credentials.apiKeyEnvVar
-  const apiKey = apiKeyEnvVar ? env[apiKeyEnvVar] : undefined
+  const apiKey = config.apiKeyEnv
+    ? env[config.apiKeyEnv]?.trim()
+    : descriptor
+      ? credentialsFromEnv(descriptor, env).apiKey
+      : undefined
   // Fail here, with instructions, rather than at the first call with a
   // provider-internal 401 that reads like a bug in Editor. This used to fire
   // only for 'anthropic', so an OpenAI misconfiguration surfaced lazily inside

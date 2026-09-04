@@ -8,11 +8,14 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_PROVIDER_PRECEDENCE,
   PROVIDER_DESCRIPTORS,
+  credentialsFromEnv,
   getDescriptor,
   isCredentialedFromEnv,
   listDescriptors,
   resolveDefaultProviderId,
 } from './provider-registry'
+import { ANTHROPIC_DESCRIPTOR } from './descriptors/anthropic'
+import { OPENAI_DESCRIPTOR } from './descriptors/openai'
 import type { ProviderDescriptor } from './provider-descriptor'
 
 const none = () => false
@@ -151,5 +154,29 @@ describe('isCredentialedFromEnv', () => {
     const env = { EDITOR_USE_CLAUDE_SUBSCRIPTION: '1' }
     expect(isCredentialedFromEnv(getDescriptor('anthropic')!, env)).toBe(true)
     expect(isCredentialedFromEnv(getDescriptor('openai')!, env)).toBe(false)
+  })
+})
+
+describe('credentialsFromEnv', () => {
+  it("reads the descriptor's own variables and trims them", () => {
+    const env = { OPENAI_API_KEY: '  sk-test-123  ', OPENAI_BASE_URL: 'https://gateway.internal/v1 ' }
+    expect(credentialsFromEnv(OPENAI_DESCRIPTOR, env)).toEqual({
+      apiKey: 'sk-test-123',
+      baseUrl: 'https://gateway.internal/v1',
+    })
+  })
+
+  it('reports nothing for an empty or absent value', () => {
+    expect(credentialsFromEnv(OPENAI_DESCRIPTOR, { OPENAI_API_KEY: '   ' })).toEqual({})
+    expect(credentialsFromEnv(ANTHROPIC_DESCRIPTOR, {})).toEqual({})
+  })
+
+  it('agrees with isCredentialedFromEnv on the key half', () => {
+    for (const env of [{}, { OPENAI_API_KEY: 'sk-x' }, { ANTHROPIC_API_KEY: 'sk-ant-x' }]) {
+      for (const d of listDescriptors()) {
+        const hasKey = credentialsFromEnv(d, env).apiKey !== undefined
+        if (hasKey) expect(isCredentialedFromEnv(d, env)).toBe(true)
+      }
+    }
   })
 })
