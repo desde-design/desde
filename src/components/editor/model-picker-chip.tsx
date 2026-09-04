@@ -32,7 +32,7 @@
  *    override, so resending one would brick every send while the chip
  *    hid itself.
  */
-import { useEffect, useRef, useState } from "react"
+import { Fragment, useEffect, useRef, useState } from "react"
 import { ChevronDown } from "lucide-react"
 import { editorFetch } from "@/lib/editor-fetch"
 import { Button } from "@/components/ui/button"
@@ -52,15 +52,64 @@ import type {
   SessionModelConfig,
 } from "@/editor/core/model-catalog"
 
+/**
+ * The capability fields this component reads, structurally.
+ *
+ * Declared here rather than imported from
+ * `src/editor/llm-providers/provider-descriptor.ts` because this module ships
+ * in the browser bundle and that directory reaches node-only code. It is a
+ * SUBSET on purpose: the chip gates on nothing else today, and a structural
+ * subset cannot go stale against the server's fuller record the way a
+ * hand-copied full duplicate would.
+ */
+interface ProviderCapabilitiesLike {
+  midTurnSteering: boolean
+  vendorRateLimitEvents: boolean
+}
+
 interface CatalogResponse {
-  catalogs: ProviderModelCatalog[]
+  catalogs: Array<ProviderModelCatalog & { capabilities?: ProviderCapabilitiesLike }>
   default: SessionModelConfig
+  /**
+   * Which provider is THE default, per the server's own rule
+   * (`resolveDefaultProviderId`) rather than array position. The chip does
+   * not read this today — `catalog.default` already names the right pair —
+   * but it is declared here so the response type matches what the server
+   * actually sends, and so a future gate has it without another round-trip
+   * through the server response shape.
+   */
+  defaultProviderId?: string
   /**
    * The model the user last chose in this project, already reconciled
    * server-side. `null` = no chat has ever carried a choice (or every
    * saved one is gone) → runtime default.
    */
   lastChosenModel?: SessionModelConfig | null
+}
+
+/** One radio value has to identify BOTH halves: two providers may reuse an id. */
+const OPTION_VALUE_SEPARATOR = "::"
+const optionValue = (providerId: string, modelId: string) =>
+  `${providerId}${OPTION_VALUE_SEPARATOR}${modelId}`
+
+/**
+ * Display label for a provider group's `DropdownMenuLabel`.
+ *
+ * A small local map rather than an import from `src/editor/llm-providers` —
+ * that directory reaches node-only code and this module ships in the
+ * browser. Falls back to a capitalised provider id so a vendor added without
+ * a picker-side update still reads as a name, not raw casing.
+ */
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+}
+
+function providerLabel(providerId: string): string {
+  return (
+    PROVIDER_LABELS[providerId] ??
+    providerId.charAt(0).toUpperCase() + providerId.slice(1)
+  )
 }
 
 let catalogCache: CatalogResponse | null = null
@@ -209,6 +258,15 @@ export function ModelPickerChip({
       // dropped to the runtime default instead of resent. A config that
       // only needs sanitizing (effort on a no-effort model) is
       // normalized in place rather than discarded.
+      //
+      // This already checks EVERY served catalog, not just the first —
+      // `reconcileSessionModelConfig` walks `catalog.catalogs` and matches
+      // on provider id. So a session whose provider stopped being served
+      // (an OpenAI key removed mid-session) reconciles to `null` here with
+      // no extra code: the provider it names is no longer in the array,
+      // the validator reports it unknown, and the chip drops to the
+      // runtime default rather than displaying a model the next turn
+      // would be refused for.
       const reconciled = reconcileSessionModelConfig(value, catalog.catalogs)
       if (reconciled === null) {
         onChangeRef.current(null)
@@ -241,11 +299,16 @@ export function ModelPickerChip({
   }, [catalog, catalogFailed, value, sessionId, canAdoptLastChosenModel])
 
   if (!catalog) return null
-  const provider = catalog.catalogs[0]
-  if (!provider) return null
   const effective = value ?? catalog.default
-  const option = provider.models.find((m) => m.id === effective.model)
-  if (!option) return null
+  // Keyed on the PAIR. Reading `catalogs[0]` here made a second provider
+  // invisible even when the server served it, and looking a model up by id
+  // alone assumed ids are globally unique across vendors, which nothing
+  // enforces.
+  const providerCatalog = catalog.catalogs.find(
+    (c) => c.providerId === effective.provider,
+  )
+  const option = providerCatalog?.models.find((m) => m.id === effective.model)
+  if (!providerCatalog || !option) return null
 
   const chipLabel = effective.effort
     ? `${option.label} · ${effective.effort}`
@@ -274,37 +337,51 @@ export function ModelPickerChip({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-56">
-        <DropdownMenuLabel className="text-xs">Model</DropdownMenuLabel>
         <DropdownMenuRadioGroup
-          value={effective.model}
-          onValueChange={(model) => {
-            const next = provider.models.find((m) => m.id === model)
-            if (!next) return
-            // Carry effort over only if the new model supports it.
+          value={optionValue(effective.provider, effective.model)}
+          onValueChange={(raw) => {
+            const [providerId, ...rest] = raw.split(OPTION_VALUE_SEPARATOR)
+            const modelId = rest.join(OPTION_VALUE_SEPARATOR)
+            const group = catalog.catalogs.find((c) => c.providerId === providerId)
+            const next = group?.models.find((m) => m.id === modelId)
+            if (!group || !next) return
+            // Carry effort over only if the new model supports it. Crossing
+            // providers is the common case for this to matter: the ladders
+            // are per model, not per vendor.
             const effort =
               effective.effort && next.effortLevels?.includes(effective.effort)
                 ? effective.effort
                 : undefined
             choose({
-              provider: provider.providerId,
-              model,
+              provider: group.providerId,
+              model: next.id,
               ...(effort ? { effort } : {}),
             })
           }}
         >
-          {provider.models.map((m) => (
-            <DropdownMenuRadioItem
-              key={m.id}
-              value={m.id}
-              className="text-sm"
-              data-testid={`editor-model-option-${m.id}`}
-            >
-              {/* Name and version, nothing else (Mo, 2026-09-02: "this menu
-                  is unnecessarily complex"). The description stays on the
-                  catalog entry for anything that wants it; the menu does
-                  not. */}
-              <span className="truncate">{m.label}</span>
-            </DropdownMenuRadioItem>
+          {catalog.catalogs.map((group, index) => (
+            <Fragment key={group.providerId}>
+              {index > 0 ? <DropdownMenuSeparator /> : null}
+              {/* One label per provider. With a single provider served this
+                  reads as the plain "Model" header it always did. */}
+              <DropdownMenuLabel className="text-xs">
+                {catalog.catalogs.length > 1 ? providerLabel(group.providerId) : "Model"}
+              </DropdownMenuLabel>
+              {group.models.map((m) => (
+                <DropdownMenuRadioItem
+                  key={optionValue(group.providerId, m.id)}
+                  value={optionValue(group.providerId, m.id)}
+                  className="text-sm"
+                  data-testid={`editor-model-option-${group.providerId}-${m.id}`}
+                >
+                  {/* Name and version, nothing else (Mo, 2026-09-02: "this
+                      menu is unnecessarily complex"). The description stays
+                      on the catalog entry for anything that wants it; the
+                      menu does not. */}
+                  <span className="truncate">{m.label}</span>
+                </DropdownMenuRadioItem>
+              ))}
+            </Fragment>
           ))}
         </DropdownMenuRadioGroup>
         {option.effortLevels ? (
@@ -315,7 +392,7 @@ export function ModelPickerChip({
               value={effective.effort ?? NO_EFFORT_SENTINEL}
               onValueChange={(effort) => {
                 choose({
-                  provider: provider.providerId,
+                  provider: effective.provider,
                   model: effective.model,
                   ...(effort !== NO_EFFORT_SENTINEL
                     ? { effort: effort as EffortLevel }

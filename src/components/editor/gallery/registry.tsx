@@ -24,6 +24,7 @@ import { CHAT_STATUS_BANNERS_SURFACE } from "./fixtures/chat-status-banners"
 import { CHAT_PENDING_QUESTION_SURFACE } from "./fixtures/chat-pending-question"
 import { CHAT_MID_TURN_SURFACE } from "./fixtures/chat-mid-turn"
 import { STYLE_ORIGIN_ROW_SURFACE } from "./fixtures/style-origin-row"
+import { MODEL_PICKER_SURFACE } from "./fixtures/model-picker"
 import { TOASTS_SURFACE } from "./fixtures/toasts"
 
 /**
@@ -62,6 +63,7 @@ export const SURFACE_REGISTRY: readonly SurfaceEntry[] = [
   CHAT_PENDING_QUESTION_SURFACE,
   CHAT_MID_TURN_SURFACE,
   STYLE_ORIGIN_ROW_SURFACE,
+  MODEL_PICKER_SURFACE,
   // Toasts fire imperatively instead of rendering a node; the overlay pins
   // them open and dismisses them on state change.
   TOASTS_SURFACE,

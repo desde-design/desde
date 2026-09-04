@@ -44,6 +44,63 @@ vi.mock("@/lib/editor-fetch", () => ({
   })),
 }))
 
+/**
+ * Two catalogs, used by the "two providers in one menu" suite below. Each
+ * provider's ids overlap in shape only (never in value) with the other's, so
+ * a test that gets the wrong provider's group would fail loudly rather than
+ * by accident matching the right id.
+ */
+const TWO_PROVIDER_CATALOG = {
+  catalogs: [
+    {
+      providerId: "anthropic",
+      models: [
+        {
+          id: "claude-opus-4-8",
+          label: "Opus 4.8",
+          effortLevels: ["low", "medium", "high", "xhigh", "max"],
+          isDefault: true,
+        },
+        { id: "claude-haiku-4-5", label: "Haiku 4.5", effortLevels: null },
+      ],
+    },
+    {
+      providerId: "openai",
+      models: [
+        {
+          id: "gpt-5.2",
+          label: "GPT-5.2",
+          effortLevels: ["low", "medium", "high"],
+          isDefault: true,
+        },
+      ],
+    },
+  ],
+  default: { provider: "anthropic", model: "claude-opus-4-8" },
+  defaultProviderId: "anthropic",
+}
+
+/** Same anthropic half as `TWO_PROVIDER_CATALOG`, openai dropped. */
+const ANTHROPIC_ONLY_CATALOG = {
+  catalogs: [TWO_PROVIDER_CATALOG.catalogs[0]],
+  default: { provider: "anthropic", model: "claude-opus-4-8" },
+  defaultProviderId: "anthropic",
+}
+
+/**
+ * Queues one catalog response for the NEXT fetch. Shared by every suite in
+ * this file — `mockCatalogOnce` below is the same shape and predates this
+ * one; kept as its own name there because it is scoped to the
+ * session/server-agreement describe block that already reads that name.
+ */
+async function stubCatalog(body: unknown) {
+  const { editorFetch } = await import("@/lib/editor-fetch")
+  vi.mocked(editorFetch).mockResolvedValueOnce({
+    ok: true,
+    json: async () => body,
+  } as unknown as Response)
+}
+
 interface RadioCtx {
   value: string
   onValueChange: (value: string) => void
@@ -217,6 +274,101 @@ describe("ModelPickerChip", () => {
       <ModelPickerChip value={null} onChange={() => {}} />,
     )
     await waitFor(() => expect(container).toBeEmptyDOMElement())
+  })
+})
+
+describe("two providers in one menu", () => {
+  it("labels each provider's group and lists its own models beneath", async () => {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    render(<ModelPickerChip value={null} onChange={() => {}} />)
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    expect(screen.getByText("Anthropic")).toBeInTheDocument()
+    expect(screen.getByText("OpenAI")).toBeInTheDocument()
+    expect(
+      screen.getByTestId("editor-model-option-anthropic-claude-opus-4-8"),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByTestId("editor-model-option-openai-gpt-5.2"),
+    ).toBeInTheDocument()
+  })
+
+  it("reports the provider alongside the model when a pick crosses providers", async () => {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    const onChange = vi.fn()
+    render(<ModelPickerChip value={null} onChange={onChange} />)
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    fireEvent.click(screen.getByTestId("editor-model-option-openai-gpt-5.2"))
+    expect(onChange).toHaveBeenCalledWith({ provider: "openai", model: "gpt-5.2" })
+  })
+
+  it("shows the label of the model in the SESSION's provider, not the first catalog's", async () => {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    render(
+      <ModelPickerChip
+        value={{ provider: "openai", model: "gpt-5.2" }}
+        onChange={() => {}}
+      />,
+    )
+    await waitFor(() => {
+      expect(screen.getByTestId("editor-model-chip")).toHaveTextContent("GPT-5.2")
+    })
+  })
+
+  it("does not carry effort across a model that has none", async () => {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    const onChange = vi.fn()
+    render(
+      <ModelPickerChip
+        value={{ provider: "anthropic", model: "claude-opus-4-8", effort: "high" }}
+        onChange={onChange}
+      />,
+    )
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    fireEvent.click(
+      screen.getByTestId("editor-model-option-anthropic-claude-haiku-4-5"),
+    )
+    expect(onChange).toHaveBeenCalledWith({
+      provider: "anthropic",
+      model: "claude-haiku-4-5",
+    })
+  })
+
+  it("hides the effort control entirely for a model with no effort levels", async () => {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    render(
+      <ModelPickerChip
+        value={{ provider: "anthropic", model: "claude-haiku-4-5" }}
+        onChange={() => {}}
+      />,
+    )
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    expect(screen.queryByText("Effort")).not.toBeInTheDocument()
+  })
+
+  it("drops a session back to the served default when its provider stops being served", async () => {
+    // Removing an OpenAI key mid-session stops that catalog being served. The
+    // chip must never display a model the next turn will be refused for.
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(ANTHROPIC_ONLY_CATALOG)
+    const onChange = vi.fn()
+    render(
+      <ModelPickerChip
+        value={{ provider: "openai", model: "gpt-5.2" }}
+        onChange={onChange}
+      />,
+    )
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(null))
   })
 })
 
