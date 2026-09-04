@@ -4,7 +4,7 @@
  * (Phase 0 punchlist).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   getProvider,
   pickDefaultConfig,
@@ -15,6 +15,28 @@ import {
 } from './registry'
 import { AnthropicProvider } from './anthropic-provider'
 import { ClaudeAgentSdkProvider } from './claude-agent-sdk-provider'
+import { registerDescriptorForTests } from './provider-registry'
+import { OPENAI_DESCRIPTOR } from './descriptors/openai'
+import type { ProviderDescriptor } from './provider-descriptor'
+import type { LLMProvider } from './types'
+
+function fakeProvider(name: string): LLMProvider {
+  return {
+    name,
+    defaultModel: 'm',
+    complete: async () => ({ text: '', stopReason: 'end_turn' as const }),
+    streamConversation: async function* () {},
+  }
+}
+
+function withRegisteredDescriptor(descriptor: ProviderDescriptor, fn: () => void): void {
+  const unregister = registerDescriptorForTests(descriptor)
+  try {
+    fn()
+  } finally {
+    unregister()
+  }
+}
 
 describe('getProvider', () => {
   const originalEnv = { ...process.env }
@@ -202,5 +224,31 @@ describe('buildProvider refuses a missing key for ANY provider', () => {
       env: { OPENAI_API_KEY: 'sk-y' },
     })
     expect(provider.name).toBe('openai')
+  })
+})
+
+describe('buildProvider builds any registered descriptor, not a hardcoded switch', () => {
+  it('builds a fake descriptor through the descriptor, not a hardcoded switch', () => {
+    const fake: ProviderDescriptor = {
+      ...OPENAI_DESCRIPTOR,
+      id: 'fakevendor',
+      label: 'Fake',
+      credentials: { ...OPENAI_DESCRIPTOR.credentials, apiKeyEnvVar: 'FAKEVENDOR_API_KEY' },
+      buildProvider: vi.fn(() => fakeProvider('fakevendor')),
+    }
+    withRegisteredDescriptor(fake, () => {
+      const p = getProvider({
+        config: { provider: 'fakevendor', apiKeyEnv: 'FAKEVENDOR_API_KEY' },
+        env: { FAKEVENDOR_API_KEY: 'k' } as unknown as NodeJS.ProcessEnv,
+      })
+      expect(p.name).toBe('fakevendor')
+      expect(fake.buildProvider).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'k' }))
+    })
+  })
+
+  it('still names every registered descriptor in the unknown-provider message', () => {
+    expect(() => getProvider({ config: { provider: 'nope' }, env: {} })).toThrow(
+      /anthropic.*openai|openai.*anthropic/,
+    )
   })
 })

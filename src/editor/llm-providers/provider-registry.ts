@@ -16,10 +16,24 @@ import { ANTHROPIC_DESCRIPTOR } from './descriptors/anthropic'
 import { OPENAI_DESCRIPTOR } from './descriptors/openai'
 import type { ProviderDescriptor } from './provider-descriptor'
 
-export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
-  ANTHROPIC_DESCRIPTOR,
-  OPENAI_DESCRIPTOR,
-]
+const REGISTERED_DESCRIPTORS: ProviderDescriptor[] = [ANTHROPIC_DESCRIPTOR, OPENAI_DESCRIPTOR]
+
+export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = REGISTERED_DESCRIPTORS
+
+/**
+ * TEST-ONLY seam. Pushes a descriptor onto the live table so `getDescriptor`
+ * / `listDescriptors` / `buildProvider` see it as a real registered vendor,
+ * without touching `ANTHROPIC_DESCRIPTOR` or `OPENAI_DESCRIPTOR`. Returns a
+ * remover; call it (e.g. in a `finally`) so the fake never leaks into another
+ * test.
+ */
+export function registerDescriptorForTests(descriptor: ProviderDescriptor): () => void {
+  REGISTERED_DESCRIPTORS.push(descriptor)
+  return () => {
+    const i = REGISTERED_DESCRIPTORS.indexOf(descriptor)
+    if (i !== -1) REGISTERED_DESCRIPTORS.splice(i, 1)
+  }
+}
 
 /** Precedence when several providers are credentialed and no config says. */
 export const DEFAULT_PROVIDER_PRECEDENCE = ['anthropic', 'openai'] as const

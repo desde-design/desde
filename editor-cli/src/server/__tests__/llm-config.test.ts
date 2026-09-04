@@ -66,4 +66,13 @@ describe("resolveLlmConfig", () => {
       resolveLlmConfig(undefined, { EDITOR_USE_CLAUDE_SUBSCRIPTION: "1" }),
     ).toMatchObject({ provider: "claude_code" })
   })
+
+  it("applies llm.providers.anthropic.model even when the subscription runtime is selected", () => {
+    const cfg = resolveLlmConfig(
+      { llm: { providers: { anthropic: { model: "claude-sonnet-5" } } } },
+      { EDITOR_USE_CLAUDE_SUBSCRIPTION: "1" },
+    )
+    expect(cfg.provider).toBe("claude_code")
+    expect(cfg.model).toBe("claude-sonnet-5")
+  })
 })

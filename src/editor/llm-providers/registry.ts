@@ -25,16 +25,16 @@
  * the runtime that owns it.
  */
 
-import { AnthropicProvider, ANTHROPIC_DEFAULT_MODEL } from './anthropic-provider'
+import { ANTHROPIC_DEFAULT_MODEL } from './anthropic-provider'
 import {
   ClaudeAgentSdkProvider,
   CLAUDE_AGENT_SDK_DEFAULT_MODEL,
 } from './claude-agent-sdk-provider'
 import { CLAUDE_SUBSCRIPTION_ENV, isClaudeSubscriptionOptIn } from './claude-subscription'
 import {
-  PROVIDER_DESCRIPTORS,
   credentialsFromEnv,
   getDescriptor,
+  listDescriptors,
   resolveDefaultProviderId,
   isCredentialedFromEnv,
 } from './provider-registry'
@@ -155,22 +155,38 @@ export function pickDefaultConfig(env: NodeJS.ProcessEnv): LLMConfig {
 }
 
 function buildProvider(config: LLMConfig, env: NodeJS.ProcessEnv): LLMProvider {
+  // `claude_code` is the one special case: it has no descriptor of its own,
+  // it is the runtime `configForProvider` translates the Anthropic
+  // descriptor into on the subscription opt-in path.
+  if (config.provider === 'claude_code') {
+    return new ClaudeAgentSdkProvider({ defaultModel: config.model })
+  }
+
+  const descriptor = getDescriptor(config.provider)
+  if (!descriptor) {
+    throw new Error(
+      `Unknown LLM provider '${config.provider}'. Supported: ${[
+        ...listDescriptors().map((d) => d.id),
+        'claude_code',
+      ].join(', ')}.`,
+    )
+  }
+
   // `apiKeyEnv`: read the named env var explicitly and pass it to the provider
   // INSTANCE, so two providers with different keys coexist in one process
   // without cross-wiring. Falls back to the provider's own descriptor env var
   // when the caller's config left `apiKeyEnv` unset.
-  const descriptor = getDescriptor(config.provider)
-  const apiKeyEnvVar = config.apiKeyEnv ?? descriptor?.credentials.apiKeyEnvVar
+  const apiKeyEnvVar = config.apiKeyEnv ?? descriptor.credentials.apiKeyEnvVar
   const apiKey = config.apiKeyEnv
     ? env[config.apiKeyEnv]?.trim()
-    : descriptor
-      ? credentialsFromEnv(descriptor, env).apiKey
-      : undefined
+    : credentialsFromEnv(descriptor, env).apiKey
+  const baseUrl = config.baseUrl ?? credentialsFromEnv(descriptor, env).baseUrl
+
   // Fail here, with instructions, rather than at the first call with a
   // provider-internal 401 that reads like a bug in Editor. This used to fire
   // only for 'anthropic', so an OpenAI misconfiguration surfaced lazily inside
   // complete() — the inconsistent failure the descriptor table removes.
-  if (descriptor && !apiKey?.trim()) {
+  if (!apiKey?.trim()) {
     const envVar = apiKeyEnvVar ?? descriptor.credentials.apiKeyEnvVar
     const subscriptionHint =
       descriptor.credentials.hasSubscriptionRuntime === true
@@ -181,23 +197,10 @@ function buildProvider(config: LLMConfig, env: NodeJS.ProcessEnv): LLMProvider {
         `or add a key from the settings gear in the top bar.${subscriptionHint}`,
     )
   }
-  switch (config.provider) {
-    case 'anthropic':
-      return new AnthropicProvider({ defaultModel: config.model, apiKey })
-    case 'claude_code':
-      return new ClaudeAgentSdkProvider({ defaultModel: config.model })
-    case 'openai':
-      return getDescriptor('openai')!.buildProvider({
-        apiKey: apiKey ?? env.OPENAI_API_KEY,
-        model: config.model,
-        baseUrl: config.baseUrl,
-      })
-    default:
-      throw new Error(
-        `Unknown LLM provider '${config.provider}'. Supported: ${[
-          ...PROVIDER_DESCRIPTORS.map((d) => d.id),
-          'claude_code',
-        ].join(', ')}.`,
-      )
-  }
+
+  return descriptor.buildProvider({
+    ...(apiKey ? { apiKey } : {}),
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(config.model ? { model: config.model } : {}),
+  })
 }

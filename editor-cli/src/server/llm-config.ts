@@ -29,10 +29,12 @@ export function resolveLlmConfig(
     isCredentialed: (d) => isCredentialedFromEnv(d, env),
   })
   const base = configForProvider(providerId, env)
-  // Overrides are looked up by the RESOLVED id, not by the configured default:
-  // naming an uncredentialed provider must not drag its model override onto
-  // whichever provider actually answers.
-  const overrides = configured?.providers?.[base.provider]
+  // Overrides are looked up by the RESOLVED DESCRIPTOR id (`providerId`), not
+  // by the configured default and not by `base.provider` — `configForProvider`
+  // can translate the descriptor into the `claude_code` subscription runtime
+  // id, and an override keyed on that runtime id would never match a project's
+  // `llm.providers.anthropic` entry.
+  const overrides = configured?.providers?.[providerId]
   return {
     ...base,
     model: overrides?.model ?? base.model,
