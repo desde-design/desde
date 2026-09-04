@@ -149,3 +149,25 @@ describe('verify_goal — verdict mapping', () => {
     expect(out.skipped).toBe(true)
   })
 })
+
+describe("verify_goal hands the translate step the session's resolved provider", () => {
+  it('passes ctx.resolveLlmProvider through to translateGoal', async () => {
+    mockTranslate.mockResolvedValue({ ok: true, predicates: [{ predicate: 'noOverflow', args: {} }] })
+    const { bridge } = bridgeWith({ measurements: meas(), supported: true })
+    const resolveLlmProvider = vi.fn(() => ({
+      name: 'fake',
+      defaultModel: 'fake-model',
+      complete: vi.fn(),
+    }))
+    await verifyGoalTool(
+      { bridge, resolveLlmProvider },
+      { goal: 'make this fit the content width', selector: '.card' },
+    )
+    // The tool's only LLM touch. Without this thread it would fall back to the
+    // process-wide registry and ignore the project's `llm` block.
+    expect(resolveLlmProvider).not.toHaveBeenCalled()
+    expect(mockTranslate).toHaveBeenCalledWith(
+      expect.objectContaining({ resolveProvider: resolveLlmProvider }),
+    )
+  })
+})

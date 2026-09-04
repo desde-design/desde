@@ -35,8 +35,10 @@ function userText(opts: CompleteOpts): string {
 
 function makeFakeProvider(
   perFileResponses: Map<string, CannedResponse | Error>,
+  onComplete?: (opts: CompleteOpts) => void,
 ): CompletionProvider {
   const complete = vi.fn(async (opts: CompleteOpts): Promise<CompleteResult> => {
+    onComplete?.(opts)
     const text = userText(opts)
     const m = /File: `([^`]+)`/.exec(text)
     if (!m) throw new Error('test fake: could not find file path in user content')
@@ -76,6 +78,10 @@ const STYLE_CONTEXT: ProjectStyleContext = {
   classTaxonomy: ['btn', 'btn-primary', 'card', 'flex', 'gap-2'],
   preprocessor: 'scss',
 }
+
+/** Single-file, single-mutation fixtures shared by the model/provider tests below. */
+const filesMap = new Map([['src/components/Card.vue', '<template>\n  <h1>Hello</h1>\n</template>']])
+const oneMutation = makeMutation({ sourceLoc: 'src/components/Card.vue:12:4' })
 
 describe('applyLLMPatch', () => {
   it('returns ok with empty result on empty mutations', async () => {
@@ -1112,5 +1118,77 @@ describe('applyLLMPatch', () => {
       })
       expect(result.ok).toBe(true)
     })
+  })
+})
+
+describe('the model id comes from the provider, never from this file', () => {
+  it('sends no model at all, so each provider falls back to its own default', async () => {
+    const seen: Array<string | undefined> = []
+    const provider = makeFakeProvider(
+      new Map([
+        [
+          'src/components/Card.vue',
+          {
+            newSource: '<template>\n  <h1>Hi</h1>\n</template>',
+            perMutationOutcome: [{ mutationId: 'm-1', outcome: 'applied' }],
+          },
+        ],
+      ]),
+      (opts) => seen.push(opts.model),
+    )
+    await applyLLMPatch({
+      files: filesMap,
+      mutations: [oneMutation],
+      projectStyleContext: STYLE_CONTEXT,
+      provider,
+    })
+    expect(seen).toEqual([undefined])
+  })
+
+  it('still honours an explicit model when the caller pins one', async () => {
+    const seen: Array<string | undefined> = []
+    const provider = makeFakeProvider(
+      new Map([
+        [
+          'src/components/Card.vue',
+          {
+            newSource: '<template>\n  <h1>Hi</h1>\n</template>',
+            perMutationOutcome: [{ mutationId: 'm-1', outcome: 'applied' }],
+          },
+        ],
+      ]),
+      (opts) => seen.push(opts.model),
+    )
+    await applyLLMPatch({
+      files: filesMap,
+      mutations: [oneMutation],
+      projectStyleContext: STYLE_CONTEXT,
+      provider,
+      model: 'gpt-5.4-mini',
+    })
+    expect(seen).toEqual(['gpt-5.4-mini'])
+  })
+})
+
+/**
+ * `getProvider()` THROWS on missing credentials, and a default-parameter throw
+ * is evaluated during destructuring, so it escaped every try/catch in this
+ * file and reached the caller as a raw 500 with a stack in the response body.
+ * `repair-edit.ts` and `iteration-data-llm.ts` already resolve inside the
+ * function for exactly this reason; this lane was the last one that did not.
+ */
+describe('a credential failure is a clean refusal, not a 500', () => {
+  it("returns ok:false with the registry's own message", async () => {
+    const result = await applyLLMPatch({
+      files: filesMap,
+      mutations: [oneMutation],
+      projectStyleContext: STYLE_CONTEXT,
+      resolveProvider: () => {
+        throw new Error('Missing OPENAI_API_KEY.')
+      },
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toContain('Missing OPENAI_API_KEY')
   })
 })

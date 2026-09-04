@@ -232,6 +232,8 @@ import {
 } from "./static-assets.js"
 import { runRetentionGc } from "../../../src/editor/agent-chat-sdk/retention-gc.js"
 import { gcAllProposalBlobs } from "../../../src/editor/agent-chat-sdk/proposal-blob-gc.js"
+import { resolveLlmConfig } from "./llm-config.js"
+import { getProvider } from "../../../src/editor/llm-providers/registry.js"
 
 export interface HttpServerOptions {
   /** Bind host. Defaults to 127.0.0.1. */
@@ -390,6 +392,8 @@ export interface HttpServerOptions {
     backups?: { keepNewest?: number; maxAgeDays?: number }
     chatSessionTurns?: { maxTurns?: number }
   }
+  /** `llm` block from the project config. See `llm-config.ts`. */
+  llm?: import("./project-config.js").ProjectConfig["llm"]
   /**
    * Phase 3 — "Use repo conventions". CLI bootstrap reads this from
    * `.desde/config.json` (project-config `conventions` section).
@@ -719,6 +723,15 @@ type HomeLauncherHolder = {
 }
 
 /**
+ * The provider this project's non-chat lanes run on, resolved per request so a
+ * key saved in the settings dialog takes effect on the next save rather than
+ * at the next restart.
+ */
+function llmConfigFor(ctx: RouteContext) {
+  return resolveLlmConfig({ llm: ctx.llm }, process.env)
+}
+
+/**
  * Narrow the route context down to what the read-roots handler needs.
  *
  * `pickFolder` is passed through so the settings dialog can pop the native
@@ -767,6 +780,7 @@ interface RouteContext extends Required<Pick<HttpServerOptions, "applicatorLoade
   enabledLanes?: ReadonlySet<DormantLaneId>
   /** Audit Task 15 — retention tunables (spread from opts). */
   retention?: HttpServerOptions["retention"]
+  llm?: HttpServerOptions["llm"]
   readRoots?: HttpServerOptions["readRoots"]
   /**
    * Live registry box. The settings dialog swaps `.current` after a write so a
@@ -2490,6 +2504,7 @@ async function handleChatRoute(
     loaders: ctx.chatLoaders,
     quotas: ctx.chatQuotas,
     retention: ctx.retention,
+    llm: ctx.llm,
     conventions: ctx.conventions,
     // Holder first: it reflects edits made from the settings dialog since
     // boot. `ctx.readRoots` is the boot-time snapshot and is the fallback for
@@ -2931,6 +2946,10 @@ async function handleDesignSystemsRoute(
       }
     },
     viteBaseUrl: ctx.viteUrl,
+    // Wired in production now, not only in tests: the LLM hint lane used to
+    // fall through to the registry's argless default, which could not see the
+    // project's `llm` block.
+    getLlmProvider: () => getProvider({ config: llmConfigFor(ctx) }),
   })
 }
 
@@ -4918,6 +4937,10 @@ async function runEditAndAutoCommit(
           return null
         }
       },
+      // The project's resolved provider. Lazy: constructing one throws on a
+      // missing key, and most edits never reach an LLM lane at all.
+      getLlmProvider: () => getProvider({ config: llmConfigFor(ctx) }),
+      llmProviderId: llmConfigFor(ctx).provider,
     },
   )
   if (!result.ok) {
@@ -5004,7 +5027,10 @@ async function handleEditStreaming(
   const mutations =
     body.edit.kind === "llm-patch" ? body.edit.mutations : []
   send("start", {
-    model: process.env.ANTHROPIC_API_KEY ? "anthropic-sdk" : "claude-code",
+    // The provider the lane will actually run on. This used to read
+    // `process.env.ANTHROPIC_API_KEY ? "anthropic-sdk" : "claude-code"`, which
+    // would report an OpenAI-backed patch as claude-code in the save dialog.
+    model: llmConfigFor(ctx).provider,
     mutationCount: mutations.length,
   })
 
@@ -5044,6 +5070,10 @@ async function handleEditStreaming(
           // handleLLMPatch). Tokens must never block an edit; the handler
           // wraps this in try/catch and degrades to `[]`.
           getGrounding: () => getGroundingService(ctx.canonicalRoot, ctx.groundingLoaders),
+          // The project's resolved provider. Lazy: constructing one throws on
+          // a missing key, and most edits never reach an LLM lane at all.
+          getLlmProvider: () => getProvider({ config: llmConfigFor(ctx) }),
+          llmProviderId: llmConfigFor(ctx).provider,
         },
       )
       if (!r.ok) return { result: r, autoCommit: NO_OP_AUTO_COMMIT }
@@ -5108,6 +5138,7 @@ async function handleLLMFallbackRequest(
     ctx.llmFallbackLoaders,
     ctx.conventions,
     ctx.enabledLanes,
+    () => getProvider({ config: llmConfigFor(ctx) }),
   )
   sendJson(res, result.status, {
     ok: result.ok,

@@ -291,6 +291,19 @@ export interface ApplyEditOpts {
    * silently re-opening a lane the product decided not to offer.
    */
   enabledLanes?: ReadonlySet<DormantLaneId>
+  /**
+   * The provider the project's non-chat lanes run on, resolved once per
+   * request by the route (`resolveLlmConfig`). Absent in older callers and
+   * tests, which keeps the registry's own default.
+   */
+  getLlmProvider?: () => import("../../../src/editor/llm-providers/types").CompletionProvider
+  /**
+   * That provider's id, for the lane gates that must refuse rather than run.
+   * Separate from the factory because the refusal must NOT construct a
+   * provider (constructing one throws on a missing key, which is a different
+   * failure with a different message).
+   */
+  llmProviderId?: string
 }
 
 export async function applyEdit(
@@ -338,6 +351,7 @@ export async function applyEdit(
       body.edit.llmFallback,
       opts.getGrounding,
       body.correlationId,
+      opts.getLlmProvider,
     )
   }
 
@@ -1351,6 +1365,7 @@ async function handleApplicatorRefusal(args: {
           // P2-2 (codex review round 3, 2026-08-20) — see
           // `tryPropEditLLMFallback`'s own doc comment on this param.
           correlationId: body.correlationId,
+          llmProviderId: opts.llmProviderId,
         })
         if (fallbackResult !== null) return fallbackResult
       } else if (body.edit.llmFallback === "chat") {
@@ -1728,6 +1743,8 @@ async function tryPropEditLLMFallback(args: {
    * `activity-verification-join.ts`).
    */
   correlationId?: string
+  /** See `ApplyEditOpts.llmProviderId`. */
+  llmProviderId?: string
 }): Promise<EditResult | null> {
   const escalateToChatOnRefusal = (reason: string): EditResult => ({
     ok: false,
@@ -1735,6 +1752,22 @@ async function tryPropEditLLMFallback(args: {
     reason,
     ...(args.llmFallbackMode === "chat" ? { needsChat: true as const } : {}),
   })
+
+  // Gate at both ends, applied to a lane. The mini-turn runs on the Claude
+  // Agent SDK, so a project whose default provider is something else must be
+  // told that rather than have the CLI reach for Anthropic credentials the
+  // customer never provided. `claude_code` IS the Anthropic lane (the bundled
+  // binary), so it passes.
+  const miniTurnProvider = args.llmProviderId
+  if (
+    miniTurnProvider !== undefined &&
+    miniTurnProvider !== "anthropic" &&
+    miniTurnProvider !== "claude_code"
+  ) {
+    return escalateToChatOnRefusal(
+      `${args.deterministicReason} The automatic fix runs on Anthropic models only for now, and this project's default provider is ${miniTurnProvider}.`,
+    )
+  }
 
   if (!args.applicatorLoaders.loadRunEditFixMiniTurn) {
     // Loader not configured (e.g. older test stubs) — skip gracefully.
@@ -2307,6 +2340,8 @@ async function handleLLMPatch(
   getGrounding?: ApplyEditOpts["getGrounding"],
   /** See `EditRequestBody.correlationId`. */
   correlationId?: string,
+  /** See `ApplyEditOpts.getLlmProvider`. */
+  getLlmProvider?: ApplyEditOpts["getLlmProvider"],
 ): Promise<EditResult> {
   if (!applicatorLoaders.loadApplyLLMPatch || !applicatorLoaders.loadStyleGrounding) {
     return {
@@ -2749,6 +2784,7 @@ async function handleLLMPatch(
     // stream surfaces token-by-token in the save dialog instead of
     // blanking for 5–95s.
     ...(onTextDelta ? { onTextDelta } : {}),
+    ...(getLlmProvider ? { resolveProvider: getLlmProvider } : {}),
   })
 
   if (!result.ok) {

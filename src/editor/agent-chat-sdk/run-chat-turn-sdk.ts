@@ -234,6 +234,13 @@ export interface RunChatTurnSdkOpts {
    */
   reviewSurface?: import('../core/review-surface').ReviewSurface
   /**
+   * `verify_goal`'s translate step — the only LLM touch reachable from a
+   * chat turn. The CLI resolves this once per turn from the project's
+   * `llm` block and forwards it into `buildEditorToolServer`. Absent
+   * (web/tests) falls back to the registry's own default.
+   */
+  resolveLlmProvider?: () => import('../llm-providers/types').CompletionProvider
+  /**
    * Gate for the canvas + screenshot-plan surface (the `save_screenshot_plan`
    * / `heal_plan_step` tools + their system-prompt discipline block).
    * DORMANT by product decision 2026-08-04 — undertested, default OFF (see
@@ -533,6 +540,9 @@ async function runChatTurnSdkInner(
     packageManagerAdapter: opts.packageManagerAdapter,
     getGrounding: opts.getGrounding,
     reviewSurface: opts.reviewSurface,
+    // `verify_goal`'s translate step. Pass-through only; the SDK runtime never
+    // calls it itself.
+    resolveLlmProvider: opts.resolveLlmProvider,
     canvasEnabled: opts.canvasEnabled,
     acquireTreeGate: opts.acquireTreeGate,
   })

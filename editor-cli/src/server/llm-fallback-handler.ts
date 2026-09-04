@@ -12,6 +12,7 @@ import path from "node:path"
 import type { RepairIntent } from "../../../src/editor/edit-service/repair-edit-prompt"
 import type { IterationDataIntent } from "../../../src/editor/edit-service/iteration-data-prompt"
 import type { ProjectKnowledgeConfig } from "../../../src/editor/edit-service/load-project-knowledge"
+import type { CompletionProvider } from "../../../src/editor/llm-providers/types"
 import {
   resolvePrototypeRoot,
   resolveCandidateWithinRoot,
@@ -170,11 +171,13 @@ export async function handleLLMFallback(
   loaders: LLMFallbackLoaders,
   conventions?: ProjectKnowledgeConfig,
   enabledLanes?: ReadonlySet<DormantLaneId>,
+  getLlmProvider?: () => CompletionProvider,
 ): Promise<LLMFallbackResult> {
-  // No API-key gate here — the provider registry falls back to the
-  // Claude Agent SDK (subscription auth via the bundled `claude`
-  // binary) when ANTHROPIC_API_KEY is unset. If the user has neither
-  // a key nor a logged-in `claude`, the SDK call itself fails with a
+  // No API-key gate here — the provider registry falls back to whichever
+  // provider `resolveLlmConfig` names for this project (the Claude Agent SDK,
+  // via the bundled `claude` binary's subscription auth, when that's the
+  // resolved provider and no API key is set). If the resolved provider has
+  // neither a key nor a logged-in `claude`, the call itself fails with a
   // useful auth error rather than a stale "no env var" message.
   const validation = validate(body)
   if (validation) return { status: 400, ok: false, reason: validation }
@@ -284,6 +287,7 @@ export async function handleLLMFallback(
       file: resolvedRelPath,
       intent: body.intent,
       projectKnowledge,
+      ...(getLlmProvider ? { resolveProvider: getLlmProvider } : {}),
     })
     if (!iteration.ok) {
       return { status: 422, ok: false, reason: iteration.reason }
@@ -308,6 +312,7 @@ export async function handleLLMFallback(
     intent: body.intent,
     errorReason: body.errorReason as string,
     projectKnowledge,
+    ...(getLlmProvider ? { resolveProvider: getLlmProvider } : {}),
   })
   if (!result.ok) {
     return { status: 422, ok: false, reason: result.reason }

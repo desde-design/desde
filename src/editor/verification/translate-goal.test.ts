@@ -306,3 +306,33 @@ describe('translateGoal', () => {
     }
   })
 })
+
+describe('the provider comes from the caller, resolved lazily', () => {
+  it('uses the injected resolver rather than the process-wide registry', async () => {
+    const provider = fakeProvider({ predicates: [{ predicate: 'widthWithin' }] })
+    const resolveProvider = vi.fn(() => provider)
+    await translateGoal({
+      goal: 'make this fit the content width',
+      selector: '.card',
+      resolveProvider,
+    })
+    expect(resolveProvider).toHaveBeenCalledTimes(1)
+  })
+
+  it('turns a credential failure into a clean refusal, not a throw', async () => {
+    // `getProvider()` throws on a missing key, and this lane used to resolve it
+    // as a destructuring default, so the throw escaped the try/catch below and
+    // reached `verify_goal` as an unhandled error rather than a skip reason.
+    const result = await translateGoal({
+      goal: 'make this fit',
+      selector: '.card',
+      resolveProvider: () => {
+        throw new Error('Missing OPENAI_API_KEY.')
+      },
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.kind).toBe('error')
+    expect(result.reason).toContain('Missing OPENAI_API_KEY')
+  })
+})

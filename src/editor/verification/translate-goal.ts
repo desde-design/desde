@@ -32,6 +32,14 @@ export interface TranslateGoalInput extends TranslateGoalPromptInput {
   /** Optional LLM provider injection (tests pass a fake). */
   provider?: CompletionProvider
   /**
+   * Lazily resolves the LLM provider when `provider` is not supplied. The
+   * CLI's `verify_goal` tool injects the session's resolved provider here
+   * (see `EditorToolContext.resolveLlmProvider`) so this lane never falls
+   * back to the process-wide registry default on its own. Absent →
+   * `getProvider()`.
+   */
+  resolveProvider?: () => CompletionProvider
+  /**
    * Model id. When omitted, the PROVIDER's own `defaultModel` is used (Anthropic
    * / claude_code → sonnet, OpenAI → its default) — NOT a hardcoded Claude model,
    * which a non-Anthropic provider would reject. Pass one only to override.
@@ -182,7 +190,6 @@ export async function translateGoal(
   const {
     goal,
     selector,
-    provider = getProvider(),
     // No hardcoded default — undefined lets each provider's complete() fall back
     // to its OWN defaultModel (`opts.model ?? this.defaultModel`), so an
     // OpenAI-configured session doesn't get a Claude model id it would reject.
@@ -190,6 +197,19 @@ export async function translateGoal(
     maxTokens = 1000,
     signal,
   } = input
+
+  // Resolved inside the function, not as a parameter default. `getProvider()`
+  // throws on missing credentials, and this lane's caller is a chat TOOL: an
+  // escaping throw surfaces to the agent as "verify_goal failed" rather than as
+  // the translate-error skip reason the tool is written to explain.
+  let provider = input.provider
+  if (!provider) {
+    try {
+      provider = (input.resolveProvider ?? getProvider)()
+    } catch (err) {
+      return { ok: false, reason: (err as Error).message, kind: 'error' }
+    }
+  }
 
   if (!goal || goal.trim().length === 0) {
     return { ok: false, reason: 'Goal is empty: nothing to translate', kind: 'error' }

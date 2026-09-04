@@ -168,13 +168,13 @@ export interface DesignSystemsHandlerCtx {
    */
   viteBaseUrl: string
   /**
-   * Phase 4 Task 5 (opt-in LLM hint generation) — injected provider
-   * override, purely for tests. Production wiring omits this: the LLM lane
-   * (`src/editor/hints/llm-generate-hints.ts`) falls back to the
-   * registry's default provider (`getProvider()`) when none is supplied —
-   * the SAME acquisition path `apply-llm-patch.ts`'s CLI caller relies on
-   * (auth via the bundled `claude` binary's Claude subscription, or
-   * `ANTHROPIC_API_KEY` when set — see `src/editor/llm-providers/registry.ts`).
+   * The project's resolved provider for the LLM hint-generation lane
+   * (`src/editor/hints/llm-generate-hints.ts`). Wired in production now,
+   * not only in tests: `http-server.ts` builds this from the same
+   * per-request `resolveLlmConfig` every other non-chat lane uses, so a
+   * project that names a provider in `.desde/config.json` reaches this
+   * lane too. Absent (older callers/tests) falls back to the registry's
+   * own default (`getProvider()`).
    */
   getLlmProvider?: () => CompletionProvider
 }

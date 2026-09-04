@@ -24,7 +24,7 @@
  *   4. two mutations falling back into one file both survive (no clobber)
  *   5. it is framework-neutral, not a React special case
  */
-import { describe, expect, it, beforeEach, afterEach } from "vitest"
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest"
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -243,5 +243,82 @@ describe("deterministic text lane — consumer-callsite fallback", () => {
     expect(result.ok).toBe(true)
     expect(readFileSync(join(dir, "App.vue"), "utf8")).toContain("<Card>Goodbye</Card>")
     expect(llmInvocations).toBe(0)
+  })
+})
+
+const PROP_EDIT_ORIGINAL_SOURCE = [
+  "<template>",
+  '  <UiInput :placeholder="filterPlaceholder" />',
+  "</template>",
+  "<script setup>",
+  "const filterPlaceholder = 'Search...'",
+  "</script>",
+  "",
+].join("\n")
+
+const propEditBodyThatRefuses: EditRequestBody = {
+  edit: {
+    kind: "prop",
+    file: "App.vue",
+    line: 2,
+    column: 3,
+    propName: "placeholder",
+    value: "Filter results",
+  },
+} as EditRequestBody
+
+/**
+ * Gate at both ends, applied to a LANE rather than a flag. The mini-turn runs
+ * on the Claude Agent SDK and nothing else until the neutral runtime ships, so
+ * an OpenAI-only project must be told that rather than have the CLI reach for
+ * Anthropic credentials the customer never provided.
+ */
+describe("the edit-fix mini-turn refuses a non-Anthropic default provider", () => {
+  let dir: string
+  const applicatorLoaders: ApplicatorLoaders = {
+    ...APPLICATORS,
+    loadApplyPropEdit: async () => ({
+      applyPropEdit: () => ({
+        ok: false,
+        reason: 'Cannot overwrite bound prop "placeholder" — source uses v-bind.',
+        fallback: { kind: "bound-binding" as const, expression: "filterPlaceholder" },
+      }),
+    }),
+  } as ApplicatorLoaders
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "editor-mini-turn-provider-gate-"))
+    writeFileSync(join(dir, "App.vue"), PROP_EDIT_ORIGINAL_SOURCE)
+  })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  it("refuses with a capability message instead of spawning the claude binary", async () => {
+    const loadRunEditFixMiniTurn = vi.fn()
+    const result = await applyEdit(
+      propEditBodyThatRefuses,
+      dir,
+      { ...applicatorLoaders, loadRunEditFixMiniTurn },
+      undefined,
+      { llmProviderId: "openai" },
+    )
+    expect(loadRunEditFixMiniTurn).not.toHaveBeenCalled()
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toContain("Anthropic")
+    expect(result.status).toBe(422)
+  })
+
+  it("still runs for an Anthropic project", async () => {
+    const loadRunEditFixMiniTurn = vi.fn(async () => ({
+      runEditFixMiniTurn: async () => ({ ok: false as const, reason: "no change" }),
+    }))
+    await applyEdit(
+      propEditBodyThatRefuses,
+      dir,
+      { ...applicatorLoaders, loadRunEditFixMiniTurn } as unknown as ApplicatorLoaders,
+      undefined,
+      { llmProviderId: "anthropic" },
+    )
+    expect(loadRunEditFixMiniTurn).toHaveBeenCalled()
   })
 })

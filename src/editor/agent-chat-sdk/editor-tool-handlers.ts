@@ -63,6 +63,12 @@ export interface EditorToolContext {
    * See [src/editor/core/review-surface.ts].
    */
   reviewSurface?: ReviewSurface
+  /**
+   * The project's resolved non-chat provider, for `verify_goal`'s translate
+   * step — the only LLM touch in any tool handler. Absent (tests, non-CLI)
+   * falls back to the registry's own default, which is the previous behaviour.
+   */
+  resolveLlmProvider?: () => import('../llm-providers/types').CompletionProvider
 }
 
 /**
@@ -1091,9 +1097,16 @@ export async function verifyGoalTool(
     result = await verifyGoal(
       { editId: 'verify_goal', goal: input.goal, selector: input.selector },
       {
-        // LLM translate step (the only LLM touch). Default provider = the CLI's
-        // configured LLM (getProvider) — supports json_schema structured output.
-        translate: (args) => translateGoal({ ...args, signal: ctx.signal }),
+        // The only LLM touch in this tool. The provider comes from the CLI's
+        // per-request `resolveLlmConfig`, so a project that names a provider in
+        // `.desde/config.json` gets it here too rather than only in the five
+        // route-driven lanes.
+        translate: (args) =>
+          translateGoal({
+            ...args,
+            signal: ctx.signal,
+            ...(ctx.resolveLlmProvider ? { resolveProvider: ctx.resolveLlmProvider } : {}),
+          }),
         readMeasurements,
         signal: ctx.signal,
       },

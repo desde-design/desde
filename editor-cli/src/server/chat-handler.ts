@@ -23,6 +23,8 @@
 
 import { randomUUID } from "node:crypto"
 import { assertChatCredentials } from "../../../src/editor/llm-providers/assert-chat-credentials.js"
+import { getProvider } from "../../../src/editor/llm-providers/registry.js"
+import { resolveLlmConfig } from "./llm-config.js"
 import type { IncomingMessage, ServerResponse } from "node:http"
 
 import { projectIdForRepoRoot, withSessionStatus } from "../../../src/editor/agent-chat/session-store.js"
@@ -340,6 +342,13 @@ export interface ChatHandlerContext {
       maxTurns?: number
     }
   }
+  /**
+   * `llm` block from `.desde/config.json` — which provider this project's
+   * non-chat lanes run on. Used here ONLY for `verify_goal`'s translate step
+   * (`resolveLlmProvider`, built below); the chat runtime itself dispatches
+   * on the session's own model choice, not this.
+   */
+  llm?: import("./project-config.js").ProjectConfig["llm"]
   /**
    * Phase 3 — "Use repo conventions". When `useRepoConventions` is false
    * the chat agent's system prompt is not grounded in the repo's
@@ -955,6 +964,12 @@ export async function handleChatRequest(
     const result = await runChatTurnSdk({
       bridge,
       reviewSurface: reviewSurface ?? undefined,
+      // `verify_goal`'s translate step — the project's resolved provider,
+      // same per-request resolution the edit routes use. Lazy: constructing
+      // a provider throws on a missing key, and most turns never call
+      // verify_goal at all.
+      resolveLlmProvider: () =>
+        getProvider({ config: resolveLlmConfig({ llm: ctx.llm }, process.env) }),
       worktreeRoot: ctx.repoRoot,
       // Deterministic Vite invalidation for the structural write
       // tools (branch mode — see vite-invalidate.ts).

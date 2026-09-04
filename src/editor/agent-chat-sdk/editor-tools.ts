@@ -177,6 +177,13 @@ export interface BuildEditorToolServerOpts {
    */
   reviewSurface?: import('../core/review-surface').ReviewSurface
   /**
+   * `verify_goal`'s translate step — the only LLM touch registered by this
+   * server. The CLI resolves this once per chat turn from the project's
+   * `llm` block; absent (tests, non-CLI) falls back to the registry's own
+   * default. See `EditorToolContext.resolveLlmProvider`.
+   */
+  resolveLlmProvider?: () => import('../llm-providers/types').CompletionProvider
+  /**
    * Gate for the canvas + screenshot-plan surface's two plan-authoring
    * tools (`save_screenshot_plan`, `heal_plan_step`). DORMANT by product
    * decision 2026-08-04 — the surface is undertested, so it's default
@@ -211,6 +218,7 @@ export function buildEditorToolServer(
     packageManagerAdapter,
     getGrounding,
     reviewSurface,
+    resolveLlmProvider,
     canvasEnabled,
     acquireTreeGate,
   } = opts
@@ -822,7 +830,7 @@ export function buildEditorToolServer(
             .describe('CSS selector for the primary element the goal is about (from get_selection — pass its `selector` verbatim).'),
         },
         ({ goal, selector }) =>
-          verifyGoalTool({ bridge, signal, reviewSurface }, { goal, selector }),
+          verifyGoalTool({ bridge, signal, reviewSurface, resolveLlmProvider }, { goal, selector }),
       ),
 
       tool(

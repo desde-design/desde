@@ -36,7 +36,18 @@ export interface ApplyIterationDataLlmInput {
   projectKnowledge?: ProjectKnowledge
   /** Optional LLM provider injection (tests pass a fake). */
   provider?: CompletionProvider
-  /** Model id. Same default tier as the repair lane. */
+  /**
+   * Lazily resolves the LLM provider when `provider` is not supplied. The
+   * CLI injects the project's per-request resolved provider here so this
+   * lane never falls back to the process-wide registry default on its own.
+   * Absent → `getProvider()`.
+   */
+  resolveProvider?: () => CompletionProvider
+  /**
+   * Model id. No hardcoded default — `undefined` lets each provider's
+   * complete() fall back to its OWN defaultModel, so an OpenAI-configured
+   * project does not get a Claude model id its API rejects outright.
+   */
   model?: string
   maxTokens?: number
 }
@@ -82,7 +93,7 @@ export async function applyIterationDataLlm(
     file,
     intent,
     projectKnowledge,
-    model = 'claude-sonnet-4-6',
+    model,
     maxTokens = 8000,
   } = input
 
@@ -94,7 +105,7 @@ export async function applyIterationDataLlm(
   let provider = input.provider
   if (!provider) {
     try {
-      provider = getProvider()
+      provider = (input.resolveProvider ?? getProvider)()
     } catch (err) {
       return { ok: false, reason: (err as Error).message }
     }
