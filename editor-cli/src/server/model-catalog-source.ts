@@ -25,7 +25,9 @@
  * static file still names but the account cannot use does not.
  *
  * A provider whose chat runtime cannot dispatch today is filtered out
- * entirely before any of this runs (`chatRuntimeServable`) — see its doc
+ * entirely before any of this runs (`chatRuntimeServable`). It reads the
+ * environment only, same as the dispatch half in `chat-runtime-dispatch.ts`
+ * (see the comment there for why) — see `chatRuntimeServable`'s own doc
  * comment for why that is the client half of a both-ends gate.
  *
  * Cached in-process, keyed on every served provider's credential state, for
@@ -126,11 +128,13 @@ function effortFallbackFor(descriptor: ProviderDescriptor) {
  * A provider whose chat runtime cannot dispatch yet must not appear in the
  * picker, or the picker offers a model the chat handler refuses a second
  * later. That is the client half of a both-ends gate whose server half is
- * `resolveChatRuntime`. Env-only by default: the resolver is a process-wide
- * singleton with no project config in scope, so `EDITOR_NEUTRAL_CHAT=1`
- * reaches it and `.desde/config.json`'s `editor.neutralChat` does not. The
- * dispatch half reads both, so the residual is a project that enables the
- * flag in its config and has to also export the variable to see the group.
+ * `resolveChatRuntime`. Env-only: the resolver is a process-wide singleton
+ * with no project config in scope, so `EDITOR_NEUTRAL_CHAT=1` reaches it and
+ * `.desde/config.json`'s `editor.neutralChat` does not. The dispatch half is
+ * ALSO env-only, on purpose (see the comment on `resolveChatRuntime` in
+ * `chat-runtime-dispatch.ts` for why): a project that enables the flag only
+ * in its config sees neither half serve the group, which is the intended
+ * residual, not a gap between the two halves.
  */
 export function chatRuntimeServable(descriptor: ProviderDescriptor): boolean {
   if (descriptor.chatRuntime === "claude-agent-sdk") return true
@@ -294,5 +298,26 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
   }
 }
 
+let inner: ModelCatalogResolver = createModelCatalogResolver()
+
 /** The process-wide resolver every consumer reads through. */
-export const modelCatalogResolver: ModelCatalogResolver = createModelCatalogResolver()
+export const modelCatalogResolver: ModelCatalogResolver = {
+  get: () => inner.get(),
+  invalidate: () => inner.invalidate(),
+}
+
+/**
+ * Test-only: swap the live sources behind the process-wide resolver so a
+ * suite that boots the real HTTP server never reaches a vendor's Models API.
+ * `null` restores the defaults. Always invalidates the cache (a fresh
+ * resolver has none, but this also drops any answer cached under the old
+ * sources).
+ */
+export function setModelCatalogLiveSourcesForTests(
+  deps: {
+    listViaApi?: ModelCatalogResolverDeps["listViaApi"]
+    listViaCli?: ModelCatalogResolverDeps["listViaCli"]
+  } | null,
+): void {
+  inner = createModelCatalogResolver(deps ?? {})
+}

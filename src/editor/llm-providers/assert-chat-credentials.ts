@@ -1,5 +1,5 @@
-import { CLAUDE_SUBSCRIPTION_ENV, isClaudeSubscriptionOptIn } from './claude-subscription'
-import { getDescriptor } from './provider-registry'
+import { CLAUDE_SUBSCRIPTION_ENV } from './claude-subscription'
+import { getDescriptor, isCredentialedFromEnv } from './provider-registry'
 import type { ProviderDescriptor } from './provider-descriptor'
 
 /**
@@ -60,11 +60,7 @@ export class ChatCredentialsMissingError extends Error {
 
 export function hasChatCredentials(env: NodeJS.ProcessEnv, providerId: string): boolean {
   const descriptor = getDescriptor(providerId)
-  if (!descriptor) return false
-  if (env[descriptor.credentials.apiKeyEnvVar]?.trim()) return true
-  // The subscription clause is gated on the descriptor, so an unrelated
-  // Claude subscription can never admit an OpenAI session.
-  return descriptor.credentials.hasSubscriptionRuntime === true && isClaudeSubscriptionOptIn(env)
+  return descriptor !== undefined && isCredentialedFromEnv(descriptor, env)
 }
 
 /**

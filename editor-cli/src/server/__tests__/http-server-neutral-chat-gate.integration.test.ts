@@ -1,10 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { startHttpServer, type HttpServerHandle } from "../http-server.js"
 import { newSecurityContext } from "../auth.js"
-import { modelCatalogResolver } from "../model-catalog-source.js"
+import { modelCatalogResolver, setModelCatalogLiveSourcesForTests } from "../model-catalog-source.js"
 
 /**
  * The both-ends gate, asserted against the real world.
@@ -39,6 +39,20 @@ let bundleDir: string
 let repoDir: string
 let token: string
 let shellOrigin: string
+
+// This suite boots the real HTTP server and sets a fake Anthropic key so
+// requests clear `assertChatCredentials`. Without a stub, that fake key
+// sends `modelCatalogResolver.get()` down the `api` branch, which calls
+// Anthropic's real Models API and only gives up after the resolver's 8s
+// abort. A unit suite must never touch the network: it is slow, flaky
+// offline, and logs a fallback error on every run.
+beforeAll(() => {
+  setModelCatalogLiveSourcesForTests({
+    listViaApi: async () => [], // the static catalog is what this suite needs
+    listViaCli: async () => [],
+  })
+})
+afterAll(() => setModelCatalogLiveSourcesForTests(null))
 
 beforeEach(async () => {
   bundleDir = await mkdtemp(join(tmpdir(), "editor-cli-bundle-"))
@@ -99,7 +113,40 @@ async function readSse(res: Response): Promise<string> {
   return await res.text()
 }
 
+/** POSTs a chat turn naming the given provider, with a fake Anthropic key set. */
+async function postChatNamingProvider(providerId: string): Promise<Response> {
+  process.env.ANTHROPIC_API_KEY = "sk-ant-test-only"
+  return fetch(`${handle.url}/api/editor/chat`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(),
+      "Content-Type": "application/json",
+      Origin: shellOrigin,
+    },
+    body: JSON.stringify({
+      userMessage: "hello",
+      modelConfig: { provider: providerId, model: "gpt-5.2" },
+    }),
+  })
+}
+
 describe("POST /api/editor/chat with a neutral provider", () => {
+  it("never reaches the network for the model list", async () => {
+    const realFetch = globalThis.fetch
+    const calls: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (/anthropic\.com|openai\.com/.test(url)) calls.push(url)
+      return realFetch(input, init)
+    }) as typeof fetch
+    try {
+      await postChatNamingProvider("openai")
+    } finally {
+      globalThis.fetch = realFetch
+    }
+    expect(calls).toEqual([])
+  })
+
   it("is refused server-side by the dispatch itself, naming the flag, even though the request named a servable provider", async () => {
     // Credentialed so the request clears `assertChatCredentials` and reaches
     // dispatch; a live Models API call with this fake key fails fast and

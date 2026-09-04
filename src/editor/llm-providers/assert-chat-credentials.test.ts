@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getDescriptor } from './provider-registry'
+import { getDescriptor, isCredentialedFromEnv, listDescriptors } from './provider-registry'
 import {
   ChatCredentialsMissingError,
   assertChatCredentials,
@@ -78,6 +78,24 @@ describe('hasChatCredentials', () => {
 
   it('is false for a provider nobody registered', () => {
     expect(hasChatCredentials({ ANTHROPIC_API_KEY: 'sk-ant-x' }, 'moonshot')).toBe(false)
+  })
+
+  it('hasChatCredentials agrees with isCredentialedFromEnv for every descriptor and every env shape', () => {
+    // The two used to be separate copies of "is this provider usable" (Task
+    // 14 review). This is the regression pin: hasChatCredentials must always
+    // delegate to the one predicate on the descriptor table, not restate it.
+    const envs: NodeJS.ProcessEnv[] = [
+      {},
+      { ANTHROPIC_API_KEY: 'sk-ant-x' },
+      { OPENAI_API_KEY: 'sk-x' },
+      { EDITOR_USE_CLAUDE_SUBSCRIPTION: '1' },
+      { ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-x' },
+    ]
+    for (const d of listDescriptors()) {
+      for (const env of envs) {
+        expect(hasChatCredentials(env, d.id)).toBe(isCredentialedFromEnv(d, env))
+      }
+    }
   })
 })
 

@@ -719,6 +719,33 @@ export async function handleChatRequest(
       stream!.send({ kind: "error", reason: w })
     }
 
+    // Both-ends gating for the BYO-key cutover, now per provider. The client
+    // already declines to present an uncredentialed provider (its catalog
+    // group is not served), and this is the server half: the dispatch refuses
+    // rather than trusting a client that could be stale or hand-built.
+    //
+    // `effectiveModelConfig` is resolved above (request > session > default)
+    // and carries `.provider`; a turn with no config at all runs on the same
+    // default rule the catalog response uses.
+    //
+    // Resolved here, BEFORE project knowledge, Figma config and the review
+    // surface below, so a turn the gate refuses never pays for any of that
+    // setup (project knowledge is a filesystem walk, review surface can
+    // launch a headless Chromium).
+    const turnProviderId =
+      effectiveModelConfig?.provider ??
+      resolveDefaultProviderId({
+        env: process.env,
+        isCredentialed: (d) => isCredentialedFromEnv(d, process.env),
+      })
+    assertChatCredentials(process.env, turnProviderId)
+
+    // One dispatch point. The SDK runtime is still the only one that exists,
+    // but which runtime serves a turn is now a decision the descriptor makes
+    // rather than a hardcoded import. Only the RESOLUTION happens here — the
+    // actual call is below, once `reviewSurface` exists.
+    const runChatTurn = await resolveChatRuntime(turnProviderId, loaders)
+
     // Phase 5 — mark the session in-flight BEFORE the orchestrator
     // runs. Persisted now so a CLI crash mid-turn leaves an
     // `in-flight` marker that the next restart-clear pass rewrites
@@ -960,26 +987,6 @@ export async function handleChatRequest(
       }
     }
 
-    // Both-ends gating for the BYO-key cutover, now per provider. The client
-    // already declines to present an uncredentialed provider (its catalog
-    // group is not served), and this is the server half: the dispatch refuses
-    // rather than trusting a client that could be stale or hand-built.
-    //
-    // `effectiveModelConfig` is resolved above (request > session > default)
-    // and carries `.provider`; a turn with no config at all runs on the same
-    // default rule the catalog response uses.
-    const turnProviderId =
-      effectiveModelConfig?.provider ??
-      resolveDefaultProviderId({
-        env: process.env,
-        isCredentialed: (d) => isCredentialedFromEnv(d, process.env),
-      })
-    assertChatCredentials(process.env, turnProviderId)
-
-    // One dispatch point. The SDK runtime is still the only one that exists,
-    // but which runtime serves a turn is now a decision the descriptor makes
-    // rather than a hardcoded import.
-    const runChatTurn = await resolveChatRuntime(turnProviderId, loaders)
     const result = await runChatTurn({
       bridge,
       reviewSurface: reviewSurface ?? undefined,
