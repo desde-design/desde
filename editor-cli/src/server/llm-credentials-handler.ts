@@ -15,6 +15,7 @@ import { inheritedLlmEnv, type InheritedLlmEnv } from "./inherited-llm-env.js"
 import { readJsonBody } from "./http-body.js"
 import {
   clearLlmApiKey,
+  CredentialFileNewerError,
   readLlmCredentials,
   readPromptDismissed,
   setLlmDevMode,
@@ -341,6 +342,13 @@ export async function handleLlmCredentialsRoute(
 
     sendJson(res, 405, { error: "Method not allowed." })
   } catch (err) {
+    // A file a NEWER Desde wrote is a refusal, not a server fault: the store
+    // declines to overwrite it, and the sentence it carries is written for
+    // the user. 409, so the client can tell the two apart.
+    if (err instanceof CredentialFileNewerError) {
+      sendJson(res, 409, { error: err.message })
+      return
+    }
     // Never leak a key through an error path — the store and validator both
     // keep the value out of their messages, so only the message is echoed.
     sendJson(res, 500, { error: (err as Error).message })

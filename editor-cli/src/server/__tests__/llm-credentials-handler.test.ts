@@ -1,10 +1,14 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { handleLlmCredentialsRoute, providerIdFromPath } from "../llm-credentials-handler.js"
-import { readLlmCredentials, writeLlmApiKey } from "../llm-credential-store.js"
+import {
+  llmCredentialFilePath,
+  readLlmCredentials,
+  writeLlmApiKey,
+} from "../llm-credential-store.js"
 
 let home: string
 
@@ -698,5 +702,33 @@ describe("GET re-applies the store to this process's environment", () => {
       fetchImpl: okFetch(),
     })
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
+  })
+})
+
+describe("FX4 item 4: a credential file written by a newer Desde", () => {
+  it("answers 409 with a sentence for the user, and leaves the file alone", async () => {
+    await mkdir(join(home, ".config", "desde"), { recursive: true })
+    await writeFile(
+      llmCredentialFilePath(home),
+      JSON.stringify({ version: 99, providers: { openai: { apiKey: "sk-newer1234" } } }),
+      { mode: 0o600 },
+    )
+    const res = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res),
+      url("/api/editor/llm-credentials/dev-mode"),
+      { home, env: {}, claudeRuntimeResolvable: false, readBody: async () => ({ devMode: true }) },
+    )
+    expect(res.statusCode).toBe(409)
+    expect(JSON.parse(res.body)).toEqual({
+      error: expect.stringMatching(/newer version of Desde/i),
+    })
+    expect(res.body).not.toContain("sk-newer1234")
+
+    const onDisk = JSON.parse(await readFile(llmCredentialFilePath(home), "utf8")) as {
+      version: number
+    }
+    expect(onDisk.version).toBe(99)
   })
 })

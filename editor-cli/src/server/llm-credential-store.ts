@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto"
 import { promises as fs } from "node:fs"
-import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import type {
   StoredCredentials,
@@ -28,9 +27,10 @@ import type {
  * shaped wrong. A credential read must never be the reason the CLI fails to
  * start; the cost of a corrupt file is re-entering a key, not a crash.
  *
- * Every reader and writer takes an explicit `home`: a defaulted home let a
- * test with the wrong argument order write into a real user's file on
- * 2026-09-04.
+ * Every reader and writer takes an explicit `home`, `llmCredentialFilePath`
+ * included: a defaulted home let a test with the wrong argument order write
+ * into a real user's file on 2026-09-04, and that default was the last one
+ * left in this module.
  */
 
 const CONFIG_DIR_RELATIVE = join(".config", "desde")
@@ -64,8 +64,29 @@ interface LlmCredentialFileV1 {
   promptDismissed?: boolean
 }
 
-export function llmCredentialFilePath(home = homedir()): string {
+export function llmCredentialFilePath(home: string): string {
   return join(home, CONFIG_DIR_RELATIVE, CREDENTIAL_FILE_NAME)
+}
+
+/**
+ * Thrown when a writer finds an on-disk `version` GREATER than this build's
+ * {@link SCHEMA_VERSION}.
+ *
+ * The 2026-09-04 incident is the reason. A still-running Editor from before
+ * the multi-provider work (`SCHEMA_VERSION = 1`) read the v2 file, could not
+ * understand it, degraded to empty defaults, and its next write serialised
+ * that emptiness over both of the user's API keys. That binary cannot be
+ * fixed. This is the same failure in the direction this code owns: rather
+ * than flattening a file a newer Desde wrote, refuse and say so. The message
+ * names no key value — it can reach a terminal.
+ */
+export class CredentialFileNewerError extends Error {
+  constructor(public readonly onDiskVersion: number) {
+    super(
+      "This machine's Desde credential file was written by a newer version of Desde. Update Desde, or move that file aside, before saving credentials from this one.",
+    )
+    this.name = "CredentialFileNewerError"
+  }
 }
 
 function defaults(): LlmCredentialFile {
@@ -126,6 +147,7 @@ function warnMalformedProviderOnce(id: string): void {
  */
 export function resetMalformedProviderWarningsForTests(): void {
   warnedMalformedProviders.clear()
+  warnedNewerFile = false
 }
 
 /**
@@ -151,6 +173,11 @@ function sanitizeProviders(raw: unknown): Record<string, StoredProviderCredentia
       warnMalformedProviderOnce(id)
       continue
     }
+    // A slot that reads clean ends the warning episode for that provider.
+    // Without this, a slot that was corrupt, got fixed, and was then
+    // corrupted a second time would never warn again for the life of the
+    // process — "tell them once" was meant per corruption, not per process.
+    warnedMalformedProviders.delete(id)
     out[id] = {
       ...(typeof slot.apiKey === "string" ? { apiKey: slot.apiKey } : {}),
       ...(typeof slot.baseUrl === "string" ? { baseUrl: slot.baseUrl } : {}),
@@ -159,35 +186,93 @@ function sanitizeProviders(raw: unknown): Record<string, StoredProviderCredentia
   return out
 }
 
-async function readFile(path: string): Promise<LlmCredentialFile> {
+/** Top-level fields THIS version authors. Anything else is carried through. */
+const KNOWN_TOP_LEVEL_FIELDS = new Set([
+  "version",
+  "providers",
+  "devMode",
+  "promptDismissed",
+  // v1's single unlabelled key. Known, because `migrateV1` consumes it.
+  "apiKey",
+])
+
+/** Warned once per process that the file on disk is newer than this build. */
+let warnedNewerFile = false
+
+interface CredentialFileSnapshot {
+  file: LlmCredentialFile
+  /** The on-disk `version` was GREATER than {@link SCHEMA_VERSION}. */
+  newerThanUs: boolean
+  /**
+   * Top-level fields this version did not author, kept so a write from this
+   * build does not silently drop what another build stored beside it.
+   */
+  unknownFields: Record<string, unknown>
+}
+
+function snapshot(file: LlmCredentialFile): CredentialFileSnapshot {
+  return { file, newerThanUs: false, unknownFields: {} }
+}
+
+/**
+ * Read the file AND everything a writer needs to know about it: whether it
+ * came from a newer Desde, and which top-level fields this version does not
+ * author.
+ */
+async function readSnapshot(path: string): Promise<CredentialFileSnapshot> {
   try {
     const raw = await fs.readFile(path, "utf8")
     const parsed = JSON.parse(raw) as unknown
-    if (typeof parsed !== "object" || parsed === null) return defaults()
+    if (typeof parsed !== "object" || parsed === null) return snapshot(defaults())
     const file = parsed as Partial<LlmCredentialFile> & Partial<LlmCredentialFileV1>
+    const unknownFields = Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>).filter(
+        ([key]) => !KNOWN_TOP_LEVEL_FIELDS.has(key),
+      ),
+    )
     // The migration branch sits BEFORE the mismatch discard. Reversed, the
     // discard would delete every existing user's key on first read.
-    if (file.version === 1) return migrateV1(file as LlmCredentialFileV1)
-    // A file from a future/older schema is ignored rather than thrown on: the
-    // cost is re-entering a key, versus the CLI refusing to start.
-    if (file.version !== SCHEMA_VERSION) return defaults()
-    const providers = sanitizeProviders(file.providers)
-    if (providers === null) return defaults()
+    if (file.version === 1) {
+      return { file: migrateV1(file as LlmCredentialFileV1), newerThanUs: false, unknownFields }
+    }
+    const newerThanUs = typeof file.version === "number" && file.version > SCHEMA_VERSION
+    // An OLDER unrecognised schema is still ignored: there is no shape to
+    // salvage from it, and the cost is re-entering a key rather than the CLI
+    // refusing to start. A NEWER one is different — its `providers` shape is
+    // this one plus whatever was added — so read what we understand and mark
+    // it, rather than degrading to empty defaults and letting a later write
+    // serialise that emptiness over the user's keys.
+    if (!newerThanUs && file.version !== SCHEMA_VERSION) return snapshot(defaults())
+    if (newerThanUs && !warnedNewerFile) {
+      warnedNewerFile = true
+      console.warn(
+        "[llm-credentials] this file was written by a newer version of Desde; reading what this version understands and refusing to overwrite it",
+      )
+    }
+    const providers = sanitizeProviders(file.providers) ?? {}
     return {
-      version: SCHEMA_VERSION,
-      providers,
-      // Tolerated rather than rejected, same as `promptDismissed` below: a
-      // malformed or missing `devMode` used to discard the WHOLE file (via
-      // `return defaults()`), which silently deleted a real user's key —
-      // the same data-loss class CX1 removed from the v1 migration path.
-      devMode: file.devMode === true,
-      // Tolerated rather than rejected: a file written before this field
-      // existed is otherwise valid, and discarding it would drop the key.
-      promptDismissed: typeof file.promptDismissed === "boolean" ? file.promptDismissed : false,
+      file: {
+        version: SCHEMA_VERSION,
+        providers,
+        // Tolerated rather than rejected, same as `promptDismissed` below: a
+        // malformed or missing `devMode` used to discard the WHOLE file (via
+        // `return defaults()`), which silently deleted a real user's key —
+        // the same data-loss class CX1 removed from the v1 migration path.
+        devMode: file.devMode === true,
+        // Tolerated rather than rejected: a file written before this field
+        // existed is otherwise valid, and discarding it would drop the key.
+        promptDismissed: typeof file.promptDismissed === "boolean" ? file.promptDismissed : false,
+      },
+      newerThanUs,
+      unknownFields,
     }
   } catch {
-    return defaults()
+    return snapshot(defaults())
   }
+}
+
+async function readFile(path: string): Promise<LlmCredentialFile> {
+  return (await readSnapshot(path)).file
 }
 
 /**
@@ -197,10 +282,18 @@ async function readFile(path: string): Promise<LlmCredentialFile> {
  * The temp name carries a UUID, not just the pid: two writes racing inside one
  * process shared a filename and could truncate each other's staging file.
  */
-async function writeFile(path: string, file: LlmCredentialFile): Promise<void> {
+async function writeFile(
+  path: string,
+  file: LlmCredentialFile,
+  unknownFields: Record<string, unknown> = {},
+): Promise<void> {
   await fs.mkdir(dirname(path), { recursive: true, mode: DIR_MODE })
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
-  await fs.writeFile(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: FILE_MODE })
+  // Unknown fields first, so this version's own fields always win. They are
+  // carried rather than dropped: a field this build does not author still
+  // belongs to whoever wrote it.
+  const body = { ...unknownFields, ...file }
+  await fs.writeFile(tmp, `${JSON.stringify(body, null, 2)}\n`, { mode: FILE_MODE })
   await fs.rename(tmp, path)
   // `rename` preserves the temp file's mode, but an existing destination from
   // an older version may predate FILE_MODE — set it explicitly. Same for the
@@ -245,23 +338,36 @@ export async function readPromptDismissed(home: string): Promise<boolean> {
   return (await readFile(llmCredentialFilePath(home))).promptDismissed
 }
 
+/**
+ * The one read-modify-write every setter goes through, inside the
+ * `serialize()` chain.
+ *
+ * Two rules live here so no setter can forget one. A file whose on-disk
+ * version is NEWER than this build's is never overwritten — see
+ * {@link CredentialFileNewerError}. And top-level fields this build does not
+ * author are carried through the write rather than dropped.
+ */
+async function mutate(
+  home: string,
+  apply: (file: LlmCredentialFile) => LlmCredentialFile,
+): Promise<void> {
+  const path = llmCredentialFilePath(home)
+  await serialize(async () => {
+    const snap = await readSnapshot(path)
+    if (snap.newerThanUs) throw new CredentialFileNewerError(snap.file.version)
+    await writeFile(path, { ...apply(snap.file), version: SCHEMA_VERSION }, snap.unknownFields)
+  })
+}
+
 export async function setPromptDismissed(
   dismissed: boolean,
   home: string,
 ): Promise<void> {
-  const path = llmCredentialFilePath(home)
-  await serialize(async () => {
-    const file = await readFile(path)
-    await writeFile(path, { ...file, version: SCHEMA_VERSION, promptDismissed: dismissed })
-  })
+  await mutate(home, (file) => ({ ...file, promptDismissed: dismissed }))
 }
 
 export async function setLlmDevMode(devMode: boolean, home: string): Promise<void> {
-  const path = llmCredentialFilePath(home)
-  await serialize(async () => {
-    const file = await readFile(path)
-    await writeFile(path, { ...file, version: SCHEMA_VERSION, devMode })
-  })
+  await mutate(home, (file) => ({ ...file, devMode }))
 }
 
 /**
@@ -275,15 +381,10 @@ async function updateProvider(
   home: string,
   update: (slot: StoredProviderCredentials) => StoredProviderCredentials,
 ): Promise<void> {
-  const path = llmCredentialFilePath(home)
-  await serialize(async () => {
-    const file = await readFile(path)
-    await writeFile(path, {
-      ...file,
-      version: SCHEMA_VERSION,
-      providers: { ...file.providers, [providerId]: update(file.providers[providerId] ?? {}) },
-    })
-  })
+  await mutate(home, (file) => ({
+    ...file,
+    providers: { ...file.providers, [providerId]: update(file.providers[providerId] ?? {}) },
+  }))
 }
 
 export async function writeLlmApiKey(

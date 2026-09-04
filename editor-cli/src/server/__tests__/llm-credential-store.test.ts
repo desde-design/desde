@@ -174,13 +174,21 @@ describe("v1 to v2 migration", () => {
     })
   })
 
-  it("still degrades to defaults for a version from the future", async () => {
+  it("reads a version from the future for what it can understand", async () => {
+    // This used to expect empty defaults. That expectation was the 2026-09-04
+    // data-loss shape written down as a rule: read a file you do not fully
+    // understand as "no credentials at all", and the next write serialises
+    // that emptiness over the user's keys. A newer file's `providers` shape
+    // is this one plus whatever was added, so read it and refuse to write.
     await fs.mkdir(configDir(), { recursive: true })
     await fs.writeFile(
       llmCredentialFilePath(home),
       JSON.stringify({ version: 99, providers: { anthropic: { apiKey: "x" } } }),
     )
-    expect(await readLlmCredentials(home)).toEqual({ providers: {}, devMode: false })
+    expect(await readLlmCredentials(home)).toEqual({
+      providers: { anthropic: { apiKey: "x" } },
+      devMode: false,
+    })
   })
 })
 
@@ -397,5 +405,102 @@ describe("promptDismissed", () => {
       const call = () => readLlmCredentials()
       expect(call).toBeTypeOf("function")
     })
+  })
+})
+
+describe("FX4 item 4: a file written by a newer Desde", () => {
+  it("is read for what it can understand, not discarded as defaults", async () => {
+    // The 2026-09-04 incident ran the other way round: an OLD binary read a
+    // NEW file, hit `version !== SCHEMA_VERSION`, returned defaults, and
+    // serialised that emptiness over both of the user's keys on its next
+    // write. The old binary cannot be fixed. This is the same class in the
+    // direction this code owns.
+    await writeRawFile(home, {
+      version: 99,
+      providers: { openai: { apiKey: "sk-openai-newer" } },
+      devMode: true,
+      promptDismissed: true,
+      somethingFromTheFuture: { a: 1 },
+    })
+    expect(await readLlmCredentials(home)).toEqual({
+      providers: { openai: { apiKey: "sk-openai-newer" } },
+      devMode: true,
+    })
+    expect(await readPromptDismissed(home)).toBe(true)
+  })
+
+  it("is never overwritten by a writer, and says why in a plain sentence", async () => {
+    await writeRawFile(home, {
+      version: 99,
+      providers: { openai: { apiKey: "sk-openai-newer" } },
+      devMode: false,
+      promptDismissed: false,
+    })
+    await expect(writeLlmApiKey("anthropic", "sk-ant-mine", home)).rejects.toThrow(
+      /newer version of Desde/i,
+    )
+    await expect(setLlmDevMode(true, home)).rejects.toThrow(/newer version of Desde/i)
+
+    // Byte-identical: the newer file still holds what it held.
+    const onDisk = JSON.parse(await fs.readFile(llmCredentialFilePath(home), "utf8")) as {
+      version: number
+      providers: Record<string, { apiKey?: string }>
+    }
+    expect(onDisk.version).toBe(99)
+    expect(onDisk.providers.openai?.apiKey).toBe("sk-openai-newer")
+  })
+
+  it("names no key value in the refusal", async () => {
+    await writeRawFile(home, {
+      version: 99,
+      providers: { openai: { apiKey: "sk-openai-newer" } },
+      devMode: false,
+      promptDismissed: false,
+    })
+    const err = await writeLlmApiKey("anthropic", "sk-ant-mine", home).catch((e: Error) => e)
+    expect((err as Error).message).not.toContain("sk-openai-newer")
+    expect((err as Error).message).not.toContain("sk-ant-mine")
+  })
+})
+
+describe("FX4 item 4: unknown top-level fields", () => {
+  it("survive a write by this version", async () => {
+    await writeRawFile(home, {
+      version: 2,
+      providers: { anthropic: { apiKey: "sk-ant-keep" } },
+      devMode: false,
+      promptDismissed: false,
+      fieldFromAnotherRelease: { keep: "me" },
+    })
+    await setLlmDevMode(true, home)
+    const onDisk = JSON.parse(await fs.readFile(llmCredentialFilePath(home), "utf8")) as Record<
+      string,
+      unknown
+    >
+    expect(onDisk.fieldFromAnotherRelease).toEqual({ keep: "me" })
+    expect(onDisk.devMode).toBe(true)
+    expect(onDisk.providers).toEqual({ anthropic: { apiKey: "sk-ant-keep" } })
+  })
+})
+
+describe("FX4 item 4: the malformed-slot warning re-arms", () => {
+  it("warns again after the slot is fixed and then corrupted a second time", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    await writeRawFile(home, { version: 2, providers: { openai: "not-an-object" }, devMode: false })
+    await readLlmCredentials(home)
+    expect(warn).toHaveBeenCalledTimes(1)
+
+    // Fixed: a valid slot for the same provider.
+    await writeLlmApiKey("openai", "sk-openai-fixed", home)
+    await readLlmCredentials(home)
+    expect(warn).toHaveBeenCalledTimes(1)
+
+    // Corrupted a second time — a fresh episode, so it warns again.
+    await writeRawFile(home, { version: 2, providers: { openai: 42 }, devMode: false })
+    await readLlmCredentials(home)
+    expect(warn).toHaveBeenCalledTimes(2)
+
+    warn.mockRestore()
   })
 })
