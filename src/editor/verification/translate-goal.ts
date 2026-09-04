@@ -84,7 +84,7 @@ const ALIGN_AXES: readonly AlignAxis[] = [
   'centerY',
 ]
 
-const TRANSLATE_RESPONSE_SCHEMA = {
+export const TRANSLATE_RESPONSE_SCHEMA = {
   type: 'object' as const,
   required: ['predicates'] as const,
   additionalProperties: false,

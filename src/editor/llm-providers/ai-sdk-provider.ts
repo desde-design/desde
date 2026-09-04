@@ -112,16 +112,17 @@ export class AiSdkProvider implements LLMProvider {
     }
     try {
       if (opts.responseFormat?.kind === 'json_schema') {
+        const callerSchema = opts.responseFormat.schema
         const result = await generateText({
           ...base,
           output: Output.object({
-            schema: jsonSchema(opts.responseFormat.schema),
+            schema: jsonSchema(toStrictJsonSchema(callerSchema)),
             name: opts.responseFormat.name ?? 'response',
           }),
         })
         return {
           text: result.text,
-          parsed: result.output,
+          parsed: dropSyntheticNulls(result.output, callerSchema),
           usage: toUsage(result.usage),
           stopReason: mapFinishReason(result.finishReason),
         }
@@ -153,7 +154,8 @@ export class AiSdkProvider implements LLMProvider {
     onTextDelta?: (delta: string) => void,
   ): Promise<CompleteResult> {
     const model = this.languageModel(opts.model ?? this.defaultModel)
-    const wantsJson = opts.responseFormat?.kind === 'json_schema'
+    const jsonSchemaAsked =
+      opts.responseFormat?.kind === 'json_schema' ? opts.responseFormat.schema : undefined
     const result = streamText({
       model,
       system: flattenToString(opts.system),
@@ -163,7 +165,7 @@ export class AiSdkProvider implements LLMProvider {
       ...(opts.responseFormat?.kind === 'json_schema'
         ? {
             output: Output.object({
-              schema: jsonSchema(opts.responseFormat.schema),
+              schema: jsonSchema(toStrictJsonSchema(opts.responseFormat.schema)),
               name: opts.responseFormat.name ?? 'response',
             }),
           }
@@ -182,7 +184,7 @@ export class AiSdkProvider implements LLMProvider {
       // `NoObjectGeneratedError` on a bad response. `types.ts` says a parse
       // failure returns the raw text instead, so the streaming path never asks
       // the SDK a question whose only answer is an exception.
-      parsed: wantsJson ? safeJsonParse(text) : undefined,
+      parsed: jsonSchemaAsked ? dropSyntheticNulls(safeJsonParse(text), jsonSchemaAsked) : undefined,
       usage: toUsage(await result.usage),
       stopReason: mapFinishReason(await result.finishReason),
     }
@@ -270,6 +272,134 @@ export class AiSdkProvider implements LLMProvider {
 }
 
 // ─── translation helpers ─────────────────────────────────────────────────
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Rewrite a JSON Schema into the shape OpenAI's STRICT Structured Outputs
+ * mode accepts, without any call site having to know that mode exists.
+ *
+ * `Output.object` makes `@ai-sdk/openai` send `strict: true` next to the
+ * schema, and strict mode requires every key of `properties` to appear in
+ * `required` and every object to set `additionalProperties: false`. Each of
+ * this repo's five `json_schema` call sites declares at least one optional
+ * property, so before this function the vendor answered 400 and the whole
+ * LLM-fallback half of the edit pipeline was dead on OpenAI.
+ *
+ * Optionality is not dropped, it is re-expressed: a property the caller left
+ * out of `required` becomes nullable (`type: ['string', 'null']`), which is
+ * OpenAI's own documented way to say "may be absent" under strict mode. The
+ * nulls that come back are removed again by {@link dropSyntheticNulls}, so a
+ * caller still reads an absent optional as `undefined`.
+ *
+ * Pure: the caller's schema object is never mutated.
+ */
+export function toStrictJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  return normalizeSchemaNode(schema, false) as Record<string, unknown>
+}
+
+function normalizeSchemaNode(node: unknown, makeNullable: boolean): unknown {
+  if (Array.isArray(node)) return node.map((child) => normalizeSchemaNode(child, false))
+  if (!isJsonRecord(node)) return node
+
+  const out: Record<string, unknown> = { ...node }
+
+  if (isJsonRecord(node.properties)) {
+    const wasRequired = new Set(
+      Array.isArray(node.required)
+        ? node.required.filter((k): k is string => typeof k === 'string')
+        : [],
+    )
+    const properties: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(node.properties)) {
+      properties[key] = normalizeSchemaNode(value, !wasRequired.has(key))
+    }
+    out.properties = properties
+    out.required = Object.keys(properties)
+    out.additionalProperties = false
+  } else if (node.type === 'object') {
+    out.additionalProperties = false
+  }
+
+  if (node.items !== undefined) out.items = normalizeSchemaNode(node.items, false)
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const branch = node[key]
+    if (Array.isArray(branch)) {
+      out[key] = branch.map((child) => normalizeSchemaNode(child, false))
+    }
+  }
+  for (const key of ['$defs', 'definitions'] as const) {
+    const defs = node[key]
+    if (isJsonRecord(defs)) {
+      out[key] = Object.fromEntries(
+        Object.entries(defs).map(([name, value]) => [name, normalizeSchemaNode(value, false)]),
+      )
+    }
+  }
+
+  return makeNullable ? withNullAllowed(out) : out
+}
+
+/** Widen one schema node so `null` is a legal value for it. */
+function withNullAllowed(node: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...node }
+  const type = out.type
+  if (typeof type === 'string') {
+    if (type !== 'null') out.type = [type, 'null']
+  } else if (Array.isArray(type)) {
+    if (!type.includes('null')) out.type = [...type, 'null']
+  } else if (Array.isArray(out.anyOf)) {
+    if (!out.anyOf.some((b) => isJsonRecord(b) && b.type === 'null')) {
+      out.anyOf = [...out.anyOf, { type: 'null' }]
+    }
+  } else if (Array.isArray(out.oneOf)) {
+    if (!out.oneOf.some((b) => isJsonRecord(b) && b.type === 'null')) {
+      out.oneOf = [...out.oneOf, { type: 'null' }]
+    }
+  } else {
+    // No `type` and no branch list: the node already admits anything, so
+    // there is nothing to widen. Leave it exactly as the caller wrote it.
+    return out
+  }
+  // An enum constrains the VALUES as well as the type, so a nullable enum
+  // has to list null among them or the vendor rejects the pair.
+  if (Array.isArray(out.enum) && !out.enum.includes(null)) out.enum = [...out.enum, null]
+  return out
+}
+
+/**
+ * Undo, on the way back, exactly what {@link toStrictJsonSchema} asked for on
+ * the way out: drop a `null` sitting where the CALLER's schema declared an
+ * optional property. Without this a call site that wrote `explanation?:
+ * string` would start receiving `null`, which is a behaviour change this
+ * transport introduced and should therefore also absorb.
+ *
+ * Only properties the caller left out of `required` are touched. A `null` on
+ * a required property is the model's answer and is passed through untouched.
+ */
+function dropSyntheticNulls(value: unknown, schema: unknown): unknown {
+  if (Array.isArray(value)) {
+    const items = isJsonRecord(schema) ? schema.items : undefined
+    return value.map((entry) => dropSyntheticNulls(entry, items))
+  }
+  if (!isJsonRecord(value) || !isJsonRecord(schema) || !isJsonRecord(schema.properties)) {
+    return value
+  }
+  const required = new Set(
+    Array.isArray(schema.required)
+      ? schema.required.filter((k): k is string => typeof k === 'string')
+      : [],
+  )
+  const out: Record<string, unknown> = {}
+  for (const [key, entry] of Object.entries(value)) {
+    const propertySchema = schema.properties[key]
+    if (entry === null && !required.has(key) && propertySchema !== undefined) continue
+    out[key] = dropSyntheticNulls(entry, propertySchema)
+  }
+  return out
+}
 
 function flattenToString(content: SystemContent | UserContent): string {
   if (typeof content === 'string') return content

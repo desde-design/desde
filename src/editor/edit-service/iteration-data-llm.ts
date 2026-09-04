@@ -68,7 +68,7 @@ interface IterationResponseShape {
   explanation?: string
 }
 
-const RESPONSE_SCHEMA = {
+export const ITERATION_DATA_RESPONSE_SCHEMA = {
   type: 'object' as const,
   required: ['newSource'] as const,
   additionalProperties: false,
@@ -124,7 +124,7 @@ export async function applyIterationDataLlm(
       maxTokens,
       system: prompt.system,
       user: prompt.user,
-      responseFormat: { kind: 'json_schema', schema: { ...RESPONSE_SCHEMA } },
+      responseFormat: { kind: 'json_schema', schema: { ...ITERATION_DATA_RESPONSE_SCHEMA } },
     })
   } catch (err) {
     return { ok: false, reason: `LLM call failed: ${(err as Error).message}` }

@@ -82,7 +82,7 @@ interface RepairResponseShape {
   explanation?: string
 }
 
-const REPAIR_RESPONSE_SCHEMA = {
+export const REPAIR_RESPONSE_SCHEMA = {
   type: 'object' as const,
   required: ['newSource'] as const,
   additionalProperties: false,
