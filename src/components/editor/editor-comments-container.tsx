@@ -57,6 +57,7 @@ import { CommentThreadPopup } from "@/components/comments/comment-thread-popup"
 import { NoteThreadPopup } from "@/components/notes/note-thread-popup"
 import { CommentsListPanel } from "@/components/editor/comments-list-panel"
 import { useLocalComments } from "@/hooks/useLocalComments"
+import { useEditorParticipants } from "@/hooks/useEditorParticipants"
 import {
   useLocalNotes,
   FALLBACK_NOTE_AUTHOR,
@@ -163,6 +164,9 @@ export function EditorCommentsContainer({
   // reshapes it for the viewer payload; there is no separate signed-in
   // identity to stamp. Notes stay on the CLI identity too (no note sync yet).
   const commentAuthor = commentSync.author
+  // Empty on a local-only repo: nobody to mention, so the composer's
+  // placeholder stops offering `@` instead of opening a picker with no rows.
+  const participants = useEditorParticipants(commentSync.viewerProjectId)
   const noteAuthor = getActiveCliUser() ?? FALLBACK_NOTE_AUTHOR
 
   // Keep the iframe's pin layer in sync with the slice's comments.
@@ -377,6 +381,7 @@ export function EditorCommentsContainer({
         onToggleResolved={handleCommentPopupToggleResolved}
         onDelete={handleCommentPopupDelete}
         onFixWithAI={handleCommentFix}
+        participants={participants}
       />
       {EDITOR_NOTES ? (
         <NoteThreadPopup

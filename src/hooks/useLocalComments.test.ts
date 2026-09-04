@@ -296,6 +296,7 @@ describe("useLocalComments", () => {
     expect(store.addReply).toHaveBeenCalledWith("c1", {
       body: "thanks",
       author: FALLBACK_COMMENT_AUTHOR,
+      mentions: [],
     })
     expect(useAppStore.getState().comments[0].replies).toHaveLength(1)
     expect(useAppStore.getState().comments[0].replies[0].id).toBe("r-server")
@@ -362,6 +363,58 @@ describe("useLocalComments", () => {
     expect(store.create).toHaveBeenCalledWith(
       expect.objectContaining({ author: customAuthor }),
     )
+  })
+
+  // The Viewer's comment routes notify from the `mentions` ARRAY and never
+  // parse the body text, so a mention the Editor fails to extract here
+  // renders as a mention and reaches nobody. Both write paths are covered:
+  // the bug would be equally silent on either.
+  it("sends the mention ids extracted from a new comment's body", async () => {
+    const store = makeMockStore()
+    store.list.mockResolvedValueOnce([])
+    const { result } = renderHook(() => useLocalComments({ store }))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.addComment("ping @[Rin](p_rin) and @[Sam](p_sam)", {
+        anchorSelector: ".x",
+        page: "/",
+      })
+    })
+
+    expect(store.create).toHaveBeenCalledWith(
+      expect.objectContaining({ mentions: ["p_rin", "p_sam"] }),
+    )
+  })
+
+  it("sends the mention ids extracted from a reply's body", async () => {
+    const store = makeMockStore()
+    const seed = fakeComment("c1", "thread", 1)
+    store.list.mockResolvedValueOnce([seed])
+    store.addReply.mockResolvedValueOnce({
+      ...seed,
+      replies: [
+        {
+          id: "r-server",
+          body: "over to @[Rin](p_rin)",
+          author: FALLBACK_COMMENT_AUTHOR,
+          createdAt: "2026-05-24T00:01:00Z",
+          mentions: ["p_rin"],
+        },
+      ],
+    })
+    const { result } = renderHook(() => useLocalComments({ store }))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.addReply("c1", "over to @[Rin](p_rin)")
+    })
+
+    expect(store.addReply).toHaveBeenCalledWith("c1", {
+      body: "over to @[Rin](p_rin)",
+      author: FALLBACK_COMMENT_AUTHOR,
+      mentions: ["p_rin"],
+    })
   })
 
 })

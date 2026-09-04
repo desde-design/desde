@@ -25,10 +25,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { AnnotationCard } from "@/components/annotations/annotation-card"
-import {
-  MentionInput,
-  encodeBodyMentions,
-} from "@/components/annotations/mention-input"
+import { MentionInput } from "@/components/annotations/mention-input"
 import type {
   CanvasAnnotationKind,
   TextAlign,
@@ -46,12 +43,6 @@ import {
   resolveTextStyle,
 } from "@/utils/text-annotation-style"
 import type { CommentAuthor, CommentReply } from "@/types/bridge"
-
-interface MentionSelection {
-  displayName: string
-  email: string
-  startIndex: number
-}
 
 export interface AnnotationNodeData {
   kind: CanvasAnnotationKind
@@ -155,12 +146,10 @@ interface NewCommentEditorProps {
 
 function NewCommentEditor({ onSubmit, onCancel }: NewCommentEditorProps) {
   const [text, setText] = useState("")
-  const mentionsRef = useRef<MentionSelection[]>([])
 
   const handleSubmit = useCallback(() => {
     if (!text.trim()) return
-    const encoded = encodeBodyMentions(text.trim(), mentionsRef.current)
-    onSubmit(encoded)
+    onSubmit(text.trim())
   }, [text, onSubmit])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -187,14 +176,14 @@ function NewCommentEditor({ onSubmit, onCancel }: NewCommentEditorProps) {
       </div>
       <div className="border-t border-border p-3">
         <div className="relative">
+          {/* No `participants`: the canvas is a local authoring surface
+              with no directory behind it, so the placeholder drops the `@`
+              hint rather than offering a picker that cannot open. */}
           <MentionInput
-            placeholder="Add a comment… (@ to mention)"
+            placeholder="Add a comment"
             value={text}
             onChange={setText}
             onKeyDown={handleKeyDown}
-            onMentionsChange={(m) => {
-              mentionsRef.current = m
-            }}
             className="min-h-[56px] resize-none pr-10 text-base"
             autoFocus
           />

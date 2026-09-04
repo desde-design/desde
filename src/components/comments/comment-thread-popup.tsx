@@ -1,19 +1,14 @@
 "use client"
 
-import { useState, useRef, useEffect, useMemo, type CSSProperties } from "react"
+import { useState, useEffect, useMemo, type CSSProperties } from "react"
 import { createPortal } from "react-dom"
 import { useAppStore } from "@/stores"
 import { Button } from "@/components/ui/button"
-import { MentionInput, encodeBodyMentions } from "@/components/annotations/mention-input"
+import { MentionInput } from "@/components/annotations/mention-input"
+import type { MentionParticipant } from "@/components/annotations/mention-encoding"
 import { AnnotationCard } from "@/components/annotations/annotation-card"
 import { X, ArrowUp } from "lucide-react"
 import type { CommentAuthor, CommentPosition } from "@/types/bridge"
-
-interface MentionSelection {
-  displayName: string
-  email: string
-  startIndex: number
-}
 
 const POPUP_WIDTH = 320
 
@@ -61,6 +56,13 @@ interface CommentThreadPopupProps {
    * the user's intent. Omitted on the web path → no button.
    */
   onFixWithAI?: (commentId: string) => boolean
+  /**
+   * The @-mention directory, when this repo is linked to a Viewer prototype
+   * (`useEditorParticipants`). Empty on a local-only repo, where there is no
+   * directory to mention against and the composer says so by dropping the
+   * `@` hint from its placeholder.
+   */
+  participants?: MentionParticipant[]
 }
 
 export function CommentThreadPopup({
@@ -70,6 +72,7 @@ export function CommentThreadPopup({
   onToggleResolved,
   onDelete,
   onFixWithAI,
+  participants,
 }: CommentThreadPopupProps = {}) {
   const comments = useAppStore((s) => s.comments)
   const activeCommentId = useAppStore((s) => s.activeCommentId)
@@ -84,7 +87,6 @@ export function CommentThreadPopup({
   const effectiveAuthor: CommentAuthor | null = authorOverride ?? null
 
   const [newCommentText, setNewCommentText] = useState("")
-  const newCommentMentionsRef = useRef<MentionSelection[]>([])
 
   const activeComment = comments.find((c) => c.id === activeCommentId) ?? null
 
@@ -113,7 +115,6 @@ export function CommentThreadPopup({
     if (!pendingPosition) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setNewCommentText("")
-      newCommentMentionsRef.current = []
     }
   }, [pendingPosition])
 
@@ -130,7 +131,9 @@ export function CommentThreadPopup({
     if (!newCommentText.trim() || !pendingPosition || !effectiveAuthor) return
     if (!onSubmitNew) return
 
-    const encodedBody = encodeBodyMentions(newCommentText.trim(), newCommentMentionsRef.current)
+    // Mentions are already `@[Name](id)` in the text: the picker writes the
+    // wire format inline, so there is no separate list to encode here.
+    const encodedBody = newCommentText.trim()
 
     // CLI override: HTTP-backed write. Await the handler so we can keep
     // the user's typed text on failure — fire-and-forget here would lose
@@ -143,7 +146,6 @@ export function CommentThreadPopup({
     if (!result.ok) return
 
     setNewCommentText("")
-    newCommentMentionsRef.current = []
     setPendingPosition(null)
     setPopupAnchorRect(null)
     setActiveComment(null)
@@ -193,6 +195,7 @@ export function CommentThreadPopup({
               if (onDelete) void onDelete(activeComment.id)
               handleClose()
             }}
+            participants={participants}
             onFix={
               onFixWithAI
                 ? () => {
@@ -208,7 +211,10 @@ export function CommentThreadPopup({
           />
         ) : (
           <div
-            className="flex w-80 flex-col overflow-hidden rounded-sm border border-border bg-background shadow-xl"
+            /* No `overflow-hidden`: the mention picker inside opens upward
+               out of this card (`absolute bottom-full`), and a clip here cut
+               its list in half. Same reasoning as `AnnotationCard`. */
+            className="flex w-80 flex-col rounded-sm border border-border bg-background shadow-xl"
           >
             <div className="flex flex-none items-center justify-between px-3 py-1.5">
               <span className="text-xs text-muted-foreground">New comment</span>
@@ -219,11 +225,11 @@ export function CommentThreadPopup({
             <div className="border-t border-border p-3">
               <div className="relative">
                 <MentionInput
-                  placeholder="Add a comment… (@ to mention)"
+                  placeholder="Add a comment"
                   value={newCommentText}
                   onChange={setNewCommentText}
                   onKeyDown={handleKeyDown}
-                  onMentionsChange={(m) => { newCommentMentionsRef.current = m }}
+                  participants={participants}
                   className="min-h-[56px] resize-none pr-10 text-base"
                   autoFocus
                 />

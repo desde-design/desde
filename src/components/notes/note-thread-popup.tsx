@@ -1,21 +1,15 @@
 "use client"
 
-import { useState, useRef, useEffect, useMemo, type CSSProperties } from "react"
+import { useState, useEffect, useMemo, type CSSProperties } from "react"
 import { createPortal } from "react-dom"
 import { useAppStore } from "@/stores"
 import { Button } from "@/components/ui/button"
-import { MentionInput, encodeBodyMentions } from "@/components/annotations/mention-input"
+import { MentionInput } from "@/components/annotations/mention-input"
 import { AnnotationCard } from "@/components/annotations/annotation-card"
 import { X, ArrowUp } from "lucide-react"
 import type { Note } from "@/types/note"
 import type { DOMRectJSON } from "@/types/bridge"
 import type { AnnotationAuthor, AnnotationPosition } from "@/types/annotation"
-
-interface MentionSelection {
-  displayName: string
-  email: string
-  startIndex: number
-}
 
 const POPUP_WIDTH = 320
 const POPUP_OFFSET = 12
@@ -151,13 +145,11 @@ function NewNoteForm({ overrides }: NewNoteFormProps) {
   const effectiveAuthor: AnnotationAuthor | null = overrides?.author ?? null
 
   const [newNoteText, setNewNoteText] = useState("")
-  const newNoteMentionsRef = useRef<MentionSelection[]>([])
 
   useEffect(() => {
     if (!pendingNotePosition) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setNewNoteText("")
-      newNoteMentionsRef.current = []
     }
   }, [pendingNotePosition])
 
@@ -182,7 +174,7 @@ function NewNoteForm({ overrides }: NewNoteFormProps) {
     if (!newNoteText.trim() || !pendingNotePosition || !effectiveAuthor) return
     if (!overrides?.onSubmitNew) return
 
-    const encodedBody = encodeBodyMentions(newNoteText.trim(), newNoteMentionsRef.current)
+    const encodedBody = newNoteText.trim()
 
     // CLI override: HTTP-backed write. Await so the form can keep the
     // user's typed text on failure (fire-and-forget would lose work when
@@ -195,7 +187,6 @@ function NewNoteForm({ overrides }: NewNoteFormProps) {
     if (!result.ok) return
 
     setNewNoteText("")
-    newNoteMentionsRef.current = []
     setPendingNotePosition(null)
     setNotePopupAnchorRect(null)
   }
@@ -222,12 +213,14 @@ function NewNoteForm({ overrides }: NewNoteFormProps) {
         </div>
         <div className="border-t border-border p-3">
           <div className="relative">
+            {/* No `participants`: notes are local to this machine
+                (`.desde/notes.json`), so there is no directory to mention
+                against and the placeholder drops the `@` hint. */}
             <MentionInput
-              placeholder="Add a note… (@ to mention)"
+              placeholder="Add a note"
               value={newNoteText}
               onChange={setNewNoteText}
               onKeyDown={handleKeyDown}
-              onMentionsChange={(m) => { newNoteMentionsRef.current = m }}
               className="min-h-[56px] resize-none bg-white pr-10 text-base"
               autoFocus
             />

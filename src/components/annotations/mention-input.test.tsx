@@ -1,0 +1,481 @@
+/**
+ * `MentionInput` — the shared @-mention composer.
+ *
+ * The defect these tests exist for: for months every reply box in the
+ * product rendered the placeholder "Reply… (@ to mention)" over a plain
+ * `Textarea` with no picker behind it. The promise was a hardcoded string at
+ * four call sites and the capability was wired at none of them, so nothing in
+ * typecheck, lint or the suite could see that they disagreed.
+ *
+ * So the first two cases here are about the PLACEHOLDER, not the picker: the
+ * hint has to be derived from the directory, or the same thing happens again
+ * the next time a surface mounts this input without one.
+ */
+
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { useState } from "react"
+import { MentionInput } from "./mention-input"
+import type { MentionParticipant } from "./mention-encoding"
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+const PARTICIPANTS: MentionParticipant[] = [
+  { id: "p_rin", displayName: "Rin Adeyemi", email: "rin@example.com" },
+  { id: "p_sam", displayName: "Sam Okafor" },
+  { id: "p_mo", displayName: "Mo Chang", email: "mo@example.com" },
+  // Email shares nothing with the display name, so it can prove that the
+  // filter really reads the address and is not just matching the name.
+  { id: "p_dana", displayName: "Dana Whitfield", email: "dw@example.com" },
+]
+
+/** Controlled wrapper: the real call sites all own the text. */
+function Harness({
+  participants,
+  onInvite,
+  onKeyDown,
+  onValue,
+}: {
+  participants?: MentionParticipant[]
+  onInvite?: (email: string) => Promise<MentionParticipant | null>
+  onKeyDown?: (e: React.KeyboardEvent) => void
+  onValue?: (v: string) => void
+}) {
+  const [value, setValue] = useState("")
+  return (
+    <div className="relative">
+      <MentionInput
+        placeholder="Reply"
+        value={value}
+        onChange={(v) => {
+          setValue(v)
+          onValue?.(v)
+        }}
+        onKeyDown={onKeyDown}
+        participants={participants}
+        onInvite={onInvite}
+      />
+    </div>
+  )
+}
+
+function type(text: string, cursor = text.length) {
+  fireEvent.change(screen.getByRole("combobox"), {
+    target: { value: text, selectionStart: cursor },
+  })
+}
+
+describe("the placeholder tracks the directory, not a hardcoded string", () => {
+  it("offers @ only when somebody is mentionable", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    expect(screen.getByPlaceholderText("Reply… (@ to mention)")).toBeTruthy()
+  })
+
+  it("drops the hint when there is no directory and no invite path", () => {
+    render(<Harness />)
+    expect(screen.getByPlaceholderText("Reply…")).toBeTruthy()
+    expect(screen.queryByPlaceholderText(/@ to mention/)).toBeNull()
+  })
+
+  it("keeps the hint when the directory is empty but inviting is possible", () => {
+    render(<Harness participants={[]} onInvite={async () => null} />)
+    expect(screen.getByPlaceholderText("Reply… (@ to mention)")).toBeTruthy()
+  })
+})
+
+describe("the picker", () => {
+  it("opens on @ and lists the directory", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@")
+    expect(screen.getByRole("listbox")).toBeTruthy()
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Rin Adeyemirin@example.com",
+      "Sam Okafor",
+      "Mo Changmo@example.com",
+      "Dana Whitfielddw@example.com",
+    ])
+  })
+
+  it("filters on display name and on email", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Rin Adeyemirin@example.com",
+    ])
+    type("@dw")
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Dana Whitfielddw@example.com",
+    ])
+  })
+
+  // The token is the text after the LAST `@` before the caret, so typing a
+  // whole address searches the part after its `@`. Worth pinning: it is the
+  // rule that keeps "@rin @sam" from being read as one long token.
+  it("reads the token from the last @ before the caret", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@mo@example")
+    expect(screen.getAllByRole("option")).toHaveLength(3)
+  })
+
+  // `email` is omitted for non-insiders (security audit S3). An unguarded
+  // `.toLowerCase()` on it once threw and took the whole picker down for
+  // anonymous reviewers, so a participant WITHOUT an email must survive a
+  // query that only the others can match.
+  it("survives a participant with no email", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@example.com")
+    expect(screen.getAllByRole("option")).toHaveLength(3)
+  })
+
+  // The options live in a combobox popup: the textarea keeps focus and its
+  // arrows move the highlight, so a Tab stop on each row is both wrong for the
+  // pattern and a dead end (Enter on a focused button fires `click`, and
+  // selection is bound to `mousedown` to preserve the caret).
+  it("keeps the option rows out of the tab order", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@")
+    for (const option of screen.getAllByRole("option")) {
+      expect(option.getAttribute("tabindex")).toBe("-1")
+    }
+  })
+
+  it("never opens when nobody is mentionable", () => {
+    render(<Harness />)
+    type("@")
+    expect(screen.queryByRole("listbox")).toBeNull()
+  })
+
+  it("closes once whitespace ends the token", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    expect(screen.getByRole("listbox")).toBeTruthy()
+    type("@rin ")
+    expect(screen.queryByRole("listbox")).toBeNull()
+  })
+
+  it("shows the invite row only when the surface can invite", () => {
+    const { unmount } = render(<Harness participants={PARTICIPANTS} />)
+    type("@")
+    expect(screen.queryByPlaceholderText("Invite by email…")).toBeNull()
+    unmount()
+
+    render(<Harness participants={PARTICIPANTS} onInvite={async () => null} />)
+    type("@")
+    expect(screen.getByPlaceholderText("Invite by email…")).toBeTruthy()
+  })
+})
+
+// The card these inputs live in is positioned against a comment pin. A pin in
+// the TOP half of the screen anchors the card by its `top`, which puts the
+// composer near the top edge — and an upward-opening list then renders
+// entirely off-screen, which is a picker that cannot be used at all.
+describe("which side the list opens on", () => {
+  function stubTextareaRect(top: number, height = 44) {
+    vi.spyOn(HTMLTextAreaElement.prototype, "getBoundingClientRect").mockReturnValue({
+      top,
+      bottom: top + height,
+      height,
+      left: 0,
+      right: 320,
+      width: 320,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    })
+  }
+
+  function popupClasses() {
+    return screen.getByRole("listbox").parentElement!.className
+  }
+
+  it("opens upward when the composer sits low on the screen", () => {
+    vi.stubGlobal("innerHeight", 720)
+    stubTextareaRect(600)
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@")
+    expect(popupClasses()).toContain("bottom-full")
+  })
+
+  it("flips below when there is no room above it", () => {
+    vi.stubGlobal("innerHeight", 720)
+    stubTextareaRect(24)
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@")
+    expect(popupClasses()).toContain("top-full")
+  })
+
+  // A viewport with no height is a page that is not being SHOWN (a hidden
+  // pane, an offscreen capture), not a cramped one. Believing it flipped the
+  // list to the wrong side, where it stayed, since the side is decided once
+  // when the list opens.
+  it("keeps the default rather than believe a zero-height viewport", () => {
+    vi.stubGlobal("innerHeight", 0)
+    stubTextareaRect(-64)
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@")
+    expect(popupClasses()).toContain("bottom-full")
+  })
+})
+
+describe("inviting by email", () => {
+  it("keeps the address, and says so, when the invite is refused", async () => {
+    render(<Harness participants={PARTICIPANTS} onInvite={async () => null} />)
+    type("@")
+
+    const field = screen.getByPlaceholderText("Invite by email…") as HTMLInputElement
+    fireEvent.change(field, { target: { value: "typo@" } })
+    fireEvent.click(screen.getByRole("button", { name: "Invite" }))
+
+    // Clearing the field on a refusal took away the one thing the person
+    // needed in order to correct it, and said nothing had gone wrong.
+    await screen.findByText(/did not go through/)
+    expect(field.value).toBe("typo@")
+  })
+
+  it("drops the failure notice as soon as the invite is retried", async () => {
+    let attempt = 0
+    render(
+      <Harness
+        participants={PARTICIPANTS}
+        onInvite={async () => (++attempt === 1 ? null : { id: "p_new", displayName: "New" })}
+      />,
+    )
+    type("@")
+    const field = screen.getByPlaceholderText("Invite by email…")
+    fireEvent.change(field, { target: { value: "someone@example.com" } })
+    fireEvent.click(screen.getByRole("button", { name: "Invite" }))
+    await screen.findByText(/did not go through/)
+
+    fireEvent.click(screen.getByRole("button", { name: "Invite" }))
+    await waitFor(() => expect(screen.queryByText(/did not go through/)).toBeNull())
+  })
+
+  it("mentions the new person as soon as the invite lands", async () => {
+    const onValue = vi.fn()
+    render(
+      <Harness
+        participants={PARTICIPANTS}
+        onValue={onValue}
+        onInvite={async () => ({ id: "p_new", displayName: "New Person" })}
+      />,
+    )
+    type("hey @", 5)
+    fireEvent.change(screen.getByPlaceholderText("Invite by email…"), {
+      target: { value: "new@example.com" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Invite" }))
+
+    await waitFor(() =>
+      expect(onValue).toHaveBeenLastCalledWith("hey @[New Person](p_new) "),
+    )
+  })
+})
+
+describe("choosing a name", () => {
+  it("writes the wire format and closes the picker", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    type("hey @rin", 8)
+    fireEvent.click(screen.getByRole("option"))
+
+    expect(onValue).toHaveBeenLastCalledWith("hey @[Rin Adeyemi](p_rin) ")
+    expect(screen.queryByRole("listbox")).toBeNull()
+  })
+
+  // Selection hangs off `click`, not `mousedown`, so that a screen reader or
+  // voice control (which dispatches only `click`) can activate a row. A real
+  // pointer sends both, and must still insert exactly one mention.
+  it("inserts once for a full pointer press, not twice", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    type("@rin")
+    const option = screen.getByRole("option")
+    const before = onValue.mock.calls.length
+    fireEvent.mouseDown(option)
+    fireEvent.click(option)
+
+    expect(onValue.mock.calls.length - before).toBe(1)
+    expect(onValue).toHaveBeenLastCalledWith("@[Rin Adeyemi](p_rin) ")
+  })
+
+  it("replaces only the token, keeping text after the caret", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    type("@sam, thoughts?", 4)
+    fireEvent.click(screen.getByRole("option"))
+
+    expect(onValue).toHaveBeenLastCalledWith("@[Sam Okafor](p_sam) , thoughts?")
+  })
+
+  it("takes a bare Enter, and lets a modified Enter reach the parent's submit", () => {
+    const onValue = vi.fn()
+    const onKeyDown = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} onKeyDown={onKeyDown} />)
+
+    type("@sam")
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" })
+    expect(onValue).toHaveBeenLastCalledWith("@[Sam Okafor](p_sam) ")
+    expect(onKeyDown).not.toHaveBeenCalled()
+
+    // Cmd+Enter is the submit at every call site. It must keep working even
+    // while a mention token happens to be open, or sending silently stops.
+    type("@sam")
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter", metaKey: true })
+    expect(onKeyDown).toHaveBeenCalledTimes(1)
+  })
+
+  it("moves the highlight with the arrow keys", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    type("@")
+    const box = screen.getByRole("combobox")
+    fireEvent.keyDown(box, { key: "ArrowDown" })
+    fireEvent.keyDown(box, { key: "ArrowDown" })
+    fireEvent.keyDown(box, { key: "Enter" })
+    expect(onValue).toHaveBeenLastCalledWith("@[Mo Chang](p_mo) ")
+  })
+
+  // A stale highlight is worse than no highlight: Enter would insert somebody
+  // the user never saw offered. The index is carried WITH the query it was
+  // chosen against, so it cannot follow the user into a different list.
+  it("returns the highlight to the top when the query changes", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    const box = screen.getByRole("combobox")
+
+    type("@")
+    fireEvent.keyDown(box, { key: "ArrowDown" })
+    fireEvent.keyDown(box, { key: "ArrowDown" })
+
+    // A different query, whose list happens to hold the same people in the
+    // same order. Enter must take the FIRST row, not the third.
+    type("@a")
+    expect(screen.getAllByRole("option")).toHaveLength(4)
+    fireEvent.keyDown(box, { key: "Enter" })
+    expect(onValue).toHaveBeenLastCalledWith("@[Rin Adeyemi](p_rin) ")
+  })
+
+  // Narrowing and widening back to the SAME query is not a new list, so the
+  // place the user had picked is kept rather than thrown away.
+  it("keeps the highlight when the query returns to what it was", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    const box = screen.getByRole("combobox")
+
+    type("@")
+    fireEvent.keyDown(box, { key: "ArrowDown" })
+    fireEvent.keyDown(box, { key: "ArrowDown" })
+    type("@rin")
+    type("@")
+    fireEvent.keyDown(box, { key: "Enter" })
+    expect(onValue).toHaveBeenLastCalledWith("@[Mo Chang](p_mo) ")
+  })
+
+  // The highlight belongs to ONE token. Abandoning a token you had arrowed
+  // down in and starting a fresh one elsewhere gave both the empty query, so
+  // the new picker opened on the old row and Enter inserted a name chosen for
+  // a sentence the user had already moved on from.
+  it("does not carry the highlight into a token started elsewhere", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    const box = screen.getByRole("combobox")
+
+    type("@")
+    fireEvent.keyDown(box, { key: "ArrowDown" })
+    fireEvent.keyDown(box, { key: "ArrowDown" })
+    // Abandon that token with whitespace, then open a new one further along.
+    type("hello @")
+    fireEvent.keyDown(box, { key: "Enter" })
+    expect(onValue).toHaveBeenLastCalledWith("hello @[Rin Adeyemi](p_rin) ")
+  })
+
+  it("wraps past the end of the list", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    type("@")
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "ArrowUp" })
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" })
+    expect(onValue).toHaveBeenLastCalledWith("@[Dana Whitfield](p_dana) ")
+  })
+})
+
+// An IME (Japanese, Korean, Chinese) uses Enter to commit its candidate and
+// the arrows to move through its own list. If the picker eats those, composing
+// an `@` query replaces half-finished text with a mention nobody chose.
+describe("while an IME is composing", () => {
+  it("leaves Enter to the composition instead of picking a name", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    type("@sam")
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter", isComposing: true })
+    expect(onValue).not.toHaveBeenCalledWith("@[Sam Okafor](p_sam) ")
+    expect(screen.getByRole("listbox")).toBeTruthy()
+  })
+
+  it("leaves the arrows to the IME's own candidate list", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    type("@")
+    const box = screen.getByRole("combobox")
+    fireEvent.keyDown(box, { key: "ArrowDown", isComposing: true })
+    fireEvent.keyDown(box, { key: "ArrowDown", isComposing: true })
+    // Highlight never moved, so a later commit still offers the first row.
+    fireEvent.keyDown(box, { key: "Enter" })
+    expect(onValue).toHaveBeenLastCalledWith("@[Rin Adeyemi](p_rin) ")
+  })
+
+  it("leaves Escape to cancel the composition, not the picker", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape", isComposing: true })
+    expect(screen.getByRole("listbox")).toBeTruthy()
+  })
+})
+
+describe("Escape", () => {
+  it("dismisses the picker and does not reach the parent", () => {
+    const onKeyDown = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onKeyDown={onKeyDown} />)
+    type("@rin")
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" })
+
+    expect(screen.queryByRole("listbox")).toBeNull()
+    // The card's own Escape handler closes the reply box (or the thread).
+    // Dismissing a picker must not also do that.
+    expect(onKeyDown).not.toHaveBeenCalled()
+  })
+
+  it("stays dismissed while the same token grows, and reopens on a new one", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" })
+    type("@rina")
+    expect(screen.queryByRole("listbox")).toBeNull()
+
+    type("@rina @sa")
+    expect(screen.getByRole("listbox")).toBeTruthy()
+  })
+
+  // Keying the dismissal on the token's START ALONE left this stuck: delete
+  // the `@` and type a fresh one at the same offset, and the picker stayed
+  // silent with no way back.
+  it("reopens once the dismissed query is edited back down", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" })
+    expect(screen.queryByRole("listbox")).toBeNull()
+
+    type("@sam")
+    expect(screen.getByRole("listbox")).toBeTruthy()
+  })
+
+  it("reaches the parent when there is no picker to dismiss", () => {
+    const onKeyDown = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onKeyDown={onKeyDown} />)
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" })
+    expect(onKeyDown).toHaveBeenCalledTimes(1)
+  })
+})

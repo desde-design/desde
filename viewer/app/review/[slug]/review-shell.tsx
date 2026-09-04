@@ -15,7 +15,6 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Textarea } from "@/components/ui/textarea"
 import {
   Dialog,
   DialogContent,
@@ -34,6 +33,7 @@ import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { AnnotationCard, annotationCardSurface } from "@/components/annotations/annotation-card"
 import { MentionText } from "@/components/annotations/mention-text"
+import { MentionInput } from "@/components/annotations/mention-input"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { createViewerHttpCommentStore } from "@/services/artifact-stores/viewer-http-comment-store"
 import { createLocalOverlayCommentStore } from "@/services/artifact-stores/local-overlay-comment-store"
@@ -57,7 +57,7 @@ import { failureMessage } from "../../api-client"
 import { repoSourceBase, useProjectDetail } from "../use-project-detail"
 import { ViewerInspectorPanel } from "../inspector-panel"
 import { useParticipants, type ReviewParticipant } from "../use-participants"
-import { encodeMention, extractMentionIds } from "../mention-encoding"
+import { extractMentionIds } from "@/components/annotations/mention-encoding"
 import { useCurrentUser } from "../../use-current-user"
 import { ProjectAccess } from "../../project-access"
 import type { ProjectAccessValue } from "../../project-access-copy"
@@ -244,6 +244,13 @@ export function ReviewShell({ project }: { project: ReviewShellProject }) {
   // 2's participants route, reloads the directory, and hands the created
   // participant back so the caller can immediately insert a mention for
   // them — the invite and the mention are one motion for the reviewer.
+  // `POST /projects/:id/participants` requires an identified caller (security
+  // audit B5), so for an anonymous public-link reviewer the invite row is an
+  // action that returns 401 every time, clears the address they typed, and
+  // says nothing. Same dead end, and the same fix, as the admin affordances
+  // above: gate on `currentUser`, not on whether auth is configured.
+  const canInvite = currentUser !== null
+
   const inviteParticipant = useCallback(
     async (email: string): Promise<ReviewParticipant | null> => {
       try {
@@ -1692,13 +1699,15 @@ export function ReviewShell({ project }: { project: ReviewShellProject }) {
                   onResolve={handleResolve}
                   onDelete={handleDeleteComment}
                   onClose={closePopup}
+                  participants={participants}
+                  onInvite={canInvite ? inviteParticipant : undefined}
                 />
               )
             ) : draft ? (
               identity ? (
                 <NewCommentCard
                   participants={participants}
-                  onInvite={inviteParticipant}
+                  onInvite={canInvite ? inviteParticipant : undefined}
                   onSubmit={handleCreateComment}
                   onClose={closePopup}
                 />
@@ -1988,111 +1997,6 @@ function IdentityFormCard({
   )
 }
 
-/**
- * Finds the `@token` the cursor is currently inside, scanning back from
- * `cursor` to the nearest unescaped `@` with no whitespace in between.
- * Returns `null` when the cursor isn't inside a live mention token (no `@`
- * on the line, or whitespace already closed it) — that `null` is what
- * hides the picker.
- */
-function findActiveMentionToken(text: string, cursor: number): { start: number; query: string } | null {
-  const upToCursor = text.slice(0, cursor)
-  const at = upToCursor.lastIndexOf("@")
-  if (at === -1) return null
-  const query = upToCursor.slice(at + 1)
-  if (/\s/.test(query)) return null
-  return { start: at, query }
-}
-
-const MAX_MENTION_MATCHES = 8
-
-function MentionPicker({
-  query,
-  participants,
-  onSelect,
-  onInvite,
-}: {
-  query: string
-  participants: ReviewParticipant[]
-  onSelect: (participant: ReviewParticipant) => void
-  onInvite: (email: string) => Promise<void>
-}) {
-  const [inviteEmail, setInviteEmail] = useState("")
-  const [inviting, setInviting] = useState(false)
-
-  const matches = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    const filtered = q
-      ? participants.filter(
-          // `email` is omitted for non-insiders (audit S3), so it must be
-          // treated as optional here — an unguarded `.toLowerCase()` threw and
-          // took the whole mention picker down for anonymous reviewers.
-          (p) =>
-            p.displayName.toLowerCase().includes(q) ||
-            (p.email?.toLowerCase().includes(q) ?? false),
-        )
-      : participants
-    return filtered.slice(0, MAX_MENTION_MATCHES)
-  }, [participants, query])
-
-  const handleInvite = useCallback(async () => {
-    const email = inviteEmail.trim()
-    if (!email || inviting) return
-    setInviting(true)
-    try {
-      await onInvite(email)
-      setInviteEmail("")
-    } finally {
-      setInviting(false)
-    }
-  }, [inviteEmail, inviting, onInvite])
-
-  return (
-    <div className="absolute bottom-full left-0 z-10 mb-1 flex w-full flex-col overflow-hidden rounded-sm border border-border bg-popover shadow-lg">
-      <ul className="max-h-32 overflow-y-auto p-1">
-        {matches.length === 0 ? (
-          <li className="px-2 py-1 text-xs text-muted-foreground">No matches</li>
-        ) : (
-          matches.map((p) => (
-            <li key={p.id}>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="w-full justify-start gap-1.5 px-2"
-                onClick={() => onSelect(p)}
-              >
-                <span className="truncate">{p.displayName}</span>
-                {p.email ? (
-                  <span className="truncate text-xs text-muted-foreground">{p.email}</span>
-                ) : null}
-              </Button>
-            </li>
-          ))
-        )}
-      </ul>
-      <div className="flex items-center gap-1 border-t border-border p-1">
-        <Input
-          size="sm"
-          type="email"
-          value={inviteEmail}
-          onChange={(e) => setInviteEmail(e.target.value)}
-          placeholder="Invite by email…"
-          className="text-xs"
-        />
-        <Button
-          type="button"
-          size="xs"
-          disabled={!inviteEmail.trim() || inviting}
-          onClick={() => void handleInvite()}
-        >
-          Invite
-        </Button>
-      </div>
-    </div>
-  )
-}
-
 function NewCommentCard({
   participants,
   onInvite,
@@ -2100,16 +2004,12 @@ function NewCommentCard({
   onClose,
 }: {
   participants: ReviewParticipant[]
-  onInvite: (email: string) => Promise<ReviewParticipant | null>
+  onInvite?: (email: string) => Promise<ReviewParticipant | null>
   onSubmit: (body: string, mentions: string[]) => Promise<void>
   onClose: () => void
 }) {
   const [text, setText] = useState("")
-  const [cursor, setCursor] = useState(0)
   const [submitting, setSubmitting] = useState(false)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
-
-  const mentionToken = useMemo(() => findActiveMentionToken(text, cursor), [text, cursor])
 
   const handleSubmit = useCallback(async () => {
     const body = text.trim()
@@ -2129,48 +2029,13 @@ function NewCommentCard({
     }
   }
 
-  // Cursor tracking drives `mentionToken` above — kept as plain state
-  // (rather than reading `textareaRef` during render, which the refs rule
-  // forbids) and refreshed on every event that can move the caret: typing,
-  // arrow/keyboard navigation, and mouse clicks.
-  const trackCursor = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
-    setCursor(e.currentTarget.selectionStart ?? e.currentTarget.value.length)
-  }
-
-  const applyMention = useCallback(
-    (displayName: string, participantId: string) => {
-      const el = textareaRef.current
-      const activeCursor = el?.selectionStart ?? cursor
-      const token = findActiveMentionToken(text, activeCursor)
-      if (!token) return
-      const inserted = encodeMention(displayName, participantId) + " "
-      const next = text.slice(0, token.start) + inserted + text.slice(activeCursor)
-      const nextCursor = token.start + inserted.length
-      setText(next)
-      setCursor(nextCursor)
-      requestAnimationFrame(() => {
-        el?.focus()
-        el?.setSelectionRange(nextCursor, nextCursor)
-      })
-    },
-    [text, cursor],
-  )
-
-  const handleInvite = useCallback(
-    async (email: string) => {
-      const created = await onInvite(email)
-      if (created) applyMention(created.displayName, created.id)
-    },
-    [onInvite, applyMention],
-  )
-
   return (
     /* No `overflow-hidden`, deliberately. The mention picker inside is
-       `absolute bottom-full` — it opens UPWARD out of this card by design,
-       and a clip here cut its list in half, leaving a sliver of rows above
-       the invite row. `overflow-hidden` was doing nothing else: this card's
-       radius is `rounded-sm` and none of its children paint a background to
-       the corners, so there is nothing for it to clip. */
+       absolutely positioned and opens out of this card by design, and a clip
+       here cut its list in half, leaving a sliver of rows above the invite
+       row. `overflow-hidden` was doing nothing else: this card's radius is
+       `rounded-sm` and none of its children paint a background to the
+       corners, so there is nothing for it to clip. */
     <div
       className="flex w-80 flex-col rounded shadow-xl"
       /* The SAME surface as the thread popup, from one definition
@@ -2193,25 +2058,17 @@ function NewCommentCard({
           the card has. */}
       <div className="p-3">
         <div className="relative">
-          {mentionToken ? (
-            <MentionPicker
-              query={mentionToken.query}
-              participants={participants}
-              onSelect={(p) => applyMention(p.displayName, p.id)}
-              onInvite={handleInvite}
-            />
-          ) : null}
-          <Textarea
-            ref={textareaRef}
-            placeholder="Add a comment… (@ to mention)"
+          {/* The same input the thread card's reply box mounts. It owns the
+              picker, the caret tracking and the `@[Name](id)` insertion, so
+              the two composers cannot drift into offering different mention
+              behaviour a click apart. */}
+          <MentionInput
+            placeholder="Add a comment"
             value={text}
-            onChange={(e) => {
-              setText(e.target.value)
-              trackCursor(e)
-            }}
+            onChange={setText}
             onKeyDown={handleKeyDown}
-            onKeyUp={trackCursor}
-            onClick={trackCursor}
+            participants={participants}
+            onInvite={onInvite}
             className="min-h-[56px] resize-none pr-10 text-base"
             autoFocus
           />

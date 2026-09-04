@@ -74,6 +74,16 @@ export interface EditorCommentStoreResult {
   needsViewerToken?: boolean
   /** `"viewer"` when writing to the linked viewer's shared project, else `"local"`. */
   mode: CommentSyncMode
+  /**
+   * The linked viewer's project id while `mode` is `"viewer"`, else null.
+   *
+   * Exposed so a caller can reach the SAME project through the CLI's proxy
+   * without mounting a second `useViewerAuthStatus` (which fetches
+   * `/api/editor/viewer-auth` per mount, with no shared cache). Its one
+   * reader today is `useEditorParticipants`, which loads the @-mention
+   * directory.
+   */
+  viewerProjectId: string | null
   /** Author stamp for new comments/replies in the active mode. */
   author: CommentAuthor
   /**
@@ -177,11 +187,16 @@ export function useEditorCommentStore(): EditorCommentStoreResult {
     () => ({
       store,
       mode,
+      // Null unless we are actually WRITING to the viewer. The id can be
+      // known while the mode is still "local" (offline, or no token yet),
+      // and a directory fetched in that state would offer to mention people
+      // on a comment that is about to land in `.desde/comments.json`.
+      viewerProjectId: mode === "viewer" ? viewerProjectId : null,
       author,
       needsViewerToken,
       resolving,
       resolveFailed: resolving && !viewerAuthLoading,
     }),
-    [store, mode, author, needsViewerToken, resolving, viewerAuthLoading],
+    [store, mode, viewerProjectId, author, needsViewerToken, resolving, viewerAuthLoading],
   )
 }

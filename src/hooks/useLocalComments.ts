@@ -23,6 +23,7 @@ import { useAppStore } from "@/stores"
 import { createHttpCommentStore } from "@/services/artifact-stores"
 import { isArtifactStoreError } from "@/services/artifact-stores/shared"
 import { getActiveCliUser } from "@/lib/cli-user-identity"
+import { extractMentionIds } from "@/components/annotations/mention-encoding"
 import type {
   Comment,
   CommentAuthor,
@@ -216,6 +217,11 @@ export function useLocalComments(
       authorOverride?: CommentAuthor,
     ): Promise<Comment | null> => {
       const useAuthor = authorOverride ?? author
+      // The picker writes `@[Name](id)` straight into the body, and the
+      // Viewer's comment routes read the recipients off this array, NEVER
+      // off the body text — so a mention that is not extracted here notifies
+      // nobody, however it renders.
+      const mentions = extractMentionIds(body)
       const optimisticId = `optimistic-${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 7)}`
@@ -228,13 +234,13 @@ export function useLocalComments(
         createdAt: new Date().toISOString(),
         resolved: false,
         replies: [],
-        mentions: [],
+        mentions,
         participantEmails: [useAuthor.email].filter(Boolean),
       }
       // Optimistic insert.
       setComments([...useAppStore.getState().comments, optimistic])
       try {
-        const created = await store.create({ position, body, author: useAuthor })
+        const created = await store.create({ position, body, author: useAuthor, mentions })
         // Replace just the optimistic record with the server's truth.
         replaceCommentInSlice(optimisticId, created)
         return created
@@ -258,6 +264,9 @@ export function useLocalComments(
       authorOverride?: CommentAuthor,
     ): Promise<Comment | null> => {
       const useAuthor = authorOverride ?? author
+      // Same reasoning as `create` above: replies carry their own mention
+      // array, and it is the only thing the Viewer notifies from.
+      const mentions = extractMentionIds(body)
       const beforeTarget = useAppStore
         .getState()
         .comments.find((c) => c.id === commentId)
@@ -273,7 +282,7 @@ export function useLocalComments(
         body,
         author: useAuthor,
         createdAt: new Date().toISOString(),
-        mentions: [],
+        mentions,
       }
       // Targeted optimistic update: insert the reply on the target
       // comment only; leave every other comment alone.
@@ -286,6 +295,7 @@ export function useLocalComments(
         const updated = await store.addReply(commentId, {
           body,
           author: useAuthor,
+          mentions,
         })
         // Server returns the full updated comment — swap it in.
         replaceCommentInSlice(commentId, updated)

@@ -1,6 +1,29 @@
 import { describe, expect, it } from "vitest"
 import { handleViewerProxy, isAllowedProjectPath, proxyTargetPath } from "../viewer-proxy"
 
+/**
+ * The Editor's @-mention directory is fetched through this proxy
+ * (`src/hooks/useEditorParticipants.ts`). It is the ONLY consumer whose URL
+ * is built by hand in the browser rather than by a store, and its failure
+ * mode is silent: a path this proxy refuses arrives as a `console.warn` and
+ * an empty picker, which is indistinguishable from a prototype that really
+ * has no participants. So the URL is asserted against the real validators
+ * here, not against a reading of them.
+ */
+describe("the mention-directory URL the Editor builds", () => {
+  const PARTICIPANTS_URL = "/api/editor/viewer/api/v1/projects/proj_1/participants"
+
+  it("is forwardable, and addresses the configured project", () => {
+    const apiPath = proxyTargetPath(PARTICIPANTS_URL)
+    expect(apiPath).toBe("/api/v1/projects/proj_1/participants")
+    expect(isAllowedProjectPath(apiPath!, "proj_1")).toBe(true)
+  })
+
+  it("cannot reach a different project on the same viewer", () => {
+    expect(isAllowedProjectPath("/api/v1/projects/proj_1/participants", "proj_2")).toBe(false)
+  })
+})
+
 describe("proxyTargetPath", () => {
   it("extracts the API path from a proxied URL", () => {
     expect(proxyTargetPath("/api/editor/viewer/api/v1/projects/p1/comments")).toBe("/api/v1/projects/p1/comments")

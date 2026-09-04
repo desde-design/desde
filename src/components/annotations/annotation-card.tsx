@@ -1,16 +1,11 @@
 "use client"
 
-import { useState, useRef, useCallback, useEffect, type CSSProperties } from "react"
+import { useState, useCallback, useEffect, type CSSProperties } from "react"
 import { Button } from "@/components/ui/button"
-import { MentionInput, encodeBodyMentions } from "@/components/annotations/mention-input"
+import { MentionInput } from "@/components/annotations/mention-input"
+import type { MentionParticipant } from "@/components/annotations/mention-encoding"
 import { MentionText } from "@/components/annotations/mention-text"
 import { Check, ArrowUp, Trash2, X, Reply, Sparkles } from "lucide-react"
-
-interface MentionSelection {
-  displayName: string
-  email: string
-  startIndex: number
-}
 
 interface AnnotationReply {
   id: string
@@ -43,6 +38,19 @@ export interface AnnotationCardProps {
    * additive opt-in with no effect elsewhere.
    */
   onFix?: () => void
+  /**
+   * The @-mention directory for the reply box. Omitted (or empty) means
+   * nobody is mentionable on this surface, and the reply placeholder stops
+   * offering `@` rather than promising a picker that cannot open — which is
+   * what it did on every surface until 2026-09-03.
+   *
+   * Wired by the Viewer's review shell (the prototype's participants) and by
+   * the Editor when the repo is linked to a Viewer prototype. Notes and the
+   * canvas pass nothing: both are local-only, so there is no directory.
+   */
+  participants?: MentionParticipant[]
+  /** Invite-by-email from inside the picker. See `MentionInput`. */
+  onInvite?: (email: string) => Promise<MentionParticipant | null>
 }
 
 const BG_COLORS: Record<string, string> = {
@@ -70,15 +78,16 @@ const RING_COLORS: Record<string, string> = {
 /**
  * The card's surface: ground plus outline, per variant.
  *
- * Exported because the Viewer's NEW-comment composer is a different component
- * from this one (it has a mention picker that opens upward, so it cannot take
- * this card's `overflow-hidden`) and the two had drifted: the composer was
- * carrying a plain grey `border border-border` and `rounded-sm` while the
- * thread popup had a teal outline and `rounded`. Two cards that open in the
- * same place, one click apart, looking like two products.
+ * Exported because the NEW-comment composers are different components from
+ * this one, and they had drifted: one was carrying a plain grey
+ * `border border-border` and `rounded-sm` while the thread popup had a teal
+ * outline and `rounded`. Two cards that open in the same place, one click
+ * apart, looking like two products.
  *
- * One definition, two callers, so they cannot drift again. The radius is not
- * in here on purpose — it is a plain utility class both sides can write.
+ * One definition, several callers, so they cannot drift again. The radius is
+ * not in here on purpose: it is a plain utility class every side can write.
+ * Neither is `overflow-hidden`, which no card that hosts a `MentionInput` can
+ * take (its picker is absolutely positioned and opens out of the card).
  */
 export function annotationCardSurface(variant: "comment" | "note"): CSSProperties {
   return {
@@ -99,15 +108,19 @@ export function AnnotationCard({
   onDelete,
   onClose,
   onFix,
+  participants,
+  onInvite,
 }: AnnotationCardProps) {
   const [replyText, setReplyText] = useState("")
   const [showReplyInput, setShowReplyInput] = useState(false)
   const [replySubmitting, setReplySubmitting] = useState(false)
-  const replyMentionsRef = useRef<MentionSelection[]>([])
 
   const handleSubmitReply = useCallback(async () => {
     if (!replyText.trim() || replySubmitting) return
-    const encodedBody = encodeBodyMentions(replyText.trim(), replyMentionsRef.current)
+    // The body already carries `@[Name](id)` tokens: the picker writes the
+    // wire format straight into the text, so there is no separate mention
+    // list to reconcile at submit time.
+    const encodedBody = replyText.trim()
     // Await the handler so a CLI override returning `{ ok: false }`
     // (network rejection) keeps the draft intact. Default synchronous
     // callers return `void`, which we treat as success.
@@ -116,7 +129,6 @@ export function AnnotationCard({
       const result = await onReply(encodedBody)
       if (result && (result as { ok?: boolean }).ok === false) return
       setReplyText("")
-      replyMentionsRef.current = []
       setShowReplyInput(false)
     } finally {
       setReplySubmitting(false)
@@ -136,7 +148,6 @@ export function AnnotationCard({
         if (showReplyInput) {
           setShowReplyInput(false)
           setReplyText("")
-          replyMentionsRef.current = []
         } else {
           onClose()
         }
@@ -148,7 +159,12 @@ export function AnnotationCard({
 
   return (
     <div
-      className="group/card flex w-80 flex-col overflow-hidden rounded shadow-xl"
+      /* No `overflow-hidden`, deliberately, and for the same reason the
+         Viewer's new-comment composer dropped it: the reply box's mention
+         picker is absolutely positioned, so it opens out of the reply row
+         and a clip here cut its list in half. Nothing else needs it, since
+         the only child that paints to a corner is this element. */
+      className="group/card flex w-80 flex-col rounded shadow-xl"
       style={annotationCardSurface(variant)}
     >
       {/* Header — author + actions */}
@@ -203,11 +219,12 @@ export function AnnotationCard({
         <div className="border-t border-border p-3">
           <div className="relative">
             <MentionInput
-              placeholder="Reply… (@ to mention)"
+              placeholder="Reply"
               value={replyText}
               onChange={setReplyText}
               onKeyDown={handleKeyDown}
-              onMentionsChange={(m) => { replyMentionsRef.current = m }}
+              participants={participants}
+              onInvite={onInvite}
               className="min-h-[44px] resize-none bg-white pr-10 text-base"
               autoFocus
             />

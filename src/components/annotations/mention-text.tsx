@@ -1,24 +1,28 @@
 "use client"
 
 import type { ReactNode } from "react"
+import { MENTION_PATTERN } from "@/components/annotations/mention-encoding"
 
 interface MentionTextProps {
   text: string
 }
 
-// Match @[Display Name](email@example.com) pattern
-const MENTION_REGEX = /@\[([^\]]+)\]\(([^)]+)\)/g
-
 /**
  * Renders comment body text with @mentions highlighted.
- * Mentions stored as @[Name](email) are rendered as styled spans.
+ *
+ * Reads the SAME pattern the composer writes (`mention-encoding.ts`) rather
+ * than a private copy of the regex: a renderer that disagrees with the
+ * encoder shows a mention as raw `@[Name](id)` punctuation, which is how a
+ * body ends up looking like a bug in the middle of somebody's sentence.
  */
 export function MentionText({ text }: MentionTextProps) {
   const parts: ReactNode[] = []
   let lastIndex = 0
   let match: RegExpExecArray | null
 
-  const regex = new RegExp(MENTION_REGEX)
+  // A fresh instance per render: the shared pattern is global (`/g`), so
+  // sharing it would carry `lastIndex` between two bodies.
+  const regex = new RegExp(MENTION_PATTERN)
 
   while ((match = regex.exec(text)) !== null) {
     // Text before the mention
