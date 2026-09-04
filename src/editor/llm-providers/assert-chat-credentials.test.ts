@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { getDescriptor } from './provider-registry'
 import {
   ChatCredentialsMissingError,
   assertChatCredentials,
@@ -7,7 +8,7 @@ import {
 } from './assert-chat-credentials'
 
 /**
- * The BYO-key cutover for the chat lane.
+ * The BYO-key cutover for the chat lane, now per provider (Task 14).
  *
  * Before this gate existed, chat ran on whatever the bundled `claude` binary
  * was signed in with. Someone with a Claude subscription got a fully working
@@ -16,68 +17,132 @@ import {
  * forbid a distributed product from offering, and the old quickstart
  * advertised it in as many words: "Nothing extra to set."
  *
- * The non-chat provider registry already required an explicit choice. These
- * tests hold chat to the same rule.
+ * The gate used to check `ANTHROPIC_API_KEY` alone, which was correct back
+ * when Anthropic was the only provider. Now that a session can pick OpenAI,
+ * the gate has to check the credential the SESSION actually needs, not the
+ * one that happened to be first.
  */
-describe('chat credentials', () => {
-  it('accepts a real API key', () => {
-    expect(hasChatCredentials({ ANTHROPIC_API_KEY: 'sk-ant-abc123' })).toBe(true)
+describe('hasChatCredentials', () => {
+  it("checks the named provider's own key", () => {
+    expect(hasChatCredentials({ OPENAI_API_KEY: 'sk-y' }, 'openai')).toBe(true)
+    expect(hasChatCredentials({ OPENAI_API_KEY: 'sk-y' }, 'anthropic')).toBe(false)
+  })
+
+  it("does not let one provider's key admit another's session", () => {
+    // The defect this closes in both directions: an OpenAI session admitted by
+    // an unrelated Anthropic key, and an OpenAI-only user refused by a gate
+    // that only ever looked at ANTHROPIC_API_KEY.
+    expect(hasChatCredentials({ ANTHROPIC_API_KEY: 'sk-ant-x' }, 'openai')).toBe(false)
+    expect(hasChatCredentials({ OPENAI_API_KEY: 'sk-y' }, 'anthropic')).toBe(false)
+  })
+
+  it('accepts a real Anthropic API key', () => {
+    expect(hasChatCredentials({ ANTHROPIC_API_KEY: 'sk-ant-abc123' }, 'anthropic')).toBe(true)
   })
 
   it('refuses when nothing is configured', () => {
     // The case that matters: a distributed user whose `claude` binary happens
     // to be signed in. The runtime resolves, so the old code proceeded.
-    expect(hasChatCredentials({})).toBe(false)
-    expect(() => assertChatCredentials({})).toThrow(ChatCredentialsMissingError)
+    expect(hasChatCredentials({}, 'anthropic')).toBe(false)
+    expect(() => assertChatCredentials({}, 'anthropic')).toThrow(ChatCredentialsMissingError)
   })
 
   it('treats a blank or whitespace key as absent', () => {
     // A key set to "" is a common shape from a .env file with an empty value,
     // and reading it as present would restore the silent-subscription path
     // through the back door.
-    expect(hasChatCredentials({ ANTHROPIC_API_KEY: '' })).toBe(false)
-    expect(hasChatCredentials({ ANTHROPIC_API_KEY: '   ' })).toBe(false)
+    expect(hasChatCredentials({ ANTHROPIC_API_KEY: '' }, 'anthropic')).toBe(false)
+    expect(hasChatCredentials({ ANTHROPIC_API_KEY: '   ' }, 'anthropic')).toBe(false)
   })
 
-  it('accepts the subscription once it is explicitly opted into', () => {
-    expect(hasChatCredentials({ EDITOR_USE_CLAUDE_SUBSCRIPTION: '1' })).toBe(true)
-    expect(hasChatCredentials({ EDITOR_USE_CLAUDE_SUBSCRIPTION: 'true' })).toBe(true)
-    expect(hasChatCredentials({ EDITOR_USE_CLAUDE_SUBSCRIPTION: 'on' })).toBe(true)
+  it('treats a whitespace-only key as absent', () => {
+    expect(hasChatCredentials({ OPENAI_API_KEY: '   ' }, 'openai')).toBe(false)
+  })
+
+  it('counts the subscription opt-in only for a provider that has one', () => {
+    expect(hasChatCredentials({ EDITOR_USE_CLAUDE_SUBSCRIPTION: '1' }, 'anthropic')).toBe(true)
+    expect(hasChatCredentials({ EDITOR_USE_CLAUDE_SUBSCRIPTION: '1' }, 'openai')).toBe(false)
+  })
+
+  it('accepts other opt-in spellings, shared with the provider registry', () => {
+    expect(hasChatCredentials({ EDITOR_USE_CLAUDE_SUBSCRIPTION: 'true' }, 'anthropic')).toBe(true)
+    expect(hasChatCredentials({ EDITOR_USE_CLAUDE_SUBSCRIPTION: 'on' }, 'anthropic')).toBe(true)
   })
 
   it('does not accept a falsy-looking opt-in value', () => {
-    // Shares one definition with the provider registry, so the two lanes
-    // cannot drift on what counts as opting in.
-    expect(hasChatCredentials({ EDITOR_USE_CLAUDE_SUBSCRIPTION: '0' })).toBe(false)
-    expect(hasChatCredentials({ EDITOR_USE_CLAUDE_SUBSCRIPTION: 'false' })).toBe(false)
+    expect(hasChatCredentials({ EDITOR_USE_CLAUDE_SUBSCRIPTION: '0' }, 'anthropic')).toBe(false)
+    expect(hasChatCredentials({ EDITOR_USE_CLAUDE_SUBSCRIPTION: 'false' }, 'anthropic')).toBe(
+      false,
+    )
   })
 
-  describe('the refusal message', () => {
-    const message = chatCredentialsMessage()
+  it('is false for a provider nobody registered', () => {
+    expect(hasChatCredentials({ ANTHROPIC_API_KEY: 'sk-ant-x' }, 'moonshot')).toBe(false)
+  })
+})
 
-    it('leads with the settings gear, which is the only route in the desktop app', () => {
-      // A macOS app launched from Finder inherits launchd's environment, not a
-      // shell's, so telling a desktop user to export a variable is advice they
-      // cannot act on.
-      expect(message).toMatch(/settings gear/i)
-      expect(message.indexOf('settings gear')).toBeLessThan(message.indexOf('ANTHROPIC_API_KEY'))
-    })
+describe('assertChatCredentials', () => {
+  it('names the provider whose key is missing', () => {
+    expect(() => assertChatCredentials({}, 'openai')).toThrow(/OpenAI/)
+    expect(() => assertChatCredentials({}, 'openai')).toThrow(/OPENAI_API_KEY/)
+  })
 
-    it('says what still works, so the refusal is not read as the product being broken', () => {
-      expect(message).toMatch(/inspector/i)
-      expect(message).toMatch(/Commit and Publish/)
-    })
+  it('offers the subscription escape hatch only for anthropic', () => {
+    expect(() => assertChatCredentials({}, 'anthropic')).toThrow(/EDITOR_USE_CLAUDE_SUBSCRIPTION/)
+    let message = ''
+    try {
+      assertChatCredentials({}, 'openai')
+    } catch (err) {
+      message = (err as Error).message
+    }
+    expect(message).not.toContain('EDITOR_USE_CLAUDE_SUBSCRIPTION')
+  })
 
-    it('names the subscription opt-in last, and scoped to running it for yourself', () => {
-      expect(message).toContain('EDITOR_USE_CLAUDE_SUBSCRIPTION=1')
-      expect(message).toMatch(/only for yourself/i)
-      expect(message.indexOf('EDITOR_USE_CLAUDE_SUBSCRIPTION')).toBeGreaterThan(
-        message.indexOf('settings gear'),
-      )
-    })
+  it('refuses an unknown provider by name rather than passing it through', () => {
+    expect(() => assertChatCredentials({ ANTHROPIC_API_KEY: 'sk-ant-x' }, 'moonshot')).toThrow(
+      /moonshot/,
+    )
+  })
 
-    it('has no em dashes, which are banned in product copy', () => {
-      expect(message).not.toContain('—')
-    })
+  it('passes when the named provider is credentialed', () => {
+    expect(() => assertChatCredentials({ OPENAI_API_KEY: 'sk-y' }, 'openai')).not.toThrow()
+  })
+})
+
+describe('the refusal message', () => {
+  const anthropicDescriptor = getDescriptor('anthropic')!
+  const openaiDescriptor = getDescriptor('openai')!
+  const message = chatCredentialsMessage(anthropicDescriptor)
+
+  it('leads with the settings gear, which is the only route in the desktop app', () => {
+    // A macOS app launched from Finder inherits launchd's environment, not a
+    // shell's, so telling a desktop user to export a variable is advice they
+    // cannot act on.
+    expect(message).toMatch(/settings gear/i)
+    expect(message.indexOf('settings gear')).toBeLessThan(message.indexOf('ANTHROPIC_API_KEY'))
+  })
+
+  it('says what still works, so the refusal is not read as the product being broken', () => {
+    expect(message).toMatch(/inspector/i)
+    expect(message).toMatch(/Commit and Publish/)
+  })
+
+  it('names the subscription opt-in last, and scoped to running it for yourself', () => {
+    expect(message).toContain('EDITOR_USE_CLAUDE_SUBSCRIPTION=1')
+    expect(message).toMatch(/only for yourself/i)
+    expect(message.indexOf('EDITOR_USE_CLAUDE_SUBSCRIPTION')).toBeGreaterThan(
+      message.indexOf('settings gear'),
+    )
+  })
+
+  it('has no em dashes, which are banned in product copy', () => {
+    expect(message).not.toContain('—')
+  })
+
+  it('never mentions the subscription opt-in for a provider without one', () => {
+    const openaiMessage = chatCredentialsMessage(openaiDescriptor)
+    expect(openaiMessage).not.toContain('EDITOR_USE_CLAUDE_SUBSCRIPTION')
+    expect(openaiMessage).toMatch(/OpenAI API key/)
+    expect(openaiMessage).toMatch(/OPENAI_API_KEY/)
   })
 })

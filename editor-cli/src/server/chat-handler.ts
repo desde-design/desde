@@ -24,6 +24,10 @@
 import { randomUUID } from "node:crypto"
 import { assertChatCredentials } from "../../../src/editor/llm-providers/assert-chat-credentials.js"
 import { getProvider } from "../../../src/editor/llm-providers/registry.js"
+import {
+  isCredentialedFromEnv,
+  resolveDefaultProviderId,
+} from "../../../src/editor/llm-providers/provider-registry.js"
 import { resolveLlmConfig } from "./llm-config.js"
 import type { IncomingMessage, ServerResponse } from "node:http"
 
@@ -947,15 +951,21 @@ export async function handleChatRequest(
       }
     }
 
-    // Both-ends gating for the BYO-key cutover. The client already declines to
-    // present chat as configured (the credential probe reports `none`), and
-    // this is the server half: with no key the SDK would spawn the bundled
-    // `claude` binary, which authenticates with whatever subscription it is
-    // signed in with. Anthropic's Agent SDK terms do not permit a distributed
-    // product to offer claude.ai login, so the dispatch refuses rather than
-    // trusting a client that could be stale or hand-built. See
-    // src/editor/llm-providers/assert-chat-credentials.ts.
-    assertChatCredentials(process.env)
+    // Both-ends gating for the BYO-key cutover, now per provider. The client
+    // already declines to present an uncredentialed provider (its catalog
+    // group is not served), and this is the server half: the dispatch refuses
+    // rather than trusting a client that could be stale or hand-built.
+    //
+    // `effectiveModelConfig` is resolved above (request > session > default)
+    // and carries `.provider`; a turn with no config at all runs on the same
+    // default rule the catalog response uses.
+    const turnProviderId =
+      effectiveModelConfig?.provider ??
+      resolveDefaultProviderId({
+        env: process.env,
+        isCredentialed: (d) => isCredentialedFromEnv(d, process.env),
+      })
+    assertChatCredentials(process.env, turnProviderId)
 
     // The SDK runtime is the only chat runtime (the legacy in-house
     // orchestrator was removed 2026-07-21 — see CLAUDE.md § Editor —

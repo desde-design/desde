@@ -266,6 +266,30 @@ describe("handleChatRequest", () => {
     expect(mock.writes.join("")).not.toMatch(/Anthropic API key/i)
   })
 
+  it("gates the turn on the provider the session picked, not on Anthropic", async () => {
+    // MEASURED before this change: `assertChatCredentials(process.env)` ran at
+    // the turn gate with no provider argument, even though
+    // `effectiveModelConfig.provider` had already been resolved well above
+    // it. The data was in scope the whole time — the gate just never looked
+    // at it, so an OpenAI-configured session was checked against
+    // ANTHROPIC_API_KEY instead of OPENAI_API_KEY.
+    //
+    // Neutral chat has to be turned on for the request validator to accept
+    // an `openai` modelConfig at all — otherwise this would 400 before ever
+    // reaching the credential gate under test.
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    // Anthropic is credentialed; OpenAI is not. The old provider-blind gate
+    // would have let this turn proceed.
+    const mock = makeMockReqRes()
+    mock.setBody({
+      userMessage: "hi",
+      modelConfig: { provider: "openai", model: "gpt-5.2" },
+    })
+    await handleChatRequest(mock.req, mock.res, { repoRoot } as ChatHandlerContext)
+    const error = mock.events().find((e) => e.kind === "error")
+    expect(error?.reason).toMatch(/OpenAI/)
+  })
+
   it("forwards orchestrator events to the SSE stream", async () => {
     const mock = makeMockReqRes()
     mock.setBody({ userMessage: "hi" })
