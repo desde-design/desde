@@ -1,11 +1,21 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import type { ProjectKnowledge } from '../core/project-knowledge'
 import {
   buildSdkSystemPrompt,
+  CONTEXT_ENVELOPE_BLOCK,
+  EDIT_LIFECYCLE_BLOCK,
   EDITOR_APPEND_PROMPT,
+  EDITOR_TOOLS_BLOCK,
   FIGMA_APPEND_BLOCK,
+  FILESYSTEM_SCOPE_BLOCK,
+  MISSING_REFERENCE_BLOCK,
   SCREENSHOT_PLAN_APPEND_BLOCK,
+  VERIFY_EDITS_BLOCK,
+  WORKING_STYLE_BLOCK,
 } from './system-prompt'
 
 describe('buildSdkSystemPrompt', () => {
@@ -266,5 +276,29 @@ describe('buildSdkSystemPrompt', () => {
       const d = buildSdkSystemPrompt({ canvasEnabled: false })
       expect(c).toBe(d)
     })
+  })
+})
+
+describe('EDITOR_APPEND_PROMPT after the block split', () => {
+  it('is byte-identical to what it was before the split', () => {
+    const fixture = readFileSync(
+      join(__dirname, '__fixtures__', 'editor-append-prompt.txt'),
+      'utf8',
+    )
+    expect(EDITOR_APPEND_PROMPT).toBe(fixture)
+  })
+
+  it('is composed of the exported blocks, so the neutral lane reuses text rather than copying it', () => {
+    for (const block of [
+      EDITOR_TOOLS_BLOCK,
+      FILESYSTEM_SCOPE_BLOCK,
+      MISSING_REFERENCE_BLOCK,
+      EDIT_LIFECYCLE_BLOCK,
+      CONTEXT_ENVELOPE_BLOCK,
+      WORKING_STYLE_BLOCK,
+      VERIFY_EDITS_BLOCK,
+    ]) {
+      expect(EDITOR_APPEND_PROMPT).toContain(block)
+    }
   })
 })
