@@ -19,6 +19,7 @@ import {
   ALLOWED_COMPONENT_EXTENSIONS,
   ALLOWED_NEW_FILE_EXTENSIONS,
   buildCanUseTool,
+  buildToolPermissionGate,
   toRel,
   type OverwriteConflictDetected,
 } from './edit-ack'
@@ -1220,5 +1221,64 @@ describe('canUseTool — protected config files', () => {
       fakeOpts(),
     )
     expect(r.behavior).toBe('deny')
+  })
+})
+
+describe('buildToolPermissionGate', () => {
+  let root: string
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'editor-tool-gate-')))
+  })
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('denies a Read outside the worktree, which the SDK callback never sees', async () => {
+    const gate = buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true as const, editId: 'e1' }),
+    })
+    const decision = await gate('Read', { file_path: '/etc/passwd' }, {})
+    expect(decision.behavior).toBe('deny')
+    expect((decision as { message: string }).message).toMatch(/Read denied/)
+  })
+
+  it('allows an in-worktree Read', async () => {
+    const gate = buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true as const, editId: 'e1' }),
+    })
+    mkdirSync(join(root, 'src'), { recursive: true })
+    writeFileSync(join(root, 'src/App.vue'), '<template><div/></template>', 'utf8')
+    const decision = await gate('Read', { file_path: 'src/App.vue' }, {})
+    expect(decision).toEqual({ behavior: 'allow', updatedInput: {} })
+  })
+
+  it('honours a runtime-supplied blockedPath from the context', async () => {
+    const gate = buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true as const, editId: 'e1' }),
+    })
+    const decision = await gate('Glob', { pattern: '**' }, { blockedPath: '/etc' })
+    expect(decision.behavior).toBe('deny')
+    expect((decision as { message: string }).message).toMatch(/out of bounds/)
+  })
+
+  it('is the same closure buildCanUseTool wraps: a protected path is denied on both', async () => {
+    const opts = {
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true as const, editId: 'e1' }),
+    }
+    const gate = buildToolPermissionGate(opts)
+    const canUseTool = buildCanUseTool(opts)
+    const input = { file_path: '.mcp.json', content: '{}' }
+    const viaGate = await gate('Write', input, {})
+    const viaSdk = await canUseTool('Write', input, {} as never)
+    expect(viaGate.behavior).toBe('deny')
+    expect(viaSdk).not.toBeNull()
+    expect(viaSdk!.behavior).toBe('deny')
+    expect((viaSdk as { message: string }).message).toBe((viaGate as { message: string }).message)
   })
 })

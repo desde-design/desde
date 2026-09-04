@@ -50,6 +50,11 @@ import type { WebPolicy } from '../core/web-policy'
 import { isWebFetchAllowed } from '../core/web-policy'
 import { resolveSafeCreatePath } from '../edit-service/safe-create-path'
 import { isRootEscape } from './root-escape'
+import type {
+  PermissionDecision,
+  ToolPermissionContext,
+  ToolPermissionGate,
+} from '../agent-chat/tool-permission'
 
 /**
  * Renderable component / source-module extensions. Spans both
@@ -239,17 +244,24 @@ export interface BuildCanUseToolOpts {
 }
 
 /**
- * Build the `canUseTool` callback. Allows safe non-write tool calls;
- * intercepts `Write`/`Edit` for the ack flow; denies anything the SDK
- * has flagged via `blockedPath`.
+ * The policy, as a Desde-owned closure. Every rule this module enforces lives
+ * here and is reached by both lanes: path containment, the protected-path
+ * list, the new-file extension allowlist, the WebFetch host allowlist, the
+ * per-extension read-verb prefixes, the no-op refusal, `old_string`
+ * uniqueness, and stale-base conflict detection.
+ *
+ * The neutral lane calls this for EVERY tool including Read. The SDK lane
+ * reaches the identical closure through `buildCanUseTool` below, so a rule
+ * added here is added to both lanes at once and neither can be forgotten.
  */
-export function buildCanUseTool(opts: BuildCanUseToolOpts): CanUseTool {
-  return async (toolName, toolInput, options) => {
-    // Always honor the SDK's own out-of-bounds signal. When set, the
-    // SDK has determined `blockedPath` is outside allowed
-    // directories — auto-allowing would let the model bypass that.
-    if (options && typeof options.blockedPath === 'string' && options.blockedPath.length > 0) {
-      return deny(`SDK flagged path '${options.blockedPath}' as out of bounds`)
+export function buildToolPermissionGate(
+  opts: BuildCanUseToolOpts,
+): ToolPermissionGate {
+  return async (toolName, toolInput, ctx: ToolPermissionContext) => {
+    // Always honour a runtime's own out-of-bounds signal. The SDK sets it on
+    // its callback options; the neutral lane never does.
+    if (typeof ctx.blockedPath === 'string' && ctx.blockedPath.length > 0) {
+      return deny(`SDK flagged path '${ctx.blockedPath}' as out of bounds`)
     }
 
     if (toolName === 'Write') {
@@ -285,6 +297,25 @@ export function buildCanUseTool(opts: BuildCanUseToolOpts): CanUseTool {
       }
     }
     return allow()
+  }
+}
+
+/**
+ * The SDK binding. `PermissionResult` and `PermissionDecision` are
+ * structurally identical, so this is a type cast around one call, not a
+ * translation: there is nowhere for the two lanes to disagree.
+ */
+export function buildCanUseTool(opts: BuildCanUseToolOpts): CanUseTool {
+  const gate = buildToolPermissionGate(opts)
+  return async (toolName, toolInput, options) => {
+    const blockedPath =
+      options && typeof options.blockedPath === 'string' && options.blockedPath.length > 0
+        ? options.blockedPath
+        : undefined
+    const decision = await gate(toolName, toolInput, {
+      ...(blockedPath !== undefined ? { blockedPath } : {}),
+    })
+    return decision as PermissionResult
   }
 }
 
@@ -418,7 +449,7 @@ function findMatchingExternalRoot(
 function handleWebFetch(
   toolInput: Record<string, unknown>,
   opts: BuildCanUseToolOpts,
-): PermissionResult {
+): PermissionDecision {
   const policy = opts.webPolicy
   if (!policy) {
     return deny(
@@ -433,7 +464,7 @@ function handleWebFetch(
   return allow()
 }
 
-function handleWebSearch(opts: BuildCanUseToolOpts): PermissionResult {
+function handleWebSearch(opts: BuildCanUseToolOpts): PermissionDecision {
   const policy = opts.webPolicy
   if (!policy || !policy.webSearchEnabled) {
     return deny(
@@ -454,7 +485,7 @@ function handleWebSearch(opts: BuildCanUseToolOpts): PermissionResult {
 function handleExtensionTool(
   toolName: string,
   opts: BuildCanUseToolOpts,
-): PermissionResult {
+): PermissionDecision {
   const rest = toolName.slice('mcp__'.length)
   const sep = rest.indexOf('__')
   const id = sep === -1 ? rest : rest.slice(0, sep)
@@ -506,7 +537,7 @@ function handleExtensionTool(
 async function handleWrite(
   toolInput: Record<string, unknown>,
   opts: BuildCanUseToolOpts,
-): Promise<PermissionResult> {
+): Promise<PermissionDecision> {
   const rawPath = toolInput.file_path
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
     return deny('Write requires a non-empty file_path')
@@ -598,7 +629,7 @@ async function handleWrite(
 async function handleEdit(
   toolInput: Record<string, unknown>,
   opts: BuildCanUseToolOpts,
-): Promise<PermissionResult> {
+): Promise<PermissionDecision> {
   const rawPath = toolInput.file_path
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
     return deny('Edit requires a non-empty file_path')
@@ -708,7 +739,7 @@ async function emit(
   payload: EditProposalPayload,
   opts: BuildCanUseToolOpts,
   advance?: { absPath: string; nextHash: string },
-): Promise<PermissionResult> {
+): Promise<PermissionDecision> {
   const ack = await opts.emitEditProposal(payload)
   if (!ack.ok) {
     return deny(`User declined: ${ack.reason}`)
@@ -729,14 +760,14 @@ async function emit(
   return allow()
 }
 
-function allow(): PermissionResult {
+function allow(): PermissionDecision {
   // SDK's runtime Zod schema requires `updatedInput` as a record even though
   // the TypeScript type marks it optional. Pass an empty object to signal
   // "use the original input unchanged" and pass validation.
   return { behavior: 'allow', updatedInput: {} }
 }
 
-function deny(message: string): PermissionResult {
+function deny(message: string): PermissionDecision {
   return { behavior: 'deny', message }
 }
 
