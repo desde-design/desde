@@ -24,14 +24,14 @@ import {
   type MenuItemConstructorOptions,
 } from "electron"
 import { buildAppMenuItem } from "./app-menu.js"
-import { createBootLog } from "./boot-log.js"
+import { createBootLog, type BootLog } from "./boot-log.js"
 import { spawnPayloadChild, PayloadBootFailure, SHUTDOWN_GRACE_MS, type PayloadChildHandle } from "./child.js"
 import { createAutoDownloadMutationQueue } from "./auto-download-mutation-queue.js"
 import { createChildShutdownCoordinator } from "./child-shutdown-coordinator.js"
 import { createClaudeRuntimeController, type ClaudeRuntimeController } from "./claude-runtime-controller.js"
 import { ClaudeRuntimeInstallError } from "./claude-runtime-installer.js"
 import { shouldDownloadClaudeRuntime } from "./claude-runtime-gate.js"
-import { readStoredDevMode, readStoredProviderKeys } from "./llm-credentials-read.js"
+import { readStoredCredentialState } from "./llm-credentials-read.js"
 import { COPYRIGHT_LINE } from "./copyright.js"
 import { openExternalIfSafe } from "./external-url-guard.js"
 import { shouldPromptMoveToApplications } from "./first-launch.js"
@@ -169,17 +169,28 @@ function buildPayload(payloadRoot: string): Promise<void> {
 const PAYLOAD_MANIFEST_FILENAME = "payload-manifest.json"
 
 /**
+ * The short line logged whenever the gate decides the runtime is not
+ * wanted — at boot (the gate's first decision) and again if the user
+ * presses Retry from the settings menu and the answer hasn't changed. Retry
+ * is otherwise a silent no-op; a user who clicked it deserves a trace of why
+ * nothing happened, in the same place boot's own decision is recorded.
+ */
+export const CLAUDE_RUNTIME_NOT_WANTED_NOTICE =
+  "AI chat runtime install skipped: a configured provider does not need it."
+
+/**
  * Read the credential state fresh at EVERY call, never once at boot. The
  * settings-menu retry exists precisely for the user who just changed something,
  * and a cached answer would tell them the app still refuses to fetch what they
  * now need.
+ *
+ * Reads and parses the credential file ONCE per call, through
+ * `readStoredCredentialState` — the stored-keys and dev-mode readers used to
+ * be called separately here, each re-reading and re-parsing the same file.
  */
 function claudeRuntimeWanted(): boolean {
-  return shouldDownloadClaudeRuntime({
-    stored: readStoredProviderKeys(),
-    devMode: readStoredDevMode(),
-    env: process.env,
-  })
+  const { stored, devMode } = readStoredCredentialState(homedir())
+  return shouldDownloadClaudeRuntime({ stored, devMode, env: process.env })
 }
 
 /** `ms` rendered as the coarsest whole unit that reads naturally — "3 minutes", "2 hours", "5 days" — not a precise duration. Good enough for a diagnostic log line, not meant for anything that parses it back. */
@@ -465,7 +476,11 @@ function buildMenu(): Menu {
   return Menu.buildFromTemplate(template)
 }
 
-function registerIpcHandlers(updater: Updater, claudeRuntime: ClaudeRuntimeController): void {
+function registerIpcHandlers(
+  updater: Updater,
+  claudeRuntime: ClaudeRuntimeController,
+  bootLog: BootLog,
+): void {
   ipcMain.handle("desktop:pick-folder", async (): Promise<string | null> => {
     if (!mainWindow) return null
     const result = await dialog.showOpenDialog(mainWindow, { properties: ["openDirectory"] })
@@ -567,7 +582,10 @@ function registerIpcHandlers(updater: Updater, claudeRuntime: ClaudeRuntimeContr
   // there's nothing meaningful to return synchronously from a "kick off a
   // background install" call.
   ipcMain.on("desktop:claude-runtime:retry", () => {
-    if (!claudeRuntimeWanted()) return
+    if (!claudeRuntimeWanted()) {
+      bootLog(CLAUDE_RUNTIME_NOT_WANTED_NOTICE)
+      return
+    }
     claudeRuntime.ensure()
   })
 }
@@ -772,7 +790,11 @@ async function boot(): Promise<void> {
   claudeRuntime.onState((state) => {
     broadcastUpdateState(CLAUDE_RUNTIME_STATE_CHANNEL, state, BrowserWindow.getAllWindows())
   })
-  if (claudeRuntimeWanted()) claudeRuntime.ensure()
+  if (claudeRuntimeWanted()) {
+    claudeRuntime.ensure()
+  } else {
+    bootLog(CLAUDE_RUNTIME_NOT_WANTED_NOTICE)
+  }
 
   childHandle = await spawnPayloadChild({
     execPath: process.execPath,
@@ -821,7 +843,7 @@ async function boot(): Promise<void> {
   const launcherOrigin = loopbackHttpOrigin(childHandle.url)
   if (launcherOrigin) trustedOrigins.add(launcherOrigin)
 
-  registerIpcHandlers(updater, claudeRuntime)
+  registerIpcHandlers(updater, claudeRuntime, bootLog)
   createWindow(childHandle.url)
   Menu.setApplicationMenu(buildMenu())
 

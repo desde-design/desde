@@ -76,15 +76,7 @@ async function run(
   const { provider, calls } = scriptedProvider(steps)
   const events: ChatStreamEvent[] = []
   const result = await runChatTurnNeutral(
-    {
-      bridge,
-      worktreeRoot: root,
-      session: makeEmptySession('p1'),
-      userMessage: 'hello',
-      providerId: 'anthropic',
-      emit: (e: ChatStreamEvent) => events.push(e),
-      ...overrides,
-    } as never,
+    minimalOpts({ emit: (e: ChatStreamEvent) => events.push(e), ...overrides }) as never,
     { buildProvider: () => provider },
   )
   return { events, result, calls }
@@ -131,8 +123,7 @@ describe('the default provider path', () => {
   })
 
   it("fails fast with the provider's own message when no key is present, and builds nothing", async () => {
-    vi.unstubAllEnvs()
-    delete process.env.OPENAI_API_KEY
+    vi.stubEnv('OPENAI_API_KEY', '')
     const spy = vi.spyOn(OPENAI_DESCRIPTOR, 'buildProvider')
     const events: ChatStreamEvent[] = []
     try {
@@ -151,6 +142,7 @@ describe('the default provider path', () => {
       ).toBe(true)
     } finally {
       spy.mockRestore()
+      vi.unstubAllEnvs()
     }
   })
 })

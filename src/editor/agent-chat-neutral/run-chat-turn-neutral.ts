@@ -162,18 +162,21 @@ async function runInner(
     return failFast(opts, turnId, startedAt, `No provider named '${providerId}' is configured.`)
   }
   const model = opts.model ?? descriptor.staticCatalog.models.find((m) => m.isDefault)?.id
-  // The Anthropic descriptor only reaches this default path under the dev
-  // subscription override, where `hasSubscriptionRuntime` covers a missing
-  // key. Every other provider needs its own key: fail fast with the
-  // provider's own remediation message rather than build a provider with an
-  // empty bearer token.
-  const credentials = credentialsFromEnv(descriptor, process.env)
-  if (!credentials.apiKey && !descriptor.credentials.hasSubscriptionRuntime && !deps.buildProvider) {
-    return failFast(opts, turnId, startedAt, chatCredentialsMessage(descriptor))
+  let provider: LLMProvider
+  if (deps.buildProvider) {
+    provider = deps.buildProvider({ providerId, ...(model ? { model } : {}) })
+  } else {
+    // The Anthropic descriptor only reaches this default path under the dev
+    // subscription override, where `hasSubscriptionRuntime` covers a missing
+    // key. Every other provider needs its own key: fail fast with the
+    // provider's own remediation message rather than build a provider with an
+    // empty bearer token.
+    const credentials = credentialsFromEnv(descriptor, process.env)
+    if (!credentials.apiKey && !descriptor.credentials.hasSubscriptionRuntime) {
+      return failFast(opts, turnId, startedAt, chatCredentialsMessage(descriptor))
+    }
+    provider = descriptor.buildProvider({ ...credentials, ...(model ? { model } : {}) })
   }
-  const provider =
-    deps.buildProvider?.({ providerId, ...(model ? { model } : {}) }) ??
-    descriptor.buildProvider({ ...credentials, ...(model ? { model } : {}) })
 
   // ── Cost ceiling (pre-turn) ───────────────────────────────────────
   // Refuse before spending a single token if the session is already over.

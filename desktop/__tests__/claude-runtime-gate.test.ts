@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { readStoredDevMode, readStoredProviderKeys } from "../llm-credentials-read.js"
-import { shouldDownloadClaudeRuntime } from "../claude-runtime-gate.js"
+import { credentialed, isSubscriptionOptIn, shouldDownloadClaudeRuntime } from "../claude-runtime-gate.js"
 
 function homeWith(contents: unknown): string {
   const home = mkdtempSync(join(tmpdir(), "desde-cred-"))
@@ -58,6 +58,12 @@ describe("readStoredProviderKeys", () => {
       rmSync(bad, { recursive: true, force: true })
     }
   })
+
+  it("requires an explicit home — a defaulted home is the footgun a prior fix removed", () => {
+    // @ts-expect-error — `home` has no default; every caller must say whose
+    // credentials it means.
+    readStoredProviderKeys()
+  })
 })
 
 describe("shouldDownloadClaudeRuntime", () => {
@@ -110,5 +116,37 @@ describe("shouldDownloadClaudeRuntime", () => {
 
   it("ignores a provider entry with no key", () => {
     expect(shouldDownloadClaudeRuntime({ stored: { openai: {} }, devMode: false, env: {} })).toBe(true)
+  })
+})
+
+describe("credentialed", () => {
+  // Mirrors `isCredentialedFromEnv` (`src/editor/llm-providers/provider-registry.ts`):
+  // a whitespace-only key must not count as credentialed.
+  it("trims a whitespace-only env key to not-credentialed", () => {
+    expect(credentialed("openai", "OPENAI_API_KEY", {}, { OPENAI_API_KEY: "   " })).toBe(false)
+  })
+
+  it("trims a whitespace-only stored key to not-credentialed", () => {
+    expect(credentialed("openai", "OPENAI_API_KEY", { openai: { apiKey: "   " } }, {})).toBe(false)
+  })
+
+  it("still accepts a real key on either side", () => {
+    expect(credentialed("openai", "OPENAI_API_KEY", {}, { OPENAI_API_KEY: "sk-test" })).toBe(true)
+    expect(credentialed("openai", "OPENAI_API_KEY", { openai: { apiKey: "sk-test" } }, {})).toBe(true)
+  })
+})
+
+describe("isSubscriptionOptIn", () => {
+  // Mirrors `isClaudeSubscriptionOptIn` (`src/editor/llm-providers/claude-subscription.ts`):
+  // a shell-exported value keeps its surrounding whitespace.
+  it("trims surrounding whitespace before checking the accepted-values list", () => {
+    expect(isSubscriptionOptIn(" yes ")).toBe(true)
+    expect(isSubscriptionOptIn(" 1 ")).toBe(true)
+    expect(isSubscriptionOptIn(" TRUE ")).toBe(true)
+  })
+
+  it("rejects anything outside the accepted-values list", () => {
+    expect(isSubscriptionOptIn("nope")).toBe(false)
+    expect(isSubscriptionOptIn(undefined)).toBe(false)
   })
 })

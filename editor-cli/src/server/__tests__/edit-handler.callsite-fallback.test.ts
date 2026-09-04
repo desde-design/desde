@@ -30,6 +30,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { applyEdit, type ApplicatorLoaders, type EditRequestBody } from "../edit-handler.js"
+import type { ChatHandlerLoaders } from "../chat-handler.js"
 
 let llmInvocations = 0
 
@@ -341,5 +342,37 @@ describe("the edit-fix mini-turn runs on the project's own provider", () => {
       { llmProviderId: "anthropic" },
     )
     expect(loadRunEditFixMiniTurn).toHaveBeenCalled()
+  })
+
+  it("a refused chat runtime answers with a clean refusal, not a throw", async () => {
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "0")
+    try {
+      const loadRunEditFixMiniTurn = vi.fn(async () => ({
+        runEditFixMiniTurn: async () => {
+          throw new Error("should not be called — resolveChatRuntime refuses first")
+        },
+      }))
+      const loadRunChatTurnNeutral = vi.fn(async () => {
+        throw new Error("should not be called — resolveChatRuntime refuses before any loader runs")
+      })
+      const result = await applyEdit(
+        propEditBodyThatRefuses,
+        dir,
+        { ...applicatorLoaders, loadRunEditFixMiniTurn } as unknown as ApplicatorLoaders,
+        undefined,
+        {
+          llmProviderId: "openai",
+          chatLoaders: { loadRunChatTurnNeutral } as unknown as ChatHandlerLoaders,
+        },
+      )
+      expect(result.ok).toBe(false)
+      expect(result.status).toBeGreaterThanOrEqual(400)
+      expect(result.status).toBeLessThan(500)
+      expect(result.reason).toMatch(/neutral|turned off|not available/i)
+      expect(JSON.stringify(result)).not.toMatch(/at .*\.ts:\d+/)
+      expect(loadRunChatTurnNeutral).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })

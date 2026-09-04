@@ -12,12 +12,31 @@
  * 200MB download they will never run.
  */
 import { readFile } from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { PROVIDER_DESCRIPTORS } from './provider-registry'
 
+// Resolved from this file's own location, not the process cwd — the suite
+// that imports this file (root `npm run test`, or `vitest run --root
+// editor-cli ...` from a different cwd) must find the same file either way.
+// `path.resolve` on the plain file path rather than a relative `new URL(...,
+// import.meta.url)` — under the `jsdom` test environment, `URL`'s own
+// relative resolution falls back to `http://localhost:3000/...` once the
+// `..` segments exceed the base path's depth, silently losing the file:
+// scheme.
+const GATE_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../../desktop/claude-runtime-gate.ts',
+)
+
+async function gateSource(): Promise<string> {
+  return readFile(GATE_PATH, 'utf8')
+}
+
 describe('desktop claude-runtime gate', () => {
   it('names every descriptor api-key environment variable', async () => {
-    const source = await readFile('desktop/claude-runtime-gate.ts', 'utf8')
+    const source = await gateSource()
     for (const descriptor of PROVIDER_DESCRIPTORS) {
       expect(
         source.includes(descriptor.credentials.apiKeyEnvVar),
@@ -27,9 +46,21 @@ describe('desktop claude-runtime gate', () => {
   })
 
   it('names every descriptor id', async () => {
-    const source = await readFile('desktop/claude-runtime-gate.ts', 'utf8')
+    const source = await gateSource()
     for (const descriptor of PROVIDER_DESCRIPTORS) {
       expect(source.includes(`'${descriptor.id}'`) || source.includes(`"${descriptor.id}"`), descriptor.id).toBe(true)
     }
+  })
+
+  it('accepts the same opt-in values as isClaudeSubscriptionOptIn, trimmed', async () => {
+    const source = await gateSource()
+    expect(source).toMatch(/\["1",\s*"true",\s*"yes",\s*"on"\]/)
+    expect(source).toContain('.trim().toLowerCase()')
+  })
+
+  it('trims a stored or env credential before checking its length, like isCredentialedFromEnv', async () => {
+    const source = await gateSource()
+    expect(source).toContain('storedKey = stored[id]?.apiKey?.trim()')
+    expect(source).toContain('envKey = env[apiKeyEnvVar]?.trim()')
   })
 })

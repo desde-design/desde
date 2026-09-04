@@ -35,7 +35,6 @@ const PROJECT_ID = "self-host-harness"
  * ever say "Anthropic" cannot show that.
  */
 export const MOCK_CHAT_MODEL = "claude-opus-4-8"
-export const MOCK_CHAT_PROVIDER = "anthropic"
 
 /** A completed turn with assistant text + a Grep tool-use container. */
 function exampleTurn(

@@ -40,20 +40,32 @@ const NON_ANTHROPIC_PROVIDERS: ReadonlyArray<{ id: string; apiKeyEnvVar: string 
 /** The Anthropic-only subscription opt-in. Its presence means the binary is wanted. */
 const SUBSCRIPTION_ENV = "EDITOR_USE_CLAUDE_SUBSCRIPTION"
 
-function isSubscriptionOptIn(value: string | undefined): boolean {
+/**
+ * Mirrors `isClaudeSubscriptionOptIn` (`src/editor/llm-providers/claude-subscription.ts`).
+ * Trimmed exactly the same way — a shell-exported value with surrounding
+ * whitespace (`EDITOR_USE_CLAUDE_SUBSCRIPTION=" yes "`) must read as opted in
+ * here the same way it does in the CLI, or the two would disagree on whether
+ * the bundled binary is wanted.
+ */
+export function isSubscriptionOptIn(value: string | undefined): boolean {
   if (value === undefined) return false
-  return ["1", "true", "yes", "on"].includes(value.toLowerCase())
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase())
 }
 
-function credentialed(
+/**
+ * Mirrors `isCredentialedFromEnv`'s env half (`src/editor/llm-providers/provider-registry.ts`):
+ * `.trim()` before the length check, so a whitespace-only key does not count
+ * as credentialed.
+ */
+export function credentialed(
   id: string,
   apiKeyEnvVar: string,
   stored: Record<string, StoredProviderCredential>,
   env: NodeJS.ProcessEnv,
 ): boolean {
-  const storedKey = stored[id]?.apiKey
+  const storedKey = stored[id]?.apiKey?.trim()
   if (typeof storedKey === "string" && storedKey.length > 0) return true
-  const envKey = env[apiKeyEnvVar]
+  const envKey = env[apiKeyEnvVar]?.trim()
   return typeof envKey === "string" && envKey.length > 0
 }
 
