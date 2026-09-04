@@ -52,6 +52,27 @@ export interface ModelCatalogResponse {
 let catalogCache: ModelCatalogResponse | null = null
 
 /**
+ * Bumped on every `setCatalogCache`/`invalidateModelCatalogCache` call,
+ * INCLUDING an invalidation that leaves `catalogCache` at `null` (a failed
+ * first fetch never set it away from `null`, so invalidating it afterward
+ * is a null-to-null "change").
+ *
+ * `ModelPickerChip`'s fetch effect used to key its retry off `catalogCache`
+ * itself. After a failed fetch, `catalogCache` was already `null`; calling
+ * `invalidateModelCatalogCache()` set it to `null` again, so
+ * `useSyncExternalStore`'s snapshot was unchanged, React never re-rendered,
+ * and the effect never reran — the chip stayed hidden forever after the
+ * user saved a key, the exact case invalidation exists to fix. This counter
+ * changes on every invalidation regardless of the cache's own value, so a
+ * `useSyncExternalStore` subscription on it always sees the invalidation.
+ */
+let version = 0
+
+export function getCatalogVersion(): number {
+  return version
+}
+
+/**
  * What the user picked through the chip since the page loaded.
  *
  * MODULE scope, deliberately, and it has to match `catalogCache`'s lifetime
@@ -77,6 +98,7 @@ export function getCatalogCache(): ModelCatalogResponse | null {
  */
 export function setCatalogCache(value: ModelCatalogResponse | null): void {
   catalogCache = value
+  version += 1
   notify()
 }
 
@@ -105,5 +127,6 @@ export function subscribeCatalogCache(onChange: () => void): () => void {
 export function invalidateModelCatalogCache(): void {
   catalogCache = null
   pickedThisLoad = null
+  version += 1
   notify()
 }

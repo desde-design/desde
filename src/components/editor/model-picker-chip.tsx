@@ -56,6 +56,7 @@ import { reconcileSessionModelConfig } from "@/editor/core/model-catalog"
 import type { EffortLevel, SessionModelConfig } from "@/editor/core/model-catalog"
 import {
   getCatalogCache,
+  getCatalogVersion,
   getPickedThisLoad,
   setCatalogCache,
   setPickedThisLoad,
@@ -152,6 +153,17 @@ export function ModelPickerChip({
   // every mounted chip renders the same catalog without a `useEffect` ever
   // having to call `setState` for a value that already changed elsewhere.
   const catalog = useSyncExternalStore(subscribeCatalogCache, getCatalogCache, getCatalogCache)
+  // A separate snapshot from `catalog` itself: after a failed fetch,
+  // `catalog` stays `null`, and invalidating a cache that is already
+  // `null` is a null-to-null "change" `useSyncExternalStore` can't see —
+  // see `getCatalogVersion`'s doc comment in `model-catalog-cache.ts`. This
+  // counter changes on every invalidation regardless, so the fetch effect
+  // below keys off it instead of off `catalog`.
+  const catalogVersion = useSyncExternalStore(
+    subscribeCatalogCache,
+    getCatalogVersion,
+    getCatalogVersion,
+  )
   const [catalogFailed, setCatalogFailed] = useState(false)
   // The rail passes an inline arrow, so `onChange`'s identity changes
   // every render. Hold it in a ref so it stays out of the sync effect's
@@ -212,7 +224,7 @@ export function ModelPickerChip({
     return () => {
       cancelled = true
     }
-  }, [catalog])
+  }, [catalogVersion])
 
   // Keep session state in agreement with what the server will run.
   // Idempotent by construction: every branch either leaves `value`

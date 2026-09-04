@@ -176,11 +176,10 @@ function buildProvider(config: LLMConfig, env: NodeJS.ProcessEnv): LLMProvider {
   // INSTANCE, so two providers with different keys coexist in one process
   // without cross-wiring. Falls back to the provider's own descriptor env var
   // when the caller's config left `apiKeyEnv` unset.
+  const creds = credentialsFromEnv(descriptor, env)
   const apiKeyEnvVar = config.apiKeyEnv ?? descriptor.credentials.apiKeyEnvVar
-  const apiKey = config.apiKeyEnv
-    ? env[config.apiKeyEnv]?.trim()
-    : credentialsFromEnv(descriptor, env).apiKey
-  const baseUrl = config.baseUrl ?? credentialsFromEnv(descriptor, env).baseUrl
+  const apiKey = config.apiKeyEnv ? env[config.apiKeyEnv]?.trim() : creds.apiKey
+  const baseUrl = config.baseUrl ?? creds.baseUrl
 
   // Fail here, with instructions, rather than at the first call with a
   // provider-internal 401 that reads like a bug in Editor. This used to fire

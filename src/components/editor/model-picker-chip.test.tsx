@@ -740,3 +740,35 @@ describe("ModelPickerChip — forgets its catalog when invalidated", () => {
     })
   })
 })
+
+/**
+ * CX7 item 2: after a FAILED first fetch, `catalogCache` is already `null`.
+ * `invalidateModelCatalogCache()` sets it to `null` again — a change
+ * `useSyncExternalStore` can't see if the fetch effect keys off the cache
+ * value itself, so the effect never reruns and the chip stays hidden
+ * forever, even after the user saves the key the failure was about.
+ */
+describe("ModelPickerChip — recovers from a failed first fetch once invalidated", () => {
+  it("refetches and renders after invalidation, even though the first fetch failed", async () => {
+    vi.resetModules()
+    const { ModelPickerChip, invalidateModelCatalogCache } = await import(
+      "./model-picker-chip"
+    )
+    const { editorFetch } = await import("@/lib/editor-fetch")
+    vi.mocked(editorFetch)
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => CATALOG_RESPONSE,
+      } as unknown as Response)
+
+    const { container } = render(<ModelPickerChip value={null} onChange={() => {}} />)
+    await waitFor(() => expect(container).toBeEmptyDOMElement())
+
+    invalidateModelCatalogCache()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("editor-model-chip")).toHaveTextContent("Opus 4.8")
+    })
+  })
+})

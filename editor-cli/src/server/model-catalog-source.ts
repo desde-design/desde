@@ -80,10 +80,13 @@ import { getRateCard, UNKNOWN_MODEL_RATE } from "../../../src/editor/llm-provide
 import { isNeutralChatEnabled } from "./dormant-surfaces.js"
 
 /**
- * `source` describes the STRONGEST live source that answered for any provider
- * this resolution served, or "static" when none did. It is informational (the
- * catalog response carries it for diagnostics); it is not how any consumer
- * decides which provider to use — `resolveDefaultProviderId` is.
+ * `source` describes the WEAKEST live source among the providers this
+ * resolution served, or "static" when any of them fell back to it. It is
+ * informational (the catalog response carries it for diagnostics); it is
+ * not how any consumer decides which provider to use —
+ * `resolveDefaultProviderId` is. The weakest-not-strongest choice is what
+ * routes a partial fallback (one provider live, another static) into the
+ * shorter failure TTL below, rather than the longer success one.
  */
 export type ModelCatalogSource = "api" | "cli" | "static"
 
@@ -305,7 +308,6 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
         log(`the ${descriptor.id} source listed no models; using the built-in list`)
         return { catalog: descriptor.staticCatalog, source: "static" }
       }
-      logUnknownRateCardsOnce(descriptor, merged)
       return { catalog: merged, source: useCli ? "cli" : "api" }
     } catch (err) {
       log(
@@ -323,7 +325,18 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
       // to show on first run, so the precedence default's own static
       // catalog is served alone. The chat gate refuses the turn exactly as
       // it always has — this is display-only.
-      const fallback = getDescriptor(DEFAULT_PROVIDER_PRECEDENCE[0])
+      //
+      // The precedence id itself may not be SERVABLE (`descriptors` is
+      // already filtered by `chatRuntimeServable`, e.g. a neutral-chat-only
+      // provider with the flag off) — pick the first precedence id that IS
+      // in `descriptors`, falling back to whichever descriptor is servable
+      // at all, rather than unconditionally trusting
+      // `DEFAULT_PROVIDER_PRECEDENCE[0]`.
+      const precedenceId = DEFAULT_PROVIDER_PRECEDENCE.find((id) =>
+        descriptors.some((d) => d.id === id),
+      )
+      const fallback = precedenceId ? getDescriptor(precedenceId) : descriptors[0]
+      if (fallback) logUnknownRateCardsOnce(fallback, fallback.staticCatalog)
       return { catalogs: fallback ? [fallback.staticCatalog] : [], source: "static" }
     }
     const controller = new AbortController()
@@ -333,6 +346,14 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
         credentialed.map((d) => catalogFor(d, currentEnv, controller.signal)),
       )
       const catalogs = results.map((r) => r.catalog)
+      // Checked over the FINAL served catalogs, not just a live-source
+      // success inside `catalogFor` — a provider that fell back to its
+      // static catalog (no key, live source failed, or nothing credentialed
+      // at all) still serves models, and those deserve the same rate-card
+      // check a live-sourced model gets.
+      for (let i = 0; i < credentialed.length; i++) {
+        logUnknownRateCardsOnce(credentialed[i], catalogs[i])
+      }
       // The WEAKEST source among served providers, not the strongest: a
       // partial fall-back (one provider live, another static) has to read as
       // "static" so the cache below holds it for the shorter failure TTL,

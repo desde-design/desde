@@ -338,7 +338,15 @@ export type BrokeredWriteResult<E = void> =
       /** Repo-relative path of the failing op — for the caller's message. */
       repoRel: string
       op: BrokerOp
-      backupDir: string
+      /**
+       * Absent under the same condition as the `ok: true` case above: an
+       * empty `journal` (every op in the batch was `allowCreate`, so
+       * `writeBackupJournal` never created the directory on disk). A failed
+       * rollback of an all-new-file batch has nothing to point the user at
+       * — see `rollbackWarning`, which drops the "Recover from" clause when
+       * this is absent.
+       */
+      backupDir?: string
       /** Repo-relative paths successfully rolled back. */
       rolledBack: string[]
       /** Non-fatal rollback failures, formatted for logging. */
@@ -356,7 +364,12 @@ export type BrokeredWriteResult<E = void> =
 export function rollbackWarning(result: BrokeredWriteResult<unknown>): string {
   if (result.ok || result.stage !== 'write') return ''
   if (result.restoreErrors.length === 0) return ''
-  return ` WARNING: could not restore ${result.restoreErrors.join('; ')}. Recover from '${result.backupDir}'.`
+  // `backupDir` is absent for an all-new-file batch (empty journal — see
+  // its own doc comment above): there is no directory to point at, so the
+  // "Recover from" clause is dropped rather than naming a path that was
+  // never created on disk.
+  const recover = result.backupDir ? ` Recover from '${result.backupDir}'.` : ''
+  return ` WARNING: could not restore ${result.restoreErrors.join('; ')}.${recover}`
 }
 
 function defaultInvalidatePaths(ops: ReadonlyArray<BrokerOp>): string[] {
@@ -1065,7 +1078,11 @@ async function brokeredWriteImpl<E = void>(
       reason: (err as Error).message,
       repoRel: attribution.op.repoRel,
       op: attribution.op,
-      backupDir: backup.backupDir,
+      // Same `journal.length > 0` condition the success path uses (see
+      // `writeBackupJournal`'s own note): an empty journal means the
+      // directory was never created on disk, so it must not be reported
+      // here either.
+      ...(opts.journal.length > 0 ? { backupDir: backup.backupDir } : {}),
       rolledBack: [],
       restoreErrors: [],
     }
@@ -1091,7 +1108,9 @@ async function brokeredWriteImpl<E = void>(
       reason: outcome.reason,
       repoRel: outcome.failure.repoRel,
       op: outcome.failure,
-      backupDir: backup.backupDir,
+      // Same `journal.length > 0` condition as above and as the success
+      // path — an empty journal never created the directory on disk.
+      ...(opts.journal.length > 0 ? { backupDir: backup.backupDir } : {}),
       rolledBack: outcome.rolledBack,
       restoreErrors: outcome.restoreErrors,
     }

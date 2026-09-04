@@ -22,6 +22,11 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(home, { recursive: true, force: true })
+  // A test that spies on console.warn and fails before its own
+  // `mockRestore()` would otherwise leave the spy in place and silently
+  // swallow (or mis-attribute) console.warn calls in every test that runs
+  // after it.
+  vi.restoreAllMocks()
 })
 
 const configDir = () => join(home, ".config", "desde")
@@ -290,6 +295,53 @@ describe("cx1: independent field migration and per-slot sanitization", () => {
     expect(
       (onDisk.providers as Record<string, { apiKey?: string }>).anthropic.apiKey,
     ).toBe("sk-ant-keep-me")
+    expect(
+      (onDisk.providers as Record<string, { apiKey?: string }>).openai.apiKey,
+    ).toBe("sk-new")
+    warn.mockRestore()
+  })
+
+  it("keeps a v2 key when devMode is the wrong type, and the next write persists it as a real boolean", async () => {
+    // Same data-loss class as the v1 case above, one line down: a v2 file
+    // with a malformed (non-boolean) `devMode` used to discard the WHOLE
+    // file via `return defaults()`, silently deleting a real key.
+    await writeRawFile(home, {
+      version: 2,
+      providers: { anthropic: { apiKey: "sk-ant-keep-me" } },
+      devMode: "yes",
+      promptDismissed: false,
+    })
+    expect(await readLlmCredentials(home)).toEqual({
+      providers: { anthropic: { apiKey: "sk-ant-keep-me" } },
+      devMode: false,
+    })
+    await setPromptDismissed(true, home)
+    const onDisk = JSON.parse(await fs.readFile(llmCredentialFilePath(home), "utf8")) as Record<
+      string,
+      unknown
+    >
+    expect(
+      (onDisk.providers as Record<string, { apiKey?: string }>).anthropic.apiKey,
+    ).toBe("sk-ant-keep-me")
+    expect(onDisk.devMode).toBe(false)
+  })
+
+  it("warns about a malformed slot once per process, not once per read", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    // A provider id unique to this test, so an earlier test's warning for
+    // 'openai' (already de-duplicated by the time this test runs, since
+    // the warned-ids set is module-level) can't make this assertion pass
+    // for the wrong reason.
+    await writeRawFile(home, {
+      version: 2,
+      providers: { "cx7-dedup-vendor": { apiKey: 42 } },
+      devMode: false,
+      promptDismissed: false,
+    })
+    await readLlmCredentials(home)
+    await readLlmCredentials(home)
+    const matching = warn.mock.calls.filter((call) => call.join(" ").includes("cx7-dedup-vendor"))
+    expect(matching).toHaveLength(1)
     warn.mockRestore()
   })
 })

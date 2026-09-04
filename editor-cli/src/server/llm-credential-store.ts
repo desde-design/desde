@@ -97,6 +97,27 @@ function migrateV1(file: LlmCredentialFileV1): LlmCredentialFile {
 }
 
 /**
+ * Provider ids already warned about for a malformed slot, this process.
+ *
+ * `readFile` runs on every credential read, and a malformed slot stays
+ * malformed until the user re-enters that provider's key — so without this,
+ * one bad slot would print the same warning to a real user's terminal on
+ * every single read for the rest of the process's life. De-duplicated by
+ * provider id, not by read, since the point is "tell them once, not never
+ * again" rather than "tell them once per corrupt value".
+ */
+const warnedMalformedProviders = new Set<string>()
+
+function warnMalformedProviderOnce(id: string): void {
+  if (warnedMalformedProviders.has(id)) return
+  warnedMalformedProviders.add(id)
+  // Never log the value itself, only the provider id: this warning can
+  // reach a real user's terminal, and the value may be (a fragment of) a
+  // secret.
+  console.warn(`[llm-credentials] ignoring a malformed entry for provider '${id}'`)
+}
+
+/**
  * Every slot must be an object of optional strings. A malformed slot is
  * dropped on its own, not treated as a reason to discard the whole file: one
  * corrupt provider must not destroy every other provider's valid key. Only
@@ -108,18 +129,15 @@ function sanitizeProviders(raw: unknown): Record<string, StoredProviderCredentia
   const out: Record<string, StoredProviderCredentials> = {}
   for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      // Never log the value itself, only the provider id: this warning can
-      // reach a real user's terminal, and the value may be (a fragment of) a
-      // secret.
-      console.warn(`[llm-credentials] ignoring a malformed entry for provider '${id}'`)
+      warnMalformedProviderOnce(id)
       continue
     }
     const slot = value as Record<string, unknown>
-    if (
+    const malformed =
       (slot.apiKey !== undefined && typeof slot.apiKey !== "string") ||
       (slot.baseUrl !== undefined && typeof slot.baseUrl !== "string")
-    ) {
-      console.warn(`[llm-credentials] ignoring a malformed entry for provider '${id}'`)
+    if (malformed) {
+      warnMalformedProviderOnce(id)
       continue
     }
     out[id] = {
@@ -142,13 +160,16 @@ async function readFile(path: string): Promise<LlmCredentialFile> {
     // A file from a future/older schema is ignored rather than thrown on: the
     // cost is re-entering a key, versus the CLI refusing to start.
     if (file.version !== SCHEMA_VERSION) return defaults()
-    if (typeof file.devMode !== "boolean") return defaults()
     const providers = sanitizeProviders(file.providers)
     if (providers === null) return defaults()
     return {
       version: SCHEMA_VERSION,
       providers,
-      devMode: file.devMode,
+      // Tolerated rather than rejected, same as `promptDismissed` below: a
+      // malformed or missing `devMode` used to discard the WHOLE file (via
+      // `return defaults()`), which silently deleted a real user's key —
+      // the same data-loss class CX1 removed from the v1 migration path.
+      devMode: file.devMode === true,
       // Tolerated rather than rejected: a file written before this field
       // existed is otherwise valid, and discarding it would drop the key.
       promptDismissed: typeof file.promptDismissed === "boolean" ? file.promptDismissed : false,

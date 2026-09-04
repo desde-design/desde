@@ -416,15 +416,77 @@ describe('brokeredWrite', () => {
     expect(result.rolledBack).toEqual([])
     expect(result.restoreErrors).toHaveLength(1)
     expect(result.restoreErrors[0]).toContain('sub/a.vue')
-    // The journal survives, so the caller's "recover from …" pointer is real.
-    expect(readFileSync(join(root, result.backupDir, 'sub', 'a.vue'), 'utf8')).toBe(
+    // The journal survives (this batch's journal was non-empty), so the
+    // caller's "recover from …" pointer is real — `backupDir` is only
+    // absent for an all-new-file (empty-journal) batch, not this one.
+    expect(result.backupDir).toBeDefined()
+    expect(readFileSync(join(root, result.backupDir!, 'sub', 'a.vue'), 'utf8')).toBe(
       'A-ORIGINAL',
     )
     // And the caller-facing suffix names the file + the recovery path.
     const warning = rollbackWarning(result)
     expect(warning).toContain('could not restore')
     expect(warning).toContain('sub/a.vue')
-    expect(warning).toContain(result.backupDir)
+    expect(warning).toContain(result.backupDir!)
+  })
+
+  it('CX7 item 5: a failed rollback of an all-new-file batch (empty journal) names no directory in the warning', async () => {
+    // Two brand-new files, so `journal` is empty and `writeBackupJournal`
+    // never creates the backup directory on disk (same fact
+    // `writeBackupJournal`'s own doc comment and the "reports no backupDir"
+    // test above establish). A rollback failure on THIS shape used to say
+    // "Recover from '<dir that never existed>'" — `backupDir` was reported
+    // unconditionally on the write-stage failure even though the success
+    // path already knew to omit it for an empty journal.
+    async function* sabotageA(): AsyncGenerator<string> {
+      // Runs while B's write is in flight, right after A has already
+      // landed — turns A into a non-empty directory so ITS OWN rollback
+      // (unlink, since it's unjournaled/new) fails for real, not just by
+      // simulation.
+      rmSync(join(root, 'a-new.vue'))
+      mkdirSync(join(root, 'a-new.vue'))
+      writeFileSync(join(root, 'a-new.vue', 'inner'), 'x')
+      yield 'B-NEW'
+    }
+
+    const result = await brokeredWrite({
+      canonicalRoot: root,
+      journal: [],
+      ops: [
+        {
+          kind: 'write',
+          repoRel: 'a-new.vue',
+          absPath: join(root, 'a-new.vue'),
+          ensureDir: true,
+          isNew: true,
+          content: 'A-NEW',
+        },
+        {
+          kind: 'write',
+          repoRel: 'b-new.vue',
+          absPath: join(root, 'b-new.vue'),
+          ensureDir: true,
+          isNew: true,
+          content: sabotageA() as unknown as Buffer,
+        },
+        sentinelOp(),
+      ],
+      lockManager,
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok || result.stage !== 'write') return
+    // B rolled back cleanly (plain unlink); A's rollback failed (EPERM:
+    // unlink on a non-empty directory).
+    expect(result.rolledBack).toEqual(['b-new.vue'])
+    expect(result.restoreErrors).toHaveLength(1)
+    expect(result.restoreErrors[0]).toContain('a-new.vue')
+    // The empty-journal fact, carried through to the failure result.
+    expect(result.backupDir).toBeUndefined()
+
+    const warning = rollbackWarning(result)
+    expect(warning).toContain('could not restore')
+    expect(warning).not.toContain('Recover from')
   })
 
   it('a concurrent writer cannot be clobbered by a later rollback (codex batch-5 P2)', async () => {

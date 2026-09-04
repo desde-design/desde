@@ -13,7 +13,7 @@ import type { IncomingMessage, ServerResponse } from "node:http"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   __resetActiveTurnsForTest,
@@ -28,6 +28,8 @@ import {
 import { newSecurityContext } from "../auth.js"
 import { startHttpServer, type HttpServerHandle } from "../http-server.js"
 import { pickFreePort } from "../launcher-server.js"
+import { setModelCatalogLiveSourcesForTests } from "../model-catalog-source.js"
+import { assertChatCredentials } from "../../../../src/editor/llm-providers/assert-chat-credentials.js"
 
 // The BYO-key cutover: chat dispatch now refuses without a model credential,
 // because the SDK would otherwise spawn the bundled `claude` binary and run on
@@ -42,6 +44,20 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs()
 })
+
+// A `modelConfig` on a request drives `modelCatalogResolver` down its live
+// branch. Without a stub here, a stubbed ANTHROPIC_API_KEY sends that
+// resolver to the REAL Anthropic Models API before falling back to the
+// static catalog — slow, flaky offline, and it logs a fallback error on
+// every run of this file. Same pair the neutral-gate suite
+// (`http-server-neutral-chat-gate.integration.test.ts`) already installs.
+beforeAll(() => {
+  setModelCatalogLiveSourcesForTests({
+    listViaApi: { anthropic: async () => [], openai: async () => [] },
+    listViaCli: async () => [],
+  })
+})
+afterAll(() => setModelCatalogLiveSourcesForTests(null))
 
 
 interface MockReqRes {
@@ -271,7 +287,7 @@ describe("handleChatRequest", () => {
     expect(mock.writes.join("")).not.toMatch(/Anthropic API key/i)
   })
 
-  it("gates the turn on the provider the session picked, not on Anthropic", async () => {
+  it("excludes an uncredentialed provider from the catalog, so its request 400s there rather than at the turn gate", async () => {
     // MEASURED before this change: `assertChatCredentials(process.env)` ran at
     // the turn gate with no provider argument, even though
     // `effectiveModelConfig.provider` had already been resolved well above
@@ -297,6 +313,58 @@ describe("handleChatRequest", () => {
     expect((mock.res as unknown as { statusCode: number }).statusCode).toBe(400)
     const body = JSON.parse(mock.endBody() ?? "{}")
     expect(body.error).toMatch(/openai/i)
+  })
+
+  it("never reaches api.anthropic.com or api.openai.com for a chat request", async () => {
+    // Without the `setModelCatalogLiveSourcesForTests` stub above, a
+    // request carrying a `modelConfig` drives the resolver down its live
+    // branch, and a stubbed fake key would reach the REAL vendor Models
+    // API. This is the assertion that proves the stub is actually doing
+    // that job, for one representative POST — not just that the suite
+    // happens to run fast.
+    //
+    // The thrown error is also RECORDED, not just thrown: `catalogFor` in
+    // `model-catalog-source.ts` catches any live-source failure and falls
+    // back to the static catalog by design, so a network reach that throws
+    // here would otherwise be silently swallowed a few frames up and the
+    // test would pass for the wrong reason. The `calls` assertion below is
+    // what actually proves the network was never touched.
+    const realFetch = globalThis.fetch
+    const calls: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (/api\.anthropic\.com|api\.openai\.com/.test(url)) {
+        calls.push(url)
+        throw new Error(`network reached: ${url}`)
+      }
+      return realFetch(input)
+    }) as typeof fetch
+    try {
+      const mock = makeMockReqRes()
+      mock.setBody({
+        userMessage: "hi",
+        modelConfig: { provider: "anthropic", model: "claude-opus-4-8" },
+      })
+      await handleChatRequest(mock.req, mock.res, {
+        repoRoot,
+        loaders: makeLoaders({ scriptedEvents: [] }),
+      } as ChatHandlerContext)
+    } finally {
+      globalThis.fetch = realFetch
+    }
+    expect(calls).toEqual([])
+  })
+
+  it("assertChatCredentials checks the named provider's own credential, not Anthropic's", () => {
+    // Direct unit call: `assertChatCredentials(env, providerId)` takes the
+    // provider id as an argument (see its own doc comment for why), so a
+    // session that picked a non-Anthropic provider is checked against that
+    // provider's own key, never against ANTHROPIC_API_KEY.
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-unrelated-to-openai")
+    vi.stubEnv("OPENAI_API_KEY", "")
+    expect(() => assertChatCredentials(process.env, "openai")).toThrow(/OpenAI/i)
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-present")
+    expect(() => assertChatCredentials(process.env, "openai")).not.toThrow()
   })
 
   it("forwards orchestrator events to the SSE stream", async () => {
@@ -2573,7 +2641,7 @@ describe("the both-ends gate, from the route", () => {
     vi.unstubAllEnvs()
   })
 
-  it("checks the credentials of the provider the session actually names", async () => {
+  it("excludes an uncredentialed provider from the catalog, so its request 400s there rather than at assertChatCredentials", async () => {
     // With no OPENAI_API_KEY, OpenAI is not in the catalog at all (codex
     // fix), so a request naming it 400s at model-config validation rather
     // than reaching `assertChatCredentials` — still gated on OpenAI's own

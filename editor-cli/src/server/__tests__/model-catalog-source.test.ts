@@ -327,6 +327,24 @@ describe('chatRuntimeServable', () => {
     const resolved = await resolver.get()
     expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic'])
   })
+
+  it('CX7 item 4: the nothing-credentialed fallback picks a SERVABLE precedence id, not DEFAULT_PROVIDER_PRECEDENCE[0] unconditionally', async () => {
+    // Anthropic is excluded from THIS resolution's servable set (via
+    // `includeDescriptor`, the same seam the two tests above use), and
+    // nobody is credentialed. `DEFAULT_PROVIDER_PRECEDENCE[0]` is
+    // 'anthropic' — unconditionally trusting it would serve a provider this
+    // resolution was never allowed to serve at all. The fallback must walk
+    // the precedence list for the first id that IS in the servable set
+    // (openai here).
+    const resolver = createModelCatalogResolver({
+      env: () => ({}),
+      listViaApi: async () => [],
+      listViaCli: async () => [],
+      includeDescriptor: (d) => d.id !== 'anthropic',
+    })
+    const resolved = await resolver.get()
+    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['openai'])
+  })
 })
 
 describe('every provider is injectable, so no unit test reaches a real vendor', () => {
