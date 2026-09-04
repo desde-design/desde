@@ -176,8 +176,9 @@ describe("POST /api/editor/chat with a neutral provider", () => {
       }),
     })
     const body = await readSse(res)
-    expect(body).toContain("EDITOR_NEUTRAL_CHAT")
-    expect(body).toContain("neutralChat")
+    expect(body).toContain("EDITOR_NEUTRAL_CHAT=0")
+    // No config key to name: this gate is env-only, on purpose. See
+    // `isNeutralChatEnabled`'s doc comment in `dormant-surfaces.ts`.
     // Refused before any turn ran: no assistant text, no turn id.
     expect(body).not.toContain('"kind":"assistant_delta"')
   })

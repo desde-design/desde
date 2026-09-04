@@ -87,16 +87,15 @@ describe("resolveChatRuntime", () => {
   /**
    * `resolveChatRuntime` takes no project-config argument today, so there is
    * nothing for a caller to widen the gate with directly. What pins the rule
-   * is the call site inside it: it must always ask `isNeutralChatEnabled({})`
-   * with an EMPTY config, never a config carrying `editor.neutralChat`, so a
-   * later refactor that threads the project config through this function
-   * cannot silently let `.desde/config.json` open the gate that today only
-   * `EDITOR_NEUTRAL_CHAT` can.
+   * is the call site inside it: it must always call the zero-argument
+   * `isNeutralChatEnabled()`, never a variant that threads a project config
+   * through, so a later refactor cannot silently let `.desde/config.json`
+   * open a gate that today only `EDITOR_NEUTRAL_CHAT` can.
    */
-  it("reads the environment only: isNeutralChatEnabled is always called with an empty config", async () => {
+  it("reads the environment only: isNeutralChatEnabled is called with no arguments", async () => {
     process.env.EDITOR_NEUTRAL_CHAT = "0"
     const spy = vi.spyOn(dormantSurfaces, "isNeutralChatEnabled")
     await expect(resolveChatRuntime("openai", loaders())).rejects.toThrow(/neutral/i)
-    expect(spy).toHaveBeenCalledWith({})
+    expect(spy).toHaveBeenCalledWith()
   })
 })

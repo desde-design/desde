@@ -29,13 +29,16 @@
  *   (`model-catalog-source.ts`), which will not serve a `neutral` provider's
  *   group while this is off; `resolveChatRuntime`'s dispatch-side refusal is
  *   the second caller. **This is the one entry in the module that is
- *   opt-OUT, not opt-IN.** Every other surface here is dormant because it is
- *   unfinished, so absence means off. Neutral chat shipped, so absence means
- *   on: a user who has stored an OpenAI key sees a picker that offers
- *   something they can run, and only an explicit `false` in the project
- *   config or an exact `EDITOR_NEUTRAL_CHAT=0` turns it back off. See
- *   `isNeutralChatEnabled`'s own doc comment for the reasoning; the
- *   `=== true` rule two paragraphs down does not apply to it.
+ *   opt-OUT, not opt-IN, and the one entry with no project-config half at
+ *   all.** Every other surface here is dormant because it is unfinished, so
+ *   absence means off and a project can opt back in through
+ *   `.desde/config.json`. Neutral chat shipped, so absence means on: a user
+ *   who has stored an OpenAI key sees a picker that offers something they
+ *   can run. There is no config key to turn it back off, only an exact
+ *   `EDITOR_NEUTRAL_CHAT=0` — see `isNeutralChatEnabled`'s own doc comment
+ *   for why the model catalog resolver's design rules a config-only
+ *   off-switch out. The `=== true` rule two paragraphs down does not apply
+ *   to it either.
  *
  * **Why this module exists at all.** Each gate is read in two places: the
  * bootstrap script, which decides what the client is allowed to OFFER, and
@@ -67,7 +70,6 @@ export interface DormantSurfaceConfig {
     notes?: boolean
     vscodeLink?: boolean
     canvas?: boolean
-    neutralChat?: boolean
   }
 }
 
@@ -131,20 +133,26 @@ export function isVscodeLinkEnabled(ctx: DormantSurfaceConfig): boolean {
  * than an oversight. Every other surface here is dormant because it is
  * unfinished, so absence means off. This one shipped: with it off, a user who
  * has stored an OpenAI key sees a picker that offers nothing they can run.
- * Absence therefore means on, and only an explicit `false` in the project
- * config or an exact `EDITOR_NEUTRAL_CHAT=0` turns it off, the mirror of the
- * exact-"1" rule the opt-in surfaces use, so that a typo cannot silently take
- * chat away from a provider.
+ * Absence therefore means on, and only an exact `EDITOR_NEUTRAL_CHAT=0`
+ * turns it off, the mirror of the exact-"1" rule the opt-in surfaces use, so
+ * that a typo cannot silently take chat away from a provider.
  *
- * It remains gated at both ends: the catalog resolver decides what the client
- * is offered (`chatRuntimeServable` in `model-catalog-source.ts`), the chat
- * handler decides what the server will run (`resolveChatRuntime`'s dispatch-
- * side refusal), and one function answers both.
+ * Env-only, and that is also deliberate rather than an oversight: unlike
+ * every other function in this module, this one takes no
+ * `DormantSurfaceConfig`, because there is no project-config half for it to
+ * read. The model catalog resolver (`chatRuntimeServable` in
+ * `model-catalog-source.ts`) is a process-wide singleton created once at
+ * import time, with no per-project config in scope, so a project-config key
+ * could only ever reach the dispatch half (`resolveChatRuntime`'s refusal)
+ * and never the catalog half — a project that set it would see the OpenAI
+ * group still offered in the picker for a dispatch that refuses it, which is
+ * a worse drift than the one this module exists to prevent. Rather than ship
+ * a config key that only half works, there is no config key: it remains
+ * gated at both ends, the catalog resolver and the chat handler, by reading
+ * the same environment variable independently.
  */
-export function isNeutralChatEnabled(ctx: DormantSurfaceConfig): boolean {
-  if (ctx.editor?.neutralChat === false) return false
-  if (process.env[NEUTRAL_CHAT_ENV] === "0") return false
-  return true
+export function isNeutralChatEnabled(): boolean {
+  return process.env[NEUTRAL_CHAT_ENV] !== "0"
 }
 
 /**
@@ -166,15 +174,16 @@ export function chatRuntimeOverride(
 /**
  * The refusal a dormant neutral-chat dispatch returns.
  *
- * It names the config key and the env var rather than 404-ing, for the reason
+ * It names the env var rather than 404-ing, for the reason
  * `dormantSurfaceRefusal` gives about its own surfaces: a stale client or a
  * direct caller should learn what to flip instead of guessing the route is
- * gone.
+ * gone. There is no config key to name — see `isNeutralChatEnabled`'s doc
+ * comment for why this gate is env-only.
  */
 export function neutralChatRefusal(): string {
   return (
-    'The neutral chat runtime is dormant. Set "editor": { "neutralChat": true } in ' +
-    '.desde/config.json at the repo root, or EDITOR_NEUTRAL_CHAT=1, to turn it on.'
+    "The neutral chat runtime is dormant (EDITOR_NEUTRAL_CHAT=0). Unset it, " +
+    "or set it to anything other than 0, to turn it back on."
   )
 }
 

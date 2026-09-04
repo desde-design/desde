@@ -439,15 +439,12 @@ export interface HttpServerOptions {
      * the whole gate here.
      */
     vscodeLink?: boolean
-    /**
-     * The Desde-owned neutral chat runtime gate. DORMANT by product
-     * decision until the runtime is proven against Anthropic. Read through
-     * `isNeutralChatEnabled`, on the same one-function-two-callers rule as
-     * `codeView` / `notes` above: the model catalog resolver is the first
-     * caller (won't serve a `neutral` provider's group while it's off), and
-     * `resolveChatRuntime`'s dispatch refusal is the second.
-     */
-    neutralChat?: boolean
+    // No `neutralChat` field here. That gate is opt-OUT and env-only
+    // (`EDITOR_NEUTRAL_CHAT=0` disables it) with no project-config
+    // equivalent, so there is nothing for the bootstrap to surface: the
+    // model catalog response is what tells the client whether the OpenAI
+    // group exists at all. See `isNeutralChatEnabled` in
+    // `dormant-surfaces.ts`.
   }
   /**
    * Resolved read-roots registry for the chat handler's git tools.

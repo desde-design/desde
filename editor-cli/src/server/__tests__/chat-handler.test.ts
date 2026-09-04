@@ -2512,7 +2512,7 @@ describe("the both-ends gate, from the route", () => {
     vi.unstubAllEnvs()
   })
 
-  it("names the config key and the env var so a stale client learns what to flip", async () => {
+  it("names the env var so a stale client learns what to flip", async () => {
     const { loaders } = makeGateLoaders()
     vi.stubEnv("EDITOR_NEUTRAL_CHAT", "0")
     vi.stubEnv("EDITOR_CHAT_RUNTIME_OVERRIDE", "neutral")
@@ -2520,8 +2520,9 @@ describe("the both-ends gate, from the route", () => {
     mock.setBody({ userMessage: "hi", modelConfig: { provider: "anthropic", model: "claude-opus-4-8" } })
     await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
     const reason = mock.events().find((e) => e.kind === "error")?.reason as string
-    expect(reason).toContain('"neutralChat": true')
-    expect(reason).toContain("EDITOR_NEUTRAL_CHAT=1")
+    // No config key to name: this gate is env-only. See
+    // `isNeutralChatEnabled`'s doc comment in `dormant-surfaces.ts`.
+    expect(reason).toContain("EDITOR_NEUTRAL_CHAT=0")
     vi.unstubAllEnvs()
   })
 

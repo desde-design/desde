@@ -116,7 +116,7 @@ describe("chatRuntimeOverride", () => {
   it("is a separate switch from isNeutralChatEnabled", () => {
     // Forcing the override does not depend on the lane's own on/off switch,
     // and the lane's switch does not itself force a provider onto it.
-    expect(isNeutralChatEnabled({})).toBe(true)
+    expect(isNeutralChatEnabled()).toBe(true)
     expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "neutral" })).toBe("neutral")
   })
 })
@@ -126,18 +126,24 @@ describe("isNeutralChatEnabled", () => {
     // The inversion, and the one line that changes what users get. Every other
     // surface in this module is opt-IN because it is unfinished. This one is
     // finished, so it is opt-OUT: the absent state means enabled.
-    expect(isNeutralChatEnabled({})).toBe(true)
+    expect(isNeutralChatEnabled()).toBe(true)
   })
 
-  it("is off when the project config says so", () => {
-    expect(isNeutralChatEnabled({ editor: { neutralChat: false } })).toBe(false)
-  })
+  // No "is off when the project config says so" case: this gate takes no
+  // `DormantSurfaceConfig` at all and has no config-key off-switch. See the
+  // function's own doc comment for why (the model catalog resolver is a
+  // process-wide singleton with no project config in scope, so a config key
+  // could only ever reach the dispatch half). The off-switch this module
+  // must prove is the env var, and proving it through this direct call is
+  // exactly what let the dead config branch go unnoticed before — see
+  // `chatRuntimeServable`'s and `resolveChatRuntime`'s own test suites for
+  // the off-switch proven through the real callers instead.
 
   it("is off when EDITOR_NEUTRAL_CHAT is exactly 0", () => {
     const previous = process.env.EDITOR_NEUTRAL_CHAT
     process.env.EDITOR_NEUTRAL_CHAT = "0"
     try {
-      expect(isNeutralChatEnabled({})).toBe(false)
+      expect(isNeutralChatEnabled()).toBe(false)
     } finally {
       if (previous === undefined) delete process.env.EDITOR_NEUTRAL_CHAT
       else process.env.EDITOR_NEUTRAL_CHAT = previous
@@ -150,7 +156,7 @@ describe("isNeutralChatEnabled", () => {
     try {
       // Only an exact "0" disables, mirroring the exact-"1" rule the opt-in
       // surfaces use. A typo must not silently turn chat off for a provider.
-      expect(isNeutralChatEnabled({})).toBe(true)
+      expect(isNeutralChatEnabled()).toBe(true)
     } finally {
       if (previous === undefined) delete process.env.EDITOR_NEUTRAL_CHAT
       else process.env.EDITOR_NEUTRAL_CHAT = previous

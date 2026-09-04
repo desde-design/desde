@@ -129,16 +129,15 @@ function effortFallbackFor(descriptor: ProviderDescriptor) {
  * picker, or the picker offers a model the chat handler refuses a second
  * later. That is the client half of a both-ends gate whose server half is
  * `resolveChatRuntime`. Env-only: the resolver is a process-wide singleton
- * with no project config in scope, so `EDITOR_NEUTRAL_CHAT=1` reaches it and
- * `.desde/config.json`'s `editor.neutralChat` does not. The dispatch half is
- * ALSO env-only, on purpose (see the comment on `resolveChatRuntime` in
- * `chat-runtime-dispatch.ts` for why): a project that enables the flag only
- * in its config sees neither half serve the group, which is the intended
- * residual, not a gap between the two halves.
+ * created once at import time, with no project config in scope, so there is
+ * no `.desde/config.json` key for this gate at all — see
+ * `isNeutralChatEnabled`'s own doc comment in `dormant-surfaces.ts` for why.
+ * The dispatch half reads the identical environment variable independently,
+ * which is what keeps the two halves from drifting.
  */
 export function chatRuntimeServable(descriptor: ProviderDescriptor): boolean {
   if (descriptor.chatRuntime === "claude-agent-sdk") return true
-  return isNeutralChatEnabled({})
+  return isNeutralChatEnabled()
 }
 
 /**

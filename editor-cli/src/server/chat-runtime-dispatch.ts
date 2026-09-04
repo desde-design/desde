@@ -12,19 +12,14 @@
  * existing consumers see the same name they always did. The shape does not
  * change, which is what lets both runtimes satisfy one function type.
  *
- * The `isNeutralChatEnabled({})` call reads env only, never the caller's
- * project config, even though `chat-handler.ts` has `ctx` in scope. That is
- * a deliberate asymmetry with the rest of `dormant-surfaces.ts`, not an
- * oversight: `chatRuntimeServable` (the client-side half, in
+ * The `isNeutralChatEnabled()` call reads env only, and takes no project
+ * config — there is nothing to pass even though `chat-handler.ts` has `ctx`
+ * in scope. See that function's own doc comment in `dormant-surfaces.ts` for
+ * why: `chatRuntimeServable` (the client-side half, in
  * `model-catalog-source.ts`) is a process-wide singleton with no project
- * config in scope either, so it is also env-only. Reading `ctx` here would
- * let a project turn the flag on in `.desde/config.json` and have the
- * dispatch agree while the catalog still refuses to serve the group, which
- * is a stricter drift than the one this file exists to prevent. The
- * residual cost: a project that sets `editor.neutralChat: false` in its
- * config to turn the lane off still has to also export
- * `EDITOR_NEUTRAL_CHAT=0` to make the catalog agree, or the group keeps
- * appearing in the picker for a dispatch that will refuse it.
+ * config in scope either, so a config-only override could only ever reach
+ * this half, leaving the catalog still offering a group this dispatch would
+ * refuse.
  */
 import type { RunChatTurn } from "../../../src/editor/agent-chat/run-chat-turn.js"
 import { getDescriptor } from "../../../src/editor/llm-providers/provider-registry.js"
@@ -53,7 +48,7 @@ export async function resolveChatRuntime(
   if (kind === "neutral") {
     // The dispatch half of the gate. Refused BEFORE any loader runs, so a
     // refusal never pays for a module import.
-    if (!isNeutralChatEnabled({})) throw new Error(neutralChatRefusal())
+    if (!isNeutralChatEnabled()) throw new Error(neutralChatRefusal())
     // Lazy on purpose: an OpenAI-only boot must never import
     // @anthropic-ai/claude-agent-sdk, and the SDK loader is the only thing
     // that would.
