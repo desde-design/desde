@@ -47,6 +47,84 @@ describe('probeCredential: rungs 0 and 3 are unreachable without a subscription 
       }),
     ).toEqual({ credentialed: false, source: 'none' })
   })
+
+  // The BYO-key cutover. This rung used to fire on `claudeRuntimeResolvable`
+  // alone, so anyone whose `claude` binary happened to be signed in got a
+  // working product and was never asked for anything. Anthropic's Agent SDK
+  // terms do not allow a distributed product to offer claude.ai login that
+  // way, so the subscription now needs an explicit opt-in.
+  it('does NOT presume the subscription when only the runtime resolves', () => {
+    expect(
+      probeCredential({
+        descriptor: ANTHROPIC_DESCRIPTOR,
+        stored: empty,
+        claudeRuntimeResolvable: true,
+      }),
+    ).toEqual({ credentialed: false, source: 'none' })
+  })
+
+  it('uses the subscription once it has been opted into', () => {
+    expect(
+      probeCredential({
+        descriptor: ANTHROPIC_DESCRIPTOR,
+        stored: empty,
+        claudeRuntimeResolvable: true,
+        subscriptionOptIn: true,
+      }),
+    ).toEqual({ credentialed: true, source: 'subscription' })
+  })
+
+  it('still reports none when opted in but the runtime is absent', () => {
+    // The opt-in is permission, not a credential. With no runtime to route
+    // through there is nothing to use.
+    expect(
+      probeCredential({
+        descriptor: ANTHROPIC_DESCRIPTOR,
+        stored: empty,
+        claudeRuntimeResolvable: false,
+        subscriptionOptIn: true,
+      }),
+    ).toEqual({ credentialed: false, source: 'none' })
+  })
+
+  it('prefers a real key over the subscription even when both are available', () => {
+    // Ordering control. If this ever inverted, an opted-in dev would stop
+    // exercising the API path that every distributed user is on.
+    expect(
+      probeCredential({
+        descriptor: ANTHROPIC_DESCRIPTOR,
+        inheritedApiKey: 'sk-ant-envkey1234',
+        stored: empty,
+        claudeRuntimeResolvable: true,
+        subscriptionOptIn: true,
+      }),
+    ).toEqual({
+      credentialed: true,
+      source: 'env',
+      maskedHint: 'sk-ant-…1234',
+    })
+  })
+
+  it('reports uncredentialed when nothing is available', () => {
+    expect(
+      probeCredential({
+        descriptor: ANTHROPIC_DESCRIPTOR,
+        stored: empty,
+        claudeRuntimeResolvable: false,
+      }),
+    ).toEqual({ credentialed: false, source: 'none' })
+  })
+
+  it('treats a whitespace-only inherited key as absent', () => {
+    expect(
+      probeCredential({
+        descriptor: ANTHROPIC_DESCRIPTOR,
+        inheritedApiKey: '   ',
+        stored: empty,
+        claudeRuntimeResolvable: false,
+      }),
+    ).toEqual({ credentialed: false, source: 'none' })
+  })
 })
 
 describe('probeCredential: the env and stored rungs are per provider', () => {
