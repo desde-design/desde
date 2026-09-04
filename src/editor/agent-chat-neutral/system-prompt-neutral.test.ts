@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { ALLOWED_NEW_FILE_EXTENSIONS } from '../agent-chat-sdk/edit-ack'
 import {
   CONTEXT_ENVELOPE_BLOCK,
-  EDITOR_TOOLS_BLOCK,
+  EDITOR_TOOLS_BLOCK_BODY,
   GROUNDING_QUERY_TOOLS_BLOCK,
   SCREENSHOT_PLAN_APPEND_BLOCK,
   VERIFY_EDITS_BLOCK,
@@ -11,6 +11,7 @@ import {
 import {
   buildNeutralSystemPrompt,
   NEUTRAL_IDENTITY_BLOCK,
+  NEUTRAL_INVESTIGATE_BLOCK,
   NEUTRAL_STEERING_BLOCK,
   neutralBuiltinToolsBlock,
 } from './system-prompt-neutral'
@@ -46,11 +47,32 @@ describe('buildNeutralSystemPrompt', () => {
     }
   })
 
-  it('reuses the editor-tool catalogue and the envelope and verification blocks verbatim', () => {
+  it('reuses the editor-tool catalogue body and the envelope and verification blocks verbatim', () => {
     const p = buildNeutralSystemPrompt({})
-    expect(p).toContain(EDITOR_TOOLS_BLOCK)
+    // The BODY is shared verbatim; the heading is this lane's own (it must
+    // not name Claude Code — see the heading test below).
+    expect(p).toContain(EDITOR_TOOLS_BLOCK_BODY)
     expect(p).toContain(CONTEXT_ENVELOPE_BLOCK)
     expect(p).toContain(VERIFY_EDITS_BLOCK)
+  })
+
+  it('never names another vendor\'s product in a heading', () => {
+    const p = buildNeutralSystemPrompt({})
+    for (const line of p.split('\n').filter((l) => l.startsWith('#'))) {
+      expect(line).not.toMatch(/Claude Code/)
+    }
+  })
+
+  it('does not claim that attempts are worktree commits', () => {
+    expect(buildNeutralSystemPrompt({})).not.toMatch(/worktree commit/i)
+  })
+
+  it('tells the model to investigate the repo before asking for a selection', () => {
+    const p = buildNeutralSystemPrompt({})
+    expect(p).toMatch(/no selection|nothing is selected/i)
+    expect(p).toMatch(/Glob|Grep|Read/)
+    // The instruction has to be an imperative about what to do FIRST, not a caveat.
+    expect(p).toMatch(/before asking/i)
   })
 
   it('never offers WebFetch or WebSearch, which this lane does not serve', () => {
@@ -98,6 +120,7 @@ describe('buildNeutralSystemPrompt', () => {
       NEUTRAL_IDENTITY_BLOCK,
       neutralBuiltinToolsBlock({ writeToolsEnabled: true }),
       NEUTRAL_STEERING_BLOCK,
+      NEUTRAL_INVESTIGATE_BLOCK,
     ].join('\n\n')
     expect(authored).not.toContain('—')
     expect(authored).not.toMatch(/\b(I|I'm|I've|my|mine)\b/)

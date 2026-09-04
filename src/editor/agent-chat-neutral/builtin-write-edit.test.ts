@@ -174,4 +174,25 @@ describe('Write', () => {
     expect(out.isError).toBeUndefined()
     expect(readFileSync(join(root, 'src/data.bin'), 'utf8')).toBe('new')
   })
+
+  it('refuses a write outside the worktree, reading as one sentence not two prefixes', async () => {
+    const out = await runWriteRefusedOnProtectedPath()
+    const text = out.content[0].type === 'text' ? out.content[0].text : ''
+    expect(text).not.toMatch(/refused: .*denied:/)
+    expect(text).toMatch(/^(Write|Edit) (refused|denied)/)
+  })
 })
+
+/**
+ * The reason `reconstructWriteEdit` returns for a path the agent may never
+ * touch (here: one that escapes the worktree entirely, via `..` traversal)
+ * already begins `Write denied: ...`. Before the fix, `applyWrite`'s error
+ * wrapper prefixed `Write refused: ` onto that unconditionally, producing
+ * `Write refused: Write denied: ...`.
+ */
+async function runWriteRefusedOnProtectedPath() {
+  return buildWriteToolSpec(opts()).handler(
+    { file_path: '../escaped.md', content: 'nope' },
+    {},
+  )
+}

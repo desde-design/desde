@@ -10,6 +10,8 @@ import {
   EDIT_LIFECYCLE_BLOCK,
   EDITOR_APPEND_PROMPT,
   EDITOR_TOOLS_BLOCK,
+  EDITOR_TOOLS_BLOCK_BODY,
+  EDITOR_TOOLS_HEADING_SDK,
   FIGMA_APPEND_BLOCK,
   FILESYSTEM_SCOPE_BLOCK,
   MISSING_REFERENCE_BLOCK,
@@ -300,5 +302,21 @@ describe('EDITOR_APPEND_PROMPT after the block split', () => {
     ]) {
       expect(EDITOR_APPEND_PROMPT).toContain(block)
     }
+  })
+})
+
+describe('EDITOR_TOOLS_BLOCK is the SDK heading joined to the shared body', () => {
+  it('is byte-identical to the heading and body joined', () => {
+    expect(EDITOR_TOOLS_BLOCK).toBe(`${EDITOR_TOOLS_HEADING_SDK}\n${EDITOR_TOOLS_BLOCK_BODY}`)
+    expect(EDITOR_TOOLS_HEADING_SDK).toBe(
+      '# Editor tools (in addition to the standard Claude Code tools)',
+    )
+  })
+})
+
+describe('VERIFY_EDITS_BLOCK no longer promises worktree commits', () => {
+  it('says backups, not worktree commits', () => {
+    expect(VERIFY_EDITS_BLOCK).not.toMatch(/worktree commit/i)
+    expect(VERIFY_EDITS_BLOCK).toMatch(/backup/i)
   })
 })

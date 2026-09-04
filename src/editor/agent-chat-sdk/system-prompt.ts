@@ -62,8 +62,10 @@ Files in the prototype's source repo are available through the standard Read/Glo
  * The Editor MCP tool catalogue. Exported because both lanes register the same
  * tools under the same names, so both must describe them with the same words.
  */
-export const EDITOR_TOOLS_BLOCK = `# Editor tools (in addition to the standard Claude Code tools)
+export const EDITOR_TOOLS_HEADING_SDK =
+  '# Editor tools (in addition to the standard Claude Code tools)'
 
+export const EDITOR_TOOLS_BLOCK_BODY = `
 These tools talk to the live iframe via the Editor bridge. Use them whenever the user's request refers to what they're currently looking at.
 
 - mcp__editor__get_selection — returns the user's current selection in the iframe (component, source file, props, ancestry). Always call this first when the user refers to "this", "the button", "this component", etc. Output is \`null\`, a single selection object, or \`{ kind: "many", selections: [...] }\` when multiple elements are pinned.
@@ -102,6 +104,16 @@ Filesystem write tools — write changes to the worktree directly. Each lands as
 - mcp__editor__insert_element — insert a PLAIN/PRIMITIVE element (\`<div>\`, \`<p>\`, \`<img>\`, \`<ul><li>…\`, \`<button>\`) or BARE TEXT as a child of a target element, via the same deterministic pipeline. Use this (not insert_component) for non-catalog HTML elements and for dropping plain text into a container; it does NOT add imports (primitives need none — for a catalog component use insert_component). Pass a single-element \`snippet\` (or set \`contentKind:"text"\` and put the text in \`snippet\`) plus the DESTINATION PARENT's \`file\`/\`line\`/\`column\` from \`get_selection\`.
 - mcp__editor__scaffold_route — create a NEW page that doesn't exist yet AND register its route, in one step (e.g. "add an /about page", "create a settings screen"). Writes a minimal page component + wires it into the router via a lazy import (no manual import edit); both land uncommitted, same as the other write tools. Pass \`path\` (e.g. \`/about\`); optional \`name\`/\`heading\`. After it returns, \`navigate\` to the new path to view it, then flesh the page out with insert_component/insert_element/Edit. It REFUSES (with a reason) rather than guess when the routing setup is unrecognized, the path duplicates an existing route, or the path has no nameable segment — heed the reason instead of hand-rewriting the router blindly.
 - mcp__editor__interact — click / fill / select an element by its SEMANTIC TARGET (ARIA \`role\` + accessible \`name\`, with a \`text\` fallback), NOT a CSS selector. Use it to walk a flow live — "click Create model", "fill the Name field", "choose an option". It resolves the target on the CURRENTLY-displayed page (navigate first if the element is elsewhere) and acts. On success it returns \`{ ok, resolved: { role, name, resolvedSelector } }\` — keep that \`resolved\` data to put in a screenshot plan's interact step. A miss returns an error: refine \`role\`/\`name\`/\`text\` or navigate to the right page; don't guess a CSS selector.`
+
+/**
+ * The full block, byte-identical to what it read before the heading/body
+ * split: the SDK heading joined to the shared body by one newline. Kept as
+ * its own export so the SDK lane's append (and its byte-identity fixture)
+ * do not have to change shape. The neutral lane composes its OWN heading
+ * with \`EDITOR_TOOLS_BLOCK_BODY\` instead of using this, because this
+ * heading names Claude Code.
+ */
+export const EDITOR_TOOLS_BLOCK = `${EDITOR_TOOLS_HEADING_SDK}\n${EDITOR_TOOLS_BLOCK_BODY}`
 
 /**
  * WebFetch and WebSearch. NOT exported: the neutral lane serves neither, and
@@ -186,7 +198,7 @@ Don't assume an edit worked — confirm it, then fix it if it didn't. You have e
 - **Visual / aesthetic edits** (color, "looks cleaner", subjective polish — anything with no measurable success condition): call \`mcp__editor__capture_screenshot\` (\`scope:'element'\` or \`'selector'\`) and check it actually looks right. Re-edit and re-capture if not. (\`verify_edit\` does NOT check styles — computed CSS can't be string-compared reliably.)
 - **New pages / things created on another route** (after \`scaffold_route\`, or after inserting onto a page you're not currently viewing): GO LOOK AT IT before declaring done. The change is on disk + committed, but you haven't seen it render. Use \`mcp__editor__navigate\` to the new/target route, then \`mcp__editor__capture_screenshot\` (\`scope:'viewport'\`) to confirm the page actually renders — and \`get_page_info\` to confirm you landed where you expected. A blank page, a 404/redirect, or a missing-component error means the route didn't take (wrong path, the lazy import doesn't resolve, a runtime error in the new SFC) — read what you see, fix it, and re-look. Only then is "I created the X page" true. A scaffolded page is intentionally minimal; once it renders, flesh it out with \`insert_component\` / \`insert_element\` / Edit and verify those edits as above.
 
-Bound the loop: at most 2–3 correction attempts on the SAME target. If it still isn't right, STOP — do not keep flailing. Tell the user plainly what you changed, what \`verify_edit\` / the screenshot showed, what you suspect is wrong (cite the \`cause\`), and what you'd try next. An honest "this didn't take effect and here's why" beats a false "done". Every attempt is its own worktree commit, so nothing is lost.`
+Bound the loop: at most 2–3 correction attempts on the SAME target. If it still isn't right, STOP — do not keep flailing. Tell the user plainly what you changed, what \`verify_edit\` / the screenshot showed, what you suspect is wrong (cite the \`cause\`), and what you'd try next. An honest "this didn't take effect and here's why" beats a false "done". Every write is journaled to \`.desde/backups/\` first, so nothing is lost.`
 
 /**
  * The frozen Editor-specific append, now assembled from named blocks so the

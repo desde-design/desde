@@ -113,7 +113,7 @@ async function applyWrite(
   opts: BuiltinWriteOpts,
 ): Promise<TextToolResult> {
   const built = await reconstructWriteEdit(toolName, input, opts.worktreeRoot)
-  if (!built.ok) return err(`${toolName} refused: ${built.reason}`)
+  if (!built.ok) return err(prefixRefusal(toolName, built.reason))
 
   const result = await brokeredWrite({
     canonicalRoot: opts.worktreeRoot,
@@ -201,4 +201,18 @@ async function applyWrite(
 
 function err(text: string): TextToolResult {
   return { content: [{ type: 'text', text }], isError: true }
+}
+
+/**
+ * `reconstructWriteEdit`'s reason sometimes already reads as a refusal
+ * itself (e.g. `Write denied: path '../x' escapes repo root`), because
+ * `edit-ack.ts` is the single implementation shared with the SDK lane's
+ * own refusal wrapper. Prefixing `${toolName} refused: ` onto that
+ * unconditionally produced `Write refused: Write denied: ...` — the same
+ * fact stated twice. Add the prefix only when the reason doesn't already
+ * read as one.
+ */
+function prefixRefusal(toolName: 'Write' | 'Edit', reason: string): string {
+  if (/^(Write|Edit) (refused|denied):/.test(reason)) return reason
+  return `${toolName} refused: ${reason}`
 }

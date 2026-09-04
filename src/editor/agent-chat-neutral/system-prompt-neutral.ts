@@ -41,7 +41,7 @@ import {
   ALLOWED_NEW_FILE_EXTENSIONS_LIST,
   CONTEXT_ENVELOPE_BLOCK,
   EDIT_LIFECYCLE_BLOCK,
-  EDITOR_TOOLS_BLOCK,
+  EDITOR_TOOLS_BLOCK_BODY,
   FILESYSTEM_SCOPE_BLOCK,
   GROUNDING_QUERY_TOOLS_BLOCK,
   MISSING_REFERENCE_BLOCK,
@@ -109,6 +109,33 @@ Some paths are refused for both tools no matter what: build configuration, git h
 Before you write to a file another change may have touched since you read it, read it again. If the file changed underneath you, the user is told and your write still lands, so an unnecessary overwrite is on you to avoid.`
 }
 
+/**
+ * The editor-tool catalogue, reused verbatim as `EDITOR_TOOLS_BLOCK_BODY`
+ * (same tools, same names, same namespace, so the same words) under this
+ * lane's OWN heading. `EDITOR_TOOLS_BLOCK`'s heading on the SDK lane names
+ * "the standard Claude Code tools" — reusing it here would put another
+ * vendor's product name in a heading a GPT model reads.
+ */
+export const NEUTRAL_EDITOR_TOOLS_BLOCK = `# Editor tools (in addition to the built-in tools above)
+${EDITOR_TOOLS_BLOCK_BODY}`
+
+/**
+ * Measured 2026-09-03 (Task 32, live): asked "what framework is this file
+ * written in?" with no selection and no path, this lane answered that
+ * nothing was selected. The SDK lane, same model, read the repo and
+ * answered. The `claude_code` preset's working style investigates before
+ * asking; this lane has no preset, so it has to say so.
+ */
+export const NEUTRAL_INVESTIGATE_BLOCK = `# When the request is about "this file" or "this component" and nothing is selected
+
+Investigate before asking. Follow this order:
+
+1. Check the current page and selection with the editor tools.
+2. If both come back empty, that is NOT a stopping point. Call Glob, and Grep if needed, to find the file the request most plausibly means, then Read it.
+3. Answer from what you read, and say which file you read.
+
+Only fall back to asking the user to select something if step 2 turns up two or more files that fit equally well, where the answer would differ between them. Telling the user nothing is selected without first trying step 2 is the mistake this section exists to prevent.`
+
 export const NEUTRAL_STEERING_BLOCK = `# Messages the user sends WHILE you are working
 
 The chat box does not lock while you work. When the user types during a turn, Desde holds that message until the step you are on finishes, then hands it to you as an ordinary user message before the next step starts. Nothing is wrapped around it. It appears in the conversation exactly where a message from the user appears.
@@ -142,15 +169,19 @@ export function buildNeutralSystemPrompt(
   const parts: string[] = [
     NEUTRAL_IDENTITY_BLOCK,
     neutralBuiltinToolsBlock({ writeToolsEnabled: opts.writeToolsEnabled }),
-    // Reused verbatim from the SDK prompt. Same tools, same names, same
-    // namespace, so the same words.
-    EDITOR_TOOLS_BLOCK,
+    // Body reused verbatim from the SDK prompt (same tools, same names, same
+    // namespace, so the same words); heading is this lane's own, so it never
+    // names Claude Code.
+    NEUTRAL_EDITOR_TOOLS_BLOCK,
     FILESYSTEM_SCOPE_BLOCK,
     MISSING_REFERENCE_BLOCK,
     EDIT_LIFECYCLE_BLOCK,
     CONTEXT_ENVELOPE_BLOCK,
     // Authored here: boundary delivery, not the SDK binary's reminder channel.
     NEUTRAL_STEERING_BLOCK,
+    // Near the top of working style, ahead of the shared block: the `claude_code`
+    // preset investigates before asking for a selection; this lane has no preset.
+    NEUTRAL_INVESTIGATE_BLOCK,
     WORKING_STYLE_BLOCK,
     VERIFY_EDITS_BLOCK,
   ]
