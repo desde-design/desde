@@ -9,17 +9,21 @@ import { modelCatalogResolver, setModelCatalogLiveSourcesForTests } from "../mod
 /**
  * The both-ends gate, asserted against the real world.
  *
+ * Task 40 flipped the neutral chat gate from opt-IN to opt-OUT: with no
+ * configuration at all, `isNeutralChatEnabled` now answers true, so an
+ * `openai` request is servable by default and reaches the dispatch. Every
+ * case below that means to prove a REFUSAL therefore sets
+ * `EDITOR_NEUTRAL_CHAT=0` explicitly — the gate still exists, it is just no
+ * longer the default.
+ *
  * How a request gets far enough to prove the SERVER half is the interesting
- * part. The brief for this task imagined proving it with a `provider:
- * "openai"` request sent after the flag flips off, on the theory that the
- * catalog resolver's cache would still be answering from before the flip.
- * It does not: `modelCatalogResolver.get()` recomputes which descriptors are
+ * part. `modelCatalogResolver.get()` recomputes which descriptors are
  * servable from the LIVE flag value on every call, before it even looks at
  * the cache key, so an openai `modelConfig` is refused by catalog validation
  * the instant the flag is off, every time. That was checked directly against
  * the resolver (see this task's report) before this file was written this
- * way. So a `provider: "openai"` request can only ever exercise the CLIENT
- * half; it never reaches `resolveChatRuntime` while the flag is off.
+ * way. So a `provider: "openai"` request, with the flag off, can only ever
+ * exercise the CLIENT half; it never reaches `resolveChatRuntime`.
  *
  * The dispatch's OWN independent gate is only reachable through a path the
  * catalog check does not know about: `EDITOR_CHAT_RUNTIME_OVERRIDE=neutral`,
@@ -28,7 +32,7 @@ import { modelCatalogResolver, setModelCatalogLiveSourcesForTests } from "../mod
  * a second vendor ships. An Anthropic `modelConfig` passes catalog
  * validation regardless of the flag (Anthropic is always servable), so the
  * request reaches `resolveChatRuntime`. There, the override picks the
- * `neutral` runtime kind, and if `EDITOR_NEUTRAL_CHAT` is off, the dispatch
+ * `neutral` runtime kind, and with `EDITOR_NEUTRAL_CHAT=0`, the dispatch
  * refuses on its own, with nothing upstream having refused first. That is
  * the real "gate at both ends" case: a request the client-side check let
  * through must still be refused server-side.
@@ -153,8 +157,10 @@ describe("POST /api/editor/chat with a neutral provider", () => {
     // falls back to the static catalog (same pattern the OPENAI_API_KEY
     // fixture below relies on).
     process.env.ANTHROPIC_API_KEY = "sk-ant-test-only"
-    // Forces the neutral runtime kind for this Anthropic session. The flag
-    // that actually turns the neutral runtime ON stays unset.
+    // The gate is opt-OUT by default now (Task 40), so proving the dispatch
+    // still refuses requires turning it off explicitly.
+    process.env.EDITOR_NEUTRAL_CHAT = "0"
+    // Forces the neutral runtime kind for this Anthropic session.
     process.env.EDITOR_CHAT_RUNTIME_OVERRIDE = "neutral"
 
     const res = await fetch(`${handle.url}/api/editor/chat`, {
@@ -176,10 +182,11 @@ describe("POST /api/editor/chat with a neutral provider", () => {
     expect(body).not.toContain('"kind":"assistant_delta"')
   })
 
-  it("refuses with the catalog's own message when a request simply names an unservable provider", async () => {
+  it("refuses with the catalog's own message when the gate is explicitly off and a request names an unservable provider", async () => {
     // The client half, for contrast: with the flag off, the OpenAI group is
     // never served, so `provider: "openai"` dies at catalog validation and
     // never reaches the dispatch at all.
+    process.env.EDITOR_NEUTRAL_CHAT = "0"
     const res = await fetch(`${handle.url}/api/editor/chat`, {
       method: "POST",
       headers: {
@@ -193,5 +200,26 @@ describe("POST /api/editor/chat with a neutral provider", () => {
       }),
     })
     expect(await readSse(res)).toContain("Unknown provider 'openai'")
+  })
+
+  it("accepts a request naming the OpenAI provider with no configuration at all", async () => {
+    // The default this task shipped: absence means on, so an OpenAI request
+    // is servable (even though `gpt-5.2` itself is not a real model id, so
+    // catalog validation refuses it for THAT reason instead).
+    const res = await fetch(`${handle.url}/api/editor/chat`, {
+      method: "POST",
+      headers: {
+        ...authHeaders(),
+        "Content-Type": "application/json",
+        Origin: shellOrigin,
+      },
+      body: JSON.stringify({
+        userMessage: "hello",
+        modelConfig: { provider: "openai", model: "gpt-5.2" },
+      }),
+    })
+    const body = await readSse(res)
+    expect(body).not.toContain("Unknown provider 'openai'")
+    expect(body).toContain("Unknown model 'gpt-5.2'")
   })
 })

@@ -21,9 +21,10 @@
  * let a project turn the flag on in `.desde/config.json` and have the
  * dispatch agree while the catalog still refuses to serve the group, which
  * is a stricter drift than the one this file exists to prevent. The
- * residual cost: a project that sets `editor.neutralChat` in its config has
- * to also export `EDITOR_NEUTRAL_CHAT=1` to see the group at all, until
- * phase 4 flips the default.
+ * residual cost: a project that sets `editor.neutralChat: false` in its
+ * config to turn the lane off still has to also export
+ * `EDITOR_NEUTRAL_CHAT=0` to make the catalog agree, or the group keeps
+ * appearing in the picker for a dispatch that will refuse it.
  */
 import type { RunChatTurn } from "../../../src/editor/agent-chat/run-chat-turn.js"
 import { getDescriptor } from "../../../src/editor/llm-providers/provider-registry.js"

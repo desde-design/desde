@@ -44,7 +44,6 @@ const GATES = [
   { name: "codeView", read: isCodeViewEnabled, env: "EDITOR_CODE_VIEW" },
   { name: "notes", read: isNotesEnabled, env: "EDITOR_NOTES" },
   { name: "canvas", read: isCanvasEnabled, env: "EDITOR_CANVAS" },
-  { name: "neutralChat", read: isNeutralChatEnabled, env: "EDITOR_NEUTRAL_CHAT" },
 ] as const
 
 describe.each(GATES)("$name gate", ({ name, read, env }) => {
@@ -115,10 +114,47 @@ describe("chatRuntimeOverride", () => {
   })
 
   it("is a separate switch from isNeutralChatEnabled", () => {
-    // Forcing the override does not itself turn the lane on for everyone,
-    // and turning the lane on does not itself force a provider onto it.
-    expect(isNeutralChatEnabled({})).toBe(false)
+    // Forcing the override does not depend on the lane's own on/off switch,
+    // and the lane's switch does not itself force a provider onto it.
+    expect(isNeutralChatEnabled({})).toBe(true)
     expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "neutral" })).toBe("neutral")
+  })
+})
+
+describe("isNeutralChatEnabled", () => {
+  it("is ON with no configuration at all", () => {
+    // The inversion, and the one line that changes what users get. Every other
+    // surface in this module is opt-IN because it is unfinished. This one is
+    // finished, so it is opt-OUT: the absent state means enabled.
+    expect(isNeutralChatEnabled({})).toBe(true)
+  })
+
+  it("is off when the project config says so", () => {
+    expect(isNeutralChatEnabled({ editor: { neutralChat: false } })).toBe(false)
+  })
+
+  it("is off when EDITOR_NEUTRAL_CHAT is exactly 0", () => {
+    const previous = process.env.EDITOR_NEUTRAL_CHAT
+    process.env.EDITOR_NEUTRAL_CHAT = "0"
+    try {
+      expect(isNeutralChatEnabled({})).toBe(false)
+    } finally {
+      if (previous === undefined) delete process.env.EDITOR_NEUTRAL_CHAT
+      else process.env.EDITOR_NEUTRAL_CHAT = previous
+    }
+  })
+
+  it("stays on for any other value of the variable", () => {
+    const previous = process.env.EDITOR_NEUTRAL_CHAT
+    process.env.EDITOR_NEUTRAL_CHAT = "yes"
+    try {
+      // Only an exact "0" disables, mirroring the exact-"1" rule the opt-in
+      // surfaces use. A typo must not silently turn chat off for a provider.
+      expect(isNeutralChatEnabled({})).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.EDITOR_NEUTRAL_CHAT
+      else process.env.EDITOR_NEUTRAL_CHAT = previous
+    }
   })
 })
 

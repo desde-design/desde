@@ -1,7 +1,10 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ANTHROPIC_MODEL_CATALOG } from '../../../../src/editor/llm-providers/anthropic-model-catalog.js'
 import type { LiveModel } from '../../../../src/editor/llm-providers/live-model-catalog.js'
-import { createModelCatalogResolver } from '../model-catalog-source.js'
+import { getDescriptor } from '../../../../src/editor/llm-providers/provider-registry.js'
+import { createModelCatalogResolver, chatRuntimeServable } from '../model-catalog-source.js'
+
+const OPENAI_DESCRIPTOR = getDescriptor('openai')!
 
 const API_LIST: LiveModel[] = [
   { id: 'claude-opus-5', label: 'Opus 5', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
@@ -62,10 +65,14 @@ describe('createModelCatalogResolver', () => {
   })
 
   it('answers static without calling anything when there are no credentials', async () => {
+    // The neutral gate is opt-OUT by default (Task 40), so OpenAI's own
+    // static catalog is served alongside Anthropic's even with no key for
+    // either — it is still `static`, and still calls nothing.
     const { resolver, listViaApi, listViaCli } = makeResolver({})
     const result = await resolver.get()
     expect(result.source).toBe('static')
-    expect(result.catalogs).toEqual([ANTHROPIC_MODEL_CATALOG])
+    expect(result.catalogs[0]).toEqual(ANTHROPIC_MODEL_CATALOG)
+    expect(result.catalogs.map((c) => c.providerId)).toEqual(['anthropic', 'openai'])
     expect(listViaApi).not.toHaveBeenCalled()
     expect(listViaCli).not.toHaveBeenCalled()
   })
@@ -132,10 +139,27 @@ describe('createModelCatalogResolver', () => {
 })
 
 describe("the resolver loops the descriptor table", () => {
-  it("serves only providers whose chat runtime can actually dispatch today", async () => {
-    // OpenAI's descriptor declares `chatRuntime: 'neutral'`, and the neutral
-    // runtime is off. Serving its catalog would let the picker offer a model
-    // the chat handler refuses one second later.
+  afterEach(() => {
+    delete process.env.EDITOR_NEUTRAL_CHAT
+  })
+
+  it("serves every provider whose chat runtime can dispatch, by default", async () => {
+    // The neutral gate is opt-OUT now (Task 40), so with no configuration at
+    // all the OpenAI group is servable and appears alongside Anthropic's.
+    const resolver = createModelCatalogResolver({
+      env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }),
+      listViaApi: async () => [],
+      listViaCli: async () => [],
+    })
+    const resolved = await resolver.get()
+    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic', 'openai'])
+  })
+
+  it("stops serving a provider whose chat runtime cannot dispatch, once the gate is off", async () => {
+    // OpenAI's descriptor declares `chatRuntime: 'neutral'`. Serving its
+    // catalog while the neutral runtime is off would let the picker offer a
+    // model the chat handler refuses one second later.
+    process.env.EDITOR_NEUTRAL_CHAT = '0'
     const resolver = createModelCatalogResolver({
       env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }),
       listViaApi: async () => [],
@@ -218,6 +242,43 @@ describe("the resolver loops the descriptor table", () => {
     })
     const resolved = await resolver.get()
     expect(resolved.source).toBe('static')
+    // OpenAI is servable by default (Task 40) and has no key here, so it
+    // rides along on its own static catalog even though only Anthropic's
+    // live source was made to fail.
+    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic', 'openai'])
+  })
+})
+
+describe('chatRuntimeServable', () => {
+  afterEach(() => {
+    delete process.env.EDITOR_NEUTRAL_CHAT
+  })
+
+  it('serves the OpenAI catalog once the neutral gate is on', async () => {
+    // `chatRuntimeServable` is the `includeDescriptor` default, and
+    // production passes nothing, so the gate flipping to opt-OUT (Task 40)
+    // is the whole mechanism by which an OpenAI group appears in the
+    // picker. No handler edit, and no second switch to keep in step with
+    // this one.
+    expect(chatRuntimeServable(OPENAI_DESCRIPTOR)).toBe(true)
+    const resolver = createModelCatalogResolver({
+      env: () => ({ OPENAI_API_KEY: 'sk-test' }),
+      listViaApi: async () => [],
+      listViaCli: async () => [],
+    })
+    const resolved = await resolver.get()
+    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic', 'openai'])
+  })
+
+  it('does not serve it while the gate is explicitly off', async () => {
+    process.env.EDITOR_NEUTRAL_CHAT = '0'
+    expect(chatRuntimeServable(OPENAI_DESCRIPTOR)).toBe(false)
+    const resolver = createModelCatalogResolver({
+      env: () => ({ OPENAI_API_KEY: 'sk-test' }),
+      listViaApi: async () => [],
+      listViaCli: async () => [],
+    })
+    const resolved = await resolver.get()
     expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic'])
   })
 })

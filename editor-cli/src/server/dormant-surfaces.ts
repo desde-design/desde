@@ -25,10 +25,17 @@
  *   off. That is precisely the drifted pair this module's own comment
  *   below warns about, in the module that warns about it.
  * - **`neutralChat`** — the Desde-owned chat runtime that every non-Anthropic
- *   provider dispatches on. DORMANT until proven against Anthropic. Its
- *   first caller is the model catalog resolver (`model-catalog-source.ts`),
- *   which will not serve a `neutral` provider's group while this is off;
- *   `resolveChatRuntime`'s dispatch-side refusal is the second caller.
+ *   provider dispatches on. Its first caller is the model catalog resolver
+ *   (`model-catalog-source.ts`), which will not serve a `neutral` provider's
+ *   group while this is off; `resolveChatRuntime`'s dispatch-side refusal is
+ *   the second caller. **This is the one entry in the module that is
+ *   opt-OUT, not opt-IN.** Every other surface here is dormant because it is
+ *   unfinished, so absence means off. Neutral chat shipped, so absence means
+ *   on: a user who has stored an OpenAI key sees a picker that offers
+ *   something they can run, and only an explicit `false` in the project
+ *   config or an exact `EDITOR_NEUTRAL_CHAT=0` turns it back off. See
+ *   `isNeutralChatEnabled`'s own doc comment for the reasoning; the
+ *   `=== true` rule two paragraphs down does not apply to it.
  *
  * **Why this module exists at all.** Each gate is read in two places: the
  * bootstrap script, which decides what the client is allowed to OFFER, and
@@ -118,17 +125,26 @@ export function isVscodeLinkEnabled(ctx: DormantSurfaceConfig): boolean {
 }
 
 /**
- * Is the Desde-owned neutral chat runtime turned on for this project?
+ * Is the neutral chat runtime available for a `neutral` descriptor?
  *
- * DORMANT by default until the runtime is proven against Anthropic. Read at
- * BOTH ends: the catalog resolver will not serve a `neutral` provider's group
- * while it is off (this task), and `resolveChatRuntime` independently refuses
- * the dispatch (Task 15). Either alone is the drifted pair this module exists
- * to prevent: UI-only gating leaves the API open, dispatch-only gating leaves
- * a control that fails on click.
+ * The ONE opt-OUT gate in this module, and the exception is deliberate rather
+ * than an oversight. Every other surface here is dormant because it is
+ * unfinished, so absence means off. This one shipped: with it off, a user who
+ * has stored an OpenAI key sees a picker that offers nothing they can run.
+ * Absence therefore means on, and only an explicit `false` in the project
+ * config or an exact `EDITOR_NEUTRAL_CHAT=0` turns it off, the mirror of the
+ * exact-"1" rule the opt-in surfaces use, so that a typo cannot silently take
+ * chat away from a provider.
+ *
+ * It remains gated at both ends: the catalog resolver decides what the client
+ * is offered (`chatRuntimeServable` in `model-catalog-source.ts`), the chat
+ * handler decides what the server will run (`resolveChatRuntime`'s dispatch-
+ * side refusal), and one function answers both.
  */
 export function isNeutralChatEnabled(ctx: DormantSurfaceConfig): boolean {
-  return enabled(ctx.editor?.neutralChat, NEUTRAL_CHAT_ENV)
+  if (ctx.editor?.neutralChat === false) return false
+  if (process.env[NEUTRAL_CHAT_ENV] === "0") return false
+  return true
 }
 
 /**

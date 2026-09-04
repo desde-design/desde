@@ -254,6 +254,7 @@ describe('handleModelCatalogRequest — lastChosenModel', () => {
     expect(state.statusCode).toBe(200)
     const body = JSON.parse(state.body)
     expect(body.lastChosenModel).toBeNull()
-    expect(body.catalogs).toHaveLength(1)
+    // Anthropic plus OpenAI, servable by default since Task 40.
+    expect(body.catalogs).toHaveLength(2)
   })
 })

@@ -2488,17 +2488,19 @@ describe("the both-ends gate, from the route", () => {
 
   // An `openai` `modelConfig` is refused before it ever reaches
   // `resolveChatRuntime`: the catalog resolver does not serve the OpenAI
-  // group while `EDITOR_NEUTRAL_CHAT` is off (`chatRuntimeServable` in
-  // `model-catalog-source.ts`), so the request 400s at model-config
-  // validation with the catalog's own "Unknown provider" message. That is
-  // the CLIENT half of the gate, proven in
+  // group while `EDITOR_NEUTRAL_CHAT` is explicitly off (`chatRuntimeServable`
+  // in `model-catalog-source.ts`; the gate is opt-OUT since Task 40, so this
+  // now requires an explicit `EDITOR_NEUTRAL_CHAT=0`), so the request 400s
+  // at model-config validation with the catalog's own "Unknown provider"
+  // message. That is the CLIENT half of the gate, proven in
   // `http-server-neutral-chat-gate.integration.test.ts`. The only path that
   // reaches the dispatch's OWN refusal — the SERVER half, which must not
   // depend on catalog validation having run first — is the dev override,
   // which reroutes an Anthropic session (always servable) onto the neutral
   // runtime kind. That is what these cases use to reach it directly.
-  it("refuses an anthropic session forced onto the neutral runtime while the surface is dormant", async () => {
+  it("refuses an anthropic session forced onto the neutral runtime while the surface is explicitly off", async () => {
     const { loaders, loadRunChatTurnNeutral, loadRunChatTurnSdk } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "0")
     vi.stubEnv("EDITOR_CHAT_RUNTIME_OVERRIDE", "neutral")
     const mock = makeMockReqRes()
     mock.setBody({ userMessage: "hi", modelConfig: { provider: "anthropic", model: "claude-opus-4-8" } })
@@ -2512,6 +2514,7 @@ describe("the both-ends gate, from the route", () => {
 
   it("names the config key and the env var so a stale client learns what to flip", async () => {
     const { loaders } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "0")
     vi.stubEnv("EDITOR_CHAT_RUNTIME_OVERRIDE", "neutral")
     const mock = makeMockReqRes()
     mock.setBody({ userMessage: "hi", modelConfig: { provider: "anthropic", model: "claude-opus-4-8" } })
@@ -2519,6 +2522,17 @@ describe("the both-ends gate, from the route", () => {
     const reason = mock.events().find((e) => e.kind === "error")?.reason as string
     expect(reason).toContain('"neutralChat": true')
     expect(reason).toContain("EDITOR_NEUTRAL_CHAT=1")
+    vi.unstubAllEnvs()
+  })
+
+  it("dispatches to the neutral runtime with no configuration at all", async () => {
+    // The default this task shipped: absence means on.
+    const { loaders, loadRunChatTurnNeutral } = makeGateLoaders()
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.6" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    expect(loadRunChatTurnNeutral).toHaveBeenCalled()
     vi.unstubAllEnvs()
   })
 
