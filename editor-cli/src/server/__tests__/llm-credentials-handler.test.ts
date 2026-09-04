@@ -92,7 +92,7 @@ describe("GET /api/editor/llm-credentials", () => {
       // `inherited` is what makes this the SHELL's key. A value in `env`
       // alone no longer implies that: boot injects stored keys there too, and
       // conflating the two is what reported every stored key as `env`.
-      inherited: { apiKey: "sk-ant-fromtheshell1111" },
+      inherited: { vars: { ANTHROPIC_API_KEY: "sk-ant-fromtheshell1111" } },
       claudeRuntimeResolvable: false,
       fetchImpl: okFetch(),
     })
@@ -277,7 +277,7 @@ describe("stored keys stay owned by the app after injection", () => {
     await handleLlmCredentialsRoute(req("GET"), asRes(res), url(), {
       home,
       env,
-      inherited: {}, // the shell exported nothing
+      inherited: { vars: {} }, // the shell exported nothing
       claudeRuntimeResolvable: true,
       fetchImpl: okFetch(),
     })
@@ -298,7 +298,7 @@ describe("stored keys stay owned by the app after injection", () => {
     await handleLlmCredentialsRoute(req("GET"), asRes(res), url(), {
       home,
       env: { ANTHROPIC_API_KEY: "sk-ant-exported1111" },
-      inherited: { apiKey: "sk-ant-exported1111" },
+      inherited: { vars: { ANTHROPIC_API_KEY: "sk-ant-exported1111" } },
       claudeRuntimeResolvable: true,
       fetchImpl: okFetch(),
     })
@@ -321,7 +321,7 @@ describe("stored keys stay owned by the app after injection", () => {
     await handleLlmCredentialsRoute(req("PUT"), asRes(res), url(), {
       home,
       env,
-      inherited: {},
+      inherited: { vars: {} },
       claudeRuntimeResolvable: true,
       fetchImpl: okFetch(),
       readBody: async () => ({ apiKey: "sk-ant-fresh4321" }),
@@ -340,7 +340,7 @@ describe("stored keys stay owned by the app after injection", () => {
   })
 
   it("restores an exported key to the environment when dev mode is turned off", async () => {
-    const inherited = { apiKey: "sk-ant-exported1111" }
+    const inherited = { vars: { ANTHROPIC_API_KEY: "sk-ant-exported1111" } }
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-exported1111" }
     const devUrl = url("/api/editor/llm-credentials/dev-mode")
 
@@ -377,7 +377,7 @@ describe("PUT /api/editor/llm-credentials/dismiss-prompt", () => {
       {
         home,
         env: {},
-        inherited: {},
+        inherited: { vars: {} },
         claudeRuntimeResolvable: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ dismissed: true }),
@@ -395,7 +395,7 @@ describe("PUT /api/editor/llm-credentials/dismiss-prompt", () => {
       {
         home,
         env: {},
-        inherited: {},
+        inherited: { vars: {} },
         claudeRuntimeResolvable: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ dismissed: true }),
@@ -405,7 +405,7 @@ describe("PUT /api/editor/llm-credentials/dismiss-prompt", () => {
     await handleLlmCredentialsRoute(req("PUT"), asRes(res), url(), {
       home,
       env: {},
-      inherited: {},
+      inherited: { vars: {} },
       claudeRuntimeResolvable: false,
       fetchImpl: okFetch(),
       readBody: async () => ({ apiKey: "sk-ant-good1234" }),
@@ -422,7 +422,7 @@ describe("PUT /api/editor/llm-credentials/dismiss-prompt", () => {
       {
         home,
         env: {},
-        inherited: {},
+        inherited: { vars: {} },
         claudeRuntimeResolvable: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ dismissed: "yes" }),
@@ -444,7 +444,7 @@ describe("GET re-applies the store to this process's environment", () => {
     await handleLlmCredentialsRoute(req("GET"), asRes(fakeRes()), url(), {
       home,
       env,
-      inherited: {},
+      inherited: { vars: {} },
       claudeRuntimeResolvable: false,
       fetchImpl: okFetch(),
     })
@@ -456,7 +456,7 @@ describe("GET re-applies the store to this process's environment", () => {
     await handleLlmCredentialsRoute(req("GET"), asRes(fakeRes()), url(), {
       home,
       env,
-      inherited: {},
+      inherited: { vars: {} },
       claudeRuntimeResolvable: false,
       fetchImpl: okFetch(),
     })

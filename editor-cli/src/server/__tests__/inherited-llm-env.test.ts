@@ -5,6 +5,7 @@ import {
   inheritedLlmEnv,
   resetInheritedLlmEnvForTests,
   spawnEnvWithInheritedLlmCredentials,
+  TRACKED_LLM_ENV_VARS,
 } from "../inherited-llm-env.js"
 
 afterEach(() => {
@@ -12,28 +13,47 @@ afterEach(() => {
 })
 
 describe("captureInheritedLlmEnv", () => {
-  it("records what the shell provided", () => {
+  it("tracks every descriptor's key and base URL plus the subscription flag", () => {
+    expect([...TRACKED_LLM_ENV_VARS].sort()).toEqual([
+      "ANTHROPIC_API_KEY",
+      "EDITOR_USE_CLAUDE_SUBSCRIPTION",
+      "OPENAI_API_KEY",
+      "OPENAI_BASE_URL",
+    ])
+  })
+
+  it("records what the shell provided, for every tracked variable", () => {
     expect(
       captureInheritedLlmEnv({
         ANTHROPIC_API_KEY: "sk-ant-exported",
+        OPENAI_API_KEY: "sk-exported",
+        OPENAI_BASE_URL: "https://gateway.internal",
         EDITOR_USE_CLAUDE_SUBSCRIPTION: "yes",
+        UNRELATED: "kept out",
       }),
-    ).toEqual({ apiKey: "sk-ant-exported", useSubscription: "yes" })
+    ).toEqual({
+      vars: {
+        ANTHROPIC_API_KEY: "sk-ant-exported",
+        OPENAI_API_KEY: "sk-exported",
+        OPENAI_BASE_URL: "https://gateway.internal",
+        EDITOR_USE_CLAUDE_SUBSCRIPTION: "yes",
+      },
+    })
   })
 
   it("records an empty baseline when the shell provided nothing", () => {
-    expect(captureInheritedLlmEnv({})).toEqual({})
+    expect(captureInheritedLlmEnv({})).toEqual({ vars: {} })
   })
 
   it("only the FIRST call records, so an injection cannot be mistaken for the shell", () => {
     captureInheritedLlmEnv({})
     // Simulates boot injection happening between the two calls.
-    captureInheritedLlmEnv({ ANTHROPIC_API_KEY: "sk-ant-injected" })
-    expect(inheritedLlmEnv()).toEqual({})
+    captureInheritedLlmEnv({ OPENAI_API_KEY: "sk-injected" })
+    expect(inheritedLlmEnv()).toEqual({ vars: {} })
   })
 
   it("defaults to an empty baseline when capture never ran", () => {
-    expect(inheritedLlmEnv()).toEqual({})
+    expect(inheritedLlmEnv()).toEqual({ vars: {} })
   })
 })
 
@@ -43,12 +63,27 @@ describe("captureInheritedLlmEnv", () => {
  * own baseline and disabled the controls for a key the app owns.
  */
 describe("spawnEnvWithInheritedLlmCredentials", () => {
-  it("rolls an injected key back out of the child's environment", () => {
+  it("rolls EVERY provider's injected variable back out of the child", () => {
     captureInheritedLlmEnv({})
-    const parentEnv = { PATH: "/bin", ANTHROPIC_API_KEY: "sk-ant-injected" }
+    const parentEnv = {
+      PATH: "/bin",
+      ANTHROPIC_API_KEY: "sk-ant-injected",
+      OPENAI_API_KEY: "sk-injected",
+      OPENAI_BASE_URL: "https://injected.internal",
+    }
     const childEnv = spawnEnvWithInheritedLlmCredentials(parentEnv)
     expect("ANTHROPIC_API_KEY" in childEnv).toBe(false)
+    expect("OPENAI_API_KEY" in childEnv).toBe(false)
+    expect("OPENAI_BASE_URL" in childEnv).toBe(false)
     expect(childEnv.PATH).toBe("/bin")
+  })
+
+  it("preserves an OpenAI key the shell really did export", () => {
+    captureInheritedLlmEnv({ OPENAI_API_KEY: "sk-exported" })
+    expect(
+      spawnEnvWithInheritedLlmCredentials({ OPENAI_API_KEY: "sk-exported" })
+        .OPENAI_API_KEY,
+    ).toBe("sk-exported")
   })
 
   it("preserves a key the shell really did export", () => {

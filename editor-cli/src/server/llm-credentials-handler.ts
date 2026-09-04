@@ -119,12 +119,12 @@ async function buildStatus(
   claudeRuntimeResolvable: boolean,
 ): Promise<LlmCredentialsStatus> {
   const stored = await readLlmCredentials(home)
-  // `inherited.apiKey`, NOT `process.env.ANTHROPIC_API_KEY`: boot copies a
+  // `inherited.vars[...]`, NOT `process.env.ANTHROPIC_API_KEY`: boot copies a
   // stored key into that variable, so probing it live reported every stored
   // key as externally managed and disabled the controls that manage it.
   const probe = probeCredential({
     descriptor: ANTHROPIC_DESCRIPTOR,
-    inheritedApiKey: inherited.apiKey,
+    inheritedApiKey: inherited.vars[ANTHROPIC_DESCRIPTOR.credentials.apiKeyEnvVar],
     stored,
     claudeRuntimeResolvable,
     // Either opt-in is sufficient, and they come from different places: dev

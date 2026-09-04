@@ -19,13 +19,39 @@
  * the user's shell or from us. Capturing the baseline answers it once, and
  * lets `applyLlmCredentialsToEnv` be idempotent — it recomputes the whole
  * desired state from (inherited, stored) rather than mutating in place.
+ *
+ * **Generalised over the descriptor table.** The tracked variable list used to
+ * be two hand-named fields (`apiKey`, `useSubscription`). It is now every
+ * descriptor's key and base-URL variable plus the subscription flag, derived
+ * from `PROVIDER_DESCRIPTORS` so a new vendor is tracked for free.
  */
+import { CLAUDE_SUBSCRIPTION_ENV } from "../../../src/editor/llm-providers/registry.js"
+import { PROVIDER_DESCRIPTORS } from "../../../src/editor/llm-providers/provider-registry.js"
+
+/**
+ * Every environment variable this process may inject into or roll back.
+ *
+ * Derived from the descriptor table rather than listed by hand, because a
+ * hand-listed variable is one a new vendor forgets. Adding Kimi adds its key
+ * here for free.
+ */
+export const TRACKED_LLM_ENV_VARS: readonly string[] = [
+  ...new Set([
+    ...PROVIDER_DESCRIPTORS.flatMap((d) => [
+      d.credentials.apiKeyEnvVar,
+      ...(d.credentials.baseUrlEnvVar ? [d.credentials.baseUrlEnvVar] : []),
+    ]),
+    CLAUDE_SUBSCRIPTION_ENV,
+  ]),
+]
 
 export interface InheritedLlmEnv {
-  /** `ANTHROPIC_API_KEY` as the process received it, if it had one. */
-  apiKey?: string
-  /** `EDITOR_USE_CLAUDE_SUBSCRIPTION` as the process received it. */
-  useSubscription?: string
+  /**
+   * Each tracked variable as the process received it. A variable the shell did
+   * not set is ABSENT from the map rather than present-and-undefined, so
+   * "empty baseline" stays literally `{}`.
+   */
+  vars: Record<string, string | undefined>
 }
 
 let captured: InheritedLlmEnv | undefined
@@ -38,12 +64,11 @@ let captured: InheritedLlmEnv | undefined
  */
 export function captureInheritedLlmEnv(env: NodeJS.ProcessEnv = process.env): InheritedLlmEnv {
   if (!captured) {
-    captured = {
-      ...(env.ANTHROPIC_API_KEY === undefined ? {} : { apiKey: env.ANTHROPIC_API_KEY }),
-      ...(env.EDITOR_USE_CLAUDE_SUBSCRIPTION === undefined
-        ? {}
-        : { useSubscription: env.EDITOR_USE_CLAUDE_SUBSCRIPTION }),
+    const vars: Record<string, string | undefined> = {}
+    for (const name of TRACKED_LLM_ENV_VARS) {
+      if (env[name] !== undefined) vars[name] = env[name]
     }
+    captured = { vars }
   }
   return captured
 }
@@ -56,7 +81,7 @@ export function captureInheritedLlmEnv(env: NodeJS.ProcessEnv = process.env): In
  * opposite default would re-create defect 1.
  */
 export function inheritedLlmEnv(): InheritedLlmEnv {
-  return captured ?? {}
+  return captured ?? { vars: {} }
 }
 
 /** Test-only: clears the module-level capture between cases. */
@@ -81,9 +106,10 @@ export function spawnEnvWithInheritedLlmCredentials(
 ): NodeJS.ProcessEnv {
   const inherited = inheritedLlmEnv()
   const next: NodeJS.ProcessEnv = { ...env }
-  if (inherited.apiKey === undefined) delete next.ANTHROPIC_API_KEY
-  else next.ANTHROPIC_API_KEY = inherited.apiKey
-  if (inherited.useSubscription === undefined) delete next.EDITOR_USE_CLAUDE_SUBSCRIPTION
-  else next.EDITOR_USE_CLAUDE_SUBSCRIPTION = inherited.useSubscription
+  for (const name of TRACKED_LLM_ENV_VARS) {
+    const base = inherited.vars[name]
+    if (base === undefined) delete next[name]
+    else next[name] = base
+  }
   return next
 }

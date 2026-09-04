@@ -3,7 +3,7 @@ import { applyLlmCredentialsToEnv } from "../apply-llm-credentials.js"
 import type { InheritedLlmEnv } from "../inherited-llm-env.js"
 
 /** No inherited baseline: the shell gave the process nothing. */
-const CLEAN: InheritedLlmEnv = {}
+const CLEAN: InheritedLlmEnv = { vars: {} }
 
 const noKey = { providers: {}, devMode: false }
 
@@ -21,7 +21,7 @@ describe("applyLlmCredentialsToEnv", () => {
   it("never overwrites a key the shell exported", () => {
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-env" }
     applyLlmCredentialsToEnv(withAnthropicKey("sk-ant-stored"), env, {
-      apiKey: "sk-ant-env",
+      vars: { ANTHROPIC_API_KEY: "sk-ant-env" },
     })
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-env")
   })
@@ -34,7 +34,9 @@ describe("applyLlmCredentialsToEnv", () => {
 
   it("dev mode DELETES an environment key rather than leaving it", () => {
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-env" }
-    applyLlmCredentialsToEnv({ providers: {}, devMode: true }, env, { apiKey: "sk-ant-env" })
+    applyLlmCredentialsToEnv({ providers: {}, devMode: true }, env, {
+      vars: { ANTHROPIC_API_KEY: "sk-ant-env" },
+    })
     // `delete`, not assignment to undefined: spawn() passes an `undefined`
     // value through as the STRING "undefined" on some platforms.
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
@@ -43,7 +45,7 @@ describe("applyLlmCredentialsToEnv", () => {
   it("dev mode deletes a stored key's injection too, and sets the flag", () => {
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-env" }
     applyLlmCredentialsToEnv(withAnthropicKey("sk-ant-stored", true), env, {
-      apiKey: "sk-ant-env",
+      vars: { ANTHROPIC_API_KEY: "sk-ant-env" },
     })
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
     expect(env.EDITOR_USE_CLAUDE_SUBSCRIPTION).toBe("1")
@@ -64,7 +66,7 @@ describe("applyLlmCredentialsToEnv", () => {
   it("treats a whitespace-only inherited key as absent and injects the stored one", () => {
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "  " }
     applyLlmCredentialsToEnv(withAnthropicKey("sk-ant-stored"), env, {
-      apiKey: "  ",
+      vars: { ANTHROPIC_API_KEY: "  " },
     })
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-stored")
   })
@@ -77,7 +79,7 @@ describe("applyLlmCredentialsToEnv", () => {
  */
 describe("applyLlmCredentialsToEnv restores the inherited baseline", () => {
   it("gives an exported key back when dev mode is turned off", () => {
-    const inherited: InheritedLlmEnv = { apiKey: "sk-ant-exported" }
+    const inherited: InheritedLlmEnv = { vars: { ANTHROPIC_API_KEY: "sk-ant-exported" } }
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-exported" }
 
     applyLlmCredentialsToEnv({ providers: {}, devMode: true }, env, inherited)
@@ -88,7 +90,7 @@ describe("applyLlmCredentialsToEnv restores the inherited baseline", () => {
   })
 
   it("gives an exported subscription flag back when dev mode is turned off", () => {
-    const inherited: InheritedLlmEnv = { useSubscription: "yes" }
+    const inherited: InheritedLlmEnv = { vars: { EDITOR_USE_CLAUDE_SUBSCRIPTION: "yes" } }
     const env: NodeJS.ProcessEnv = { EDITOR_USE_CLAUDE_SUBSCRIPTION: "yes" }
 
     applyLlmCredentialsToEnv({ providers: {}, devMode: true }, env, inherited)
@@ -115,5 +117,54 @@ describe("applyLlmCredentialsToEnv restores the inherited baseline", () => {
 
     applyLlmCredentialsToEnv({ providers: {}, devMode: false }, env, CLEAN)
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
+  })
+})
+
+/**
+ * The assembly case. MEASURED before this change: the dev-mode branch
+ * `return`ed, so an OpenAI injection added after it would silently never run
+ * and dev mode would disable a provider it has no business touching.
+ */
+describe("dev mode is Anthropic-scoped and never short-circuits another provider", () => {
+  it("injects a stored OpenAI key even with dev mode ON", () => {
+    const env: NodeJS.ProcessEnv = {}
+    applyLlmCredentialsToEnv(
+      {
+        providers: {
+          anthropic: { apiKey: "sk-ant-stored" },
+          openai: { apiKey: "sk-openai-stored", baseUrl: "https://gateway.internal" },
+        },
+        devMode: true,
+      },
+      env,
+      { vars: {} },
+    )
+    expect("ANTHROPIC_API_KEY" in env).toBe(false)
+    expect(env.EDITOR_USE_CLAUDE_SUBSCRIPTION).toBe("1")
+    expect(env.OPENAI_API_KEY).toBe("sk-openai-stored")
+    expect(env.OPENAI_BASE_URL).toBe("https://gateway.internal")
+  })
+
+  it("lets a shell-exported OpenAI key beat the stored one", () => {
+    const env: NodeJS.ProcessEnv = { OPENAI_API_KEY: "sk-exported" }
+    applyLlmCredentialsToEnv(
+      { providers: { openai: { apiKey: "sk-stored" } }, devMode: false },
+      env,
+      { vars: { OPENAI_API_KEY: "sk-exported" } },
+    )
+    expect(env.OPENAI_API_KEY).toBe("sk-exported")
+  })
+
+  it("removes a previously injected OpenAI key once the store is cleared", () => {
+    const env: NodeJS.ProcessEnv = {}
+    const inherited = { vars: {} }
+    applyLlmCredentialsToEnv(
+      { providers: { openai: { apiKey: "sk-stored" } }, devMode: false },
+      env,
+      inherited,
+    )
+    expect(env.OPENAI_API_KEY).toBe("sk-stored")
+    applyLlmCredentialsToEnv({ providers: {}, devMode: false }, env, inherited)
+    expect("OPENAI_API_KEY" in env).toBe(false)
   })
 })
