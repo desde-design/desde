@@ -22,7 +22,7 @@ describe('buildModelCatalogResponse: the default is a decision, not an index', (
     })
     expect(body.defaultProviderId).toBe('openai')
     expect(body.default.provider).toBe('openai')
-    expect(body.default.model).toBe('gpt-5.2')
+    expect(body.default.model).toBe('gpt-5.6')
   })
 
   it('prefers anthropic when both are credentialed', () => {

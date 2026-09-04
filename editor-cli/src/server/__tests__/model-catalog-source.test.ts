@@ -188,6 +188,25 @@ describe("the resolver loops the descriptor table", () => {
     expect(calls).toBe(2)
   })
 
+  it("serves both providers' real catalogs when both are credentialed", async () => {
+    // Explicit, and independent of the neutral gate: this case is about the
+    // CATALOG being right, not about when it is offered. `chatRuntimeServable`
+    // itself is asserted directly, elsewhere.
+    const resolver = createModelCatalogResolver({
+      env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-test', OPENAI_API_KEY: 'sk-test' }),
+      listViaApi: async () => [],
+      listViaCli: async () => [],
+      includeDescriptor: () => true,
+    })
+    const resolved = await resolver.get()
+    expect(resolved.catalogs.map((c) => c.providerId).sort()).toEqual(['anthropic', 'openai'])
+    const openai = resolved.catalogs.find((c) => c.providerId === 'openai')!
+    // The placeholder had one entry. The real catalog has the seven the
+    // picker offers, and exactly one of them opens.
+    expect(openai.models.length).toBeGreaterThan(1)
+    expect(openai.models.filter((m) => m.isDefault).map((m) => m.id)).toEqual(['gpt-5.6'])
+  })
+
   it("falls back to every provider's static catalog when a live source throws", async () => {
     const resolver = createModelCatalogResolver({
       env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x' }),

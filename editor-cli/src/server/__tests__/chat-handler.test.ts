@@ -288,7 +288,7 @@ describe("handleChatRequest", () => {
     const mock = makeMockReqRes()
     mock.setBody({
       userMessage: "hi",
-      modelConfig: { provider: "openai", model: "gpt-5.2" },
+      modelConfig: { provider: "openai", model: "gpt-5.6" },
     })
     await handleChatRequest(mock.req, mock.res, { repoRoot } as ChatHandlerContext)
     const error = mock.events().find((e) => e.kind === "error")
@@ -2527,7 +2527,7 @@ describe("the both-ends gate, from the route", () => {
     vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
     vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
     const mock = makeMockReqRes()
-    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.2" } })
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.6" } })
     await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
     expect(loadRunChatTurnNeutral).toHaveBeenCalled()
     vi.unstubAllEnvs()
@@ -2538,7 +2538,7 @@ describe("the both-ends gate, from the route", () => {
     vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
     vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
     const mock = makeMockReqRes()
-    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.2" } })
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.6" } })
     await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
     expect(runTurnSpy.mock.calls[0][0]).toMatchObject({ providerId: "openai" })
     vi.unstubAllEnvs()
@@ -2559,7 +2559,7 @@ describe("the both-ends gate, from the route", () => {
     vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
     vi.stubEnv("OPENAI_API_KEY", "")
     const mock = makeMockReqRes()
-    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.2" } })
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.6" } })
     await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
     const error = mock.events().find((e) => e.kind === "error")
     expect(error?.reason).toMatch(/OpenAI/)

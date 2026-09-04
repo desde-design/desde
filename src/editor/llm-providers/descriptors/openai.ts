@@ -11,6 +11,7 @@
  */
 import { EFFORT_LEVELS } from '../../core/model-catalog'
 import { OPENAI_MODEL_CATALOG } from '../openai-model-catalog'
+import { listOpenAiLiveModels } from '../openai-live-models'
 import { buildOpenAiProvider } from '../ai-sdk-openai'
 import type { ProviderDescriptor } from '../provider-descriptor'
 
@@ -48,6 +49,9 @@ export const OPENAI_DESCRIPTOR: ProviderDescriptor = {
     return buildOpenAiProvider(input)
   },
   staticCatalog: OPENAI_MODEL_CATALOG,
+  listLiveModels(input) {
+    return listOpenAiLiveModels(input)
+  },
   async validateKey(input) {
     const fetchImpl = input.fetchImpl ?? fetch
     try {

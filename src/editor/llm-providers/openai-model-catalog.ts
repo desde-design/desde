@@ -1,27 +1,69 @@
 /**
- * OpenAI's static catalog.
+ * Static OpenAI model catalog for the chat model picker: the FALLBACK, and the
+ * per-model detail the live list lacks.
  *
- * PLACEHOLDER, deliberately minimal. Phase 0 only needs a catalog to exist so
- * the descriptor's invariants hold (exactly one default, ids that resolve to a
- * rate card); phase 4 replaces this list with the real one and adds the
- * rate-card coverage test that keeps it honest. Nothing serves it in
- * production until the neutral chat runtime is switched on.
+ * `GET /v1/models` returns ids, a creation timestamp and an owner, and nothing
+ * else — no context window, no modality, no effort support (a standing feature
+ * request, not an oversight). So labels, descriptions and effort ladders come
+ * from here, exactly as they do for Anthropic.
  *
- * `gpt-5.2` is the id `OPENAI_DEFAULT_MODEL` already names and the one
- * `rate-cards.ts` already prices, so the placeholder cannot price at the
- * conservative unknown-model fallback.
+ * Data, not code — edit this list when models change. Every entry carries the
+ * five levels Desde and OpenAI share. OpenAI also accepts `none` and `minimal`;
+ * neither is offered, because the gpt-5.6 family rejects `none` with a 400 and
+ * `minimal` has no rung on Desde's ladder.
+ *
+ * The `isDefault` entry must have a rate card, which
+ * `rate-cards.test.ts` asserts for every id here.
  */
 import type { ProviderModelCatalog } from '../core/model-catalog'
+
+const LADDER = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
 export const OPENAI_MODEL_CATALOG: ProviderModelCatalog = {
   providerId: 'openai',
   models: [
     {
-      id: 'gpt-5.2',
-      label: 'GPT-5.2',
-      description: 'Placeholder entry. The full list ships with OpenAI chat.',
-      effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      id: 'gpt-5.6',
+      label: 'GPT-5.6',
+      description: 'Most capable: the hardest reasoning and long-horizon work',
+      effortLevels: [...LADDER],
       isDefault: true,
+    },
+    {
+      id: 'gpt-5.6-terra',
+      label: 'GPT-5.6 Terra',
+      description: 'Strong agentic coding at a lower cost',
+      effortLevels: [...LADDER],
+    },
+    {
+      id: 'gpt-5.6-luna',
+      label: 'GPT-5.6 Luna',
+      description: 'Fastest: simple edits and lookups',
+      effortLevels: [...LADDER],
+    },
+    {
+      id: 'gpt-5.5',
+      label: 'GPT-5.5',
+      description: 'Previous flagship generation',
+      effortLevels: [...LADDER],
+    },
+    {
+      id: 'gpt-5.4',
+      label: 'GPT-5.4',
+      description: 'Balanced quality and cost',
+      effortLevels: [...LADDER],
+    },
+    {
+      id: 'gpt-5.4-mini',
+      label: 'GPT-5.4 Mini',
+      description: 'Fast and economical',
+      effortLevels: [...LADDER],
+    },
+    {
+      id: 'gpt-5.3-codex',
+      label: 'GPT-5.3 Codex',
+      description: 'Tuned for code',
+      effortLevels: [...LADDER],
     },
   ],
 }

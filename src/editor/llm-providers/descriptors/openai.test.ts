@@ -22,14 +22,15 @@ describe('OPENAI_DESCRIPTOR', () => {
     expect(OPENAI_DESCRIPTOR.capabilities.webTools).toBe(false)
   })
 
-  it('serves a placeholder static catalog with exactly one default', () => {
+  it('serves the real static catalog with exactly one default', () => {
     const defaults = OPENAI_DESCRIPTOR.staticCatalog.models.filter((m) => m.isDefault)
     expect(OPENAI_DESCRIPTOR.staticCatalog.providerId).toBe('openai')
+    expect(OPENAI_DESCRIPTOR.staticCatalog.models.length).toBeGreaterThan(1)
     expect(defaults).toHaveLength(1)
   })
 
-  it('has no live model list until phase 4 adds one', () => {
-    expect(OPENAI_DESCRIPTOR.listLiveModels).toBeUndefined()
+  it('has a live model list', () => {
+    expect(OPENAI_DESCRIPTOR.listLiveModels).toBeTypeOf('function')
   })
 
   it('builds an OpenAIProvider bound to the key and base URL it is given', () => {
