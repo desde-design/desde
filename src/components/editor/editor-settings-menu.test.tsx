@@ -279,7 +279,7 @@ describe("EditorSettingsMenu — API key section", () => {
     stubCredentials(anthropicStatus({ source: "none" }))
     render(<EditorSettingsMenu />)
     await waitFor(() =>
-      expect(screen.getByText("Anthropic API key")).toBeInTheDocument(),
+      expect(screen.getByText("AI provider keys")).toBeInTheDocument(),
     )
   })
 

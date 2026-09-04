@@ -12,8 +12,8 @@
  *
  * ## What is here, and what deliberately is not
  *
- * The Anthropic API key is machine-level — one key, every project — so it
- * belongs here and not only behind an open project. Same for updates.
+ * AI provider keys are machine-level — one key per provider, every project —
+ * so they belong here and not only behind an open project. Same for updates.
  *
  * Extensions are NOT here, and that is a fact about where they live rather
  * than an omission: enabling one writes `.mcp.json` inside a repo, and on the
@@ -48,18 +48,36 @@ import {
 import { SettingsStatusDot } from "@/components/editor/settings-status-dot"
 import { LlmCredentialDialog } from "@/components/editor/llm-credential-dialog"
 import { everyProviderUncredentialed, useLlmCredentials } from "@/hooks/useLlmCredentials"
+import { useFirstRunCredentialPrompt } from "@/hooks/useFirstRunCredentialPrompt"
 import type { DesktopUpdatesApi } from "@/hooks/useDesktopUpdates"
 import { cn } from "@/lib/utils"
 
 export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi | undefined }) {
   const credentials = useLlmCredentials()
-  const [credentialDialogOpen, setCredentialDialogOpen] = useState(false)
+  const [credentialDialogManuallyOpen, setCredentialDialogManuallyOpen] =
+    useState(false)
   // Owned here, not in `DesktopUpdateSection`: the dropdown closes on
   // select, so a dialog rendered inside it would unmount with the menu.
   const [checkDialogOpen, setCheckDialogOpen] = useState(false)
 
   const status = credentials.status
   const credentialMissing = everyProviderUncredentialed(status)
+  // The Launcher showed only a passive "Not set" badge, so a brand-new user's
+  // FIRST screen never asked for a key. Someone with nothing configured should
+  // be asked before they open a project, not after.
+  const { shouldPrompt: credentialPrompt, dismiss: dismissCredentialPrompt } =
+    useFirstRunCredentialPrompt(status, credentials.dismissPrompt)
+  const credentialDialogOpen = credentialDialogManuallyOpen || credentialPrompt
+
+  const handleCredentialDialogChange = useCallback(
+    (open: boolean) => {
+      setCredentialDialogManuallyOpen(open)
+      // Closing the auto-opened prompt IS the dismissal, or it reopens
+      // immediately while no credential exists.
+      if (!open && credentialPrompt) dismissCredentialPrompt()
+    },
+    [credentialPrompt, dismissCredentialPrompt],
+  )
   // Same rule as the project gear: an actionable update makes the button say
   // its own name, because it is the one thing behind here worth interrupting
   // for. Downloading and error keep the quiet dot — progress and problems are
@@ -119,11 +137,11 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
             onCheckClick={() => setCheckDialogOpen(true)}
           />
           <DropdownMenuItem
-            onSelect={() => setCredentialDialogOpen(true)}
+            onSelect={() => setCredentialDialogManuallyOpen(true)}
             data-testid="launcher-settings-api-key"
           >
             <KeyRound className="h-4 w-4" />
-            Anthropic API key
+            AI provider keys
             {credentialMissing ? (
               <span className="ml-auto text-2xs text-muted-foreground">Not set</span>
             ) : null}
@@ -138,7 +156,7 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
       />
       <LlmCredentialDialog
         open={credentialDialogOpen}
-        onOpenChange={setCredentialDialogOpen}
+        onOpenChange={handleCredentialDialogChange}
         credentials={credentials}
       />
     </>

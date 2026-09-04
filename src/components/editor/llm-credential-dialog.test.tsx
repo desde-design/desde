@@ -4,6 +4,7 @@ import {
   useLlmCredentials,
   type LlmCredentialsStatus,
   type ProviderCredentialStatus,
+  type UseLlmCredentials,
 } from "@/hooks/useLlmCredentials"
 import { LlmCredentialDialog, shouldRevealDevMode } from "./llm-credential-dialog"
 
@@ -102,7 +103,7 @@ describe("LlmCredentialDialog", () => {
   it("hides the dev mode toggle until it is revealed", async () => {
     stubStatus(anthropicStatus({ source: "none" }))
     render(<Harness />)
-    await waitFor(() => expect(screen.getByText("Anthropic API key")).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText("AI provider keys")).toBeInTheDocument())
     expect(screen.queryByLabelText("Dev mode")).toBeNull()
   })
 
@@ -119,7 +120,7 @@ describe("LlmCredentialDialog", () => {
       expect(screen.getByText(/environment variable/i)).toBeInTheDocument(),
     )
     // Query the control, not a label: the dialog's own `aria-labelledby`
-    // points at the title "Anthropic API key" and matches a loose regex.
+    // points at the title "AI provider keys" and matches a loose regex.
     expect(screen.queryByPlaceholderText("sk-ant-...")).toBeNull()
     expect(screen.queryByRole("button", { name: "Save key" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Remove key" })).toBeNull()
@@ -242,5 +243,129 @@ describe("LlmCredentialDialog save race", () => {
 
     // It must NOT close the instance the user is now looking at.
     expect(onOpenChange).not.toHaveBeenCalledWith(false)
+  })
+})
+
+const twoProviders = {
+  providers: {
+    anthropic: {
+      id: "anthropic",
+      label: "Anthropic",
+      source: "none" as const,
+      hasStoredKey: false,
+      apiKeyEnvVar: "ANTHROPIC_API_KEY",
+      consoleUrl: "https://console.anthropic.com/settings/keys",
+      maskPrefix: "sk-ant-",
+      hasSubscriptionRuntime: true,
+    },
+    openai: {
+      id: "openai",
+      label: "OpenAI",
+      source: "none" as const,
+      hasStoredKey: false,
+      apiKeyEnvVar: "OPENAI_API_KEY",
+      baseUrlEnvVar: "OPENAI_BASE_URL",
+      consoleUrl: "https://platform.openai.com/api-keys",
+      maskPrefix: "sk-",
+      hasSubscriptionRuntime: false,
+    },
+  },
+  devMode: false,
+  promptDismissed: false,
+}
+
+function credentials(overrides: Partial<UseLlmCredentials> = {}): UseLlmCredentials {
+  return {
+    status: twoProviders,
+    loading: false,
+    error: null,
+    saveKey: vi.fn(async () => true),
+    removeKey: vi.fn(async () => true),
+    setDevMode: vi.fn(async () => true),
+    dismissPrompt: vi.fn(async () => true),
+    refresh: vi.fn(async () => {}),
+    ...overrides,
+  }
+}
+
+describe("LlmCredentialDialog: one tab per provider", () => {
+  it("renders a tab for every provider the server served", () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    expect(screen.getByRole("tab", { name: "Anthropic" })).toBeInTheDocument()
+    expect(screen.getByRole("tab", { name: "OpenAI" })).toBeInTheDocument()
+  })
+
+  it("saves against the provider whose tab is open", async () => {
+    const saveKey = vi.fn(async () => true)
+    render(
+      <LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials({ saveKey })} />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-typed" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }))
+    await waitFor(() =>
+      expect(saveKey).toHaveBeenCalledWith("openai", "sk-typed", undefined),
+    )
+  })
+
+  it("keeps each tab's draft separate", async () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-ant-draft" } })
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    expect(screen.getByLabelText("API key")).toHaveValue("")
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Anthropic" }))
+    expect(screen.getByLabelText("API key")).toHaveValue("sk-ant-draft")
+  })
+
+  it("offers a base URL field only for a provider that takes one", async () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument()
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    expect(screen.getByLabelText("Base URL")).toBeInTheDocument()
+  })
+
+  it("names the provider's own environment variable when it manages the key", () => {
+    const envManaged = {
+      ...twoProviders,
+      providers: {
+        ...twoProviders.providers,
+        openai: { ...twoProviders.providers.openai, source: "env" as const },
+      },
+    }
+    render(
+      <LlmCredentialDialog
+        open
+        onOpenChange={() => {}}
+        credentials={credentials({ status: envManaged })}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    expect(screen.getByText("OPENAI_BASE_URL", { exact: false })).toBeDefined()
+    expect(screen.getByText("OPENAI_API_KEY")).toBeInTheDocument()
+  })
+})
+
+describe("dev mode stays inside the Anthropic tab", () => {
+  it("does not reveal the toggle from a tab with no subscription runtime", async () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "?",
+      code: "Slash",
+      ctrlKey: true,
+      shiftKey: true,
+    })
+    expect(screen.queryByLabelText("Dev mode")).not.toBeInTheDocument()
+  })
+
+  it("reveals it from the Anthropic tab", async () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "?",
+      code: "Slash",
+      ctrlKey: true,
+      shiftKey: true,
+    })
+    expect(await screen.findByLabelText("Dev mode")).toBeInTheDocument()
   })
 })

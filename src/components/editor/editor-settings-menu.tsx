@@ -240,7 +240,7 @@ export function EditorSettingsMenu({
             data-testid="editor-settings-api-key"
           >
             <KeyRound className="h-4 w-4" />
-            Anthropic API key
+            AI provider keys
             {credentialMissing ? (
               <span className="ml-auto text-2xs text-muted-foreground">Not set</span>
             ) : null}
