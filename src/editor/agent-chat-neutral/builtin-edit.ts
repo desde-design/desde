@@ -154,7 +154,12 @@ async function applyWrite(
     ...(opts.recordHistory !== false
       ? { record: { history: getSharedEditHistory(), label: `${toolName}: ${built.repoRel}` } }
       : {}),
-    describe: { kind: toolName === 'Write' ? 'write_file' : 'edit_file', lane: 'chat' as const },
+    // 'write' / 'edit' are the kinds the ledger already knows (LEDGER_KINDS in
+    // ledger/describe-entry.ts), and the same ones the SDK lane records for the
+    // same tool call. Inventing a spelling here would make every row of this
+    // lane read as the humanised fallback in the Activity panel, and the log is
+    // append-only, so those rows could never be repaired.
+    describe: { kind: toolName === 'Write' ? 'write' : 'edit', lane: 'chat' as const },
     ...(opts.acquireTreeGate ? { acquireTreeGate: opts.acquireTreeGate } : {}),
   })
 

@@ -5,7 +5,17 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { EditProposalPayload } from '../agent-tools/types'
+import type { LedgerEditEntry } from '../ledger/entry'
+import { describeLedgerEntry } from '../ledger/describe-entry'
 import { buildEditToolSpec, buildWriteToolSpec } from './builtin-edit'
+
+/** The ledger rows this lane appended, newest last. */
+function ledgerEntries(): LedgerEditEntry[] {
+  return readFileSync(join(root, '.desde/edit-log.jsonl'), 'utf8')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as LedgerEditEntry)
+}
 
 let root: string
 let emitted: EditProposalPayload[]
@@ -87,6 +97,16 @@ describe('Edit', () => {
     expect(log).toContain('"lane":"chat"')
   })
 
+  it('appends a ledger entry the Activity panel can describe', async () => {
+    await buildEditToolSpec(opts()).handler(
+      { file_path: 'src/App.vue', old_string: 'Old', new_string: 'New' },
+      {},
+    )
+    const [entry] = ledgerEntries()
+    expect(entry.kind).toBe('edit')
+    expect(describeLedgerEntry(entry)).toBe('Edited App.vue')
+  })
+
   it('refuses a non-unique old_string and says how to fix it', async () => {
     writeFileSync(join(root, 'src/App.vue'), 'x\nx\n', 'utf8')
     const out = await buildEditToolSpec(opts()).handler(
@@ -127,6 +147,13 @@ describe('Write', () => {
     expect(out.isError).toBeUndefined()
     expect(readFileSync(join(root, 'docs/plan.md'), 'utf8')).toBe('# Plan\n')
     expect(emitted[0]).toMatchObject({ allowCreate: true, appliedByAgent: true })
+  })
+
+  it('appends a ledger entry the Activity panel can describe', async () => {
+    await buildWriteToolSpec(opts()).handler({ file_path: 'docs/plan.md', content: '# Plan\n' }, {})
+    const [entry] = ledgerEntries()
+    expect(entry.kind).toBe('write')
+    expect(describeLedgerEntry(entry)).toBe('Wrote plan.md')
   })
 
   it('refuses a disallowed extension and writes nothing', async () => {
