@@ -19,6 +19,52 @@ const eslintConfig = defineConfig([
       ],
     },
   },
+  // The Vercel AI SDK lives behind ONE file. `ai` and `@ai-sdk/*` shipped two
+  // breaking majors inside a year (`maxSteps` became `stopWhen`; per-tool
+  // `needsApproval` became a `toolApproval` option), and the mitigation this
+  // repo chose is that a major bump is a one-directory migration rather than a
+  // sweep. `src/editor/llm-providers/ai-sdk-*.ts` is that directory-of-one.
+  // Everything else reaches the SDK through `LLMProvider`, which is vendor
+  // neutral and predates it.
+  //
+  // Ported here from `feat/multi-provider-llm` on 2026-09-04, ahead of the
+  // branch, because `tasks/` is ONE repository shared by every root branch
+  // while `eslint.config.mjs` is per-branch. `tasks/scripts/ai-sdk-transport-spike.mts`
+  // was committed to `tasks/` main carrying three `no-restricted-imports`
+  // disables for a rule that only existed on the branch, so on main those
+  // directives reported as unused and `npm run verify` failed its lint stage
+  // for everyone — including the deploy script, whose first step is a local
+  // `npm run verify`. Deleting the directives instead would have made the same
+  // three imports hard errors the moment the branch was checked out.
+  //
+  // Nothing on main imports `ai` or `@ai-sdk/*` today (the packages are not
+  // even installed here), so this restricts nothing that exists — it makes the
+  // spike's directives honest. Expect it to conflict trivially when the branch
+  // lands; keep the branch's copy.
+  {
+    ignores: ["src/editor/llm-providers/ai-sdk-*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "ai",
+              message:
+                "Import the AI SDK only from src/editor/llm-providers/ai-sdk-*.ts. Elsewhere, depend on the vendor-neutral LLMProvider in src/editor/llm-providers/types.ts.",
+            },
+          ],
+          patterns: [
+            {
+              group: ["ai/*", "@ai-sdk/*"],
+              message:
+                "Import the AI SDK only from src/editor/llm-providers/ai-sdk-*.ts. Elsewhere, depend on the vendor-neutral LLMProvider in src/editor/llm-providers/types.ts.",
+            },
+          ],
+        },
+      ],
+    },
+  },
   // Dev-only live smoke / probe harnesses. They drive Playwright `page.evaluate`,
   // whose results are inherently `any` at the boundary; forcing types on these
   // throwaway scripts is noise, not safety. Not shipped in any bundle.
