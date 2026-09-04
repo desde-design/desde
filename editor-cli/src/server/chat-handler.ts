@@ -29,6 +29,7 @@ import {
   resolveDefaultProviderId,
 } from "../../../src/editor/llm-providers/provider-registry.js"
 import { resolveLlmConfig } from "./llm-config.js"
+import { resolveChatRuntime } from "./chat-runtime-dispatch.js"
 import type { IncomingMessage, ServerResponse } from "node:http"
 
 import { projectIdForRepoRoot, withSessionStatus } from "../../../src/editor/agent-chat/session-store.js"
@@ -127,6 +128,14 @@ export interface ChatHandlerLoaders {
    * view+drive ops fall back to the bridge → user's live iframe.
    */
   loadReviewSurface?: () => Promise<typeof import("../review-surface")>
+  /**
+   * Loads the Desde-owned neutral chat runtime. Optional until phase 3 ships
+   * `src/editor/agent-chat-neutral/run-chat-turn-neutral.ts`; `resolveChatRuntime`
+   * refuses with a capability message while it is absent.
+   */
+  loadRunChatTurnNeutral?: () => Promise<{
+    runChatTurnNeutral: import("./chat-runtime-dispatch.js").RunChatTurn
+  }>
 }
 
 export const defaultChatLoaders: ChatHandlerLoaders = {
@@ -967,11 +976,11 @@ export async function handleChatRequest(
       })
     assertChatCredentials(process.env, turnProviderId)
 
-    // The SDK runtime is the only chat runtime (the legacy in-house
-    // orchestrator was removed 2026-07-21 — see CLAUDE.md § Editor —
-    // Agent Orchestrator).
-    const { runChatTurnSdk } = await loaders.loadRunChatTurnSdk()
-    const result = await runChatTurnSdk({
+    // One dispatch point. The SDK runtime is still the only one that exists,
+    // but which runtime serves a turn is now a decision the descriptor makes
+    // rather than a hardcoded import.
+    const runChatTurn = await resolveChatRuntime(turnProviderId, loaders)
+    const result = await runChatTurn({
       bridge,
       reviewSurface: reviewSurface ?? undefined,
       // `verify_goal`'s translate step — the project's resolved provider,

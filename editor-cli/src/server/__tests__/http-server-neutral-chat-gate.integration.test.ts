@@ -1,0 +1,150 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { startHttpServer, type HttpServerHandle } from "../http-server.js"
+import { newSecurityContext } from "../auth.js"
+import { modelCatalogResolver } from "../model-catalog-source.js"
+
+/**
+ * The both-ends gate, asserted against the real world.
+ *
+ * How a request gets far enough to prove the SERVER half is the interesting
+ * part. The brief for this task imagined proving it with a `provider:
+ * "openai"` request sent after the flag flips off, on the theory that the
+ * catalog resolver's cache would still be answering from before the flip.
+ * It does not: `modelCatalogResolver.get()` recomputes which descriptors are
+ * servable from the LIVE flag value on every call, before it even looks at
+ * the cache key, so an openai `modelConfig` is refused by catalog validation
+ * the instant the flag is off, every time. That was checked directly against
+ * the resolver (see this task's report) before this file was written this
+ * way. So a `provider: "openai"` request can only ever exercise the CLIENT
+ * half; it never reaches `resolveChatRuntime` while the flag is off.
+ *
+ * The dispatch's OWN independent gate is only reachable through a path the
+ * catalog check does not know about: `EDITOR_CHAT_RUNTIME_OVERRIDE=neutral`,
+ * the dev-only knob that reroutes an Anthropic session onto the neutral
+ * runtime so the neutral loop can be proven against Anthropic's API before
+ * a second vendor ships. An Anthropic `modelConfig` passes catalog
+ * validation regardless of the flag (Anthropic is always servable), so the
+ * request reaches `resolveChatRuntime`. There, the override picks the
+ * `neutral` runtime kind, and if `EDITOR_NEUTRAL_CHAT` is off, the dispatch
+ * refuses on its own, with nothing upstream having refused first. That is
+ * the real "gate at both ends" case: a request the client-side check let
+ * through must still be refused server-side.
+ */
+
+let handle: HttpServerHandle
+let bundleDir: string
+let repoDir: string
+let token: string
+let shellOrigin: string
+
+beforeEach(async () => {
+  bundleDir = await mkdtemp(join(tmpdir(), "editor-cli-bundle-"))
+  await writeFile(join(bundleDir, "index.html"), "<!doctype html><title>test</title>")
+  repoDir = await mkdtemp(join(tmpdir(), "editor-cli-repo-"))
+
+  const port = await pickFreePort()
+  shellOrigin = `http://127.0.0.1:${port}`
+  const security = newSecurityContext(shellOrigin)
+  token = security.token
+
+  handle = await startHttpServer({
+    host: "127.0.0.1",
+    port,
+    repoRoot: repoDir,
+    uiBundleRoot: bundleDir,
+    viteUrl: "http://localhost:5173",
+    security,
+  })
+
+  delete process.env.ANTHROPIC_API_KEY
+  delete process.env.OPENAI_API_KEY
+  delete process.env.EDITOR_NEUTRAL_CHAT
+  delete process.env.EDITOR_CHAT_RUNTIME_OVERRIDE
+})
+
+afterEach(async () => {
+  await handle.close()
+  await rm(bundleDir, { recursive: true, force: true })
+  await rm(repoDir, { recursive: true, force: true })
+  delete process.env.ANTHROPIC_API_KEY
+  delete process.env.OPENAI_API_KEY
+  delete process.env.EDITOR_NEUTRAL_CHAT
+  delete process.env.EDITOR_CHAT_RUNTIME_OVERRIDE
+  modelCatalogResolver.invalidate()
+})
+
+async function pickFreePort(): Promise<number> {
+  const net = await import("node:net")
+  return new Promise((resolve, reject) => {
+    const server = net.createServer()
+    server.unref()
+    server.on("error", reject)
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address()
+      const port = typeof addr === "object" && addr ? addr.port : 0
+      server.close(() => resolve(port))
+    })
+  })
+}
+
+function authHeaders(): HeadersInit {
+  return { Authorization: `Bearer ${token}` }
+}
+
+/** Reads an SSE response body to completion and returns it as text. */
+async function readSse(res: Response): Promise<string> {
+  return await res.text()
+}
+
+describe("POST /api/editor/chat with a neutral provider", () => {
+  it("is refused server-side by the dispatch itself, naming the flag, even though the request named a servable provider", async () => {
+    // Credentialed so the request clears `assertChatCredentials` and reaches
+    // dispatch; a live Models API call with this fake key fails fast and
+    // falls back to the static catalog (same pattern the OPENAI_API_KEY
+    // fixture below relies on).
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test-only"
+    // Forces the neutral runtime kind for this Anthropic session. The flag
+    // that actually turns the neutral runtime ON stays unset.
+    process.env.EDITOR_CHAT_RUNTIME_OVERRIDE = "neutral"
+
+    const res = await fetch(`${handle.url}/api/editor/chat`, {
+      method: "POST",
+      headers: {
+        ...authHeaders(),
+        "Content-Type": "application/json",
+        Origin: shellOrigin,
+      },
+      body: JSON.stringify({
+        userMessage: "hello",
+        modelConfig: { provider: "anthropic", model: "claude-haiku-4-5" },
+      }),
+    })
+    const body = await readSse(res)
+    expect(body).toContain("EDITOR_NEUTRAL_CHAT")
+    expect(body).toContain("neutralChat")
+    // Refused before any turn ran: no assistant text, no turn id.
+    expect(body).not.toContain('"kind":"assistant_delta"')
+  })
+
+  it("refuses with the catalog's own message when a request simply names an unservable provider", async () => {
+    // The client half, for contrast: with the flag off, the OpenAI group is
+    // never served, so `provider: "openai"` dies at catalog validation and
+    // never reaches the dispatch at all.
+    const res = await fetch(`${handle.url}/api/editor/chat`, {
+      method: "POST",
+      headers: {
+        ...authHeaders(),
+        "Content-Type": "application/json",
+        Origin: shellOrigin,
+      },
+      body: JSON.stringify({
+        userMessage: "hello",
+        modelConfig: { provider: "openai", model: "gpt-5.2" },
+      }),
+    })
+    expect(await readSse(res)).toContain("Unknown provider 'openai'")
+  })
+})
