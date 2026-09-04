@@ -2,6 +2,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+// Re-exported from the one file allowed to import the AI SDK, rather than
+// importing `ai` here directly — see the fence in `ai-sdk-provider.ts`.
+import { APICallError } from '../llm-providers/ai-sdk-provider'
 
 import type { BridgeClient } from '../agent-tools/types'
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
@@ -370,6 +373,94 @@ describe('runChatTurnNeutral: failures', () => {
     expect(result.turn.error).toBe('turn aborted')
     expect(provider.attempts()).toBe(1)
     expect(Date.now() - startedWaitingAt).toBeLessThan(2000)
+  })
+
+  it('retries a real APICallError whose message a status-number regex would miss', async () => {
+    // The AI SDK throws `APICallError`, which carries the status on
+    // `statusCode`, not `status`, and a body that a 429-shaped message regex
+    // does not match ("Limit 30000, Used 29000 ... try again in 2s" has no
+    // standalone 3-digit run). Reading `err.status` (final review I4) left
+    // this case unretried; this constructs the real error class rather than
+    // a hand-shaped object, so a rename of `statusCode` upstream would break
+    // the test rather than pass silently.
+    let attempts = 0
+    const provider: LLMProvider = {
+      name: 'flaky',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () => {
+        const firstAttempt = ++attempts === 1
+        return (async function* () {
+          if (firstAttempt) {
+            throw new APICallError({
+              message: 'Limit 30000, Used 29000, Requested 5000. Please try again in 2s.',
+              url: 'https://api.openai.com/v1/responses',
+              requestBodyValues: {},
+              statusCode: 429,
+              isRetryable: true,
+            })
+          }
+          for (const ev of textStep('recovered')) yield ev
+        })()
+      },
+    }
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(attempts).toBe(2)
+    expect(events.find((e) => e.kind === 'api_retry')).toMatchObject({
+      attempt: 1,
+      errorStatus: 429,
+    })
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it('retries on `isRetryable` alone, when the status is not one this code recognizes', async () => {
+    // A gateway can mark an error retriable at a status (or with no status
+    // at all) this code's own 429/5xx check would not catch. `isRetryable`
+    // is more authoritative than the derived status.
+    let attempts = 0
+    const provider: LLMProvider = {
+      name: 'flaky',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () => {
+        const firstAttempt = ++attempts === 1
+        return (async function* () {
+          if (firstAttempt) {
+            throw new APICallError({
+              message: 'temporarily unavailable',
+              url: 'https://gw.example.com/v1/responses',
+              requestBodyValues: {},
+              isRetryable: true,
+            })
+          }
+          for (const ev of textStep('recovered')) yield ev
+        })()
+      },
+    }
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        emit: () => {},
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(attempts).toBe(2)
+    expect(result.turn.error).toBeUndefined()
   })
 
   it('turns a provider throw into an error event and an errored turn', async () => {

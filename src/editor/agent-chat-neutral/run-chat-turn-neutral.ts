@@ -739,7 +739,8 @@ async function* streamStepWithRetry(
     } catch (err) {
       if (streamOpts.signal?.aborted) throw err
       const status = httpStatusOf(err)
-      const retriable = status === 429 || (status !== null && status >= 500)
+      const retriable =
+        isRetryableError(err) || status === 429 || (status !== null && status >= 500)
       if (yielded || !retriable || attempt >= API_RETRY_MAX_ATTEMPTS) throw err
       const requestedMs = (extractRetryAfterFromError(err) ?? 2 ** attempt) * 1000
       const retryDelayMs = Math.min(requestedMs, MAX_RETRY_SLEEP_MS)
@@ -777,13 +778,33 @@ function waitOrAbort(ms: number, signal: AbortSignal | undefined): Promise<void>
   })
 }
 
-/** The HTTP status inside a provider error, when there is one. */
+/**
+ * The HTTP status inside a provider error, when there is one.
+ *
+ * The AI SDK's `APICallError` (the shape every provider in this lane throws)
+ * exposes `statusCode`, not `status` — reading `status` left this always
+ * `null` for a real OpenAI error and fell through to a message-text regex
+ * that a typical 429 body does not match (final review I4). `status` stays
+ * as a fallback for a hand-shaped or third-party error that happens to use
+ * the more common field name.
+ */
 function httpStatusOf(err: unknown): number | null {
-  const status = (err as { status?: unknown } | null)?.status
+  const candidate = err as { statusCode?: unknown; status?: unknown } | null
+  const status = candidate?.statusCode ?? candidate?.status
   if (typeof status === 'number') return status
   const message = err instanceof Error ? err.message : ''
   const match = /\b(4\d\d|5\d\d)\b/.exec(message)
   return match ? Number(match[1]) : null
+}
+
+/**
+ * `APICallError.isRetryable`, when the error carries one. A gateway can mark
+ * an error retriable at a status this code would not otherwise recognize
+ * (or without a status at all), and that flag is more authoritative than the
+ * regex fallback in `httpStatusOf`.
+ */
+function isRetryableError(err: unknown): boolean {
+  return (err as { isRetryable?: unknown } | null)?.isRetryable === true
 }
 
 function providerOptionsFor(

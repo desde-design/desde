@@ -34,6 +34,7 @@
  */
 
 import {
+  APICallError,
   generateText,
   jsonSchema,
   NoObjectGeneratedError,
@@ -47,6 +48,14 @@ import {
   type ModelMessage,
   type ToolSet,
 } from 'ai'
+
+/**
+ * Re-exported so a test outside this file can construct a REAL error the
+ * SDK throws (`run-chat-turn-neutral.test.ts`, final review I4) without
+ * itself importing `ai` and stepping outside the fence this file's header
+ * describes.
+ */
+export { APICallError }
 
 import type {
   AssistantContent,
