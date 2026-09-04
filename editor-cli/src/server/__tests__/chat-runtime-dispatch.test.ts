@@ -9,6 +9,9 @@ function loaders(overrides: Record<string, unknown> = {}) {
   return {
     loadSessionStore: vi.fn(),
     loadRunChatTurnSdk: vi.fn(async () => ({ runChatTurnSdk: sdkRuntime })),
+    // Required now that `agent-chat-neutral/` exists — a real caller always
+    // supplies this. Overridable per test so a case can swap in its own spy.
+    loadRunChatTurnNeutral: vi.fn(async () => ({ runChatTurnNeutral: neutralRuntime })),
     ...overrides,
   } as never
 }
@@ -42,28 +45,30 @@ describe("resolveChatRuntime", () => {
       .not.toHaveBeenCalled()
   })
 
-  it("says the neutral runtime is not available yet once the flag is on", async () => {
+  it("uses the neutral loader once the flag is on", async () => {
     process.env.EDITOR_NEUTRAL_CHAT = "1"
-    await expect(resolveChatRuntime("openai", loaders())).rejects.toThrow(
-      /not available yet/,
-    )
+    const l = loaders()
+    expect(await resolveChatRuntime("openai", l)).toBe(neutralRuntime)
   })
 
-  it("uses the neutral loader once one is supplied", async () => {
+  it("never touches the SDK loader on a neutral dispatch", async () => {
     process.env.EDITOR_NEUTRAL_CHAT = "1"
-    const l = loaders({
-      loadRunChatTurnNeutral: vi.fn(async () => ({ runChatTurnNeutral: neutralRuntime })),
-    })
-    expect(await resolveChatRuntime("openai", l)).toBe(neutralRuntime)
+    const l = loaders()
+    await resolveChatRuntime("openai", l)
+    expect((l as unknown as { loadRunChatTurnSdk: ReturnType<typeof vi.fn> }).loadRunChatTurnSdk)
+      .not.toHaveBeenCalled()
   })
 
   it("lets the dev override force the neutral lane for an Anthropic session", async () => {
     process.env.EDITOR_NEUTRAL_CHAT = "1"
     process.env.EDITOR_CHAT_RUNTIME_OVERRIDE = "neutral"
-    const l = loaders({
-      loadRunChatTurnNeutral: vi.fn(async () => ({ runChatTurnNeutral: neutralRuntime })),
-    })
+    const l = loaders()
     expect(await resolveChatRuntime("anthropic", l)).toBe(neutralRuntime)
+  })
+
+  it("refuses the dev override too while the flag is off", async () => {
+    process.env.EDITOR_CHAT_RUNTIME_OVERRIDE = "neutral"
+    await expect(resolveChatRuntime("anthropic", loaders())).rejects.toThrow(/dormant/i)
   })
 
   it("refuses a provider nobody registered", async () => {

@@ -27,7 +27,7 @@
  */
 import type { RunChatTurn } from "../../../src/editor/agent-chat/run-chat-turn.js"
 import { getDescriptor } from "../../../src/editor/llm-providers/provider-registry.js"
-import { chatRuntimeOverride, isNeutralChatEnabled } from "./dormant-surfaces.js"
+import { chatRuntimeOverride, isNeutralChatEnabled, neutralChatRefusal } from "./dormant-surfaces.js"
 import type { ChatHandlerLoaders } from "./chat-handler.js"
 
 export type { RunChatTurn }
@@ -39,26 +39,26 @@ export async function resolveChatRuntime(
   const descriptor = getDescriptor(providerId)
   if (!descriptor) {
     throw new Error(
-      `Chat cannot run on provider '${providerId}': no such provider is configured.`,
+      `resolveChatRuntime: no provider named '${providerId}'`,
     )
   }
-  const kind = chatRuntimeOverride(process.env) ?? descriptor.chatRuntime
-  if (kind === "claude-agent-sdk") {
-    return (await loaders.loadRunChatTurnSdk()).runChatTurnSdk
+  // The dev override forces the neutral loop onto a provider whose descriptor
+  // says otherwise. It is how phase 3 proves the loop against Anthropic before
+  // any OpenAI code exists, and how the parity matrix runs both lanes over the
+  // same prompts. It is subject to the same gate as any other neutral
+  // dispatch: an override is not an exemption.
+  const kind =
+    chatRuntimeOverride(process.env) === "neutral" ? "neutral" : descriptor.chatRuntime
+  if (kind === "neutral") {
+    // The dispatch half of the gate. Refused BEFORE any loader runs, so a
+    // refusal never pays for a module import.
+    if (!isNeutralChatEnabled({})) throw new Error(neutralChatRefusal())
+    // Lazy on purpose: an OpenAI-only boot must never import
+    // @anthropic-ai/claude-agent-sdk, and the SDK loader is the only thing
+    // that would.
+    const { runChatTurnNeutral } = await loaders.loadRunChatTurnNeutral()
+    return runChatTurnNeutral
   }
-  // The dispatch half of the gate. Refused BEFORE any loader runs, so a
-  // refusal never pays for a module import.
-  if (!isNeutralChatEnabled({})) {
-    throw new Error(
-      `Chat on ${descriptor.label} needs the neutral runtime, which is off. ` +
-        `Set "editor": { "neutralChat": true } in .desde/config.json at the repo root, ` +
-        `or EDITOR_NEUTRAL_CHAT=1, to turn it on.`,
-    )
-  }
-  if (!loaders.loadRunChatTurnNeutral) {
-    throw new Error(
-      `Chat on ${descriptor.label} is not available yet: the neutral runtime has not shipped.`,
-    )
-  }
-  return (await loaders.loadRunChatTurnNeutral()).runChatTurnNeutral
+  const { runChatTurnSdk } = await loaders.loadRunChatTurnSdk()
+  return runChatTurnSdk
 }

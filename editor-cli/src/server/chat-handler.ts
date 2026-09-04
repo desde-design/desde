@@ -129,11 +129,12 @@ export interface ChatHandlerLoaders {
    */
   loadReviewSurface?: () => Promise<typeof import("../review-surface")>
   /**
-   * Loads the Desde-owned neutral chat runtime. Optional until phase 3 ships
-   * `src/editor/agent-chat-neutral/run-chat-turn-neutral.ts`; `resolveChatRuntime`
-   * refuses with a capability message while it is absent.
+   * The neutral chat runtime. Was optional while `agent-chat-neutral/` did not
+   * exist; required now, because an optional loader means an `if` that decides
+   * dispatch, and a dispatch decision that lives in two places is the drift
+   * this seam exists to prevent.
    */
-  loadRunChatTurnNeutral?: () => Promise<{
+  loadRunChatTurnNeutral: () => Promise<{
     runChatTurnNeutral: import("./chat-runtime-dispatch.js").RunChatTurn
   }>
 }
@@ -144,6 +145,8 @@ export const defaultChatLoaders: ChatHandlerLoaders = {
     import("../../../src/editor/edit-service/load-project-knowledge"),
   loadRunChatTurnSdk: () =>
     import("../../../src/editor/agent-chat-sdk/run-chat-turn-sdk"),
+  loadRunChatTurnNeutral: () =>
+    import("../../../src/editor/agent-chat-neutral/run-chat-turn-neutral"),
   loadVerificationAdapter: () =>
     import("../../../src/editor/adapters/node-npm/verification-adapter"),
   loadPackageManagerAdapter: () =>
@@ -989,6 +992,7 @@ export async function handleChatRequest(
 
     const result = await runChatTurn({
       bridge,
+      providerId: turnProviderId,
       reviewSurface: reviewSurface ?? undefined,
       // `verify_goal`'s translate step — the project's resolved provider,
       // same per-request resolution the edit routes use. Lazy: constructing

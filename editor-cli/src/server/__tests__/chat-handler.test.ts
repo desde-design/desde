@@ -139,6 +139,11 @@ function makeLoaders(opts: {
   bridgeResponses?: Map<string, unknown>
 }): ChatHandlerLoaders {
   return {
+    loadRunChatTurnNeutral: async () => ({
+      runChatTurnNeutral: async () => {
+        throw new Error("makeLoaders: this suite's turns run on the SDK loader, not neutral")
+      },
+    }),
     loadRunChatTurnSdk: async () => {
       const { makeEmptySession } = await import(
         "../../../../src/editor/agent-chat/types.js"
@@ -447,6 +452,11 @@ describe("handleChatRequest — per-session mutex (Phase 5)", () => {
       releaseFirst = resolve
     })
     const slowLoaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () =>
         ({
           runChatTurnSdk: async (
@@ -549,6 +559,11 @@ describe("handleChatRequest — per-session mutex (Phase 5)", () => {
       releaseSlow = resolve
     })
     const slowLoaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () =>
         ({
           runChatTurnSdk: async (
@@ -756,6 +771,11 @@ describe("handleChatRequest — Phase 5 rate-limit classification", () => {
     const saved: Array<import("../../../../src/editor/agent-chat/types").ChatSession> = []
     const sessionId = "rl-session"
     const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () => {
         const { makeEmptySession } = await import(
           "../../../../src/editor/agent-chat/types.js"
@@ -833,6 +853,11 @@ describe("handleChatRequest — Phase 5 rate-limit classification", () => {
     const saved: Array<import("../../../../src/editor/agent-chat/types").ChatSession> = []
     const sessionId = "generic-fail"
     const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () => {
         const { makeEmptySession } = await import(
           "../../../../src/editor/agent-chat/types.js"
@@ -948,6 +973,11 @@ describe("handleChatRequest — Phase 5 route-level lifecycle", () => {
     seedSession?: import("../../../../src/editor/agent-chat/types").ChatSession,
   ): ChatHandlerLoaders {
     return {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () =>
         ({ runChatTurnSdk: runChatTurnSdkImpl }) as unknown as Awaited<
           ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>
@@ -1132,6 +1162,11 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
     seedSession?: import("../../../../src/editor/agent-chat/types").ChatSession
   }): ChatHandlerLoaders {
     return {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () => {
         return {
           runChatTurnSdk: async (
@@ -1622,6 +1657,11 @@ describe("bridge request/reply round trip", () => {
 
     // The fake runChatTurnSdk calls bridge.send() and emits the result.
     const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () =>
         ({
           runChatTurnSdk: async (callOpts: {
@@ -1717,6 +1757,11 @@ describe("bridge request/reply round trip", () => {
     mock.setBody({ userMessage: "x" })
     let captured: Error | null = null
     const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () =>
         ({
           runChatTurnSdk: async (callOpts: {
@@ -2189,6 +2234,11 @@ describe("handleSteerRequest — mid-turn steering", () => {
     onStarted: () => void
   }): ChatHandlerLoaders {
     return {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadSessionStore: async () => {
         const { makeEmptySession } = await import(
           "../../../../src/editor/agent-chat/types.js"
@@ -2379,5 +2429,140 @@ describe("POST /api/editor/chat/steer — auth + Origin", () => {
     // is the handler's own answer rather than the gate's.
     expect(res.status).toBe(409)
     expect(await res.json()).toEqual({ accepted: false, reason: "no-live-turn" })
+  })
+})
+
+describe("the both-ends gate, from the route", () => {
+  let repoRoot: string
+
+  beforeEach(async () => {
+    repoRoot = await mkdtemp(join(tmpdir(), "desde-chat-neutral-gate-"))
+    __resetPendingBridgeRequestsForTest()
+    __resetActiveTurnsForTest()
+  })
+  afterEach(async () => {
+    await rm(repoRoot, { recursive: true, force: true })
+    __resetPendingBridgeRequestsForTest()
+    __resetActiveTurnsForTest()
+  })
+
+  /**
+   * A loader set with its own spies, so a case can assert which loader ran
+   * and what the turn function itself was called with (in particular
+   * `providerId`).
+   */
+  function makeGateLoaders() {
+    const runTurnSpy = vi.fn(async (_opts: { providerId?: string }) => {
+      const { makeEmptySession } = await import(
+        "../../../../src/editor/agent-chat/types.js"
+      )
+      return {
+        session: makeEmptySession("test-proj"),
+        turn: {
+          id: "test-turn",
+          startedAt: "x",
+          userMessage: "ignored",
+          assistantContent: [],
+          toolResults: {},
+          editProposals: [],
+        },
+      }
+    })
+    const loadRunChatTurnSdk = vi.fn(async () => ({ runChatTurnSdk: runTurnSpy }))
+    const loadRunChatTurnNeutral = vi.fn(async () => ({ runChatTurnNeutral: runTurnSpy }))
+    const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnSdk: loadRunChatTurnSdk as unknown as ChatHandlerLoaders["loadRunChatTurnSdk"],
+      loadRunChatTurnNeutral: loadRunChatTurnNeutral as unknown as ChatHandlerLoaders["loadRunChatTurnNeutral"],
+      loadSessionStore: async () => {
+        const { makeEmptySession } = await import(
+          "../../../../src/editor/agent-chat/types.js"
+        )
+        return {
+          loadSession: async () => ({ session: makeEmptySession("test-proj"), fresh: true }),
+          saveSession: async (_root: string, session: unknown) => session,
+        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadSessionStore"]>>
+      },
+    }
+    return { loaders, loadRunChatTurnSdk, loadRunChatTurnNeutral, runTurnSpy }
+  }
+
+  // An `openai` `modelConfig` is refused before it ever reaches
+  // `resolveChatRuntime`: the catalog resolver does not serve the OpenAI
+  // group while `EDITOR_NEUTRAL_CHAT` is off (`chatRuntimeServable` in
+  // `model-catalog-source.ts`), so the request 400s at model-config
+  // validation with the catalog's own "Unknown provider" message. That is
+  // the CLIENT half of the gate, proven in
+  // `http-server-neutral-chat-gate.integration.test.ts`. The only path that
+  // reaches the dispatch's OWN refusal — the SERVER half, which must not
+  // depend on catalog validation having run first — is the dev override,
+  // which reroutes an Anthropic session (always servable) onto the neutral
+  // runtime kind. That is what these cases use to reach it directly.
+  it("refuses an anthropic session forced onto the neutral runtime while the surface is dormant", async () => {
+    const { loaders, loadRunChatTurnNeutral, loadRunChatTurnSdk } = makeGateLoaders()
+    vi.stubEnv("EDITOR_CHAT_RUNTIME_OVERRIDE", "neutral")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "anthropic", model: "claude-opus-4-8" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    const error = mock.events().find((e) => e.kind === "error")
+    expect(error?.reason).toMatch(/neutral chat runtime is dormant/i)
+    expect(loadRunChatTurnNeutral).not.toHaveBeenCalled()
+    expect(loadRunChatTurnSdk).not.toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  it("names the config key and the env var so a stale client learns what to flip", async () => {
+    const { loaders } = makeGateLoaders()
+    vi.stubEnv("EDITOR_CHAT_RUNTIME_OVERRIDE", "neutral")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "anthropic", model: "claude-opus-4-8" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    const reason = mock.events().find((e) => e.kind === "error")?.reason as string
+    expect(reason).toContain('"neutralChat": true')
+    expect(reason).toContain("EDITOR_NEUTRAL_CHAT=1")
+    vi.unstubAllEnvs()
+  })
+
+  it("dispatches to the neutral runtime once the surface is on", async () => {
+    const { loaders, loadRunChatTurnNeutral } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.2" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    expect(loadRunChatTurnNeutral).toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  it("passes the session's own provider id into the turn", async () => {
+    const { loaders, runTurnSpy } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.2" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    expect(runTurnSpy.mock.calls[0][0]).toMatchObject({ providerId: "openai" })
+    vi.unstubAllEnvs()
+  })
+
+  it("still dispatches an anthropic session to the SDK runtime with the surface on", async () => {
+    const { loaders, loadRunChatTurnSdk } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "anthropic", model: "claude-opus-4-8" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    expect(loadRunChatTurnSdk).toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  it("checks the credentials of the provider the session actually names", async () => {
+    const { loaders } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    vi.stubEnv("OPENAI_API_KEY", "")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.2" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    const error = mock.events().find((e) => e.kind === "error")
+    expect(error?.reason).toMatch(/OpenAI/)
+    vi.unstubAllEnvs()
   })
 })

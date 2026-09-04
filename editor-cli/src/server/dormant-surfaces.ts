@@ -148,6 +148,21 @@ export function chatRuntimeOverride(
 }
 
 /**
+ * The refusal a dormant neutral-chat dispatch returns.
+ *
+ * It names the config key and the env var rather than 404-ing, for the reason
+ * `dormantSurfaceRefusal` gives about its own surfaces: a stale client or a
+ * direct caller should learn what to flip instead of guessing the route is
+ * gone.
+ */
+export function neutralChatRefusal(): string {
+  return (
+    'The neutral chat runtime is dormant. Set "editor": { "neutralChat": true } in ' +
+    '.desde/config.json at the repo root, or EDITOR_NEUTRAL_CHAT=1, to turn it on.'
+  )
+}
+
+/**
  * The refusal a dormant surface's routes return.
  *
  * It names the config key rather than 404-ing, so a stale client or a

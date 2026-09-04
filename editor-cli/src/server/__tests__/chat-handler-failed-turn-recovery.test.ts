@@ -105,6 +105,11 @@ function makeLoaders(opts: {
       ({ runChatTurnSdk: opts.run }) as unknown as Awaited<
         ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>
       >,
+    loadRunChatTurnNeutral: async () => ({
+      runChatTurnNeutral: async () => {
+        throw new Error("makeLoaders: this suite's turns run on the SDK loader, not neutral")
+      },
+    }),
     loadSessionStore: async () =>
       ({
         loadSession: async () => ({
