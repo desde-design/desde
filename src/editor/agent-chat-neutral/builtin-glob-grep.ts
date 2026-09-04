@@ -144,6 +144,15 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
       } catch (e) {
         return err(`Grep failed to enumerate files: ${(e as Error).message}`)
       }
+      // Enumeration itself is capped at GLOB_MAX_RESULTS files, independent of
+      // the match cap below. Without this notice a repo with more candidate
+      // files than the cap gets silently under-searched: "No matches." reads
+      // as "nothing in the repo", when it can mean "nothing in the first 500
+      // files scanned".
+      const enumerationTruncated = paths.length >= GLOB_MAX_RESULTS
+      const enumerationNotice = enumerationTruncated
+        ? `\n\n[searched only the first ${GLOB_MAX_RESULTS} files matching this scope; narrow with \`glob\`]`
+        : ''
       const hits: string[] = []
       let capped = false
       for (const repoRel of paths) {
@@ -172,11 +181,16 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
         }
       }
       if (hits.length === 0) {
-        return { content: [{ type: 'text' as const, text: 'No matches.' }], isError: undefined }
+        return {
+          content: [{ type: 'text' as const, text: `No matches.${enumerationNotice}` }],
+          isError: undefined,
+        }
       }
-      const notice = capped
-        ? `\n\n[stopped at ${GREP_MAX_MATCHES} matches; narrow the pattern or pass a glob]`
-        : ''
+      // The match cap and the enumeration cap are independent: a search can
+      // hit either, both, or neither, so both notices can appear together.
+      const notice =
+        (capped ? `\n\n[stopped at ${GREP_MAX_MATCHES} matches; narrow the pattern or pass a glob]` : '') +
+        enumerationNotice
       return { content: [{ type: 'text' as const, text: `${hits.join('\n')}${notice}` }], isError: undefined }
     },
   }

@@ -59,4 +59,16 @@ describe('Grep', () => {
     const out = await buildGrepToolSpec({ worktreeRoot: root }).handler({ pattern: 'hit' }, {})
     expect(out.content[0].text).toMatch(/stopped at 200 matches/)
   })
+
+  it('says when file enumeration was capped, even on the No matches path', async () => {
+    for (let i = 0; i < 501; i++) {
+      writeFileSync(join(root, `src/f${String(i).padStart(4, '0')}.txt`), 'nothing to see here\n', 'utf8')
+    }
+    const out = await buildGrepToolSpec({ worktreeRoot: root }).handler(
+      { pattern: 'this-string-is-not-in-any-file' },
+      {},
+    )
+    expect(out.isError).toBeUndefined()
+    expect(out.content[0].text).toMatch(/searched only the first 500 files/)
+  })
 })
