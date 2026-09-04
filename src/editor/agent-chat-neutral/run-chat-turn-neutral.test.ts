@@ -1,11 +1,13 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { BridgeClient } from '../agent-tools/types'
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
+import { resolveSessionConflict } from '../agent-chat/resolve-conflict'
 import { makeEmptySession } from '../agent-chat/types'
+import { readProposalBlob } from '../agent-chat-sdk/proposal-blob-store'
 import { createTurnInputChannel } from '../agent-chat-sdk/turn-input-channel'
 import { OPENAI_DESCRIPTOR } from '../llm-providers/descriptors/openai'
 import type { LLMProvider, ProviderEvent, StreamOpts } from '../llm-providers/types'
@@ -638,5 +640,108 @@ describe('runChatTurnNeutral: steering', () => {
     )
     expect(channel.closed).toBe(true)
     expect(events.filter((e) => e.kind === 'resubmit_required')).toHaveLength(1)
+  })
+})
+
+/**
+ * Conflict recovery, end to end on this lane.
+ *
+ * The lane already DETECTED conflicts and emitted `edit_overwrite_warning`,
+ * which is the half the user sees. The half they act on is
+ * `resolve-conflict.ts`, and it needs two artefacts on disk: the proposal blob
+ * holding what this session meant to write, and the read-time base snapshot.
+ * Without them "Use mine" and "Merge" both 409 and only "Discard mine" works,
+ * so the assertions below run the REAL resolution rather than checking that
+ * the two files exist.
+ */
+describe('conflict recovery on the neutral lane', () => {
+  const BASE = 'a\nb\nc\n'
+  const MINE = 'A\nb\nc\n'
+  const THEIRS = 'a\nb\nC\n'
+
+  /**
+   * Read the file, let someone else write it, then write it ourselves — the
+   * exact interleaving `detectOverwriteConflict` fires on.
+   */
+  async function runConflictingTurn(): Promise<{
+    session: Awaited<ReturnType<typeof runChatTurnNeutral>>['session']
+    events: ChatStreamEvent[]
+  }> {
+    writeFileSync(join(root, 'src/App.vue'), BASE, 'utf8')
+    const { provider } = scriptedProvider([
+      toolStep('tu_1', 'Read', { file_path: 'src/App.vue' }),
+      toolStep('tu_2', 'Write', { file_path: 'src/App.vue', content: MINE }),
+      textStep('written'),
+    ])
+    const original = provider.streamConversation.bind(provider)
+    let step = 0
+    provider.streamConversation = (o) => {
+      // Between our Read and our Write, the other writer lands.
+      if (step++ === 1) writeFileSync(join(root, 'src/App.vue'), THEIRS, 'utf8')
+      return original(o)
+    }
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      minimalOpts({ emit: (e: ChatStreamEvent) => events.push(e) }) as never,
+      { buildProvider: () => provider },
+    )
+    return { session: result.session, events }
+  }
+
+  it('writes the proposal blob and the base snapshot the resolver reads', async () => {
+    const { session, events } = await runConflictingTurn()
+    expect(events.some((e) => e.kind === 'edit_overwrite_warning')).toBe(true)
+
+    const abs = join(root, 'src/App.vue')
+    const conflict = (session.conflicts ?? {})[abs]
+    expect(conflict).toBeDefined()
+
+    const proposal = session.turns.at(-1)?.editProposals?.find((p) => p.kind === 'overwrite')
+    expect(proposal).toBeDefined()
+    expect(await readProposalBlob(root, session.id.sessionId, proposal!.editId)).toBe(MINE)
+
+    const basePath = join(
+      root,
+      '.desde',
+      'chat-sessions',
+      session.id.sessionId,
+      'bases',
+      `${conflict.hashAtRead}.txt`,
+    )
+    expect(existsSync(basePath)).toBe(true)
+    expect(readFileSync(basePath, 'utf8')).toBe(BASE)
+    // The record on the session points at the same file, rather than the
+    // empty string that made the resolver report a GC'd snapshot.
+    expect(session.fileReads?.[abs]?.baseContentPath).toBe(basePath)
+  })
+
+  it('recovers this session s content with "Use mine"', async () => {
+    const { session } = await runConflictingTurn()
+    // Someone writes again after the conflict, so a passing assertion cannot
+    // be the agent's own write still sitting on disk.
+    writeFileSync(join(root, 'src/App.vue'), 'CLOBBERED\n', 'utf8')
+    const outcome = await resolveSessionConflict({
+      worktreeRoot: root,
+      session,
+      file: 'src/App.vue',
+      resolution: 'mine',
+    })
+    expect(outcome).toMatchObject({ ok: true })
+    expect(readFileSync(join(root, 'src/App.vue'), 'utf8')).toBe(MINE)
+  })
+
+  it('merges both sides cleanly with "Merge"', async () => {
+    const { session } = await runConflictingTurn()
+    // The other writer's line has to be back on disk for a 3-way merge to
+    // have anything to keep: our own Write overwrote it.
+    writeFileSync(join(root, 'src/App.vue'), THEIRS, 'utf8')
+    const outcome = await resolveSessionConflict({
+      worktreeRoot: root,
+      session,
+      file: 'src/App.vue',
+      resolution: 'merge',
+    })
+    expect(outcome).toMatchObject({ ok: true, mergeClean: true })
+    expect(readFileSync(join(root, 'src/App.vue'), 'utf8')).toBe('A\nb\nC\n')
   })
 })

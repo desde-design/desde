@@ -21,7 +21,6 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { join as joinPath } from 'node:path'
 
 import { query } from '@anthropic-ai/claude-agent-sdk'
 
@@ -300,12 +299,7 @@ async function runChatTurnSdkInner(
 
   const readSnapshotHook = createReadSnapshotHook({
     worktreeRoot: opts.worktreeRoot,
-    snapshotRoot: joinPath(
-      opts.worktreeRoot,
-      '.desde',
-      'chat-sessions',
-      opts.session.id.sessionId,
-    ),
+    sessionId: opts.session.id.sessionId,
     onReadObserved: (record: FileReadRecord) => {
       fileReads[record.absolutePath] = {
         hashAtRead: record.hashAtRead,

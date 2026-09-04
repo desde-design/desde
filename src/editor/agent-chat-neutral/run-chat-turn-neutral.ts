@@ -61,7 +61,9 @@ import type {
 } from '../agent-chat/types'
 import type { ToolPermissionGate } from '../agent-chat/tool-permission'
 import { buildToolPermissionGate } from '../agent-chat-sdk/edit-ack'
+import { captureReadSnapshot } from '../agent-chat-sdk/file-read-snapshot'
 import { buildGroundingDigest } from '../agent-chat-sdk/grounding-tools'
+import { writeProposalBlob } from '../agent-chat-sdk/proposal-blob-store'
 import {
   attachSteerReconciliation,
   createTurnInputChannel,
@@ -210,6 +212,30 @@ async function runInner(
     payload: EditProposalPayload,
   ): Promise<{ ok: true; editId: string } | { ok: false; reason: string }> => {
     const editId = randomUUID()
+    // What this session MEANT to write, persisted before the event fires and
+    // keyed by the same `editId` the proposal record carries. The working tree
+    // keeps only the last writer's bytes, so this blob is the only thing "Use
+    // mine" can recover from after another session overwrites the file.
+    //
+    // Best-effort, exactly as on the SDK lane (`run-chat-turn-sdk.ts`): a
+    // failure to persist costs recovery of this one edit and must not take
+    // down the edit that is otherwise fine.
+    if (payload.type === 'overwrite' && typeof payload.newSource === 'string') {
+      try {
+        await writeProposalBlob(
+          opts.worktreeRoot,
+          opts.session.id.sessionId,
+          editId,
+          payload.newSource,
+        )
+      } catch (err) {
+        console.warn(
+          `[runChatTurnNeutral] failed to persist proposal blob for editId=${editId}: ${
+            (err as Error).message
+          }`,
+        )
+      }
+    }
     opts.emit({ kind: 'edit_proposed', turnId, editId, edit: payload })
     if (opts.awaitEditAck) {
       const ack = await opts.awaitEditAck(editId)
@@ -226,10 +252,26 @@ async function runInner(
 
   const catalog = buildNeutralToolCatalog({
     worktreeRoot: opts.worktreeRoot,
-    onFileRead: (r) => {
+    onFileRead: async (r) => {
+      // The read-time base, written to the SAME layout the SDK lane writes it
+      // to. Without it `resolve-conflict.ts` has nothing to merge against and
+      // refuses "Merge" with a message about base capture not being enabled —
+      // which would be true of this lane and of no other.
+      const snapshot = await captureReadSnapshot(r.repoRel, {
+        worktreeRoot: opts.worktreeRoot,
+        sessionId: opts.session.id.sessionId,
+      })
       fileReads[r.absolutePath] = {
         hashAtRead: r.hashAtRead,
-        baseContentPath: '',
+        // The snapshot file is named for the hash of the bytes IT read, and
+        // the resolver looks the base up by the `hashAtRead` recorded here. If
+        // the file changed between the tool's read and the snapshot's, the two
+        // no longer describe the same content, so record no base rather than
+        // one that is not the base the model was shown.
+        baseContentPath:
+          snapshot !== null && snapshot.hashAtRead === r.hashAtRead
+            ? snapshot.baseContentPath
+            : '',
         readAt: r.readAt,
       }
     },

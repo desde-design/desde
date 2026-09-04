@@ -33,7 +33,9 @@ describe('Read', () => {
     const seen: Array<{ absolutePath: string; hashAtRead: string }> = []
     const spec = buildReadToolSpec({
       worktreeRoot: root,
-      onFileRead: (r) => seen.push({ absolutePath: r.absolutePath, hashAtRead: r.hashAtRead }),
+      onFileRead: (r) => {
+        seen.push({ absolutePath: r.absolutePath, hashAtRead: r.hashAtRead })
+      },
     })
     await spec.handler({ file_path: 'src/App.vue' }, {})
     expect(seen).toHaveLength(1)

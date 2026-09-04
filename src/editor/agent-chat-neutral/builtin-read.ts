@@ -39,8 +39,13 @@ export interface BuiltinReadOpts {
    * Called for every SUCCESSFUL read. The loop writes the record into the
    * turn's `fileReads` map, which `edit-ack.ts`'s conflict detection reads to
    * decide whether a later write is overwriting someone else's change.
+   *
+   * Awaited when it returns a promise: the loop's observer also writes the
+   * read-time base snapshot that "Merge" recovers from, and that snapshot has
+   * to be on disk before the next write can conflict against it. The SDK
+   * lane's equivalent hook awaits for the same reason.
    */
-  onFileRead?: (observation: FileReadObservation) => void
+  onFileRead?: (observation: FileReadObservation) => void | Promise<void>
 }
 
 const DESCRIPTION =
@@ -104,7 +109,7 @@ export function buildReadToolSpec(opts: BuiltinReadOpts) {
       }
       const truncated = raw.byteLength > READ_FILE_MAX_BYTES
       const text = raw.subarray(0, READ_FILE_MAX_BYTES).toString('utf8')
-      opts.onFileRead?.({
+      await opts.onFileRead?.({
         absolutePath: safe.absolute,
         repoRel: filePath,
         // The hash covers the WHOLE file, not the truncated slice. It is a
