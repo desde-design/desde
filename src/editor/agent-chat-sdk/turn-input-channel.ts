@@ -57,6 +57,7 @@
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { MessageParam } from '@anthropic-ai/sdk/resources'
 
+import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
 import type { ModelImageContent } from './media-content'
 
 /**
@@ -425,6 +426,83 @@ export function createTurnInputChannel(): TurnInputChannel {
       return iterator
     },
   }
+}
+
+/**
+ * Close a turn's input channel and tell the client about every steer we
+ * cannot show reached the model, so it can send those messages again.
+ *
+ * Both chat runtimes (the SDK lane and the neutral lane) need this exact
+ * behaviour at the exact same two call sites — once in a `finally` after the
+ * turn's own loop, and once from an abort listener registered up front — so
+ * it lives here, next to the channel it closes, instead of being copied into
+ * each runtime.
+ *
+ * Close-then-drain, never the reverse: a steer accepted between the drain and
+ * the close would be closed away with nobody told, which is the exact loss
+ * this reconciliation exists to prevent. (Nothing is awaited between the two,
+ * so in practice the pair is atomic — the ordering is written down because
+ * getting it backwards is silently wrong.)
+ *
+ * Safe to call more than once. `close()` is idempotent and
+ * `takeUndeliveredSteers()` drains its tracking list, so a second call
+ * reports nothing rather than asking for a duplicate resubmit.
+ *
+ * Best-effort on the wire: if the client has already disconnected, `emit`
+ * writes into a closed SSE stream and drops. Nothing can be delivered to a
+ * client that is gone; the client's own steer-failure fallback covers the
+ * disconnect case.
+ *
+ * Also wires the abort path: if `signal` is given, this same close-and-report
+ * runs when the signal fires (immediately, if it is already aborted). Abort
+ * runs the FULL close-and-report, not a bare close, and it runs from the
+ * listener rather than leaning on the caller's own `finally`. Two reasons,
+ * and the second is why this is not merely belt-and-braces:
+ *
+ *  1. If a runtime's abort path ever waits for its own input stream to end
+ *     before finishing, the code that would reach the `finally` never runs.
+ *     Closing from the listener is what breaks that deadlock — and a close
+ *     that did not also report would leave the steers inside a channel
+ *     nobody will drain.
+ *  2. Stop is the MOST likely way a steer dies unconsumed: the user typed a
+ *     correction and then decided the agent was going the wrong way anyway.
+ *     Reporting only on the paths that unwind cleanly would leave the single
+ *     most common loss as the one path that stays silent.
+ *
+ * Returns the close-and-report function itself, so the caller can also invoke
+ * it directly from its own `finally` (the two triggers race safely — see
+ * "safe to call more than once" above).
+ */
+export function attachSteerReconciliation(params: {
+  channel: TurnInputChannel
+  sessionId: string
+  emit: (event: ChatStreamEvent) => void
+  signal?: AbortSignal
+}): () => void {
+  const { channel, sessionId, emit, signal } = params
+
+  const closeChannelAndReportUndelivered = (): void => {
+    channel.close()
+    for (const steer of channel.takeUndeliveredSteers()) {
+      emit({
+        kind: 'resubmit_required',
+        sessionId,
+        userMessage: steer.text,
+        ...(steer.images ? { images: steer.images } : {}),
+      })
+    }
+  }
+
+  if (signal) {
+    if (signal.aborted) closeChannelAndReportUndelivered()
+    else {
+      signal.addEventListener('abort', () => closeChannelAndReportUndelivered(), {
+        once: true,
+      })
+    }
+  }
+
+  return closeChannelAndReportUndelivered
 }
 
 /**

@@ -62,7 +62,10 @@ import type {
 import type { ToolPermissionGate } from '../agent-chat/tool-permission'
 import { buildToolPermissionGate } from '../agent-chat-sdk/edit-ack'
 import { buildGroundingDigest } from '../agent-chat-sdk/grounding-tools'
-import { createTurnInputChannel } from '../agent-chat-sdk/turn-input-channel'
+import {
+  attachSteerReconciliation,
+  createTurnInputChannel,
+} from '../agent-chat-sdk/turn-input-channel'
 import type { EditProposalPayload } from '../agent-tools/types'
 import { computeSessionCost } from '../agent-chat/session-cost'
 import type { EffortLevel } from '../core/model-catalog'
@@ -310,25 +313,15 @@ async function runInner(
     // at because it appends the message itself.
   )
 
-  const closeChannelAndReportUndelivered = (): void => {
-    turnChannel.close()
-    for (const steer of turnChannel.takeUndeliveredSteers()) {
-      opts.emit({
-        kind: 'resubmit_required',
-        sessionId: opts.session.id.sessionId,
-        userMessage: steer.text,
-        ...(steer.images ? { images: steer.images } : {}),
-      })
-    }
-  }
-  if (opts.signal) {
-    if (opts.signal.aborted) closeChannelAndReportUndelivered()
-    else {
-      opts.signal.addEventListener('abort', () => closeChannelAndReportUndelivered(), {
-        once: true,
-      })
-    }
-  }
+  // Shared with the SDK lane: see `attachSteerReconciliation` in
+  // `turn-input-channel.ts` for the close-then-drain rule and why abort
+  // reports too, not just a bare close.
+  const closeChannelAndReportUndelivered = attachSteerReconciliation({
+    channel: turnChannel,
+    sessionId: opts.session.id.sessionId,
+    emit: opts.emit,
+    signal: opts.signal,
+  })
   let inputTokens = 0
   let outputTokens = 0
   let stopReason: 'end_turn' | 'error' = 'end_turn'

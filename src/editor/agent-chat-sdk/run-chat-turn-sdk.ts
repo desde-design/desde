@@ -67,6 +67,7 @@ import { writeProposalBlob } from './proposal-blob-store'
 import { createSdkEventAdapter } from './sdk-event-adapter'
 import { flattenSdkMessage } from './sdk-message-flatten'
 import {
+  attachSteerReconciliation,
   createTurnInputChannel,
   readAssistantMessageBoundaryId,
 } from './turn-input-channel'
@@ -568,62 +569,15 @@ async function runChatTurnSdkInner(
     },
   )
 
-  /**
-   * Close the channel, then tell the client about every steer we cannot show
-   * reached the model, so it can send those messages again.
-   *
-   * Close-then-drain, never the reverse: a steer accepted between the drain and
-   * the close would be closed away with nobody told, which is the exact loss
-   * this reconciliation exists to prevent. (Nothing is awaited between the two,
-   * so in practice the pair is atomic — the ordering is written down because
-   * getting it backwards is silently wrong.)
-   *
-   * Safe to call more than once. `close()` is idempotent and
-   * `takeUndeliveredSteers()` drains its tracking list, so the second call
-   * reports nothing rather than asking for a duplicate resubmit.
-   *
-   * Best-effort on the wire: if the client has already disconnected, `emit`
-   * writes into a closed SSE stream and drops. Nothing can be delivered to a
-   * client that is gone; the client's own steer-failure fallback covers the
-   * disconnect case.
-   */
-  const closeChannelAndReportUndelivered = (): void => {
-    turnChannel.close()
-    for (const steer of turnChannel.takeUndeliveredSteers()) {
-      opts.emit({
-        kind: 'resubmit_required',
-        sessionId: opts.session.id.sessionId,
-        userMessage: steer.text,
-        ...(steer.images ? { images: steer.images } : {}),
-      })
-    }
-  }
-
-  // Abort runs the FULL close-and-report, not a bare close, and it runs here
-  // rather than leaning on the finally. Two reasons, and the second is why this
-  // is not merely belt-and-braces:
-  //
-  //  1. If the SDK's abort path ever waits for stdin to end before finishing
-  //     its message stream, the `for await` below never returns and the finally
-  //     never runs. Closing from the listener is what breaks that deadlock —
-  //     and a close that did not also report would leave the steers inside a
-  //     channel nobody will drain.
-  //  2. Stop is the MOST likely way a steer dies unconsumed: the user typed a
-  //     correction and then decided the agent was going the wrong way anyway.
-  //     Reporting only on the paths that unwind cleanly would leave the single
-  //     most common loss as the one path that stays silent.
-  //
-  // Best-effort on the wire when abort came from the client disconnecting —
-  // `emit` writes into a dead SSE stream and drops. Nothing can reach a client
-  // that is gone; its own steer-failure fallback covers that case.
-  if (opts.signal) {
-    if (opts.signal.aborted) closeChannelAndReportUndelivered()
-    else {
-      opts.signal.addEventListener('abort', () => closeChannelAndReportUndelivered(), {
-        once: true,
-      })
-    }
-  }
+  // Shared with the neutral lane: see `attachSteerReconciliation` in
+  // `turn-input-channel.ts` for the close-then-drain rule and why abort
+  // reports too, not just a bare close.
+  const closeChannelAndReportUndelivered = attachSteerReconciliation({
+    channel: turnChannel,
+    sessionId: opts.session.id.sessionId,
+    emit: opts.emit,
+    signal: opts.signal,
+  })
 
   const maxBudgetUsd =
     typeof opts.costCeilingUsd === 'number'
