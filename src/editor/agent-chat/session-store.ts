@@ -40,7 +40,7 @@ import {
 } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
-import { desdeDir } from '../worktree/desde-dir'
+import { desdePath } from '../worktree/desde-dir'
 import { makeEmptySession, type ChatSession } from './types'
 import {
   DEFAULT_MAX_CHAT_TURNS,
@@ -57,7 +57,7 @@ import {
  * message in it) outside the working tree. See `desde-dir.ts`.
  */
 function sessionsDir(repoRoot: string): string {
-  return join(desdeDir(repoRoot), 'chat-sessions')
+  return desdePath(repoRoot, 'chat-sessions')
 }
 
 /**

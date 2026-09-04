@@ -32,7 +32,7 @@ import {
   type DriftSignal,
 } from "../../../src/editor/core"
 import { triggerRepairForEntry, type RepairTriggerCtx } from "./repair-trigger.js"
-import { desdeDir } from "../../../src/editor/worktree/desde-dir.js"
+import { desdePath } from "../../../src/editor/worktree/desde-dir.js"
 import {
   createDefaultOnboardDeps,
   createLocalRegistryStore,
@@ -493,7 +493,7 @@ function resolveIngestedSourceRoot(root: string, entry: RegisteredDesignSystem):
   // to a directory outside the working tree.
   let ingestedRoot: string
   try {
-    ingestedRoot = join(desdeDir(realRoot), "ingested")
+    ingestedRoot = desdePath(realRoot, "ingested")
   } catch {
     return null
   }

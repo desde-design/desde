@@ -35,7 +35,7 @@ import { readdir, readFile, rename, writeFile, mkdir, unlink } from 'node:fs/pro
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
-import { desdeDir } from '../worktree/desde-dir'
+import { desdePath } from '../worktree/desde-dir'
 import {
   normalizeLoadedSession,
   projectIdForRepoRoot,
@@ -76,7 +76,7 @@ export async function runRestartClear(
   // symlink is reported like any other unreadable directory.
   let dir: string
   try {
-    dir = join(desdeDir(repoRoot), 'chat-sessions')
+    dir = desdePath(repoRoot, 'chat-sessions')
   } catch (err) {
     result.errors.push({ file: repoRoot, reason: (err as Error).message })
     return result

@@ -1,6 +1,7 @@
 /**
- * Guards writers AND deleters of `.desde/*` against a `.desde` that is
- * a symbolic link pointing outside the working tree.
+ * Guards writers AND deleters of `.desde/*` against a `.desde` — or ANY
+ * directory beneath it — that is a symbolic link pointing outside the
+ * working tree.
  *
  * A prototype repo is untrusted input (2026-08-09 security audit doctrine):
  * nothing stops it from shipping `.desde` as a symlink to, say, `/`. Every
@@ -12,15 +13,28 @@
  * whole subtree recursively, so a hostile symlink turns a GC sweep into a
  * recursive delete of whatever the symlink points at.
  *
- * This is the one place that check lives. `desdeDir` is what every call
- * site below obtains its base path through, so a caller cannot
- * accidentally join onto `canonicalRoot` directly and skip the check.
- * These are exactly the sites that go through it today — a new writer or
- * deleter under `.desde/` must join through `desdeDir` too, and add
- * itself to this list. **The list is not the same thing as complete
- * coverage**: the sites named at the bottom still do not go through the
- * guard, and this comment claiming otherwise is what the 2026-09-04
- * branch review caught.
+ * **The check walks every segment, not just `.desde`.** Until 2026-09-04
+ * it `lstat`ed exactly one path, `<repoRoot>/.desde`, which left the
+ * subdirectories the Editor owns (`backups/`, `chat-sessions/`,
+ * `manifests/`, `ingested/`, `stamp/`) completely unguarded: a real
+ * `.desde` directory containing `backups -> /somewhere/else` was measured
+ * turning `gcBackups()` into a recursive delete of two directories outside
+ * the repository. {@link desdePath} is the resolver that closes that — it
+ * `lstat`s `.desde` and then each segment the caller asks for, and refuses
+ * on the first symbolic link.
+ *
+ * This is the one place that check lives. Every writer and deleter listed
+ * below builds its whole path here — including the subpath, not just the
+ * `.desde` prefix — so a caller cannot accidentally join onto
+ * `canonicalRoot` (or onto a guarded `.desde`) and skip the check.
+ *
+ * **The list is not the same thing as complete coverage.** Four writers
+ * still build `<repoRoot>/.desde/…` by plain `join` and follow a hostile
+ * symlink: the manifest cache (`adapters/cached/index.ts`), the
+ * design-system registry (`onboarding/registry-store.ts`), the attach-mode
+ * stampers (`editor-cli/src/attach-preflight/stamper-files.ts`) and the
+ * lock-event audit log (`edit-service/lock-event-persistence.ts`). They are
+ * the next commit, not an oversight.
  *
  *  - `backup-journal.ts` (`writeBackupJournal`) — the per-edit backup
  *    journal under `.desde/backups/`.
@@ -51,10 +65,11 @@
  *    logs rather than deleting, same tolerance as the retention sweeps.
  *  - `git-branches.ts` (`publishBranch`, `updateBranchFromRef`) — the
  *    ephemeral worktree each mints under `.desde/` (`publish-<uuid>` /
- *    `update-<uuid>`) for an isolated squash-merge or update. A refusal
+ *    `update-<uuid>`) for an isolated squash-merge or update. Both call
+ *    the guard as a PRECONDITION, before their dirty-tree auto-commit, so
+ *    a refusal leaves the repository byte-identical; the refusal then
  *    surfaces through the same `try`/`catch` that already converts a git
- *    failure into that function's ordinary `{ ok: false, reason }` result
- *    — no special handling needed.
+ *    failure into that function's ordinary `{ ok: false, reason }` result.
  *  - `session-turns-archive.ts` (`archiveFilePath`) — the shared path
  *    builder both the archive writer (`appendArchivedTurns`) and reader
  *    (`readArchivedTurns`) use for `.desde/chat-sessions/<id>.archive.jsonl`.
@@ -79,72 +94,164 @@
  *    (`.desde/backups/`), `proposal-blob-gc.ts` (`.desde/chat-sessions/`),
  *    `read-snapshot-gc.ts` (`.desde/chat-sessions/<id>/bases/`).
  *
- * **Writers that do NOT go through the guard yet** (measured 2026-09-04 by
- * grepping both `'.desde'` and `'.desde/…'` spellings; each one still
- * follows a hostile symlink):
+ * **What this guard does NOT close, and why.**
  *
- *  - `adapters/cached/index.ts`'s `CACHE_DIR_NAME` (`.desde/manifests`),
- *    joined at five call sites in `build-manifest-source.ts`,
- *    `repair-component.ts` and `onboarding/orchestrator.ts`.
- *  - `onboarding/registry-store.ts` (`.desde/design-systems.json`), whose
- *    path is built in a constructor that runs on the serving path.
- *  - `editor-cli/src/attach-preflight/stamper-files.ts` (`.desde/stamp`),
- *    which writes the generated source-tag plugins.
+ * A swap between the check and the write is still a race. The resolver
+ * returns a STRING, and every caller then writes through path-based
+ * `mkdir`/`writeFile`/`rm`, which re-resolve each segment at call time —
+ * so a process that replaces `.desde` with a symlink in that window
+ * redirects the write. Node's promise API has no `O_NOFOLLOW` write and no
+ * directory-handle-relative `rm`, so closing it fully means an fd-based
+ * traversal this module does not have. What is done instead:
+ * {@link desdeRemovalPath} re-resolves the target with `realpath` and
+ * refuses when it lands outside the repository, and every recursive
+ * deleter calls it immediately before its `rm`. That narrows the window to
+ * the microseconds between that call and the `rm` itself, on the
+ * operations where the damage is unrecoverable. It needs a process running
+ * concurrently inside the prototype repo to matter at all.
  *
- * They are left as they are deliberately, not by oversight: each builds
- * its path where a throw would land on a boot or serving path whose
- * failure behaviour has not been measured, and guessing at that is how a
- * containment fix becomes an outage. Guarding them is its own change.
+ * Hard links are deliberately out of scope. `lstat` cannot tell a hard
+ * link from an ordinary file, but git has no hard-link representation in
+ * the index (only regular file, executable, symlink and gitlink), so a
+ * clone or checkout of a hostile repository cannot deliver one; the
+ * dominant write pattern here is temp-file-plus-rename, which replaces the
+ * name rather than writing through the shared inode; and deleting one name
+ * of a hard link leaves the other file's data intact. There is nothing to
+ * build for them.
  */
 
-import { lstatSync } from 'node:fs'
-import { join } from 'node:path'
+import { lstatSync, realpathSync } from 'node:fs'
+import { join, sep } from 'node:path'
 
 /**
- * Thrown by {@link assertDesdeDirIsNotASymlink} (and so by {@link desdeDir})
- * when `<repoRoot>/.desde` exists and is a symbolic link. Not a runtime
- * condition a well-formed request can trigger from inside the app — it
- * names a property of the repo itself, so every writer or deleter under
- * `.desde/` checks it before touching disk.
+ * Thrown by {@link desdePath} (and so by {@link desdeDir} and
+ * {@link desdeRemovalPath}) when `<repoRoot>/.desde`, or any directory the
+ * caller asked for beneath it, exists and is a symbolic link — or when a
+ * removal target resolves outside the repository. Not a runtime condition
+ * a well-formed request can trigger from inside the app: it names a
+ * property of the repo itself, so every writer or deleter under `.desde/`
+ * checks it before touching disk.
  */
 export class DesdeDirSymlinkError extends Error {
-  constructor(public readonly path: string) {
+  constructor(
+    public readonly path: string,
+    detail = '.desde is a symbolic link.',
+  ) {
     super(
-      `Refusing to write under '${path}': .desde is a symbolic link. Desde writes its journal and ledger only into a real directory in the working tree.`,
+      `Refusing to write under '${path}': ${detail} Desde writes its journal and ledger only into a real directory in the working tree.`,
     )
     this.name = 'DesdeDirSymlinkError'
   }
 }
 
-/**
- * Throws {@link DesdeDirSymlinkError} when `<repoRoot>/.desde` exists and
- * is a symbolic link. A missing `.desde` is fine — it will be created as
- * an ordinary directory by the caller's own `mkdir`.
- *
- * Not exported: {@link desdeDir} below is the one public entry point every
- * writer or deleter should use, so the guard cannot be skipped by
- * accident. It stays a separate named function (rather than inlined into
- * `desdeDir`) only for readability.
- */
-function assertDesdeDirIsNotASymlink(repoRoot: string): void {
-  const desdeDirPath = join(repoRoot, '.desde')
-  let st
-  try {
-    st = lstatSync(desdeDirPath)
-  } catch {
-    return
-  }
-  if (st.isSymbolicLink()) throw new DesdeDirSymlinkError(desdeDirPath)
+/** Splits `'chat-sessions'` / `'a/b'` alike into single path segments. */
+function toSegments(segments: readonly string[]): string[] {
+  return segments.flatMap((segment) => segment.split(/[\\/]+/)).filter((s) => s.length > 0)
 }
 
 /**
- * The `.desde` directory under `repoRoot`, guarded. Runs
- * {@link assertDesdeDirIsNotASymlink} and returns `join(repoRoot,
- * '.desde')` — every writer or deleter under `.desde/` should build its
- * path from this, rather than joining `.desde` onto `repoRoot` itself, so
- * the guard cannot be skipped by accident.
+ * The `.desde` directory under `repoRoot`, or a path beneath it, guarded.
+ *
+ * Walks `.desde` and then every segment the caller asked for, `lstat`ing
+ * each one in turn, and throws {@link DesdeDirSymlinkError} naming the
+ * FIRST that is a symbolic link. A segment that does not exist is fine —
+ * nothing below it can exist either, and the caller's own `mkdir` will
+ * create it as an ordinary directory — so the walk stops there and returns
+ * the full path.
+ *
+ * Pass the whole subpath, not just `.desde`: `desdePath(root,
+ * 'chat-sessions', id)` is guarded at three levels, whereas
+ * `join(desdePath(root), 'chat-sessions', id)` is guarded at one.
+ */
+export function desdePath(repoRoot: string, ...segments: string[]): string {
+  const parts = ['.desde', ...toSegments(segments)]
+  const full = join(repoRoot, ...parts)
+  let current = repoRoot
+  for (let i = 0; i < parts.length; i++) {
+    current = join(current, parts[i])
+    let st
+    try {
+      st = lstatSync(current)
+    } catch {
+      // Missing (or unreadable) — nothing below it can be a symlink
+      // either, and the caller's own write reports any other problem.
+      return full
+    }
+    if (st.isSymbolicLink()) {
+      // Indexed, not `indexOf`: a repeated segment name would otherwise
+      // name the wrong depth in the message.
+      const label = parts.slice(0, i + 1).join('/')
+      throw new DesdeDirSymlinkError(full, `${label} is a symbolic link.`)
+    }
+  }
+  return full
+}
+
+/**
+ * {@link desdePath} for callers that cannot throw: returns `null` instead
+ * of raising {@link DesdeDirSymlinkError}.
+ *
+ * This exists for the boot and serving paths — the manifest cache, the
+ * design-system registry read, the attach-mode stampers. Those four
+ * writers were left unguarded for a whole release because the only guard
+ * on offer threw, and a throw on a boot path is an outage; `null` lets
+ * them skip the work and say so instead.
+ */
+export function desdePathOrNull(repoRoot: string, ...segments: string[]): string | null {
+  try {
+    return desdePath(repoRoot, ...segments)
+  } catch (err) {
+    if (err instanceof DesdeDirSymlinkError) return null
+    throw err
+  }
+}
+
+/**
+ * A path under `.desde/` that is about to be REMOVED, guarded twice.
+ *
+ * Runs {@link desdePath}'s segment walk, then re-resolves the target with
+ * `realpath` and refuses when the resolved path is not the repository root
+ * or inside it. The second check is what makes a recursive `rm` safe
+ * against a link swapped in after the walk — see the module header's note
+ * on what remains a race. A target that does not exist passes: there is
+ * nothing to delete. A `repoRoot` that cannot itself be resolved passes
+ * too, since there is nothing to compare against; the segment walk has
+ * already run in that case.
+ */
+export function desdeRemovalPath(repoRoot: string, ...segments: string[]): string {
+  const target = desdePath(repoRoot, ...segments)
+  let realTarget: string
+  let realRoot: string
+  try {
+    realTarget = realpathSync(target)
+  } catch {
+    return target
+  }
+  try {
+    realRoot = realpathSync(repoRoot)
+  } catch {
+    return target
+  }
+  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) {
+    throw new DesdeDirSymlinkError(
+      target,
+      `it resolves outside the working tree ('${realRoot}').`,
+    )
+  }
+  return target
+}
+
+/**
+ * The `.desde` directory under `repoRoot`, guarded — {@link desdePath}
+ * with no extra segments. Kept as its own name because most call sites
+ * read better for it, but prefer `desdePath(root, …)` whenever the caller
+ * goes on to join a subpath: only the segments passed here are checked.
  */
 export function desdeDir(repoRoot: string): string {
-  assertDesdeDirIsNotASymlink(repoRoot)
-  return join(repoRoot, '.desde')
+  return desdePath(repoRoot)
+}
+
+/** {@link desdeDir} for callers that cannot throw. See {@link desdePathOrNull}. */
+export function desdeDirOrNull(repoRoot: string): string | null {
+  return desdePathOrNull(repoRoot)
 }

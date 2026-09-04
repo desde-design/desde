@@ -13,10 +13,10 @@
  */
 
 import { mkdir, readFile, rename, writeFile, unlink, readdir, stat } from "node:fs/promises"
-import { dirname, join, resolve as resolvePath } from "node:path"
+import { dirname, join } from "node:path"
 import { randomUUID } from "node:crypto"
 
-import { desdeDir } from "../../../../src/editor/worktree/desde-dir.js"
+import { desdePath } from "../../../../src/editor/worktree/desde-dir.js"
 
 /** Default subdirectory under the user's repo root. */
 export const DESDE_DIR = ".desde"
@@ -29,13 +29,14 @@ export const DESDE_DIR = ".desde"
  * below `mkdir`s and writes them. `mkdir(..., { recursive: true })` on an
  * existing symlink-to-a-directory is a no-op and the write then follows the
  * link, so a prototype that ships `.desde` as a symlink would have every one of
- * those files land outside the working tree. `desdeDir` is the one guard
- * against that; see `src/editor/worktree/desde-dir.ts`. It throws
+ * those files land outside the working tree. `desdePath` is the one guard
+ * against that, and it checks every segment below `.desde` as well as
+ * `.desde` itself; see `src/editor/worktree/desde-dir.ts`. It throws
  * `DesdeDirSymlinkError`, which surfaces as a failed store call rather than a
  * silent write to someone else's directory.
  */
 export function resolveStorePath(repoRoot: string, ...segments: string[]): string {
-  return resolvePath(desdeDir(repoRoot), ...segments)
+  return desdePath(repoRoot, ...segments)
 }
 
 /**

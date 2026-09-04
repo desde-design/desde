@@ -48,14 +48,13 @@
  */
 
 import { rm } from 'node:fs/promises'
-import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { makeEmptySession } from '../agent-chat/types'
 import type { PropEditFallbackHint } from '../edit-service/apply-prop-edit'
 import type { ProjectKnowledge } from '../core/project-knowledge'
 import type { RunChatTurn, RunChatTurnOpts, RunChatTurnResult } from '../agent-chat/run-chat-turn'
 import { runChatTurnSdk } from './run-chat-turn-sdk'
-import { desdeDir, DesdeDirSymlinkError } from '../worktree/desde-dir'
+import { desdeRemovalPath, DesdeDirSymlinkError } from '../worktree/desde-dir'
 
 export interface EditFixMiniTurnInput {
   repoRoot: string
@@ -242,7 +241,7 @@ export async function runEditFixMiniTurn(
     // as a "change" and defeat the no-op guard — codex follow-up P2).
     let sessionDir: string | null = null
     try {
-      sessionDir = join(desdeDir(input.repoRoot), 'chat-sessions', sessionId)
+      sessionDir = desdeRemovalPath(input.repoRoot, 'chat-sessions', sessionId)
     } catch (err) {
       // A recursive `rm` under a hostile symlink is worse than leaving
       // the sidecar behind: refuse and log rather than delete whatever

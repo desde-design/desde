@@ -31,12 +31,12 @@
 
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 
 import type { HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk'
 
 import { resolveRepoPath } from '../agent-tools/read-tools'
-import { desdeDir } from '../worktree/desde-dir'
+import { desdePath } from '../worktree/desde-dir'
 
 export interface FileReadRecord {
   /** Absolute path of the file the SDK read (worktree-relative resolved). */
@@ -130,8 +130,8 @@ export async function captureReadSnapshot(
       return null
     }
     const hash = createHash('sha256').update(content).digest('hex')
-    const baseContentPath = join(
-      desdeDir(opts.worktreeRoot),
+    const baseContentPath = desdePath(
+      opts.worktreeRoot,
       'chat-sessions',
       opts.sessionId,
       'bases',

@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 
-import { desdeDir } from '../worktree/desde-dir'
+import { desdePath } from '../worktree/desde-dir'
 
 export interface BackupEntry {
   /** Repo-relative path the original content lived at. */
@@ -91,8 +91,8 @@ export async function writeBackupJournal(
     .toISOString()
     .replace(/[:.]/g, '-')
     .replace('T', '_')
-  const backupDir = join(
-    desdeDir(canonicalRoot),
+  const backupDir = desdePath(
+    canonicalRoot,
     'backups',
     `${timestamp}-${randomUUID()}`,
   )

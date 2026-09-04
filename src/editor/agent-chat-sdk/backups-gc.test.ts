@@ -189,4 +189,31 @@ describe('gcBackups', () => {
     expect(existsSync(join(outside, 'backups', 'd0', 'file.txt'))).toBe(true)
     rmSync(outside, { recursive: true, force: true })
   })
+
+  it('FX4 item 1: refuses to sweep when .desde is real but .desde/backups is a symlink out of the worktree', async () => {
+    // The measured escape. The guard used to `lstat` `.desde` and nothing
+    // below it, so a real `.desde` holding `backups -> <outside>` made this
+    // sweep enumerate and recursively delete directories outside the repo.
+    const outside = mkdtempSync(join(tmpdir(), 'backups-gc-outside-'))
+    const now = Date.now()
+    for (const name of ['precious', 'another']) {
+      const dir = join(outside, name)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'file.txt'), 'content')
+      const mtime = (now - 90 * DAY_MS) / 1000
+      utimesSync(dir, mtime, mtime)
+    }
+    mkdirSync(join(root, '.desde'), { recursive: true })
+    symlinkSync(outside, join(root, '.desde', 'backups'))
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await gcBackups(root, { now: () => now })
+    expect(result).toEqual({ deleted: [], kept: 0, errors: 0 })
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+
+    expect(existsSync(join(outside, 'precious', 'file.txt'))).toBe(true)
+    expect(existsSync(join(outside, 'another', 'file.txt'))).toBe(true)
+    rmSync(outside, { recursive: true, force: true })
+  })
 })

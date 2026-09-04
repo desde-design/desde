@@ -26,7 +26,7 @@ import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
-import { desdeDir } from './desde-dir'
+import { desdePath } from './desde-dir'
 
 const execFileAsync = promisify(execFile)
 
@@ -1005,10 +1005,10 @@ export async function publishBranch(
   // checkout is untouched.
   let tmp: string
   try {
-    // `desdeDir` refuses (and this catch converts that refusal into the
+    // `desdePath` refuses (and this catch converts that refusal into the
     // same "couldn't prepare publish" shape as any other failure here) if
     // `.desde` is a symlink — see `desde-dir.ts`.
-    tmp = path.join(desdeDir(root), `publish-${randomUUID().slice(0, 8)}`)
+    tmp = desdePath(root, `publish-${randomUUID().slice(0, 8)}`)
     // `git worktree add` mkdir's the leaf but not `.desde/` itself.
     await fs.mkdir(path.dirname(tmp), { recursive: true })
     await execFileAsync('git', ['-C', root, 'worktree', 'add', '--quiet', tmp, defaultBranch], {
@@ -1377,10 +1377,10 @@ export async function updateBranchFromRef(
   // known clean anyway.
   let tmp: string
   try {
-    // `desdeDir` refuses (and this catch converts that refusal into the
+    // `desdePath` refuses (and this catch converts that refusal into the
     // same "couldn't prepare the update" shape as any other failure here)
     // if `.desde` is a symlink — see `desde-dir.ts`.
-    tmp = path.join(desdeDir(root), `update-${randomUUID().slice(0, 8)}`)
+    tmp = desdePath(root, `update-${randomUUID().slice(0, 8)}`)
     await fs.mkdir(path.dirname(tmp), { recursive: true })
     await execFileAsync(
       'git',

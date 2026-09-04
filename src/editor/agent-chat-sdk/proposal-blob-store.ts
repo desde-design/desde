@@ -29,9 +29,9 @@
  */
 
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 
-import { desdeDir, DesdeDirSymlinkError } from '../worktree/desde-dir'
+import { desdePath, desdeRemovalPath, DesdeDirSymlinkError } from '../worktree/desde-dir'
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 
@@ -55,7 +55,7 @@ export function proposalBlobPath(
 ): string {
   assertValidId(sessionId, 'sessionId')
   assertValidId(editId, 'editId')
-  return join(desdeDir(repoRoot), 'chat-sessions', sessionId, 'proposals', `${editId}.txt`)
+  return desdePath(repoRoot, 'chat-sessions', sessionId, 'proposals', `${editId}.txt`)
 }
 
 /**
@@ -123,9 +123,9 @@ export async function deleteProposalBlobsForSession(
   sessionId: string,
 ): Promise<void> {
   assertValidId(sessionId, 'sessionId')
-  let base: string
+  let dir: string
   try {
-    base = desdeDir(repoRoot)
+    dir = desdeRemovalPath(repoRoot, 'chat-sessions', sessionId, 'proposals')
   } catch (err) {
     // A recursive `rm` under a hostile symlink is worse than a plain
     // write: refuse and log rather than delete whatever the symlink
@@ -137,7 +137,6 @@ export async function deleteProposalBlobsForSession(
     }
     throw err
   }
-  const dir = join(base, 'chat-sessions', sessionId, 'proposals')
   try {
     await rm(dir, { recursive: true, force: true })
   } catch {

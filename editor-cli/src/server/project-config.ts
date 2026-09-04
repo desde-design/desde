@@ -1,8 +1,8 @@
 import { promises as fs } from "node:fs"
-import { dirname, join } from "node:path"
+import { dirname } from "node:path"
 import { randomUUID } from "node:crypto"
 import type { ProjectKnowledgeConfig } from "../../../src/editor/edit-service/load-project-knowledge"
-import { desdeDir } from "../../../src/editor/worktree/desde-dir.js"
+import { desdePath } from "../../../src/editor/worktree/desde-dir.js"
 import {
   deriveSlug,
   mintProjectId,
@@ -268,7 +268,7 @@ export type ReadProjectConfigResult =
  * unreadable config.
  */
 function configPathFor(repoRoot: string): string {
-  return join(desdeDir(repoRoot), "config.json")
+  return desdePath(repoRoot, "config.json")
 }
 const SUPPORTED_VERSION = 1
 /**

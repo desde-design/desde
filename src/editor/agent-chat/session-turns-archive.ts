@@ -22,11 +22,11 @@
  */
 
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 
 import type { ChatTurn } from './types'
 import { costOfTurn } from '../llm-providers/rate-cards'
-import { desdeDir } from '../worktree/desde-dir'
+import { desdePath } from '../worktree/desde-dir'
 
 /** Default cap on turns kept in a session's head JSON file. */
 export const DEFAULT_MAX_CHAT_TURNS = 500
@@ -39,7 +39,7 @@ export const DEFAULT_MAX_CHAT_TURNS = 500
  * neither can join onto `repoRoot` directly and skip the check.
  */
 export function archiveFilePath(repoRoot: string, sessionId: string): string {
-  return join(desdeDir(repoRoot), 'chat-sessions', `${sessionId}.archive.jsonl`)
+  return desdePath(repoRoot, 'chat-sessions', `${sessionId}.archive.jsonl`)
 }
 
 export interface SplitTurnsResult {
