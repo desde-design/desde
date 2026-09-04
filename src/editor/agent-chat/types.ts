@@ -11,6 +11,8 @@
  * them lands in Phase 1.
  */
 
+import type { EffortLevel } from '../core/model-catalog'
+
 /**
  * Stable identifier for a chat session.
  *
@@ -91,10 +93,14 @@ export interface ChatTurn {
    */
   model?: string
   /**
-   * Reasoning effort requested for this turn ('low'…'max'). Absent on
-   * turns that ran at the provider default and on pre-picker records.
+   * Reasoning effort requested for this turn. Absent on turns that ran at
+   * the provider default and on pre-picker records.
+   *
+   * Imported rather than re-declared: this is a PERSISTED schema, so a
+   * hand-copied union here and a changed ladder in `core/model-catalog.ts`
+   * would leave the validator accepting a value the record cannot hold.
    */
-  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  effort?: EffortLevel
   /**
    * Vendor-reported dollar cost for the turn. SDK turns capture this
    * from `SDKResultMessage.total_cost_usd` (which accounts for cache
@@ -361,7 +367,7 @@ export interface ChatSession {
   modelConfig?: {
     provider: string
     model: string
-    effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+    effort?: EffortLevel
   }
   /**
    * Files read by the agent during this session, keyed by absolute

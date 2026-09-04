@@ -939,7 +939,7 @@ async function runChatTurnSdkInner(
         // trivial turns, so there's no fixed per-turn overhead); other models
         // get a bounded fixed budget. `summarized` keeps the surfaced reasoning
         // concise rather than dumping the full raw chain.
-        thinking: resolveThinkingConfig(model, opts.adaptiveThinking),
+        thinking: resolveAnthropicThinkingConfig(model, opts.adaptiveThinking),
         ...(opts.effort ? { effort: opts.effort } : {}),
         systemPrompt: { type: 'preset', preset: 'claude_code', append: sdkAppend },
         // `tools` only filters built-in tools (sdk.d.ts:1257 — "the
@@ -1538,25 +1538,32 @@ const ADAPTIVE_THINKING_MODELS: readonly string[] = [
 ]
 
 /**
- * True when `model` is one of the adaptive-thinking families above.
+ * True when `model` is one of the adaptive-thinking Claude families above.
  * Tolerates a dated-snapshot suffix (`-20260401`) but never matches a
- * different family by prefix — `claude-opus-5` does not match
- * `claude-opus-50`, because the separator is required.
+ * different family by prefix.
+ *
+ * Anthropic-scoped BY NAME as of the multi-provider work: adaptive versus
+ * fixed-budget thinking is Anthropic's own two-mode system, and this function
+ * is consulted for the SDK lane and for the Anthropic catalog's effort
+ * fallback. Another provider's reasoning knob is its descriptor's
+ * `effort.toRequest`, not this.
  */
-export function supportsAdaptiveThinking(model: string): boolean {
+export function supportsAnthropicAdaptiveThinking(model: string): boolean {
   return ADAPTIVE_THINKING_MODELS.some(
     (family) => model === family || model.startsWith(`${family}-`),
   )
 }
 
 /**
- * Pick the extended-thinking config for a model. Adaptive-thinking models
- * (see above) get `{type:'adaptive'}`, which is what `effort` modulates;
- * older-generation models get a bounded fixed budget so thinking still
- * surfaces. `summarized` keeps the reasoning concise. Reasoning is rendered
- * as a collapsible block in the chat and is NOT persisted on the turn.
+ * Pick the extended-thinking config for an ANTHROPIC model. Adaptive-thinking
+ * models get `{type:'adaptive'}`, which is what `effort` modulates; older
+ * generations get a bounded fixed budget so thinking still surfaces.
+ *
+ * Not reachable for a non-Anthropic session: the SDK runtime is the only
+ * caller, and `resolveChatRuntime` only routes `claude-agent-sdk` descriptors
+ * to it.
  */
-export function resolveThinkingConfig(
+export function resolveAnthropicThinkingConfig(
   model: string,
   adaptiveHint?: boolean,
 ):
@@ -1564,7 +1571,7 @@ export function resolveThinkingConfig(
   | { type: 'enabled'; budgetTokens: number; display: 'summarized' } {
   // The catalog's own answer wins over the family rule: a live source that
   // says `sonnet` thinks adaptively knows which Sonnet it means.
-  if (adaptiveHint ?? supportsAdaptiveThinking(model)) {
+  if (adaptiveHint ?? supportsAnthropicAdaptiveThinking(model)) {
     return { type: 'adaptive', display: 'summarized' }
   }
   return { type: 'enabled', budgetTokens: 4000, display: 'summarized' }

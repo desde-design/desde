@@ -50,7 +50,7 @@ import {
   assertClaudeRuntimeReady,
   resolveClaudeExecutablePath,
 } from "../../../src/editor/llm-providers/resolve-claude-executable.js"
-import { supportsAdaptiveThinking } from "../../../src/editor/agent-chat-sdk/run-chat-turn-sdk.js"
+import { supportsAnthropicAdaptiveThinking } from "../../../src/editor/agent-chat-sdk/run-chat-turn-sdk.js"
 import { PROVIDER_DESCRIPTORS } from "../../../src/editor/llm-providers/provider-registry.js"
 import type { ProviderDescriptor } from "../../../src/editor/llm-providers/provider-descriptor.js"
 import { isNeutralChatEnabled } from "./dormant-surfaces.js"
@@ -115,7 +115,7 @@ export interface ModelCatalogResolver {
 /** The Anthropic-only effort fallback, matched by provider id. */
 function effortFallbackFor(descriptor: ProviderDescriptor) {
   if (descriptor.id === ANTHROPIC_MODEL_CATALOG.providerId) {
-    return (id: string) => (supportsAdaptiveThinking(id) ? [...EFFORT_LEVELS] : null)
+    return (id: string) => (supportsAnthropicAdaptiveThinking(id) ? [...EFFORT_LEVELS] : null)
   }
   return () => descriptor.effort.levels
 }
