@@ -56,7 +56,11 @@
 
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
-import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
+// Type-only: erased at compile time, so this alone does not pull the SDK
+// onto the boot graph. `query` itself is a DYNAMIC import inside
+// `listViaClaudeCli`, below, for the same reason — see that function's doc
+// comment.
+import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
 import type { ProviderModelCatalog } from "../../../src/editor/core/model-catalog.js"
 import { EFFORT_LEVELS } from "../../../src/editor/core/model-catalog.js"
 import { ANTHROPIC_MODEL_CATALOG } from "../../../src/editor/llm-providers/anthropic-model-catalog.js"
@@ -67,7 +71,11 @@ import {
   assertClaudeRuntimeReady,
   resolveClaudeExecutablePath,
 } from "../../../src/editor/llm-providers/resolve-claude-executable.js"
-import { supportsAnthropicAdaptiveThinking } from "../../../src/editor/agent-chat-sdk/run-chat-turn-sdk.js"
+// From the SDK-FREE sibling, not `run-chat-turn-sdk.js` (which imports the
+// Agent SDK at module scope): this module is on the boot graph, so pulling
+// that in here would put the SDK on every boot, OpenAI-only included (M1,
+// final-review-report.md).
+import { supportsAnthropicAdaptiveThinking } from "../../../src/editor/llm-providers/anthropic-adaptive-thinking.js"
 import {
   DEFAULT_PROVIDER_PRECEDENCE,
   PROVIDER_DESCRIPTORS,
@@ -184,10 +192,19 @@ export function chatRuntimeServable(descriptor: ProviderDescriptor): boolean {
  * that never yields, the models control request is answered, and the process
  * is closed: no turn runs, no tokens are spent. The spawn is the cost, which
  * is why this is cached and bounded by the resolver's timeout.
+ *
+ * `query` is a DYNAMIC import (M1, final-review-report.md). This module sits
+ * on the boot graph (`core.ts` -> `http-server.ts` -> `model-catalog-handler`
+ * -> here), and this function is the ONLY thing in it that needs the Agent
+ * SDK — Anthropic's `cli` live-model source, reached only when no API key is
+ * active and dev mode / subscription opt-in is on. A static top-level import
+ * would put the SDK on every boot, including an OpenAI-only one, which is
+ * exactly the laziness `resolveChatRuntime`'s loaders exist to preserve.
  */
 export async function listViaClaudeCli(signal: AbortSignal): Promise<LiveModel[]> {
   const claudeExecutablePath = resolveClaudeExecutablePath()
   assertClaudeRuntimeReady(claudeExecutablePath)
+  const { query } = await import("@anthropic-ai/claude-agent-sdk")
   const idle = (async function* (): AsyncGenerator<SDKUserMessage, void> {
     await new Promise<void>((resolve) => {
       if (signal.aborted) resolve()

@@ -2,7 +2,12 @@ import { homedir } from "node:os"
 import type { StoredCredentials } from "../../../src/editor/llm-providers/credential-probe.js"
 import type { ProviderDescriptor } from "../../../src/editor/llm-providers/provider-descriptor.js"
 import { PROVIDER_DESCRIPTORS } from "../../../src/editor/llm-providers/provider-registry.js"
-import { CLAUDE_SUBSCRIPTION_ENV } from "../../../src/editor/llm-providers/registry.js"
+// From `claude-subscription.js` directly, NOT `registry.js` (M1,
+// final-review-report.md): `registry.js` statically imports
+// `claude-agent-sdk-provider.ts`, which imports the Agent SDK, and this
+// module is on the boot graph — pulling that in here would put the SDK on
+// every boot, OpenAI-only included.
+import { CLAUDE_SUBSCRIPTION_ENV } from "../../../src/editor/llm-providers/claude-subscription.js"
 import {
   captureInheritedLlmEnv,
   inheritedLlmEnv,

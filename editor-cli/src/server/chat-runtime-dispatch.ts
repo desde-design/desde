@@ -2,9 +2,27 @@
  * Which runtime serves this turn.
  *
  * The descriptor's `chatRuntime` decides, and both loaders stay lazy dynamic
- * imports so an OpenAI-only boot never imports
- * `@anthropic-ai/claude-agent-sdk`. That laziness is the reason this is a
- * function taking loaders rather than two top-level imports.
+ * imports so DISPATCHING a chat turn never imports
+ * `@anthropic-ai/claude-agent-sdk` unless the turn actually routes to the
+ * SDK lane. That laziness is the reason this is a function taking loaders
+ * rather than two top-level imports.
+ *
+ * This is narrower than "an OpenAI-only boot never imports the SDK" — that
+ * broader claim is FALSE at HEAD (M1, final-review-report.md, 2026-09-04):
+ * `editor-cli/src/server/http-server.ts` statically imports `getProvider`
+ * from `../../../src/editor/llm-providers/registry.js`, which itself
+ * statically imports `claude-agent-sdk-provider.ts`, for the non-chat
+ * LLM-fallback lane (`apply-llm-patch.ts` / `repair-edit.ts` /
+ * `translate-goal.ts` / `llm-generate-hints.ts`). That import runs on every
+ * boot regardless of provider or chat runtime. Two OTHER confirmed leaks on
+ * this same claim — `model-catalog-source.ts`'s top-level `query` import,
+ * and `inherited-llm-env.ts` / `apply-llm-credentials.ts` importing
+ * `CLAUDE_SUBSCRIPTION_ENV` from `registry.js` instead of
+ * `claude-subscription.js` — were fixed alongside this comment; the
+ * `http-server.ts` one was not, because closing it means threading an async
+ * `getLlmProvider` through `edit-handler.ts` / `llm-fallback-handler.ts` /
+ * `design-systems-handler.ts` and every non-chat LLM-fallback caller, which
+ * is bigger and riskier than this task's scope.
  *
  * `RunChatTurn` imports the shared contract type from
  * `src/editor/agent-chat/run-chat-turn.ts` (`RunChatTurnOpts` /
