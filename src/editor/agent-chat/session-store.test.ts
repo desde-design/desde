@@ -10,7 +10,7 @@
  *   - Distinct project ids per repo root (worktree isolation)
  */
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -1166,5 +1166,38 @@ describe('findRecentWriterForFile', () => {
     // No saveSession called — directory never created.
     const result = await findRecentWriterForFile(repoRoot, 'self', 'src/App.vue')
     expect(result).toBeNull()
+  })
+})
+
+/**
+ * A prototype repo is untrusted input (2026-08-09 doctrine) and can ship
+ * `.desde` as a symlink. The session record carries the whole conversation, so
+ * following such a link would write every message the user typed into whatever
+ * directory the repo chose. See `src/editor/worktree/desde-dir.ts`.
+ */
+describe('a .desde that is a symlink', () => {
+  let target: string
+
+  beforeEach(async () => {
+    target = join(repoRoot, 'target')
+    await mkdir(target, { recursive: true })
+    await symlink(target, join(repoRoot, '.desde'))
+  })
+
+  it('refuses to save a session, and leaves the link target empty', async () => {
+    await expect(saveSession(repoRoot, makeEmptySession('p1'))).rejects.toThrow(
+      /\.desde is a symbolic link/,
+    )
+    expect(await readdir(target)).toEqual([])
+  })
+
+  it('refuses to list sessions rather than reading through the link', async () => {
+    await expect(listSessionsForProject(repoRoot)).rejects.toThrow(
+      /\.desde is a symbolic link/,
+    )
+  })
+
+  it('reports no recent writer instead of scanning through the link', async () => {
+    expect(await findRecentWriterForFile(repoRoot, 'other', 'src/App.vue')).toBeNull()
   })
 })

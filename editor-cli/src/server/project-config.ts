@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs"
 import { dirname, join } from "node:path"
 import { randomUUID } from "node:crypto"
 import type { ProjectKnowledgeConfig } from "../../../src/editor/edit-service/load-project-knowledge"
+import { desdeDir } from "../../../src/editor/worktree/desde-dir.js"
 import {
   deriveSlug,
   mintProjectId,
@@ -258,7 +259,17 @@ export type ReadProjectConfigResult =
       message: string
     }
 
-const CONFIG_RELATIVE_PATH = join(".desde", "config.json")
+/**
+ * `<repoRoot>/.desde/config.json`, guarded. `.desde` is joined through
+ * `desdeDir` so a prototype that ships it as a symlink cannot make the
+ * writers below drop the project config outside the working tree; see
+ * `src/editor/worktree/desde-dir.ts`. Throws `DesdeDirSymlinkError` on such
+ * a repo — the writers let it surface, and the reader below reports it as an
+ * unreadable config.
+ */
+function configPathFor(repoRoot: string): string {
+  return join(desdeDir(repoRoot), "config.json")
+}
 const SUPPORTED_VERSION = 1
 /**
  * Versions this CLI can READ. Writes are always the newest (see
@@ -277,7 +288,19 @@ const SUPPORTED_VERSIONS = [1, 2]
 export async function readProjectConfig(
   repoRoot: string,
 ): Promise<ReadProjectConfigResult> {
-  const configPath = join(repoRoot, CONFIG_RELATIVE_PATH)
+  let configPath: string
+  try {
+    configPath = configPathFor(repoRoot)
+  } catch (err) {
+    // This runs on the CLI boot path, whose contract is to degrade rather
+    // than refuse to start. A repo whose `.desde` is a symlink reads as a
+    // config we cannot use, which is exactly what "malformed" means here.
+    return {
+      ok: false,
+      reason: "malformed",
+      message: (err as Error).message,
+    }
+  }
 
   let raw: string
   try {
@@ -802,7 +825,7 @@ export async function writeProjectConfig(
   repoRoot: string,
   fields: ProjectLinkFields,
 ): Promise<Record<string, unknown>> {
-  const configPath = join(repoRoot, CONFIG_RELATIVE_PATH)
+  const configPath = configPathFor(repoRoot)
 
   let existing: Record<string, unknown> = {}
   try {
@@ -863,7 +886,7 @@ export async function ensureProjectIdentity(
   repoRoot: string,
   opts: { name: string },
 ): Promise<ProjectIdentity> {
-  const configPath = join(repoRoot, ".desde", "config.json")
+  const configPath = configPathFor(repoRoot)
 
   let existingText: string | null = null
   try {

@@ -15,7 +15,7 @@
  *     sessions don't show in the picker)
  */
 
-import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -273,5 +273,27 @@ describe("runRestartClear", () => {
     // Listing still surfaces it.
     const summaries = await listSessionsForProject(repoRoot)
     expect(summaries.find((s) => s.sessionId === "s-legacy")).toBeDefined()
+  })
+})
+
+/**
+ * The boot path: this pass runs before the CLI serves anything, and its
+ * contract is that it never blocks boot. A prototype that ships `.desde` as a
+ * symlink is reported like any other unreadable directory, and nothing is
+ * rewritten through the link. See `src/editor/worktree/desde-dir.ts`.
+ */
+describe("runRestartClear under a symlinked .desde", () => {
+  it("reports the refusal without throwing, and touches nothing at the link target", async () => {
+    const target = join(repoRoot, "target")
+    await mkdir(target, { recursive: true })
+    await symlink(target, join(repoRoot, ".desde"))
+
+    const result = await runRestartClear(repoRoot)
+
+    expect(result.cleared).toBe(0)
+    expect(result.scanned).toBe(0)
+    expect(result.errors).toHaveLength(1)
+    expect(result.errors[0].reason).toMatch(/\.desde is a symbolic link/)
+    expect(await readdir(target)).toEqual([])
   })
 })

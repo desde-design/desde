@@ -51,6 +51,7 @@ import {
   type StalenessResult,
 } from "../../../src/editor/onboarding/index.js"
 import type { ComponentManifest, ComponentManifestSource, GroundingHealth } from "../../../src/editor/core"
+import { desdeDir } from "../../../src/editor/worktree/desde-dir.js"
 import {
   loadDesignSystemDeclarations,
   appendDesignSystemDeclaration,
@@ -595,7 +596,15 @@ function isRepoIngestedEntry(entry: RegisteredDesignSystem): boolean {
 function resolveIngestedSourceRoot(root: string, entry: RegisteredDesignSystem): string | null {
   if (!entry.packageRoot) return null
   const realRoot = resolve(root)
-  const ingestedRoot = join(realRoot, ".desde", "ingested")
+  // Through the `.desde` guard: on a repo whose `.desde` is a symlink there
+  // is no containment to check, so the entry resolves to nothing rather than
+  // to a directory outside the working tree.
+  let ingestedRoot: string
+  try {
+    ingestedRoot = join(desdeDir(realRoot), "ingested")
+  } catch {
+    return null
+  }
   const resolved = resolve(realRoot, entry.packageRoot)
   if (resolved !== ingestedRoot && !resolved.startsWith(ingestedRoot + sep)) return null
   return resolved

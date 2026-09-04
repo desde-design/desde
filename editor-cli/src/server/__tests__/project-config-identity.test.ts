@@ -134,3 +134,45 @@ describe("ensureProjectIdentity", () => {
     expect(identity.slug).toBeTruthy()
   })
 })
+
+/**
+ * The config write predates the `.desde` guard, and a prototype repo is
+ * untrusted input: shipping `.desde` as a symlink used to land `config.json`
+ * (and, once the stores followed, every note and comment) wherever the link
+ * pointed. See `src/editor/worktree/desde-dir.ts`.
+ */
+describe("project config under a symlinked .desde", () => {
+  let linked: string
+  let target: string
+
+  beforeEach(async () => {
+    linked = await mkdtemp(join(tmpdir(), "pt-identity-linked-"))
+    target = join(linked, "target")
+    await fs.mkdir(target, { recursive: true })
+    await fs.symlink(target, join(linked, ".desde"))
+  })
+
+  afterEach(async () => {
+    await rm(linked, { recursive: true, force: true })
+  })
+
+  it("refuses to create the project identity, and writes nothing at the link target", async () => {
+    await expect(
+      ensureProjectIdentity(linked, { name: "Hostile" }),
+    ).rejects.toThrow(/\.desde is a symbolic link/)
+    expect(await fs.readdir(target)).toEqual([])
+  })
+
+  it("reports the config as unreadable rather than following the link", async () => {
+    await fs.writeFile(
+      join(target, "config.json"),
+      JSON.stringify({ version: 1, projectSlug: "outside" }),
+    )
+    const result = await readProjectConfig(linked)
+    expect(result.ok).toBe(false)
+    expect(result).toMatchObject({ reason: "malformed" })
+    expect((result as { message: string }).message).toMatch(
+      /\.desde is a symbolic link/,
+    )
+  })
+})

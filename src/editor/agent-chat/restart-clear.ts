@@ -35,14 +35,12 @@ import { readdir, readFile, rename, writeFile, mkdir, unlink } from 'node:fs/pro
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
+import { desdeDir } from '../worktree/desde-dir'
 import {
   normalizeLoadedSession,
   projectIdForRepoRoot,
 } from './session-store'
 import type { ChatSession } from './types'
-
-/** Path the listing endpoint also uses. Kept identical to session-store's. */
-const SESSIONS_DIR = '.desde/chat-sessions'
 
 /**
  * Reason text stamped on `statusReason` for cleared sessions. Drawer
@@ -70,9 +68,19 @@ export interface RestartClearResult {
 export async function runRestartClear(
   repoRoot: string,
 ): Promise<RestartClearResult> {
-  const dir = join(repoRoot, SESSIONS_DIR)
   const expectedProjectId = projectIdForRepoRoot(repoRoot)
   const result: RestartClearResult = { cleared: 0, scanned: 0, errors: [] }
+
+  // Boot path: this runs before the CLI serves anything, and its own
+  // contract is "never block CLI boot". A `.desde` the repo ships as a
+  // symlink is reported like any other unreadable directory.
+  let dir: string
+  try {
+    dir = join(desdeDir(repoRoot), 'chat-sessions')
+  } catch (err) {
+    result.errors.push({ file: repoRoot, reason: (err as Error).message })
+    return result
+  }
 
   let entries: string[]
   try {

@@ -40,6 +40,7 @@ import {
 } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
+import { desdeDir } from '../worktree/desde-dir'
 import { makeEmptySession, type ChatSession } from './types'
 import {
   DEFAULT_MAX_CHAT_TURNS,
@@ -49,7 +50,15 @@ import {
   sumTurnCostUsd,
 } from './session-turns-archive'
 
-const SESSIONS_DIR = '.desde/chat-sessions'
+/**
+ * The session directory, guarded. Built through `desdeDir` rather than
+ * joined onto `repoRoot` directly, so a `.desde` the prototype ships as a
+ * symlink cannot make `saveSession` write the session record (and every
+ * message in it) outside the working tree. See `desde-dir.ts`.
+ */
+function sessionsDir(repoRoot: string): string {
+  return join(desdeDir(repoRoot), 'chat-sessions')
+}
 
 /**
  * Stable per-project session id. Derived from the absolute repo root
@@ -90,7 +99,7 @@ function assertValidSessionId(sessionId: string, context: string): void {
  */
 export function sessionFilePath(repoRoot: string, sessionId: string): string {
   assertValidSessionId(sessionId, 'sessionFilePath')
-  return join(repoRoot, SESSIONS_DIR, `${sessionId}.json`)
+  return join(sessionsDir(repoRoot), `${sessionId}.json`)
 }
 
 export interface LoadResult {
@@ -389,7 +398,10 @@ export interface ChatSessionSummary {
 export async function listSessionsForProject(
   repoRoot: string,
 ): Promise<ChatSessionSummary[]> {
-  const dir = join(repoRoot, SESSIONS_DIR)
+  // Throws on a symlinked `.desde`, the same way this function already
+  // rethrows an EACCES from the readdir below: a directory we refuse to
+  // touch is not the same answer as "this repo has no sessions".
+  const dir = sessionsDir(repoRoot)
   const projectId = projectIdForRepoRoot(repoRoot)
 
   let entries: string[]
@@ -460,7 +472,14 @@ export async function findRecentWriterForFile(
   excludeSessionId: string,
   file: string,
 ): Promise<{ sessionId: string; firstUserMessagePreview?: string } | null> {
-  const dir = join(repoRoot, SESSIONS_DIR)
+  // Every failure in this scan is already "no recent writer found"; a
+  // refused `.desde` is one more of them.
+  let dir: string
+  try {
+    dir = sessionsDir(repoRoot)
+  } catch {
+    return null
+  }
   const projectId = projectIdForRepoRoot(repoRoot)
 
   let entries: string[]
