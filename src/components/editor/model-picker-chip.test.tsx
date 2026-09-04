@@ -16,6 +16,7 @@
  */
 import { createContext, useContext, useState, type ReactNode } from "react"
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { createRoot } from "react-dom/client"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { SessionModelConfig } from "@/editor/core/model-catalog"
 
@@ -85,6 +86,30 @@ const ANTHROPIC_ONLY_CATALOG = {
   catalogs: [TWO_PROVIDER_CATALOG.catalogs[0]],
   default: { provider: "anthropic", model: "claude-opus-4-8" },
   defaultProviderId: "anthropic",
+}
+
+/**
+ * A stale/fresh pair used only by the invalidation-race test below. Both
+ * name the same provider and id so the point-of-difference is purely the
+ * label, which is what the assertion reads off the rendered chip.
+ */
+const RACE_STALE_CATALOG = {
+  catalogs: [
+    {
+      providerId: "anthropic",
+      models: [{ id: "claude-opus-4-8", label: "Stale Model", effortLevels: null, isDefault: true }],
+    },
+  ],
+  default: { provider: "anthropic", model: "claude-opus-4-8" },
+}
+const RACE_FRESH_CATALOG = {
+  catalogs: [
+    {
+      providerId: "anthropic",
+      models: [{ id: "claude-opus-4-8", label: "Fresh Model", effortLevels: null, isDefault: true }],
+    },
+  ],
+  default: { provider: "anthropic", model: "claude-opus-4-8" },
 }
 
 /**
@@ -738,6 +763,77 @@ describe("ModelPickerChip — forgets its catalog when invalidated", () => {
     await waitFor(() => {
       expect(screen.getByTestId("editor-model-chip")).toHaveTextContent("Opus 4.8")
     })
+  })
+})
+
+/**
+ * FX5 item 2: the invalidation race. `invalidateModelCatalogCache()` can run
+ * WHILE a catalog fetch is still in flight (the user saves a credential
+ * before the picker's first fetch has settled). If that fetch's promise
+ * settles and the invalidation is called in the same synchronous tick — no
+ * `await` between them — the fetch's `await` continuation can resume AFTER
+ * the invalidation's version bump. A plain `setCatalogCache(body)` in that
+ * continuation would then repopulate the cache with the catalog fetched
+ * BEFORE the invalidation, and the picker would never issue the refetch
+ * invalidation exists to trigger. This uses `createRoot` directly rather
+ * than `@testing-library/react`'s `render` (and never wraps the
+ * settle/invalidate pair in `act()`): `act()` forces a synchronous flush
+ * between them that changes the very microtask ordering the race depends
+ * on, and hides it — this reproduces the live repro's finding that the
+ * race only shows up under production-shaped (non-`act`) scheduling.
+ */
+describe("ModelPickerChip — an in-flight fetch cannot defeat an invalidation racing it", () => {
+  it("discards a catalog that settles after invalidation instead of repopulating the cache with it", async () => {
+    vi.resetModules()
+    const { ModelPickerChip, invalidateModelCatalogCache } = await import(
+      "./model-picker-chip"
+    )
+    const { editorFetch } = await import("@/lib/editor-fetch")
+    // Other tests in this file only rely on `mockResolvedValueOnce`'s
+    // queueing order and never assert an absolute call count, so nothing
+    // else here resets it. This test does assert a count, and the mock
+    // instance is shared across the whole file, so it has to start clean.
+    vi.mocked(editorFetch).mockClear()
+    let resolveFirst!: (value: unknown) => void
+    const firstFetch = new Promise((resolve) => {
+      resolveFirst = resolve
+    })
+    vi.mocked(editorFetch)
+      .mockReturnValueOnce(firstFetch as unknown as Promise<Response>)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => RACE_FRESH_CATALOG,
+      } as unknown as Response)
+
+    const el = document.createElement("div")
+    document.body.appendChild(el)
+    const root = createRoot(el)
+    try {
+      root.render(<ModelPickerChip value={null} onChange={() => {}} />)
+      await waitFor(() => expect(editorFetch).toHaveBeenCalledTimes(1))
+
+      // Settle the in-flight fetch, then let its FIRST `await` (on the
+      // response itself) resume before invalidating — one microtask tick,
+      // no more. That lands us mid-continuation: `res.ok` has been read and
+      // `res.json()` called, but the SECOND `await` (on the parsed body)
+      // has not resumed yet, so the write at the end of the effect has not
+      // run. `invalidateModelCatalogCache()` bumps the module-level
+      // version counter SYNCHRONOUSLY the moment it is called, before that
+      // write runs — this is what makes the ordering deterministic rather
+      // than a coin flip on React's own re-render scheduling.
+      resolveFirst({ ok: true, json: () => RACE_STALE_CATALOG })
+      await Promise.resolve()
+      invalidateModelCatalogCache()
+
+      await waitFor(() => expect(editorFetch).toHaveBeenCalledTimes(2))
+      await waitFor(() => {
+        expect(screen.getByTestId("editor-model-chip")).toHaveTextContent("Fresh Model")
+      })
+      expect(screen.queryByText("Stale Model")).not.toBeInTheDocument()
+    } finally {
+      root.unmount()
+      el.remove()
+    }
   })
 })
 

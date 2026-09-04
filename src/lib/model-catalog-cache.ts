@@ -110,6 +110,30 @@ export function setPickedThisLoad(value: SessionModelConfig | null): void {
   pickedThisLoad = value
 }
 
+/**
+ * Sets the cache only when `version` still equals `expectedVersion`. A write
+ * carrying a stale version is discarded instead of applied.
+ *
+ * This closes a race the plain `setCatalogCache` cannot: a catalog fetch can
+ * still be in flight when `invalidateModelCatalogCache()` runs (the user
+ * saved a credential while the picker's first fetch was still pending). If
+ * the fetch's continuation is queued before the invalidation and happens to
+ * run after it in the same microtask drain, a plain `setCatalogCache(body)`
+ * would repopulate the cache with the PRE-invalidation catalog. The rerender
+ * this causes then sees a non-null cache and never issues the refetch —
+ * exactly the case invalidation exists to trigger. The caller captures
+ * `getCatalogVersion()` when the fetch starts and passes it back here; if
+ * `invalidateModelCatalogCache()` bumped the version in between, this no-ops
+ * and the stale body is dropped on the floor.
+ */
+export function setCatalogCacheIfVersion(
+  expectedVersion: number,
+  value: ModelCatalogResponse | null,
+): void {
+  if (version !== expectedVersion) return
+  setCatalogCache(value)
+}
+
 /** `useSyncExternalStore`'s subscribe half. */
 export function subscribeCatalogCache(onChange: () => void): () => void {
   listeners.add(onChange)

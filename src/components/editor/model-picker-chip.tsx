@@ -58,7 +58,7 @@ import {
   getCatalogCache,
   getCatalogVersion,
   getPickedThisLoad,
-  setCatalogCache,
+  setCatalogCacheIfVersion,
   setPickedThisLoad,
   subscribeCatalogCache,
   invalidateModelCatalogCache,
@@ -215,7 +215,12 @@ export function ModelPickerChip({
           if (!cancelled) setCatalogFailed(true)
           return
         }
-        if (!cancelled) setCatalogCache(body)
+        // A version-checked write, not a plain `setCatalogCache`: if
+        // `invalidateModelCatalogCache()` ran while this fetch was in
+        // flight, `catalogVersion` (captured when this effect started) no
+        // longer matches the live version, and the stale body is discarded
+        // instead of repopulating the cache the invalidation just cleared.
+        if (!cancelled) setCatalogCacheIfVersion(catalogVersion, body)
       } catch {
         // Catalog unavailable — chip stays hidden, chat uses defaults.
         if (!cancelled) setCatalogFailed(true)
