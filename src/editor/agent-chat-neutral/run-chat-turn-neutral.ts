@@ -491,16 +491,15 @@ async function runInner(
           // OBSERVES delivery (it appends the message itself), so the position
           // it can report is exact, not an approximation from whenever the
           // steer was accepted.
+          //
+          // No emit of the steered event kind here: the steer route
+          // (`chat-handler.ts`, at accept time) already emits one such frame
+          // per steer, for both lanes. Emitting a second one here drew a
+          // duplicate user bubble on the OpenAI lane (final review I1).
           steerRecords.push({
             text: steer.text,
             ...(steer.images?.length ? { hadImages: true } : {}),
             afterAssistantBlocks: assistantContent.length,
-          })
-          opts.emit({
-            kind: 'steered',
-            sessionId: opts.session.id.sessionId,
-            userMessage: steer.text,
-            imageCount: steer.images?.length ?? 0,
           })
         }
       }

@@ -576,9 +576,12 @@ describe('runChatTurnNeutral: steering', () => {
       role: 'user',
       content: [{ type: 'text', text: 'actually the sidebar' }],
     })
-    expect(events.filter((e) => e.kind === 'steered')).toEqual([
-      { kind: 'steered', sessionId: 'p1', userMessage: 'actually the sidebar', imageCount: 0 },
-    ])
+    // No `steered` event from the runtime: the steer route
+    // (`chat-handler.ts`) already emits one at accept time, for both lanes.
+    // A second one here drew a duplicate user bubble on the OpenAI lane
+    // (final review I1). The runtime still owns recording the steer's
+    // position in the transcript, via `result.turn.steers`.
+    expect(events.filter((e) => e.kind === 'steered')).toEqual([])
     expect(result.turn.steers).toEqual([
       { text: 'actually the sidebar', afterAssistantBlocks: 1 },
     ])

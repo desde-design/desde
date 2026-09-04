@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -46,6 +46,32 @@ afterEach(() => rmSync(root, { recursive: true, force: true }))
 describe('ChatStreamEvent kind coverage', () => {
   it('lists exactly rate_limit_warning as Anthropic-only', () => {
     expect([...ANTHROPIC_ONLY_EVENT_KINDS]).toEqual(['rate_limit_warning'])
+  })
+
+  it('emits `steered` from the steer route only, never from a runtime', () => {
+    // The steer route (`chat-handler.ts`, at accept time) emits `steered`
+    // for both lanes already. The neutral runtime used to emit a second one
+    // at boundary delivery, which drew a duplicate user bubble on the
+    // OpenAI lane (final review I1) — the SDK runtime never emitted one at
+    // all. `run-chat-turn-neutral.test.ts` drives the runtime alone and
+    // never sees the route's frame, so it cannot catch a regression here;
+    // this greps the actual sources the way the finding's evidence was
+    // gathered, so a re-added emitter in either runtime fails this test
+    // regardless of what any single runtime's own script asserts.
+    const neutralSrc = readFileSync(
+      join(__dirname, '../agent-chat-neutral/run-chat-turn-neutral.ts'),
+      'utf8',
+    )
+    const sdkSrc = readFileSync(join(__dirname, '../agent-chat-sdk/run-chat-turn-sdk.ts'), 'utf8')
+    expect(neutralSrc).not.toMatch(/kind:\s*['"]steered['"]/)
+    expect(sdkSrc).not.toMatch(/kind:\s*['"]steered['"]/)
+
+    const routeSrc = readFileSync(
+      join(__dirname, '../../../editor-cli/src/server/chat-handler.ts'),
+      'utf8',
+    )
+    const routeEmitters = routeSrc.match(/kind:\s*['"]steered['"]/g) ?? []
+    expect(routeEmitters).toHaveLength(1)
   })
 
   it('accounts for every declared kind', async () => {
