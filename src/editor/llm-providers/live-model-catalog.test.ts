@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ProviderModelCatalog } from '../core/model-catalog'
 import { mergeLiveModels } from './live-model-catalog'
+import { OPENAI_MODEL_CATALOG } from './openai-model-catalog'
 
 const STATIC: ProviderModelCatalog = {
   providerId: 'anthropic',
@@ -86,5 +87,37 @@ describe('mergeLiveModels', () => {
   it('drops duplicate ids and falls back to the id as a label', () => {
     const merged = mergeLiveModels(STATIC, [{ id: 'x-1' }, { id: 'x-1' }], { effortFallback: fallback })!
     expect(merged.models).toEqual([{ id: 'x-1', label: 'x-1', effortLevels: null, isDefault: true }])
+  })
+
+  it('keeps the flagship as the default when the live list carries only its dated or suffixed forms', () => {
+    const merged = mergeLiveModels(
+      STATIC,
+      [
+        // A dated snapshot of the static default, not itself a static entry.
+        { id: 'claude-opus-4-8-20260315' },
+        { id: 'claude-sonnet-4-6' },
+      ],
+      { effortFallback: fallback },
+    )!
+    expect(merged.models.filter((m) => m.isDefault).map((m) => m.id)).toEqual(['claude-opus-4-8-20260315'])
+  })
+
+  it('picks the flagship alias, not a cheaper tier that shares its stem, when the live list has no bare gpt-5.6', () => {
+    // Regression for the real 2026-09-04 shell: the live list carried
+    // gpt-5.6-sol, gpt-5.6-terra and gpt-5.6-luna but no bare gpt-5.6, and
+    // the served default fell to Luna (the cheapest tier) because it was
+    // simply first in the (newest-first) live order. Terra and Luna are
+    // already their own static entries, so only Sol (live-only) qualifies
+    // as an alias of the default.
+    const merged = mergeLiveModels(
+      OPENAI_MODEL_CATALOG,
+      [
+        { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+        { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+        { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+      ],
+      { effortFallback: () => null },
+    )
+    expect(merged?.models.find((m) => m.isDefault)?.id).toBe('gpt-5.6-sol')
   })
 })

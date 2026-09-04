@@ -31,6 +31,20 @@ export interface OpenAiApiModel {
 /** `gpt-5`, `gpt-5.6`, `gpt-5.4-mini`, `gpt-5.3-codex`. Nothing else. */
 const CHAT_MODEL_ID = /^gpt-5(?:\.\d+)?(?:-(?:mini|nano|terra|luna|sol|cyber|codex))?$/
 
+/**
+ * Derive a label the same way the static catalog would name it, for a live
+ * id the static catalog does not describe (`mergeLiveModels` prefers the
+ * static label when one exists, so this only ever surfaces for a live-only
+ * id). `gpt` is uppercased, the version is kept as-is, and every following
+ * dash-separated word is title-cased: `gpt-5.4-nano` -> `GPT-5.4 Nano`,
+ * `gpt-5.6-sol` -> `GPT-5.6 Sol`, `gpt-5` -> `GPT-5`.
+ */
+export function labelFromOpenAiId(id: string): string {
+  const [, version = '', ...words] = id.split('-')
+  const wordLabels = words.map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+  return ['GPT-' + version, ...wordLabels].join(' ')
+}
+
 export function fromOpenAiModelsApi(models: readonly OpenAiApiModel[]): LiveModel[] {
   return [...models]
     .filter((m) => CHAT_MODEL_ID.test(m.id))
@@ -38,10 +52,11 @@ export function fromOpenAiModelsApi(models: readonly OpenAiApiModel[]): LiveMode
     .sort((a, b) => b.created - a.created)
     .map((m) => ({
       id: m.id,
-      // No label: the static catalog's hand-written one wins, and inventing
-      // "Gpt 5.6" from an id would be worse than what it replaces.
-      // No effort information either: `/v1/models` carries none, and
-      // `undefined` is what mergeLiveModels reads as "ask the static catalog".
+      // The static catalog's hand-written label still wins in the merge
+      // when one exists; this is only what a live-only id falls back to.
+      label: labelFromOpenAiId(m.id),
+      // No effort information: `/v1/models` carries none, and `undefined`
+      // is what mergeLiveModels reads as "ask the static catalog".
     }))
 }
 

@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fromOpenAiModelsApi, listOpenAiLiveModels } from './openai-live-models'
+import { fromOpenAiModelsApi, labelFromOpenAiId, listOpenAiLiveModels } from './openai-live-models'
+
+describe('labelFromOpenAiId', () => {
+  it('labels a live-only OpenAI id the way the static catalog would', () => {
+    expect(labelFromOpenAiId('gpt-5.4-nano')).toBe('GPT-5.4 Nano')
+    expect(labelFromOpenAiId('gpt-5.6-sol')).toBe('GPT-5.6 Sol')
+    expect(labelFromOpenAiId('gpt-5')).toBe('GPT-5')
+    expect(labelFromOpenAiId('gpt-5-mini')).toBe('GPT-5 Mini')
+  })
+})
 
 describe('fromOpenAiModelsApi', () => {
   it('keeps gpt-5 chat models, newest first', () => {
@@ -44,6 +53,14 @@ describe('fromOpenAiModelsApi', () => {
     // "ask the static catalog".
     expect(live!.effortLevels).toBeUndefined()
     expect(live!.supportsEffort).toBeUndefined()
+  })
+
+  it('labels every entry so a live-only id never shows its raw id in the picker', () => {
+    const live = fromOpenAiModelsApi([
+      { id: 'gpt-5.6-sol', object: 'model', created: 2, owned_by: 'openai' },
+      { id: 'gpt-5.4-nano', object: 'model', created: 1, owned_by: 'openai' },
+    ])
+    expect(live.map((m) => m.label)).toEqual(['GPT-5.6 Sol', 'GPT-5.4 Nano'])
   })
 })
 

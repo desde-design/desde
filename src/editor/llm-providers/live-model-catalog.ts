@@ -25,9 +25,15 @@
  *    brand-new model nobody has described yet still needs an answer.
  *  - Labels and descriptions: static first for the ones it knows, because a
  *    hand-written "Fast, near-Opus quality on coding" beats "Claude Sonnet 5".
- *  - The default is the static default when the live list has it, otherwise
- *    the first live entry. The picker never opens on a model that cannot be
- *    used.
+ *  - The default is the static default when the live list has it. Otherwise,
+ *    when the live list has an ALIAS STEM of it (a live id that starts with
+ *    the static default's id plus a dash, and is not itself some OTHER
+ *    static model's id), that alias becomes the default: a vendor can retire
+ *    the bare id and keep serving it only under a dated snapshot (Anthropic)
+ *    or a tier suffix (OpenAI's `gpt-5.6-sol`, the researched alias of
+ *    `gpt-5.6`), and the flagship should not lose its place just because the
+ *    bare id disappeared. Otherwise, the first live entry. The picker never
+ *    opens on a model that cannot be used.
  */
 
 import type { EffortLevel, ModelOption, ProviderModelCatalog } from '../core/model-catalog'
@@ -49,6 +55,24 @@ export interface LiveModel {
 }
 
 const FULL_EFFORT_LADDER: EffortLevel[] = [...EFFORT_LEVELS]
+
+/**
+ * Find a live entry that is an alias of `staticDefault`: its id starts with
+ * `staticDefault.id` plus a dash, and it is not itself some OTHER static
+ * model's id (that would make it its own distinct entry, not a stand-in for
+ * the default — `gpt-5.6-terra` and `gpt-5.6-luna` both share the `gpt-5.6-`
+ * stem but already have their own static catalog rows, so neither qualifies;
+ * only `gpt-5.6-sol`, live-only, does). Takes the first match in live order.
+ */
+function findAliasStemDefault(
+  catalog: ProviderModelCatalog,
+  models: readonly ModelOption[],
+  staticDefault: ModelOption,
+): ModelOption | undefined {
+  const staticIds = new Set(catalog.models.map((m) => m.id))
+  const stem = `${staticDefault.id}-`
+  return models.find((m) => m.id.startsWith(stem) && !staticIds.has(m.id))
+}
 
 export interface MergeLiveOptions {
   /** What a live model with no effort information of any kind gets. */
@@ -92,7 +116,10 @@ export function mergeLiveModels(
       ...(typeof adaptiveThinking === 'boolean' ? { adaptiveThinking } : {}),
     })
   }
-  const defaultId = staticDefault && seen.has(staticDefault.id) ? staticDefault.id : models[0]!.id
+  const defaultId =
+    staticDefault && seen.has(staticDefault.id)
+      ? staticDefault.id
+      : (staticDefault && findAliasStemDefault(catalog, models, staticDefault)?.id) ?? models[0]!.id
   return {
     providerId: catalog.providerId,
     models: models.map((m) => (m.id === defaultId ? { ...m, isDefault: true } : m)),
