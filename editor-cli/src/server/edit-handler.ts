@@ -13,6 +13,7 @@ import {
   resolveBranchCached,
 } from "../../../src/editor/ledger/edit-ledger"
 import { normalizeLedgerPath } from "../../../src/editor/ledger/normalize-path"
+import { desdeDir } from "../../../src/editor/worktree/desde-dir.js"
 import {
   resolvePrototypeRoot,
   resolveCandidateWithinRoot,
@@ -2040,7 +2041,11 @@ async function tryPropEditLLMFallback(args: {
   let miniTurnBackedUpAny = false
   try {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-")
-    const backupDir = path.join(args.rootReal, ".desde", "backups", `${stamp}-mini-turn`)
+    // `desdeDir` throws when `.desde` is a symlink out of the worktree.
+    // That throw lands in the catch below (best-effort — the landed edit
+    // must never fail over a backup), so `miniTurnBackupDir` is left
+    // unset and nothing is written under the hostile target.
+    const backupDir = path.join(desdeDir(args.rootReal), "backups", `${stamp}-mini-turn`)
     miniTurnBackupDir = backupDir
     if (targetChanged) {
       const backupPath = path.join(backupDir, args.file)

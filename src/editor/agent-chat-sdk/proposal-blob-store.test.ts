@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -129,5 +129,20 @@ describe('deleteProposalBlobsForSession', () => {
     await expect(
       deleteProposalBlobsForSession(root, '../escape'),
     ).rejects.toThrow(/sessionId must match/i)
+  })
+
+  it('CX7 item 6: refuses to delete, and removes nothing, when .desde is a symlink out of the worktree', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'proposal-blob-store-outside-'))
+    mkdirSync(join(outside, 'chat-sessions', 'sess-1', 'proposals'), { recursive: true })
+    writeFileSync(join(outside, 'chat-sessions', 'sess-1', 'proposals', 'e1.txt'), 'content')
+    symlinkSync(outside, join(root, '.desde'))
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await expect(deleteProposalBlobsForSession(root, 'sess-1')).resolves.toBeUndefined()
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+
+    expect(existsSync(join(outside, 'chat-sessions', 'sess-1', 'proposals', 'e1.txt'))).toBe(true)
+    rmSync(outside, { recursive: true, force: true })
   })
 })

@@ -62,6 +62,8 @@
 import { readdir, readFile, rm, stat } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
+import { desdeDir, DesdeDirSymlinkError } from '../worktree/desde-dir'
+
 /** Delete unreferenced base files older than this many days. */
 export const DEFAULT_READ_SNAPSHOT_MAX_AGE_DAYS = 14
 /** Never delete a base file younger than this, regardless of reference status. */
@@ -86,7 +88,18 @@ export async function gcReadSnapshotBases(
 ): Promise<ReadSnapshotGcResult> {
   const maxAgeMs = (opts.maxAgeDays ?? DEFAULT_READ_SNAPSHOT_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000
   const now = (opts.now ?? Date.now)()
-  const chatSessionsDir = join(repoRoot, '.desde', 'chat-sessions')
+  let chatSessionsDir: string
+  try {
+    chatSessionsDir = join(desdeDir(repoRoot), 'chat-sessions')
+  } catch (err) {
+    // Refuse and log rather than sweep whatever a hostile `.desde`
+    // symlink points at — same tolerance as `backups-gc.ts`.
+    if (err instanceof DesdeDirSymlinkError) {
+      console.warn(`[read-snapshot-gc] refusing to sweep '${repoRoot}': ${err.message}`)
+      return { sessionsSwept: 0, deleted: 0 }
+    }
+    throw err
+  }
 
   let sessionDirNames: string[]
   try {

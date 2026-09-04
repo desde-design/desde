@@ -35,6 +35,7 @@ import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { deleteProposalBlobsForSession } from './proposal-blob-store'
+import { desdeDir, DesdeDirSymlinkError } from '../worktree/desde-dir'
 
 /**
  * Sweep every chat-session under the worktree's
@@ -46,7 +47,18 @@ import { deleteProposalBlobsForSession } from './proposal-blob-store'
  * counted.
  */
 export async function gcAllProposalBlobs(repoRoot: string): Promise<number> {
-  const dir = join(repoRoot, '.desde', 'chat-sessions')
+  let dir: string
+  try {
+    dir = join(desdeDir(repoRoot), 'chat-sessions')
+  } catch (err) {
+    // Refuse and log rather than sweep whatever a hostile `.desde`
+    // symlink points at — same tolerance as `backups-gc.ts`.
+    if (err instanceof DesdeDirSymlinkError) {
+      console.warn(`[proposal-blob-gc] refusing to sweep '${repoRoot}': ${err.message}`)
+      return 0
+    }
+    throw err
+  }
   let entries: string[]
   try {
     entries = await readdir(dir, { withFileTypes: true }).then((dirents) =>

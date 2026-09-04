@@ -71,7 +71,7 @@ import { lstat, mkdir, open, readFile, realpath, rename as fsRename, unlink, wri
 import { dirname, sep as pathSep } from 'node:path'
 
 import { isProtectedAgentPath, protectedPathDenial } from './protected-paths'
-import { DesdeDirSymlinkError } from './desde-dir'
+import { DesdeDirSymlinkError } from '../worktree/desde-dir'
 
 import {
   getSharedFileLockManager,

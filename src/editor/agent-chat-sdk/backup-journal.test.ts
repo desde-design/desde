@@ -22,7 +22,7 @@ import {
   writeBackupJournal,
   BackupJournalPathEscapeError,
 } from './backup-journal'
-import { DesdeDirSymlinkError } from './desde-dir'
+import { DesdeDirSymlinkError } from '../worktree/desde-dir'
 
 describe('writeBackupJournal', () => {
   let root: string

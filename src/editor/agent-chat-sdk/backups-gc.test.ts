@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
@@ -170,5 +171,22 @@ describe('gcBackups', () => {
     expect(result).toEqual({ deleted: [], kept: 0, errors: 0 })
     expect(warn).toHaveBeenCalled()
     warn.mockRestore()
+  })
+
+  it('CX7 item 6: refuses to sweep, and removes nothing, when .desde is a symlink out of the worktree', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'backups-gc-outside-'))
+    mkdirSync(join(outside, 'backups', 'd0'), { recursive: true })
+    writeFileSync(join(outside, 'backups', 'd0', 'file.txt'), 'content')
+    symlinkSync(outside, join(root, '.desde'))
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await gcBackups(root)
+    expect(result).toEqual({ deleted: [], kept: 0, errors: 0 })
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+
+    // Nothing was created or removed at the symlink target.
+    expect(existsSync(join(outside, 'backups', 'd0', 'file.txt'))).toBe(true)
+    rmSync(outside, { recursive: true, force: true })
   })
 })

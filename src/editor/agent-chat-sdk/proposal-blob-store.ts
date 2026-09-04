@@ -31,6 +31,8 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
+import { desdeDir, DesdeDirSymlinkError } from '../worktree/desde-dir'
+
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 
 function assertValidId(value: string, label: string): void {
@@ -53,14 +55,7 @@ export function proposalBlobPath(
 ): string {
   assertValidId(sessionId, 'sessionId')
   assertValidId(editId, 'editId')
-  return join(
-    repoRoot,
-    '.desde',
-    'chat-sessions',
-    sessionId,
-    'proposals',
-    `${editId}.txt`,
-  )
+  return join(desdeDir(repoRoot), 'chat-sessions', sessionId, 'proposals', `${editId}.txt`)
 }
 
 /**
@@ -122,13 +117,21 @@ export async function deleteProposalBlobsForSession(
   sessionId: string,
 ): Promise<void> {
   assertValidId(sessionId, 'sessionId')
-  const dir = join(
-    repoRoot,
-    '.desde',
-    'chat-sessions',
-    sessionId,
-    'proposals',
-  )
+  let base: string
+  try {
+    base = desdeDir(repoRoot)
+  } catch (err) {
+    // A recursive `rm` under a hostile symlink is worse than a plain
+    // write: refuse and log rather than delete whatever the symlink
+    // points at. Never re-thrown — this is a best-effort deleter, same
+    // tolerance as the retention sweeps below.
+    if (err instanceof DesdeDirSymlinkError) {
+      console.warn(`[proposal-blob-store] refusing to delete under '${repoRoot}': ${err.message}`)
+      return
+    }
+    throw err
+  }
+  const dir = join(base, 'chat-sessions', sessionId, 'proposals')
   try {
     await rm(dir, { recursive: true, force: true })
   } catch {

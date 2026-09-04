@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, existsSync, writeFileSync, readFileSync } from "node:fs"
 import { join, basename } from "node:path"
 import { tmpdir } from "node:os"
 import { validateEditRequest } from "../../../../src/editor/edit-service/validate-edit-request"
@@ -764,6 +764,48 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
     // Not just present — a real, readable backup of the PRE-turn source.
     const backedUp = readFileSync(join(dir, entry.backupDir!, "App.vue"), "utf8")
     expect(backedUp).toBe(ORIGINAL_SOURCE)
+  })
+
+  // CX7 item 6: the mini-turn backup writer used to join `.desde/backups/…`
+  // straight onto `args.rootReal` with no symlink guard — a hostile
+  // `.desde` could send the backup (and later, on Undo, a restore write)
+  // outside the worktree. It now builds the path through `desdeDir`,
+  // which throws for a symlinked `.desde`; the surrounding block already
+  // treats a backup failure as best-effort (never fails a landed edit), so
+  // the edit still lands and the ledger entry simply carries no
+  // `backupDir` — same as any other run where the loop never wrote a file.
+  it("refuses to write the mini-turn backup, and writes nothing at the target, when .desde is a symlink out of the worktree", async () => {
+    writeFileSync(join(dir, "App.vue"), ORIGINAL_SOURCE)
+    const outside = mkdtempSync(join(tmpdir(), "editor-llm-fallback-outside-"))
+    symlinkSync(outside, join(dir, ".desde"))
+
+    const body: EditRequestBody = {
+      edit: {
+        kind: "prop",
+        file: "App.vue",
+        line: 2,
+        column: 3,
+        propName: "placeholder",
+        value: "Filter results",
+      },
+    }
+
+    const result = await applyEdit(body, dir, makeLoaders())
+    // Best-effort: the landed edit must not fail over a backup problem.
+    expect(result.ok).toBe(true)
+    expect(readFileSync(join(dir, "App.vue"), "utf8")).toBe(REWRITTEN_SOURCE)
+
+    // The ledger append goes through the same guarded `desdeDir` (via
+    // `ledgerPath`) and is itself best-effort, so a symlinked `.desde`
+    // means no ledger entry lands either — `readLedger` degrades to `[]`
+    // the same way it does for a missing file.
+    const { readLedger } = await import("../../../../src/editor/ledger/edit-ledger")
+    expect(await readLedger(dir)).toEqual([])
+    // Nothing was created at the symlink target.
+    expect(existsSync(join(outside, "backups"))).toBe(false)
+    expect(existsSync(join(outside, "edit-log.jsonl"))).toBe(false)
+
+    rmSync(outside, { recursive: true, force: true })
   })
 
   // P2-1 (codex review round 6, 2026-08-20): the consolidated ledger

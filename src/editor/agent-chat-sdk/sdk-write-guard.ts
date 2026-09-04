@@ -179,7 +179,7 @@ import {
   type BackupEntry,
 } from './backup-journal'
 import { isRootEscape } from './root-escape'
-import { DesdeDirSymlinkError } from './desde-dir'
+import { DesdeDirSymlinkError } from '../worktree/desde-dir'
 import type { HistoryRecorder, HistoryFileState } from './write-broker'
 import { appendLedgerEntry, hashContent, resolveBranchCached } from '../ledger/edit-ledger'
 

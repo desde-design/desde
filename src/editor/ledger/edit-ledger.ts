@@ -17,7 +17,7 @@ import { createHash } from 'node:crypto'
 import { appendFile, mkdir, open, readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve as resolvePath, sep } from 'node:path'
 
-import { assertDesdeDirIsNotASymlink } from '../agent-chat-sdk/desde-dir'
+import { desdeDir } from '../worktree/desde-dir'
 import { currentBranch } from '../worktree/git-branches'
 import type { LedgerEditEntry, LedgerEntry } from './entry'
 import { resolveCommitState } from './commit-state'
@@ -25,7 +25,7 @@ import { editBelongsToBranch, resolveEditBranches } from './rename-aliases'
 import { normalizeLedgerPath } from './normalize-path'
 
 export function ledgerPath(canonicalRoot: string): string {
-  return join(canonicalRoot, '.desde', 'edit-log.jsonl')
+  return join(desdeDir(canonicalRoot), 'edit-log.jsonl')
 }
 
 /** SHA-256 hex of a file's content. The Undo drift check compares these. */
@@ -63,7 +63,6 @@ export async function appendLedgerEntry(
   entry: LedgerEntry,
 ): Promise<void> {
   try {
-    assertDesdeDirIsNotASymlink(canonicalRoot)
     const path = ledgerPath(canonicalRoot)
     await mkdir(dirname(path), { recursive: true })
     const prefix = (await endsWithNewlineOrAbsent(path)) ? '' : '\n'

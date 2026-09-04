@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { gcAllProposalBlobs } from './proposal-blob-gc'
 import { writeProposalBlob } from './proposal-blob-store'
@@ -138,5 +138,22 @@ describe('gcAllProposalBlobs — skips sessions with unresolved conflicts (audit
     await writeProposalBlob(root, 'sess-a', 'e1', 'content')
     writeFileSync(join(root, '.desde', 'chat-sessions', 'sess-a.json'), '{ not json')
     expect(await gcAllProposalBlobs(root)).toBe(1)
+  })
+
+  it('CX7 item 6: refuses to sweep, and removes nothing, when .desde is a symlink out of the worktree', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'proposal-blob-gc-outside-'))
+    mkdirSync(join(outside, 'chat-sessions', 'sess-a', 'proposals'), { recursive: true })
+    writeFileSync(join(outside, 'chat-sessions', 'sess-a', 'proposals', 'e1.txt'), 'content')
+    symlinkSync(outside, join(root, '.desde'))
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    expect(await gcAllProposalBlobs(root)).toBe(0)
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+
+    expect(
+      existsSync(join(outside, 'chat-sessions', 'sess-a', 'proposals', 'e1.txt')),
+    ).toBe(true)
+    rmSync(outside, { recursive: true, force: true })
   })
 })

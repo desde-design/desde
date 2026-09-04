@@ -159,7 +159,7 @@ describe('brokeredWrite', () => {
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.stage).toBe('backup')
-    expect(result.reason).toMatch(/\.desde.*symlink|symlink.*\.desde/i)
+    expect(result.reason).toMatch(/\.desde.*symbolic link|symbolic link.*\.desde/i)
     expect(existsSync(join(outside, 'backups'))).toBe(false)
     expect(existsSync(join(outside, 'edit-log.jsonl'))).toBe(false)
     expect(readFileSync(join(root, 'App.vue'), 'utf8')).toBe('original')
