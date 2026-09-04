@@ -412,3 +412,94 @@ describe('streamComplete is deliberately absent', () => {
     expect(provider.streamComplete).toBeUndefined()
   })
 })
+
+function captureFetch(
+  captured: Array<Record<string, unknown>>,
+  chunks: string[],
+): typeof fetch {
+  return (async (_url: string, init: { body: string }) => {
+    captured.push(JSON.parse(init.body) as Record<string, unknown>)
+    const encoder = new TextEncoder()
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const c of chunks) controller.enqueue(encoder.encode(c))
+          controller.close()
+        },
+      }),
+      text: async () => '',
+    }
+  }) as unknown as typeof fetch
+}
+
+describe('streamConversation: additive provider-seam extensions', () => {
+  it('sends a user image block as an image_url data URL', async () => {
+    const captured: Array<Record<string, unknown>> = []
+    const provider = new OpenAIProvider({
+      apiKey: 'test',
+      fetchImpl: captureFetch(captured, ['data: [DONE]\n\n']),
+    })
+    for await (const _ of provider.streamConversation({
+      system: 'sys',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'what colour is this' },
+            { type: 'image', mediaType: 'image/png', data: 'AAAA' },
+          ],
+        },
+      ],
+      tools: [],
+    })) {
+      void _
+    }
+    const body = captured[0] as { messages: Array<{ content: unknown }> }
+    expect(body.messages[1].content).toEqual([
+      { type: 'text', text: 'what colour is this' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+    ])
+  })
+
+  it('merges providerOptions into the request body', async () => {
+    const captured: Array<Record<string, unknown>> = []
+    const provider = new OpenAIProvider({
+      apiKey: 'test',
+      fetchImpl: captureFetch(captured, ['data: [DONE]\n\n']),
+    })
+    for await (const _ of provider.streamConversation({
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [],
+      providerOptions: { reasoning_effort: 'high' },
+    })) {
+      void _
+    }
+    expect(captured[0].reasoning_effort).toBe('high')
+  })
+
+  it('emits reasoning_delta from delta.reasoning_content', async () => {
+    const provider = new OpenAIProvider({
+      apiKey: 'test',
+      fetchImpl: captureFetch(
+        [],
+        [
+          'data: {"choices":[{"delta":{"reasoning_content":"weighing it"}}]}\n\n',
+          'data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\n',
+          'data: [DONE]\n\n',
+        ],
+      ),
+    })
+    const events = []
+    for await (const ev of provider.streamConversation({
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [],
+    })) {
+      events.push(ev)
+    }
+    expect(events).toContainEqual({ kind: 'reasoning_delta', delta: 'weighing it' })
+  })
+})

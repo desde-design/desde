@@ -173,6 +173,9 @@ export class OpenAIProvider implements LLMProvider {
         ...opts.messages.map(toOpenAIMessage).flat(),
       ],
       tools: opts.tools.map(toOpenAITool),
+      // See the Anthropic provider: descriptor-supplied vendor fields, spread
+      // last so the descriptor wins.
+      ...(opts.providerOptions ?? {}),
     }
     const response = await this.fetchImpl(`${this.baseUrl}/v1/chat/completions`, {
       method: 'POST',
@@ -208,6 +211,18 @@ export class OpenAIProvider implements LLMProvider {
       if (delta?.content) {
         textParts.push(delta.content)
         yield { kind: 'text_delta', delta: delta.content }
+      }
+      // Reasoning summary. `reasoning_content` is what the OpenAI-compatible
+      // vendors emit (DeepSeek, Kimi, vLLM); `reasoning` is OpenAI's own
+      // Chat Completions field. Read both so one adapter covers the family.
+      const reasoning =
+        typeof (delta as { reasoning_content?: unknown })?.reasoning_content === 'string'
+          ? (delta as { reasoning_content: string }).reasoning_content
+          : typeof (delta as { reasoning?: unknown })?.reasoning === 'string'
+            ? (delta as { reasoning: string }).reasoning
+            : null
+      if (reasoning !== null && reasoning.length > 0) {
+        yield { kind: 'reasoning_delta', delta: reasoning }
       }
       if (delta?.refusal) {
         // Structured-output refusal — stream as text deltas so the
@@ -305,9 +320,13 @@ function flattenToString(content: SystemContent | UserContent): string {
   return content.map((b) => b.text).join('\n\n')
 }
 
+type OpenAIContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
 interface OpenAIChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content?: string | null
+  content?: string | OpenAIContentPart[] | null
   tool_call_id?: string
   tool_calls?: Array<{
     id: string
@@ -324,12 +343,18 @@ function toOpenAIMessage(msg: Message): OpenAIChatMessage[] {
     // Mixed content: text blocks become a regular user message; tool
     // results become role: 'tool' messages keyed by toolUseId.
     const userTextParts: string[] = []
+    const imageParts: OpenAIContentPart[] = []
     const toolMessages: OpenAIChatMessage[] = []
     for (const block of msg.content) {
       if (block.type === 'text') {
         // cacheHint dropped — OpenAI doesn't have a first-class
         // cache-breakpoint API; cf. file header.
         userTextParts.push(block.text)
+      } else if (block.type === 'image') {
+        imageParts.push({
+          type: 'image_url',
+          image_url: { url: `data:${block.mediaType};base64,${block.data}` },
+        })
       } else if (block.type === 'tool_result') {
         const content =
           typeof block.content === 'string'
@@ -343,7 +368,16 @@ function toOpenAIMessage(msg: Message): OpenAIChatMessage[] {
       }
     }
     const out: OpenAIChatMessage[] = []
-    if (userTextParts.length > 0) {
+    if (imageParts.length > 0) {
+      // Content-array form. A text-only message stays a plain string so the
+      // wire shape for every existing caller is byte-identical to before.
+      const parts: OpenAIContentPart[] = []
+      if (userTextParts.length > 0) {
+        parts.push({ type: 'text', text: userTextParts.join('\n\n') })
+      }
+      parts.push(...imageParts)
+      out.push({ role: 'user', content: parts })
+    } else if (userTextParts.length > 0) {
       out.push({ role: 'user', content: userTextParts.join('\n\n') })
     }
     out.push(...toolMessages)
