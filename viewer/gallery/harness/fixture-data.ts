@@ -425,7 +425,10 @@ export const SAMPLE_COMMENTS: Comment[] = [
     replies: [
       {
         id: "reply-cta-copy-1",
-        body: "Agreed, I'll draft two alternatives.",
+        // Carries a mention on purpose. No fixture had one, so nothing in the
+        // catalog showed how a SENT mention reads, and the badge it used to
+        // render was never once visible here.
+        body: "Agreed, I'll draft two alternatives. @[Rin Adeyemi](user-rin) can you sanity check the tone?",
         author: {
           uid: "user:user-mo",
           displayName: "Mo Chang",
@@ -433,7 +436,10 @@ export const SAMPLE_COMMENTS: Comment[] = [
           photoURL: "https://avatars.githubusercontent.com/u/0?v=4",
         },
         createdAt: "2026-08-18T15:10:00.000Z",
-        mentions: [],
+        // Matches the body's token. The server notifies from THIS array and
+        // never from the text, so a fixture where they disagree would model a
+        // mention that reaches nobody.
+        mentions: ["user-rin"],
       },
     ],
     mentions: [],
@@ -449,7 +455,9 @@ export const SAMPLE_COMMENTS: Comment[] = [
       anchorX: 420,
       anchorY: 300,
     },
-    body: "Spacing between the two cards feels tight on smaller viewports.",
+    // A mention at the very start of a body, which is where a pill sat worst:
+    // it put a filled chip in the first characters of the comment rail's row.
+    body: "@[Mo Chang](user-mo) spacing between the two cards feels tight on smaller viewports.",
     author: {
       uid: "viewer:9f2c41ba-7d6e-4c0f-a8b3-5172e94d0c6a",
       displayName: "Dana Okafor",
@@ -459,7 +467,7 @@ export const SAMPLE_COMMENTS: Comment[] = [
     createdAt: "2026-08-19T09:30:00.000Z",
     resolved: false,
     replies: [],
-    mentions: [],
+    mentions: ["user-mo"],
     participantEmails: [],
     projectId: "proj-gateway",
   },

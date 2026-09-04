@@ -75,13 +75,20 @@ export function buildEditEscalationPrompt(
 }
 
 /**
- * Strip the `@[Display Name](email)` mention encoding back to plain
- * `@Display Name` so the seed prompt reads naturally (the agent doesn't
- * care about the email-anchored encoding the UI uses for notifications).
- * Mirrors {@link MentionText}'s parse regex.
+ * Strip the `@[Display Name](participantId)` mention encoding back to plain
+ * `@Display Name`, so the seed prompt reads naturally: the agent has no use
+ * for the id the UI carries for notifications.
+ *
+ * The pattern must stay identical to `MENTION_PATTERN` in
+ * `src/components/annotations/mention-encoding.ts`, which is what WRITES these
+ * tokens. A private copy because that module belongs to the component layer
+ * and this one does not import upward. The name group excludes `[` as well as
+ * `]`: without that, a literal `@[` earlier in a comment starts a match that
+ * runs through the next real mention and swallows it, so the prompt would
+ * carry one mangled name in place of the text and the person mentioned.
  */
 export function decodeCommentMentions(body: string): string {
-  return body.replace(/@\[([^\]]+)\]\(([^)]+)\)/g, "@$1")
+  return body.replace(/@\[([^[\]]+)\]\(([^)]+)\)/g, "@$1")
 }
 
 export interface CommentFixSeed {

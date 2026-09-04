@@ -31,13 +31,17 @@ export function MentionText({ text }: MentionTextProps) {
     }
 
     const displayName = match[1]
-    // Render the mention with styling
+    // Colour alone, no pill. A filled chip made every mention the loudest
+    // thing in a thread, and inside a selected row (`bg-primary/10`, the same
+    // value) it turned into a tint on a tint. The aqua is `--primary`, the
+    // same colour the composer shows while the mention is being written, so a
+    // mention looks the same before and after it is sent.
+    //
+    // No `title` either: it carried the participant id, which is opaque, so
+    // hovering a name produced a bare UUID. It read as an email address back
+    // when the format anchored on one.
     parts.push(
-      <span
-        key={match.index}
-        className="rounded bg-primary/10 px-0.5 font-normal text-primary"
-        title={match[2]}
-      >
+      <span key={match.index} className="text-primary">
         @{displayName}
       </span>
     )

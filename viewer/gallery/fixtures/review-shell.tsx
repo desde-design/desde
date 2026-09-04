@@ -226,7 +226,7 @@ async function clickRow(cancelled: () => boolean, pattern: RegExp): Promise<void
 }
 
 async function openReplyBox(cancelled: () => boolean): Promise<void> {
-  await clickRow(cancelled, /Spacing between the two cards/)
+  await clickRow(cancelled, /spacing between the two cards/i)
   if (cancelled()) return
   const replyButton = await waitForElement(() => findButtonByText(/^Reply$/))
   if (cancelled() || !replyButton) return
@@ -632,7 +632,7 @@ export const REVIEW_SHELL_SURFACE: SurfaceEntry = {
       render: () => (
         <ReviewShellFixture
           routes={{ [COMMENTS_PATH]: COMMENTS_OK }}
-          run={(cancelled) => clickRow(cancelled, /Spacing between the two cards/)}
+          run={(cancelled) => clickRow(cancelled, /spacing between the two cards/i)}
         />
       ),
       readyWhen: '[data-testid^="comment-row-"][aria-current="true"]',
