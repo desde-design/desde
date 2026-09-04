@@ -55,12 +55,14 @@ import type {
   ChatPageSnapshot,
   ChatSelectionSnapshot,
   ChatSession,
+  ChatSteeredMessage,
   ChatToolResult,
   ChatTurn,
 } from '../agent-chat/types'
 import type { ToolPermissionGate } from '../agent-chat/tool-permission'
 import { buildToolPermissionGate } from '../agent-chat-sdk/edit-ack'
 import { buildGroundingDigest } from '../agent-chat-sdk/grounding-tools'
+import { createTurnInputChannel } from '../agent-chat-sdk/turn-input-channel'
 import type { EditProposalPayload } from '../agent-tools/types'
 import { computeSessionCost } from '../agent-chat/session-cost'
 import type { EffortLevel } from '../core/model-catalog'
@@ -290,6 +292,43 @@ async function runInner(
   const adapter = createNeutralEventAdapter(turnId)
   const assistantContent: ChatAssistantBlock[] = []
   const toolResults: Record<string, ChatToolResult> = {}
+
+  const steerRecords: ChatSteeredMessage[] = []
+  const turnChannel = opts.inputChannel ?? createTurnInputChannel()
+  // Seeded so the channel's own lifecycle matches the SDK lane's: steers
+  // accepted before the runtime was reached are already queued behind it, and
+  // `begin` puts the opening prompt at the head of that queue.
+  turnChannel.begin(
+    {
+      text: opts.userMessage,
+      ...(opts.images?.length ? { images: opts.images } : {}),
+    },
+    // No `onAccepted`: this lane records a steer where it delivers it, in the
+    // boundary-delivery block below, not at accept time. Accept time is not
+    // useful here — a steer can be accepted before the turn's first request
+    // is even built, and this lane knows the position it will actually land
+    // at because it appends the message itself.
+  )
+
+  const closeChannelAndReportUndelivered = (): void => {
+    turnChannel.close()
+    for (const steer of turnChannel.takeUndeliveredSteers()) {
+      opts.emit({
+        kind: 'resubmit_required',
+        sessionId: opts.session.id.sessionId,
+        userMessage: steer.text,
+        ...(steer.images ? { images: steer.images } : {}),
+      })
+    }
+  }
+  if (opts.signal) {
+    if (opts.signal.aborted) closeChannelAndReportUndelivered()
+    else {
+      opts.signal.addEventListener('abort', () => closeChannelAndReportUndelivered(), {
+        once: true,
+      })
+    }
+  }
   let inputTokens = 0
   let outputTokens = 0
   let stopReason: 'end_turn' | 'error' = 'end_turn'
@@ -328,6 +367,42 @@ async function runInner(
         errorMessage = costGuard.refusalMessage()
         break
       }
+
+      // Boundary delivery. Drain before the step is assembled, so anything the
+      // user typed during the previous step is part of THIS request. Step 0
+      // has no previous step — its request is the turn's opening prompt,
+      // already built above — so nothing is drained until step 1.
+      if (step > 0) {
+        for (const steer of turnChannel.drainSteers()) {
+          messages.push({
+            role: 'user',
+            content: [
+              { type: 'text', text: steer.text },
+              ...(steer.images ?? []).map((image) => ({
+                type: 'image' as const,
+                mediaType: image.mimeType,
+                data: image.data,
+              })),
+            ],
+          })
+          // Recorded here, at delivery, rather than at accept time: this lane
+          // OBSERVES delivery (it appends the message itself), so the position
+          // it can report is exact, not an approximation from whenever the
+          // steer was accepted.
+          steerRecords.push({
+            text: steer.text,
+            ...(steer.images?.length ? { hadImages: true } : {}),
+            afterAssistantBlocks: assistantContent.length,
+          })
+          opts.emit({
+            kind: 'steered',
+            sessionId: opts.session.id.sessionId,
+            userMessage: steer.text,
+            imageCount: steer.images?.length ?? 0,
+          })
+        }
+      }
+
       const pending: Array<{ id: string; name: string; input: unknown }> = []
       let assistantMessage: { role: 'assistant'; content: readonly AssistantContent[] } | null =
         null
@@ -378,6 +453,12 @@ async function runInner(
 
       for (const block of assistantMessage.content) assistantContent.push(toChatBlock(block))
       messages.push(assistantMessage)
+
+      // The observable "a new request was assembled" marker the channel's
+      // undelivered-steer rule reads. On the SDK lane this comes off the
+      // wire; here the loop IS the thing that assembles requests, so it can
+      // simply say so.
+      turnChannel.noteAssistantMessage(randomUUID())
 
       // A `tool_use` stop with no calls in it is a malformed step, not a
       // reason to ask the same question again: treat it as the end.
@@ -436,6 +517,12 @@ async function runInner(
       const raw = err instanceof Error ? err.message : String(err)
       errorMessage = isAuthError(raw) ? AUTH_REAUTH_MESSAGE : `${raw}${hint}`
     }
+  } finally {
+    // Backstop for every path that reaches neither the abort listener nor a
+    // clean end of the loop. Closing twice is a no-op and the steer drain is
+    // one-shot, so the common case (already reconciled at abort) costs
+    // nothing, while a turn that died holding a steer still reports it.
+    closeChannelAndReportUndelivered()
   }
 
   if (stopReason === 'error') {
@@ -459,6 +546,9 @@ async function runInner(
     assistantContent,
     toolResults,
     editProposals: editProposalRefs,
+    // Omitted entirely when nothing was steered, so a turn that took no
+    // steers serializes exactly as it did before this field existed.
+    ...(steerRecords.length > 0 ? { steers: steerRecords } : {}),
     usage: inputTokens > 0 || outputTokens > 0 ? { inputTokens, outputTokens } : undefined,
     costUsd: costGuard.turnCostUsd > 0 ? costGuard.turnCostUsd : undefined,
     model,

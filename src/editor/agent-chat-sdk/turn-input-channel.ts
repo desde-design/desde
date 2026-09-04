@@ -189,6 +189,27 @@ export interface TurnInputChannel {
    */
   takeUndeliveredSteers(): SteeredMessage[]
   /**
+   * Take every message currently queued, without blocking and without closing.
+   *
+   * The generator in {@link stream} is the SDK lane's way in: the SDK pulls,
+   * and parks when the queue is dry. A runtime that drives its OWN loop cannot
+   * park, because there is no other consumer to wake it. So it pulls here, at
+   * a step boundary, and gets whatever is waiting.
+   *
+   * Each returned steer is stamped handed-off at the current assistant-message
+   * count, exactly as the generator stamps one, so
+   * {@link takeUndeliveredSteers} applies the SAME evidential rule to both
+   * lanes: a steer with no new assistant message after it is reported for
+   * resubmission. The self-driven caller marks each step with
+   * {@link noteAssistantMessage}.
+   *
+   * A queued entry with no steer record is the turn's OPENING message, which
+   * `begin` puts at the head. A self-driven caller has already built its own
+   * opening message from the same text, so that entry is discarded here rather
+   * than returned. Returning it would make the loop send the prompt twice.
+   */
+  drainSteers(): SteeredMessage[]
+  /**
    * The generator handed to `query({ prompt })`. Repeated calls return the SAME
    * iterator — two consumers pulling from one queue would split the messages
    * between them, which is not a mode anything wants.
@@ -386,6 +407,19 @@ export function createTurnInputChannel(): TurnInputChannel {
         text: s.text,
         ...(s.images ? { images: s.images } : {}),
       }))
+    },
+    drainSteers(): SteeredMessage[] {
+      const out: SteeredMessage[] = []
+      while (queue.length > 0) {
+        const entry = queue.shift()!
+        if (!entry.steer) continue
+        entry.steer.handedOffAtMessageCount = assistantMessageCount
+        out.push({
+          text: entry.steer.text,
+          ...(entry.steer.images ? { images: entry.steer.images } : {}),
+        })
+      }
+      return out
     },
     stream(): AsyncGenerator<SDKUserMessage> {
       return iterator

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { BridgeClient } from '../agent-tools/types'
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
 import { makeEmptySession } from '../agent-chat/types'
+import { createTurnInputChannel } from '../agent-chat-sdk/turn-input-channel'
 import type { LLMProvider, ProviderEvent, StreamOpts } from '../llm-providers/types'
 import {
   API_RETRY_MAX_ATTEMPTS,
@@ -456,5 +457,100 @@ describe('runChatTurnNeutral: cost ceiling', () => {
     expect(calls).toHaveLength(1)
     expect(result.turn.error).toMatch(/cost ceiling/)
     expect(result.turn.costUsd).toBeGreaterThan(1)
+  })
+})
+
+describe('runChatTurnNeutral: steering', () => {
+  it('delivers a steer as a user message at the next step boundary', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = scriptedProvider([
+      toolStep('tu_1', 'Read', { file_path: 'src/App.vue' }),
+      textStep('changed the sidebar instead'),
+    ])
+    const events: ChatStreamEvent[] = []
+    // Pushed before the turn runs, which is the CLI's real shape: the channel
+    // is registered as steerable at lock time, many awaits before the runtime.
+    channel.push('actually the sidebar')
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'change the header',
+        providerId: 'anthropic',
+        inputChannel: channel,
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    const second = calls[1].messages
+    expect(second.at(-1)).toEqual({
+      role: 'user',
+      content: [{ type: 'text', text: 'actually the sidebar' }],
+    })
+    expect(events.filter((e) => e.kind === 'steered')).toEqual([
+      { kind: 'steered', sessionId: 'p1', userMessage: 'actually the sidebar', imageCount: 0 },
+    ])
+    expect(result.turn.steers).toEqual([
+      { text: 'actually the sidebar', afterAssistantBlocks: 1 },
+    ])
+  })
+
+  it('reports a steer that arrived after the last step for resubmission', async () => {
+    const channel = createTurnInputChannel()
+    const { provider } = scriptedProvider([textStep('all done')])
+    const events: ChatStreamEvent[] = []
+    const original = provider.streamConversation.bind(provider)
+    provider.streamConversation = (o) => {
+      channel.push('one more thing')
+      return original(o)
+    }
+    await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'first',
+        providerId: 'anthropic',
+        inputChannel: channel,
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(events.filter((e) => e.kind === 'resubmit_required')).toEqual([
+      { kind: 'resubmit_required', sessionId: 'p1', userMessage: 'one more thing' },
+    ])
+  })
+
+  it('closes the channel on abort and reports what it was holding', async () => {
+    const channel = createTurnInputChannel()
+    const controller = new AbortController()
+    const provider: LLMProvider = {
+      name: 'slow',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () =>
+        (async function* () {
+          channel.push('never delivered')
+          controller.abort()
+          throw new Error('aborted')
+        })(),
+    }
+    const events: ChatStreamEvent[] = []
+    await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'first',
+        providerId: 'anthropic',
+        inputChannel: channel,
+        signal: controller.signal,
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(channel.closed).toBe(true)
+    expect(events.filter((e) => e.kind === 'resubmit_required')).toHaveLength(1)
   })
 })
