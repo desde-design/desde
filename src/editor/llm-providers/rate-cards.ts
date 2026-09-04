@@ -3,10 +3,14 @@
  *
  * Used by the chat orchestrator to compute a running per-session
  * dollar estimate and refuse new turns when the configured cost
- * ceiling is hit. Numbers are USD per 1M tokens, as of late 2025;
- * update when providers publish new pricing. Unknown models get a
- * conservative default so we never under-bill (and thus never let an
- * unknown model slip past the ceiling unnoticed).
+ * ceiling is hit.
+ *
+ * Numbers are USD per 1M tokens. Anthropic's are the published first-party
+ * rates; OpenAI's were measured from developers.openai.com on 2026-09-03.
+ * Unknown models get a conservative default so we never under-bill, which
+ * matters more on the neutral chat lane than on the SDK one: the SDK reports a
+ * real dollar figure per turn and these cards only decorate it, while the
+ * neutral loop has no such figure and prices every step from this table.
  *
  * No live API call — these are static lookups. Bypassable by editing
  * this file, which is acceptable: the ceiling is a designer-facing
@@ -65,11 +69,31 @@ const RATE_CARDS: Record<string, ModelRateCard> = {
   'claude-sonnet-5': { inputPerM: 2, outputPerM: 10 },
   'claude-opus-4-8': { inputPerM: 5, outputPerM: 25 },
   'claude-opus-5': { inputPerM: 5, outputPerM: 25 },
-  // OpenAI — guesses based on the gpt-5.x family. Update when pricing
-  // is published. The "unknown model" fallback is intentionally
-  // identical to Opus so cost estimates stay conservative.
-  'gpt-5.2': { inputPerM: 5, outputPerM: 15 },
-  'gpt-5.2-codex': { inputPerM: 5, outputPerM: 15 },
+  // OpenAI — published rates from developers.openai.com/api/docs/pricing,
+  // measured 2026-09-03, USD per 1M input / output tokens. The two rows that
+  // sat here before ('gpt-5.2' and 'gpt-5.2-codex' at $5/$15) were guesses and
+  // both were wrong: the real output rate is $14, so the ceiling was being
+  // computed against a number nobody had checked.
+  //
+  // NOTE: gpt-5.6 pricing is PROMOTIONAL and was published as running at least
+  // through 2026-11-21. Re-check this block after that date.
+  'gpt-5.6': { inputPerM: 4, outputPerM: 20 },
+  'gpt-5.6-sol': { inputPerM: 4, outputPerM: 20 },
+  'gpt-5.6-terra': { inputPerM: 2, outputPerM: 12 },
+  'gpt-5.6-luna': { inputPerM: 0.2, outputPerM: 1.2 },
+  'gpt-5.6-cyber': { inputPerM: 12.5, outputPerM: 75 },
+  'gpt-5.5': { inputPerM: 5, outputPerM: 30 },
+  'gpt-5.5-pro': { inputPerM: 30, outputPerM: 180 },
+  'gpt-5.5-cyber': { inputPerM: 12.5, outputPerM: 75 },
+  'gpt-5.4': { inputPerM: 2.5, outputPerM: 15 },
+  'gpt-5.4-mini': { inputPerM: 0.75, outputPerM: 4.5 },
+  'gpt-5.4-nano': { inputPerM: 0.2, outputPerM: 1.25 },
+  'gpt-5.3-codex': { inputPerM: 1.75, outputPerM: 14 },
+  'gpt-5.2': { inputPerM: 1.75, outputPerM: 14 },
+  'gpt-5.1': { inputPerM: 1.25, outputPerM: 10 },
+  'gpt-5': { inputPerM: 1.25, outputPerM: 10 },
+  'gpt-5-mini': { inputPerM: 0.25, outputPerM: 2 },
+  'gpt-5-nano': { inputPerM: 0.05, outputPerM: 0.4 },
 }
 
 export function getRateCard(model: string): ModelRateCard {
