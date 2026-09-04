@@ -19,6 +19,37 @@ const eslintConfig = defineConfig([
       ],
     },
   },
+  // The Vercel AI SDK lives behind ONE file. `ai` and `@ai-sdk/*` shipped two
+  // breaking majors inside a year (`maxSteps` became `stopWhen`; per-tool
+  // `needsApproval` became a `toolApproval` option), and the mitigation this
+  // repo chose is that a major bump is a one-directory migration rather than a
+  // sweep. `src/editor/llm-providers/ai-sdk-*.ts` is that directory-of-one.
+  // Everything else reaches the SDK through `LLMProvider`, which is vendor
+  // neutral and predates it.
+  {
+    ignores: ["src/editor/llm-providers/ai-sdk-*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "ai",
+              message:
+                "Import the AI SDK only from src/editor/llm-providers/ai-sdk-*.ts. Elsewhere, depend on the vendor-neutral LLMProvider in src/editor/llm-providers/types.ts.",
+            },
+          ],
+          patterns: [
+            {
+              group: ["ai/*", "@ai-sdk/*"],
+              message:
+                "Import the AI SDK only from src/editor/llm-providers/ai-sdk-*.ts. Elsewhere, depend on the vendor-neutral LLMProvider in src/editor/llm-providers/types.ts.",
+            },
+          ],
+        },
+      ],
+    },
+  },
   // Dev-only live smoke / probe harnesses. They drive Playwright `page.evaluate`,
   // whose results are inherently `any` at the boundary; forcing types on these
   // throwaway scripts is noise, not safety. Not shipped in any bundle.
