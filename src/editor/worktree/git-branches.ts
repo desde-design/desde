@@ -26,6 +26,8 @@ import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
+import { desdeDir } from './desde-dir'
+
 const execFileAsync = promisify(execFile)
 
 // Force a stable, English, lock-free git environment so parsing + concurrent
@@ -1001,8 +1003,12 @@ export async function publishBranch(
   // Ephemeral worktree on the default branch (gitignored under
   // .desde/). Runs the squash-merge in isolation so the user's
   // checkout is untouched.
-  const tmp = path.join(root, '.desde', `publish-${randomUUID().slice(0, 8)}`)
+  let tmp: string
   try {
+    // `desdeDir` refuses (and this catch converts that refusal into the
+    // same "couldn't prepare publish" shape as any other failure here) if
+    // `.desde` is a symlink — see `desde-dir.ts`.
+    tmp = path.join(desdeDir(root), `publish-${randomUUID().slice(0, 8)}`)
     // `git worktree add` mkdir's the leaf but not `.desde/` itself.
     await fs.mkdir(path.dirname(tmp), { recursive: true })
     await execFileAsync('git', ['-C', root, 'worktree', 'add', '--quiet', tmp, defaultBranch], {
@@ -1369,8 +1375,12 @@ export async function updateBranchFromRef(
   // purpose: git refuses to check the checked-out branch into a second
   // worktree, and we don't want the branch ref moving until the merge is
   // known clean anyway.
-  const tmp = path.join(root, '.desde', `update-${randomUUID().slice(0, 8)}`)
+  let tmp: string
   try {
+    // `desdeDir` refuses (and this catch converts that refusal into the
+    // same "couldn't prepare the update" shape as any other failure here)
+    // if `.desde` is a symlink — see `desde-dir.ts`.
+    tmp = path.join(desdeDir(root), `update-${randomUUID().slice(0, 8)}`)
     await fs.mkdir(path.dirname(tmp), { recursive: true })
     await execFileAsync(
       'git',

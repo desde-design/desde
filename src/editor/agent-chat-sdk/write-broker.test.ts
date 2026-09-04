@@ -1827,25 +1827,32 @@ describe('brokeredWrite', () => {
       }
       try {
         // A documented `writeFile` data form (see the "MUTATES in caller
-        // order" test above) that isn't a `Buffer` or `string` — the same
-        // trick, smuggled past `BrokerOp`'s declared type.
+        // order" test above) that isn't a `Buffer` or `string`. `BrokerOp`
+        // declares `content: string | Buffer`; `WriteOpWithArbitraryContent`
+        // widens ONLY this op's `content` to `unknown` so the test says what
+        // it means — "this op's content deliberately isn't the declared
+        // type" — instead of asserting the generator itself IS a `Buffer`
+        // (which `gen() as unknown as Buffer` used to claim, wrongly).
         async function* gen(): AsyncGenerator<string> {
           yield 'NEW'
+        }
+        type WriteOpWithArbitraryContent = Omit<
+          Extract<BrokerOp, { kind: 'write' }>,
+          'content'
+        > & { content: unknown }
+        const op: WriteOpWithArbitraryContent = {
+          kind: 'write',
+          repoRel: 'pages/New.vue',
+          absPath: join(root, 'pages', 'New.vue'),
+          content: gen(),
+          ensureDir: true,
+          isNew: true,
         }
 
         const result = await brokeredWrite({
           canonicalRoot: root,
           journal: [],
-          ops: [
-            {
-              kind: 'write',
-              repoRel: 'pages/New.vue',
-              absPath: join(root, 'pages', 'New.vue'),
-              content: gen() as unknown as Buffer,
-              ensureDir: true,
-              isNew: true,
-            },
-          ],
+          ops: [op as BrokerOp],
           lockManager,
           record: { history: spyHistory(calls), label: 'create New.vue' },
         })

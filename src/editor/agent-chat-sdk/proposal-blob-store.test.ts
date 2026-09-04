@@ -97,6 +97,17 @@ describe('readProposalBlob', () => {
       /editId must match/i,
     )
   })
+
+  it('CX7 fix round 1: throws DesdeDirSymlinkError, not null, when .desde is a symlink out of the worktree', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'proposal-blob-store-outside-'))
+    symlinkSync(outside, join(root, '.desde'))
+
+    await expect(readProposalBlob(root, 'sess-1', 'edit-1')).rejects.toThrow(
+      /is a symbolic link/i,
+    )
+
+    rmSync(outside, { recursive: true, force: true })
+  })
 })
 
 describe('deleteProposalBlobsForSession', () => {

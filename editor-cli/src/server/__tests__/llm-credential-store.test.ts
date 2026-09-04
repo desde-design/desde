@@ -8,6 +8,7 @@ import {
   llmCredentialFilePath,
   readLlmCredentials,
   readPromptDismissed,
+  resetMalformedProviderWarningsForTests,
   setLlmDevMode,
   setPromptDismissed,
   writeLlmApiKey,
@@ -18,6 +19,11 @@ let home: string
 
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), "llm-cred-"))
+  // `warnedMalformedProviders` is a module-level Set that survives across
+  // tests (by design — it de-dupes for the life of the process), so a
+  // test asserting "warns once" must start from a clean slate or an
+  // earlier test's warning silently suppresses this one's.
+  resetMalformedProviderWarningsForTests()
 })
 
 afterEach(async () => {

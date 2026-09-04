@@ -14,7 +14,10 @@
  *
  * This is the one place that check lives. `desdeDir` is what every one of
  * those call sites obtains its base path through, so a caller cannot
- * accidentally join onto `canonicalRoot` directly and skip the check:
+ * accidentally join onto `canonicalRoot` directly and skip the check.
+ * These are exactly the sites that go through it today — a new writer or
+ * deleter under `.desde/` must join through `desdeDir` too, and add
+ * itself to this list:
  *
  *  - `backup-journal.ts` (`writeBackupJournal`) — the per-edit backup
  *    journal under `.desde/backups/`.
@@ -27,6 +30,19 @@
  *    the CLI edit route's own best-effort backup, outside `brokeredWrite`.
  *  - `proposal-blob-store.ts` — `.desde/chat-sessions/<id>/proposals/`,
  *    both the per-edit blob writer and the per-session recursive deleter.
+ *  - `edit-fix-mini-turn.ts` — the headless mini-turn's own throwaway
+ *    session cleanup, a recursive delete of
+ *    `.desde/chat-sessions/<sessionId>` in a `finally` block. Refuses and
+ *    logs rather than deleting, same tolerance as the retention sweeps.
+ *  - `git-branches.ts` (`publishBranch`, `updateBranchFromRef`) — the
+ *    ephemeral worktree each mints under `.desde/` (`publish-<uuid>` /
+ *    `update-<uuid>`) for an isolated squash-merge or update. A refusal
+ *    surfaces through the same `try`/`catch` that already converts a git
+ *    failure into that function's ordinary `{ ok: false, reason }` result
+ *    — no special handling needed.
+ *  - `session-turns-archive.ts` (`archiveFilePath`) — the shared path
+ *    builder both the archive writer (`appendArchivedTurns`) and reader
+ *    (`readArchivedTurns`) use for `.desde/chat-sessions/<id>.archive.jsonl`.
  *  - The retention sweeps, which all `rm` recursively and so refuse and
  *    log rather than proceed when the guard throws: `backups-gc.ts`
  *    (`.desde/backups/`), `proposal-blob-gc.ts` (`.desde/chat-sessions/`),

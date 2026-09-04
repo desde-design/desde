@@ -55,6 +55,7 @@ import type { PropEditFallbackHint } from '../edit-service/apply-prop-edit'
 import type { ProjectKnowledge } from '../core/project-knowledge'
 import type { RunChatTurn, RunChatTurnOpts, RunChatTurnResult } from '../agent-chat/run-chat-turn'
 import { runChatTurnSdk } from './run-chat-turn-sdk'
+import { desdeDir, DesdeDirSymlinkError } from '../worktree/desde-dir'
 
 export interface EditFixMiniTurnInput {
   repoRoot: string
@@ -239,10 +240,21 @@ export async function runEditFixMiniTurn(
     // the caller snapshots git status immediately after, and in a repo
     // where .desde/ isn't gitignored a lingering sidecar would count
     // as a "change" and defeat the no-op guard — codex follow-up P2).
-    await rm(join(input.repoRoot, '.desde', 'chat-sessions', sessionId), {
-      recursive: true,
-      force: true,
-    }).catch(() => {})
+    let sessionDir: string | null = null
+    try {
+      sessionDir = join(desdeDir(input.repoRoot), 'chat-sessions', sessionId)
+    } catch (err) {
+      // A recursive `rm` under a hostile symlink is worse than leaving
+      // the sidecar behind: refuse and log rather than delete whatever
+      // the symlink points at (same tolerance as the retention sweeps
+      // in `backups-gc.ts` / `proposal-blob-gc.ts` / `read-snapshot-gc.ts`).
+      if (err instanceof DesdeDirSymlinkError) {
+        console.warn(`[edit-fix-mini-turn] refusing to delete under '${input.repoRoot}': ${err.message}`)
+      }
+    }
+    if (sessionDir) {
+      await rm(sessionDir, { recursive: true, force: true }).catch(() => {})
+    }
   }
 }
 

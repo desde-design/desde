@@ -118,6 +118,17 @@ function warnMalformedProviderOnce(id: string): void {
 }
 
 /**
+ * Test-only reset for {@link warnedMalformedProviders}. The set is
+ * module-level and persists for the life of the process (by design — see
+ * the de-duplication comment above), so a test file that exercises the
+ * "warn once" behavior must reset it in `beforeEach`, or an earlier test's
+ * warning silently suppresses a later test's assertion.
+ */
+export function resetMalformedProviderWarningsForTests(): void {
+  warnedMalformedProviders.clear()
+}
+
+/**
  * Every slot must be an object of optional strings. A malformed slot is
  * dropped on its own, not treated as a reason to discard the whole file: one
  * corrupt provider must not destroy every other provider's valid key. Only

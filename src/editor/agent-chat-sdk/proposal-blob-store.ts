@@ -91,7 +91,13 @@ export async function writeProposalBlob(
 /**
  * Read a proposal blob. Returns `null` when the blob doesn't exist —
  * the save dialog uses this to gracefully degrade ("Use mine" button
- * hidden when no blob is available) rather than fail loudly.
+ * hidden when no blob is available) rather than fail loudly. A
+ * symlinked `.desde` is a different case: `proposalBlobPath` throws
+ * `DesdeDirSymlinkError` before any read is attempted, and this
+ * function deliberately lets that throw through rather than treating
+ * it as a missing blob — refusing is the safer default for a property
+ * of the repo itself, not a per-blob condition the save dialog should
+ * silently paper over.
  */
 export async function readProposalBlob(
   repoRoot: string,

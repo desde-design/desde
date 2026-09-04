@@ -5,8 +5,8 @@
  * degradation to a refusal, and throwaway-session hygiene.
  */
 
-import { describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, symlinkSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { runEditFixMiniTurn } from './edit-fix-mini-turn'
@@ -124,6 +124,31 @@ describe('runEditFixMiniTurn', () => {
     // Cleanup is fire-and-forget — give the microtask a beat.
     await new Promise((r) => setTimeout(r, 50))
     expect(existsSync(join(dir, '.desde', 'chat-sessions', sessionId))).toBe(false)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('CX7 fix round 1: refuses to delete, and removes nothing, when .desde is a symlink out of the worktree', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mini-turn-'))
+    const outside = mkdtempSync(join(tmpdir(), 'mini-turn-outside-'))
+    let sessionId = ''
+    symlinkSync(outside, join(dir, '.desde'))
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await runEditFixMiniTurn(makeInput(dir), {
+      runTurn: async (opts) => {
+        sessionId = opts.session.id.sessionId
+        return turnResultWithText('EDIT_REFUSED: nope')
+      },
+    })
+    expect(result.outcome).toBe('refused')
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+
+    // Nothing was created at (or removed from) the symlink target.
+    expect(readdirSync(outside)).not.toContain('chat-sessions')
+    expect(sessionId).not.toBe('')
+
+    rmSync(outside, { recursive: true, force: true })
     rmSync(dir, { recursive: true, force: true })
   })
 })

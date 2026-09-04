@@ -26,13 +26,20 @@ import { dirname, join } from 'node:path'
 
 import type { ChatTurn } from './types'
 import { costOfTurn } from '../llm-providers/rate-cards'
+import { desdeDir } from '../worktree/desde-dir'
 
 /** Default cap on turns kept in a session's head JSON file. */
 export const DEFAULT_MAX_CHAT_TURNS = 500
 
-/** Path to the append-only archive sidecar for a session. */
+/**
+ * Path to the append-only archive sidecar for a session. Builds off
+ * {@link desdeDir}, which refuses (throws `DesdeDirSymlinkError`) when
+ * `.desde` is a symbolic link — both the writer (`appendArchivedTurns`)
+ * and the reader (`readArchivedTurns`) go through this one function, so
+ * neither can join onto `repoRoot` directly and skip the check.
+ */
 export function archiveFilePath(repoRoot: string, sessionId: string): string {
-  return join(repoRoot, '.desde', 'chat-sessions', `${sessionId}.archive.jsonl`)
+  return join(desdeDir(repoRoot), 'chat-sessions', `${sessionId}.archive.jsonl`)
 }
 
 export interface SplitTurnsResult {
