@@ -50,7 +50,7 @@ function statusOf(overrides: Record<string, unknown>) {
 
 describe("GET /api/editor/llm-credentials", () => {
   it("reports the stored source with a masked hint and never the key", async () => {
-    await writeLlmApiKey("sk-ant-supersecret9999", home)
+    await writeLlmApiKey("anthropic", "sk-ant-supersecret9999", home)
     const res = fakeRes()
     await handleLlmCredentialsRoute(req("GET"), asRes(res), url(), {
       home,
@@ -137,7 +137,7 @@ describe("PUT /api/editor/llm-credentials", () => {
       readBody: async () => ({ apiKey: "sk-ant-bad" }),
     })
     expect(res.statusCode).toBe(400)
-    expect(await readLlmCredentials(home)).toEqual({ devMode: false })
+    expect(await readLlmCredentials(home)).toEqual({ providers: {}, devMode: false })
   })
 
   it("rejects an empty key without calling the API", async () => {
@@ -165,7 +165,7 @@ describe("PUT /api/editor/llm-credentials", () => {
       readBody: async () => ({ apiKey: "sk-ant-good1234" }),
     })
     expect(res.statusCode).toBe(200)
-    expect((await readLlmCredentials(home)).apiKey).toBe("sk-ant-good1234")
+    expect((await readLlmCredentials(home)).providers.anthropic?.apiKey).toBe("sk-ant-good1234")
     // Injected live so the next turn works without restarting the CLI.
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-good1234")
   })
@@ -173,7 +173,7 @@ describe("PUT /api/editor/llm-credentials", () => {
 
 describe("DELETE and dev-mode", () => {
   it("clears the key and removes it from the environment", async () => {
-    await writeLlmApiKey("sk-ant-good1234", home)
+    await writeLlmApiKey("anthropic", "sk-ant-good1234", home)
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-good1234" }
     const res = fakeRes()
     await handleLlmCredentialsRoute(req("DELETE"), asRes(res), url(), {
@@ -183,12 +183,12 @@ describe("DELETE and dev-mode", () => {
       fetchImpl: okFetch(),
     })
     expect(res.statusCode).toBe(200)
-    expect((await readLlmCredentials(home)).apiKey).toBeUndefined()
+    expect((await readLlmCredentials(home)).providers.anthropic?.apiKey).toBeUndefined()
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
   })
 
   it("enabling dev mode deletes the env key and sets the flag", async () => {
-    await writeLlmApiKey("sk-ant-good1234", home)
+    await writeLlmApiKey("anthropic", "sk-ant-good1234", home)
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-good1234" }
     const res = fakeRes()
     await handleLlmCredentialsRoute(
@@ -210,7 +210,7 @@ describe("DELETE and dev-mode", () => {
   })
 
   it("disabling dev mode restores the stored key to the environment", async () => {
-    await writeLlmApiKey("sk-ant-good1234", home)
+    await writeLlmApiKey("anthropic", "sk-ant-good1234", home)
     const env: NodeJS.ProcessEnv = { EDITOR_USE_CLAUDE_SUBSCRIPTION: "1" }
     const res = fakeRes()
     await handleLlmCredentialsRoute(
@@ -270,7 +270,7 @@ describe("DELETE and dev-mode", () => {
  */
 describe("stored keys stay owned by the app after injection", () => {
   it("reports `stored`, not `env`, when the env value is our own injection", async () => {
-    await writeLlmApiKey("sk-ant-stored9999", home)
+    await writeLlmApiKey("anthropic", "sk-ant-stored9999", home)
     // Exactly the production shape: boot already injected the stored key.
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-stored9999" }
     const res = fakeRes()
@@ -293,7 +293,7 @@ describe("stored keys stay owned by the app after injection", () => {
   })
 
   it("still reports `env` when the shell really did export a key", async () => {
-    await writeLlmApiKey("sk-ant-stored9999", home)
+    await writeLlmApiKey("anthropic", "sk-ant-stored9999", home)
     const res = fakeRes()
     await handleLlmCredentialsRoute(req("GET"), asRes(res), url(), {
       home,
@@ -439,7 +439,7 @@ describe("PUT /api/editor/llm-credentials/dismiss-prompt", () => {
  */
 describe("GET re-applies the store to this process's environment", () => {
   it("picks up a key another process stored", async () => {
-    await writeLlmApiKey("sk-ant-fromelsewhere", home)
+    await writeLlmApiKey("anthropic", "sk-ant-fromelsewhere", home)
     const env: NodeJS.ProcessEnv = {} // this process booted before that write
     await handleLlmCredentialsRoute(req("GET"), asRes(fakeRes()), url(), {
       home,

@@ -11,6 +11,7 @@ import {
   setLlmDevMode,
   setPromptDismissed,
   writeLlmApiKey,
+  writeLlmBaseUrl,
 } from "../llm-credential-store.js"
 
 let home: string
@@ -27,19 +28,19 @@ const configDir = () => join(home, ".config", "desde")
 
 describe("llm-credential-store", () => {
   it("returns typed defaults when the file is absent", async () => {
-    expect(await readLlmCredentials(home)).toEqual({ devMode: false })
+    expect(await readLlmCredentials(home)).toEqual({ providers: {}, devMode: false })
   })
 
   it("round-trips an api key", async () => {
-    await writeLlmApiKey("sk-ant-secret1234", home)
+    await writeLlmApiKey("anthropic", "sk-ant-secret1234", home)
     expect(await readLlmCredentials(home)).toEqual({
-      apiKey: "sk-ant-secret1234",
+      providers: { anthropic: { apiKey: "sk-ant-secret1234" } },
       devMode: false,
     })
   })
 
   it("writes the file 0600 and the directory 0700", async () => {
-    await writeLlmApiKey("sk-ant-secret1234", home)
+    await writeLlmApiKey("anthropic", "sk-ant-secret1234", home)
     const file = await fs.stat(llmCredentialFilePath(home))
     const dir = await fs.stat(configDir())
     expect(file.mode & 0o777).toBe(0o600)
@@ -48,33 +49,33 @@ describe("llm-credential-store", () => {
 
   it("preserves dev mode when the key changes", async () => {
     await setLlmDevMode(true, home)
-    await writeLlmApiKey("sk-ant-secret1234", home)
+    await writeLlmApiKey("anthropic", "sk-ant-secret1234", home)
     expect(await readLlmCredentials(home)).toEqual({
-      apiKey: "sk-ant-secret1234",
+      providers: { anthropic: { apiKey: "sk-ant-secret1234" } },
       devMode: true,
     })
   })
 
   it("preserves the key when dev mode changes", async () => {
-    await writeLlmApiKey("sk-ant-secret1234", home)
+    await writeLlmApiKey("anthropic", "sk-ant-secret1234", home)
     await setLlmDevMode(true, home)
     expect(await readLlmCredentials(home)).toEqual({
-      apiKey: "sk-ant-secret1234",
+      providers: { anthropic: { apiKey: "sk-ant-secret1234" } },
       devMode: true,
     })
   })
 
   it("clears only the key, leaving dev mode intact", async () => {
-    await writeLlmApiKey("sk-ant-secret1234", home)
+    await writeLlmApiKey("anthropic", "sk-ant-secret1234", home)
     await setLlmDevMode(true, home)
-    await clearLlmApiKey(home)
-    expect(await readLlmCredentials(home)).toEqual({ devMode: true })
+    await clearLlmApiKey("anthropic", home)
+    expect(await readLlmCredentials(home)).toEqual({ providers: { anthropic: {} }, devMode: true })
   })
 
   it("degrades to defaults on malformed JSON rather than throwing", async () => {
     await fs.mkdir(configDir(), { recursive: true })
     await fs.writeFile(llmCredentialFilePath(home), "{ not json")
-    expect(await readLlmCredentials(home)).toEqual({ devMode: false })
+    expect(await readLlmCredentials(home)).toEqual({ providers: {}, devMode: false })
   })
 
   it("degrades to defaults on a wrong-shaped file", async () => {
@@ -83,21 +84,125 @@ describe("llm-credential-store", () => {
       llmCredentialFilePath(home),
       JSON.stringify({ version: 99, apiKey: 42 }),
     )
-    expect(await readLlmCredentials(home)).toEqual({ devMode: false })
+    expect(await readLlmCredentials(home)).toEqual({ providers: {}, devMode: false })
   })
 
-  it("degrades to defaults when apiKey is the wrong type", async () => {
+  it("degrades to defaults when a v1 apiKey is the wrong type", async () => {
     await fs.mkdir(configDir(), { recursive: true })
     await fs.writeFile(
       llmCredentialFilePath(home),
       JSON.stringify({ version: 1, apiKey: 42, devMode: false }),
     )
-    expect(await readLlmCredentials(home)).toEqual({ devMode: false })
+    expect(await readLlmCredentials(home)).toEqual({ providers: {}, devMode: false })
   })
 
   it("leaves no temp file behind after a write", async () => {
-    await writeLlmApiKey("sk-ant-secret1234", home)
+    await writeLlmApiKey("anthropic", "sk-ant-secret1234", home)
     expect(await fs.readdir(configDir())).toEqual(["llm-credentials.json"])
+  })
+})
+
+/**
+ * The single highest-risk line in the whole multi-provider design.
+ *
+ * MEASURED before this change: `readFile()` discarded the ENTIRE file and
+ * returned defaults on any `file.version !== SCHEMA_VERSION`. Moving the
+ * constant to 2 without a migration branch silently deletes every existing
+ * user's Anthropic key on the first read after upgrade. These cases run
+ * against a real file in a real temp HOME for that reason.
+ */
+describe("v1 to v2 migration", () => {
+  it("lifts a v1 key into the anthropic provider slot", async () => {
+    await fs.mkdir(configDir(), { recursive: true })
+    await fs.writeFile(
+      llmCredentialFilePath(home),
+      JSON.stringify({
+        version: 1,
+        apiKey: "sk-ant-fromv1",
+        devMode: false,
+        promptDismissed: true,
+      }),
+    )
+    expect(await readLlmCredentials(home)).toEqual({
+      providers: { anthropic: { apiKey: "sk-ant-fromv1" } },
+      devMode: false,
+    })
+    expect(await readPromptDismissed(home)).toBe(true)
+  })
+
+  it("migrates a v1 file that never held a key", async () => {
+    await fs.mkdir(configDir(), { recursive: true })
+    await fs.writeFile(
+      llmCredentialFilePath(home),
+      JSON.stringify({ version: 1, devMode: true, promptDismissed: false }),
+    )
+    expect(await readLlmCredentials(home)).toEqual({ providers: {}, devMode: true })
+  })
+
+  it("does not rewrite the file on read, only on the next write", async () => {
+    await fs.mkdir(configDir(), { recursive: true })
+    const raw = JSON.stringify({ version: 1, apiKey: "sk-ant-fromv1", devMode: false })
+    await fs.writeFile(llmCredentialFilePath(home), raw)
+    await readLlmCredentials(home)
+    expect(await fs.readFile(llmCredentialFilePath(home), "utf8")).toBe(raw)
+
+    await writeLlmApiKey("openai", "sk-openai", home)
+    const after = JSON.parse(
+      await fs.readFile(llmCredentialFilePath(home), "utf8"),
+    ) as Record<string, unknown>
+    expect(after.version).toBe(2)
+    expect(after.providers).toEqual({
+      anthropic: { apiKey: "sk-ant-fromv1" },
+      openai: { apiKey: "sk-openai" },
+    })
+  })
+
+  it("still degrades to defaults for a version from the future", async () => {
+    await fs.mkdir(configDir(), { recursive: true })
+    await fs.writeFile(
+      llmCredentialFilePath(home),
+      JSON.stringify({ version: 99, providers: { anthropic: { apiKey: "x" } } }),
+    )
+    expect(await readLlmCredentials(home)).toEqual({ providers: {}, devMode: false })
+  })
+})
+
+describe("provider-scoped writers", () => {
+  it("keeps two providers' keys side by side", async () => {
+    await writeLlmApiKey("anthropic", "sk-ant-one", home)
+    await writeLlmApiKey("openai", "sk-two", home)
+    expect(await readLlmCredentials(home)).toEqual({
+      providers: { anthropic: { apiKey: "sk-ant-one" }, openai: { apiKey: "sk-two" } },
+      devMode: false,
+    })
+  })
+
+  it("clears one provider's key without touching the other", async () => {
+    await writeLlmApiKey("anthropic", "sk-ant-one", home)
+    await writeLlmApiKey("openai", "sk-two", home)
+    await clearLlmApiKey("openai", home)
+    expect(await readLlmCredentials(home)).toEqual({
+      providers: { anthropic: { apiKey: "sk-ant-one" }, openai: {} },
+      devMode: false,
+    })
+  })
+
+  it("round-trips a base URL and clears it with undefined", async () => {
+    await writeLlmBaseUrl("openai", "https://gateway.internal", home)
+    expect((await readLlmCredentials(home)).providers.openai).toEqual({
+      baseUrl: "https://gateway.internal",
+    })
+    await writeLlmBaseUrl("openai", undefined, home)
+    expect((await readLlmCredentials(home)).providers.openai).toEqual({})
+  })
+
+  it("keeps a base URL when the key is replaced", async () => {
+    await writeLlmBaseUrl("openai", "https://gateway.internal", home)
+    await writeLlmApiKey("openai", "sk-two", home)
+    expect((await readLlmCredentials(home)).providers.openai).toEqual({
+      apiKey: "sk-two",
+      baseUrl: "https://gateway.internal",
+    })
   })
 })
 
@@ -109,32 +214,32 @@ describe("llm-credential-store", () => {
 describe("concurrent writes do not lose fields", () => {
   it("keeps a key saved concurrently with a dev-mode toggle", async () => {
     await Promise.all([
-      writeLlmApiKey("sk-ant-concurrent", home),
+      writeLlmApiKey("anthropic", "sk-ant-concurrent", home),
       setLlmDevMode(true, home),
     ])
     expect(await readLlmCredentials(home)).toEqual({
-      apiKey: "sk-ant-concurrent",
+      providers: { anthropic: { apiKey: "sk-ant-concurrent" } },
       devMode: true,
     })
   })
 
   it("keeps every field under a burst of interleaved updates", async () => {
     await Promise.all([
-      writeLlmApiKey("sk-ant-burst", home),
+      writeLlmApiKey("anthropic", "sk-ant-burst", home),
       setLlmDevMode(true, home),
       setPromptDismissed(true, home),
     ])
     const file = JSON.parse(
       await fs.readFile(llmCredentialFilePath(home), "utf8"),
     ) as Record<string, unknown>
-    expect(file.apiKey).toBe("sk-ant-burst")
+    expect(file.providers).toEqual({ anthropic: { apiKey: "sk-ant-burst" } })
     expect(file.devMode).toBe(true)
     expect(file.promptDismissed).toBe(true)
   })
 
   it("leaves no temp files behind after concurrent writes", async () => {
     await Promise.all([
-      writeLlmApiKey("sk-ant-a", home),
+      writeLlmApiKey("anthropic", "sk-ant-a", home),
       setLlmDevMode(true, home),
       setPromptDismissed(true, home),
     ])
@@ -151,12 +256,12 @@ describe("promptDismissed", () => {
 
   it("survives a key write and a key clear", async () => {
     await setPromptDismissed(true, home)
-    await writeLlmApiKey("sk-ant-x", home)
-    await clearLlmApiKey(home)
+    await writeLlmApiKey("anthropic", "sk-ant-x", home)
+    await clearLlmApiKey("anthropic", home)
     expect(await readPromptDismissed(home)).toBe(true)
   })
 
-  it("tolerates a file written before the field existed", async () => {
+  it("tolerates a v1 file written before the field existed", async () => {
     await fs.mkdir(configDir(), { recursive: true })
     await fs.writeFile(
       llmCredentialFilePath(home),
@@ -164,7 +269,7 @@ describe("promptDismissed", () => {
     )
     // Tolerated, not rejected: discarding it would drop the user's key.
     expect(await readLlmCredentials(home)).toEqual({
-      apiKey: "sk-ant-old",
+      providers: { anthropic: { apiKey: "sk-ant-old" } },
       devMode: false,
     })
     expect(await readPromptDismissed(home)).toBe(false)

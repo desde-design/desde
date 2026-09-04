@@ -5,16 +5,22 @@ import type { InheritedLlmEnv } from "../inherited-llm-env.js"
 /** No inherited baseline: the shell gave the process nothing. */
 const CLEAN: InheritedLlmEnv = {}
 
+const noKey = { providers: {}, devMode: false }
+
+function withAnthropicKey(apiKey: string, devMode = false) {
+  return { providers: { anthropic: { apiKey } }, devMode }
+}
+
 describe("applyLlmCredentialsToEnv", () => {
   it("injects a stored key when the environment has none", () => {
     const env: NodeJS.ProcessEnv = {}
-    applyLlmCredentialsToEnv({ apiKey: "sk-ant-stored", devMode: false }, env, CLEAN)
+    applyLlmCredentialsToEnv(withAnthropicKey("sk-ant-stored"), env, CLEAN)
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-stored")
   })
 
   it("never overwrites a key the shell exported", () => {
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-env" }
-    applyLlmCredentialsToEnv({ apiKey: "sk-ant-stored", devMode: false }, env, {
+    applyLlmCredentialsToEnv(withAnthropicKey("sk-ant-stored"), env, {
       apiKey: "sk-ant-env",
     })
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-env")
@@ -22,13 +28,13 @@ describe("applyLlmCredentialsToEnv", () => {
 
   it("does nothing when there is no stored key", () => {
     const env: NodeJS.ProcessEnv = {}
-    applyLlmCredentialsToEnv({ devMode: false }, env, CLEAN)
+    applyLlmCredentialsToEnv(noKey, env, CLEAN)
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
   })
 
   it("dev mode DELETES an environment key rather than leaving it", () => {
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-env" }
-    applyLlmCredentialsToEnv({ devMode: true }, env, { apiKey: "sk-ant-env" })
+    applyLlmCredentialsToEnv({ providers: {}, devMode: true }, env, { apiKey: "sk-ant-env" })
     // `delete`, not assignment to undefined: spawn() passes an `undefined`
     // value through as the STRING "undefined" on some platforms.
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
@@ -36,7 +42,7 @@ describe("applyLlmCredentialsToEnv", () => {
 
   it("dev mode deletes a stored key's injection too, and sets the flag", () => {
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-env" }
-    applyLlmCredentialsToEnv({ apiKey: "sk-ant-stored", devMode: true }, env, {
+    applyLlmCredentialsToEnv(withAnthropicKey("sk-ant-stored", true), env, {
       apiKey: "sk-ant-env",
     })
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
@@ -45,19 +51,19 @@ describe("applyLlmCredentialsToEnv", () => {
 
   it("does not set the subscription flag when dev mode is off", () => {
     const env: NodeJS.ProcessEnv = {}
-    applyLlmCredentialsToEnv({ apiKey: "sk-ant-stored", devMode: false }, env, CLEAN)
+    applyLlmCredentialsToEnv(withAnthropicKey("sk-ant-stored"), env, CLEAN)
     expect(env.EDITOR_USE_CLAUDE_SUBSCRIPTION).toBeUndefined()
   })
 
   it("treats a whitespace-only stored key as absent", () => {
     const env: NodeJS.ProcessEnv = {}
-    applyLlmCredentialsToEnv({ apiKey: "   ", devMode: false }, env, CLEAN)
+    applyLlmCredentialsToEnv(withAnthropicKey("   "), env, CLEAN)
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
   })
 
   it("treats a whitespace-only inherited key as absent and injects the stored one", () => {
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "  " }
-    applyLlmCredentialsToEnv({ apiKey: "sk-ant-stored", devMode: false }, env, {
+    applyLlmCredentialsToEnv(withAnthropicKey("sk-ant-stored"), env, {
       apiKey: "  ",
     })
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-stored")
@@ -74,10 +80,10 @@ describe("applyLlmCredentialsToEnv restores the inherited baseline", () => {
     const inherited: InheritedLlmEnv = { apiKey: "sk-ant-exported" }
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-exported" }
 
-    applyLlmCredentialsToEnv({ devMode: true }, env, inherited)
+    applyLlmCredentialsToEnv({ providers: {}, devMode: true }, env, inherited)
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
 
-    applyLlmCredentialsToEnv({ devMode: false }, env, inherited)
+    applyLlmCredentialsToEnv({ providers: {}, devMode: false }, env, inherited)
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-exported")
   })
 
@@ -85,16 +91,16 @@ describe("applyLlmCredentialsToEnv restores the inherited baseline", () => {
     const inherited: InheritedLlmEnv = { useSubscription: "yes" }
     const env: NodeJS.ProcessEnv = { EDITOR_USE_CLAUDE_SUBSCRIPTION: "yes" }
 
-    applyLlmCredentialsToEnv({ devMode: true }, env, inherited)
+    applyLlmCredentialsToEnv({ providers: {}, devMode: true }, env, inherited)
     expect(env.EDITOR_USE_CLAUDE_SUBSCRIPTION).toBe("1")
 
-    applyLlmCredentialsToEnv({ devMode: false }, env, inherited)
+    applyLlmCredentialsToEnv({ providers: {}, devMode: false }, env, inherited)
     expect(env.EDITOR_USE_CLAUDE_SUBSCRIPTION).toBe("yes")
   })
 
   it("is idempotent: repeated applies do not accumulate state", () => {
     const env: NodeJS.ProcessEnv = {}
-    const stored = { apiKey: "sk-ant-stored", devMode: false }
+    const stored = withAnthropicKey("sk-ant-stored")
 
     applyLlmCredentialsToEnv(stored, env, CLEAN)
     const first = { ...env }
@@ -104,10 +110,10 @@ describe("applyLlmCredentialsToEnv restores the inherited baseline", () => {
 
   it("removes a previously injected key once the store is cleared", () => {
     const env: NodeJS.ProcessEnv = {}
-    applyLlmCredentialsToEnv({ apiKey: "sk-ant-stored", devMode: false }, env, CLEAN)
+    applyLlmCredentialsToEnv(withAnthropicKey("sk-ant-stored"), env, CLEAN)
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-stored")
 
-    applyLlmCredentialsToEnv({ devMode: false }, env, CLEAN)
+    applyLlmCredentialsToEnv({ providers: {}, devMode: false }, env, CLEAN)
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
   })
 })

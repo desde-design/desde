@@ -74,7 +74,7 @@ export function applyLlmCredentialsToEnv(
   // exported one — that would make a user's own shell config stop meaning
   // what it says.
   if (present(env.ANTHROPIC_API_KEY)) return
-  const storedKey = present(stored.apiKey)
+  const storedKey = present(stored.providers.anthropic?.apiKey)
   if (storedKey) env.ANTHROPIC_API_KEY = storedKey
 }
 

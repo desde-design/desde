@@ -6,6 +6,7 @@ import {
   type CredentialSource,
 } from "../../../src/editor/llm-providers/credential-probe.js"
 import { isClaudeSubscriptionOptIn } from "../../../src/editor/llm-providers/claude-subscription.js"
+import { ANTHROPIC_DESCRIPTOR } from "../../../src/editor/llm-providers/descriptors/anthropic.js"
 import { applyLlmCredentialsToEnv } from "./apply-llm-credentials.js"
 import { inheritedLlmEnv, type InheritedLlmEnv } from "./inherited-llm-env.js"
 import { readJsonBody } from "./http-body.js"
@@ -122,6 +123,7 @@ async function buildStatus(
   // stored key into that variable, so probing it live reported every stored
   // key as externally managed and disabled the controls that manage it.
   const probe = probeCredential({
+    descriptor: ANTHROPIC_DESCRIPTOR,
     inheritedApiKey: inherited.apiKey,
     stored,
     claudeRuntimeResolvable,
@@ -133,13 +135,13 @@ async function buildStatus(
     // whatever subscription the binary happens to hold.
     subscriptionOptIn: stored.devMode || isClaudeSubscriptionOptIn(process.env),
   })
-  const storedKey = stored.apiKey?.trim()
+  const storedKey = stored.providers.anthropic?.apiKey?.trim()
   return {
     source: probe.credentialed ? probe.source : "none",
     ...("maskedHint" in probe ? { maskedHint: probe.maskedHint } : {}),
     devMode: stored.devMode,
     hasStoredKey: Boolean(storedKey),
-    ...(storedKey ? { storedHint: maskKey(storedKey) } : {}),
+    ...(storedKey ? { storedHint: maskKey(storedKey, ANTHROPIC_DESCRIPTOR.credentials.maskPrefix) } : {}),
     promptDismissed: await readPromptDismissed(home),
   }
 }
@@ -235,14 +237,14 @@ export async function handleLlmCredentialsRoute(
         sendJson(res, 400, { error: validation.reason })
         return
       }
-      await writeLlmApiKey(apiKey, home)
+      await writeLlmApiKey("anthropic", apiKey, home)
       await reapplyEnv(home, env, inherited)
       sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable))
       return
     }
 
     if (req.method === "DELETE") {
-      await clearLlmApiKey(home)
+      await clearLlmApiKey("anthropic", home)
       await reapplyEnv(home, env, inherited)
       sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable))
       return
