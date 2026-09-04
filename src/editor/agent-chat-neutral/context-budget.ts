@@ -61,6 +61,49 @@ export function applyContextBudget(
     dropped++
   }
 
+  // The drop loop above slices one whole message at a time with no regard
+  // for `tool_use` / `tool_result` pairing. Roughly half of its stopping
+  // points leave a leading user message whose `tool_result` block still
+  // references a `tool_use` that was in the assistant message just dropped.
+  // `history-replay.ts`'s header states the invariant: every `tool_use`
+  // needs its matching `tool_result` in the next user message, or the
+  // request is a 400 from both vendors (final review I6). Strip any
+  // orphaned `tool_result` here, dropping a message that empties out.
+  //
+  // Only when the drop loop actually removed a message: `history-replay.ts`
+  // guarantees the invariant holds on input, so the only way it can break
+  // here is a message THIS loop just sliced off. Running this pass
+  // unconditionally would also "fix" an elision-only history whose fixture
+  // never had a matching `tool_use` in the first place, changing a case
+  // that was never broken.
+  if (dropped > 0) {
+    const producedToolUseIds = new Set<string>()
+    for (const message of working) {
+      if (message.role !== 'assistant') continue
+      for (const block of message.content) {
+        if (block.type === 'tool_use') producedToolUseIds.add(block.id)
+      }
+    }
+    const withoutOrphans: Message[] = []
+    for (const message of working) {
+      if (message.role !== 'user' || typeof message.content === 'string') {
+        withoutOrphans.push(message)
+        continue
+      }
+      const content = message.content.filter(
+        (block) => block.type !== 'tool_result' || producedToolUseIds.has(block.toolUseId),
+      )
+      if (content.length === 0) {
+        dropped++
+        continue
+      }
+      withoutOrphans.push(
+        content.length === message.content.length ? message : { ...message, content },
+      )
+    }
+    working = withoutOrphans
+  }
+
   const parts: string[] = []
   if (elided > 0) parts.push(`${elided} older tool result${elided === 1 ? '' : 's'} replaced with a placeholder`)
   if (dropped > 0) parts.push(`${dropped} older message${dropped === 1 ? '' : 's'} dropped`)

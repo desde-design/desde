@@ -8,6 +8,31 @@ const toolResult = (id: string, size: number): Message => ({
   content: [{ type: 'tool_result', toolUseId: id, content: 'x'.repeat(size) }],
 })
 
+const toolUse = (id: string, size: number): Message => ({
+  role: 'assistant',
+  content: [{ type: 'tool_use', id, name: 'Read', input: { pad: 'a'.repeat(size) } }],
+})
+
+/** Every `tool_result` block in `messages` whose `toolUseId` names a `tool_use`
+ * that no retained assistant message produces. Empty means the pairing
+ * invariant `history-replay.ts` documents (every `tool_use` needs its
+ * `tool_result` in the very next user message) holds for this history. */
+function orphanedToolResultIds(messages: readonly Message[]): string[] {
+  const produced = new Set<string>()
+  for (const m of messages) {
+    if (m.role !== 'assistant') continue
+    for (const b of m.content) if (b.type === 'tool_use') produced.add(b.id)
+  }
+  const orphans: string[] = []
+  for (const m of messages) {
+    if (m.role !== 'user' || typeof m.content === 'string') continue
+    for (const b of m.content) {
+      if (b.type === 'tool_result' && !produced.has(b.toolUseId)) orphans.push(b.toolUseId)
+    }
+  }
+  return orphans
+}
+
 describe('applyContextBudget', () => {
   it('leaves a small history untouched and says so', () => {
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]
@@ -51,6 +76,41 @@ describe('applyContextBudget', () => {
     ]
     const out = applyContextBudget(messages, { maxChars: 10 })
     expect(out.messages).toHaveLength(1)
+  })
+
+  it('never orphans a tool_result whose tool_use was dropped, at every stopping point (I6)', () => {
+    // The drop loop slices one whole message at a time with no regard for
+    // tool_use / tool_result pairing. Sweeping maxChars checks the
+    // invariant at every stopping point the loop can land on, not just the
+    // one hand-picked value that happens to split a pair.
+    const messages: Message[] = [
+      toolUse('tu_0', 300),
+      toolResult('tu_0', 300),
+      toolUse('tu_1', 300),
+      toolResult('tu_1', 300),
+      toolUse('tu_2', 300),
+      toolResult('tu_2', 300),
+      { role: 'user', content: [{ type: 'text', text: 'the turn the user just sent' }] },
+    ]
+    const total = messages.reduce((n, m) => n + JSON.stringify(m.content).length, 0)
+    for (let max = 50; max < total; max += 37) {
+      const out = applyContextBudget(messages, { maxChars: max })
+      expect(orphanedToolResultIds(out.messages)).toEqual([])
+      for (const m of out.messages) {
+        expect(typeof m.content === 'string' || m.content.length > 0).toBe(true)
+      }
+    }
+  })
+
+  it('drops a user message that empties out once its only tool_result is orphaned', () => {
+    const messages: Message[] = [
+      toolUse('tu_0', 10),
+      toolResult('tu_0', 800),
+      { role: 'user', content: [{ type: 'text', text: 'final ask' }] },
+    ]
+    const out = applyContextBudget(messages, { maxChars: 100 })
+    expect(orphanedToolResultIds(out.messages)).toEqual([])
+    expect(out.messages).toEqual([{ role: 'user', content: [{ type: 'text', text: 'final ask' }] }])
   })
 
   it('returns a notice naming what was dropped, for the model to read', () => {
