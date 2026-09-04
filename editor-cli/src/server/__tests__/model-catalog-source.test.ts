@@ -130,3 +130,75 @@ describe('createModelCatalogResolver', () => {
     }
   })
 })
+
+describe("the resolver loops the descriptor table", () => {
+  it("serves only providers whose chat runtime can actually dispatch today", async () => {
+    // OpenAI's descriptor declares `chatRuntime: 'neutral'`, and the neutral
+    // runtime is off. Serving its catalog would let the picker offer a model
+    // the chat handler refuses one second later.
+    const resolver = createModelCatalogResolver({
+      env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }),
+      listViaApi: async () => [],
+      listViaCli: async () => [],
+    })
+    const resolved = await resolver.get()
+    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic'])
+  })
+
+  it("serves a second provider's static catalog once it is included", async () => {
+    const resolver = createModelCatalogResolver({
+      env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }),
+      listViaApi: async () => [],
+      listViaCli: async () => [],
+      includeDescriptor: () => true,
+    })
+    const resolved = await resolver.get()
+    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic', 'openai'])
+    expect(resolved.catalogs[1]?.models.some((m) => m.isDefault)).toBe(true)
+  })
+
+  it("still merges a live Anthropic list over the static one", async () => {
+    const resolver = createModelCatalogResolver({
+      env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x' }),
+      listViaApi: async () => [{ id: 'claude-opus-9', label: 'Opus 9' }],
+      listViaCli: async () => [],
+    })
+    const resolved = await resolver.get()
+    expect(resolved.source).toBe('api')
+    expect(resolved.catalogs[0]?.models.map((m) => m.id)).toEqual(['claude-opus-9'])
+  })
+
+  it("re-resolves when ANOTHER provider's credential changes", async () => {
+    // The cache key used to be Anthropic's key alone, so adding an OpenAI key
+    // would have served a stale catalog for up to ten minutes.
+    let env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: 'sk-ant-x' }
+    let calls = 0
+    const resolver = createModelCatalogResolver({
+      env: () => env,
+      listViaApi: async () => {
+        calls += 1
+        return [{ id: 'claude-opus-9', label: 'Opus 9' }]
+      },
+      listViaCli: async () => [],
+      includeDescriptor: () => true,
+    })
+    await resolver.get()
+    env = { ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }
+    await resolver.get()
+    expect(calls).toBe(2)
+  })
+
+  it("falls back to every provider's static catalog when a live source throws", async () => {
+    const resolver = createModelCatalogResolver({
+      env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x' }),
+      listViaApi: async () => {
+        throw new Error('network down')
+      },
+      listViaCli: async () => [],
+      log: () => {},
+    })
+    const resolved = await resolver.get()
+    expect(resolved.source).toBe('static')
+    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic'])
+  })
+})

@@ -4,13 +4,20 @@ import {
   isCodeViewEnabled,
   isCanvasEnabled,
   isNotesEnabled,
+  isNeutralChatEnabled,
+  chatRuntimeOverride,
 } from "../dormant-surfaces.js"
 
 // Every gate's env var, because this list does double duty: `setEnv` is typed
 // from it, and the save/restore around each test reads it. A surface added to
 // GATES but not here fails typecheck rather than silently leaking its variable
 // into the next case.
-const ENV_KEYS = ["EDITOR_CODE_VIEW", "EDITOR_NOTES", "EDITOR_CANVAS"] as const
+const ENV_KEYS = [
+  "EDITOR_CODE_VIEW",
+  "EDITOR_NOTES",
+  "EDITOR_CANVAS",
+  "EDITOR_NEUTRAL_CHAT",
+] as const
 const saved = new Map<string, string | undefined>()
 
 afterEach(() => {
@@ -37,6 +44,7 @@ const GATES = [
   { name: "codeView", read: isCodeViewEnabled, env: "EDITOR_CODE_VIEW" },
   { name: "notes", read: isNotesEnabled, env: "EDITOR_NOTES" },
   { name: "canvas", read: isCanvasEnabled, env: "EDITOR_CANVAS" },
+  { name: "neutralChat", read: isNeutralChatEnabled, env: "EDITOR_NEUTRAL_CHAT" },
 ] as const
 
 describe.each(GATES)("$name gate", ({ name, read, env }) => {
@@ -92,6 +100,25 @@ describe("the two gates are independent", () => {
     setEnv("EDITOR_NOTES", "1")
     expect(isNotesEnabled({})).toBe(true)
     expect(isCodeViewEnabled({})).toBe(false)
+  })
+})
+
+describe("chatRuntimeOverride", () => {
+  it("is undefined when the env var is unset", () => {
+    expect(chatRuntimeOverride({})).toBeUndefined()
+  })
+
+  it("returns 'neutral' only for the exact value 'neutral'", () => {
+    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "neutral" })).toBe("neutral")
+    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "1" })).toBeUndefined()
+    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "true" })).toBeUndefined()
+  })
+
+  it("is a separate switch from isNeutralChatEnabled", () => {
+    // Forcing the override does not itself turn the lane on for everyone,
+    // and turning the lane on does not itself force a provider onto it.
+    expect(isNeutralChatEnabled({})).toBe(false)
+    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "neutral" })).toBe("neutral")
   })
 })
 

@@ -1,7 +1,7 @@
 /**
  * Which DORMANT product surfaces this project has turned back on.
  *
- * Four surfaces live here. All are gates rather than deletions: every component,
+ * Five surfaces live here. All are gates rather than deletions: every component,
  * store, handler and colocated test stays intact and in the default test
  * run, because a dormant surface whose tests rot is one that cannot be
  * un-dormanted.
@@ -24,6 +24,11 @@
  *   endpoints, create/patch/delete included — with the surface switched
  *   off. That is precisely the drifted pair this module's own comment
  *   below warns about, in the module that warns about it.
+ * - **`neutralChat`** — the Desde-owned chat runtime that every non-Anthropic
+ *   provider dispatches on. DORMANT until proven against Anthropic. Its
+ *   first caller is the model catalog resolver (`model-catalog-source.ts`),
+ *   which will not serve a `neutral` provider's group while this is off;
+ *   `resolveChatRuntime`'s dispatch-side refusal is the second caller.
  *
  * **Why this module exists at all.** Each gate is read in two places: the
  * bootstrap script, which decides what the client is allowed to OFFER, and
@@ -55,6 +60,7 @@ export interface DormantSurfaceConfig {
     notes?: boolean
     vscodeLink?: boolean
     canvas?: boolean
+    neutralChat?: boolean
   }
 }
 
@@ -67,6 +73,7 @@ const CODE_VIEW_ENV = "EDITOR_CODE_VIEW"
 const NOTES_ENV = "EDITOR_NOTES"
 const VSCODE_LINK_ENV = "EDITOR_VSCODE_LINK"
 const CANVAS_ENV = "EDITOR_CANVAS"
+const NEUTRAL_CHAT_ENV = "EDITOR_NEUTRAL_CHAT"
 
 function enabled(configured: boolean | undefined, envVar: string): boolean {
   return configured === true || process.env[envVar] === "1"
@@ -108,6 +115,36 @@ export function isCanvasEnabled(ctx: DormantSurfaceConfig): boolean {
  */
 export function isVscodeLinkEnabled(ctx: DormantSurfaceConfig): boolean {
   return enabled(ctx.editor?.vscodeLink, VSCODE_LINK_ENV)
+}
+
+/**
+ * Is the Desde-owned neutral chat runtime turned on for this project?
+ *
+ * DORMANT by default until the runtime is proven against Anthropic. Read at
+ * BOTH ends: the catalog resolver will not serve a `neutral` provider's group
+ * while it is off (this task), and `resolveChatRuntime` independently refuses
+ * the dispatch (Task 15). Either alone is the drifted pair this module exists
+ * to prevent: UI-only gating leaves the API open, dispatch-only gating leaves
+ * a control that fails on click.
+ */
+export function isNeutralChatEnabled(ctx: DormantSurfaceConfig): boolean {
+  return enabled(ctx.editor?.neutralChat, NEUTRAL_CHAT_ENV)
+}
+
+/**
+ * Dev-only: force the neutral runtime for a provider whose descriptor says
+ * otherwise. This is how the neutral loop gets proven against Anthropic, where
+ * a behaviour difference is the prompt rather than the provider.
+ *
+ * A separate switch from `isNeutralChatEnabled` on purpose. That one says the
+ * lane may run at all; this one says which lane a given provider takes.
+ * Folding them into one boolean would make "prove the loop against Anthropic"
+ * indistinguishable from "ship OpenAI chat".
+ */
+export function chatRuntimeOverride(
+  env: NodeJS.ProcessEnv,
+): "neutral" | undefined {
+  return env.EDITOR_CHAT_RUNTIME_OVERRIDE === "neutral" ? "neutral" : undefined
 }
 
 /**

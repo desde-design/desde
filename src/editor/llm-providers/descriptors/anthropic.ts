@@ -12,6 +12,7 @@
 import { EFFORT_LEVELS } from '../../core/model-catalog'
 import { ANTHROPIC_MODEL_CATALOG } from '../anthropic-model-catalog'
 import { AnthropicProvider, ANTHROPIC_DEFAULT_MODEL } from '../anthropic-provider'
+import { listAnthropicLiveModels } from '../anthropic-live-models'
 import type { ProviderDescriptor } from '../provider-descriptor'
 
 const VALIDATE_URL = 'https://api.anthropic.com/v1/models?limit=1'
@@ -44,6 +45,11 @@ export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
     })
   },
   staticCatalog: ANTHROPIC_MODEL_CATALOG,
+  listLiveModels: (input) =>
+    listAnthropicLiveModels({
+      apiKey: input.apiKey,
+      ...(input.signal ? { signal: input.signal } : {}),
+    }),
   async validateKey(input) {
     const fetchImpl = input.fetchImpl ?? fetch
     try {

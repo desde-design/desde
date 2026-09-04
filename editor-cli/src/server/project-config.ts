@@ -175,6 +175,20 @@ export interface ProjectConfig {
      * `dormant-surfaces.ts`.
      */
     vscodeLink?: boolean
+    /**
+     * The Desde-owned neutral chat runtime gate (every non-Anthropic
+     * provider's chat dispatch). DORMANT by product decision until the
+     * runtime is proven against Anthropic; default `false` (opt-IN, same
+     * shape as `canvas`). Setting the `EDITOR_NEUTRAL_CHAT=1` env var also
+     * enables it (either enables). Set `true` here to turn it on for this
+     * project.
+     *
+     * Gates BOTH ends: the model catalog resolver will not serve a
+     * `neutral` provider's group while it is off, and `resolveChatRuntime`
+     * independently refuses the dispatch. See `isNeutralChatEnabled` in
+     * `dormant-surfaces.ts`.
+     */
+    neutralChat?: boolean
   }
   /**
    * Audit Task 15 — on-disk retention for the growth points that had no
@@ -583,6 +597,18 @@ export async function readProjectConfig(
         }
       }
       out.vscodeLink = co.vscodeLink
+    }
+    if (co.neutralChat !== undefined) {
+      // Same explicit refusal as the other dormant-surface flags above: a
+      // malformed value must be refused, not silently read as the default.
+      if (typeof co.neutralChat !== 'boolean') {
+        return {
+          ok: false,
+          reason: 'malformed',
+          message: `${configPath}: 'editor.neutralChat' must be a boolean.`,
+        }
+      }
+      out.neutralChat = co.neutralChat
     }
     editor = Object.keys(out).length > 0 ? out : undefined
   }
