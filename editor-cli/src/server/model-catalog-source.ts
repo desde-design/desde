@@ -320,6 +320,7 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
           : []
       const merged = mergeLiveModels(descriptor.staticCatalog, live, {
         effortFallback: effortFallbackFor(descriptor),
+        defaultAlias: descriptor.defaultAlias,
       })
       if (!merged) {
         log(`the ${descriptor.id} source listed no models; using the built-in list`)

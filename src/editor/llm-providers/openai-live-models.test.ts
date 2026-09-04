@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fromOpenAiModelsApi, labelFromOpenAiId, listOpenAiLiveModels } from './openai-live-models'
+import { mergeLiveModels } from './live-model-catalog'
+import { OPENAI_DESCRIPTOR } from './descriptors/openai'
 
 describe('labelFromOpenAiId', () => {
   it('labels a live-only OpenAI id the way the static catalog would', () => {
@@ -61,6 +63,26 @@ describe('fromOpenAiModelsApi', () => {
       { id: 'gpt-5.4-nano', object: 'model', created: 1, owned_by: 'openai' },
     ])
     expect(live.map((m) => m.label)).toEqual(['GPT-5.6 Sol', 'GPT-5.4 Nano'])
+  })
+})
+
+describe('fromOpenAiModelsApi + mergeLiveModels, through the real OPENAI_DESCRIPTOR', () => {
+  it('serves gpt-5.6-sol as the default, not the newer and pricier gpt-5.6-cyber, when the bare id is retired', () => {
+    // End-to-end regression for the real 2026-09-04 shell defect: cyber
+    // passes the live-model allowlist (CHAT_MODEL_ID names it explicitly)
+    // and, being newer, sorts ahead of sol. The descriptor's explicit
+    // `defaultAlias` map is what keeps the served default on sol.
+    const live = fromOpenAiModelsApi([
+      { id: 'gpt-5.6-cyber', object: 'model', created: 2000, owned_by: 'openai' },
+      { id: 'gpt-5.6-sol', object: 'model', created: 1000, owned_by: 'openai' },
+      { id: 'gpt-5.4', object: 'model', created: 500, owned_by: 'openai' },
+    ])
+    expect(live.map((m) => m.id)).toEqual(['gpt-5.6-cyber', 'gpt-5.6-sol', 'gpt-5.4'])
+    const merged = mergeLiveModels(OPENAI_DESCRIPTOR.staticCatalog, live, {
+      effortFallback: () => null,
+      defaultAlias: OPENAI_DESCRIPTOR.defaultAlias,
+    })!
+    expect(merged.models.find((m) => m.isDefault)?.id).toBe('gpt-5.6-sol')
   })
 })
 

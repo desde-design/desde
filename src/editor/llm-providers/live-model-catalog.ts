@@ -26,14 +26,20 @@
  *  - Labels and descriptions: static first for the ones it knows, because a
  *    hand-written "Fast, near-Opus quality on coding" beats "Claude Sonnet 5".
  *  - The default is the static default when the live list has it. Otherwise,
- *    when the live list has an ALIAS STEM of it (a live id that starts with
- *    the static default's id plus a dash, and is not itself some OTHER
- *    static model's id), that alias becomes the default: a vendor can retire
+ *    when the descriptor's `defaultAlias` rule recognises a live id as a
+ *    stand-in for it, that alias becomes the default: a vendor can retire
  *    the bare id and keep serving it only under a dated snapshot (Anthropic)
- *    or a tier suffix (OpenAI's `gpt-5.6-sol`, the researched alias of
- *    `gpt-5.6`), and the flagship should not lose its place just because the
- *    bare id disappeared. Otherwise, the first live entry. The picker never
- *    opens on a model that cannot be used.
+ *    or a named tier (OpenAI's `gpt-5.6-sol`), and the flagship should not
+ *    lose its place just because the bare id disappeared. Otherwise, the
+ *    first live entry. The picker never opens on a model that cannot be used.
+ *
+ *    The alias rule is PER PROVIDER, supplied by the caller (the provider's
+ *    `ProviderDescriptor.defaultAlias`), not guessed generically here. A
+ *    generic "starts with the default id plus a dash" guess used to pick
+ *    ANY matching live id in live order — which is newest-first, so a newer
+ *    and more expensive tier that happens to share the stem (`gpt-5.6-cyber`)
+ *    could outrank the intended alias (`gpt-5.6-sol`) with no UI saying the
+ *    user's default just got pricier. See `DefaultAliasRule`.
  */
 
 import type { EffortLevel, ModelOption, ProviderModelCatalog } from '../core/model-catalog'
@@ -57,26 +63,62 @@ export interface LiveModel {
 const FULL_EFFORT_LADDER: EffortLevel[] = [...EFFORT_LEVELS]
 
 /**
- * Find a live entry that is an alias of `staticDefault`: its id starts with
- * `staticDefault.id` plus a dash, and it is not itself some OTHER static
- * model's id (that would make it its own distinct entry, not a stand-in for
- * the default — `gpt-5.6-terra` and `gpt-5.6-luna` both share the `gpt-5.6-`
- * stem but already have their own static catalog rows, so neither qualifies;
- * only `gpt-5.6-sol`, live-only, does). Takes the first match in live order.
+ * How a provider's live ids can stand in for its static default when the
+ * bare default id itself has fallen out of the live list.
+ *
+ *  - `'dated-snapshot'`: a live id counts as an alias when it is
+ *    `<defaultId>-` followed by exactly an 8-digit date (`YYYYMMDD`) and is
+ *    not itself some OTHER static model's id. Anthropic's shape: the vendor
+ *    keeps serving a retiring alias under its dated snapshot
+ *    (`claude-opus-4-8-20260315`) before the next one takes the bare id.
+ *  - `'map'`: an explicit `{ [staticDefaultId]: aliasId }` table. OpenAI's
+ *    shape: `gpt-5.6` resolves to the researched alias `gpt-5.6-sol`, a
+ *    named tier chosen on purpose rather than picked by string prefix or
+ *    live-list sort order (which is newest-first, and would otherwise let a
+ *    newer, pricier tier like `gpt-5.6-cyber` win just for sharing the
+ *    `gpt-5.6-` stem).
+ *
+ * Provider-supplied and explicit on purpose: a generic "starts with the
+ * default id plus a dash" guess cannot tell "the vendor's intended stand-in"
+ * from "an unrelated model that happens to share the prefix."
  */
-function findAliasStemDefault(
+export type DefaultAliasRule =
+  | { readonly kind: 'dated-snapshot' }
+  | { readonly kind: 'map'; readonly aliases: Readonly<Record<string, string>> }
+
+const DATED_SNAPSHOT_SUFFIX = /^\d{8}$/
+
+/**
+ * Find the live entry that `rule` recognises as an alias of `staticDefault`.
+ * `undefined` when there is no rule, or the rule names nothing present in
+ * `models`.
+ */
+function findDefaultAlias(
   catalog: ProviderModelCatalog,
   models: readonly ModelOption[],
   staticDefault: ModelOption,
+  rule: DefaultAliasRule | undefined,
 ): ModelOption | undefined {
+  if (!rule) return undefined
+  if (rule.kind === 'map') {
+    const aliasId = rule.aliases[staticDefault.id]
+    return aliasId === undefined ? undefined : models.find((m) => m.id === aliasId)
+  }
   const staticIds = new Set(catalog.models.map((m) => m.id))
   const stem = `${staticDefault.id}-`
-  return models.find((m) => m.id.startsWith(stem) && !staticIds.has(m.id))
+  return models.find(
+    (m) =>
+      m.id.startsWith(stem) &&
+      !staticIds.has(m.id) &&
+      DATED_SNAPSHOT_SUFFIX.test(m.id.slice(stem.length)),
+  )
 }
 
 export interface MergeLiveOptions {
   /** What a live model with no effort information of any kind gets. */
   effortFallback: (id: string) => EffortLevel[] | null
+  /** How to recognise a live id as a stand-in for the static default. */
+  defaultAlias?: DefaultAliasRule
 }
 
 /**
@@ -119,7 +161,8 @@ export function mergeLiveModels(
   const defaultId =
     staticDefault && seen.has(staticDefault.id)
       ? staticDefault.id
-      : (staticDefault && findAliasStemDefault(catalog, models, staticDefault)?.id) ?? models[0]!.id
+      : (staticDefault && findDefaultAlias(catalog, models, staticDefault, opts.defaultAlias)?.id) ??
+        models[0]!.id
   return {
     providerId: catalog.providerId,
     models: models.map((m) => (m.id === defaultId ? { ...m, isDefault: true } : m)),

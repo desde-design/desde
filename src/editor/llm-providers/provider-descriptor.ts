@@ -13,7 +13,7 @@
  * picker while adding a vendor is a design failure, not a bigger commit.
  */
 import type { EffortLevel, ProviderModelCatalog } from '../core/model-catalog'
-import type { LiveModel } from './live-model-catalog'
+import type { DefaultAliasRule, LiveModel } from './live-model-catalog'
 import type { LLMProvider } from './types'
 
 /** Which turn runtime serves this provider's chat. */
@@ -76,6 +76,13 @@ export interface ProviderDescriptor {
   }): LLMProvider
   /** Static fallback catalog. Always present, exactly one isDefault. */
   readonly staticCatalog: ProviderModelCatalog
+  /**
+   * How a live id can stand in for `staticCatalog`'s default when the bare
+   * default id has fallen out of the live list. Omit for a vendor with no
+   * such aliasing (the merge then falls through to the first live entry).
+   * See `DefaultAliasRule` in `live-model-catalog.ts`.
+   */
+  readonly defaultAlias?: DefaultAliasRule
   /** Live model list. Omitted for a vendor with no usable models endpoint. */
   listLiveModels?(input: {
     apiKey: string

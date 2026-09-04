@@ -46,6 +46,10 @@ export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
     })
   },
   staticCatalog: ANTHROPIC_MODEL_CATALOG,
+  // The vendor retires a bare alias by continuing to serve it under its own
+  // dated snapshot (`claude-opus-4-8-20260315`) before the next generation
+  // takes the bare id. See `DefaultAliasRule` in `live-model-catalog.ts`.
+  defaultAlias: { kind: 'dated-snapshot' },
   listLiveModels: (input) =>
     listAnthropicLiveModels({
       apiKey: input.apiKey,

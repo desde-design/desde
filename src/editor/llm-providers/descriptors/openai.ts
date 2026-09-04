@@ -53,6 +53,12 @@ export const OPENAI_DESCRIPTOR: ProviderDescriptor = {
     return buildOpenAiProvider(input)
   },
   staticCatalog: OPENAI_MODEL_CATALOG,
+  // The researched alias of the flagship: when the live list drops the bare
+  // `gpt-5.6`, the default follows it to `gpt-5.6-sol` specifically, not to
+  // whichever `gpt-5.6-`-prefixed tier happens to sort first (newest-first
+  // live order would otherwise hand the default to a pricier tier like
+  // `gpt-5.6-cyber` the moment it ships). See `DefaultAliasRule`.
+  defaultAlias: { kind: 'map', aliases: { 'gpt-5.6': 'gpt-5.6-sol' } },
   listLiveModels(input) {
     return listOpenAiLiveModels(input)
   },

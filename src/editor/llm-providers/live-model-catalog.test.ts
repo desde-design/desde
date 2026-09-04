@@ -89,7 +89,7 @@ describe('mergeLiveModels', () => {
     expect(merged.models).toEqual([{ id: 'x-1', label: 'x-1', effortLevels: null, isDefault: true }])
   })
 
-  it('keeps the flagship as the default when the live list carries only its dated or suffixed forms', () => {
+  it('keeps the flagship as the default when the live list carries only its dated snapshot (Anthropic rule)', () => {
     const merged = mergeLiveModels(
       STATIC,
       [
@@ -97,12 +97,36 @@ describe('mergeLiveModels', () => {
         { id: 'claude-opus-4-8-20260315' },
         { id: 'claude-sonnet-4-6' },
       ],
-      { effortFallback: fallback },
+      { effortFallback: fallback, defaultAlias: { kind: 'dated-snapshot' } },
     )!
     expect(merged.models.filter((m) => m.isDefault).map((m) => m.id)).toEqual(['claude-opus-4-8-20260315'])
   })
 
-  it('picks the flagship alias, not a cheaper tier that shares its stem, when the live list has no bare gpt-5.6', () => {
+  it('does not treat a live id sharing the stem as a dated-snapshot alias when it has no date suffix', () => {
+    // `claude-opus-4-8-preview` shares the `claude-opus-4-8-` stem but is
+    // not `-<8 digits>`, so the dated-snapshot rule must not claim it.
+    const merged = mergeLiveModels(
+      STATIC,
+      [{ id: 'claude-opus-4-8-preview' }, { id: 'claude-sonnet-4-6' }],
+      { effortFallback: fallback, defaultAlias: { kind: 'dated-snapshot' } },
+    )!
+    // No dated-snapshot alias found, so the default falls to the first live entry.
+    expect(merged.models.filter((m) => m.isDefault).map((m) => m.id)).toEqual(['claude-opus-4-8-preview'])
+  })
+
+  it('falls through to the first live entry with no alias rule at all (no generic stem guessing)', () => {
+    const merged = mergeLiveModels(
+      STATIC,
+      [{ id: 'claude-opus-4-8-20260315' }, { id: 'claude-sonnet-4-6' }],
+      { effortFallback: fallback },
+    )!
+    // Without a `defaultAlias` rule, mergeLiveModels no longer guesses by
+    // string prefix. It falls straight through to the first live entry,
+    // same as the "no static default at all" case.
+    expect(merged.models.filter((m) => m.isDefault).map((m) => m.id)).toEqual(['claude-opus-4-8-20260315'])
+  })
+
+  it('picks the flagship alias, not a cheaper tier that shares its stem, when the live list has no bare gpt-5.6 (OpenAI rule)', () => {
     // Regression for the real 2026-09-04 shell: the live list carried
     // gpt-5.6-sol, gpt-5.6-terra and gpt-5.6-luna but no bare gpt-5.6, and
     // the served default fell to Luna (the cheapest tier) because it was
@@ -116,7 +140,25 @@ describe('mergeLiveModels', () => {
         { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
         { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
       ],
-      { effortFallback: () => null },
+      { effortFallback: () => null, defaultAlias: { kind: 'map', aliases: { 'gpt-5.6': 'gpt-5.6-sol' } } },
+    )
+    expect(merged?.models.find((m) => m.isDefault)?.id).toBe('gpt-5.6-sol')
+  })
+
+  it('does not let a newer, pricier tier that shares the stem win the default just by sorting first', () => {
+    // The actual FX5 defect: a live-only id (gpt-5.6-cyber) is BOTH newer
+    // than the intended alias AND shares its stem, so a generic
+    // "first live id starting with the stem" guess picks it over
+    // gpt-5.6-sol. The explicit map rule must not be fooled by that.
+    const merged = mergeLiveModels(
+      OPENAI_MODEL_CATALOG,
+      [
+        // Newest first, matching fromOpenAiModelsApi's real sort order.
+        { id: 'gpt-5.6-cyber', label: 'GPT-5.6 Cyber' },
+        { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+        { id: 'gpt-5.4' },
+      ],
+      { effortFallback: () => null, defaultAlias: { kind: 'map', aliases: { 'gpt-5.6': 'gpt-5.6-sol' } } },
     )
     expect(merged?.models.find((m) => m.isDefault)?.id).toBe('gpt-5.6-sol')
   })
