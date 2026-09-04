@@ -17,8 +17,10 @@ import { handleCapabilitiesRoute } from "./capabilities-handler.js"
 import {
   LLM_CREDENTIALS_DEV_MODE_ROUTE,
   LLM_CREDENTIALS_DISMISS_ROUTE,
+  LLM_CREDENTIALS_PROVIDER_ROUTE,
   LLM_CREDENTIALS_ROUTE,
   handleLlmCredentialsRoute,
+  providerIdFromPath,
 } from "./llm-credentials-handler.js"
 import { isClaudeRuntimeResolvable } from "./claude-runtime-available.js"
 import { VIEWER_PROBE_ROUTE, handleViewerProbe } from "./viewer-probe.js"
@@ -2165,24 +2167,6 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   },
   {
     method: "PUT",
-    path: LLM_CREDENTIALS_ROUTE,
-    authPolicy: "bearer-origin-required",
-    handler: (req, res, _ctx, url) =>
-      handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
-      }),
-  },
-  {
-    method: "DELETE",
-    path: LLM_CREDENTIALS_ROUTE,
-    authPolicy: "bearer-origin-required",
-    handler: (req, res, _ctx, url) =>
-      handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
-      }),
-  },
-  {
-    method: "PUT",
     path: LLM_CREDENTIALS_DEV_MODE_ROUTE,
     authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
@@ -2193,6 +2177,30 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   {
     method: "PUT",
     path: LLM_CREDENTIALS_DISMISS_ROUTE,
+    authPolicy: "bearer-origin-required",
+    handler: (req, res, _ctx, url) =>
+      handleLlmCredentialsRoute(req, res, url, {
+        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+      }),
+  },
+  // Provider-scoped writes. These sit AFTER the two reserved sub-routes above:
+  // both live under the same prefix, and first-match resolution would give
+  // them to this matcher otherwise. `providerIdFromPath` refuses those two
+  // names as well, so the ordering and the matcher agree.
+  {
+    method: "PUT",
+    path: LLM_CREDENTIALS_PROVIDER_ROUTE,
+    match: (pathname) => providerIdFromPath(pathname) !== null,
+    authPolicy: "bearer-origin-required",
+    handler: (req, res, _ctx, url) =>
+      handleLlmCredentialsRoute(req, res, url, {
+        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+      }),
+  },
+  {
+    method: "DELETE",
+    path: LLM_CREDENTIALS_PROVIDER_ROUTE,
+    match: (pathname) => providerIdFromPath(pathname) !== null,
     authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {

@@ -212,6 +212,21 @@ describe("route table — order-sensitive neighbours", () => {
     )
   })
 
+  /**
+   * `/dev-mode` and `/dismiss-prompt` live UNDER the base path, so the
+   * `:providerId` matcher would swallow them if it came first. The matcher
+   * excludes both names as well, so this is belt and braces on a route whose
+   * only failure mode is silent.
+   */
+  it("puts the two reserved credential routes ahead of the :providerId matcher", () => {
+    const provider = entryAt("PUT", "/api/editor/llm-credentials/:providerId")
+    expect(provider).toBeGreaterThanOrEqual(0)
+    expect(entryAt("PUT", "/api/editor/llm-credentials/dev-mode")).toBeLessThan(provider)
+    expect(entryAt("PUT", "/api/editor/llm-credentials/dismiss-prompt")).toBeLessThan(
+      provider,
+    )
+  })
+
   it("puts the /api/* 404 fallback ahead of the static catch-all, which is last", () => {
     expect(entryAt("ANY", "/api/*")).toBeLessThan(entryAt("GET", "/*"))
     expect(entryAt("GET", "/*")).toBe(ROUTE_TABLE.length - 1)
@@ -313,6 +328,11 @@ describe("route resolution — postures match the pre-refactor if-chain", () => 
     ["POST", "/api/editor/smoke-test", "bearer-origin-required"],
     ["POST", "/api/editor/project/link", "bearer-origin-required"],
     ["GET", "/api/health", "bearer-origin-if-present"],
+    ["GET", "/api/editor/llm-credentials", "bearer-origin-if-present"],
+    ["PUT", "/api/editor/llm-credentials/dev-mode", "bearer-origin-required"],
+    ["PUT", "/api/editor/llm-credentials/dismiss-prompt", "bearer-origin-required"],
+    ["PUT", "/api/editor/llm-credentials/openai", "bearer-origin-required"],
+    ["DELETE", "/api/editor/llm-credentials/openai", "bearer-origin-required"],
     // --- unknown API paths 404 after the strict gate, never fall to static ---
     ["GET", "/api/editor/nope", "bearer-origin-required"],
     ["POST", "/api/nope", "bearer-origin-required"],

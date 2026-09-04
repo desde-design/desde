@@ -1278,8 +1278,11 @@ describe("launcher server — LLM credentials", () => {
     })
     expect(res.status).toBe(200)
     expect(res.headers.get("content-type")).toContain("application/json")
-    const body = (await res.json()) as { source: string; devMode: boolean }
-    expect(typeof body.source).toBe("string")
+    const body = (await res.json()) as {
+      providers: Record<string, { source: string }>
+      devMode: boolean
+    }
+    expect(typeof body.providers.anthropic.source).toBe("string")
     expect(typeof body.devMode).toBe("boolean")
   })
 

@@ -125,6 +125,7 @@ describe("every credential route reaches the router", () => {
       "LLM_CREDENTIALS_ROUTE",
       "LLM_CREDENTIALS_DEV_MODE_ROUTE",
       "LLM_CREDENTIALS_DISMISS_ROUTE",
+      "LLM_CREDENTIALS_PROVIDER_ROUTE",
     ]) {
       expect(source).toContain(`path: ${constant},`)
     }

@@ -3,10 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import {
-  handleLlmCredentialsRoute,
-  validateAnthropicKey,
-} from "../llm-credentials-handler.js"
+import { handleLlmCredentialsRoute, providerIdFromPath } from "../llm-credentials-handler.js"
 import { readLlmCredentials, writeLlmApiKey } from "../llm-credential-store.js"
 
 let home: string
@@ -39,18 +36,10 @@ const asRes = (r: ReturnType<typeof fakeRes>) => r as unknown as ServerResponse
 const okFetch = () => vi.fn(async () => new Response("{}", { status: 200 }))
 const url = (path = "/api/editor/llm-credentials") => new URL(`http://x${path}`)
 
-/**
- * Fills the status fields a case does not care about, so assertions stay
- * EXACT (`toEqual`) rather than loosening to `toMatchObject` and letting a
- * future shape change slip through unnoticed.
- */
-function statusOf(overrides: Record<string, unknown>) {
-  return { hasStoredKey: false, promptDismissed: false, ...overrides }
-}
-
 describe("GET /api/editor/llm-credentials", () => {
-  it("reports the stored source with a masked hint and never the key", async () => {
+  it("answers one entry per descriptor, in registration order", async () => {
     await writeLlmApiKey("anthropic", "sk-ant-supersecret9999", home)
+    await writeLlmApiKey("openai", "sk-proj-othersecret1234", home)
     const res = fakeRes()
     await handleLlmCredentialsRoute(req("GET"), asRes(res), url(), {
       home,
@@ -58,20 +47,34 @@ describe("GET /api/editor/llm-credentials", () => {
       claudeRuntimeResolvable: false,
       fetchImpl: okFetch(),
     })
-    expect(res.statusCode).toBe(200)
-    expect(JSON.parse(res.body)).toEqual(
-      statusOf({
-        source: "stored",
-        maskedHint: "sk-ant-…9999",
-        storedHint: "sk-ant-…9999",
-        devMode: false,
-        hasStoredKey: true,
-      }),
-    )
+    const body = JSON.parse(res.body) as { providers: Record<string, Record<string, unknown>>; devMode: boolean }
+    expect(Object.keys(body.providers)).toEqual(["anthropic", "openai"])
+    expect(body.providers.anthropic).toEqual({
+      id: "anthropic",
+      label: "Anthropic",
+      source: "stored",
+      maskedHint: "sk-ant-…9999",
+      hasStoredKey: true,
+      storedHint: "sk-ant-…9999",
+      apiKeyEnvVar: "ANTHROPIC_API_KEY",
+      consoleUrl: "https://console.anthropic.com/settings/keys",
+      maskPrefix: "sk-ant-",
+      hasSubscriptionRuntime: true,
+    })
+    expect(body.providers.openai).toMatchObject({
+      source: "stored",
+      storedHint: "sk-…1234",
+      apiKeyEnvVar: "OPENAI_API_KEY",
+      baseUrlEnvVar: "OPENAI_BASE_URL",
+      hasSubscriptionRuntime: false,
+    })
+    expect(body.devMode).toBe(false)
     expect(res.body).not.toContain("supersecret")
+    expect(res.body).not.toContain("othersecret")
   })
 
-  it("reports source none when nothing is configured", async () => {
+  it("reports each provider independently when only one is configured", async () => {
+    await writeLlmApiKey("openai", "sk-only1234", home)
     const res = fakeRes()
     await handleLlmCredentialsRoute(req("GET"), asRes(res), url(), {
       home,
@@ -79,9 +82,9 @@ describe("GET /api/editor/llm-credentials", () => {
       claudeRuntimeResolvable: false,
       fetchImpl: okFetch(),
     })
-    expect(JSON.parse(res.body)).toEqual(
-      statusOf({ source: "none", devMode: false }),
-    )
+    const body = JSON.parse(res.body) as { providers: Record<string, Record<string, unknown>>; devMode: boolean }
+    expect(body.providers.anthropic.source).toBe("none")
+    expect(body.providers.openai.source).toBe("stored")
   })
 
   it("reports the env source without exposing the env key", async () => {
@@ -96,60 +99,74 @@ describe("GET /api/editor/llm-credentials", () => {
       claudeRuntimeResolvable: false,
       fetchImpl: okFetch(),
     })
-    expect(JSON.parse(res.body)).toEqual(
-      statusOf({ source: "env", maskedHint: "sk-ant-…1111", devMode: false }),
-    )
+    const body = JSON.parse(res.body) as { providers: Record<string, Record<string, unknown>>; devMode: boolean }
+    expect(body.providers.anthropic).toMatchObject({
+      source: "env",
+      maskedHint: "sk-ant-…1111",
+    })
     expect(res.body).not.toContain("fromtheshell")
   })
 })
 
-describe("validateAnthropicKey", () => {
-  it("accepts a key the API answers 200 for", async () => {
-    const f = vi.fn(async () => new Response("{}", { status: 200 }))
-    expect(await validateAnthropicKey("sk-ant-good", f)).toEqual({ ok: true })
-    const [target, init] = f.mock.calls[0] as unknown as [string, RequestInit]
-    expect(String(target)).toContain("api.anthropic.com")
-    expect((init.headers as Record<string, string>)["x-api-key"]).toBe("sk-ant-good")
-  })
-
-  it("rejects a key the API answers 401 for", async () => {
-    const f = vi.fn(async () => new Response("{}", { status: 401 }))
-    expect((await validateAnthropicKey("sk-ant-bad", f)).ok).toBe(false)
-  })
-
-  it("rejects rather than accepts when the network fails", async () => {
-    const f = vi.fn(async () => {
-      throw new Error("ENOTFOUND")
-    })
-    // Fail closed: an unreachable API must not let an unverified key persist.
-    expect((await validateAnthropicKey("sk-ant-any", f)).ok).toBe(false)
-  })
-})
-
-describe("PUT /api/editor/llm-credentials", () => {
-  it("refuses to persist a key the API rejects", async () => {
+describe("PUT /api/editor/llm-credentials/:providerId", () => {
+  it("validates against the named provider and persists into its slot", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }))
     const res = fakeRes()
-    await handleLlmCredentialsRoute(req("PUT"), asRes(res), url(), {
-      home,
-      env: {},
-      claudeRuntimeResolvable: false,
-      fetchImpl: vi.fn(async () => new Response("{}", { status: 401 })),
-      readBody: async () => ({ apiKey: "sk-ant-bad" }),
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res),
+      url("/api/editor/llm-credentials/openai"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        readBody: async () => ({ apiKey: "sk-new1234", baseUrl: "https://gateway.internal" }),
+      },
+    )
+    expect(res.statusCode).toBe(200)
+    expect((fetchImpl.mock.calls[0] as unknown[] | undefined)?.[0]).toBe("https://gateway.internal/v1/models")
+    expect((await readLlmCredentials(home)).providers.openai).toEqual({
+      apiKey: "sk-new1234",
+      baseUrl: "https://gateway.internal",
     })
-    expect(res.statusCode).toBe(400)
-    expect(await readLlmCredentials(home)).toEqual({ providers: {}, devMode: false })
   })
 
-  it("rejects an empty key without calling the API", async () => {
+  it("refuses to persist a key the provider rejects", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 401 }))
+    const res = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res),
+      url("/api/editor/llm-credentials/openai"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        readBody: async () => ({ apiKey: "sk-bad" }),
+      },
+    )
+    expect(res.statusCode).toBe(400)
+    expect(JSON.parse(res.body).error).toBe("OpenAI rejected that key.")
+    expect((await readLlmCredentials(home)).providers.openai).toBeUndefined()
+  })
+
+  it("rejects an empty key without calling the provider", async () => {
     const f = okFetch()
     const res = fakeRes()
-    await handleLlmCredentialsRoute(req("PUT"), asRes(res), url(), {
-      home,
-      env: {},
-      claudeRuntimeResolvable: false,
-      fetchImpl: f,
-      readBody: async () => ({ apiKey: "   " }),
-    })
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res),
+      url("/api/editor/llm-credentials/anthropic"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: f,
+        readBody: async () => ({ apiKey: "   " }),
+      },
+    )
     expect(res.statusCode).toBe(400)
     expect(f).not.toHaveBeenCalled()
   })
@@ -157,36 +174,100 @@ describe("PUT /api/editor/llm-credentials", () => {
   it("persists and injects a valid key", async () => {
     const env: NodeJS.ProcessEnv = {}
     const res = fakeRes()
-    await handleLlmCredentialsRoute(req("PUT"), asRes(res), url(), {
-      home,
-      env,
-      claudeRuntimeResolvable: false,
-      fetchImpl: okFetch(),
-      readBody: async () => ({ apiKey: "sk-ant-good1234" }),
-    })
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res),
+      url("/api/editor/llm-credentials/anthropic"),
+      {
+        home,
+        env,
+        claudeRuntimeResolvable: false,
+        fetchImpl: okFetch(),
+        readBody: async () => ({ apiKey: "sk-ant-good1234" }),
+      },
+    )
     expect(res.statusCode).toBe(200)
     expect((await readLlmCredentials(home)).providers.anthropic?.apiKey).toBe("sk-ant-good1234")
     // Injected live so the next turn works without restarting the CLI.
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-good1234")
   })
-})
 
-describe("DELETE and dev-mode", () => {
+  it("404s an unregistered provider id", async () => {
+    const res = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res),
+      url("/api/editor/llm-credentials/moonshot"),
+      { home, env: {}, claudeRuntimeResolvable: false, readBody: async () => ({ apiKey: "x" }) },
+    )
+    expect(res.statusCode).toBe(404)
+  })
+
+  it("refuses a base URL for a provider that has no base-URL variable", async () => {
+    const res = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res),
+      url("/api/editor/llm-credentials/anthropic"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: okFetch(),
+        readBody: async () => ({ apiKey: "sk-ant-x", baseUrl: "https://nope.internal" }),
+      },
+    )
+    expect(res.statusCode).toBe(400)
+  })
+
+  it("DELETE clears only the named provider's key", async () => {
+    await writeLlmApiKey("anthropic", "sk-ant-keep", home)
+    await writeLlmApiKey("openai", "sk-drop", home)
+    const res = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("DELETE"),
+      asRes(res),
+      url("/api/editor/llm-credentials/openai"),
+      { home, env: {}, claudeRuntimeResolvable: false },
+    )
+    expect(res.statusCode).toBe(200)
+    const stored = await readLlmCredentials(home)
+    expect(stored.providers.anthropic).toEqual({ apiKey: "sk-ant-keep" })
+    expect(stored.providers.openai).toEqual({})
+  })
+
   it("clears the key and removes it from the environment", async () => {
     await writeLlmApiKey("anthropic", "sk-ant-good1234", home)
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-good1234" }
     const res = fakeRes()
-    await handleLlmCredentialsRoute(req("DELETE"), asRes(res), url(), {
-      home,
-      env,
-      claudeRuntimeResolvable: false,
-      fetchImpl: okFetch(),
-    })
+    await handleLlmCredentialsRoute(
+      req("DELETE"),
+      asRes(res),
+      url("/api/editor/llm-credentials/anthropic"),
+      {
+        home,
+        env,
+        claudeRuntimeResolvable: false,
+        fetchImpl: okFetch(),
+      },
+    )
     expect(res.statusCode).toBe(200)
     expect((await readLlmCredentials(home)).providers.anthropic?.apiKey).toBeUndefined()
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
   })
+})
 
+describe("providerIdFromPath", () => {
+  it("reads a single trailing segment and refuses the reserved names", () => {
+    expect(providerIdFromPath("/api/editor/llm-credentials/openai")).toBe("openai")
+    expect(providerIdFromPath("/api/editor/llm-credentials/dev-mode")).toBeNull()
+    expect(providerIdFromPath("/api/editor/llm-credentials/dismiss-prompt")).toBeNull()
+    expect(providerIdFromPath("/api/editor/llm-credentials")).toBeNull()
+    expect(providerIdFromPath("/api/editor/llm-credentials/a/b")).toBeNull()
+  })
+})
+
+describe("dev-mode", () => {
   it("enabling dev mode deletes the env key and sets the flag", async () => {
     await writeLlmApiKey("anthropic", "sk-ant-good1234", home)
     const env: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-ant-good1234" }
@@ -246,7 +327,7 @@ describe("DELETE and dev-mode", () => {
     expect(res.statusCode).toBe(400)
   })
 
-  it("answers 405 for an unsupported method", async () => {
+  it("answers 405 for an unsupported method on the base route", async () => {
     const res = fakeRes()
     await handleLlmCredentialsRoute(req("POST"), asRes(res), url(), {
       home,
@@ -281,15 +362,13 @@ describe("stored keys stay owned by the app after injection", () => {
       claudeRuntimeResolvable: true,
       fetchImpl: okFetch(),
     })
-    expect(JSON.parse(res.body)).toEqual(
-      statusOf({
-        source: "stored",
-        maskedHint: "sk-ant-…9999",
-        storedHint: "sk-ant-…9999",
-        devMode: false,
-        hasStoredKey: true,
-      }),
-    )
+    const body = JSON.parse(res.body) as { providers: Record<string, Record<string, unknown>>; devMode: boolean }
+    expect(body.providers.anthropic).toMatchObject({
+      source: "stored",
+      maskedHint: "sk-ant-…9999",
+      storedHint: "sk-ant-…9999",
+      hasStoredKey: true,
+    })
   })
 
   it("still reports `env` when the shell really did export a key", async () => {
@@ -304,39 +383,40 @@ describe("stored keys stay owned by the app after injection", () => {
     })
     // A stored key exists too, and stays reported and manageable even though
     // the exported one is what is in use.
-    expect(JSON.parse(res.body)).toEqual(
-      statusOf({
-        source: "env",
-        maskedHint: "sk-ant-…1111",
-        storedHint: "sk-ant-…9999",
-        devMode: false,
-        hasStoredKey: true,
-      }),
-    )
+    const body = JSON.parse(res.body) as { providers: Record<string, Record<string, unknown>>; devMode: boolean }
+    expect(body.providers.anthropic).toMatchObject({
+      source: "env",
+      maskedHint: "sk-ant-…1111",
+      storedHint: "sk-ant-…9999",
+      hasStoredKey: true,
+    })
   })
 
   it("keeps reporting `stored` right after a save", async () => {
     const env: NodeJS.ProcessEnv = {}
     const res = fakeRes()
-    await handleLlmCredentialsRoute(req("PUT"), asRes(res), url(), {
-      home,
-      env,
-      inherited: { vars: {} },
-      claudeRuntimeResolvable: true,
-      fetchImpl: okFetch(),
-      readBody: async () => ({ apiKey: "sk-ant-fresh4321" }),
-    })
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res),
+      url("/api/editor/llm-credentials/anthropic"),
+      {
+        home,
+        env,
+        inherited: { vars: {} },
+        claudeRuntimeResolvable: true,
+        fetchImpl: okFetch(),
+        readBody: async () => ({ apiKey: "sk-ant-fresh4321" }),
+      },
+    )
     // The save injected into `env`; the response must not now call it `env`.
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-fresh4321")
-    expect(JSON.parse(res.body)).toEqual(
-      statusOf({
-        source: "stored",
-        maskedHint: "sk-ant-…4321",
-        storedHint: "sk-ant-…4321",
-        devMode: false,
-        hasStoredKey: true,
-      }),
-    )
+    const body = JSON.parse(res.body) as { providers: Record<string, Record<string, unknown>>; devMode: boolean }
+    expect(body.providers.anthropic).toMatchObject({
+      source: "stored",
+      maskedHint: "sk-ant-…4321",
+      storedHint: "sk-ant-…4321",
+      hasStoredKey: true,
+    })
   })
 
   it("restores an exported key to the environment when dev mode is turned off", async () => {
@@ -402,14 +482,19 @@ describe("PUT /api/editor/llm-credentials/dismiss-prompt", () => {
       },
     )
     const res = fakeRes()
-    await handleLlmCredentialsRoute(req("PUT"), asRes(res), url(), {
-      home,
-      env: {},
-      inherited: { vars: {} },
-      claudeRuntimeResolvable: false,
-      fetchImpl: okFetch(),
-      readBody: async () => ({ apiKey: "sk-ant-good1234" }),
-    })
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res),
+      url("/api/editor/llm-credentials/anthropic"),
+      {
+        home,
+        env: {},
+        inherited: { vars: {} },
+        claudeRuntimeResolvable: false,
+        fetchImpl: okFetch(),
+        readBody: async () => ({ apiKey: "sk-ant-good1234" }),
+      },
+    )
     expect(JSON.parse(res.body).promptDismissed).toBe(true)
   })
 

@@ -6,7 +6,10 @@ import {
   type CredentialSource,
 } from "../../../src/editor/llm-providers/credential-probe.js"
 import { isClaudeSubscriptionOptIn } from "../../../src/editor/llm-providers/claude-subscription.js"
-import { ANTHROPIC_DESCRIPTOR } from "../../../src/editor/llm-providers/descriptors/anthropic.js"
+import {
+  PROVIDER_DESCRIPTORS,
+} from "../../../src/editor/llm-providers/provider-registry.js"
+import type { ProviderDescriptor } from "../../../src/editor/llm-providers/provider-descriptor.js"
 import { applyLlmCredentialsToEnv } from "./apply-llm-credentials.js"
 import { inheritedLlmEnv, type InheritedLlmEnv } from "./inherited-llm-env.js"
 import { readJsonBody } from "./http-body.js"
@@ -17,49 +20,82 @@ import {
   setLlmDevMode,
   setPromptDismissed,
   writeLlmApiKey,
+  writeLlmBaseUrl,
 } from "./llm-credential-store.js"
 
 /**
- * `/api/editor/llm-credentials` — the Anthropic API key surface.
+ * `/api/editor/llm-credentials` — the provider credential surface.
  *
  * Served by the CLI rather than through Electron IPC on purpose: the desktop
  * app loads the CLI's own URL, so one implementation covers both the packaged
  * app and a terminal user in a browser tab. An IPC-only surface would leave
  * terminal users with nothing, which is half the gap this work closes.
  *
- * **The full key never appears in a response.** GET returns the source, a
- * masked hint, and the dev-mode flag. There is deliberately no read-back
- * route: a stored key is write-only from the client's point of view.
+ * **The full key never appears in a response.** GET returns, per provider,
+ * the source, a masked hint, and the dev-mode flag. There is deliberately no
+ * read-back route: a stored key is write-only from the client's point of
+ * view.
  */
 
 export const LLM_CREDENTIALS_ROUTE = "/api/editor/llm-credentials"
 export const LLM_CREDENTIALS_DEV_MODE_ROUTE = `${LLM_CREDENTIALS_ROUTE}/dev-mode`
 export const LLM_CREDENTIALS_DISMISS_ROUTE = `${LLM_CREDENTIALS_ROUTE}/dismiss-prompt`
+export const LLM_CREDENTIALS_PROVIDER_ROUTE = `${LLM_CREDENTIALS_ROUTE}/:providerId`
 
-const ANTHROPIC_VALIDATE_URL = "https://api.anthropic.com/v1/models?limit=1"
-const ANTHROPIC_VERSION = "2023-06-01"
-const VALIDATE_TIMEOUT_MS = 10_000
+/** Names that are sub-resources of the base route, not provider ids. */
+const RESERVED_SEGMENTS = new Set(["dev-mode", "dismiss-prompt"])
 
-export interface LlmCredentialsStatus {
-  /** Which credential is ACTIVE right now. */
+/**
+ * The provider id in `/api/editor/llm-credentials/<id>`, or null.
+ *
+ * Exported so `http-server.ts`'s route matcher and this handler decide
+ * membership with the SAME function. Two copies of a path predicate is how a
+ * route ends up registered for paths its handler refuses, or the reverse.
+ */
+export function providerIdFromPath(pathname: string): string | null {
+  const prefix = `${LLM_CREDENTIALS_ROUTE}/`
+  if (!pathname.startsWith(prefix)) return null
+  const rest = pathname.slice(prefix.length)
+  if (rest.length === 0 || rest.includes("/")) return null
+  if (RESERVED_SEGMENTS.has(rest)) return null
+  try {
+    return decodeURIComponent(rest)
+  } catch {
+    return null
+  }
+}
+
+export interface ProviderCredentialStatus {
+  id: string
+  label: string
+  /** Which credential is ACTIVE for this provider right now. */
   source: CredentialSource
-  /** Masked form of the active credential, when it is a key. */
   maskedHint?: string
-  devMode: boolean
   /**
-   * Whether a key sits in the app's own store, independent of `source`.
-   *
-   * Needed because `source` answers "what is in use", and dev mode makes that
-   * `subscription` even while a stored key waits behind it. Gating the Remove
-   * control on `source === "stored"` therefore stranded that key: it could be
-   * neither seen nor removed until dev mode was switched off, contradicting
-   * the spec's §5, which requires key management to stay available in dev
-   * mode.
+   * Whether a key sits in the app's own store, independent of `source`. Dev
+   * mode makes Anthropic's source `subscription` even while a stored key waits
+   * behind it, and gating Remove on the source stranded that key.
    */
   hasStoredKey: boolean
-  /** Masked form of the STORED key, whether or not it is the active one. */
   storedHint?: string
-  /** First-run prompt dismissal, held machine-level. See the store. */
+  baseUrl?: string
+  apiKeyEnvVar: string
+  baseUrlEnvVar?: string
+  consoleUrl: string
+  maskPrefix: string
+  /** Whether the dev-mode row belongs in this provider's tab. Anthropic only. */
+  hasSubscriptionRuntime: boolean
+}
+
+export interface LlmCredentialsStatus {
+  /**
+   * One entry per descriptor, built in registration order. Insertion order
+   * survives `JSON.stringify` and `JSON.parse` for non-numeric keys, so the
+   * client can render tabs in this order without a second field.
+   */
+  providers: Record<string, ProviderCredentialStatus>
+  /** Global; Anthropic-only in meaning. */
+  devMode: boolean
   promptDismissed: boolean
 }
 
@@ -72,39 +108,7 @@ export interface LlmCredentialsDeps {
   inherited?: InheritedLlmEnv
   fetchImpl?: typeof fetch
   readBody?: (req: IncomingMessage) => Promise<Record<string, unknown>>
-}
-
-/**
- * Validate against the cheapest authenticated endpoint Anthropic exposes.
- * `/v1/models` is a GET, consumes no tokens, and answers 401 for a bad key.
- *
- * **Fails closed.** A network error rejects rather than accepts. Persisting an
- * unverified key would recreate exactly the failure this validation exists to
- * prevent: a user who believes they are configured and is not.
- */
-export async function validateAnthropicKey(
-  apiKey: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
-  try {
-    const res = await fetchImpl(ANTHROPIC_VALIDATE_URL, {
-      method: "GET",
-      headers: { "x-api-key": apiKey, "anthropic-version": ANTHROPIC_VERSION },
-      signal: AbortSignal.timeout(VALIDATE_TIMEOUT_MS),
-    })
-    if (res.status === 401 || res.status === 403) {
-      return { ok: false, reason: "Anthropic rejected that key." }
-    }
-    if (!res.ok) {
-      return { ok: false, reason: `Anthropic answered ${res.status}. Try again.` }
-    }
-    return { ok: true }
-  } catch {
-    return {
-      ok: false,
-      reason: "Could not reach Anthropic to check the key. Check your connection.",
-    }
-  }
+  descriptors?: readonly ProviderDescriptor[]
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -113,35 +117,55 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body))
 }
 
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+  } catch {
+    return false
+  }
+}
+
 async function buildStatus(
   home: string,
   inherited: InheritedLlmEnv,
   claudeRuntimeResolvable: boolean,
+  descriptors: readonly ProviderDescriptor[],
 ): Promise<LlmCredentialsStatus> {
   const stored = await readLlmCredentials(home)
-  // `inherited.vars[...]`, NOT `process.env.ANTHROPIC_API_KEY`: boot copies a
-  // stored key into that variable, so probing it live reported every stored
-  // key as externally managed and disabled the controls that manage it.
-  const probe = probeCredential({
-    descriptor: ANTHROPIC_DESCRIPTOR,
-    inheritedApiKey: inherited.vars[ANTHROPIC_DESCRIPTOR.credentials.apiKeyEnvVar],
-    stored,
-    claudeRuntimeResolvable,
-    // Either opt-in is sufficient, and they come from different places: dev
-    // mode is a stored setting behind the dialog's hidden toggle, the env var
-    // is what a terminal user exports. Without one of them a resolvable
-    // `claude` runtime no longer counts as a credential, so the first-run
-    // dialog asks for an API key instead of the product quietly running on
-    // whatever subscription the binary happens to hold.
-    subscriptionOptIn: stored.devMode || isClaudeSubscriptionOptIn(process.env),
-  })
-  const storedKey = stored.providers.anthropic?.apiKey?.trim()
+  const subscriptionOptIn = stored.devMode || isClaudeSubscriptionOptIn(process.env)
+  const providers: Record<string, ProviderCredentialStatus> = {}
+  for (const d of descriptors) {
+    // `inherited.vars[...]`, NOT `process.env[...]`: boot copies a stored key
+    // into that variable, so probing it live reported every stored key as
+    // externally managed and disabled the controls that manage it.
+    const probe = probeCredential({
+      descriptor: d,
+      inheritedApiKey: inherited.vars[d.credentials.apiKeyEnvVar],
+      stored,
+      claudeRuntimeResolvable,
+      subscriptionOptIn,
+    })
+    const slot = stored.providers[d.id]
+    const storedKey = slot?.apiKey?.trim()
+    providers[d.id] = {
+      id: d.id,
+      label: d.label,
+      source: probe.credentialed ? probe.source : "none",
+      ...("maskedHint" in probe ? { maskedHint: probe.maskedHint } : {}),
+      hasStoredKey: Boolean(storedKey),
+      ...(storedKey ? { storedHint: maskKey(storedKey, d.credentials.maskPrefix) } : {}),
+      ...(slot?.baseUrl ? { baseUrl: slot.baseUrl } : {}),
+      apiKeyEnvVar: d.credentials.apiKeyEnvVar,
+      ...(d.credentials.baseUrlEnvVar ? { baseUrlEnvVar: d.credentials.baseUrlEnvVar } : {}),
+      consoleUrl: d.credentials.consoleUrl,
+      maskPrefix: d.credentials.maskPrefix,
+      hasSubscriptionRuntime: d.credentials.hasSubscriptionRuntime === true,
+    }
+  }
   return {
-    source: probe.credentialed ? probe.source : "none",
-    ...("maskedHint" in probe ? { maskedHint: probe.maskedHint } : {}),
+    providers,
     devMode: stored.devMode,
-    hasStoredKey: Boolean(storedKey),
-    ...(storedKey ? { storedHint: maskKey(storedKey, ANTHROPIC_DESCRIPTOR.credentials.maskPrefix) } : {}),
     promptDismissed: await readPromptDismissed(home),
   }
 }
@@ -172,6 +196,7 @@ export async function handleLlmCredentialsRoute(
   const env = deps.env ?? process.env
   const runtimeResolvable = deps.claudeRuntimeResolvable ?? false
   const inherited = deps.inherited ?? inheritedLlmEnv()
+  const descriptors = deps.descriptors ?? PROVIDER_DESCRIPTORS
   const readBody =
     deps.readBody ??
     ((r: IncomingMessage) => readJsonBody<Record<string, unknown>>(r))
@@ -189,7 +214,7 @@ export async function handleLlmCredentialsRoute(
       }
       await setLlmDevMode(body.devMode, home)
       await reapplyEnv(home, env, inherited)
-      sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable))
+      sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable, descriptors))
       return
     }
 
@@ -204,7 +229,65 @@ export async function handleLlmCredentialsRoute(
         return
       }
       await setPromptDismissed(body.dismissed, home)
-      sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable))
+      sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable, descriptors))
+      return
+    }
+
+    const providerId = providerIdFromPath(url.pathname)
+    if (providerId !== null) {
+      const descriptor = descriptors.find((d) => d.id === providerId)
+      if (!descriptor) {
+        sendJson(res, 404, { error: `Unknown provider '${providerId}'.` })
+        return
+      }
+      if (req.method === "PUT") {
+        const body = await readBody(req)
+        const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : ""
+        if (!apiKey) {
+          sendJson(res, 400, { error: "`apiKey` must be a non-empty string." })
+          return
+        }
+        let baseUrl: string | undefined
+        if (body.baseUrl !== undefined && body.baseUrl !== "") {
+          if (!descriptor.credentials.baseUrlEnvVar) {
+            sendJson(res, 400, {
+              error: `${descriptor.label} does not take a base URL.`,
+            })
+            return
+          }
+          if (typeof body.baseUrl !== "string" || !isHttpUrl(body.baseUrl)) {
+            sendJson(res, 400, { error: "`baseUrl` must be an absolute http or https URL." })
+            return
+          }
+          baseUrl = body.baseUrl.trim()
+        }
+        const validation = await descriptor.validateKey({
+          apiKey,
+          ...(baseUrl ? { baseUrl } : {}),
+          fetchImpl: deps.fetchImpl ?? fetch,
+        })
+        if (!validation.ok) {
+          sendJson(res, 400, { error: validation.message ?? "That key was not accepted." })
+          return
+        }
+        await writeLlmApiKey(descriptor.id, apiKey, home)
+        if (descriptor.credentials.baseUrlEnvVar) {
+          await writeLlmBaseUrl(descriptor.id, baseUrl, home)
+        }
+        await reapplyEnv(home, env, inherited)
+        sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable, descriptors))
+        return
+      }
+      if (req.method === "DELETE") {
+        // The key only. A base URL is a routing choice, not a secret, and
+        // dropping it on "Remove key" would silently re-point the next key at
+        // the public endpoint.
+        await clearLlmApiKey(descriptor.id, home)
+        await reapplyEnv(home, env, inherited)
+        sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable, descriptors))
+        return
+      }
+      sendJson(res, 405, { error: "Method not allowed." })
       return
     }
 
@@ -221,32 +304,7 @@ export async function handleLlmCredentialsRoute(
       // editor pick the change up on its next load rather than at restart.
       // Residual, accepted: a process whose UI is never reloaded stays stale.
       await reapplyEnv(home, env, inherited)
-      sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable))
-      return
-    }
-
-    if (req.method === "PUT") {
-      const body = await readBody(req)
-      const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : ""
-      if (!apiKey) {
-        sendJson(res, 400, { error: "`apiKey` must be a non-empty string." })
-        return
-      }
-      const validation = await validateAnthropicKey(apiKey, deps.fetchImpl ?? fetch)
-      if (!validation.ok) {
-        sendJson(res, 400, { error: validation.reason })
-        return
-      }
-      await writeLlmApiKey("anthropic", apiKey, home)
-      await reapplyEnv(home, env, inherited)
-      sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable))
-      return
-    }
-
-    if (req.method === "DELETE") {
-      await clearLlmApiKey("anthropic", home)
-      await reapplyEnv(home, env, inherited)
-      sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable))
+      sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable, descriptors))
       return
     }
 
