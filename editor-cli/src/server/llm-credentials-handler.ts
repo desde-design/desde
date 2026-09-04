@@ -271,7 +271,12 @@ export async function handleLlmCredentialsRoute(
           return
         }
         await writeLlmApiKey(descriptor.id, apiKey, home)
-        if (descriptor.credentials.baseUrlEnvVar) {
+        // Only touch the stored base URL when this request actually supplied
+        // one (a real value to set, or "" to clear it). A key-only PUT
+        // (`body.baseUrl === undefined`) must leave any previously stored
+        // base URL alone, not wipe it via a local `baseUrl` that is
+        // unconditionally undefined for this request.
+        if (descriptor.credentials.baseUrlEnvVar && body.baseUrl !== undefined) {
           await writeLlmBaseUrl(descriptor.id, baseUrl, home)
         }
         await reapplyEnv(home, env, inherited)

@@ -132,6 +132,48 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
     })
   })
 
+  it("a key-only PUT does not wipe a previously stored base URL", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }))
+    const res1 = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res1),
+      url("/api/editor/llm-credentials/openai"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        readBody: async () => ({ apiKey: "sk-first1234", baseUrl: "https://gateway.internal" }),
+      },
+    )
+    expect(res1.statusCode).toBe(200)
+    expect((await readLlmCredentials(home)).providers.openai).toEqual({
+      apiKey: "sk-first1234",
+      baseUrl: "https://gateway.internal",
+    })
+
+    // Re-save just the key (e.g. rotating it) without resending baseUrl.
+    const res2 = fakeRes()
+    await handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res2),
+      url("/api/editor/llm-credentials/openai"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        readBody: async () => ({ apiKey: "sk-second5678" }),
+      },
+    )
+    expect(res2.statusCode).toBe(200)
+    expect((await readLlmCredentials(home)).providers.openai).toEqual({
+      apiKey: "sk-second5678",
+      baseUrl: "https://gateway.internal",
+    })
+  })
+
   it("refuses to persist a key the provider rejects", async () => {
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 401 }))
     const res = fakeRes()
