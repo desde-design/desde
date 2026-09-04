@@ -166,6 +166,43 @@ describe('the request body a json_schema lane puts on the wire', () => {
   })
 })
 
+describe('prompt retention (the reason this lane runs on the Responses API)', () => {
+  it('sends store: false on a completion, so the vendor keeps no copy of the prompt', async () => {
+    const { fetchImpl, bodies } = recordingFetch('hello')
+    const provider = buildOpenAiProvider({ apiKey: 'sk-not-a-real-key', fetchImpl })
+    await provider.complete({ system: 'sys', user: 'usr' })
+    expect(bodies[0]!.store).toBe(false)
+  })
+
+  it('sends store: false on a conversation step too, where the repo file contents ride', async () => {
+    const { fetchImpl, bodies } = recordingFetch('hello')
+    const provider = buildOpenAiProvider({ apiKey: 'sk-not-a-real-key', fetchImpl })
+    for await (const _ of provider.streamConversation({
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [],
+    })) {
+      // drain
+    }
+    expect(bodies[0]!.store).toBe(false)
+  })
+
+  it('keeps store: false when a turn also carries the descriptor effort options', async () => {
+    const { fetchImpl, bodies } = recordingFetch('hello')
+    const provider = buildOpenAiProvider({ apiKey: 'sk-not-a-real-key', fetchImpl })
+    for await (const _ of provider.streamConversation({
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [],
+      providerOptions: { reasoningEffort: 'high' },
+    })) {
+      // drain
+    }
+    expect(bodies[0]!.store).toBe(false)
+    expect(bodies[0]!.reasoning).toMatchObject({ effort: 'high' })
+  })
+})
+
 describe('every json_schema call site in the repo', () => {
   it.each([
     ['apply-llm-patch', PATCH_SCHEMA as unknown as JsonObject],

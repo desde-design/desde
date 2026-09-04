@@ -86,6 +86,14 @@ export interface AiSdkProviderOptions {
    * options up.
    */
   providerOptionsKey: string
+  /**
+   * Provider options sent on EVERY request, before a caller's per-turn ones
+   * are merged over them. This is where a vendor posture that must not depend
+   * on a call site remembering it belongs — OpenAI's `store: false`, which
+   * keeps the user's prompts and source excerpts out of the vendor's
+   * retention, is set here for exactly that reason.
+   */
+  defaultProviderOptions?: Record<string, JSONValue>
 }
 
 export class AiSdkProvider implements LLMProvider {
@@ -93,12 +101,31 @@ export class AiSdkProvider implements LLMProvider {
   readonly defaultModel: string
   private readonly languageModel: (modelId: string) => LanguageModel
   private readonly providerOptionsKey: string
+  private readonly defaultProviderOptions: Record<string, JSONValue> | undefined
 
   constructor(opts: AiSdkProviderOptions) {
     this.name = opts.name
     this.defaultModel = opts.defaultModel
     this.languageModel = opts.languageModel
     this.providerOptionsKey = opts.providerOptionsKey
+    this.defaultProviderOptions = opts.defaultProviderOptions
+  }
+
+  /**
+   * The `providerOptions` argument for one request: the build-time defaults
+   * with the caller's per-turn options merged over them, nested under the
+   * key the SDK package looks its own options up by. Omitted entirely when
+   * there is nothing to send, so a request that needs none carries none.
+   */
+  private providerOptionsFor(
+    perRequest?: Record<string, unknown>,
+  ): { providerOptions?: Record<string, Record<string, JSONValue>> } {
+    const merged = {
+      ...(this.defaultProviderOptions ?? {}),
+      ...((perRequest ?? {}) as Record<string, JSONValue>),
+    }
+    if (Object.keys(merged).length === 0) return {}
+    return { providerOptions: { [this.providerOptionsKey]: merged } }
   }
 
   async complete(opts: CompleteOpts): Promise<CompleteResult> {
@@ -109,6 +136,7 @@ export class AiSdkProvider implements LLMProvider {
       prompt: flattenToString(opts.user),
       maxOutputTokens: opts.maxTokens ?? 8000,
       abortSignal: opts.signal,
+      ...this.providerOptionsFor(),
     }
     try {
       if (opts.responseFormat?.kind === 'json_schema') {
@@ -162,6 +190,7 @@ export class AiSdkProvider implements LLMProvider {
       prompt: flattenToString(opts.user),
       maxOutputTokens: opts.maxTokens ?? 8000,
       abortSignal: opts.signal,
+      ...this.providerOptionsFor(),
       ...(opts.responseFormat?.kind === 'json_schema'
         ? {
             output: Output.object({
@@ -202,13 +231,7 @@ export class AiSdkProvider implements LLMProvider {
       // only the descriptor that produced it knows what its own vendor accepts.
       // The SDK wants JSON, and a wrong value is a 400 with the vendor's own
       // message, which is the error we want the user to read.
-      ...(opts.providerOptions
-        ? {
-            providerOptions: {
-              [this.providerOptionsKey]: opts.providerOptions as Record<string, JSONValue>,
-            },
-          }
-        : {}),
+      ...this.providerOptionsFor(opts.providerOptions),
       abortSignal: opts.signal,
     })
 
