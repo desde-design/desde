@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdirSync, symlinkSync } from 'node:fs'
 import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
@@ -1173,6 +1173,36 @@ describe('brokeredWrite', () => {
       expect(result.reason).toContain('App.vue')
       // Nothing mutated.
       expect(readFileSync(join(root, 'App.vue'), 'utf8')).toBe('ACTUALLY-ON-DISK')
+    })
+
+    it('leaves no backup directory behind for a precondition refusal', async () => {
+      // 2026-09-04 adversarial review, P3-1. The journal is written BEFORE the
+      // locks, so a precondition refusal — decided inside the locks, before
+      // any mutation — used to return leaving a directory on disk holding
+      // bytes that were never the pre-write state of anything.
+      writeFileSync(join(root, 'App.vue'), 'ACTUALLY-ON-DISK')
+
+      const result = await brokeredWrite({
+        canonicalRoot: root,
+        journal: [{ file: 'App.vue', content: 'ACTUALLY-ON-DISK' }],
+        ops: [{ kind: 'write', repoRel: 'App.vue', absPath: join(root, 'App.vue'), content: 'AFTER' }],
+        lockManager,
+        preconditions: [
+          {
+            repoRel: 'App.vue',
+            absPath: join(root, 'App.vue'),
+            expect: { exists: true, content: Buffer.from('STALE-EXPECTATION') },
+          },
+        ],
+      })
+
+      expect(result.ok).toBe(false)
+      expect(readFileSync(join(root, 'App.vue'), 'utf8')).toBe('ACTUALLY-ON-DISK')
+      // The `backups` tree may exist from an earlier write in this file's
+      // fixture, so the assertion is that it holds no directory, not that it
+      // is absent.
+      const backupsDir = join(root, '.desde/backups')
+      expect(existsSync(backupsDir) ? readdirSync(backupsDir) : []).toEqual([])
     })
 
     it('existence mismatch (expected present, now absent) refuses', async () => {

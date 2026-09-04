@@ -142,6 +142,18 @@ async function applyWrite(
       },
     ],
     ...(opts.invalidateFiles ? { invalidate: opts.invalidateFiles } : {}),
+    // The ack is awaited AFTER the bytes are on disk, and that is deliberate.
+    // It differs from the SDK lane's BUILT-IN Write/Edit, where a failed ack
+    // is a `deny` in the permission gate and the write never happens — but
+    // that lane has no other option: the SDK owns the write syscall, so the
+    // gate is the only place it can intervene. Every tool that performs its
+    // OWN write through `brokeredWrite` acks afterwards, including all six of
+    // the SDK lane's structural tools (`fs-structural-tools.ts`, which report
+    // the same "the change IS on disk" on a failed ack). Acking first here
+    // would make Write and Edit the odd pair on their own lane, and would
+    // record an edit proposal and persist its blob for a write the broker's
+    // precondition check may then refuse. Raised as P3-2 in the 2026-09-04
+    // adversarial review and kept as it stands for those reasons.
     emit: () =>
       opts.emitEdit({
         type: 'overwrite',

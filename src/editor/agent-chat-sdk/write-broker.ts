@@ -67,11 +67,11 @@
 
 import { randomUUID } from 'node:crypto'
 import { constants as fsConstants, existsSync } from 'node:fs'
-import { lstat, mkdir, open, readFile, realpath, rename as fsRename, unlink, writeFile } from 'node:fs/promises'
-import { dirname, sep as pathSep } from 'node:path'
+import { lstat, mkdir, open, readFile, realpath, rename as fsRename, rm, unlink, writeFile } from 'node:fs/promises'
+import { basename, dirname, sep as pathSep } from 'node:path'
 
 import { isProtectedAgentPath, protectedPathDenial } from './protected-paths'
-import { DesdeDirSymlinkError } from '../worktree/desde-dir'
+import { desdeRemovalPath, DesdeDirSymlinkError } from '../worktree/desde-dir'
 
 import {
   getSharedFileLockManager,
@@ -718,6 +718,39 @@ export async function brokeredWrite<E = void>(
   }
 }
 
+/**
+ * Remove the backup directory this batch wrote, best effort.
+ *
+ * A refusal that never touched a file must leave no journal behind. The
+ * journal is written BEFORE the locks (so a caller bug cannot leave a
+ * half-written file with no recoverable original), which means a precondition
+ * refusal — decided inside the locks, before any mutation — has already
+ * created a directory holding bytes that were never the pre-write state of
+ * anything (2026-09-04 adversarial review, P3-1). `containment.test.ts`
+ * asserted the no-orphan rule only for a containment refusal, which is
+ * refused before the journal is written and so never got this far.
+ *
+ * Never fatal. The write did not happen either way, and `backups-gc` sweeps a
+ * directory this fails to remove.
+ */
+async function discardBackupDir(canonicalRoot: string, backupDirRel: string): Promise<void> {
+  try {
+    // Re-resolved immediately before the `rm`, the same discipline
+    // `backups-gc` follows: this is a RECURSIVE delete and
+    // `desdeRemovalPath` refuses a target that resolves outside the repo.
+    await rm(desdeRemovalPath(canonicalRoot, 'backups', basename(backupDirRel)), {
+      recursive: true,
+      force: true,
+    })
+  } catch (err) {
+    console.warn(
+      `brokeredWrite: could not remove the backup directory left by a refused write: ${
+        (err as Error).message
+      }`,
+    )
+  }
+}
+
 async function brokeredWriteImpl<E = void>(
   opts: BrokeredWriteOptions<E>,
 ): Promise<BrokeredWriteResult<E>> {
@@ -1065,6 +1098,9 @@ async function brokeredWriteImpl<E = void>(
     // may propagate.
     const attribution = attributeFailure((err as NodeJS.ErrnoException)?.path)
     if (attribution.kind === 'precondition') {
+      // Lock acquisition threw, so nothing was mutated. Same no-orphan rule as
+      // the precondition refusal below.
+      if (opts.journal.length > 0) await discardBackupDir(opts.canonicalRoot, backup.backupDir)
       return {
         ok: false,
         stage: 'precondition',
@@ -1092,7 +1128,9 @@ async function brokeredWriteImpl<E = void>(
     // No backup/rollback bookkeeping to report: nothing was written, and
     // — critically — the `record` block below is never reached from this
     // return, so a failed precondition can never record a bogus undo/redo
-    // step for a batch that didn't happen.
+    // step for a batch that didn't happen. The journal directory the batch
+    // wrote before taking its locks goes with it — see `discardBackupDir`.
+    if (opts.journal.length > 0) await discardBackupDir(opts.canonicalRoot, backup.backupDir)
     return {
       ok: false,
       stage: 'precondition',

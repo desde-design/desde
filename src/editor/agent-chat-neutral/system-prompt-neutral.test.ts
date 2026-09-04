@@ -40,6 +40,16 @@ describe('buildNeutralSystemPrompt', () => {
     expect(p).toContain('must appear EXACTLY ONCE')
   })
 
+  it('tells the model a stale write is REFUSED, which is what this lane does', () => {
+    // 2026-09-04 adversarial review, P3-3. The sentence used to say the write
+    // "still lands", which is the SDK lane's auto-apply contract. On this lane
+    // `builtin-edit.ts`'s precondition refuses it, so the model was being told
+    // the opposite of what happens and had no reason to re-read the file.
+    const p = buildNeutralSystemPrompt({ writeToolsEnabled: true })
+    expect(p).not.toContain('your write still lands')
+    expect(p).toContain('the write is REFUSED and nothing is modified')
+  })
+
   it('interpolates the SAME extension set the gate enforces', () => {
     const p = buildNeutralSystemPrompt({ writeToolsEnabled: true })
     for (const ext of ALLOWED_NEW_FILE_EXTENSIONS) {

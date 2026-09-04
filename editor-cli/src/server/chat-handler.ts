@@ -245,14 +245,48 @@ interface LiveTurn {
    * cut the live transcript at accept time while hydration replays the
    * delivery position, and the two would disagree.
    *
-   * Set once the lane is known (`resolveChatRuntimeKind`, below), which is
-   * after this entry is registered. A steer accepted in that window is the
-   * pre-dispatch case: `false` is right for it, because no runtime has started
-   * to emit anything yet.
+   * Set when this entry is CREATED, from the provider the request names (or
+   * the default when it names none), so the very first steer the route accepts
+   * already gets the right answer. It used to be set after the runtime was
+   * resolved, many awaits later, and a steer accepted in that window drew two
+   * bubbles on the neutral lane: one from the route, one from the runtime at
+   * delivery (2026-09-04 adversarial review, P2-2).
    */
   runtimeEmitsSteered: boolean
+  /**
+   * False until the turn's provider has been resolved with its FULL
+   * precedence — request config, then the session's persisted config, then the
+   * default. Only the first and third are in hand when this entry is created,
+   * so a session whose persisted model sits on the other lane can still flip
+   * `runtimeEmitsSteered` once, right after the session loads.
+   */
+  laneConfirmed: boolean
+  /**
+   * The `steered` frames the route BUILT while `laneConfirmed` was false,
+   * whether or not it emitted them.
+   *
+   * Kept so the one-frame-per-steer invariant survives that flip. If the lane
+   * turns out to be neutral the route already announced these and the runtime
+   * will announce them again, so the runtime's duplicates are dropped; if it
+   * turns out to be the SDK lane the route stood down for a runtime that emits
+   * nothing, so these are sent then. Emptied at confirmation.
+   */
+  setupSteerFrames: ChatStreamEvent[]
 }
 const liveTurns = new Map<string, LiveTurn>()
+
+/**
+ * The provider a turn runs on when nothing names one. Read from env only, so
+ * it is available both at live-turn registration (before the session loads)
+ * and again once the effective model config is known — and the two can never
+ * disagree about the default, only about what overrides it.
+ */
+function defaultProviderIdFromEnv(): string {
+  return resolveDefaultProviderId({
+    env: process.env,
+    isCredentialed: (d) => isCredentialedFromEnv(d, process.env),
+  })
+}
 
 /**
  * Test hook: clear the active-turn set between tests. Clears the live-channel
@@ -629,6 +663,10 @@ export async function handleChatRequest(
   // itself ran on — the `const` inside the try is a sibling block scope
   // to the catch, not a parent, so the catch can't see it otherwise.
   let turnProviderId: string | undefined
+  // Set only on the rare turn whose lane changes at session load (see the
+  // reconciliation below). Counts the `steered` frames the neutral runtime is
+  // about to repeat because the route already announced them.
+  let suppressRuntimeSteered = 0
   try {
     stream = openSseStream(req, res)
     // Surface the resolved sessionId as the very first SSE event so the
@@ -644,13 +682,22 @@ export async function handleChatRequest(
     // the turn runtime seeds it via `begin()` — and a steer accepted before
     // then simply waits behind it. See `turn-input-channel.ts`.
     turnChannel = createTurnInputChannel()
+    // Which lane serves this turn decides who announces a steer, so it has to
+    // be known BEFORE the entry exists — the first steer the route accepts
+    // already needs the answer. Both inputs are in hand here: `modelConfig`
+    // came off the request body above, and `resolveDefaultProviderId` reads
+    // only env. The one input that is not is the session's persisted model,
+    // which the reconciliation after the session load corrects for.
+    turnProviderId = requestModelConfig?.provider ?? defaultProviderIdFromEnv()
     liveTurns.set(lockKey, {
       channel: turnChannel,
       emit: (ev) => {
         stream!.send(ev)
       },
       steers: acceptedSteers,
-      runtimeEmitsSteered: false,
+      runtimeEmitsSteered: resolveChatRuntimeKind(turnProviderId, process.env) === "neutral",
+      laneConfirmed: false,
+      setupSteerFrames: [],
     })
 
     const abort = new AbortController()
@@ -776,27 +823,51 @@ export async function handleChatRequest(
     // surface below, so a turn the gate refuses never pays for any of that
     // setup (project knowledge is a filesystem walk, review surface can
     // launch a headless Chromium).
-    turnProviderId =
-      effectiveModelConfig?.provider ??
-      resolveDefaultProviderId({
-        env: process.env,
-        isCredentialed: (d) => isCredentialedFromEnv(d, process.env),
-      })
+    turnProviderId = effectiveModelConfig?.provider ?? defaultProviderIdFromEnv()
     assertChatCredentials(process.env, turnProviderId)
+
+    // The lane is now settled: `effectiveModelConfig` adds the session's
+    // persisted model, the one input the registration above could not see.
+    // Usually it agrees and this does nothing. It disagrees only when a
+    // request carried no `modelConfig` and the session's persisted one names a
+    // provider on the OTHER lane, and then a steer accepted in the meantime
+    // has to be repaired: exactly one `steered` frame must reach the client
+    // per steer, whichever side ends up sending it.
+    {
+      const laneIsNeutral = resolveChatRuntimeKind(turnProviderId, process.env) === "neutral"
+      const liveEntry = liveTurns.get(lockKey)
+      if (liveEntry) {
+        const framesFromSetup = liveEntry.setupSteerFrames
+        liveEntry.setupSteerFrames = []
+        liveEntry.laneConfirmed = true
+        if (liveEntry.runtimeEmitsSteered !== laneIsNeutral) {
+          liveEntry.runtimeEmitsSteered = laneIsNeutral
+          if (laneIsNeutral) {
+            // The route announced each of these; the neutral runtime will
+            // announce them again when it delivers them. Drop that many of
+            // the runtime's frames rather than un-drawing a bubble.
+            suppressRuntimeSteered = framesFromSetup.length
+          } else {
+            // The route stood down for a runtime that emits none, so these
+            // were never announced at all. Send them now, unmodified.
+            //
+            // Not reachable with today's two providers: the guess is neutral
+            // only when the default provider is OpenAI, which happens only
+            // when Anthropic has no credential, and then a persisted Anthropic
+            // model is dropped as uncredentialed before it can move the lane.
+            // Kept because losing a bubble is worse than duplicating one, and
+            // a third provider or a configured default makes it reachable.
+            for (const frame of framesFromSetup) stream.send(frame)
+          }
+        }
+      }
+    }
 
     // One dispatch point. The SDK runtime is still the only one that exists,
     // but which runtime serves a turn is now a decision the descriptor makes
     // rather than a hardcoded import. Only the RESOLUTION happens here — the
     // actual call is below, once `reviewSurface` exists.
     const runChatTurn = await resolveChatRuntime(turnProviderId, loaders)
-    // The lane decides who emits `steered` — see `LiveTurn.runtimeEmitsSteered`.
-    // Read through the same function the dispatch above used, so the route and
-    // the runtime can never disagree about which lane is serving this turn.
-    const liveEntry = liveTurns.get(lockKey)
-    if (liveEntry) {
-      liveEntry.runtimeEmitsSteered =
-        resolveChatRuntimeKind(turnProviderId, process.env) === "neutral"
-    }
 
     // Phase 5 — mark the session in-flight BEFORE the orchestrator
     // runs. Persisted now so a CLI crash mid-turn leaves an
@@ -1097,6 +1168,15 @@ export async function handleChatRequest(
       canvasEnabled: ctx.canvasEnabled,
       awaitEditAck,
       emit: (ev) => {
+        // Normally a straight forward. The one exception is the lane
+        // reconciliation above: when this turn moved onto the neutral lane
+        // after the route had already announced a steer, the runtime is about
+        // to announce the same steer again at delivery, and the client would
+        // draw a second bubble and cut the transcript twice.
+        if (ev.kind === "steered" && suppressRuntimeSteered > 0) {
+          suppressRuntimeSteered--
+          return
+        }
         stream!.send(ev)
       },
       // Already registered as steerable (above, at lock time). The runtime
@@ -1760,13 +1840,18 @@ export async function handleSteerRequest(
   // one `steered` must reach the client per steer, and on that lane the
   // runtime is the side that knows the position the client should cut at. See
   // `LiveTurn.runtimeEmitsSteered`.
+  const frame: ChatStreamEvent = {
+    kind: "steered",
+    sessionId: body.sessionId,
+    userMessage: body.userMessage,
+    imageCount: validatedImages.length,
+  }
+  // Kept, emitted or not, while the turn's lane is still the pre-session
+  // guess. The chat route replays or cancels these once it knows the lane —
+  // see `LiveTurn.setupSteerFrames`.
+  if (!live.laneConfirmed) live.setupSteerFrames.push(frame)
   if (!live.runtimeEmitsSteered) {
-    live.emit({
-      kind: "steered",
-      sessionId: body.sessionId,
-      userMessage: body.userMessage,
-      imageCount: validatedImages.length,
-    })
+    live.emit(frame)
   }
   sendSteerResult(res, 200, { accepted: true })
 }

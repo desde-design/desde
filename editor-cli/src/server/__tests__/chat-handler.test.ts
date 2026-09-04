@@ -1933,13 +1933,27 @@ describe("handleSteerRequest — mid-turn steering", () => {
     onRegistered: () => void
     /** Awaited before the runtime is even loaded — stands in for setup awaits. */
     beforeStart?: Promise<void>
+    /**
+     * Awaited inside the SESSION LOAD, which is earlier still: after the live
+     * turn is registered and before its provider has been resolved with the
+     * session's persisted model. That is the registration window proper, and
+     * `beforeStart` no longer sits inside it.
+     */
+    beforeSessionLoad?: Promise<void>
+    /**
+     * Make the NEUTRAL stub announce each delivered steer itself, the way the
+     * real neutral runtime does at its step boundary. Off by default, so a
+     * test that wants to see whether the ROUTE emitted still can.
+     */
+    neutralEmitsSteered?: { sessionId: string }
+    /** A `modelConfig` to persist on the loaded session. */
+    sessionModelConfig?: { provider: string; model: string }
   }): ChatHandlerLoaders {
     const base = makeLoaders({ scriptedEvents: [] })
     // The same steerable stub serves BOTH lanes, so a test can flip the lane
     // with `EDITOR_CHAT_RUNTIME_OVERRIDE` and still get a turn that accepts a
-    // steer. It emits no `steered` frame of its own on either lane, which is
-    // what lets a test see whether the ROUTE emitted one.
-    const makeRuntime = async () => {
+    // steer.
+    const makeRuntime = async (announceSteers: { sessionId: string } | undefined) => {
         // Awaited HERE, where the real handler awaits session load, project
         // knowledge, web policy and the concurrency-cap queue: after the lock
         // is taken and before the turn runtime runs.
@@ -1965,10 +1979,18 @@ describe("handleSteerRequest — mid-turn steering", () => {
               for await (const m of channel.stream()) {
                 const content = m.message.content
                 const blocks = Array.isArray(content) ? content : []
-                opts.received.push({
-                  text: blocks.map((b) => (b.type === "text" ? b.text : "")).join(""),
-                  imageBlocks: blocks.filter((b) => b.type === "image").length,
-                })
+                const text = blocks.map((b) => (b.type === "text" ? b.text : "")).join("")
+                const imageBlocks = blocks.filter((b) => b.type === "image").length
+                opts.received.push({ text, imageBlocks })
+                // The opening prompt is not a steer; everything after it is.
+                if (announceSteers && opts.received.length > 1) {
+                  callOpts.emit({
+                    kind: "steered",
+                    sessionId: announceSteers.sessionId,
+                    userMessage: text,
+                    imageCount: imageBlocks,
+                  })
+                }
               }
             })()
             callOpts.emit({ kind: "turn_start", turnId: "t-steer" })
@@ -1996,12 +2018,28 @@ describe("handleSteerRequest — mid-turn steering", () => {
     }
     return {
       ...base,
+      loadSessionStore: async () => {
+        const store = await base.loadSessionStore()
+        if (!opts.beforeSessionLoad && !opts.sessionModelConfig) return store
+        return {
+          ...store,
+          loadSession: async (...args: Parameters<typeof store.loadSession>) => {
+            if (opts.beforeSessionLoad) await opts.beforeSessionLoad
+            const loaded = await store.loadSession(...args)
+            if (!opts.sessionModelConfig) return loaded
+            return {
+              ...loaded,
+              session: { ...loaded.session, modelConfig: opts.sessionModelConfig },
+            }
+          },
+        }
+      },
       loadRunChatTurnSdk: async () =>
-        (await makeRuntime()) as unknown as Awaited<
+        (await makeRuntime(undefined)) as unknown as Awaited<
           ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>
         >,
       loadRunChatTurnNeutral: async () => {
-        const { runChatTurnSdk } = await makeRuntime()
+        const { runChatTurnSdk } = await makeRuntime(opts.neutralEmitsSteered)
         return { runChatTurnNeutral: runChatTurnSdk } as unknown as Awaited<
           ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>
         >
@@ -2013,7 +2051,12 @@ describe("handleSteerRequest — mid-turn steering", () => {
   async function startLiveTurn(
     sessionId: string,
     received: DeliveredMessage[],
-    opts: { beforeStart?: Promise<void> } = {},
+    opts: {
+      beforeStart?: Promise<void>
+      beforeSessionLoad?: Promise<void>
+      neutralEmitsSteered?: { sessionId: string }
+      sessionModelConfig?: { provider: string; model: string }
+    } = {},
   ): Promise<{
     turn: MockReqRes
     done: Promise<void>
@@ -2037,9 +2080,12 @@ describe("handleSteerRequest — mid-turn steering", () => {
         finish,
         onRegistered: () => signalStarted(),
         ...(opts.beforeStart ? { beforeStart: opts.beforeStart } : {}),
+        ...(opts.beforeSessionLoad ? { beforeSessionLoad: opts.beforeSessionLoad } : {}),
+        ...(opts.neutralEmitsSteered ? { neutralEmitsSteered: opts.neutralEmitsSteered } : {}),
+        ...(opts.sessionModelConfig ? { sessionModelConfig: opts.sessionModelConfig } : {}),
       }),
     })
-    if (opts.beforeStart) {
+    if (opts.beforeStart || opts.beforeSessionLoad) {
       // The caller is deliberately holding the turn in its setup awaits, so
       // waiting for the runtime would deadlock — the point of that test is
       // that the turn is steerable BEFORE the runtime is reached. Wait instead
@@ -2299,6 +2345,121 @@ describe("handleSteerRequest — mid-turn steering", () => {
       "start the work",
       "wait, use the other component",
     ])
+  })
+
+  it("stands down for the neutral lane even while the turn is still in setup", async () => {
+    // 2026-09-04 adversarial review, P2-2. The live-turn entry used to be
+    // registered with `runtimeEmitsSteered: false` and only corrected once the
+    // runtime had been resolved — after the concurrency-cap wait, the session
+    // load, project knowledge and the web policy. A steer accepted in that
+    // window got a frame from the ROUTE and, later, a second one from the
+    // neutral runtime at delivery. The client draws a bubble and cuts the
+    // transcript on each, so that steer showed up twice.
+    //
+    // The stub runtime emits no `steered` of its own on either lane, so any
+    // frame on this stream came from the route.
+    vi.stubEnv("EDITOR_CHAT_RUNTIME_OVERRIDE", "neutral")
+    try {
+      const received: DeliveredMessage[] = []
+      let releaseSetup: () => void = () => {}
+      const holdSetup = new Promise<void>((resolve) => {
+        releaseSetup = resolve
+      })
+      const { turn, done, release, started } = await startLiveTurn("s-setup-neutral", received, {
+        beforeSessionLoad: holdSetup,
+      })
+
+      const { status } = await steer({
+        sessionId: "s-setup-neutral",
+        userMessage: "typed while it was starting",
+      })
+      expect(status).toBe(200)
+      // The window itself: the runtime has not been reached yet.
+      expect(turn.events().filter((e) => e.kind === "steered")).toEqual([])
+
+      releaseSetup()
+      await started
+      release()
+      await done
+
+      // Still delivered — only the announcement belongs to the other side.
+      expect(received.map((m) => m.text)).toEqual([
+        "start the work",
+        "typed while it was starting",
+      ])
+      expect(turn.events().filter((e) => e.kind === "steered")).toEqual([])
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it("still announces a setup-window steer itself on the SDK lane", async () => {
+    // The control for the case above. The SDK runtime emits no `steered` at
+    // all, so if the route stopped emitting during setup the steer would draw
+    // no bubble at all — a worse failure than the duplicate.
+    const received: DeliveredMessage[] = []
+    let releaseSetup: () => void = () => {}
+    const holdSetup = new Promise<void>((resolve) => {
+      releaseSetup = resolve
+    })
+    const { turn, done, release, started } = await startLiveTurn("s-setup-sdk", received, {
+      beforeSessionLoad: holdSetup,
+    })
+
+    await steer({ sessionId: "s-setup-sdk", userMessage: "typed while it was starting" })
+    releaseSetup()
+    await started
+    release()
+    await done
+
+    expect(turn.events().filter((e) => e.kind === "steered")).toEqual([
+      {
+        kind: "steered",
+        sessionId: "s-setup-sdk",
+        userMessage: "typed while it was starting",
+        imageCount: 0,
+      },
+    ])
+  })
+
+  it("still sends exactly one frame when the persisted model moves the turn onto the neutral lane mid-setup", async () => {
+    // The residual case the registration fix cannot see. The live turn is
+    // registered from the REQUEST's provider (here: none, so the default,
+    // Anthropic — the SDK lane, where the route emits). The session's
+    // persisted model then names OpenAI, which is the neutral lane, where the
+    // runtime emits. A steer accepted in between would otherwise be announced
+    // by both sides.
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    try {
+      const received: DeliveredMessage[] = []
+      let releaseSetup: () => void = () => {}
+      const holdSetup = new Promise<void>((resolve) => {
+        releaseSetup = resolve
+      })
+      const { turn, done, release, started } = await startLiveTurn("s-flip-neutral", received, {
+        beforeSessionLoad: holdSetup,
+        sessionModelConfig: { provider: "openai", model: "gpt-5.6" },
+        neutralEmitsSteered: { sessionId: "s-flip-neutral" },
+      })
+
+      await steer({ sessionId: "s-flip-neutral", userMessage: "typed while it was starting" })
+      // The route emitted, because on the lane it knew about, it is the emitter.
+      expect(turn.events().filter((e) => e.kind === "steered")).toHaveLength(1)
+
+      releaseSetup()
+      await started
+      release()
+      await done
+
+      // And the runtime's own frame for the SAME steer was dropped.
+      expect(turn.events().filter((e) => e.kind === "steered")).toHaveLength(1)
+      expect(received.map((m) => m.text)).toEqual([
+        "start the work",
+        "typed while it was starting",
+      ])
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   it("reports a steer for resubmission when the turn dies before it ever starts", async () => {
