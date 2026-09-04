@@ -973,6 +973,20 @@ export async function publishBranch(
     return { ok: false, reason: `No branch named '${branch}'.` }
   }
 
+  // The `.desde` guard runs BEFORE the auto-commit below, not at the
+  // ephemeral-worktree line further down. It used to run there, and a
+  // refused publish had by then committed the user's uncommitted work onto
+  // their branch — including sweeping the hostile `.desde` symlink into that
+  // commit, since the auto-commit is a `git add -A`. `PublishResult`'s
+  // failure branch carries no `committedBranch`, so nothing could even tell
+  // the user it had happened. Checked here, a refusal leaves the repository
+  // byte-identical.
+  try {
+    desdePath(root)
+  } catch (err) {
+    return { ok: false, reason: `Couldn't prepare publish: ${gitMessage(err)}` }
+  }
+
   // Commit uncommitted edits on the branch first — but only if it IS the
   // checked-out branch (only it has a working tree; a dirty tree while
   // publishing some OTHER branch belongs to the current branch, not this one).
@@ -1316,6 +1330,20 @@ export async function updateBranchFromRef(
   // line (no `sha`) rather than a `commit` line (with one). Documented
   // here so this is the accepted class it already is, not a rediscovery
   // (whole-branch review, 2026-08-18).
+  // Same precondition as `publishBranch`, and for the same reason: the guard
+  // used to run at the ephemeral-worktree line below, so a refusal arrived
+  // with the user's work already committed. Checked here, a refusal leaves
+  // the repository byte-identical.
+  try {
+    desdePath(root)
+  } catch (err) {
+    return {
+      ok: false,
+      committedBranch: false,
+      reason: `Couldn't prepare the update: ${gitMessage(err)}.`,
+    }
+  }
+
   let committedBranch = false
   const current = await currentBranch(root)
   if (branch === current && (await isWorkingTreeDirty(root))) {
