@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest"
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { execFileSync } from "node:child_process"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs"
 import { join, basename } from "node:path"
@@ -1519,5 +1519,67 @@ describe("the edit-fix mini-turn runs on the project's default provider (Task 43
 
     expect(seen).toEqual([{ model: "gpt-5.6", providerId: "openai" }])
     expect(JSON.stringify(result)).not.toMatch(/capability/i)
+  })
+
+  it("dispatches a claude_code (subscription) project to the Anthropic runtime instead of throwing", async () => {
+    // `resolveLlmConfig(...).provider` is `'claude_code'` whenever
+    // EDITOR_USE_CLAUDE_SUBSCRIPTION=1 is set and ANTHROPIC_API_KEY is
+    // unset — the interim gate's deleted check explicitly allowed this id.
+    // `claude_code` has no entry in the provider-registry descriptor table
+    // (it is `resolveLlmConfig`'s synthetic id for the subscription lane),
+    // so a naive `resolveChatRuntime('claude_code', ...)` throws
+    // "no provider named 'claude_code'". It must be mapped onto the
+    // Anthropic runtime instead.
+    const seen: Array<{ model?: string; providerId?: string }> = []
+    const loaders: ApplicatorLoaders = {
+      ...APPLICATORS_REFUSING_BOUND_BINDING,
+      loadRunEditFixMiniTurn: async () =>
+        ({
+          runEditFixMiniTurn: async (input: { model?: string; providerId?: string }) => {
+            seen.push({ model: input.model, providerId: input.providerId })
+            return { outcome: "refused", notes: "not the point of this test" }
+          },
+        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+    } as ApplicatorLoaders
+
+    const result = await applyEdit(boundBindingPropEdit, dir, loaders, undefined, {
+      llmProviderId: "claude_code",
+      chatLoaders: STUB_CHAT_LOADERS,
+    })
+
+    // The raw `claude_code` id still reaches the mini-turn (it's what
+    // `args.llmProviderId` carries) — only the RUNTIME lookup is remapped.
+    expect(seen).toEqual([{ model: "claude-opus-4-8", providerId: "claude_code" }])
+    expect(JSON.stringify(result)).not.toMatch(/capability/i)
+    expect(JSON.stringify(result)).not.toMatch(/no provider named/i)
+  })
+
+  it("turns a resolveChatRuntime failure into a 422 refusal instead of an uncaught throw", async () => {
+    // Before this task, a refused or unknown runtime (e.g.
+    // EDITOR_NEUTRAL_CHAT=0 against an OpenAI project, or any other
+    // resolveChatRuntime throw) surfaced as a clean 422 via
+    // escalateToChatOnRefusal. An unguarded await turned that into an
+    // uncaught exception out of applyEdit. This proves the guard is back:
+    // an unresolvable provider id must not crash the save flow.
+    const runEditFixMiniTurn = vi.fn(async () => ({
+      outcome: "refused" as const,
+      notes: "should never be reached — resolveChatRuntime must throw first",
+    }))
+    const loaders: ApplicatorLoaders = {
+      ...APPLICATORS_REFUSING_BOUND_BINDING,
+      loadRunEditFixMiniTurn: async () =>
+        ({ runEditFixMiniTurn }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+    } as ApplicatorLoaders
+
+    const result = await applyEdit(boundBindingPropEdit, dir, loaders, undefined, {
+      llmProviderId: "not-a-real-provider",
+      chatLoaders: STUB_CHAT_LOADERS,
+    })
+
+    expect(runEditFixMiniTurn).not.toHaveBeenCalled()
+
+    expect(result.ok).toBe(false)
+    expect((result as { status?: number }).status).toBe(422)
+    expect(JSON.stringify(result)).toMatch(/no provider named/i)
   })
 })

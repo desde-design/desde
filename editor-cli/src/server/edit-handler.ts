@@ -21,7 +21,7 @@ import {
 import { checkExtensionGate } from "./edit-extension-gate"
 import { dormantLaneRefusal, type DormantLaneId } from "./enabled-lanes"
 import { resolveLlmConfig } from "./llm-config.js"
-import { resolveChatRuntime } from "./chat-runtime-dispatch.js"
+import { resolveChatRuntime, type RunChatTurn } from "./chat-runtime-dispatch.js"
 import type { ChatHandlerLoaders } from "./chat-handler.js"
 import { getDescriptor } from "../../../src/editor/llm-providers/provider-registry.js"
 
@@ -1813,7 +1813,17 @@ async function tryPropEditLLMFallback(args: {
   // is the id the route already resolved (`resolveLlmConfig` at the CLI
   // route) — trust it when present rather than re-resolving from scratch.
   const providerId = args.llmProviderId ?? resolveLlmConfig(undefined, process.env).provider
-  const descriptor = getDescriptor(providerId)
+  // `claude_code` is `resolveLlmConfig`'s synthetic id for the Claude
+  // subscription lane (opted in via EDITOR_USE_CLAUDE_SUBSCRIPTION, no
+  // ANTHROPIC_API_KEY set) — it has no entry in the provider-registry
+  // descriptor table, because it has always meant "the Anthropic runtime,
+  // reached through the subscription" rather than a distinct provider.
+  // `getDescriptor` and `resolveChatRuntime` only know real descriptor ids,
+  // so map it onto 'anthropic' for those two lookups. `providerId` itself
+  // stays the raw id passed to the mini-turn, since that is what
+  // `args.llmProviderId` already carries for other callers.
+  const runtimeProviderId = providerId === "claude_code" ? "anthropic" : providerId
+  const descriptor = getDescriptor(runtimeProviderId)
   // The default model of the provider that will actually run, not the SDK's.
   // `undefined` when a descriptor somehow has no default: the runtime then
   // picks, which is better than pinning a model id from another vendor.
@@ -1821,9 +1831,23 @@ async function tryPropEditLLMFallback(args: {
   // `chatLoaders` is absent for older callers/tests — they keep getting the
   // mini-turn's own built-in default (the Claude Agent SDK runtime), same as
   // before this change.
-  const runTurn = args.chatLoaders
-    ? await resolveChatRuntime(providerId, args.chatLoaders)
-    : undefined
+  //
+  // `resolveChatRuntime` can throw (an unknown provider id, or a neutral
+  // runtime refused by `EDITOR_NEUTRAL_CHAT=0`). Before this task that exact
+  // configuration returned a clean 422 with an actionable reason; an uncaught
+  // throw here would turn it into a 500 raised deep inside a save flow, which
+  // is the one thing this fallback exists to avoid. Route it back through the
+  // same `escalateToChatOnRefusal` every other refusal in this function uses.
+  let runTurn: RunChatTurn | undefined
+  if (args.chatLoaders) {
+    try {
+      runTurn = await resolveChatRuntime(runtimeProviderId, args.chatLoaders)
+    } catch (err) {
+      return escalateToChatOnRefusal(
+        `${args.deterministicReason} (agent fallback unavailable: ${(err as Error).message})`,
+      )
+    }
+  }
 
   let miniResult: Awaited<ReturnType<typeof runEditFixMiniTurn>>
   try {
