@@ -8,6 +8,40 @@ describe("encodeMention / extractMentionIds", () => {
     expect(extractMentionIds(body)).toEqual(["p_rin"])
   })
 
+  // A `]` in the name closed it early and the pattern then matched nothing,
+  // so the mention became literal text: the raw markup shipped and nobody was
+  // notified. Reachable, because display names are free text from the invite
+  // and reviewer-identity forms.
+  it("survives a display name that would otherwise break its own token", () => {
+    const body = `hi ${encodeMention("Ana [Design] Whitfield", "p_ana")}`
+    expect(extractMentionIds(body)).toEqual(["p_ana"])
+    expect(body).toBe("hi @[Ana Design Whitfield](p_ana)")
+  })
+
+  // Sanitizing a name down to nothing produced `@[](id)`, which the pattern's
+  // name group does not match at all: the token shipped as raw markup and
+  // notified nobody, which is the exact failure the sanitizing exists to
+  // prevent.
+  it("never emits a token its own pattern cannot match", () => {
+    for (const pathological of ["[]", "[[]]", " [ ] ", "\n"]) {
+      const token = encodeMention(pathological, "p_x")
+      expect(extractMentionIds(token), pathological).toEqual(["p_x"])
+    }
+    expect(encodeMention("[]", "p_x")).toBe("@[someone](p_x)")
+  })
+
+  it("drops a newline in a name rather than break the sentence", () => {
+    expect(encodeMention("Ana\nWhitfield", "p_ana")).toBe("@[AnaWhitfield](p_ana)")
+  })
+
+  // The id is written exactly as given. Altering it would still look like a
+  // mention while quietly addressing nobody, which is worse than the shape it
+  // would be guarding against and which server-generated ids cannot take.
+  it("passes the participant id through untouched", () => {
+    const id = "7f9b83f8-1c0c-417d-b622-de860fa9lfef"
+    expect(extractMentionIds(encodeMention("Ana", id))).toEqual([id])
+  })
+
   it("never treats a bare email as a mention", () => {
     expect(extractMentionIds("write to rin@example.com")).toEqual([])
   })

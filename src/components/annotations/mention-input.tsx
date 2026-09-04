@@ -10,6 +10,13 @@ import {
   findActiveMentionToken,
   type MentionParticipant,
 } from "@/components/annotations/mention-encoding"
+import {
+  displayToStorage,
+  isInsideMention,
+  project,
+  projectWithMap,
+  reconcile,
+} from "@/components/annotations/mention-projection"
 
 const MAX_MENTION_MATCHES = 8
 
@@ -219,6 +226,20 @@ function MentionPicker({
  * A textarea that resolves `@` against a participant directory and writes
  * the shared `@[Name](id)` wire format (`mention-encoding.ts`).
  *
+ * ## Two coordinate systems
+ *
+ * `value` and `onChange` carry STORAGE, exactly as they always have, so every
+ * parent submits the body unchanged and none of them can forget to encode.
+ * What the textarea RENDERS is the display projection: `@Ana Whitfield`, not
+ * `@[Ana Whitfield](7f9b83f8-…)`. See `mention-projection.ts` for why storage
+ * stays the source of truth.
+ *
+ * So every offset in this component (`cursor`, `nav.start`, `dismissed.start`,
+ * and everything `findActiveMentionToken` returns) is a DISPLAY offset. The
+ * only places the two systems meet are `applyMention`, which converts, and the
+ * change handler, which reconciles. Mixing them anywhere else splices at the
+ * wrong place and garbles the visible sentence.
+ *
  * The picker opens upward by default, because every mount site is a card whose
  * composer sits at its bottom, and it flips below when the card is anchored
  * near the top of the screen and there is no room. Either way it escapes the
@@ -237,6 +258,12 @@ export function MentionInput({
   autoFocus,
 }: MentionInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // Set by `applyMention`, applied once the projected value has been written
+  // to the DOM. Inserting a mention is the ONLY edit that changes what the
+  // textarea shows out from under the browser: an ordinary keystroke, even one
+  // that degrades a mention, projects back to the characters already on screen,
+  // so React's write-back is a no-op and the caret is left alone.
+  const pendingCaretRef = useRef<number | null>(null)
   const listId = useId()
   // Cursor tracked as state rather than read off the ref during render (the
   // refs rule), refreshed on every event that can move the caret.
@@ -252,16 +279,29 @@ export function MentionInput({
   const [nav, setNav] = useState<{ start: number; query: string; index: number } | null>(null)
   // What Escape dismissed, if anything.
   const [dismissed, setDismissed] = useState<{ start: number; query: string } | null>(null)
+  // Whether an IME composition is open. The key handler reads this off the
+  // event, but the caret effect runs outside any event and needs the flag.
+  const composingRef = useRef(false)
   // Which side of the textarea the list opens on. Above by default, because
   // that is where it belongs for a composer at the bottom of a card.
   const [placement, setPlacement] = useState<"above" | "below">("above")
 
   const mentionsPossible = canMention(participants, onInvite)
 
-  const token = useMemo(
-    () => (mentionsPossible ? findActiveMentionToken(value, cursor) : null),
-    [mentionsPossible, value, cursor],
-  )
+  // What the writer sees, plus where each live mention sits in it.
+  const projection = useMemo(() => projectWithMap(value), [value])
+  const display = projection.display
+
+  const token = useMemo(() => {
+    if (!mentionsPossible) return null
+    const found = findActiveMentionToken(display, cursor)
+    // An `@` that belongs to a mention already resolved is not a query. Left
+    // unguarded, clicking after the first word of `@Ana Whitfield` reopened
+    // the picker on it, and choosing a name replaced half the name and left
+    // the rest of it stranded in the sentence.
+    if (found && isInsideMention(projection.mentions, found.start)) return null
+    return found
+  }, [mentionsPossible, display, cursor, projection.mentions])
   // A dismissal covers the token it was made on and anything typed onto the
   // end of it. Editing the query back down, or starting a token somewhere
   // else, is a new question and gets the picker back — otherwise deleting an
@@ -300,22 +340,33 @@ export function MentionInput({
   const applyMention = useCallback(
     (participant: MentionParticipant) => {
       const el = textareaRef.current
+      // Display offsets, both of them: this is what the DOM reports.
       const activeCursor = el?.selectionStart ?? cursor
-      const active = findActiveMentionToken(value, activeCursor)
+      const active = findActiveMentionToken(display, activeCursor)
       if (!active) return
-      const inserted = encodeMention(participant.displayName, participant.id) + " "
-      const next = value.slice(0, active.start) + inserted + value.slice(activeCursor)
-      const nextCursor = active.start + inserted.length
+
+      // ...converted to storage offsets before touching `value`. The token
+      // being replaced is always in literal text (the picker refuses to open
+      // inside a resolved mention), so neither conversion has to snap.
+      const storageStart = displayToStorage(value, active.start, "start")
+      const storageCursor = displayToStorage(value, activeCursor, "end")
+      const insertedStorage = encodeMention(participant.displayName, participant.id) + " "
+      const next = value.slice(0, storageStart) + insertedStorage + value.slice(storageCursor)
+      // Back to display space for the caret. Measured from the projection of
+      // what was inserted, not from the token's length, because the name is
+      // sanitized on the way in and the two can differ.
+      const nextCursor = active.start + project(insertedStorage).length
+
       onChange(next)
       setCursor(nextCursor)
       setNav(null)
       setDismissed(null)
-      requestAnimationFrame(() => {
-        el?.focus()
-        el?.setSelectionRange(nextCursor, nextCursor)
-      })
+      // Consumed by the layout effect below. Not `requestAnimationFrame`: that
+      // runs after paint, so the caret was visibly in the wrong place for a
+      // frame, and it could land after a parent's post-submit reset.
+      pendingCaretRef.current = nextCursor
     },
-    [value, cursor, onChange],
+    [value, display, cursor, onChange],
   )
 
   const handleInvite = useCallback(
@@ -352,6 +403,26 @@ export function MentionInput({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPlacement(roomAbove < PICKER_HEIGHT_ESTIMATE && roomBelow > roomAbove ? "below" : "above")
   }, [open])
+
+  // Applies the caret `applyMention` asked for, once the projected value has
+  // reached the DOM.
+  const applyPendingCaret = useCallback(() => {
+    const next = pendingCaretRef.current
+    if (next === null) return
+    // Never move the caret mid-composition: writing a selection while an IME
+    // is open aborts or scrambles the composition. HOLD the request rather
+    // than consuming it, or picking a name while composing leaves the caret at
+    // the end of the field with nothing to put it back. `onCompositionEnd`
+    // drains it, since a composition ending does not on its own re-render.
+    if (composingRef.current) return
+    pendingCaretRef.current = null
+    const el = textareaRef.current
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(next, next)
+  }, [])
+
+  useLayoutEffect(applyPendingCaret)
 
   const trackCursor = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
     setCursor(e.currentTarget.selectionStart ?? e.currentTarget.value.length)
@@ -422,9 +493,19 @@ export function MentionInput({
       ) : null}
       <Textarea
         ref={textareaRef}
-        value={value}
+        value={display}
+        onCompositionStart={() => {
+          composingRef.current = true
+        }}
+        onCompositionEnd={() => {
+          composingRef.current = false
+          applyPendingCaret()
+        }}
         onChange={(e) => {
-          onChange(e.target.value)
+          // The browser edited DISPLAY text; fold that edit back into storage.
+          // `onChange` keeps firing during a composition, as it always has, so
+          // the parent's value is never stale when Send is clicked.
+          onChange(reconcile(value, e.target.value))
           trackCursor(e)
         }}
         onKeyDown={handleKeyDown}

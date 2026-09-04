@@ -8,7 +8,18 @@
  * drain (`outbox-drain.ts`), which supplies the I/O via `ProcessIntentDeps`.
  */
 
-const MENTION_PATTERN = /@\[([^\]]+)\]\(([^)]+)\)/g
+/**
+ * Must stay identical to `MENTION_PATTERN` in
+ * `src/components/annotations/mention-encoding.ts`, which is what WRITES these
+ * tokens. A private copy on purpose: this module is deliberately dependency
+ * free so the outbox drain can reuse it verbatim.
+ *
+ * The name group excludes `[` as well as `]`. Without that, a literal `@[`
+ * earlier in a body starts a match that runs through the next real mention and
+ * swallows it, so the email would render one mangled name in place of the text
+ * and the person who was actually mentioned.
+ */
+const MENTION_PATTERN = /@\[([^[\]]+)\]\(([^)]+)\)/g
 
 /** `@[Name](id)` → `@Name` for human-readable email text. Mirrors core. */
 function stripMentionSyntax(body: string): string {

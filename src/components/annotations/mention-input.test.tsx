@@ -427,11 +427,131 @@ describe("while an IME is composing", () => {
     expect(onValue).toHaveBeenLastCalledWith("@[Rin Adeyemi](p_rin) ")
   })
 
+  // The pending caret used to be CONSUMED before the composition guard, so a
+  // name picked while an IME was open lost its caret with nothing left to put
+  // it back. A composition ending does not re-render on its own, so the
+  // request has to be held and drained explicitly.
+  it("defers the caret until the composition ends, rather than dropping it", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    const box = screen.getByRole("combobox") as HTMLTextAreaElement
+    fireEvent.compositionStart(box)
+    type("over to @rin")
+    fireEvent.click(screen.getByRole("option"))
+
+    // Still composing: the caret must not have been written yet.
+    expect(box.value).toBe("over to @Rin Adeyemi ")
+    fireEvent.compositionEnd(box)
+    expect(box.selectionStart).toBe("over to @Rin Adeyemi ".length)
+  })
+
   it("leaves Escape to cancel the composition, not the picker", () => {
     render(<Harness participants={PARTICIPANTS} />)
     type("@rin")
     fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape", isComposing: true })
     expect(screen.getByRole("listbox")).toBeTruthy()
+  })
+})
+
+// The whole point of the projection. `value` stays the storage format the
+// parents submit, but the writer must never see the id: a 36-character UUID
+// mid-sentence is startling, and the textarea carries `field-sizing-content`,
+// so it grew the box by a line or two per mention as well.
+describe("what the writer sees", () => {
+  function field() {
+    return screen.getByRole("combobox") as HTMLTextAreaElement
+  }
+
+  it("shows the name, never the id", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    type("over to @rin")
+    fireEvent.click(screen.getByRole("option"))
+
+    expect(field().value).toBe("over to @Rin Adeyemi ")
+    expect(field().value).not.toContain("p_rin")
+    expect(field().value).not.toContain("[")
+    // The parent still receives the storage format, unchanged.
+    expect(onValue).toHaveBeenLastCalledWith("over to @[Rin Adeyemi](p_rin) ")
+  })
+
+  it("leaves the caret after the inserted name, in display coordinates", () => {
+    render(<Harness participants={PARTICIPANTS} onValue={vi.fn()} />)
+    type("over to @rin")
+    fireEvent.click(screen.getByRole("option"))
+    expect(field().selectionStart).toBe("over to @Rin Adeyemi ".length)
+  })
+
+  it("keeps the mention when the writer types on after it", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    type("@rin")
+    fireEvent.click(screen.getByRole("option"))
+    type("@Rin Adeyemi please")
+
+    expect(field().value).toBe("@Rin Adeyemi please")
+    expect(onValue).toHaveBeenLastCalledWith("@[Rin Adeyemi](p_rin) please")
+  })
+
+  it("drops the mention when the writer edits the name", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    type("@rin")
+    fireEvent.click(screen.getByRole("option"))
+    // Backspace the last letter of the name.
+    type("@Rin Adeyem")
+
+    expect(onValue).toHaveBeenLastCalledWith("@Rin Adeyem")
+    expect(field().value).toBe("@Rin Adeyem")
+  })
+
+  // Left unguarded, clicking after the first word of a resolved mention
+  // reopened the picker on it, and choosing a name replaced half the name and
+  // stranded the rest in the sentence.
+  it("does not reopen the picker inside a mention it already resolved", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    fireEvent.click(screen.getByRole("option"))
+    expect(screen.queryByRole("listbox")).toBeNull()
+
+    // Caret parked just after "@Rin", inside the resolved mention.
+    fireEvent.click(field())
+    fireEvent.keyUp(field(), { target: { selectionStart: 4 } })
+    expect(screen.queryByRole("listbox")).toBeNull()
+  })
+
+  // Control for the case above: the SAME caret move on the same characters,
+  // with no mention resolved, does open the picker. Without this the test
+  // above would pass just as well if moving the caret did nothing at all.
+  it("does open on the same caret move when the text is not a mention", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@Rin Adeyemi", 12)
+    expect(screen.queryByRole("listbox")).toBeNull() // whitespace closed it
+    fireEvent.keyUp(screen.getByRole("combobox"), { target: { selectionStart: 4 } })
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Rin Adeyemirin@example.com",
+    ])
+  })
+
+  it("still opens for a fresh @ typed after a mention", () => {
+    render(<Harness participants={PARTICIPANTS} />)
+    type("@rin")
+    fireEvent.click(screen.getByRole("option"))
+    type("@Rin Adeyemi @sa")
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["Sam Okafor"])
+  })
+
+  it("carries two mentions independently", () => {
+    const onValue = vi.fn()
+    render(<Harness participants={PARTICIPANTS} onValue={onValue} />)
+    type("@rin")
+    fireEvent.click(screen.getByRole("option"))
+    type("@Rin Adeyemi and @sam")
+    fireEvent.click(screen.getByRole("option"))
+
+    expect(field().value).toBe("@Rin Adeyemi and @Sam Okafor ")
+    expect(onValue).toHaveBeenLastCalledWith(
+      "@[Rin Adeyemi](p_rin) and @[Sam Okafor](p_sam) ",
+    )
   })
 })
 

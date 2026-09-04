@@ -14,7 +14,21 @@
  * surfaces would drift into writing bodies the other cannot read.
  */
 
-export const MENTION_PATTERN = /@\[([^\]]+)\]\(([^)]+)\)/g
+/**
+ * The name group excludes `[` as well as `]`.
+ *
+ * With `[^\]]+` a literal `@[` anywhere earlier in the body started a match
+ * that ran straight through the next real mention, swallowing its `@[Name` as
+ * part of its own name and stealing its id. Typing `@[design review ` and then
+ * picking Bo produced one token whose name was `design review @[Bo`, which
+ * rewrote text the writer never typed and moved their caret. Excluding `[`
+ * makes that match fail at the stray bracket and pick up the real token
+ * instead.
+ *
+ * This costs nothing: `encodeMention` strips `[` and `]` from the name, so no
+ * token this product writes can carry one.
+ */
+export const MENTION_PATTERN = /@\[([^[\]]+)\]\(([^)]+)\)/g
 
 /**
  * One entry in the @-mention directory.
@@ -32,8 +46,38 @@ export interface MentionParticipant {
   email?: string
 }
 
+/**
+ * Writes the token, with the display name made safe to put inside it.
+ *
+ * A `]` in the name closes the name early and the pattern then matches
+ * NOTHING at all: the mention silently becomes literal text, the raw
+ * `@[Ana [Design] Whitfield](id)` markup is what gets sent, and nobody is
+ * notified. Display names are free text from the invite and reviewer-identity
+ * forms, so this is reachable rather than theoretical. Newlines are dropped
+ * for a plainer reason: they would put a line break in the middle of the
+ * sentence being written.
+ *
+ * Stripping is deliberate over escaping. An escape would be a wire-format
+ * change that `MentionText` and the viewer's `stripMentionSyntax` would both
+ * have to learn, for a name shape almost nobody has. `[` goes with `]` only
+ * so the result reads as a name: half a bracket pair looks like a bug.
+ *
+ * The ID is passed through UNTOUCHED, on purpose. It is opaque and
+ * server-generated, so it cannot carry the `)` that would break it, and
+ * sanitizing it would trade a shape that cannot happen for one that can: an
+ * altered id still looks like a mention, and the server's `resolveMentionIds`
+ * would quietly drop it as a non-participant. Better to write the id we were
+ * given.
+ */
 export function encodeMention(displayName: string, participantId: string): string {
-  return `@[${displayName}](${participantId})`
+  const name = displayName.replace(/[[\]\r\n]/g, "").trim()
+  // A name made only of the characters above sanitizes to nothing, and the
+  // pattern's name group needs at least one character: `@[](id)` matches
+  // nothing at all, so it would ship as raw markup and notify nobody. That is
+  // the exact failure the sanitizing exists to prevent, so it cannot be
+  // allowed to cause it. Unreachable in practice (it takes a display name made
+  // entirely of brackets and whitespace) but silent if it ever happened.
+  return `@[${name || "someone"}](${participantId})`
 }
 
 export function extractMentionIds(body: string): string[] {
