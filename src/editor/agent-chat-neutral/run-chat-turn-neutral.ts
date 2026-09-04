@@ -28,8 +28,9 @@
  * session. It returns `{ session, turn }` and `chat-handler.ts` saves, exactly
  * as it does for the SDK lane.
  *
- * Scope of THIS task: one turn, read-only tools, no history replay, no cost
- * ceiling, no steering. Each of those is its own task and its own tests.
+ * History replay and the cost ceiling are wired in (`history-replay.ts`,
+ * `cost-guard.ts`). Steering is not: each of those was its own task and its
+ * own tests.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -61,6 +62,7 @@ import type { ToolPermissionGate } from '../agent-chat/tool-permission'
 import { buildToolPermissionGate } from '../agent-chat-sdk/edit-ack'
 import { buildGroundingDigest } from '../agent-chat-sdk/grounding-tools'
 import type { EditProposalPayload } from '../agent-tools/types'
+import { computeSessionCost } from '../agent-chat/session-cost'
 import type { EffortLevel } from '../core/model-catalog'
 import { runWithChatSession } from '../edit-service/chat-session-context'
 import type { ProviderDescriptor } from '../llm-providers/provider-descriptor'
@@ -81,6 +83,7 @@ import type {
 import { branchModeRootCommitSha } from '../worktree/git-branches'
 
 import { applyContextBudget } from './context-budget'
+import { createCostGuard } from './cost-guard'
 import { replayHistory } from './history-replay'
 import {
   createNeutralEventAdapter,
@@ -154,6 +157,23 @@ async function runInner(
   const provider =
     deps.buildProvider?.({ providerId, ...(model ? { model } : {}) }) ??
     descriptor.buildProvider({ ...(model ? { model } : {}) })
+
+  // ── Cost ceiling (pre-turn) ───────────────────────────────────────
+  // Refuse before spending a single token if the session is already over.
+  const priorCostUsd = computeSessionCost(opts.session)
+  if (typeof opts.costCeilingUsd === 'number' && priorCostUsd >= opts.costCeilingUsd) {
+    return failFast(
+      opts,
+      turnId,
+      startedAt,
+      `Session cost ceiling reached ($${priorCostUsd.toFixed(2)} of $${opts.costCeilingUsd}). Start a new session or raise the ceiling.`,
+    )
+  }
+  const costGuard = createCostGuard({
+    model: model ?? 'unknown-model',
+    priorCostUsd,
+    ...(typeof opts.costCeilingUsd === 'number' ? { ceilingUsd: opts.costCeilingUsd } : {}),
+  })
 
   // ── Edit-proposal plumbing (identical semantics to the SDK lane) ─────
   const editProposalRefs: ChatTurn['editProposals'] = []
@@ -303,6 +323,11 @@ async function runInner(
         errorMessage = `The turn hit its step limit of ${stepCap} without finishing. Ask for a smaller piece of the work.`
         break
       }
+      if (costGuard.exceeded) {
+        stopReason = 'error'
+        errorMessage = costGuard.refusalMessage()
+        break
+      }
       const pending: Array<{ id: string; name: string; input: unknown }> = []
       let assistantMessage: { role: 'assistant'; content: readonly AssistantContent[] } | null =
         null
@@ -327,6 +352,7 @@ async function runInner(
           streamedOut += ev.outputTokens
           inputTokens += ev.inputTokens
           outputTokens += ev.outputTokens
+          costGuard.record({ inputTokens: ev.inputTokens, outputTokens: ev.outputTokens })
         } else if (ev.kind === 'message_complete') {
           assistantMessage = ev.message
           finalUsage = ev.usage
@@ -394,6 +420,7 @@ async function runInner(
       if (extraIn > 0 || extraOut > 0) {
         inputTokens += extraIn
         outputTokens += extraOut
+        costGuard.record({ inputTokens: extraIn, outputTokens: extraOut })
         opts.emit({ kind: 'usage', turnId, inputTokens: extraIn, outputTokens: extraOut })
       }
 
@@ -433,6 +460,7 @@ async function runInner(
     toolResults,
     editProposals: editProposalRefs,
     usage: inputTokens > 0 || outputTokens > 0 ? { inputTokens, outputTokens } : undefined,
+    costUsd: costGuard.turnCostUsd > 0 ? costGuard.turnCostUsd : undefined,
     model,
     ...(opts.effort ? { effort: opts.effort } : {}),
     error: errorMessage,

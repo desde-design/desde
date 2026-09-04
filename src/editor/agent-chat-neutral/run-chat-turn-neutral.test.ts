@@ -413,3 +413,48 @@ describe('runChatTurnNeutral: history replay', () => {
     })
   })
 })
+
+describe('runChatTurnNeutral: cost ceiling', () => {
+  it('refuses before calling the model when the session is already over the ceiling', async () => {
+    const spent = {
+      ...makeEmptySession('p1'),
+      turns: [
+        {
+          id: 't0',
+          startedAt: '2026-09-03T00:00:00.000Z',
+          userMessage: 'x',
+          assistantContent: [],
+          toolResults: {},
+          editProposals: [],
+          costUsd: 5,
+        },
+      ],
+    }
+    const { events, calls, result } = await run([textStep('never runs')], {
+      session: spent,
+      costCeilingUsd: 1,
+    })
+    expect(calls).toHaveLength(0)
+    expect(result.turn.error).toMatch(/cost ceiling reached/)
+    expect(events.map((e) => e.kind)).toEqual(['error', 'turn_complete'])
+  })
+
+  it('stops at the next step boundary once the ceiling is crossed mid-turn', async () => {
+    const expensive: ProviderEvent[] = [
+      { kind: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'src/App.vue' } },
+      { kind: 'usage', inputTokens: 5_000_000, outputTokens: 5_000_000 },
+      {
+        kind: 'message_complete',
+        stopReason: 'tool_use',
+        message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: {} }] },
+      },
+    ]
+    const { calls, result } = await run([expensive, textStep('second step')], {
+      costCeilingUsd: 1,
+      model: 'claude-opus-4-8',
+    })
+    expect(calls).toHaveLength(1)
+    expect(result.turn.error).toMatch(/cost ceiling/)
+    expect(result.turn.costUsd).toBeGreaterThan(1)
+  })
+})

@@ -42,7 +42,7 @@ import type {
   ChatToolResult,
   ChatTurn,
 } from '../agent-chat/types'
-import { costOfTurn } from '../llm-providers/rate-cards'
+import { computeSessionCost } from '../agent-chat/session-cost'
 
 import { runWithChatSession } from '../edit-service/chat-session-context'
 import { getSharedEditHistory } from '../edit-service/edit-history'
@@ -1186,27 +1186,6 @@ function isResultMessage(msg: unknown): msg is {
   )
 }
 
-function computeSessionCost(session: ChatSession): number {
-  // Audit Task 15 — `saveSession` archives the oldest turns off `turns`
-  // once the retention cap is exceeded (`session-turns-archive.ts`).
-  // `archivedCostUsd` carries the summed cost of everything that rolled
-  // off the head so a long session's cost-ceiling check doesn't
-  // silently reset once its early turns archive out.
-  //
-  // Audit Task 15, codex round 4 — per-turn cost goes through the
-  // SHARED `costOfTurn` (`rate-cards.ts`), the same formula
-  // `sumTurnCostUsd` (`session-turns-archive.ts`) uses to fold an
-  // archived turn's cost into `archivedCostUsd`. The two must never
-  // drift: a usage-only turn (no vendor `costUsd`) has to price
-  // identically whether it's still in `session.turns` or has already
-  // rolled into `archivedCostUsd`, or a long session's ceiling check
-  // silently undercounts once its early turns archive out.
-  let total = session.archivedCostUsd ?? 0
-  for (const turn of session.turns) {
-    total += costOfTurn(turn)
-  }
-  return total
-}
 
 /**
  * Mirror of the legacy orchestrator's context envelope. Keeps the
