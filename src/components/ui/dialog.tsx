@@ -34,6 +34,26 @@ function DialogClose({
   return <DialogPrimitive.Close data-slot="dialog-close" {...props} />
 }
 
+/**
+ * The app's stacking ladder, in one place because it is only correct as a set:
+ *
+ *   z-40  transient dismiss backdrops (the comment composer's)
+ *   z-50  in-page floating chrome (comment/note popups, busy overlays)
+ *   z-60  the editor toolbar (`editor-toolbar.tsx` — always reachable)
+ *   z-70  modal dialogs: this overlay and its content
+ *   z-80  popper primitives (select, dropdown, context menu, popover, tooltip)
+ *
+ * `z-[70]`, not `z-50`. Everything used to sit at `z-50` and let portal order
+ * decide, which worked until the editor toolbar moved to `z-[60]` to stay above
+ * the comment composer. From then on the toolbar pill floated over the dialog's
+ * black backdrop — visible, and clickable, on top of a modal.
+ *
+ * Raising the dialog alone would have put every Select and DropdownMenu opened
+ * INSIDE a dialog (all `z-50`, portaled to body) behind the dialog content, so
+ * the poppers move to `z-[80]` in the same change. They are transient and
+ * always meant to be on top, and a modal Radix dialog blocks pointer events
+ * outside itself, so nothing outside can open one over the dialog anyway.
+ */
 function DialogOverlay({
   className,
   ...props
@@ -42,7 +62,7 @@ function DialogOverlay({
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"
       className={cn(
-        "fixed inset-0 isolate z-50 bg-black/80 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        "fixed inset-0 isolate z-[70] bg-black/80 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className
       )}
       {...props}
@@ -71,7 +91,7 @@ const dialogContentVariants = cva(
     // token name, a selector chain, a file path) widens the track past the
     // dialog's own max-width and everything inside spills out the right edge.
     // `minmax(0,…)` lets the track shrink so children can truncate or wrap.
-    "fixed top-1/2 left-1/2 z-50 grid grid-cols-[minmax(0,1fr)] w-full max-w-[calc(100%-2rem)]",
+    "fixed top-1/2 left-1/2 z-[70] grid grid-cols-[minmax(0,1fr)] w-full max-w-[calc(100%-2rem)]",
     "-translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-5",
     "text-sm text-popover-foreground ring-1 ring-foreground/10",
     "duration-100 outline-none",

@@ -187,7 +187,9 @@ export function EditorToolbar({
       // and the X still close the composer, but "the toolbar is the one thing
       // always reachable" is the rule worth keeping. An arbitrary value is
       // used knowingly: Tailwind's z scale stops at 50, so there is no step
-      // above the portal to reach for.
+      // above the portal to reach for. Modal dialogs sit ABOVE this at
+      // `z-[70]` — see the ladder comment in `src/components/ui/dialog.tsx`.
+      // This bar being above the dialog backdrop was a real bug.
       //
       // `top-2.5`: the pill's top edge sits 10px below the top of the nav bar
       // it is positioned in (Mo, 2026-09-02: "I am ok with position top,
