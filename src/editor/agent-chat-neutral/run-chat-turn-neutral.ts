@@ -279,6 +279,17 @@ async function runInner(
     writeOpts: {
       worktreeRoot: opts.worktreeRoot,
       emitEdit: emitEditProposal,
+      // Moved here from the permission gate (FX11 item 2): the baseline may
+      // only advance once the bytes are actually on disk, and on this lane
+      // that is the tool handler, not the gate. Same map the gate reads
+      // through `getFileReads`, and the same key shape the read hook uses.
+      recordOwnWrite: (absPath: string, nextHash: string) => {
+        fileReads[absPath] = {
+          hashAtRead: nextHash,
+          baseContentPath: fileReads[absPath]?.baseContentPath ?? '',
+          readAt: new Date().toISOString(),
+        }
+      },
       ...(opts.invalidateFiles ? { invalidateFiles: opts.invalidateFiles } : {}),
       ...(opts.acquireTreeGate ? { acquireTreeGate: opts.acquireTreeGate } : {}),
       ...(opts.recordHistory !== undefined ? { recordHistory: opts.recordHistory } : {}),
@@ -367,13 +378,12 @@ async function runInner(
         hashAtWrite: detected.hashAtWrite,
       })
     },
-    recordOwnWrite: (absPath, nextHash) => {
-      fileReads[absPath] = {
-        hashAtRead: nextHash,
-        baseContentPath: fileReads[absPath]?.baseContentPath ?? '',
-        readAt: new Date().toISOString(),
-      }
-    },
+    // `recordOwnWrite` is deliberately NOT passed here. The gate would advance
+    // the read baseline the moment it ALLOWED a write, and on this lane the
+    // write has not happened yet at that point: the gate's ack is a no-op stub
+    // and the tool handler does the writing, where the broker can still refuse.
+    // The baseline is advanced from `builtin-edit.ts` instead, on the broker's
+    // success path. See `recordOwnWrite` on `BuiltinWriteOpts` (FX11 item 2).
   })
 
   const system = buildNeutralSystemPrompt({

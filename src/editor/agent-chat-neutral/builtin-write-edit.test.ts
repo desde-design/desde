@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -196,6 +197,118 @@ describe('Write', () => {
     // No backup directory was ever created — the new file had no prior
     // content to journal.
     expect(existsSync(join(root, '.desde/backups'))).toBe(false)
+  })
+})
+
+/**
+ * FX11 items 2 to 4 (codex review + adversarial verification, 2026-09-05).
+ * Three defects in this lane's Write/Edit, each reproduced before it was
+ * fixed. None of them lost data; all three misled either the model or the
+ * user.
+ */
+describe('FX11', () => {
+  const sha256 = (s: string) => createHash('sha256').update(Buffer.from(s, 'utf8')).digest('hex')
+
+  /**
+   * Item 2. The baseline is what tells a later edit "somebody else changed
+   * this file". It used to advance when the permission gate ALLOWED the
+   * write, which on this lane is before the write happens, so a write the
+   * broker then refused still moved it.
+   */
+  it('advances the read baseline after the write lands', async () => {
+    const advanced: Array<{ absPath: string; hash: string }> = []
+    const out = await buildEditToolSpec({
+      ...opts(),
+      recordOwnWrite: (absPath: string, hash: string) => advanced.push({ absPath, hash }),
+    }).handler({ file_path: 'src/App.vue', old_string: 'Old', new_string: 'New' }, {})
+
+    expect(out.isError).toBeUndefined()
+    expect(advanced).toEqual([
+      { absPath: join(root, 'src/App.vue'), hash: sha256(readFileSync(join(root, 'src/App.vue'), 'utf8')) },
+    ])
+  })
+
+  it('leaves the read baseline alone when the broker refuses the write', async () => {
+    const advanced: Array<{ absPath: string; hash: string }> = []
+    const before = readFileSync(join(root, 'src/App.vue'), 'utf8')
+    const out = await buildEditToolSpec({
+      ...opts(),
+      recordOwnWrite: (absPath: string, hash: string) => advanced.push({ absPath, hash }),
+      // A concurrent writer lands between the reconstruction and the broker's
+      // locked window, so the precondition refuses the batch.
+      acquireTreeGate: async () => {
+        writeFileSync(join(root, 'src/App.vue'), `${before}// concurrent\n`, 'utf8')
+        return () => {}
+      },
+    }).handler({ file_path: 'src/App.vue', old_string: 'Old', new_string: 'New' }, {})
+
+    expect(out.isError).toBe(true)
+    expect(advanced).toEqual([])
+  })
+
+  /**
+   * Item 3. The uniqueness scan resumed past the end of the first match, so
+   * two matches that OVERLAP counted as one. A string that borders itself is
+   * ordinary in source: repeated closing tags, repeated blank lines, repeated
+   * imports. The edit was then applied to the first pair, which is a
+   * wrong-location edit the user has to notice on their own.
+   */
+  it('refuses a self-overlapping old_string instead of editing the first pair', async () => {
+    const content = '<a>\n  </div>\n  </div>\n  </div>\n</a>\n'
+    writeFileSync(join(root, 'src/App.vue'), content, 'utf8')
+    const out = await buildEditToolSpec(opts()).handler(
+      { file_path: 'src/App.vue', old_string: '  </div>\n  </div>\n', new_string: '  </section>\n' },
+      {},
+    )
+    expect(out.isError).toBe(true)
+    expect(out.content[0].text).toMatch(/not unique/)
+    expect(readFileSync(join(root, 'src/App.vue'), 'utf8')).toBe(content)
+  })
+
+  it('leaves replace_all counting occurrences the way it always has', async () => {
+    // `replace_all` is `split`/`join`, which is non-overlapping, and that is
+    // also the reference Edit semantics. Only the UNIQUENESS check changed.
+    writeFileSync(join(root, 'src/App.vue'), 'abcabcab', 'utf8')
+    const out = await buildEditToolSpec(opts()).handler(
+      { file_path: 'src/App.vue', old_string: 'abcab', new_string: 'ZZ', replace_all: true },
+      {},
+    )
+    expect(out.isError).toBeUndefined()
+    expect(readFileSync(join(root, 'src/App.vue'), 'utf8')).toBe('ZZcab')
+  })
+
+  /**
+   * Item 4. A file holding bytes that are not valid UTF-8 decoded lossily,
+   * so the precondition re-encoded to different bytes than the ones on disk
+   * and could never match. Every edit to such a file was refused as "changed
+   * on disk", which is false and which the model cannot act on: re-reading
+   * decodes identically, so it loops.
+   */
+  it('edits a file whose bytes are not valid UTF-8, and journals the real bytes', async () => {
+    const original = Buffer.concat([
+      Buffer.from('const a = 1 // '),
+      Buffer.from([0x80, 0xfe]),
+      Buffer.from('\nconst b = 2\n'),
+    ])
+    writeFileSync(join(root, 'src/b.ts'), original)
+
+    const out = await buildEditToolSpec(opts()).handler(
+      { file_path: 'src/b.ts', old_string: 'const b = 2', new_string: 'const b = 3' },
+      {},
+    )
+
+    expect(out.isError).toBeUndefined()
+    expect(readFileSync(join(root, 'src/b.ts'), 'utf8')).toContain('const b = 3')
+    // The backup holds the file's REAL bytes, so undo restores the invalid
+    // ones exactly. The written file does not: `newSource` is built from a
+    // UTF-8 decode, so those two bytes come back as the replacement
+    // character. Byte-preserving edits would mean editing at the byte level,
+    // which is a different change from this one.
+    const backups = readdirSync(join(root, '.desde/backups'))
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(root, '.desde/backups', backups[0], 'src/b.ts')).equals(original)).toBe(
+      true,
+    )
   })
 })
 

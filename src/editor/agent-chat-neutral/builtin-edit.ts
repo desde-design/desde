@@ -23,7 +23,7 @@
 
 import { z } from 'zod'
 
-import { reconstructWriteEdit } from '../agent-chat-sdk/edit-ack'
+import { reconstructWriteEdit, sha256 } from '../agent-chat-sdk/edit-ack'
 import {
   brokeredWrite,
   rollbackWarning,
@@ -55,6 +55,20 @@ export interface BuiltinWriteOpts {
   invalidateFiles?: (files: string[]) => void
   /** Orders the write and its ledger append against Commit and Publish. */
   acquireTreeGate?: AcquireTreeGate
+  /**
+   * Advances the session's read baseline for a file this lane just wrote, so
+   * the agent's next write to it without an intervening Read is not reported
+   * as somebody else's change.
+   *
+   * FX11 item 2 (2026-09-05). This used to live in the permission gate, which
+   * on this lane runs BEFORE the write: the gate's ack is a no-op stub here,
+   * and the write happens down in this file, where the broker can still refuse
+   * it. So a refused write left the baseline recording bytes nobody wrote, and
+   * the next edit raised a conflict banner over a file nothing had touched.
+   * Called only on the broker's success path, which is the earliest moment the
+   * new bytes are actually on disk.
+   */
+  recordOwnWrite?: (absPath: string, nextHash: string) => void
   /** Whether to record an undo step. The edit-fix mini-turn passes false. */
   recordHistory?: boolean
 }
@@ -117,8 +131,12 @@ async function applyWrite(
 
   const result = await brokeredWrite({
     canonicalRoot: opts.worktreeRoot,
-    journal:
-      built.priorContent === null ? [] : [{ file: built.repoRel, content: built.priorContent }],
+    // The RAW bytes, not `priorContent`'s UTF-8 decode, for both the journal
+    // and the precondition below — see `priorBytes` on `WriteReconstruction`.
+    // A file holding invalid UTF-8 re-encodes to different bytes than the ones
+    // on disk, so the precondition could never match and every edit to such a
+    // file was refused as "changed on disk".
+    journal: built.priorBytes === null ? [] : [{ file: built.repoRel, content: built.priorBytes }],
     ops: [
       {
         kind: 'write',
@@ -137,7 +155,7 @@ async function applyWrite(
         absPath: built.absPath,
         expect: {
           exists: !built.isNew,
-          content: built.priorContent === null ? null : Buffer.from(built.priorContent, 'utf8'),
+          content: built.priorBytes,
         },
       },
     ],
@@ -188,6 +206,16 @@ async function applyWrite(
       )
     }
     return err(`${toolName} failed: ${result.reason}${rollbackWarning(result)}`)
+  }
+  // The bytes are on disk now, so this is the first honest moment to move the
+  // session's read baseline. Wrapped, like the conflict callback it pairs
+  // with, so a telemetry failure cannot turn a landed write into an error.
+  if (opts.recordOwnWrite) {
+    try {
+      opts.recordOwnWrite(built.absPath, sha256(built.newSource))
+    } catch {
+      // Deliberately swallowed: see above.
+    }
   }
   const ack = result.emitted
   if (ack && ack.ok === false) {

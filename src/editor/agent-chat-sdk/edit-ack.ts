@@ -561,8 +561,23 @@ export type WriteReconstruction =
       newSource: string
       /** sha256 of the current on-disk content. Absent when creating. */
       baseHash?: string
-      /** Bytes currently on disk, for the backup journal. Null when creating. */
+      /** Bytes currently on disk, decoded as UTF-8. Null when creating. */
       priorContent: string | null
+      /**
+       * The SAME bytes, undecoded. Null when creating.
+       *
+       * FX11 item 4 (2026-09-05). `priorContent` is a UTF-8 decode, so a file
+       * holding bytes that are not valid UTF-8 comes back with replacement
+       * characters and no longer round-trips: re-encoding it produced
+       * different bytes than the ones on disk. A caller that compared those
+       * re-encoded bytes against the file — which is exactly what the write
+       * broker's precondition does — could never match, so every edit to such
+       * a file was refused as "changed on disk". That message is false and
+       * unactionable, and the model loops on it, because re-reading decodes
+       * identically. Use this field for anything BYTE-level (a precondition, a
+       * backup journal entry) and `priorContent` only for text work.
+       */
+      priorBytes: Buffer | null
       isNew: boolean
     }
   | { ok: false; reason: string }
@@ -608,15 +623,19 @@ async function reconstructWrite(
     // instead of `Write src/components/Foo.vue` is an ordinary model slip and
     // used to throw EISDIR out of the permission gate, which on the neutral
     // lane ended the whole turn (2026-09-04 adversarial review, P2-1).
-    let current: string
+    let currentBytes: Buffer
     try {
-      current = await readFile(safe.absolute, 'utf8')
+      // Read once, undecoded, and derive the string from it — see
+      // `priorBytes` on `WriteReconstruction` for why the raw bytes have to
+      // survive this call.
+      currentBytes = await readFile(safe.absolute)
     } catch (err) {
       return {
         ok: false,
         reason: `Write denied: cannot read '${safeRel}': ${(err as Error).message}`,
       }
     }
+    const current = currentBytes.toString('utf8')
     if (current === content) {
       return { ok: false, reason: `Write produces no change to '${safeRel}'` }
     }
@@ -627,6 +646,7 @@ async function reconstructWrite(
       newSource: content,
       baseHash: sha256(current),
       priorContent: current,
+      priorBytes: currentBytes,
       isNew: false,
     }
   }
@@ -653,6 +673,7 @@ async function reconstructWrite(
     absPath: create.absolute,
     newSource: content,
     priorContent: null,
+    priorBytes: null,
     isNew: true,
   }
 }
@@ -693,12 +714,14 @@ async function reconstructEdit(
       reason: `Edit denied: file not found '${repoRel}'. Use Write to create new files`,
     }
   }
-  let current: string
+  let currentBytes: Buffer
   try {
-    current = await readFile(safe.absolute, 'utf8')
+    // Read once, undecoded — see `priorBytes` on `WriteReconstruction`.
+    currentBytes = await readFile(safe.absolute)
   } catch (err) {
     return { ok: false, reason: `Edit denied: cannot read '${repoRel}': ${(err as Error).message}` }
   }
+  const current = currentBytes.toString('utf8')
   const replaceAll = toolInput.replace_all === true
   let newSource: string
   if (replaceAll) {
@@ -711,7 +734,19 @@ async function reconstructEdit(
     if (idx < 0) {
       return { ok: false, reason: `Edit old_string not found in '${repoRel}'` }
     }
-    if (current.indexOf(oldString, idx + oldString.length) >= 0) {
+    // FX11 item 3 (2026-09-05): resume at `idx + 1`, not past the end of the
+    // first match. A string that borders itself — repeated closing tags,
+    // repeated blank lines, repeated import lines — has OVERLAPPING
+    // occurrences, and resuming past the first one made them invisible. The
+    // edit was then accepted as unique and applied to the first pair, which
+    // is a wrong-location edit the user has to spot on their own.
+    //
+    // This is the uniqueness check only. `replace_all` above stays on
+    // `split`/`join`, which counts non-overlapping occurrences, because that
+    // is what "replace every occurrence" means everywhere else and is the
+    // reference Edit semantics. The two branches disagreeing is the point:
+    // one refuses an ambiguous match, the other is told to take them all.
+    if (current.indexOf(oldString, idx + 1) >= 0) {
       return {
         ok: false,
         reason: `Edit old_string is not unique in '${repoRel}'; expand the match or set replace_all`,
@@ -729,6 +764,7 @@ async function reconstructEdit(
     newSource,
     baseHash: sha256(current),
     priorContent: current,
+    priorBytes: currentBytes,
     isNew: false,
   }
 }
@@ -917,6 +953,6 @@ export function extensionOf(repoRel: string): string {
   return dot >= 0 ? base.slice(dot) : ''
 }
 
-function sha256(buf: string): string {
+export function sha256(buf: string): string {
   return createHash('sha256').update(Buffer.from(buf, 'utf8')).digest('hex')
 }

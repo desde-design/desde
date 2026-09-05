@@ -911,6 +911,31 @@ describe('runChatTurnNeutral: steering', () => {
 })
 
 /**
+ * FX11 item 2 (2026-09-05). The read baseline that `detectOverwriteConflict`
+ * compares against used to advance in the permission gate, the moment the gate
+ * ALLOWED a write. On this lane the gate's ack is a no-op stub and the write
+ * happens afterwards, in the tool handler, where the broker can still refuse
+ * it. So a refused write left a baseline recording bytes nobody wrote, and the
+ * next edit raised a conflict banner over a file nothing had touched.
+ *
+ * The baseline now advances from the tool handler, on the broker's success
+ * path. This pins the property that move must not break: the agent's own
+ * consecutive writes, with no Read in between, still raise no warning.
+ */
+describe('the read baseline on the neutral lane', () => {
+  it('does not warn about the agent overwriting its own write', async () => {
+    const { events } = await run([
+      toolStep('tu_1', 'Read', { file_path: 'src/App.vue' }),
+      toolStep('tu_2', 'Write', { file_path: 'src/App.vue', content: 'ONE\n' }),
+      toolStep('tu_3', 'Write', { file_path: 'src/App.vue', content: 'TWO\n' }),
+      textStep('done'),
+    ])
+    expect(events.filter((e) => e.kind === 'edit_overwrite_warning')).toHaveLength(0)
+    expect(readFileSync(join(root, 'src/App.vue'), 'utf8')).toBe('TWO\n')
+  })
+})
+
+/**
  * Conflict recovery, end to end on this lane.
  *
  * The lane already DETECTED conflicts and emitted `edit_overwrite_warning`,
