@@ -42,6 +42,7 @@ import {
   AUTH_REAUTH_MESSAGE,
   extractRetryAfterFromError,
   isAuthError,
+  redactSecrets,
 } from '../agent-chat/classify-turn-error'
 import type {
   RunChatTurnOpts,
@@ -718,9 +719,24 @@ async function runInner(
       const retryAfter = extractRetryAfterFromError(cause)
       const hint = retryAfter !== undefined ? ` (retry after ${retryAfter}s)` : ''
       const raw = cause instanceof Error ? cause.message : String(cause)
+      // `errorMessage` becomes `turn.error`, which `saveSession` writes to
+      // `.desde/chat-sessions/<sessionId>.json`. That makes this the site
+      // where a vendor's own words become a durable file on the user's disk,
+      // so it is where anything key-shaped is masked.
+      //
+      // Defence in depth, not a response to a known leak. The one message
+      // either shipped vendor is known to echo a key into is OpenAI's
+      // "Incorrect API key provided: …", and the auth arm below already
+      // replaces that one with the remediation copy. Neither vendor puts the
+      // request URL, headers or body into `.message`. What was missing was the
+      // guarantee for the non-auth arm — a 403 from a gateway behind
+      // `OPENAI_BASE_URL`, say, whose wording nobody here controls.
+      //
+      // `isAuthError` is still asked about the RAW string, so masking can
+      // never make a pattern miss.
       errorMessage = isAuthError(raw, { errorPatterns: descriptor.errorPatterns })
         ? (descriptor.errorPatterns?.reauthMessage ?? AUTH_REAUTH_MESSAGE)
-        : `${raw}${hint}`
+        : redactSecrets(`${raw}${hint}`)
     }
   } finally {
     // Backstop for every path that reaches neither the abort listener nor a

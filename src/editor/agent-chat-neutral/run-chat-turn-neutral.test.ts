@@ -615,6 +615,44 @@ describe('runChatTurnNeutral: failures', () => {
     expect(events.at(-1)).toMatchObject({ kind: 'turn_complete', stopReason: 'error' })
   })
 
+  it('never persists a credential the vendor echoed back in its error text', async () => {
+    // Defence in depth. Against both shipped vendors the one key-bearing
+    // message ("Incorrect API key provided: …") is already intercepted by the
+    // auth arm below and replaced with the remediation copy, so this is not a
+    // leak being closed. What it closes is the guarantee: this 403 is the
+    // shape a custom OPENAI_BASE_URL gateway can return, it carries the key,
+    // it matches no auth pattern, and `turn.error` is written to
+    // `.desde/chat-sessions/<id>.json`.
+    const key = 'sk-test-not-a-real-key-000000'
+    const provider: LLMProvider = {
+      name: 'boom',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () =>
+        (async function* () {
+          throw new Error(`Forbidden: token ${key} is not permitted on this route.`)
+        })(),
+    }
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'openai',
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(result.turn.error).not.toContain(key)
+    expect(result.turn.error).toContain('sk-***')
+    // Still diagnosable: the vendor's own sentence survives the masking.
+    expect(result.turn.error).toMatch(/not permitted on this route/)
+    const errorEvent = events.find((e) => e.kind === 'error')
+    expect(JSON.stringify(errorEvent)).not.toContain(key)
+  })
+
   it('swaps in the re-auth guidance for a 401', async () => {
     const provider: LLMProvider = {
       name: 'boom',

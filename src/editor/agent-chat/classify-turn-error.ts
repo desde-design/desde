@@ -59,11 +59,20 @@ export interface ClassifiedTurnError {
    */
   retryAfterSeconds?: number
   /**
-   * Sanitised message for display. We don't redact — Anthropic
-   * messages don't contain secrets — but we strip noisy prefixes
-   * the chat routes add (`Chat handler failed: `) so the toast /
-   * tooltip reads cleanly. Returns the original string when no
-   * known prefix was present.
+   * Sanitised message for display. Two passes: noisy prefixes the chat routes
+   * add (`Chat handler failed: `) are stripped so the toast / tooltip reads
+   * cleanly, and anything key-shaped is masked by {@link redactSecrets}.
+   * Returns the original string when neither had anything to do.
+   *
+   * The redaction pass is defence in depth, not a response to a known leak.
+   * This comment used to say "we don't redact — Anthropic messages don't
+   * contain secrets", which was written for the Anthropic-only lane and stopped
+   * being a safe assumption once a second vendor and a configurable base URL
+   * arrived. Against both shipped vendors the one message that echoes a key
+   * back is OpenAI's "Incorrect API key provided: …", and that one is caught by
+   * the auth arm below and replaced with the remediation copy before it is ever
+   * shown or persisted. What was missing was the guarantee for everything else,
+   * including whatever a gateway behind `OPENAI_BASE_URL` decides to say.
    */
   message: string
 }
@@ -126,6 +135,31 @@ const RETRY_AFTER_PATTERNS = [
 // reset windows are minutes, not hours; anything bigger is almost
 // certainly a misparsed number (e.g. a timestamp).
 const MAX_RETRY_AFTER_SECONDS = 3600
+
+/**
+ * Anything key-shaped in a vendor message, masked.
+ *
+ * Both shipped vendors use the `sk-` prefix (`sk-…` for OpenAI, `sk-ant-…` for
+ * Anthropic), and a self-hosted gateway can answer with an `Authorization`
+ * header echoed into its own error text, so a bare bearer token is masked too.
+ * The rest of the sentence is left alone: the message is the only thing the
+ * user has to diagnose with, and a message redacted down to nothing is a
+ * support ticket.
+ *
+ * The 12-character floor is what keeps this from firing on prose. A vendor
+ * that already partially redacts (`sk-abc***`) is left as it is, and a
+ * sentence that happens to contain "sk-" is not a key.
+ */
+const SECRET_PATTERNS: Array<[RegExp, string]> = [
+  [/\bsk-[A-Za-z0-9_-]{12,}/g, 'sk-***'],
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, 'Bearer ***'],
+]
+
+export function redactSecrets(message: string): string {
+  let out = message
+  for (const [pattern, mask] of SECRET_PATTERNS) out = out.replace(pattern, mask)
+  return out
+}
 
 const NOISE_PREFIXES = [
   /^Chat handler failed:\s*/,
@@ -251,7 +285,10 @@ export function classifyTurnError(
   opts: ClassifyTurnErrorOpts = {},
 ): ClassifiedTurnError {
   const raw = toMessage(rawError)
-  const message = stripNoise(raw)
+  // Patterns are matched against the RAW message, not the redacted one: a
+  // pattern could legitimately key off the shape of the credential, and
+  // masking first would make it miss. Only what is handed back is redacted.
+  const message = redactSecrets(stripNoise(raw))
   const authPatterns = [...AUTH_ERROR_PATTERNS, ...(opts.errorPatterns?.auth ?? [])]
   const ratePatterns = [...RATE_LIMITED_PATTERNS, ...(opts.errorPatterns?.rateLimited ?? [])]
   // Auth is checked FIRST now, where it used to be checked only after the

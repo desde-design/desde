@@ -5,6 +5,7 @@ import {
   classifyTurnError,
   extractRetryAfterFromError,
   isAuthError,
+  redactSecrets,
 } from "./classify-turn-error"
 import { ANTHROPIC_DESCRIPTOR } from "../llm-providers/descriptors/anthropic"
 import { OPENAI_DESCRIPTOR } from "../llm-providers/descriptors/openai"
@@ -383,5 +384,54 @@ describe("the OpenAI descriptor's copy, against errors OpenAI actually produces"
     const out = classifyTurnError(err, patterns)
     expect(out.kind).toBe("rate-limited")
     expect(out.retryAfterSeconds).toBe(2)
+  })
+})
+
+describe("redactSecrets", () => {
+  // Defence in depth, not an incident response. Against both shipped vendors
+  // the one message that echoes a key back ("Incorrect API key provided: …")
+  // is already intercepted by the auth arm and replaced with the remediation
+  // copy, and neither vendor's error puts headers, URL or body into
+  // `.message`. What is missing is the guarantee: any vendor or gateway
+  // message that carries a key AND misses every auth pattern is persisted
+  // verbatim into `.desde/chat-sessions/<id>.json`. This closes that.
+  const FAKE_OPENAI_KEY = "sk-test-not-a-real-key-000000"
+  const FAKE_ANTHROPIC_KEY = "sk-ant-api03-test-not-a-real-key-000000"
+
+  it("masks an OpenAI-shaped key", () => {
+    const out = redactSecrets(`Forbidden: token ${FAKE_OPENAI_KEY} is not permitted on this route.`)
+    expect(out).not.toContain(FAKE_OPENAI_KEY)
+    expect(out).toContain("sk-***")
+    // The rest of the sentence survives, because the message is the only thing
+    // the user has to diagnose with.
+    expect(out).toContain("is not permitted on this route")
+  })
+
+  it("masks an Anthropic-shaped key", () => {
+    const out = redactSecrets(`request rejected for ${FAKE_ANTHROPIC_KEY}`)
+    expect(out).not.toContain(FAKE_ANTHROPIC_KEY)
+    expect(out).toContain("sk-***")
+  })
+
+  it("masks a bearer token that is not key-shaped", () => {
+    const out = redactSecrets("upstream said: Authorization: Bearer abcdef0123456789abcdef")
+    expect(out).not.toContain("abcdef0123456789abcdef")
+    expect(out).toContain("Bearer ***")
+  })
+
+  it("leaves an ordinary vendor message untouched", () => {
+    const message = "The model produced an invalid tool call for read_file (sk- is not a key here)."
+    expect(redactSecrets(message)).toBe(message)
+  })
+
+  it("is applied to the message classifyTurnError hands back for display", () => {
+    const out = classifyTurnError(
+      `Forbidden: token ${FAKE_OPENAI_KEY} is not permitted on this route.`,
+      { errorPatterns: OPENAI_DESCRIPTOR.errorPatterns },
+    )
+    // A 403 from a custom OPENAI_BASE_URL gateway matches no auth pattern, so
+    // this is the arm that returns the vendor's own words.
+    expect(out.kind).toBe("other")
+    expect(out.message).not.toContain(FAKE_OPENAI_KEY)
   })
 })
