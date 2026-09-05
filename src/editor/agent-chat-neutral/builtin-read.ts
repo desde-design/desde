@@ -51,8 +51,9 @@ export interface BuiltinReadOpts {
 const DESCRIPTION =
   'Read a file from the prototype repository. Pass a repository-relative path such as ' +
   '`src/views/Home.vue`. Output is the file with line numbers, in the same form as `cat -n`, ' +
-  'so you can quote a line number back to the user or aim an Edit at it. Reads are capped at ' +
-  `${READ_FILE_MAX_BYTES} bytes; use offset and limit to page through a long file. This tool ` +
+  'so you can quote a line number back to the user or aim an Edit at it. One call returns at ' +
+  `most ${READ_FILE_MAX_BYTES} bytes; when it stops early it names the line to continue from, ` +
+  'so offset and limit page through a file of any size. This tool ' +
   'only sees files inside the repository. For a declared reference folder use ' +
   'mcp__editor__read_file_at_commit instead.'
 
@@ -107,30 +108,86 @@ export function buildReadToolSpec(opts: BuiltinReadOpts) {
         }
         return err(`Read failed for '${filePath}': ${(e as Error).message}`)
       }
-      const truncated = raw.byteLength > READ_FILE_MAX_BYTES
-      const text = raw.subarray(0, READ_FILE_MAX_BYTES).toString('utf8')
       await opts.onFileRead?.({
         absolutePath: safe.absolute,
         repoRel: filePath,
-        // The hash covers the WHOLE file, not the truncated slice. It is a
-        // stale-base check, and a partial hash would report every long file as
-        // changed the moment anything wrote it.
+        // The hash covers the WHOLE file. It is a stale-base check, and a
+        // partial hash would report every long file as changed the moment
+        // anything wrote it.
         hashAtRead: createHash('sha256').update(raw).digest('hex'),
         readAt: new Date().toISOString(),
       })
-      const lines = text.split('\n')
+      // The WHOLE file is split into lines BEFORE offset and limit are
+      // applied, and only the resulting SLICE is capped.
+      //
+      // It used to be the other way round: the buffer was cut to
+      // READ_FILE_MAX_BYTES first, so on a 1 MB file every line past the first
+      // 200 KB was unreachable by ANY offset (MEASURED: lines 2544-13000 of a
+      // 13000-line file, 80% of it). Meanwhile the description and the
+      // truncation notice both told the model to page with offset, so the
+      // model followed an instruction that could not work and got back an
+      // empty body it could not tell from the end of the file.
+      const lines = raw.toString('utf8').split('\n')
       // A trailing newline yields a final empty element that is not a line.
       if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+      if (lines.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: `[${filePath} is empty]` }],
+          isError: undefined,
+        }
+      }
       const start = typeof input.offset === 'number' ? Math.max(1, input.offset) : 1
+      if (start > lines.length) {
+        // Named, not empty. "Empty" and "past the end" look identical to the
+        // model otherwise, and it has no other way to learn how long the file
+        // is.
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `[offset ${start} is past the end of '${filePath}'; it has ${lines.length} lines]`,
+            },
+          ],
+          isError: undefined,
+        }
+      }
       const count = typeof input.limit === 'number' ? Math.max(1, input.limit) : lines.length
       const slice = lines.slice(start - 1, start - 1 + count)
-      const numbered = slice
-        .map((line, i) => `${String(start + i).padStart(6, ' ')}\t${line}`)
-        .join('\n')
-      const notice = truncated
-        ? `\n\n[truncated at ${READ_FILE_MAX_BYTES} bytes; use offset and limit to read the rest]`
-        : ''
-      return { content: [{ type: 'text' as const, text: `${numbered}${notice}` }], isError: undefined }
+
+      const kept: string[] = []
+      let bytes = 0
+      let byteCapped = false
+      let lastLine = start - 1
+      for (let i = 0; i < slice.length; i++) {
+        const numbered = `${String(start + i).padStart(6, ' ')}\t${slice[i]}`
+        // +1 for the newline this line will be joined with.
+        const size = Buffer.byteLength(numbered, 'utf8') + (kept.length > 0 ? 1 : 0)
+        if (kept.length === 0 && size > READ_FILE_MAX_BYTES) {
+          // One line longer than the whole budget — a minified bundle, say.
+          // Hand back the head of it rather than nothing at all.
+          kept.push(Buffer.from(numbered, 'utf8').subarray(0, READ_FILE_MAX_BYTES).toString('utf8'))
+          lastLine = start + i
+          byteCapped = true
+          break
+        }
+        if (bytes + size > READ_FILE_MAX_BYTES) {
+          byteCapped = true
+          break
+        }
+        kept.push(numbered)
+        bytes += size
+        lastLine = start + i
+      }
+
+      const notice = byteCapped
+        ? `\n\n[truncated at ${READ_FILE_MAX_BYTES} bytes, after line ${lastLine} of ${lines.length}; continue with offset=${lastLine + 1}]`
+        : lastLine < lines.length
+          ? `\n\n[showed lines ${start} to ${lastLine} of ${lines.length}; continue with offset=${lastLine + 1}]`
+          : ''
+      return {
+        content: [{ type: 'text' as const, text: `${kept.join('\n')}${notice}` }],
+        isError: undefined,
+      }
     },
   }
 }

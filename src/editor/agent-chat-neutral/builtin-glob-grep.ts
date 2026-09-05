@@ -38,6 +38,26 @@ export const GREP_MAX_MATCHES = 200
 /** Files above this are treated as binary or generated and skipped by Grep. */
 const GREP_MAX_FILE_BYTES = 512 * 1024
 
+/**
+ * Ceiling on ONE matching line.
+ *
+ * A match used to push its whole line, and a line's length is bounded only by
+ * its file's size. One checked-in minified bundle is a single line, so a single
+ * match could return half a megabyte — past any turn's context budget on its
+ * own, and `context-budget.ts` only elides OLDER tool results, so the current
+ * one lands whole.
+ */
+export const GREP_MAX_LINE_CHARS = 2000
+
+/**
+ * Ceiling on the WHOLE result.
+ *
+ * The three older caps (500 files, 200 matches, 512 KiB per file) bound the
+ * output only in combination, and their product is about 105 MB. This is the
+ * one that makes the bound useful rather than arithmetically true.
+ */
+export const GREP_MAX_TOTAL_BYTES = 64 * 1024
+
 const EXCLUDED_DIRS = ['node_modules', '.git', 'dist', '.desde', '.next', 'coverage']
 
 export interface BuiltinSearchOpts {
@@ -124,8 +144,9 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
       'Search the prototype repository for a regular expression and return each match as ' +
       '`path:line:text`. Use this to find where a component is used, where a string appears, or ' +
       'where a value is set. Scope it with `glob` when you already know which part of the tree ' +
-      `to look in. Capped at ${GREP_MAX_MATCHES} matches; if you hit the cap, make the pattern ` +
-      'more specific rather than reading everything. Build output, dependencies and ' +
+      `to look in. Capped at ${GREP_MAX_MATCHES} matches, ${GREP_MAX_LINE_CHARS} characters per ` +
+      `line and ${GREP_MAX_TOTAL_BYTES} bytes of output in total; if you hit a cap, make the ` +
+      'pattern more specific rather than reading everything. Build output, dependencies and ' +
       'version-control internals are never searched.',
     kind: 'builtin' as const,
     inputShape: {
@@ -166,8 +187,11 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
         : ''
       const hits: string[] = []
       let capped = false
+      let byteCapped = false
+      let clampedAny = false
+      let totalBytes = 0
       for (const repoRel of paths) {
-        if (capped) break
+        if (capped || byteCapped) break
         const safe = await resolveRepoPath(opts.worktreeRoot, repoRel)
         if (!safe.ok) continue
         let text: string
@@ -184,7 +208,23 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
         const lines = text.split('\n')
         for (let i = 0; i < lines.length; i++) {
           if (!re.test(lines[i])) continue
-          hits.push(`${repoRel}:${i + 1}:${lines[i]}`)
+          const raw = lines[i]
+          const clamped = raw.length > GREP_MAX_LINE_CHARS
+          if (clamped) clampedAny = true
+          const shown = clamped
+            ? `${raw.slice(0, GREP_MAX_LINE_CHARS)} …[line truncated at ${GREP_MAX_LINE_CHARS} characters]`
+            : raw
+          const hit = `${repoRel}:${i + 1}:${shown}`
+          const size = Buffer.byteLength(hit, 'utf8') + 1
+          // Checked BEFORE the push, and the first hit is always kept: a cap
+          // that could return zero matches for a pattern that matched would
+          // read to the model as "not in the repo".
+          if (hits.length > 0 && totalBytes + size > GREP_MAX_TOTAL_BYTES) {
+            byteCapped = true
+            break
+          }
+          hits.push(hit)
+          totalBytes += size
           if (hits.length >= GREP_MAX_MATCHES) {
             capped = true
             break
@@ -201,6 +241,12 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
       // hit either, both, or neither, so both notices can appear together.
       const notice =
         (capped ? `\n\n[stopped at ${GREP_MAX_MATCHES} matches; narrow the pattern or pass a glob]` : '') +
+        (byteCapped
+          ? `\n\n[stopped at the ${GREP_MAX_TOTAL_BYTES}-byte output limit; narrow the pattern or pass a glob]`
+          : '') +
+        (clampedAny
+          ? `\n\n[at least one match sat on a line longer than ${GREP_MAX_LINE_CHARS} characters and was cut short; open that file with Read to see the whole line]`
+          : '') +
         enumerationNotice
       return { content: [{ type: 'text' as const, text: `${hits.join('\n')}${notice}` }], isError: undefined }
     },

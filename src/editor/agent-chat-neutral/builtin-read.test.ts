@@ -25,7 +25,18 @@ describe('Read', () => {
     writeFileSync(join(root, 'src/App.vue'), 'a\nb\nc\nd\n', 'utf8')
     const spec = buildReadToolSpec({ worktreeRoot: root })
     const out = await spec.handler({ file_path: 'src/App.vue', offset: 2, limit: 2 }, {})
-    expect(out.content[0].text).toBe('     2\tb\n     3\tc')
+    // The continuation line is part of the contract, not decoration: it is how
+    // the model tells "the limit cut this short" from "the file ended here".
+    expect(out.content[0].text).toBe(
+      '     2\tb\n     3\tc\n\n[showed lines 2 to 3 of 4; continue with offset=4]',
+    )
+  })
+
+  it('adds no continuation line when the whole file fitted', async () => {
+    writeFileSync(join(root, 'src/App.vue'), 'a\nb\n', 'utf8')
+    const spec = buildReadToolSpec({ worktreeRoot: root })
+    const out = await spec.handler({ file_path: 'src/App.vue' }, {})
+    expect(out.content[0].text).toBe('     1\ta\n     2\tb')
   })
 
   it('records hashAtRead so a later write can detect a stale base', async () => {
@@ -55,6 +66,44 @@ describe('Read', () => {
     const out = await spec.handler({ file_path: 'src/Nope.vue' }, {})
     expect(out.isError).toBe(true)
     expect(out.content[0].text).toMatch(/not found/)
+  })
+
+  it('pages a file past the byte cap: a high offset returns that part of the file', async () => {
+    // 13000 lines, about 1 MB — five times READ_FILE_MAX_BYTES. Slicing the
+    // buffer before applying offset made every line past the first 200 KB
+    // unreachable by ANY offset, while the description told the model to page
+    // with offset. The instruction has to be true.
+    const lines = Array.from({ length: 13000 }, (_, i) => `line ${i + 1} ${'y'.repeat(70)}`)
+    writeFileSync(join(root, 'src/huge.txt'), `${lines.join('\n')}\n`, 'utf8')
+    const spec = buildReadToolSpec({ worktreeRoot: root })
+    const out = await spec.handler({ file_path: 'src/huge.txt', offset: 12000, limit: 5 }, {})
+    expect(out.isError).toBeUndefined()
+    expect(out.content[0].text).toContain('line 12000')
+    expect(out.content[0].text).toContain('line 12004')
+    expect(out.content[0].text).not.toContain('line 12005')
+  })
+
+  it('says an offset past the end is past the end, not empty', async () => {
+    writeFileSync(join(root, 'src/App.vue'), 'a\nb\n', 'utf8')
+    const spec = buildReadToolSpec({ worktreeRoot: root })
+    const out = await spec.handler({ file_path: 'src/App.vue', offset: 99 }, {})
+    expect(out.isError).toBeUndefined()
+    expect(out.content[0].text).toMatch(/past the end/)
+    expect(out.content[0].text).toMatch(/2 lines/)
+  })
+
+  it('names the line to continue from when the byte cap stops the slice', async () => {
+    const lines = Array.from({ length: 13000 }, (_, i) => `line ${i + 1} ${'y'.repeat(70)}`)
+    writeFileSync(join(root, 'src/huge.txt'), `${lines.join('\n')}\n`, 'utf8')
+    const spec = buildReadToolSpec({ worktreeRoot: root })
+    const out = await spec.handler({ file_path: 'src/huge.txt' }, {})
+    const text = out.content[0].text
+    expect(text).toMatch(/truncated/)
+    const m = text.match(/offset=(\d+)/)
+    expect(m).not.toBeNull()
+    const next = Number(m![1])
+    const rest = await spec.handler({ file_path: 'src/huge.txt', offset: next, limit: 1 }, {})
+    expect(rest.content[0].text).toContain(`line ${next} `)
   })
 
   it('truncates a large file and says so', async () => {

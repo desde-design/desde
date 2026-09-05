@@ -3,7 +3,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { buildGlobToolSpec, buildGrepToolSpec } from './builtin-glob-grep'
+import {
+  buildGlobToolSpec,
+  buildGrepToolSpec,
+  GREP_MAX_LINE_CHARS,
+  GREP_MAX_MATCHES,
+  GREP_MAX_TOTAL_BYTES,
+} from './builtin-glob-grep'
 
 let root: string
 beforeEach(() => {
@@ -70,5 +76,33 @@ describe('Grep', () => {
     )
     expect(out.isError).toBeUndefined()
     expect(out.content[0].text).toMatch(/searched only the first 500 files/)
+  })
+
+  it('clamps one very long matching line instead of returning the whole line', async () => {
+    // A checked-in minified bundle is one line. Pushing the whole line put
+    // half a megabyte into the model's context from a single match.
+    writeFileSync(join(root, 'src/bundle.min.js'), `var a=1;${'z'.repeat(300 * 1024)}//needle\n`, 'utf8')
+    const out = await buildGrepToolSpec({ worktreeRoot: root }).handler({ pattern: 'needle' }, {})
+    expect(out.isError).toBeUndefined()
+    expect(out.content[0].text.length).toBeLessThan(GREP_MAX_LINE_CHARS + 500)
+    expect(out.content[0].text).toMatch(/line truncated/)
+  })
+
+  it('stops on a total output byte cap and says so', async () => {
+    const line = `needle ${'q'.repeat(1500)}`
+    for (let i = 0; i < 60; i++) {
+      writeFileSync(join(root, `src/big${i}.txt`), `${`${line}\n`.repeat(40)}`, 'utf8')
+    }
+    const out = await buildGrepToolSpec({ worktreeRoot: root }).handler({ pattern: 'needle' }, {})
+    expect(Buffer.byteLength(out.content[0].text, 'utf8')).toBeLessThan(
+      GREP_MAX_TOTAL_BYTES + 4096,
+    )
+    expect(out.content[0].text).toMatch(/output limit/)
+  })
+
+  it('names its caps in the description, so the model can act on them', () => {
+    const spec = buildGrepToolSpec({ worktreeRoot: root })
+    expect(spec.description).toContain(String(GREP_MAX_MATCHES))
+    expect(spec.description).toContain(String(GREP_MAX_LINE_CHARS))
   })
 })
