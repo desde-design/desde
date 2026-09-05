@@ -33,6 +33,7 @@ import {
   resolvedDefaultModelFor,
   setModelCatalogLiveSourcesForTests,
 } from "../model-catalog-source.js"
+import { handleModelCatalogRequest } from "../model-catalog-handler.js"
 import { assertChatCredentials } from "../../../../src/editor/llm-providers/assert-chat-credentials.js"
 
 // The BYO-key cutover: chat dispatch now refuses without a model credential,
@@ -369,6 +370,79 @@ describe("handleChatRequest", () => {
     expect(() => assertChatCredentials(process.env, "openai")).toThrow(/OpenAI/i)
     vi.stubEnv("OPENAI_API_KEY", "sk-openai-present")
     expect(() => assertChatCredentials(process.env, "openai")).not.toThrow()
+  })
+
+  it("dispatches the turn on the provider the catalog serves as its default", async () => {
+    // The billing-correctness case. With BOTH providers credentialed and
+    // `llm.defaultProvider: "openai"` set, the model picker chip renders the
+    // catalog's default — an OpenAI model — while the turn used to run, and
+    // bill, on Anthropic. That is the first-ever chat in a project: no request
+    // `modelConfig`, no persisted session model, so the handler falls back to
+    // its own default rule, and that rule was the only one in the product
+    // that ignored `llm.defaultProvider`.
+    //
+    // The assertion is deliberately against what the CATALOG answers rather
+    // than against the literal "openai": the chip and the turn have to agree,
+    // and hardcoding both sides of an agreement proves nothing.
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    const llm = { defaultProvider: "openai" }
+    modelCatalogResolver.invalidate()
+
+    const catalogMock = makeMockReqRes()
+    await handleModelCatalogRequest(catalogMock.req, catalogMock.res, repoRoot, {
+      configuredDefaultProvider: llm.defaultProvider,
+    })
+    const catalogDefault = (
+      JSON.parse(catalogMock.endBody() ?? "{}") as { defaultProviderId?: string }
+    ).defaultProviderId
+    expect(catalogDefault).toBe("openai")
+
+    const base = makeLoaders({ scriptedEvents: [] })
+    let dispatchedProvider: string | undefined
+    let sdkLaneLoaded = false
+    const loaders: ChatHandlerLoaders = {
+      ...base,
+      loadRunChatTurnSdk: async () => {
+        sdkLaneLoaded = true
+        return base.loadRunChatTurnSdk()
+      },
+      loadRunChatTurnNeutral: async () => {
+        const { makeEmptySession } = await import(
+          "../../../../src/editor/agent-chat/types.js"
+        )
+        return {
+          runChatTurnNeutral: async (callOpts: { providerId?: string }) => {
+            dispatchedProvider = callOpts.providerId
+            return {
+              session: makeEmptySession("test-proj"),
+              turn: {
+                id: "t-default-provider",
+                startedAt: "x",
+                userMessage: "hi",
+                assistantContent: [],
+                toolResults: {},
+                editProposals: [],
+              },
+            }
+          },
+        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>>
+      },
+    }
+
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi" })
+    await handleChatRequest(mock.req, mock.res, {
+      repoRoot,
+      loaders,
+      llm,
+    } as ChatHandlerContext)
+    modelCatalogResolver.invalidate()
+
+    expect(dispatchedProvider).toBe(catalogDefault)
+    // And the lane followed the provider. Anthropic is the SDK lane and OpenAI
+    // is the neutral one, so a turn that silently ran on Anthropic would also
+    // have had different steering behaviour than the picker advertised.
+    expect(sdkLaneLoaded).toBe(false)
   })
 
   it("forwards orchestrator events to the SSE stream", async () => {
@@ -2083,6 +2157,8 @@ describe("handleSteerRequest — mid-turn steering", () => {
       beforeSessionLoad?: Promise<void>
       neutralEmitsSteered?: { sessionId: string }
       sessionModelConfig?: { provider: string; model: string }
+      /** The project's `llm` block, as `.desde/config.json` supplies it. */
+      llm?: ChatHandlerContext["llm"]
     } = {},
   ): Promise<{
     turn: MockReqRes
@@ -2102,6 +2178,7 @@ describe("handleSteerRequest — mid-turn steering", () => {
     turn.setBody({ userMessage: "start the work", sessionId })
     const done = handleChatRequest(turn.req, turn.res, {
       repoRoot,
+      ...(opts.llm ? { llm: opts.llm } : {}),
       loaders: makeSteerableLoaders({
         received,
         finish,
@@ -2487,6 +2564,47 @@ describe("handleSteerRequest — mid-turn steering", () => {
     } finally {
       vi.unstubAllEnvs()
     }
+  })
+
+  it("registers the live turn on the configured default provider's lane, not Anthropic's", async () => {
+    // The other half of the billing fix, at the EARLIER call site. Before the
+    // turn's session has loaded, the route has to know which lane will serve
+    // it — that is what decides who announces a steer. It resolved that from
+    // env alone and ignored `llm.defaultProvider`, so a project configured for
+    // OpenAI registered on Anthropic's SDK lane.
+    //
+    // Observable difference: on the SDK lane the ROUTE announces a steer at
+    // accept time, because that runtime emits none. On the neutral lane the
+    // runtime announces it later, at its own step boundary, so the route must
+    // stay quiet. A frame appearing here is the route saying "SDK lane".
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    const received: DeliveredMessage[] = []
+    let releaseSetup: () => void = () => {}
+    const holdSetup = new Promise<void>((resolve) => {
+      releaseSetup = resolve
+    })
+    const { turn, done, release, started } = await startLiveTurn("s-configured-default", received, {
+      beforeSessionLoad: holdSetup,
+      llm: { defaultProvider: "openai" },
+      neutralEmitsSteered: { sessionId: "s-configured-default" },
+    })
+
+    await steer({ sessionId: "s-configured-default", userMessage: "typed while it was starting" })
+    // The route stood down: this turn is on the neutral lane, where the
+    // runtime is the announcer.
+    expect(turn.events().filter((e) => e.kind === "steered")).toHaveLength(0)
+
+    releaseSetup()
+    await started
+    release()
+    await done
+
+    // And the steer was still announced exactly once, by the runtime.
+    expect(turn.events().filter((e) => e.kind === "steered")).toHaveLength(1)
+    expect(received.map((m) => m.text)).toEqual([
+      "start the work",
+      "typed while it was starting",
+    ])
   })
 
   it("reports a steer for resubmission when the turn dies before it ever starts", async () => {

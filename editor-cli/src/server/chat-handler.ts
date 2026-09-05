@@ -276,14 +276,27 @@ interface LiveTurn {
 const liveTurns = new Map<string, LiveTurn>()
 
 /**
- * The provider a turn runs on when nothing names one. Read from env only, so
- * it is available both at live-turn registration (before the session loads)
- * and again once the effective model config is known — and the two can never
- * disagree about the default, only about what overrides it.
+ * The provider a turn runs on when nothing names one.
+ *
+ * Both inputs are available at live-turn registration (before the session
+ * loads) and again once the effective model config is known, so the two call
+ * sites can never disagree about the default, only about what overrides it.
+ *
+ * `configuredDefault` is the project's `llm.defaultProvider`, and passing it
+ * is what makes the turn run on the provider the picker chip is showing.
+ * Omitting it was a billing bug, not a cosmetic one: with both providers
+ * credentialed, `DEFAULT_PROVIDER_PRECEDENCE` handed every unconfigured turn
+ * to Anthropic while the catalog — which DOES read the configured default —
+ * served an OpenAI model as the chip's value. The first chat in an
+ * OpenAI-configured project therefore showed "gpt-5.6", ran on Claude, billed
+ * the Anthropic key, and persisted a Claude model into the transcript. It also
+ * flipped the lane, so the mid-turn-steering behaviour the picker advertised
+ * for OpenAI was not the behaviour the turn had.
  */
-function defaultProviderIdFromEnv(): string {
+function defaultProviderIdForTurn(configuredDefault: string | undefined): string {
   return resolveDefaultProviderId({
     env: process.env,
+    ...(configuredDefault ? { configuredDefault } : {}),
     isCredentialed: (d) => isCredentialedFromEnv(d, process.env),
   })
 }
@@ -415,10 +428,13 @@ export interface ChatHandlerContext {
     }
   }
   /**
-   * `llm` block from `.desde/config.json` — which provider this project's
-   * non-chat lanes run on. Used here ONLY for `verify_goal`'s translate step
-   * (`resolveLlmProvider`, built below); the chat runtime itself dispatches
-   * on the session's own model choice, not this.
+   * `llm` block from `.desde/config.json` — which provider this project runs
+   * on. Two consumers here: `verify_goal`'s translate step
+   * (`resolveLlmProvider`, built below), and `defaultProviderIdForTurn`, which
+   * reads `llm.defaultProvider` so a chat turn that names no model of its own
+   * runs on the provider the model picker is showing as the default. A turn
+   * that DOES name a model still dispatches on that model's provider; this is
+   * the fallback only.
    */
   llm?: import("./project-config.js").ProjectConfig["llm"]
   /**
@@ -685,10 +701,12 @@ export async function handleChatRequest(
     // Which lane serves this turn decides who announces a steer, so it has to
     // be known BEFORE the entry exists — the first steer the route accepts
     // already needs the answer. Both inputs are in hand here: `modelConfig`
-    // came off the request body above, and `resolveDefaultProviderId` reads
-    // only env. The one input that is not is the session's persisted model,
-    // which the reconciliation after the session load corrects for.
-    turnProviderId = requestModelConfig?.provider ?? defaultProviderIdFromEnv()
+    // came off the request body above, and the default rule reads env plus
+    // the project's `llm.defaultProvider`, both in hand. The one input that is
+    // not is the session's persisted model, which the reconciliation after the
+    // session load corrects for.
+    turnProviderId =
+      requestModelConfig?.provider ?? defaultProviderIdForTurn(ctx.llm?.defaultProvider)
     liveTurns.set(lockKey, {
       channel: turnChannel,
       emit: (ev) => {
@@ -823,7 +841,8 @@ export async function handleChatRequest(
     // surface below, so a turn the gate refuses never pays for any of that
     // setup (project knowledge is a filesystem walk, review surface can
     // launch a headless Chromium).
-    turnProviderId = effectiveModelConfig?.provider ?? defaultProviderIdFromEnv()
+    turnProviderId =
+      effectiveModelConfig?.provider ?? defaultProviderIdForTurn(ctx.llm?.defaultProvider)
     assertChatCredentials(process.env, turnProviderId)
 
     // The lane is now settled: `effectiveModelConfig` adds the session's
