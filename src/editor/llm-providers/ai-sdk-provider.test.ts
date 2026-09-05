@@ -11,7 +11,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { MockLanguageModelV4 } from 'ai/test'
-import { AiSdkProvider } from './ai-sdk-provider'
+import { AiSdkProvider, APICallError, RetryError } from './ai-sdk-provider'
 import type { ProviderEvent } from './types'
 
 /**
@@ -576,5 +576,96 @@ describe('AiSdkProvider.streamConversation', () => {
         }),
       ),
     ).rejects.toThrow(/429/)
+  })
+})
+
+/**
+ * The retry budget for a chat step belongs to `streamStepWithRetry` in the
+ * neutral runtime, NOT to the SDK. `streamConversation` therefore sends
+ * `maxRetries: 0`, and that single line is what keeps the vendor's own
+ * `APICallError` — the one carrying the status and the `retry-after` header
+ * our classifier reads — from being swallowed and re-thrown as a `RetryError`
+ * envelope that carries neither.
+ *
+ * These cases exist because that line was load-bearing and unasserted:
+ * MEASURED on 2026-09-04, deleting it left all 4481 tests in `src/editor`
+ * green, which is how the first attempt at this defect shipped wrong. The
+ * neutral-runtime retry tests cannot catch it — they inject a hand-written
+ * `LLMProvider` stub, so `AiSdkProvider.streamConversation` never runs.
+ */
+describe('AiSdkProvider retry ownership', () => {
+  /** A 429 shaped exactly like the one the SDK's retry loop acts on. */
+  function retryable429(): Error {
+    return new APICallError({
+      message: 'Rate limit reached for gpt-5.6',
+      url: 'https://api.openai.com/v1/responses',
+      requestBodyValues: {},
+      statusCode: 429,
+      responseHeaders: { 'retry-after': '3' },
+      isRetryable: true,
+    })
+  }
+
+  it('hands a retryable error to our loop once, un-enveloped, without retrying itself', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        throw retryable429()
+      },
+    })
+    let thrown: unknown
+    try {
+      await collect(
+        providerFor(model).streamConversation({
+          system: 's',
+          messages: [{ role: 'user', content: 'u' }],
+          tools: [],
+        }),
+      )
+    } catch (err) {
+      thrown = err
+    }
+
+    // The SDK did NOT retry internally: one request, not three nested inside
+    // each of our own three.
+    expect(model.doStreamCalls).toHaveLength(1)
+    // What reaches our classifier is the vendor's error, not the envelope.
+    // Without `maxRetries: 0` this is a `RetryError` whose `statusCode`,
+    // `responseHeaders` and `isRetryable` are all undefined, so the turn is
+    // classified un-retryable and the `retry-after` header is lost.
+    expect(RetryError.isInstance(thrown)).toBe(false)
+    expect(APICallError.isInstance(thrown)).toBe(true)
+    const api = thrown as InstanceType<typeof APICallError>
+    expect(api.statusCode).toBe(429)
+    expect(api.isRetryable).toBe(true)
+    expect(api.responseHeaders?.['retry-after']).toBe('3')
+  })
+
+  it('keeps the SDK\'s own retries on streamComplete, which no loop of ours wraps', async () => {
+    // The asymmetry is deliberate, so pin it at the boundary rather than by
+    // waiting out two real exponential-backoff sleeps: `streamConversation`
+    // sends `maxRetries: 0`, `streamComplete` sends no `maxRetries` at all
+    // and inherits the SDK's default of 2.
+    streamTextMock.mockClear()
+    const model = new MockLanguageModelV4({
+      doStream: streamOf([
+        { type: 'stream-start', warnings: [] },
+        { type: 'text-start', id: '1' },
+        { type: 'text-delta', id: '1', delta: 'ok' },
+        { type: 'text-end', id: '1' },
+        { type: 'finish', finishReason: finishOf('stop'), usage: USAGE },
+      ]),
+    })
+    const provider = providerFor(model)
+
+    await collect(
+      provider.streamConversation({ system: 's', messages: [{ role: 'user', content: 'u' }], tools: [] }),
+    )
+    const conversationOpts = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(conversationOpts.maxRetries).toBe(0)
+
+    streamTextMock.mockClear()
+    await provider.streamComplete({ system: 's', user: 'u' })
+    const completeOpts = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(completeOpts).not.toHaveProperty('maxRetries')
   })
 })
