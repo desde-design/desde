@@ -481,6 +481,19 @@ export interface ChatHandlerContext {
    * Omitted (tests) → tools stay off, matching the default.
    */
   canvasEnabled?: boolean
+  /**
+   * Whether this project allows the agent to READ credential-bearing files
+   * (`.env`, private keys, `.npmrc`, cloud credential stores). Default OFF —
+   * omitted means refused, on the `=== true` discipline.
+   *
+   * `http-server.ts` computes it from `editor.secretReads` in
+   * `.desde/config.json` OR `EDITOR_SECRET_READS=1`, through
+   * `isSecretReadsEnabled`, which the client bootstrap reads too. Threaded
+   * into BOTH chat runtimes: the SDK lane enforces it in a `PreToolUse` hook
+   * (its Read never reaches `canUseTool`), the neutral lane in the shared
+   * permission gate and in its own Read/Glob/Grep.
+   */
+  allowSecretReads?: boolean
 }
 
 /** Best-effort pathname+hash from the request's page snapshot (mirror the user's route). */
@@ -1203,6 +1216,7 @@ export async function handleChatRequest(
       extensions,
       disabledCapabilities,
       canvasEnabled: ctx.canvasEnabled,
+      allowSecretReads: ctx.allowSecretReads === true,
       awaitEditAck,
       emit: (ev) => {
         // Normally a straight forward. The one exception is the lane

@@ -5,6 +5,7 @@ import {
   isCanvasEnabled,
   isNotesEnabled,
   isNeutralChatEnabled,
+  isSecretReadsEnabled,
   chatRuntimeOverride,
 } from "../dormant-surfaces.js"
 
@@ -16,6 +17,7 @@ const ENV_KEYS = [
   "EDITOR_CODE_VIEW",
   "EDITOR_NOTES",
   "EDITOR_CANVAS",
+  "EDITOR_SECRET_READS",
   "EDITOR_NEUTRAL_CHAT",
 ] as const
 const saved = new Map<string, string | undefined>()
@@ -44,6 +46,11 @@ const GATES = [
   { name: "codeView", read: isCodeViewEnabled, env: "EDITOR_CODE_VIEW" },
   { name: "notes", read: isNotesEnabled, env: "EDITOR_NOTES" },
   { name: "canvas", read: isCanvasEnabled, env: "EDITOR_CANVAS" },
+  // Not a surface: a policy relaxation that lets the agent read credential
+  // files. It is in the table because it is the same `=== true` gate with the
+  // same two callers, and because the safe default is the one a typo must not
+  // be able to flip.
+  { name: "secretReads", read: isSecretReadsEnabled, env: "EDITOR_SECRET_READS" },
 ] as const
 
 describe.each(GATES)("$name gate", ({ name, read, env }) => {

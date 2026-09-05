@@ -68,6 +68,14 @@ type CliBootstrap = {
    */
   vscodeLink?: boolean
   /**
+   * Secret-file read policy for the chat agent. Populated by the CLI
+   * bootstrap from `editor.secretReads` in `.desde/config.json` OR the
+   * `EDITOR_SECRET_READS=1` env var (either enables). Default `false`.
+   * Absent on the web shell — always `false` there.
+   * See {@link EDITOR_SECRET_READS}.
+   */
+  secretReads?: boolean
+  /**
    * Dormant edit-lane gates. Populated by the CLI bootstrap from the `lanes`
    * block of `desde.config.json` (the same file `hosts` lives in),
    * and always emitted exhaustively — every dormant lane appears with an
@@ -241,6 +249,27 @@ export const EDITOR_CANVAS: boolean = cliBootstrap?.canvas === true
  * none of this machinery.
  */
 export const EDITOR_CODE_VIEW: boolean = cliBootstrap?.codeView === true
+
+/**
+ * Secret-file reads — whether the chat agent may READ credential-bearing
+ * files in this project (`.env` and its variants, private keys, `.npmrc`,
+ * cloud credential stores). Default **false** — opt-IN, same shape as
+ * {@link EDITOR_CODE_VIEW}. Set `editor.secretReads: true` in
+ * `.desde/config.json`, or `EDITOR_SECRET_READS=1`, to allow them.
+ *
+ * This one does NOT gate a surface, and it is not a dormant feature. It is a
+ * POLICY: with it off the agent's Read, Glob and Grep refuse those files,
+ * because their content would otherwise land in a transcript sent to a model
+ * vendor, and a prototype repository is untrusted input. `.env.example` and
+ * the other documentation spellings stay readable either way.
+ *
+ * Gated at BOTH ends, the same discipline as the flags above. This flag is
+ * the REPORTING half — the capabilities panel says the project has allowed
+ * it. The CLI enforces independently on the same config, in the shared
+ * permission gate and in the SDK lane's `PreToolUse` guard, so a stale client
+ * cannot talk the chat route into reading a secret the project never allowed.
+ */
+export const EDITOR_SECRET_READS: boolean = cliBootstrap?.secretReads === true
 
 /**
  * Notes — the second kind of DOM-anchored annotation, alongside comments.

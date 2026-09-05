@@ -205,6 +205,7 @@ import { handleNotesRequest, matchesNotesRoute } from "./notes-handler.js"
 import {
   dormantSurfaceRefusal,
   isCanvasEnabled,
+  isSecretReadsEnabled,
   isCodeViewEnabled,
   isNotesEnabled,
   isVscodeLinkEnabled,
@@ -432,6 +433,13 @@ export interface HttpServerOptions {
      * as `codeView` above.
      */
     notes?: boolean
+    /**
+     * Secret-file read policy for the chat agent. Opt-IN, default false.
+     * Read through `isSecretReadsEnabled` — never compared here — so the
+     * bootstrap's `secretReads` field and what the chat dispatch actually
+     * allows cannot disagree. See `dormant-surfaces.ts`.
+     */
+    secretReads?: boolean
     /**
      * "Open in VS Code" gate. DORMANT by product decision 2026-08-18.
      * Read through `isVscodeLinkEnabled`. Unlike the two above it has no
@@ -2539,6 +2547,11 @@ async function handleChatRoute(
     // `EDITOR_CANVAS=1` restores it — same either-enables contract
     // as the client bootstrap's `canvas` field below.
     canvasEnabled: isCanvasEnabled(ctx),
+    // Secret-file reads — opt-IN, default OFF. The DISPATCH half of the
+    // both-ends gate: the client bootstrap reports the same boolean below,
+    // through the same function, so a stale client cannot talk this route
+    // into reading a `.env` the project never allowed.
+    allowSecretReads: isSecretReadsEnabled(ctx),
   })
 }
 
@@ -5290,6 +5303,11 @@ function serveBootstrapScript(
   const codeView = isCodeViewEnabled(ctx)
   const notes = isNotesEnabled(ctx)
   const vscodeLink = isVscodeLinkEnabled(ctx)
+  // Secret-file read policy — opt-IN, default OFF. The OFFERING half: the
+  // capabilities panel reports that this project allows the agent to read
+  // credential-bearing files. Same function the chat route reads, so what the
+  // panel says and what the agent may do cannot drift.
+  const secretReads = isSecretReadsEnabled(ctx)
   // Editor runtime tunables from `.desde/config.json`. Only
   // emit the subkey if the user set something — keeps the bootstrap
   // payload clean for the common case and lets the shell distinguish
@@ -5348,6 +5366,9 @@ function serveBootstrapScript(
     codeView,
     notes,
     vscodeLink,
+    // Secret-file reads — default false (opt-IN). Reported so the
+    // capabilities panel can say the project has turned it on.
+    secretReads,
     // Dormant edit lanes — both default false (opt-IN). See EDITOR_LANE_DETACH
     // / EDITOR_LANE_SWAP in src/lib/editor-feature-flags.ts.
     lanes,

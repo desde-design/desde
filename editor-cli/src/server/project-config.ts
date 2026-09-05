@@ -166,6 +166,22 @@ export interface ProjectConfig {
      */
     notes?: boolean
     /**
+     * Secret-file read policy for the chat agent. Default `false` (opt-IN,
+     * same shape as `canvas` and `codeView`). `EDITOR_SECRET_READS=1` also
+     * enables it (either enables).
+     *
+     * With it off, the agent's Read, Glob and Grep refuse credential-bearing
+     * files — `.env` and its variants, private keys, `.npmrc`, cloud
+     * credential stores — while `.env.example` and friends stay readable.
+     * With it on they behave as they did before the policy existed. Set it
+     * only when the agent genuinely needs to see env values.
+     *
+     * Gates BOTH ends: the client bootstrap reports it, and the chat dispatch
+     * refuses independently. See `isSecretReadsEnabled` in
+     * `dormant-surfaces.ts`.
+     */
+    secretReads?: boolean
+    /**
      * "Open in VS Code" gate — the right-click item that launches
      * `vscode://file/<abs>:<line>`. DORMANT by product decision
      * 2026-08-18; default `false` (opt-IN). `EDITOR_VSCODE_LINK=1` also
@@ -599,6 +615,20 @@ export async function readProjectConfig(
         }
       }
       out.notes = co.notes
+    }
+    if (co.secretReads !== undefined) {
+      // Explicit refusal, not a silent skip: a malformed value here would
+      // read as the default (refuse secret reads), which is the SAFE answer
+      // and therefore the one most likely to hide a typo from a user who
+      // deliberately turned the policy off and believes they did.
+      if (typeof co.secretReads !== 'boolean') {
+        return {
+          ok: false,
+          reason: 'malformed',
+          message: `${configPath}: 'editor.secretReads' must be a boolean.`,
+        }
+      }
+      out.secretReads = co.secretReads
     }
     if (co.vscodeLink !== undefined) {
       // Same explicit refusal as `codeView` / `notes` above, not a silent
