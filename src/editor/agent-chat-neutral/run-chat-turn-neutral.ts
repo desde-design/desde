@@ -60,6 +60,7 @@ import type {
   ChatTurn,
 } from '../agent-chat/types'
 import type { ToolPermissionGate } from '../agent-chat/tool-permission'
+import type { OverwriteConflictDetected } from '../agent-chat-sdk/edit-ack'
 import { buildToolPermissionGate } from '../agent-chat-sdk/edit-ack'
 import { captureReadSnapshot } from '../agent-chat-sdk/file-read-snapshot'
 import { buildGroundingDigest } from '../agent-chat-sdk/grounding-tools'
@@ -251,6 +252,31 @@ async function runInner(
     return { ok: true, editId }
   }
 
+  /**
+   * Raises the overwrite banner and records the conflict on the session.
+   *
+   * FX14 item 2 (2026-09-05). This used to be handed to the permission gate,
+   * which on this lane runs BEFORE the write and re-reads the file to decide.
+   * A writer landing in the window between the gate's read and the handler's
+   * own read escaped it entirely, and the overwrite went out silently. The
+   * write tools raise it themselves now, against the bytes they actually
+   * replaced. See `reportOverwriteConflict` in `builtin-edit.ts`.
+   */
+  const onConflictDetected = (detected: OverwriteConflictDetected): void => {
+    conflicts[detected.absolutePath] = {
+      detectedAt: new Date().toISOString(),
+      hashAtRead: detected.hashAtRead,
+      hashAtWrite: detected.hashAtWrite,
+    }
+    opts.emit({
+      kind: 'edit_overwrite_warning',
+      turnId,
+      file: detected.file,
+      hashAtRead: detected.hashAtRead,
+      hashAtWrite: detected.hashAtWrite,
+    })
+  }
+
   const catalog = buildNeutralToolCatalog({
     worktreeRoot: opts.worktreeRoot,
     onFileRead: async (r) => {
@@ -280,6 +306,10 @@ async function runInner(
     writeOpts: {
       worktreeRoot: opts.worktreeRoot,
       emitEdit: emitEditProposal,
+      // Same map and same callback the gate used to hold. See
+      // `onConflictDetected` above (FX14 item 2).
+      getFileReads: () => fileReads,
+      onConflictDetected,
       // Moved here from the permission gate (FX11 item 2): the baseline may
       // only advance once the bytes are actually on disk, and on this lane
       // that is the tool handler, not the gate. Same map the gate reads
@@ -364,22 +394,18 @@ async function runInner(
     emitEditProposal: async () => ({ ok: true, editId: '' }),
     readRoots: opts.readRoots,
     webPolicy: opts.webPolicy,
-    getFileReads: () => fileReads,
-    onConflictDetected: (detected) => {
-      conflicts[detected.absolutePath] = {
-        detectedAt: new Date().toISOString(),
-        hashAtRead: detected.hashAtRead,
-        hashAtWrite: detected.hashAtWrite,
-      }
-      opts.emit({
-        kind: 'edit_overwrite_warning',
-        turnId,
-        file: detected.file,
-        hashAtRead: detected.hashAtRead,
-        hashAtWrite: detected.hashAtWrite,
-      })
-    },
-    // `recordOwnWrite` is deliberately NOT passed here. The gate would advance
+    // `getFileReads` and `onConflictDetected` are deliberately NOT passed
+    // here, and that is the FX14 item 2 fix. The gate detects an overwrite by
+    // re-reading the file and comparing it to the model's baseline, but on
+    // this lane the gate does not perform the write: the tool handler does,
+    // after reading the file a THIRD time. A concurrent writer landing in
+    // between made the gate's two reads agree with each other and disagree
+    // with the model, so the overwrite went out with no banner. The write
+    // tools raise it themselves now, against the bytes they replaced. The SDK
+    // lane still detects in the gate, correctly, because there the gate is
+    // the last point before the SDK's own write syscall.
+    //
+    // `recordOwnWrite` is deliberately NOT passed here either. The gate would advance
     // the read baseline the moment it ALLOWED a write, and on this lane the
     // write has not happened yet at that point: the gate's ack is a no-op stub
     // and the tool handler does the writing, where the broker can still refuse.

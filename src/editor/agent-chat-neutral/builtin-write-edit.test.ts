@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import type { OverwriteConflictDetected } from '../agent-chat-sdk/edit-ack'
+import { buildToolPermissionGate } from '../agent-chat-sdk/edit-ack'
 import type { EditProposalPayload } from '../agent-tools/types'
 import type { LedgerEditEntry } from '../ledger/entry'
 import { describeLedgerEntry } from '../ledger/describe-entry'
@@ -367,3 +369,102 @@ async function runWriteRefusedOnProtectedPath() {
     {},
   )
 }
+
+/**
+ * FX14 item 2 (2026-09-05). A `Write` could silently overwrite a concurrent
+ * edit, in the window between the permission gate and this handler.
+ *
+ * The overwrite itself is by design: a whole-file `Write` over a file that
+ * changed replaces it, and the user is told through the `edit_overwrite_warning`
+ * banner. The warning is therefore the only thing between the user and a
+ * silent loss, and it was anchored in the wrong place. The gate hashed the
+ * file, allowed the write, and the handler then re-read the file and wrote it;
+ * a writer landing between those two reads made BOTH checks agree with each
+ * other and disagree with what the model had actually read. The verifier
+ * measured the window at 0.197 ms and reproduced `warnings=0` with the other
+ * writer's bytes gone.
+ *
+ * The fix moves the comparison onto the bytes this handler actually replaced,
+ * which the broker's precondition has already pinned under the file's lock.
+ * `Edit` was never affected: it re-applies `old_string` to whatever it reads.
+ */
+describe('FX14: a concurrent write is never overwritten silently', () => {
+  const sha256 = (s: string) => createHash('sha256').update(Buffer.from(s, 'utf8')).digest('hex')
+
+  /** Replays `runOneTool`'s gate-then-handler sequence, with the race in between. */
+  async function writeWithRaceBetweenGateAndHandler(theirs: string | null) {
+    const abs = join(root, 'src/App.vue')
+    const fileReads = { [abs]: { hashAtRead: sha256(readFileSync(abs, 'utf8')) } }
+    const warnings: OverwriteConflictDetected[] = []
+    const conflictOpts = {
+      getFileReads: () => fileReads,
+      onConflictDetected: (c: OverwriteConflictDetected) => {
+        warnings.push(c)
+      },
+    }
+    const input = { file_path: 'src/App.vue', content: 'MINE\n' }
+
+    // 1. The permission gate runs, against the bytes the model read.
+    const gate = buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true as const, editId: '' }),
+      ...conflictOpts,
+    })
+    const decision = await gate('Write', input, {} as never)
+    expect(decision.behavior).toBe('allow')
+
+    // 2. The CLI edit route, another chat session, or the user's own editor
+    //    lands in the sub-millisecond window before the handler starts.
+    if (theirs !== null) writeFileSync(abs, theirs, 'utf8')
+
+    // 3. The handler runs.
+    const out = await buildWriteToolSpec({ ...opts(), ...conflictOpts }).handler(input, {})
+    return { out, warnings, abs }
+  }
+
+  it('warns about the bytes it actually replaced, not the bytes the gate read', async () => {
+    const theirs = 'THEIRS\n'
+    const { out, warnings, abs } = await writeWithRaceBetweenGateAndHandler(theirs)
+
+    expect(out.isError).toBeUndefined()
+    // The write still lands: that is the documented Write contract.
+    expect(readFileSync(abs, 'utf8')).toBe('MINE\n')
+    // But it is announced, which is the whole point.
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatchObject({ file: 'src/App.vue', hashAtWrite: sha256(theirs) })
+    // And the loss is recoverable: the journal holds THEIR bytes, not the
+    // gate's older ones, so Undo restores what was actually lost.
+    const backups = readdirSync(join(root, '.desde/backups'))
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(root, '.desde/backups', backups[0], 'src/App.vue'), 'utf8')).toBe(theirs)
+  })
+
+  it('stays quiet when nothing raced it', async () => {
+    const { out, warnings } = await writeWithRaceBetweenGateAndHandler(null)
+    expect(out.isError).toBeUndefined()
+    expect(warnings).toEqual([])
+  })
+
+  it('does not warn about a write the broker refused', async () => {
+    const abs = join(root, 'src/App.vue')
+    const before = readFileSync(abs, 'utf8')
+    const warnings: OverwriteConflictDetected[] = []
+    const out = await buildWriteToolSpec({
+      ...opts(),
+      getFileReads: () => ({ [abs]: { hashAtRead: sha256('something else entirely') } }),
+      onConflictDetected: (c: OverwriteConflictDetected) => {
+        warnings.push(c)
+      },
+      // Lands after the reconstruction, so the precondition refuses the batch.
+      acquireTreeGate: async () => {
+        writeFileSync(abs, `${before}// concurrent\n`, 'utf8')
+        return () => {}
+      },
+    }).handler({ file_path: 'src/App.vue', content: 'MINE\n' }, {})
+
+    expect(out.isError).toBe(true)
+    // A banner about an overwrite that never happened is the FX11 item 2
+    // defect in a different costume.
+    expect(warnings).toEqual([])
+  })
+})

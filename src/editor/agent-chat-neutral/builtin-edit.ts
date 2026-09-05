@@ -23,6 +23,7 @@
 
 import { z } from 'zod'
 
+import type { OverwriteConflictDetected } from '../agent-chat-sdk/edit-ack'
 import { reconstructWriteEdit, sha256 } from '../agent-chat-sdk/edit-ack'
 import {
   brokeredWrite,
@@ -71,6 +72,17 @@ export interface BuiltinWriteOpts {
   recordOwnWrite?: (absPath: string, nextHash: string) => void
   /** Whether to record an undo step. The edit-fix mini-turn passes false. */
   recordHistory?: boolean
+  /**
+   * The session's read baselines, by absolute path. Same getter the permission
+   * gate takes, and on this lane it is passed HERE instead. See
+   * `reportOverwriteConflict` below for why.
+   */
+  getFileReads?: () => Record<string, { hashAtRead: string }> | undefined
+  /**
+   * Raises the `edit_overwrite_warning` banner. Same callback shape the
+   * permission gate takes, and on this lane it is passed HERE instead.
+   */
+  onConflictDetected?: (conflict: OverwriteConflictDetected) => void | Promise<void>
 }
 
 const WRITE_DESCRIPTION =
@@ -207,6 +219,9 @@ async function applyWrite(
     }
     return err(`${toolName} failed: ${result.reason}${rollbackWarning(result)}`)
   }
+  // Ordered before `recordOwnWrite`, which is about to move the baseline this
+  // reads.
+  await reportOverwriteConflict(built, opts)
   // The bytes are on disk now, so this is the first honest moment to move the
   // session's read baseline. Wrapped, like the conflict callback it pairs
   // with, so a telemetry failure cannot turn a landed write into an error.
@@ -237,6 +252,56 @@ async function applyWrite(
         text: `${toolName}: '${built.repoRel}' ${built.isNew ? 'created' : 'updated'}. The change is uncommitted in the working tree.`,
       },
     ],
+  }
+}
+
+/**
+ * Warns when this write replaced bytes the model had not read.
+ *
+ * FX14 item 2 (2026-09-05). A whole-file `Write` over a file that changed
+ * replaces it, and that is the documented contract of the tool; the banner
+ * this raises is the only thing between the user and a SILENT loss. It used to
+ * be raised in the permission gate, which on this lane runs before the write
+ * and reads the file a second time to decide. So the sequence was: gate reads
+ * the file, gate compares it to the model's baseline, gate allows, THEN this
+ * handler reads the file again and writes it. A concurrent writer landing
+ * between those two reads made both checks agree with each other and disagree
+ * with what the model had actually read, so nothing warned. The verifier
+ * measured the window at 0.197 ms and reproduced the loss with `warnings=0`.
+ *
+ * It is raised here instead, against `built.baseHash` — the hash of the bytes
+ * this handler read, which the broker's precondition has since pinned under
+ * the file's own lock. Those ARE the bytes that were replaced, so there is no
+ * window left between the comparison and the write.
+ *
+ * Two consequences worth stating. A write the broker refuses no longer raises
+ * a banner, which is right: nothing was overwritten. And `Edit` was never
+ * exposed to this in the first place, because it re-applies `old_string` to
+ * whatever it read, so the other writer's content survives.
+ */
+async function reportOverwriteConflict(
+  built: { repoRel: string; absPath: string; isNew: boolean; baseHash?: string | undefined },
+  opts: BuiltinWriteOpts,
+): Promise<void> {
+  if (!opts.onConflictDetected) return
+  const prior = opts.getFileReads?.()?.[built.absPath]
+  // No baseline means the model wrote a file it never read, and conflict
+  // semantics need one. Same rule the gate applied.
+  if (!prior) return
+  // `isNew` with a recorded read means the file was deleted between the
+  // model's Read and this write. The gate spelled that state as the hash of
+  // empty content, and the resolver reads it back the same way.
+  const hashAtWrite = built.isNew ? sha256('') : (built.baseHash ?? sha256(''))
+  if (prior.hashAtRead === hashAtWrite) return
+  try {
+    await opts.onConflictDetected({
+      file: built.repoRel,
+      absolutePath: built.absPath,
+      hashAtRead: prior.hashAtRead,
+      hashAtWrite,
+    })
+  } catch {
+    // Telemetry must never turn a landed write into a failure.
   }
 }
 
