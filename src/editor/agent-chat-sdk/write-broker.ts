@@ -67,7 +67,18 @@
 
 import { randomUUID } from 'node:crypto'
 import { constants as fsConstants, existsSync } from 'node:fs'
-import { lstat, mkdir, open, readFile, realpath, rename as fsRename, rm, unlink, writeFile } from 'node:fs/promises'
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  rename as fsRename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises'
 import { basename, dirname, join, sep as pathSep } from 'node:path'
 
 import { isProtectedAgentPath, protectedPathDenial } from './protected-paths'
@@ -656,7 +667,8 @@ function realPathIsUnder(real: string, rootReal: string): boolean {
 }
 
 /**
- * **FX11 (codex review + adversarial verification, 2026-09-05, SECURITY).**
+ * **FX11 (codex review + adversarial verification, 2026-09-05, SECURITY),
+ * corrected by FX17 the same day.**
  * Create a file that provably lands inside the repo.
  *
  * The create used to be a plain `writeFile`, on the reasoning quoted above
@@ -672,40 +684,108 @@ function realPathIsUnder(real: string, rootReal: string): boolean {
  * the symlink pointed, and the model was told the write succeeded. The
  * user's prototype repository is untrusted, so anything running in it can
  * do that: a build script, an `npm postinstall`, a second agent session.
- * The verifier won the race against a real, separate OS process in eleven
- * attempts.
  *
- * Three steps, in this order:
+ * ## The FX17 correction, and the claim it retracts
+ *
+ * FX11's first fix added a three-step guard and closed its own doc comment
+ * with a measured-sounding claim: that a lost race could only ever leave a
+ * ZERO-BYTE file outside the repository, and that no escape was ever
+ * reported as a success. **Both halves were false.** The adversarial
+ * verifier disproved them with two ordinary user processes. Its swapper
+ * renamed the destination directory out of the repository, let the create
+ * land in the replacement, renamed the replacement BACK into the
+ * repository so the guard's `realpath` and `lstat` both agreed, and then
+ * carried it out again. Sixteen complete, non-empty payloads left the
+ * repository in twenty-five seconds; every one of them was reported to the
+ * model as a success. Reproduced here before this change was written.
+ *
+ * The mistake was believing an inode comparison anchored the write.
+ * `handle.stat()` is anchored to the created inode, but `realpath` and
+ * `lstat` are PATH lookups, so the pair answered "does this path name my
+ * inode right now" — not "is my inode in the directory I checked". A
+ * DIFFERENT directory moved into the same name answers yes to the first
+ * question and no to the second.
+ *
+ * ## What the code does now
  *
  *  1. `realpath` the parent directory and require it under `rootReal`.
  *     `realpath` resolves EVERY component, so this catches an ancestor
  *     swap that an `lstat` of the leaf alone cannot see. It runs before
  *     anything is created, so the ordinary attack — a symlink already in
- *     place when we get here — creates nothing at all.
+ *     place when we get here — creates nothing at all. Record that
+ *     directory's own `dev`/`ino`.
  *  2. Create at `<resolved parent>/<basename>` with
  *     `O_CREAT | O_EXCL | O_NOFOLLOW`. `O_EXCL` refuses atomically if
  *     ANYTHING is already at that name, a symlink included, so the create
- *     can never follow one; addressing the resolved parent means the
- *     lookup cannot re-traverse a symlink we just resolved away.
- *  3. Prove, against the OPEN HANDLE, that what we created is still the
- *     file that path names, before writing a single byte: re-`realpath`
- *     the parent, and compare the handle's `dev`/`ino` with an `lstat` of
- *     the path. If either disagrees, the parent was swapped between step 1
- *     and step 2, so we unlink the (still empty) file we made and refuse.
+ *     can never follow one.
+ *  3. Prove three things before writing a single byte: the parent path
+ *     still resolves to itself, the parent is still the SAME DIRECTORY
+ *     INODE recorded in step 1, and the target path names the inode the
+ *     open handle holds. The middle one is the FX17 addition and it is
+ *     what refuses the verifier's swap-in.
+ *  4. Write the caller's bytes through the open handle, which is anchored
+ *     to the inode step 3 proved.
+ *  5. Re-run step 3's proof AFTER the write. If it now disagrees,
+ *     `ftruncate(0)` the handle — the fd still names our inode wherever it
+ *     has been moved to, so this empties it — unlink the path when it still
+ *     names that inode, and fail the op, so the model is told the write did
+ *     not happen.
  *
- * What remains racy, stated plainly: step 2 is a path lookup, so a swap
- * landing in the window between step 1 and step 2 can still place a
- * ZERO-BYTE file outside the repo. Closing that completely needs `openat`
- * against a directory handle, which Node does not expose. Step 3 is what
- * keeps the residue harmless: the caller's content is never written, the
- * empty file is unlinked whenever the path still names it, and the op
- * fails, so the model is told the write did not happen. Measured on macOS
- * against the verifier's own swapper process, 20 seconds of continuous
- * toggling: 627 refusals, every escaped entry 0 bytes, and no escape ever
- * reported as a success. That is the intended trade — refuse a write we
- * cannot prove rather than complete one.
+ * ## Why the bytes are not staged elsewhere first
+ *
+ * The obvious alternative, and the one the FX17 brief proposed, is to write
+ * the content into a staging file under the repository root and then
+ * publish it with `link`. It was implemented and then rejected, because it
+ * is strictly WEAKER here. `link` is itself a path lookup: a swap landing
+ * in its window publishes a directory entry that ALREADY HOLDS the caller's
+ * bytes, outside the repository, with no check between. The order above
+ * never puts a byte anywhere until a proof has passed, so the residue of a
+ * lost race is an empty file.
+ *
+ * ## The residual, measured rather than assumed
+ *
+ * Node exposes no `openat` against a directory handle, so step 2 is a path
+ * lookup and a swap landing between steps 1 and 2 can still CREATE an empty
+ * file outside the repository. Step 3 refuses that and unlinks it whenever
+ * the path still names it.
+ *
+ * What no version of this function can prevent is a directory that is
+ * genuinely inside the repository when the write happens and is moved out
+ * of it afterwards. That is not specific to a create: any file written
+ * anywhere in a repository can be renamed out of it a moment later by a
+ * process that can rename its parent. Such a write is reported as a
+ * success, correctly — at the moment it completed, the file was in the
+ * repository.
+ *
+ * Measured on macOS, 25 seconds each, against the verifier's own swapper
+ * process. Before this change: 345,679 create attempts, 58 successes, 16
+ * complete non-empty payloads captured outside the repository, 16 of those
+ * 16 reported as a success. After: 329,552 attempts, 3 successes, 2
+ * payloads captured outside — and both of those two are the unpreventable
+ * shape above, a write into a directory that was inside the repository at
+ * write time and was renamed out of it afterwards.
+ *
+ * The other half of the measurement isolates what IS preventable. A second
+ * swapper empties its outside directory before every flip, so anything it
+ * finds there was put there by the create it is racing, and it looks while
+ * the repository path is still a symlink — the moment when no path inside
+ * the repository names the file. 25 seconds: 440,919 attempts, 14,643
+ * flips, 17 creates that did land outside the repository, 0 of them
+ * non-empty. That is the ZERO-BYTE-residue claim FX11 made without
+ * measuring it; it is stated here only because it has now been measured,
+ * and `write-broker-create-containment.test.ts` re-runs a shortened form of
+ * the same loop on every suite run. Note honestly that the pre-FX17 code
+ * scores 0 on that metric too — the loop pins the invariant, and the
+ * deterministic test beside it is what pins THIS defect.
+ *
+ * Exported for that test only. It has to drive this primitive tens of
+ * thousands of times against a real second OS process; going through
+ * `brokeredWrite` would add locking, journalling and ledger work per
+ * attempt and cut the attempt count by three orders of magnitude, which is
+ * the difference between a test that can lose the race and one that cannot
+ * reach it.
  */
-async function createNoFollow(
+export async function createNoFollow(
   absPath: string,
   content: string | Buffer,
   rootReal: string,
@@ -716,34 +796,61 @@ async function createNoFollow(
       `'${absPath}' would be created outside the repository (its parent resolves to '${parentReal}'). Refusing.`,
     )
   }
+  const parentAtStart = await stat(parentReal)
   const target = join(parentReal, basename(absPath))
+
   const handle = await open(
     target,
     fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
     0o666,
   )
   try {
-    const [parentAfter, onHandle, onPath] = await Promise.all([
-      realpath(dirname(target)).catch(() => null),
-      handle.stat(),
-      lstat(target).catch(() => null),
-    ])
-    const stillTheSameFile =
-      onPath !== null && onPath.dev === onHandle.dev && onPath.ino === onHandle.ino
-    if (parentAfter !== parentReal || !stillTheSameFile) {
-      if (stillTheSameFile) {
-        // Only reachable when the path still names OUR inode, so this
-        // unlink can only remove the empty file we just created.
-        await unlink(target).catch(() => {})
-      }
+    const onHandle = await handle.stat()
+    const stillProven = async (): Promise<boolean> => {
+      const [resolvedNow, parentNow, onPath] = await Promise.all([
+        realpath(parentReal).catch(() => null),
+        stat(parentReal).catch(() => null),
+        lstat(target).catch(() => null),
+      ])
+      if (resolvedNow !== parentReal || parentNow === null) return false
+      if (parentNow.dev !== parentAtStart.dev || parentNow.ino !== parentAtStart.ino) return false
+      return onPath !== null && onPath.dev === onHandle.dev && onPath.ino === onHandle.ino
+    }
+
+    if (!(await stillProven())) {
+      await discardCreated(target, onHandle)
       throw new Error(
         `'${absPath}' moved out of the repository while it was being created. Refusing to write it.`,
       )
     }
     // Strings default to utf8; Buffers are written byte-for-byte.
     await handle.writeFile(content)
+    if (!(await stillProven())) {
+      // The fd is anchored to the inode we wrote, so truncating it empties
+      // the bytes wherever that inode has been moved to.
+      await handle.truncate(0).catch(() => {})
+      await discardCreated(target, onHandle)
+      throw new Error(
+        `'${absPath}' moved out of the repository while it was being created. Refusing to write it.`,
+      )
+    }
   } finally {
     await handle.close()
+  }
+}
+
+/**
+ * Remove the file {@link createNoFollow} created, but only while the path
+ * still names that exact inode. A path that names something else now is a
+ * path this call has no business unlinking.
+ */
+async function discardCreated(
+  target: string,
+  onHandle: { dev: number; ino: number },
+): Promise<void> {
+  const onPath = await lstat(target).catch(() => null)
+  if (onPath !== null && onPath.dev === onHandle.dev && onPath.ino === onHandle.ino) {
+    await unlink(target).catch(() => {})
   }
 }
 
