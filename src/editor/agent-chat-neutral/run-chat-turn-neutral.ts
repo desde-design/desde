@@ -474,6 +474,18 @@ async function runInner(
       // user typed during the previous step is part of THIS request. Step 0
       // has no previous step — its request is the turn's opening prompt,
       // already built above — so nothing is drained until step 1.
+      //
+      // A steer accepted during turn SETUP (the channel is live before the
+      // first await, so the route can push into it) therefore misses step 0.
+      // That is deliberate, and it is not a dropped message — verified
+      // 2026-09-04, do not "fix" it. On a multi-step turn it is delivered at
+      // step 1 like any other boundary steer. On a single-step turn nothing
+      // drains it, its `handedOffAtMessageCount` stays null,
+      // `takeUndeliveredSteers` reports it, and the client is told to
+      // resubmit. Either way exactly one frame reaches the client and the
+      // persisted transcript agrees with what the client saw. The residual
+      // cost is one needless resubmit prompt, which is cheaper than folding a
+      // late arrival into a request that was already assembled.
       if (step > 0) {
         for (const steer of turnChannel.drainSteers()) {
           messages.push({

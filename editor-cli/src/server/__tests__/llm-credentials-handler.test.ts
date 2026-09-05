@@ -732,3 +732,113 @@ describe("FX4 item 4: a credential file written by a newer Desde", () => {
     expect(onDisk.version).toBe(99)
   })
 })
+
+describe("FX10 item 3: read, validate and write are one transaction", () => {
+  /** Resolves once `pred` holds, or throws after ~1s of event-loop turns. */
+  async function until(pred: () => boolean): Promise<void> {
+    for (let i = 0; i < 1000; i++) {
+      if (pred()) return
+      await new Promise((r) => setTimeout(r, 1))
+    }
+    throw new Error("condition never held")
+  }
+
+  const put = (
+    body: Record<string, unknown>,
+    fetchImpl: unknown,
+    res = fakeRes(),
+  ) => ({
+    res,
+    done: handleLlmCredentialsRoute(
+      req("PUT"),
+      asRes(res),
+      url("/api/editor/llm-credentials/openai"),
+      {
+        home,
+        env: {},
+        claudeRuntimeResolvable: false,
+        fetchImpl: fetchImpl as typeof fetch,
+        readBody: async () => body,
+      },
+    ),
+  })
+
+  it("validates a key-only PUT against the STORED base URL, not the default", async () => {
+    // Deterministic half of the finding: `baseUrl` was only ever read from
+    // the request body, so rotating a key against a custom gateway validated
+    // it at the public endpoint and answered 200 for a pairing the runtime
+    // would never use.
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }))
+    const first = put(
+      { apiKey: "sk-first1234", baseUrl: "https://gateway.internal/v1" },
+      fetchImpl,
+    )
+    await first.done
+    expect(first.res.statusCode).toBe(200)
+
+    fetchImpl.mockClear()
+    const second = put({ apiKey: "sk-second5678" }, fetchImpl)
+    await second.done
+    expect(second.res.statusCode).toBe(200)
+    expect((fetchImpl.mock.calls[0] as unknown[])[0]).toBe(
+      "https://gateway.internal/v1/models",
+    )
+    expect(
+      ((fetchImpl.mock.calls[0] as unknown[])[1] as { headers: Record<string, string> })
+        .headers.Authorization,
+    ).toBe("Bearer sk-second5678")
+  })
+
+  it("queues a second PUT behind the first one's vendor validation", async () => {
+    await writeLlmApiKey("openai", "sk-first1234", home)
+
+    const seen: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const fetchImpl = vi.fn(async (target: unknown) => {
+      seen.push(String(target))
+      if (seen.length === 1) await gate
+      return new Response("{}", { status: 200 })
+    })
+
+    // A: base-URL only, reusing the stored key. Its validation is held open.
+    const a = put({ baseUrl: "https://a.internal" }, fetchImpl)
+    await until(() => seen.length === 1)
+
+    // B: key only, issued while A is still validating.
+    const b = put({ apiKey: "sk-second5678" }, fetchImpl)
+    await new Promise((r) => setTimeout(r, 20))
+    // Before the fix B read, validated and wrote straight through A's window,
+    // so its validation had already gone out against the DEFAULT endpoint.
+    expect(seen).toHaveLength(1)
+
+    release()
+    await a.done
+    await b.done
+    expect(a.res.statusCode).toBe(200)
+    expect(b.res.statusCode).toBe(200)
+
+    // B validated the new key against the base URL A had committed, so the
+    // 200 it returned describes a pairing that was actually checked.
+    expect(seen[1]).toBe("https://a.internal/models")
+    expect((await readLlmCredentials(home)).providers.openai).toEqual({
+      apiKey: "sk-second5678",
+      baseUrl: "https://a.internal",
+    })
+  })
+
+  it("names no key value in the refusal a rejected pairing produces", async () => {
+    await writeLlmApiKey("openai", "sk-secretvalue9999", home)
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 401 }))
+    const { res, done } = put({ baseUrl: "https://a.internal" }, fetchImpl)
+    await done
+    expect(res.statusCode).toBe(400)
+    expect(res.body).not.toContain("secretvalue")
+    // Nothing was written: the refusal happened inside the transaction.
+    expect((await readLlmCredentials(home)).providers.openai).toEqual({
+      apiKey: "sk-secretvalue9999",
+    })
+  })
+})

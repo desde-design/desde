@@ -431,3 +431,62 @@ export async function writeLlmBaseUrl(
     baseUrl === undefined ? rest : { ...rest, baseUrl },
   )
 }
+
+/** What {@link transactProviderCredentials}'s callback hands back. */
+export interface ProviderCredentialOutcome<T> {
+  /** Returned to the caller of the transaction. */
+  result: T
+  /**
+   * When present, the provider's slot is rewritten from the SAME snapshot the
+   * callback read. Omit it to commit nothing — a refusal, or a request that
+   * only re-validated what was already stored.
+   */
+  update?: (slot: StoredProviderCredentials) => StoredProviderCredentials
+}
+
+/**
+ * Read one provider's stored credentials, do asynchronous work with them, and
+ * write the result back, as ONE transaction on the `serialize()` chain.
+ *
+ * The credential route reads the stored key, validates a key/base-URL pairing
+ * against the vendor over the network, and then writes. Each individual write
+ * was already serialised, but the read and the validation were not, so two
+ * overlapping PUTs could each validate against a snapshot the other then
+ * replaced. No write was lost and no key leaked — every setter is
+ * field-scoped — but the 200 answer claimed a pairing had been checked
+ * together when it had not (2026-09-04 review). Holding the chain across the
+ * callback is what makes the answer true.
+ *
+ * **The cost, stated plainly:** the callback may take a vendor round trip, and
+ * every other credential write in this process waits behind it. That is a
+ * human pressing Save in one dialog, so the wait is the validation the user is
+ * already watching. The honest bound on {@link serialize} still applies: this
+ * is per-process, and two editor processes can still interleave.
+ */
+export async function transactProviderCredentials<T>(
+  providerId: string,
+  home: string,
+  work: (current: StoredProviderCredentials) => Promise<ProviderCredentialOutcome<T>>,
+): Promise<T> {
+  const path = llmCredentialFilePath(home)
+  return serialize(async () => {
+    const snap = await readSnapshot(path)
+    // Refuse a file a newer Desde wrote BEFORE the vendor round trip, not
+    // after: there is no point validating a key we would then decline to
+    // store.
+    if (snap.newerThanUs) throw new CredentialFileNewerError(snap.onDiskVersion)
+    const current = snap.file.providers[providerId] ?? {}
+    const outcome = await work(current)
+    if (!outcome.update) return outcome.result
+    await writeFile(
+      path,
+      {
+        ...snap.file,
+        providers: { ...snap.file.providers, [providerId]: outcome.update(current) },
+        version: SCHEMA_VERSION,
+      },
+      snap.unknownFields,
+    )
+    return outcome.result
+  })
+}

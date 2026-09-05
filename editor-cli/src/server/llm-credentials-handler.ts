@@ -20,8 +20,7 @@ import {
   readPromptDismissed,
   setLlmDevMode,
   setPromptDismissed,
-  writeLlmApiKey,
-  writeLlmBaseUrl,
+  transactProviderCredentials,
 } from "./llm-credential-store.js"
 
 /**
@@ -257,20 +256,12 @@ export async function handleLlmCredentialsRoute(
           sendJson(res, 400, { error: "`apiKey` must be a non-empty string." })
           return
         }
-        let apiKey: string
-        if (apiKeyProvided) {
-          apiKey = apiKeyFromBody
-        } else {
-          const stored = await readLlmCredentials(home)
-          const existing = stored.providers[descriptor.id]?.apiKey?.trim()
-          if (!existing) {
-            sendJson(res, 400, { error: "`apiKey` must be a non-empty string." })
-            return
-          }
-          apiKey = existing
-        }
-        let baseUrl: string | undefined
-        if (body.baseUrl !== undefined && body.baseUrl !== "") {
+        // The base URL's SHAPE is checked out here, before the transaction: a
+        // malformed body must not hold the credential write chain open across
+        // a vendor round trip.
+        const baseUrlProvided = body.baseUrl !== undefined
+        let baseUrlFromBody: string | undefined
+        if (baseUrlProvided && body.baseUrl !== "") {
           if (!descriptor.credentials.baseUrlEnvVar) {
             sendJson(res, 400, {
               error: `${descriptor.label} does not take a base URL.`,
@@ -281,30 +272,68 @@ export async function handleLlmCredentialsRoute(
             sendJson(res, 400, { error: "`baseUrl` must be an absolute http or https URL." })
             return
           }
-          baseUrl = body.baseUrl.trim()
+          baseUrlFromBody = body.baseUrl.trim()
         }
-        const validation = await descriptor.validateKey({
-          apiKey,
-          ...(baseUrl ? { baseUrl } : {}),
-          fetchImpl: deps.fetchImpl ?? fetch,
-        })
-        if (!validation.ok) {
-          sendJson(res, 400, { error: validation.message ?? "That key was not accepted." })
+        // Read, validate and write as ONE transaction (2026-09-04 review).
+        // These three steps used to be separate awaits with only the writes
+        // serialised, so two overlapping PUTs could each validate against a
+        // snapshot the other replaced and both answer 200 for a pairing that
+        // was never checked together. Returns a refusal sentence, or null.
+        const refusal = await transactProviderCredentials<string | null>(
+          descriptor.id,
+          home,
+          async (current) => {
+            // An omitted `apiKey` reuses the key already on disk, so a user
+            // fixing only a wrong base URL is not forced to retype it — the
+            // store never hands the plaintext back to the client, so
+            // resending it is not something the client could do anyway.
+            const apiKey = apiKeyProvided ? apiKeyFromBody : (current.apiKey?.trim() ?? "")
+            if (!apiKey) {
+              return { result: "`apiKey` must be a non-empty string." }
+            }
+            // A key-only PUT is validated against the base URL ALREADY
+            // STORED, because that is the endpoint the runtime will use.
+            // Validating it at the vendor's default answered 200 for a
+            // pairing the next chat turn could still 401 on.
+            const baseUrl = baseUrlProvided
+              ? baseUrlFromBody
+              : descriptor.credentials.baseUrlEnvVar
+                ? current.baseUrl?.trim() || undefined
+                : undefined
+            const validation = await descriptor.validateKey({
+              apiKey,
+              ...(baseUrl ? { baseUrl } : {}),
+              fetchImpl: deps.fetchImpl ?? fetch,
+            })
+            if (!validation.ok) {
+              return { result: validation.message ?? "That key was not accepted." }
+            }
+            // Only rewrite the stored key when this request actually supplied
+            // a new one. Rewriting the same plaintext we just read back on a
+            // base-URL-only PUT would be a needless disk write of a secret.
+            const writesKey = apiKeyProvided
+            // Only touch the stored base URL when this request actually
+            // supplied one (a real value to set, or "" to clear it). A
+            // key-only PUT must leave any previously stored base URL alone.
+            const writesBaseUrl = Boolean(descriptor.credentials.baseUrlEnvVar) && baseUrlProvided
+            if (!writesKey && !writesBaseUrl) return { result: null }
+            return {
+              result: null,
+              update: ({ baseUrl: storedBaseUrl, ...rest }) => {
+                const nextBaseUrl = writesBaseUrl ? baseUrlFromBody : storedBaseUrl
+                return {
+                  ...rest,
+                  ...(writesKey ? { apiKey: apiKeyFromBody } : {}),
+                  ...(nextBaseUrl === undefined ? {} : { baseUrl: nextBaseUrl }),
+                }
+              },
+            }
+          },
+        )
+        if (refusal !== null) {
+          // Names the provider's own message, never a key value.
+          sendJson(res, 400, { error: refusal })
           return
-        }
-        // Only rewrite the stored key when this request actually supplied a
-        // new one. Rewriting the same plaintext we just read back on a
-        // base-URL-only PUT would be a needless disk write of a secret.
-        if (apiKeyProvided) {
-          await writeLlmApiKey(descriptor.id, apiKey, home)
-        }
-        // Only touch the stored base URL when this request actually supplied
-        // one (a real value to set, or "" to clear it). A key-only PUT
-        // (`body.baseUrl === undefined`) must leave any previously stored
-        // base URL alone, not wipe it via a local `baseUrl` that is
-        // unconditionally undefined for this request.
-        if (descriptor.credentials.baseUrlEnvVar && body.baseUrl !== undefined) {
-          await writeLlmBaseUrl(descriptor.id, baseUrl, home)
         }
         await reapplyEnv(home, env, inherited)
         sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable, descriptors))
