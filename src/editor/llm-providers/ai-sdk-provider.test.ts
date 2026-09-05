@@ -592,7 +592,29 @@ describe('AiSdkProvider.streamConversation', () => {
           tools: [],
         }),
       ),
-    ).rejects.toThrow(/without producing any content/i)
+    ).rejects.toThrow(/without producing an answer/i)
+  })
+
+  it('says what was observed, not why, when a step finishes with nothing to show', async () => {
+    // FX16 item 5 (2026-09-05). The failure itself is right and stays: a
+    // reasoning-only step persists nothing (`reasoning-delta` never enters
+    // `blocks`, and `history-replay.ts` has no reasoning branch), so a
+    // "successful" one would be a blank bubble with a silent charge. What was
+    // wrong was the message asserting the model "declined to answer" — which a
+    // user who just watched it reason on screen can see is false.
+    const model = new MockLanguageModelV4({ doStream: emptyStopStream() })
+    const failure = await collect(
+      providerFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [],
+      }),
+    ).then(
+      () => null,
+      (e: unknown) => (e as Error).message,
+    )
+    expect(failure).not.toMatch(/declin/i)
+    expect(failure).toMatch(/reasoning/i)
   })
 
   it('still reports the tokens the empty step spent before it fails', async () => {

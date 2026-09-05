@@ -730,6 +730,27 @@ async function regularFileRefusal(
   return `${toolName} denied: '${repoRel}' is not a regular file`
 }
 
+/**
+ * The conflict baseline, hashed from the RAW bytes.
+ *
+ * FX16 item 4 (2026-09-05). This used to be `sha256(current)` — the hash of a
+ * UTF-8 DECODE, re-encoded. Its counterpart, `hashAtRead`, is the hash of the
+ * Buffer (`builtin-read.ts`, and `file-read-snapshot.ts` on the SDK lane), so
+ * on a file that is not valid UTF-8 the two could never agree and every first
+ * write after a read reported a conflict nobody caused. MEASURED by the
+ * adversarial verifier on `alpha ` + 0xFF + ` omega`: 36affec1… against
+ * f368cf6d…, with nothing else touching the file.
+ *
+ * It failed safe — the write still landed, because the broker's precondition
+ * uses `priorBytes` — so this was a spurious banner, not a refusal. Both
+ * consumers compare it against `hashAtRead`, and the third use, the
+ * `edit_proposed` carrier, is `appliedByAgent: true` on both chat lanes, so
+ * nothing re-applies it against a decode.
+ */
+function hashOfBytes(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
 async function reconstructWrite(
   toolInput: Record<string, unknown>,
   worktreeRoot: string,
@@ -784,7 +805,7 @@ async function reconstructWrite(
       repoRel: safeRel,
       absPath: safe.absolute,
       newSource: content,
-      baseHash: sha256(current),
+      baseHash: hashOfBytes(currentBytes),
       priorContent: current,
       priorBytes: currentBytes,
       isNew: false,
@@ -904,7 +925,7 @@ async function reconstructEdit(
     repoRel,
     absPath: safe.absolute,
     newSource,
-    baseHash: sha256(current),
+    baseHash: hashOfBytes(currentBytes),
     priorContent: current,
     priorBytes: currentBytes,
     isNew: false,

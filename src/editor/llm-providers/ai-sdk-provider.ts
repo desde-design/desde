@@ -330,9 +330,20 @@ export class AiSdkProvider implements LLMProvider {
     // made and the vendor bills it whether or not the model answered, so the
     // turn's accounting stays honest even though the step fails.
     if (!aborted && finishReason === 'stop' && blocks.length === 0) {
+      // The wording states what was OBSERVED and stops there.
+      //
+      // FX16 item 5 (2026-09-05). It used to assert a cause — "which usually
+      // means it declined to answer" — and that is wrong for the case a user
+      // is most likely to hit: a reasoning model that thought out loud on
+      // screen and then stopped. `reasoning-delta` reaches the client for live
+      // display but never pushes into `blocks`, so such a step arrives here
+      // with nothing to persist. The user just watched it think, and was told
+      // it had declined. The remedy the message points at changed with it:
+      // rephrasing does not help a model that reasoned itself out of an
+      // answer; a different model or a different effort setting does.
       throw new Error(
-        'The model ended the turn without producing any content, which usually means it ' +
-          'declined to answer. Rephrase the request, or try a different model.',
+        'The model ended the turn without producing an answer. It may have spent the step ' +
+          'reasoning and stopped. Try again, or use a different model or effort setting.',
       )
     }
 

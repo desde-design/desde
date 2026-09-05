@@ -18,7 +18,7 @@
  * either way the request fits.
  */
 
-import type { Message } from '../llm-providers/types'
+import type { ImageContent, Message, TextContent } from '../llm-providers/types'
 
 /** Roughly 150k tokens of headroom at four characters per token. */
 export const DEFAULT_CONTEXT_BUDGET_CHARS = 600_000
@@ -160,6 +160,83 @@ export function applyContextBudget(
         ? `Note: the earlier part of this conversation was shortened to fit (${parts.join(', ')}). Ask the user rather than assuming something did not happen.`
         : undefined,
   }
+}
+
+/**
+ * Ceiling on the base64 image bytes a single request may carry, counted
+ * across every tool result in it.
+ *
+ * FX16 item 3 (2026-09-05). Nothing re-ran the budget inside the step loop, so
+ * accumulated tool-result images were unbounded. The adversarial verifier's
+ * numbers: `DEFAULT_MAX_IMAGE_BYTES` caps ONE image at 4.5 MB decoded (about
+ * 6.0 MB of base64 on the wire) and `MAX_NEUTRAL_STEPS` caps a turn at 40
+ * steps, so the ceiling was 180 MB decoded resident in one request, and
+ * because every step re-sends the whole array, about 4.9 GB uploaded across a
+ * turn — each re-send re-billed as image input. At a realistic 0.5 MB
+ * screenshot it was still ~20 MB per request and ~410 MB per turn.
+ *
+ * This is the direct consequence of the change that lets a tool result's
+ * image reach the model, and that change stays: `capture_screenshot` is the
+ * agent's only sight of the running prototype, and before it the model was
+ * handed the sentence "[image/png image returned]" and asked to judge what it
+ * showed. So the cap keeps the NEWEST image unconditionally, whatever its
+ * size, and elides backwards from there. A turn that captures once still sees
+ * its screenshot; a turn that captures thirty times sees the recent ones.
+ *
+ * 4 MB of base64 is roughly six 0.5 MB screenshots, which comfortably covers
+ * the several parallel captures a single step can make plus the before/after
+ * pair a turn compares.
+ */
+export const MAX_TURN_IMAGE_BYTES = 4_000_000
+
+export const ELIDED_TOOL_IMAGE = '[older screenshot elided to keep the request within its size budget]'
+
+/**
+ * Elide older tool-result images, newest first, until the rest fit.
+ *
+ * Mutates `messages` in place, exactly as the tool-output elision above does,
+ * because the loop re-sends the SAME array every step: replacing a part once
+ * removes it from every later request too.
+ *
+ * Only `tool_result` images are touched. An `image` block on a user message is
+ * something the USER attached to their question, so eliding it would answer a
+ * question about a picture nobody can see any more.
+ */
+export function capToolResultImageBytes(
+  messages: readonly Message[],
+  opts: { maxBytes?: number } = {},
+): { elided: number } {
+  const max = opts.maxBytes ?? MAX_TURN_IMAGE_BYTES
+  let used = 0
+  let kept = 0
+  let elided = 0
+  for (let m = messages.length - 1; m >= 0; m--) {
+    const message = messages[m]
+    if (message.role !== 'user' || typeof message.content === 'string') continue
+    for (let b = message.content.length - 1; b >= 0; b--) {
+      const block = message.content[b]
+      if (block.type !== 'tool_result' || typeof block.content === 'string') continue
+      const parts = block.content
+      for (let i = parts.length - 1; i >= 0; i--) {
+        const part = parts[i]
+        if (part.type !== 'image') continue
+        const bytes = part.data.length
+        // The newest image is kept whatever it costs. A cap that could drop
+        // the only picture in the turn would put the model back to guessing.
+        if (kept === 0 || used + bytes <= max) {
+          used += bytes
+          kept++
+          continue
+        }
+        ;(parts as (TextContent | ImageContent)[])[i] = {
+          type: 'text',
+          text: ELIDED_TOOL_IMAGE,
+        }
+        elided++
+      }
+    }
+  }
+  return { elided }
 }
 
 function cloneMessage(message: Message): Message {

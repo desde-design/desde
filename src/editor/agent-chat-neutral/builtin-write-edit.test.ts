@@ -470,6 +470,61 @@ describe('FX14: a concurrent write is never overwritten silently', () => {
 })
 
 /**
+ * FX16 item 4 (2026-09-05). MEASURED by the adversarial verifier on a file
+ * holding `alpha ` + 0xFF + ` omega`: `hashAtRead` hashes the raw Buffer
+ * (`builtin-read.ts`, and `file-read-snapshot.ts` on the SDK lane agrees),
+ * while `baseHash` hashed `currentBytes.toString('utf8')` and then re-encoded
+ * that string. A file that is not valid UTF-8 does not round-trip, so the two
+ * could never agree and every first write after a read raised a conflict
+ * nobody caused.
+ *
+ * It fails safe — the write still lands, because the broker's precondition
+ * uses the raw `priorBytes` — so this is a spurious banner, not a refusal.
+ */
+describe('FX16: a file that is not valid UTF-8 does not report a conflict nobody caused', () => {
+  const NOT_UTF8 = Buffer.concat([
+    Buffer.from('alpha '),
+    Buffer.from([0xff]),
+    Buffer.from(' omega\n'),
+  ])
+
+  /** Hash the bytes, the way both producers of `hashAtRead` do. */
+  const hashBytes = (buf: Buffer) => createHash('sha256').update(buf).digest('hex')
+
+  it('raises no warning when nothing touched the file between Read and Edit', async () => {
+    const abs = join(root, 'data.txt')
+    writeFileSync(abs, NOT_UTF8)
+    const warnings: OverwriteConflictDetected[] = []
+    const out = await buildEditToolSpec({
+      ...opts(),
+      getFileReads: () => ({ [abs]: { hashAtRead: hashBytes(NOT_UTF8) } }),
+      onConflictDetected: (c: OverwriteConflictDetected) => {
+        warnings.push(c)
+      },
+    }).handler({ file_path: 'data.txt', old_string: 'omega', new_string: 'OMEGA' }, {})
+
+    expect(out.isError).toBeUndefined()
+    expect(warnings).toEqual([])
+  })
+
+  it('still warns when the bytes really did change under it', async () => {
+    const abs = join(root, 'data.txt')
+    writeFileSync(abs, NOT_UTF8)
+    const warnings: OverwriteConflictDetected[] = []
+    await buildWriteToolSpec({
+      ...opts(),
+      getFileReads: () => ({ [abs]: { hashAtRead: hashBytes(Buffer.from('what the model read')) } }),
+      onConflictDetected: (c: OverwriteConflictDetected) => {
+        warnings.push(c)
+      },
+    }).handler({ file_path: 'data.txt', content: 'MINE\n' }, {})
+
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0].hashAtWrite).toBe(hashBytes(NOT_UTF8))
+  })
+})
+
+/**
  * FX16 item 1 (2026-09-05). The loop rechecks the signal between the gate's
  * `allow` and the handler, but `brokeredWrite` then waits for the repo's tree
  * gate, which a Commit or a Publish can hold for seconds. The handler is the

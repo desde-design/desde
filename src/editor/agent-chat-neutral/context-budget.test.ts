@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Message } from '../llm-providers/types'
-import { applyContextBudget, ELIDED_TOOL_OUTPUT } from './context-budget'
+import {
+  applyContextBudget,
+  capToolResultImageBytes,
+  ELIDED_TOOL_IMAGE,
+  ELIDED_TOOL_OUTPUT,
+} from './context-budget'
 
 const toolResult = (id: string, size: number): Message => ({
   role: 'user',
@@ -208,5 +213,91 @@ describe('applyContextBudget', () => {
     ]
     const out = applyContextBudget(messages, { maxChars: 200 })
     expect(out.notice).toMatch(/earlier part of this conversation/)
+  })
+})
+
+/**
+ * FX16 item 3 (2026-09-05). Tool-result images accumulated with no ceiling:
+ * 40 steps of up to 4.5 MB decoded each is 180 MB in one request, and about
+ * 4.9 GB uploaded across a turn because every step re-sends the whole array.
+ * The elision keeps the NEWEST image whatever it costs, which is what lets
+ * the model still see the prototype it just captured.
+ */
+describe('capToolResultImageBytes', () => {
+  const shot = (id: string, data: string): Message => ({
+    role: 'user',
+    content: [
+      {
+        type: 'tool_result',
+        toolUseId: id,
+        content: [
+          { type: 'text', text: `Captured screenshot for ${id}.` },
+          { type: 'image', mediaType: 'image/png', data },
+        ],
+      },
+    ],
+  })
+
+  /** The image parts still carrying pixels, oldest first. */
+  const survivors = (messages: readonly Message[]): string[] => {
+    const out: string[] = []
+    for (const m of messages) {
+      if (typeof m.content === 'string') continue
+      for (const b of m.content) {
+        if (b.type !== 'tool_result' || typeof b.content === 'string') continue
+        for (const part of b.content) if (part.type === 'image') out.push(part.data)
+      }
+    }
+    return out
+  }
+
+  it('keeps the newest images and turns the older ones into a placeholder', () => {
+    const messages = [shot('a', 'AAAA'), shot('b', 'BBBB'), shot('c', 'CCCC')]
+    const out = capToolResultImageBytes(messages, { maxBytes: 8 })
+    expect(out.elided).toBe(1)
+    expect(survivors(messages)).toEqual(['BBBB', 'CCCC'])
+  })
+
+  it('replaces the elided image with text rather than dropping the part', () => {
+    // A tool result whose parts vanish reads to the model as a call that
+    // returned nothing, which is a different and wronger thing than a call
+    // whose picture is no longer being re-sent.
+    const messages = [shot('a', 'AAAA'), shot('b', 'BBBB')]
+    capToolResultImageBytes(messages, { maxBytes: 4 })
+    const first = messages[0].content as readonly { type: string; content: unknown }[]
+    const parts = first[0].content as readonly { type: string; text?: string }[]
+    expect(parts.map((p) => p.type)).toEqual(['text', 'text'])
+    expect(parts[1].text).toBe(ELIDED_TOOL_IMAGE)
+  })
+
+  it('keeps the newest image even when it alone is over the budget', () => {
+    const messages = [shot('a', 'AAAA'), shot('b', 'B'.repeat(50))]
+    capToolResultImageBytes(messages, { maxBytes: 4 })
+    expect(survivors(messages)).toEqual(['B'.repeat(50)])
+  })
+
+  it('leaves an image the USER attached to their own message alone', () => {
+    // That picture IS the question. Eliding it would leave the model
+    // answering about something it can no longer see.
+    const messages: Message[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'why does this look wrong?' },
+          { type: 'image', mediaType: 'image/png', data: 'U'.repeat(100) },
+        ],
+      },
+      shot('a', 'AAAA'),
+    ]
+    capToolResultImageBytes(messages, { maxBytes: 1 })
+    const attached = messages[0].content as readonly { type: string }[]
+    expect(attached[1].type).toBe('image')
+  })
+
+  it('does nothing when everything already fits', () => {
+    const messages = [shot('a', 'AAAA'), shot('b', 'BBBB')]
+    const out = capToolResultImageBytes(messages, { maxBytes: 1000 })
+    expect(out.elided).toBe(0)
+    expect(survivors(messages)).toEqual(['AAAA', 'BBBB'])
   })
 })

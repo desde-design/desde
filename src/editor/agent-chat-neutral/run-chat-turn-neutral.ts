@@ -93,7 +93,7 @@ import type {
 } from '../llm-providers/types'
 import { branchModeRootCommitSha } from '../worktree/git-branches'
 
-import { applyContextBudget } from './context-budget'
+import { applyContextBudget, capToolResultImageBytes } from './context-budget'
 import { createCostGuard } from './cost-guard'
 import { replayHistory } from './history-replay'
 import {
@@ -147,6 +147,12 @@ export interface RunChatTurnNeutralDeps {
    * the event loop happens to put it. Production never sets it.
    */
   wrapGate?: (gate: ToolPermissionGate) => ToolPermissionGate
+  /**
+   * Per-request ceiling on accumulated tool-result image bytes. Defaults to
+   * `MAX_TURN_IMAGE_BYTES`. Only tests set it, so a case about the elision
+   * can be written with four-byte fixtures instead of megabytes of base64.
+   */
+  maxTurnImageBytes?: number
 }
 
 export async function runChatTurnNeutral(
@@ -706,6 +712,17 @@ async function runInner(
           })
         }
         messages.push({ role: 'user', content: results })
+        // Re-run INSIDE the loop, because `applyContextBudget` runs once, on
+        // replayed history, before the first step — and images only ever
+        // arrive after that, one tool result at a time. Nothing else removes
+        // them: the transport does not downsample, and every step re-sends
+        // the whole array. See `MAX_TURN_IMAGE_BYTES` for the verifier's
+        // numbers on what that costs unbounded.
+        capToolResultImageBytes(messages, {
+          ...(deps.maxTurnImageBytes !== undefined
+            ? { maxBytes: deps.maxTurnImageBytes }
+            : {}),
+        })
       }
 
       // The step's accounting closes here, after its tool results, so the

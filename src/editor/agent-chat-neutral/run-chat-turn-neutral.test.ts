@@ -9,6 +9,7 @@ import { APICallError, RetryError } from '../llm-providers/ai-sdk-provider'
 import type { BridgeClient } from '../agent-tools/types'
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
 import { resolveSessionConflict } from '../agent-chat/resolve-conflict'
+import { ELIDED_TOOL_IMAGE } from './context-budget'
 import { makeEmptySession } from '../agent-chat/types'
 import { readProposalBlob } from '../agent-chat-sdk/proposal-blob-store'
 import { createTurnInputChannel } from '../agent-chat-sdk/turn-input-channel'
@@ -1111,6 +1112,56 @@ describe('a tool result carrying an image', () => {
     const parts = block.content as readonly { type: string; data?: string }[]
     expect(parts.some((p) => p.type === 'image' && p.data === 'AAAA')).toBe(true)
     expect(parts.some((p) => p.type === 'text')).toBe(true)
+  })
+
+  it('stops re-sending older screenshots once the turn is over its image budget', async () => {
+    // FX16 item 3 (2026-09-05). `applyContextBudget` runs ONCE, on replayed
+    // history, before the loop — and images only arrive after that, one tool
+    // result at a time. Nothing else removed them, so a turn re-sent every
+    // screenshot it had ever taken on every subsequent step: MEASURED by the
+    // adversarial verifier at up to 180 MB in one request and about 4.9 GB
+    // uploaded across a turn, re-billed as image input each time.
+    //
+    // The newest image survives. That is the whole reason images reach the
+    // model at all, and a cap that could drop the picture the model just took
+    // would put it back to describing a screenshot it never saw.
+    let shot = 0
+    const varyingBridge: BridgeClient = {
+      send: async (channel: string) =>
+        channel === 'chat:capture_screenshot'
+          ? ({
+              dataUrl: `data:image/png;base64,${'ABCD'[shot++ % 4].repeat(4)}`,
+              width: 10,
+              height: 10,
+            } as never)
+          : null,
+    }
+    const { provider, calls } = scriptedProvider([
+      toolStep('tu_1', 'mcp__editor__capture_screenshot', { scope: 'viewport' }),
+      toolStep('tu_2', 'mcp__editor__capture_screenshot', { scope: 'viewport' }),
+      toolStep('tu_3', 'mcp__editor__capture_screenshot', { scope: 'viewport' }),
+      textStep('the third one looks right'),
+    ])
+    await runChatTurnNeutral(minimalOpts({ bridge: varyingBridge }) as never, {
+      buildProvider: () => provider,
+      // Four bytes of base64 is one fixture image, so this is "keep one".
+      maxTurnImageBytes: 4,
+    })
+    const finalRequest = calls.at(-1)!
+    const images: string[] = []
+    const placeholders: string[] = []
+    for (const message of finalRequest.messages) {
+      if (typeof message.content === 'string') continue
+      for (const block of message.content) {
+        if (block.type !== 'tool_result' || typeof block.content === 'string') continue
+        for (const part of block.content) {
+          if (part.type === 'image') images.push(part.data)
+          else if (part.text === ELIDED_TOOL_IMAGE) placeholders.push(part.text)
+        }
+      }
+    }
+    expect(images).toEqual(['CCCC'])
+    expect(placeholders).toHaveLength(2)
   })
 
   it('still gives the client a renderable string on the tool_result stream event', async () => {
