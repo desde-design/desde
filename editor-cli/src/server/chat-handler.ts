@@ -482,19 +482,18 @@ export interface ChatHandlerContext {
    */
   canvasEnabled?: boolean
   /**
-   * Whether this project allows the agent to READ credential-bearing files
+   * Whether this project stops the agent READING credential-bearing files
    * (`.env`, private keys, `.npmrc`, cloud credential stores). Default OFF —
-   * omitted means refused, on the `=== true` discipline.
+   * omitted means the agent reads them, on the `=== true` discipline.
    *
-   * `http-server.ts` computes it from `editor.secretReads` in
-   * `.desde/config.json` and nothing else, through `isSecretReadsEnabled`,
+   * `http-server.ts` computes it from `editor.blockSecretReads` in
+   * `.desde/config.json` and nothing else, through `isSecretReadsBlocked`,
    * which the client bootstrap reads too. No env var — see that gate's doc
-   * comment. Threaded
-   * into BOTH chat runtimes: the SDK lane enforces it in a `PreToolUse` hook
-   * (its Read never reaches `canUseTool`), the neutral lane in the shared
-   * permission gate and in its own Read/Glob/Grep.
+   * comment. Threaded into BOTH chat runtimes: the SDK lane enforces it in a
+   * `PreToolUse` hook (its Read never reaches `canUseTool`), the neutral lane
+   * in the shared permission gate and in its own Read/Glob/Grep.
    */
-  allowSecretReads?: boolean
+  blockSecretReads?: boolean
 }
 
 /** Best-effort pathname+hash from the request's page snapshot (mirror the user's route). */
@@ -1217,7 +1216,7 @@ export async function handleChatRequest(
       extensions,
       disabledCapabilities,
       canvasEnabled: ctx.canvasEnabled,
-      allowSecretReads: ctx.allowSecretReads === true,
+      blockSecretReads: ctx.blockSecretReads === true,
       awaitEditAck,
       emit: (ev) => {
         // Normally a straight forward. The one exception is the lane

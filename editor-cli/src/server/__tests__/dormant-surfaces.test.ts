@@ -5,7 +5,7 @@ import {
   isCanvasEnabled,
   isNotesEnabled,
   isNeutralChatEnabled,
-  isSecretReadsEnabled,
+  isSecretReadsBlocked,
   chatRuntimeOverride,
 } from "../dormant-surfaces.js"
 
@@ -17,7 +17,7 @@ const ENV_KEYS = [
   "EDITOR_CODE_VIEW",
   "EDITOR_NOTES",
   "EDITOR_CANVAS",
-  "EDITOR_SECRET_READS",
+  "EDITOR_BLOCK_SECRET_READS",
   "EDITOR_NEUTRAL_CHAT",
 ] as const
 const saved = new Map<string, string | undefined>()
@@ -92,46 +92,59 @@ describe.each(GATES)("$name gate", ({ name, read, env }) => {
 })
 
 /**
- * `secretReads` is the one gate in the module with NO env var, and FX17
+ * `blockSecretReads` is the one gate in the module with NO env var, and FX17
  * item 6 is why. It is not a dormant surface, it is a credential-read
- * permission, and it was asked for per project. `EDITOR_SECRET_READS=1` in a
- * shell profile was inherited by every per-project CLI child the launcher
- * and the desktop shell spawn, so one project's permission became every
- * project's.
+ * permission, and it was asked for per project. `EDITOR_BLOCK_SECRET_READS=1`
+ * in a shell profile would be inherited by every per-project CLI child the
+ * launcher and the desktop shell spawn, so one project's answer would become
+ * every project's.
  *
- * It keeps the `=== true` config discipline the surfaces above have, so the
- * same falsy table runs against it — just without the two env cases.
+ * FX18 (2026-09-05) flipped which way it points. Blocking is now what a
+ * project OPTS IN to, so the falsy table below asserts "not blocked" where it
+ * used to assert "not allowed". The `=== true` discipline is unchanged: an
+ * absent key, a malformed value and an explicit `false` are one state.
  */
-describe("secretReads gate", () => {
-  it("is off with no editor block, an omitted key, or an explicit false", () => {
-    expect(isSecretReadsEnabled({})).toBe(false)
-    expect(isSecretReadsEnabled({ editor: {} })).toBe(false)
-    expect(isSecretReadsEnabled({ editor: { secretReads: false } })).toBe(false)
+describe("blockSecretReads gate", () => {
+  it("does not block with no editor block, an omitted key, or an explicit false", () => {
+    expect(isSecretReadsBlocked({})).toBe(false)
+    expect(isSecretReadsBlocked({ editor: {} })).toBe(false)
+    expect(isSecretReadsBlocked({ editor: { blockSecretReads: false } })).toBe(false)
   })
 
-  it("is off on a truthy value that is not true", () => {
-    expect(isSecretReadsEnabled({ editor: { secretReads: 1 } } as never)).toBe(false)
-    expect(isSecretReadsEnabled({ editor: { secretReads: "true" } } as never)).toBe(false)
+  it("does not block on a truthy value that is not true", () => {
+    expect(isSecretReadsBlocked({ editor: { blockSecretReads: 1 } } as never)).toBe(false)
+    expect(isSecretReadsBlocked({ editor: { blockSecretReads: "true" } } as never)).toBe(false)
   })
 
-  it("is on for this project on an explicit true", () => {
-    expect(isSecretReadsEnabled({ editor: { secretReads: true } })).toBe(true)
+  it("blocks for this project on an explicit true", () => {
+    expect(isSecretReadsBlocked({ editor: { blockSecretReads: true } })).toBe(true)
   })
 
-  it("is NOT enabled by an environment variable", () => {
+  it("is NOT turned on by an environment variable", () => {
     // The whole point. A process-wide variable cannot express a per-project
     // permission, and it propagates to every CLI child the launcher and the
     // desktop shell spawn.
-    setEnv("EDITOR_SECRET_READS", "1")
-    expect(isSecretReadsEnabled({})).toBe(false)
-    expect(isSecretReadsEnabled({ editor: {} })).toBe(false)
-    expect(isSecretReadsEnabled({ editor: { secretReads: false } })).toBe(false)
+    setEnv("EDITOR_BLOCK_SECRET_READS", "1")
+    expect(isSecretReadsBlocked({})).toBe(false)
+    expect(isSecretReadsBlocked({ editor: {} })).toBe(false)
+    expect(isSecretReadsBlocked({ editor: { blockSecretReads: false } })).toBe(false)
   })
 
   it("does not read any other surface's env var either", () => {
     setEnv("EDITOR_CANVAS", "1")
     setEnv("EDITOR_NOTES", "1")
-    expect(isSecretReadsEnabled({})).toBe(false)
+    expect(isSecretReadsBlocked({})).toBe(false)
+  })
+
+  it("ignores the old key name, which shipped only on an unmerged branch", () => {
+    // FX18 renamed `editor.secretReads` (allow) to `editor.blockSecretReads`
+    // (block). There is no compatibility alias, deliberately: the old key
+    // shipped only on this unmerged branch, and reading a renamed permission
+    // key under its old spelling is how a permission ends up meaning
+    // something nobody wrote. An unknown `editor.*` key is left untouched by
+    // `project-config.ts` (it preserves keys it does not know), so a stale
+    // `secretReads` simply decides nothing.
+    expect(isSecretReadsBlocked({ editor: { secretReads: true } } as never)).toBe(false)
   })
 })
 

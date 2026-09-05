@@ -1,7 +1,14 @@
 /**
- * The NEUTRAL lane's half of the FX15 proof.
+ * The NEUTRAL lane's half of the secret-read policy proof.
  *
- * Every assertion here is against the real tool handlers and the real shared
+ * The policy is OPT-IN since FX18 (2026-09-05): a project that has said
+ * nothing gets the pre-policy behaviour, and `editor.blockSecretReads: true`
+ * is what turns the refusals on. So every refusal here is paired with the
+ * default it inverts — the file has to prove BOTH states, because a test
+ * suite that only exercised the blocked one would pass just as happily if
+ * the default had been left pointing the wrong way.
+ *
+ * Every assertion is against the real tool handlers and the real shared
  * gate, over a real temp repository containing a real (fake-valued) `.env`.
  * The secrets in the fixture are obviously fake and the directory is thrown
  * away in `afterEach`.
@@ -29,88 +36,119 @@ beforeEach(() => {
 })
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
-function gate(allowSecretReads?: boolean) {
+/** The default: no project setting at all, so nothing is blocked. */
+function gate() {
   return buildToolPermissionGate({
     worktreeRoot: root,
     emitEditProposal: async () => ({ ok: true, editId: '' }),
-    ...(allowSecretReads === true ? { allowSecretReads: true } : {}),
   })
 }
 
-describe('neutral lane — the shared gate', () => {
+/** A project that opted in with `editor.blockSecretReads: true`. */
+function blockedGate() {
+  return buildToolPermissionGate({
+    worktreeRoot: root,
+    emitEditProposal: async () => ({ ok: true, editId: '' }),
+    blockSecretReads: true,
+  })
+}
+
+describe('neutral lane — the default, where nothing is blocked', () => {
+  it('allows a Read of .env', async () => {
+    expect((await gate()('Read', { file_path: '.env' }, {})).behavior).toBe('allow')
+  })
+
+  it('allows an aimed Glob and an aimed Grep scope', async () => {
+    expect((await gate()('Glob', { pattern: '**/.env*' }, {})).behavior).toBe('allow')
+    expect((await gate()('Grep', { pattern: 'KEY', glob: '.env*' }, {})).behavior).toBe('allow')
+  })
+
+  it('returns the bytes of .env through the real Read handler', async () => {
+    const out = await buildReadToolSpec({ worktreeRoot: root }).handler({ file_path: '.env' }, {})
+    expect(out.isError).toBeUndefined()
+    expect(out.content[0].text).toContain(FAKE_KEY)
+  })
+
+  it('lists .env in a broad enumeration, with no omission note', async () => {
+    const out = await buildGlobToolSpec({ worktreeRoot: root }).handler({ pattern: '**/.*' }, {})
+    expect(out.content[0].text).toMatch(/^\.env$/m)
+    expect(out.content[0].text).not.toContain('left out')
+  })
+
+  it('searches .env through the real Grep handler', async () => {
+    const out = await buildGrepToolSpec({ worktreeRoot: root }).handler(
+      { pattern: 'OPENAI_API_KEY', glob: '**/.*' },
+      {},
+    )
+    expect(out.content[0].text).toContain(FAKE_KEY)
+  })
+})
+
+describe('neutral lane — the shared gate, with blocking turned on', () => {
   it('denies a Read of .env', async () => {
-    const d = await gate()('Read', { file_path: '.env' }, {})
+    const d = await blockedGate()('Read', { file_path: '.env' }, {})
     expect(d.behavior).toBe('deny')
     if (d.behavior === 'deny') expect(d.message).toContain('credentials')
   })
 
   it('denies a Read reached through an in-repo symlink', async () => {
     symlinkSync(join(root, '.env'), join(root, 'src/notes.md'))
-    const d = await gate()('Read', { file_path: 'src/notes.md' }, {})
+    const d = await blockedGate()('Read', { file_path: 'src/notes.md' }, {})
     expect(d.behavior).toBe('deny')
   })
 
   it('allows a Read of .env.example', async () => {
-    expect((await gate()('Read', { file_path: '.env.example' }, {})).behavior).toBe('allow')
+    expect((await blockedGate()('Read', { file_path: '.env.example' }, {})).behavior).toBe('allow')
   })
 
   it('denies a Glob whose pattern names the file', async () => {
-    expect((await gate()('Glob', { pattern: '**/.env*' }, {})).behavior).toBe('deny')
+    expect((await blockedGate()('Glob', { pattern: '**/.env*' }, {})).behavior).toBe('deny')
   })
 
   it('denies a Grep whose glob scope names the file', async () => {
-    const d = await gate()('Grep', { pattern: 'KEY', glob: '.env*' }, {})
+    const d = await blockedGate()('Grep', { pattern: 'KEY', glob: '.env*' }, {})
     expect(d.behavior).toBe('deny')
   })
 
   it('allows a broad Glob, because the results are filtered instead', async () => {
-    expect((await gate()('Glob', { pattern: '**/.*' }, {})).behavior).toBe('allow')
+    expect((await blockedGate()('Glob', { pattern: '**/.*' }, {})).behavior).toBe('allow')
   })
 
   it("does not treat Grep's regular expression as a path", async () => {
     // `pattern` on Grep is a regex. Refusing it as a path would refuse the
     // ordinary search for where the code reads an env variable.
-    const d = await gate()('Grep', { pattern: '\\.env', glob: 'src/**/*' }, {})
+    const d = await blockedGate()('Grep', { pattern: '\\.env', glob: 'src/**/*' }, {})
     expect(d.behavior).toBe('allow')
-  })
-
-  it('allows every one of those when the override is on', async () => {
-    expect((await gate(true)('Read', { file_path: '.env' }, {})).behavior).toBe('allow')
-    expect((await gate(true)('Glob', { pattern: '**/.env*' }, {})).behavior).toBe('allow')
-    expect((await gate(true)('Grep', { pattern: 'KEY', glob: '.env*' }, {})).behavior).toBe('allow')
   })
 })
 
-describe('neutral lane — Read', () => {
+describe('neutral lane — Read, with blocking turned on', () => {
   it('refuses .env and returns no bytes of it', async () => {
-    const out = await buildReadToolSpec({ worktreeRoot: root }).handler({ file_path: '.env' }, {})
+    const out = await buildReadToolSpec({ worktreeRoot: root, blockSecretReads: true }).handler(
+      { file_path: '.env' },
+      {},
+    )
     expect(out.isError).toBe(true)
     expect(out.content[0].text).not.toContain(FAKE_KEY)
     expect(out.content[0].text).toContain('cannot be read')
   })
 
   it('still reads .env.example', async () => {
-    const out = await buildReadToolSpec({ worktreeRoot: root }).handler(
+    const out = await buildReadToolSpec({ worktreeRoot: root, blockSecretReads: true }).handler(
       { file_path: '.env.example' },
       {},
     )
     expect(out.isError).toBeUndefined()
     expect(out.content[0].text).toContain('OPENAI_API_KEY')
   })
-
-  it('reads .env when the override is on', async () => {
-    const out = await buildReadToolSpec({ worktreeRoot: root, allowSecretReads: true }).handler(
-      { file_path: '.env' },
-      {},
-    )
-    expect(out.isError).toBeUndefined()
-    expect(out.content[0].text).toContain(FAKE_KEY)
-  })
 })
 
-describe('neutral lane — Glob', () => {
+describe('neutral lane — Glob, with blocking turned on', () => {
   it('omits secret files from a broad enumeration and says how many', async () => {
-    const out = await buildGlobToolSpec({ worktreeRoot: root }).handler({ pattern: '**/.*' }, {})
+    const out = await buildGlobToolSpec({ worktreeRoot: root, blockSecretReads: true }).handler(
+      { pattern: '**/.*' },
+      {},
+    )
     const text = out.content[0].text
     expect(text).not.toMatch(/^\.env$/m)
     expect(text).not.toMatch(/^\.env\.local$/m)
@@ -119,13 +157,16 @@ describe('neutral lane — Glob', () => {
   })
 
   it('refuses a pattern aimed straight at the file', async () => {
-    const out = await buildGlobToolSpec({ worktreeRoot: root }).handler({ pattern: '.env*' }, {})
+    const out = await buildGlobToolSpec({ worktreeRoot: root, blockSecretReads: true }).handler(
+      { pattern: '.env*' },
+      {},
+    )
     expect(out.isError).toBe(true)
     expect(out.content[0].text).toContain('cannot be searched')
   })
 
-  it('says how many were withheld even when nothing else matched', async () => {
-    const out = await buildGlobToolSpec({ worktreeRoot: root }).handler(
+  it('refuses rather than silently emptying when nothing else matched', async () => {
+    const out = await buildGlobToolSpec({ worktreeRoot: root, blockSecretReads: true }).handler(
       { pattern: '**/.env.local' },
       {},
     )
@@ -133,20 +174,11 @@ describe('neutral lane — Glob', () => {
     // silently emptied. The note path is covered by the broad case above.
     expect(out.isError).toBe(true)
   })
-
-  it('lists them when the override is on', async () => {
-    const out = await buildGlobToolSpec({ worktreeRoot: root, allowSecretReads: true }).handler(
-      { pattern: '**/.*' },
-      {},
-    )
-    expect(out.content[0].text).toMatch(/^\.env$/m)
-    expect(out.content[0].text).not.toContain('left out')
-  })
 })
 
-describe('neutral lane — Grep', () => {
+describe('neutral lane — Grep, with blocking turned on', () => {
   it('never returns a line out of a secret file', async () => {
-    const out = await buildGrepToolSpec({ worktreeRoot: root }).handler(
+    const out = await buildGrepToolSpec({ worktreeRoot: root, blockSecretReads: true }).handler(
       { pattern: 'KEY', glob: '**/.*' },
       {},
     )
@@ -155,19 +187,11 @@ describe('neutral lane — Grep', () => {
   })
 
   it('refuses a scope aimed straight at the file', async () => {
-    const out = await buildGrepToolSpec({ worktreeRoot: root }).handler(
+    const out = await buildGrepToolSpec({ worktreeRoot: root, blockSecretReads: true }).handler(
       { pattern: 'KEY', glob: '.env' },
       {},
     )
     expect(out.isError).toBe(true)
     expect(out.content[0].text).not.toContain(FAKE_KEY)
-  })
-
-  it('searches them when the override is on', async () => {
-    const out = await buildGrepToolSpec({
-      worktreeRoot: root,
-      allowSecretReads: true,
-    }).handler({ pattern: 'OPENAI_API_KEY', glob: '**/.*' }, {})
-    expect(out.content[0].text).toContain(FAKE_KEY)
   })
 })

@@ -255,18 +255,18 @@ export interface BuildCanUseToolOpts {
    */
   extensionToolPolicy?: ReadonlyMap<string, ReadonlyArray<string> | null>
   /**
-   * The per-project override that lets the agent read secret-bearing files
+   * The per-project setting that stops the agent reading secret-bearing files
    * (`.env`, private keys, `.npmrc`, …). Default OFF — an omitted value means
-   * refused, on the same `=== true` discipline every other opt-in gate in the
-   * product uses, so a missing key, a malformed value and an explicit `false`
-   * are indistinguishable.
+   * the agent reads them, on the same `=== true` discipline every other
+   * opt-in gate in the product uses, so a missing key, a malformed value and
+   * an explicit `false` are indistinguishable.
    *
-   * The CLI computes it once (`isSecretReadsEnabled` in
+   * The CLI computes it once (`isSecretReadsBlocked` in
    * `editor-cli/src/server/dormant-surfaces.ts`) and both the client offering
    * and this dispatch read that one function, per the both-ends rule in
    * CLAUDE.md.
    */
-  allowSecretReads?: boolean
+  blockSecretReads?: boolean
 }
 
 /**
@@ -316,7 +316,7 @@ export function buildToolPermissionGate(
     // credential to a name neither Read guard refuses. The check reads the
     // ARGUMENTS, so an editor tool added later is covered the day it is
     // added rather than the day someone remembers this list.
-    if (toolName.startsWith('mcp__editor__') && opts.allowSecretReads !== true) {
+    if (toolName.startsWith('mcp__editor__') && opts.blockSecretReads === true) {
       const refusal = await editorToolSecretRefusal(opts.worktreeRoot, toolInput)
       if (refusal !== null) return deny(refusal)
     }
@@ -333,19 +333,20 @@ export function buildToolPermissionGate(
           )
         }
         // Containment says the path is inside the repository. It says nothing
-        // about whether the CONTENT is a credential, and until 2026-09-05
-        // nothing else asked: `isProtectedAgentPath` had write call sites
-        // only, so `Read .env` returned the key verbatim into a transcript
-        // sent to a model vendor. Repository content alone steers the model
-        // here (a README saying "the key is in .env"), which is why this is a
-        // default rather than a prompt-time judgement.
+        // about whether the CONTENT is a credential: `isProtectedAgentPath`
+        // had write call sites only, so `Read .env` returned the key verbatim
+        // into a transcript sent to a model vendor. Repository content alone
+        // steers the model here (a README saying "the key is in .env"), which
+        // is why the refusal is a project setting rather than a prompt-time
+        // judgement. It is OFF by default since FX18: a project that wants
+        // this branch says so.
         //
         // BOTH spellings are tested: the one the model asked for, and the
         // realpath'd target `resolveRepoPath` returned. An in-repo symlink
         // (`docs/notes.md` -> `.env`) passes containment, because the link and
         // its target are both inside the repository.
         if (
-          opts.allowSecretReads !== true &&
+          opts.blockSecretReads === true &&
           (isSecretAgentPath(filePath) || isSecretAgentPath(safe.absolute))
         ) {
           return deny(secretPathDenial(filePath))
@@ -363,7 +364,7 @@ export function buildToolPermissionGate(
     // silently returning a short list for `**\/.env` would teach the model
     // the file does not exist and send it looking under other names.
     if (toolName === 'Glob' || toolName === 'Grep') {
-      if (opts.allowSecretReads !== true) {
+      if (opts.blockSecretReads === true) {
         const input = toolInput as {
           pattern?: unknown
           glob?: unknown

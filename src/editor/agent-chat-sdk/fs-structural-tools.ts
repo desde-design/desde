@@ -206,12 +206,12 @@ interface RenameFileHandlerOpts {
   /** See `DeleteFileHandlerOpts.acquireTreeGate` (A2). */
   acquireTreeGate?: AcquireTreeGate
   /**
-   * The project's secret-read permission, threaded from the chat dispatch.
-   * Default OFF, on the same `=== true` discipline as every other opt-in
-   * gate. See the refusal in the handler for what it gates and why a RENAME
-   * is a read.
+   * The project's secret-read policy, threaded from the chat dispatch.
+   * Default OFF — no blocking — on the same `=== true` discipline as every
+   * other opt-in gate. See the refusal in the handler for what it gates when
+   * it IS on, and why a RENAME counts as a read.
    */
-  allowSecretReads?: boolean
+  blockSecretReads?: boolean
 }
 
 /**
@@ -243,7 +243,7 @@ export async function renameFileHandler(
   // Refused here as well as in the shared gate, which is the both-ends rule:
   // the gate is the policy, and this handler is the code that moves the
   // file.
-  if (opts.allowSecretReads !== true && isSecretAgentPath(input.from)) {
+  if (opts.blockSecretReads === true && isSecretAgentPath(input.from)) {
     return {
       content: [{ type: 'text', text: secretPathDenial(input.from) }],
       isError: true,

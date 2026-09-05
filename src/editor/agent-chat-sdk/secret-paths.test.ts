@@ -303,7 +303,7 @@ describe('secretPathDenial', () => {
     const msg = secretPathDenial('.env')
     expect(msg).toContain("'.env'")
     expect(msg).toContain('credentials')
-    expect(msg).toContain('secretReads')
+    expect(msg).toContain('blockSecretReads')
   })
 
   it('never suggests the user paste the contents', () => {

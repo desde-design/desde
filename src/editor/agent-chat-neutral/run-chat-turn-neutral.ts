@@ -401,20 +401,20 @@ async function runInner(
       canvasEnabled: opts.canvasEnabled,
       acquireTreeGate: opts.acquireTreeGate,
       // `rename_file`'s own half of the secret-read policy (FX17 item 5).
-      ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
+      ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
     },
     ...(opts.builtinTools ? { builtinTools: opts.builtinTools } : {}),
     ...(opts.disallowedTools ? { disallowedTools: opts.disallowedTools } : {}),
     // Secret-file reads. Passed to the TOOLS as well as to the gate below,
     // which is the both-ends rule applied within one lane: the gate is the
     // policy, and the tool is the code that opens the file.
-    ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
+    ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
   })
   const byName = new Map(catalog.map((spec) => [spec.name, spec]))
 
   const builtGate = buildToolPermissionGate({
     worktreeRoot: opts.worktreeRoot,
-    ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
+    ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
     // A gate built for the neutral lane never emits: on this lane the write
     // tools call `brokeredWrite`, whose own `emit` is the single source of the
     // `edit_proposed` event. A second emit here would double every diff card.
@@ -446,7 +446,7 @@ async function runInner(
     groundingEnabled: opts.getGrounding !== undefined,
     ...(groundingDigest ? { groundingDigest } : {}),
     canvasEnabled: opts.canvasEnabled === true,
-    allowSecretReads: opts.allowSecretReads === true,
+    blockSecretReads: opts.blockSecretReads === true,
     ...(opts.projectKnowledge ? { projectKnowledge: opts.projectKnowledge } : {}),
     disabledCapabilities: opts.disabledCapabilities ?? null,
   })

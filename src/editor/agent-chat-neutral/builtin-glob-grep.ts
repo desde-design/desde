@@ -85,15 +85,17 @@ const EXCLUDED_DIRS = ['node_modules', '.git', 'dist', '.desde', '.next', 'cover
 export interface BuiltinSearchOpts {
   worktreeRoot: string
   /**
-   * The per-project override that lets the agent read secret-bearing files.
-   * Default OFF, on the same `=== true` discipline as every other opt-in gate.
+   * The per-project setting that stops the agent reading secret-bearing
+   * files. Default OFF, on the same `=== true` discipline as every other
+   * opt-in gate, so absent means these tools behave as they did before the
+   * policy existed.
    *
-   * With it off, an enumeration that HAPPENS to reach `.env` drops it from the
+   * With it ON, an enumeration that HAPPENS to reach `.env` drops it from the
    * results and says how many were dropped; a pattern that AIMS at one is
    * refused outright by the shared gate before the handler runs. The two
    * treatments are deliberately different — see `globPatternTargetsSecret`.
    */
-  allowSecretReads?: boolean
+  blockSecretReads?: boolean
 }
 
 /** What an enumeration returned, and what it withheld on the way. */
@@ -118,7 +120,7 @@ async function matchingPaths(
   pattern: string,
   cap: number,
   signal: AbortSignal | undefined,
-  allowSecretReads: boolean,
+  blockSecretReads: boolean,
 ): Promise<Enumeration> {
   const out: string[] = []
   let omittedSecrets = 0
@@ -145,7 +147,7 @@ async function matchingPaths(
     // symlink pointing at `.env` passes containment because the link and its
     // target are both inside the repository.
     if (
-      !allowSecretReads &&
+      blockSecretReads &&
       (isSecretAgentPath(repoRel) || isSecretAgentPath(safe.absolute))
     ) {
       omittedSecrets++
@@ -181,12 +183,12 @@ export function buildGlobToolSpec(opts: BuiltinSearchOpts) {
     handler: async (input: Record<string, unknown>, ctx?: unknown) => {
       const pattern = typeof input.pattern === 'string' ? input.pattern : ''
       if (pattern.length === 0) return err('Glob needs a non-empty pattern.')
-      const allowSecretReads = opts.allowSecretReads === true
+      const blockSecretReads = opts.blockSecretReads === true
       // The shared gate refuses this before the handler runs. Repeating it
       // here is the second of the two ends CLAUDE.md asks for: a caller that
       // assembles the catalog without the gate would otherwise get a Glob with
       // no policy on it at all. The LIST is not duplicated, only the call.
-      if (!allowSecretReads && globPatternTargetsSecret(pattern)) {
+      if (blockSecretReads && globPatternTargetsSecret(pattern)) {
         return err(secretPathDenial(pattern, 'search'))
       }
       const signal = signalOf(ctx)
@@ -196,7 +198,7 @@ export function buildGlobToolSpec(opts: BuiltinSearchOpts) {
           pattern,
           GLOB_MAX_RESULTS,
           signal,
-          allowSecretReads,
+          blockSecretReads,
         )
         if (signal?.aborted === true) {
           return { content: [{ type: 'text' as const, text: 'Search cancelled.' }], isError: undefined }
@@ -267,12 +269,12 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
       const signal = signalOf(ctx)
       const deadlineAt = Date.now() + GREP_DEADLINE_MS
       const pattern = typeof input.glob === 'string' && input.glob.length > 0 ? input.glob : '**/*'
-      const allowSecretReads = opts.allowSecretReads === true
+      const blockSecretReads = opts.blockSecretReads === true
       // The SCOPE is what can name a secret file. `input.pattern` is a regular
       // expression, not a path, so it is deliberately not tested against a
       // path policy. The verifier's own repro was `glob: '.env*'`, which is
       // this branch.
-      if (!allowSecretReads && globPatternTargetsSecret(pattern)) {
+      if (blockSecretReads && globPatternTargetsSecret(pattern)) {
         return err(secretPathDenial(pattern, 'search'))
       }
       let enumeration: Enumeration
@@ -282,7 +284,7 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
           pattern,
           GLOB_MAX_RESULTS,
           signal,
-          allowSecretReads,
+          blockSecretReads,
         )
       } catch (e) {
         return err(`Grep failed to enumerate files: ${(e as Error).message}`)

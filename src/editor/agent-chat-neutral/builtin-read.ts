@@ -48,8 +48,10 @@ export interface BuiltinReadOpts {
    */
   onFileRead?: (observation: FileReadObservation) => void | Promise<void>
   /**
-   * The per-project override that lets the agent read secret-bearing files.
-   * Default OFF, on the same `=== true` discipline as every other opt-in gate.
+   * The per-project setting that stops the agent reading secret-bearing
+   * files. Default OFF, on the same `=== true` discipline as every other
+   * opt-in gate, so absent means this Read behaves as it did before the
+   * policy existed.
    *
    * The shared gate (`buildToolPermissionGate`) refuses these before the
    * handler runs, so this is the SECOND of the two ends CLAUDE.md asks for
@@ -60,7 +62,7 @@ export interface BuiltinReadOpts {
    * open" shape the rule exists to prevent. The LIST is not duplicated; only
    * the call is.
    */
-  allowSecretReads?: boolean
+  blockSecretReads?: boolean
 }
 
 const DESCRIPTION =
@@ -113,7 +115,7 @@ export function buildReadToolSpec(opts: BuiltinReadOpts) {
       // pointing at `.env` passes containment, because the link and its
       // target are both inside the repository.
       if (
-        opts.allowSecretReads !== true &&
+        opts.blockSecretReads === true &&
         (isSecretAgentPath(filePath) || isSecretAgentPath(safe.absolute))
       ) {
         return err(secretPathDenial(filePath))

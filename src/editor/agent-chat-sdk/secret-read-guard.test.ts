@@ -1,5 +1,12 @@
 /**
- * The SDK lane's half of the FX15 proof.
+ * The SDK lane's half of the secret-read policy proof.
+ *
+ * The policy is OPT-IN since FX18 (2026-09-05): `guardDecision` below is a
+ * project that has said nothing, and it must ALLOW; `blockedDecision` is a
+ * project that set `editor.blockSecretReads: true`, and it must refuse. Both
+ * halves are asserted for every shape, because a suite that only exercised
+ * the blocked one would pass just as happily with the default pointing the
+ * wrong way.
  *
  * The subject is `createSecretReadGuard`, not the permission gate, and that is
  * the point of this file. On this lane the SDK auto-allows Read without ever
@@ -48,14 +55,14 @@ function preToolUse(tool_name: string, tool_input: unknown): HookInput {
   } as unknown as HookInput
 }
 
-async function guardDecision(
+async function decide(
   tool: string,
   input: unknown,
-  allowSecretReads?: boolean,
+  blockSecretReads: boolean,
 ): Promise<{ decision: string | undefined; reason: string | undefined }> {
   const guard = createSecretReadGuard({
     worktreeRoot: root,
-    ...(allowSecretReads === true ? { allowSecretReads: true } : {}),
+    ...(blockSecretReads ? { blockSecretReads: true } : {}),
   })
   const out = await guard(preToolUse(tool, input), undefined, { signal: new AbortController().signal })
   const specific = (out as { hookSpecificOutput?: Record<string, unknown> }).hookSpecificOutput
@@ -65,9 +72,15 @@ async function guardDecision(
   }
 }
 
-describe('SDK lane — the PreToolUse guard', () => {
+/** The default: no project setting, so the guard blocks nothing. */
+const guardDecision = (tool: string, input: unknown) => decide(tool, input, false)
+
+/** A project that opted in with `editor.blockSecretReads: true`. */
+const blockedDecision = (tool: string, input: unknown) => decide(tool, input, true)
+
+describe('SDK lane — the PreToolUse guard, with blocking turned on', () => {
   it('denies a Read of .env', async () => {
-    const { decision, reason } = await guardDecision('Read', { file_path: '.env' })
+    const { decision, reason } = await blockedDecision('Read', { file_path: '.env' })
     expect(decision).toBe('deny')
     expect(reason).toContain('credentials')
     expect(reason).not.toContain(FAKE_KEY)
@@ -75,52 +88,52 @@ describe('SDK lane — the PreToolUse guard', () => {
 
   it('denies a Read of every .env variant', async () => {
     for (const p of ['.env.local', '.env.production', 'packages/api/.env']) {
-      expect((await guardDecision('Read', { file_path: p })).decision, p).toBe('deny')
+      expect((await blockedDecision('Read', { file_path: p })).decision, p).toBe('deny')
     }
   })
 
   it('denies a Read reached through an in-repo symlink', async () => {
     symlinkSync(join(root, '.env'), join(root, 'src/notes.md'))
-    expect((await guardDecision('Read', { file_path: 'src/notes.md' })).decision).toBe('deny')
+    expect((await blockedDecision('Read', { file_path: 'src/notes.md' })).decision).toBe('deny')
   })
 
   it('allows a Read of .env.example', async () => {
-    expect((await guardDecision('Read', { file_path: '.env.example' })).decision).toBeUndefined()
+    expect((await blockedDecision('Read', { file_path: '.env.example' })).decision).toBeUndefined()
   })
 
   it('allows a Read of ordinary source', async () => {
-    expect((await guardDecision('Read', { file_path: 'src/App.tsx' })).decision).toBeUndefined()
+    expect((await blockedDecision('Read', { file_path: 'src/App.tsx' })).decision).toBeUndefined()
   })
 
   it('denies a Glob whose pattern names the file', async () => {
-    expect((await guardDecision('Glob', { pattern: '**/.env*' })).decision).toBe('deny')
-    expect((await guardDecision('Glob', { pattern: '**/*.pem' })).decision).toBe('deny')
+    expect((await blockedDecision('Glob', { pattern: '**/.env*' })).decision).toBe('deny')
+    expect((await blockedDecision('Glob', { pattern: '**/*.pem' })).decision).toBe('deny')
   })
 
   it('denies a Grep scoped at the file, by glob or by path', async () => {
-    expect((await guardDecision('Grep', { pattern: 'KEY', glob: '.env*' })).decision).toBe('deny')
-    expect((await guardDecision('Grep', { pattern: 'KEY', path: '.env' })).decision).toBe('deny')
+    expect((await blockedDecision('Grep', { pattern: 'KEY', glob: '.env*' })).decision).toBe('deny')
+    expect((await blockedDecision('Grep', { pattern: 'KEY', path: '.env' })).decision).toBe('deny')
   })
 
   it("does not read Grep's regular expression as a path", async () => {
-    const { decision } = await guardDecision('Grep', { pattern: '\\.env', glob: 'src/**/*' })
+    const { decision } = await blockedDecision('Grep', { pattern: '\\.env', glob: 'src/**/*' })
     expect(decision).toBeUndefined()
   })
 
   it('allows a broad enumeration', async () => {
-    expect((await guardDecision('Glob', { pattern: '**/*' })).decision).toBeUndefined()
-    expect((await guardDecision('Grep', { pattern: 'KEY' })).decision).toBeUndefined()
+    expect((await blockedDecision('Glob', { pattern: '**/*' })).decision).toBeUndefined()
+    expect((await blockedDecision('Grep', { pattern: 'KEY' })).decision).toBeUndefined()
   })
 
   it('leaves tools other than Read, Glob and Grep alone', async () => {
-    expect((await guardDecision('Write', { file_path: '.env' })).decision).toBeUndefined()
+    expect((await blockedDecision('Write', { file_path: '.env' })).decision).toBeUndefined()
   })
 
-  it('allows all of it when the override is on', async () => {
-    expect((await guardDecision('Read', { file_path: '.env' }, true)).decision).toBeUndefined()
-    expect((await guardDecision('Glob', { pattern: '**/.env*' }, true)).decision).toBeUndefined()
+  it('allows all of it by default, when the project has not opted in', async () => {
+    expect((await guardDecision('Read', { file_path: '.env' })).decision).toBeUndefined()
+    expect((await guardDecision('Glob', { pattern: '**/.env*' })).decision).toBeUndefined()
     expect(
-      (await guardDecision('Grep', { pattern: 'KEY', glob: '.env*' }, true)).decision,
+      (await guardDecision('Grep', { pattern: 'KEY', glob: '.env*' })).decision,
     ).toBeUndefined()
   })
 
@@ -136,23 +149,27 @@ describe('SDK lane — the PreToolUse guard', () => {
 })
 
 describe('SDK lane — the shared gate, its second end', () => {
-  function gate(allowSecretReads?: boolean) {
-    return buildToolPermissionGate({
+  const gate = () =>
+    buildToolPermissionGate({
       worktreeRoot: root,
       emitEditProposal: async () => ({ ok: true, editId: '' }),
-      ...(allowSecretReads === true ? { allowSecretReads: true } : {}),
     })
-  }
+  const blockedGate = () =>
+    buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true, editId: '' }),
+      blockSecretReads: true,
+    })
 
   it('denies Read, Glob and Grep for a secret path', async () => {
-    expect((await gate()('Read', { file_path: '.env' }, {})).behavior).toBe('deny')
-    expect((await gate()('Glob', { pattern: '.env*' }, {})).behavior).toBe('deny')
-    expect((await gate()('Grep', { pattern: 'K', glob: '**/.env' }, {})).behavior).toBe('deny')
+    expect((await blockedGate()('Read', { file_path: '.env' }, {})).behavior).toBe('deny')
+    expect((await blockedGate()('Glob', { pattern: '.env*' }, {})).behavior).toBe('deny')
+    expect((await blockedGate()('Grep', { pattern: 'K', glob: '**/.env' }, {})).behavior).toBe('deny')
   })
 
-  it('allows them with the override on', async () => {
-    expect((await gate(true)('Read', { file_path: '.env' }, {})).behavior).toBe('allow')
-    expect((await gate(true)('Glob', { pattern: '.env*' }, {})).behavior).toBe('allow')
+  it('allows them by default', async () => {
+    expect((await gate()('Read', { file_path: '.env' }, {})).behavior).toBe('allow')
+    expect((await gate()('Glob', { pattern: '.env*' }, {})).behavior).toBe('allow')
   })
 })
 
@@ -165,16 +182,20 @@ describe('SDK lane — the shared gate, its second end', () => {
  * path.
  */
 describe('SDK lane — a content-mode Grep (FX17 item 3b)', () => {
-  function gate(allowSecretReads?: boolean) {
-    return buildToolPermissionGate({
+  const gate = () =>
+    buildToolPermissionGate({
       worktreeRoot: root,
       emitEditProposal: async () => ({ ok: true, editId: '' }),
-      ...(allowSecretReads === true ? { allowSecretReads: true } : {}),
     })
-  }
+  const blockedGate = () =>
+    buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true, editId: '' }),
+      blockSecretReads: true,
+    })
 
   it('is refused with no scope at all — the shape that needed no bypass', async () => {
-    const { decision, reason } = await guardDecision('Grep', {
+    const { decision, reason } = await blockedDecision('Grep', {
       pattern: 'KEY',
       output_mode: 'content',
     })
@@ -189,12 +210,12 @@ describe('SDK lane — a content-mode Grep (FX17 item 3b)', () => {
       { pattern: 'KEY', output_mode: 'content', path: '.' },
       { pattern: 'KEY', output_mode: 'content', glob: '**/*.ts' },
     ]) {
-      expect((await guardDecision('Grep', input)).decision, JSON.stringify(input)).toBe('deny')
+      expect((await blockedDecision('Grep', input)).decision, JSON.stringify(input)).toBe('deny')
     }
   })
 
   it('runs as written when the scope is one non-credential file', async () => {
-    const { decision } = await guardDecision('Grep', {
+    const { decision } = await blockedDecision('Grep', {
       pattern: 'App',
       output_mode: 'content',
       path: 'src/App.tsx',
@@ -204,7 +225,7 @@ describe('SDK lane — a content-mode Grep (FX17 item 3b)', () => {
 
   it('refuses even a single-file scope when that file is the credential', async () => {
     expect(
-      (await guardDecision('Grep', { pattern: 'KEY', output_mode: 'content', path: '.env' }))
+      (await blockedDecision('Grep', { pattern: 'KEY', output_mode: 'content', path: '.env' }))
         .decision,
     ).toBe('deny')
   })
@@ -212,20 +233,20 @@ describe('SDK lane — a content-mode Grep (FX17 item 3b)', () => {
   it('leaves the other output modes alone — a name is not a content', async () => {
     for (const mode of [undefined, 'files_with_matches', 'count']) {
       const input = { pattern: 'KEY', ...(mode ? { output_mode: mode } : {}) }
-      expect((await guardDecision('Grep', input)).decision, String(mode)).toBeUndefined()
+      expect((await blockedDecision('Grep', input)).decision, String(mode)).toBeUndefined()
     }
   })
 
-  it('is allowed with the project override on', async () => {
+  it('is allowed by default', async () => {
     expect(
-      (await guardDecision('Grep', { pattern: 'KEY', output_mode: 'content' }, true)).decision,
+      (await guardDecision('Grep', { pattern: 'KEY', output_mode: 'content' })).decision,
     ).toBeUndefined()
   })
 
   it('is refused at the shared gate too, which is the other end', async () => {
-    const out = await gate()('Grep', { pattern: 'KEY', output_mode: 'content' }, {})
+    const out = await blockedGate()('Grep', { pattern: 'KEY', output_mode: 'content' }, {})
     expect(out.behavior).toBe('deny')
-    expect((await gate(true)('Grep', { pattern: 'KEY', output_mode: 'content' }, {})).behavior).toBe(
+    expect((await gate()('Grep', { pattern: 'KEY', output_mode: 'content' }, {})).behavior).toBe(
       'allow',
     )
   })
@@ -234,7 +255,7 @@ describe('SDK lane — a content-mode Grep (FX17 item 3b)', () => {
     // The neutral lane owns its own Grep and filters secret hits out of the
     // RESULTS. Its tool schema has `pattern`, `glob` and `case_insensitive`
     // and nothing else, so this branch is false for every call it makes.
-    const out = await gate()('Grep', { pattern: 'KButton', glob: 'src/**/*.vue' }, {})
+    const out = await blockedGate()('Grep', { pattern: 'KButton', glob: 'src/**/*.vue' }, {})
     expect(out.behavior).toBe('allow')
   })
 })
@@ -247,13 +268,17 @@ describe('SDK lane — a content-mode Grep (FX17 item 3b)', () => {
  * contents and `diff_file` returned the same bytes as hunks.
  */
 describe("the editor's own tools reach the policy (FX17 item 4)", () => {
-  function gate(allowSecretReads?: boolean) {
-    return buildToolPermissionGate({
+  const gate = () =>
+    buildToolPermissionGate({
       worktreeRoot: root,
       emitEditProposal: async () => ({ ok: true, editId: '' }),
-      ...(allowSecretReads === true ? { allowSecretReads: true } : {}),
     })
-  }
+  const blockedGate = () =>
+    buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true, editId: '' }),
+      blockSecretReads: true,
+    })
 
   const SECRET_CALLS: ReadonlyArray<[string, Record<string, unknown>]> = [
     ['mcp__editor__read_file_at_commit', { root: 'worktree', path: '.env', sha: 'HEAD' }],
@@ -266,18 +291,18 @@ describe("the editor's own tools reach the policy (FX17 item 4)", () => {
   ]
 
   it.each(SECRET_CALLS)('the PreToolUse hook denies %s', async (tool, input) => {
-    const { decision, reason } = await guardDecision(tool, input)
+    const { decision, reason } = await blockedDecision(tool, input)
     expect(decision).toBe('deny')
     expect(reason).not.toContain(FAKE_KEY)
   })
 
   it.each(SECRET_CALLS)('the shared gate denies %s', async (tool, input) => {
-    expect((await gate()(tool, input, {})).behavior).toBe('deny')
+    expect((await blockedGate()(tool, input, {})).behavior).toBe('deny')
   })
 
-  it.each(SECRET_CALLS)('the project override allows %s', async (tool, input) => {
-    expect((await guardDecision(tool, input, true)).decision).toBeUndefined()
-    expect((await gate(true)(tool, input, {})).behavior).toBe('allow')
+  it.each(SECRET_CALLS)('the default allows %s', async (tool, input) => {
+    expect((await guardDecision(tool, input)).decision).toBeUndefined()
+    expect((await gate()(tool, input, {})).behavior).toBe('allow')
   })
 
   it('leaves ordinary editor-tool calls alone', async () => {
@@ -288,14 +313,14 @@ describe("the editor's own tools reach the policy (FX17 item 4)", () => {
       ['mcp__editor__rename_file', { from: 'src/App.tsx', to: 'src/Main.tsx' }],
       ['mcp__editor__get_selection', {}],
     ] as ReadonlyArray<[string, Record<string, unknown>]>) {
-      expect((await guardDecision(tool, input)).decision, tool).toBeUndefined()
-      expect((await gate()(tool, input, {})).behavior, tool).toBe('allow')
+      expect((await blockedDecision(tool, input)).decision, tool).toBeUndefined()
+      expect((await blockedGate()(tool, input, {})).behavior, tool).toBe('allow')
     }
   })
 
   it('catches an in-repo symlink pointing at the credential', async () => {
     symlinkSync(join(root, '.env'), join(root, 'src/notes.md'))
-    const { decision } = await guardDecision('mcp__editor__diff_file', { path: 'src/notes.md' })
+    const { decision } = await blockedDecision('mcp__editor__diff_file', { path: 'src/notes.md' })
     expect(decision).toBe('deny')
   })
 })

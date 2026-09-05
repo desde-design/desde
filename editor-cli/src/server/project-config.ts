@@ -169,20 +169,26 @@ export interface ProjectConfig {
      * Secret-file read policy for the chat agent. Default `false` (opt-IN,
      * the same `=== true` shape as `codeView`). This key is the ONLY way to
      * turn it on — there is no env var, because a process-wide variable
-     * cannot express a per-project permission. See `isSecretReadsEnabled` in
+     * cannot express a per-project permission. See `isSecretReadsBlocked` in
      * `dormant-surfaces.ts` (FX17 item 6).
      *
-     * With it off, the agent's Read, Glob and Grep refuse credential-bearing
+     * With it ON, the agent's Read, Glob and Grep refuse credential-bearing
      * files — `.env` and its variants, private keys, `.npmrc`, cloud
      * credential stores — while `.env.example` and friends stay readable.
-     * With it on they behave as they did before the policy existed. Set it
-     * only when the agent genuinely needs to see env values.
+     * With it off, which is the default, they behave as they did before the
+     * policy existed. Set it when you would rather the agent could not put
+     * this repository's credentials into a transcript.
+     *
+     * FX18 (2026-09-05) inverted this key. It was `secretReads`, which
+     * ALLOWED reads that were blocked by default; the product owner reversed
+     * that default, and the key was renamed rather than left pointing the
+     * other way. There is no alias for the old spelling.
      *
      * Gates BOTH ends: the client bootstrap reports it, and the chat dispatch
-     * refuses independently. See `isSecretReadsEnabled` in
+     * refuses independently. See `isSecretReadsBlocked` in
      * `dormant-surfaces.ts`.
      */
-    secretReads?: boolean
+    blockSecretReads?: boolean
     /**
      * "Open in VS Code" gate — the right-click item that launches
      * `vscode://file/<abs>:<line>`. DORMANT by product decision
@@ -618,19 +624,19 @@ export async function readProjectConfig(
       }
       out.notes = co.notes
     }
-    if (co.secretReads !== undefined) {
-      // Explicit refusal, not a silent skip: a malformed value here would
-      // read as the default (refuse secret reads), which is the SAFE answer
-      // and therefore the one most likely to hide a typo from a user who
-      // deliberately turned the policy off and believes they did.
-      if (typeof co.secretReads !== 'boolean') {
+    if (co.blockSecretReads !== undefined) {
+      // Explicit refusal, not a silent skip. A malformed value here reads as
+      // the default, which since FX18 is "do not block" — so a typo would
+      // quietly leave the agent able to read credentials for a user who
+      // deliberately turned the policy ON and believes they did.
+      if (typeof co.blockSecretReads !== 'boolean') {
         return {
           ok: false,
           reason: 'malformed',
-          message: `${configPath}: 'editor.secretReads' must be a boolean.`,
+          message: `${configPath}: 'editor.blockSecretReads' must be a boolean.`,
         }
       }
-      out.secretReads = co.secretReads
+      out.blockSecretReads = co.blockSecretReads
     }
     if (co.vscodeLink !== undefined) {
       // Same explicit refusal as `codeView` / `notes` above, not a silent

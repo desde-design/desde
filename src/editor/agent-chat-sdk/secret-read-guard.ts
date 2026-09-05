@@ -69,10 +69,12 @@ export interface SecretReadGuardOptions {
   /** Absolute path to the worktree the SDK is running against. */
   worktreeRoot: string
   /**
-   * The per-project override. Default OFF — an omitted value refuses, on the
-   * same `=== true` discipline as every other opt-in gate in the product.
+   * The per-project setting. Default OFF — an omitted value blocks nothing,
+   * on the same `=== true` discipline as every other opt-in gate in the
+   * product. When it is off this hook allows every call it sees, which is
+   * what the Editor did before the policy existed.
    */
-  allowSecretReads?: boolean
+  blockSecretReads?: boolean
 }
 
 /** Deny this tool call, with a reason written to be read by the model. */
@@ -101,7 +103,7 @@ const ALLOW = { continue: true } as const
  */
 export function createSecretReadGuard(opts: SecretReadGuardOptions): HookCallback {
   return async (input) => {
-    if (opts.allowSecretReads === true) return ALLOW
+    if (opts.blockSecretReads !== true) return ALLOW
     if (input.hook_event_name !== 'PreToolUse') return ALLOW
     const pre = input as PreToolUseHookInput
     const toolInput = (pre.tool_input ?? {}) as {

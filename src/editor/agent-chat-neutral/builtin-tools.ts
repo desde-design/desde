@@ -37,11 +37,11 @@ export function buildBuiltinToolSpecs(opts: BuiltinToolOpts): ToolSpec[] {
     buildReadToolSpec(opts),
     buildGlobToolSpec({
       worktreeRoot: opts.worktreeRoot,
-      ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
+      ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
     }),
     buildGrepToolSpec({
       worktreeRoot: opts.worktreeRoot,
-      ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
+      ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
     }),
     buildTodoToolSpec(store),
   ]

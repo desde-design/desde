@@ -291,7 +291,7 @@ async function runChatTurnSdkInner(
     canvasEnabled: opts.canvasEnabled,
     acquireTreeGate: opts.acquireTreeGate,
     // `rename_file`'s own half of the secret-read policy (FX17 item 5).
-    ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
+    ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
   })
 
   // Phase 4a §2 — per-turn fileReads accumulator. Seeded from any
@@ -326,7 +326,7 @@ async function runChatTurnSdkInner(
   // `PreToolUse` fires for every tool and runs before the permission system.
   const secretReadGuard = createSecretReadGuard({
     worktreeRoot: opts.worktreeRoot,
-    ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
+    ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
   })
 
   // Audit Task 13 — write safety for the SDK's BUILT-IN Write/Edit, which
@@ -421,7 +421,7 @@ async function runChatTurnSdkInner(
     emitEditProposal: emitWriteEditProposal,
     readRoots: opts.readRoots,
     webPolicy: opts.webPolicy,
-    ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
+    ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
     figmaAllowedToolPrefixes: opts.figmaConfig?.allowedToolPrefixes,
     // Per-extension read-only policy, keyed by MCP namespace id. Built from
     // the SAME list that gets registered above, so a server can never be
@@ -495,7 +495,7 @@ async function runChatTurnSdkInner(
     groundingEnabled: opts.getGrounding !== undefined,
     groundingDigest: groundingDigest ?? undefined,
     canvasEnabled: opts.canvasEnabled === true,
-    allowSecretReads: opts.allowSecretReads === true,
+    blockSecretReads: opts.blockSecretReads === true,
   })
 
   const userMessageWithContext = buildUserMessageWithContext(

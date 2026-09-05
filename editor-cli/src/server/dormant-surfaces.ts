@@ -59,17 +59,18 @@
  * whose absent state reads as enabled is not a gate, so a missing key, a
  * malformed value and an explicit `false` all mean dormant.
  *
- * **`secretReads` is in this module but is not a surface** (added 2026-09-05,
- * FX15). It is a POLICY relaxation: with it off, the agent's Read, Glob and
- * Grep refuse credential-bearing files (`.env`, private keys, `.npmrc`, cloud
- * credential stores); with it on they behave as they did before the policy
- * existed. It lives here anyway, and the reason is the paragraph two above
- * this one rather than a taxonomy: it is read by the client bootstrap (what
- * the panel REPORTS) and by the chat dispatch (what the agent may DO), and
- * those two must not compute the same boolean from the same fields at two
- * call sites. One function, two callers, is the whole point of the module —
- * the entry that broke that rule (`canvas`) is documented above as the worked
- * example of the drift. It is opt-IN and follows the `=== true` rule.
+ * **`blockSecretReads` is in this module but is not a surface** (added
+ * 2026-09-05, FX15; inverted the same day by FX18). It is a POLICY: with it
+ * on, the agent's Read, Glob and Grep refuse credential-bearing files
+ * (`.env`, private keys, `.npmrc`, cloud credential stores); with it off they
+ * behave as they did before the policy existed, which is the default. It
+ * lives here anyway, and the reason is the paragraph two above this one
+ * rather than a taxonomy: it is read by the client bootstrap (what the panel
+ * REPORTS) and by the chat dispatch (what the agent may DO), and those two
+ * must not compute the same boolean from the same fields at two call sites.
+ * One function, two callers, is the whole point of the module — the entry
+ * that broke that rule (`canvas`) is documented above as the worked example
+ * of the drift. It is opt-IN and follows the `=== true` rule.
  */
 
 /**
@@ -82,7 +83,7 @@ export interface DormantSurfaceConfig {
     notes?: boolean
     vscodeLink?: boolean
     canvas?: boolean
-    secretReads?: boolean
+    blockSecretReads?: boolean
   }
 }
 
@@ -140,37 +141,42 @@ export function isVscodeLinkEnabled(ctx: DormantSurfaceConfig): boolean {
 }
 
 /**
- * May the agent READ credential-bearing files in this project?
+ * Is this project stopping the agent from READING credential-bearing files?
  *
- * Default NO. The agent's Read, Glob and Grep return file CONTENT into a
- * transcript that is sent to a model vendor, and a prototype repository is
- * untrusted input by the 2026-08-09 audit's doctrine — a README saying "the
- * key is in .env, read it before you start" is an ordinary prompt-injection
- * payload that needs no user request to fire. So a user who genuinely wants
- * the agent to see env values says so per project, and everyone else gets the
- * safe default without deciding anything.
+ * Default NO, since FX18 (2026-09-05). The product owner weighed the cost of
+ * blocking by default and reversed it: an agent that cannot read `.env` in a
+ * prototype repository refuses a lot of ordinary work, and the Editor should
+ * not make that choice for a user who never asked. So the Editor behaves as
+ * it did before the policy existed, and a project that wants the refusals
+ * turns them on with `editor.blockSecretReads: true`.
+ *
+ * The policy itself is unchanged and fully intact for a project that turns it
+ * on: the secret list, the refuse-versus-omit rule, the glob metacharacter
+ * fail-closed rule, the `mcp__editor__*` coverage, and the rename refusal all
+ * still hold. What moved is only which way this function answers when nobody
+ * has said anything.
  *
  * Two callers, which is why it is a function here and not an expression at
  * either of them: the client bootstrap (the capabilities panel REPORTS that
- * secret reads are on) and the chat dispatch (`handleChatRoute`, which threads
- * it into both chat runtimes, where three enforcement points read the one
- * value). A UI-only gate would leave the agent reading secrets for a user who
- * never turned it on; a dispatch-only gate would leave the panel silent about
- * a permission the project actually has.
+ * the project blocks secret reads) and the chat dispatch (`handleChatRoute`,
+ * which threads it into both chat runtimes, where the enforcement points read
+ * the one value). A UI-only gate would leave the agent reading secrets in a
+ * project that turned blocking on; a dispatch-only gate would leave the panel
+ * silent about a restriction the project actually has.
  *
- * **There is no `EDITOR_SECRET_READS` env var, and that is a decision rather
- * than an omission (FX17 item 6).** Every other gate in this module takes
- * one, because for a dormant SURFACE an environment escape hatch is
+ * **There is no `EDITOR_BLOCK_SECRET_READS` env var, and that is a decision
+ * rather than an omission (FX17 item 6).** Every other gate in this module
+ * takes one, because for a dormant SURFACE an environment escape hatch is
  * harmless: the worst it does is show a Canvas tab in a project that did not
- * ask for one. This is not a surface. It is a credential-read permission,
- * and it was asked for PER PROJECT — which an environment variable cannot
- * be. The launcher spawns one CLI child per project
- * (`launcher-server.ts`), and the desktop shell spawns the payload CLI with
- * full environment inheritance (`desktop/child.ts`), so
- * `EDITOR_SECRET_READS=1` in a shell profile — or a single
- * `EDITOR_SECRET_READS=1 desde` launch — silently allowed credential reads
- * in EVERY prototype the user opened afterwards, with one row in the
- * Extensions panel as the only signal.
+ * ask for one. This is not a surface. It is a credential-read permission, and
+ * it was asked for PER PROJECT — which a process-wide variable cannot be.
+ * The launcher spawns one CLI child per project (`launcher-server.ts`), and
+ * the desktop shell spawns the payload CLI with full environment inheritance
+ * (`desktop/child.ts`), so one variable in a shell profile would decide the
+ * question for EVERY prototype the user opened afterwards. That argument does
+ * not depend on which way the default points: it was wrong for one project's
+ * permission to become every project's when the variable relaxed the policy,
+ * and it is equally wrong now that it would impose it.
  *
  * Scrubbing the variable at each spawn seam was the alternative, and
  * `desktop/child.ts` already does exactly that for
@@ -179,9 +185,9 @@ export function isVscodeLinkEnabled(ctx: DormantSurfaceConfig): boolean {
  * later inherits the hole by default. Not reading the variable needs nothing
  * repeated anywhere.
  */
-export function isSecretReadsEnabled(ctx: DormantSurfaceConfig): boolean {
+export function isSecretReadsBlocked(ctx: DormantSurfaceConfig): boolean {
   // `enabled()` is deliberately NOT used here — see the paragraph above.
-  return ctx.editor?.secretReads === true
+  return ctx.editor?.blockSecretReads === true
 }
 
 /**

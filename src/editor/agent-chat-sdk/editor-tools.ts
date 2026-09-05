@@ -204,13 +204,14 @@ export interface BuildEditorToolServerOpts {
    */
   canvasEnabled?: boolean
   /**
-   * The project's secret-read permission (`editor.secretReads` in
-   * `.desde/config.json`). Default OFF. Only `rename_file` reads it today —
-   * a rename whose SOURCE is a credential file is a READ of that file under
-   * a new name, and the shared permission gate refuses the same call. This
-   * is the tool-side half of that both-ends pair. See FX17 item 5.
+   * The project's secret-read policy (`editor.blockSecretReads` in
+   * `.desde/config.json`). Default OFF — nothing is blocked. Only
+   * `rename_file` reads it today: a rename whose SOURCE is a credential file
+   * is a READ of that file under a new name, and the shared permission gate
+   * refuses the same call. This is the tool-side half of that both-ends
+   * pair. See FX17 item 5.
    */
-  allowSecretReads?: boolean
+  blockSecretReads?: boolean
 }
 
 /**
@@ -238,7 +239,7 @@ export function buildEditorToolSpecs(opts: BuildEditorToolServerOpts): ToolSpec[
     resolveLlmProvider,
     canvasEnabled,
     acquireTreeGate,
-    allowSecretReads,
+    blockSecretReads,
   } = opts
   const rootCtx = { bridge, signal, readRoots, rootCommitSha, verificationAdapter }
 
@@ -741,7 +742,7 @@ export function buildEditorToolSpecs(opts: BuildEditorToolServerOpts): ToolSpec[
           emitEdit,
           input: { from, to },
           acquireTreeGate,
-          ...(allowSecretReads === true ? { allowSecretReads: true } : {}),
+          ...(blockSecretReads === true ? { blockSecretReads: true } : {}),
         })
       },
     },

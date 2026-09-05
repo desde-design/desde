@@ -291,13 +291,14 @@ describe('renameFileHandler', () => {
    * allowed the second call.
    */
   describe('a rename whose SOURCE is a credential (FX17 item 5)', () => {
-    it('is refused, and moves nothing', async () => {
+    it('is refused when the project turned blocking on, and moves nothing', async () => {
       await writeFile(join(root, '.env'), 'OPENAI_API_KEY=sk-NOT-A-REAL-KEY-0000\n', 'utf8')
       const { emitEdit, emissions } = captureEmit()
       const r = await renameFileHandler({
         worktreeRoot: root,
         emitEdit,
         input: { from: '.env', to: 'notes.txt' },
+        blockSecretReads: true,
       })
       expect(r.isError).toBe(true)
       expect(r.content[0].text).toMatch(/cannot be read by the agent/)
@@ -307,27 +308,27 @@ describe('renameFileHandler', () => {
       expect(existsSync(join(root, 'notes.txt'))).toBe(false)
     })
 
-    it('is refused for every spelling the name policy covers', async () => {
+    it('is refused for every spelling the name policy covers, when blocking is on', async () => {
       for (const from of ['.env', '.env.local', '.ENV', '.envrc', 'id_rsa', 'certs/server.pem']) {
         const { emitEdit } = captureEmit()
         const r = await renameFileHandler({
           worktreeRoot: root,
           emitEdit,
           input: { from, to: 'notes.txt' },
+          blockSecretReads: true,
         })
         expect(r.isError, from).toBe(true)
         expect(r.content[0].text, from).toMatch(/cannot be read by the agent/)
       }
     })
 
-    it('is allowed when the project has turned secret reads on', async () => {
+    it('is allowed by default, when the project has not turned blocking on', async () => {
       await writeFile(join(root, '.env'), 'OPENAI_API_KEY=sk-NOT-A-REAL-KEY-0000\n', 'utf8')
       const { emitEdit } = captureEmit()
       const r = await renameFileHandler({
         worktreeRoot: root,
         emitEdit,
         input: { from: '.env', to: 'notes.txt' },
-        allowSecretReads: true,
       })
       expect(r.isError).toBeFalsy()
       expect(existsSync(join(root, 'notes.txt'))).toBe(true)
