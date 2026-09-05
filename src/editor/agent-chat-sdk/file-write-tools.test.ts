@@ -281,6 +281,70 @@ describe('renameFileHandler', () => {
     expect(r.content[0].text).toMatch(/source 'missing\.vue' does not exist/)
   })
 
+  /**
+   * FX17 item 5. `.env` is not on the WRITE-protected list — that list's
+   * rule is "can this path make code execute or instructions be obeyed",
+   * and `.env` does neither — and `.txt`/`.md`/`.json` are all allowed
+   * rename destinations. So `rename_file(from: '.env', to: 'notes.txt')`
+   * followed by `Read('notes.txt')` returned the whole credential file:
+   * neither spelling is a secret by name, so both lanes' Read guards
+   * allowed the second call.
+   */
+  describe('a rename whose SOURCE is a credential (FX17 item 5)', () => {
+    it('is refused, and moves nothing', async () => {
+      await writeFile(join(root, '.env'), 'OPENAI_API_KEY=sk-NOT-A-REAL-KEY-0000\n', 'utf8')
+      const { emitEdit, emissions } = captureEmit()
+      const r = await renameFileHandler({
+        worktreeRoot: root,
+        emitEdit,
+        input: { from: '.env', to: 'notes.txt' },
+      })
+      expect(r.isError).toBe(true)
+      expect(r.content[0].text).toMatch(/cannot be read by the agent/)
+      // Not a proposal card either: the refusal is before the emit.
+      expect(emissions.length).toBe(0)
+      expect(existsSync(join(root, '.env'))).toBe(true)
+      expect(existsSync(join(root, 'notes.txt'))).toBe(false)
+    })
+
+    it('is refused for every spelling the name policy covers', async () => {
+      for (const from of ['.env', '.env.local', '.ENV', '.envrc', 'id_rsa', 'certs/server.pem']) {
+        const { emitEdit } = captureEmit()
+        const r = await renameFileHandler({
+          worktreeRoot: root,
+          emitEdit,
+          input: { from, to: 'notes.txt' },
+        })
+        expect(r.isError, from).toBe(true)
+        expect(r.content[0].text, from).toMatch(/cannot be read by the agent/)
+      }
+    })
+
+    it('is allowed when the project has turned secret reads on', async () => {
+      await writeFile(join(root, '.env'), 'OPENAI_API_KEY=sk-NOT-A-REAL-KEY-0000\n', 'utf8')
+      const { emitEdit } = captureEmit()
+      const r = await renameFileHandler({
+        worktreeRoot: root,
+        emitEdit,
+        input: { from: '.env', to: 'notes.txt' },
+        allowSecretReads: true,
+      })
+      expect(r.isError).toBeFalsy()
+      expect(existsSync(join(root, 'notes.txt'))).toBe(true)
+    })
+
+    it('still renames ordinary source', async () => {
+      const { emitEdit } = captureEmit()
+      const r = await renameFileHandler({
+        worktreeRoot: root,
+        emitEdit,
+        input: { from: 'src.vue', to: 'dest.vue' },
+      })
+      expect(r.isError).toBeFalsy()
+      expect(existsSync(join(root, 'dest.vue'))).toBe(true)
+    })
+  })
+
   it('refuses when the destination already exists', async () => {
     await writeFile(join(root, 'dest.vue'), 'pre-existing\n', 'utf8')
     const { emitEdit } = captureEmit()

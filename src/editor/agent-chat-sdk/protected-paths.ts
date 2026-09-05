@@ -332,6 +332,16 @@ const SECRET_BASENAMES: ReadonlySet<string> = new Set([
   'id_dsa',
   'id_ecdsa',
   'id_ed25519',
+  // direnv's per-directory shell file (FX17 item 2, 2026-09-05). It is not
+  // `.env`-shaped — it does not end in `.env`, is not `.env`, and does not
+  // start with `.env.` — so `classifyEnvBasename` returned `null` for it and
+  // a plain `Read('.envrc')` served its contents on BOTH lanes. direnv's own
+  // documented usage is `export AWS_SECRET_ACCESS_KEY=…` in this file, so in
+  // a repository that uses direnv it is the `.env` equivalent. The `.envrc.`
+  // prefixed forms are handled with the documentation-marker rule in
+  // `classifyEnvBasename`, so `.envrc.local` refuses and `.envrc.example`
+  // reads, matching what `.env.local` and `.env.example` already do.
+  '.envrc',
 ])
 
 /**
@@ -392,8 +402,12 @@ function classifyEnvBasename(base: string): 'secret' | 'readable' | null {
   if (trailing !== null && trailing.length > 0) {
     return READABLE_ENV_MARKERS.has(trailing) ? 'readable' : 'secret'
   }
-  if (base !== '.env' && !base.startsWith('.env.')) return null
-  const suffix = base.slice('.env'.length)
+  // `.envrc` and its suffixed forms, checked BEFORE the `.env` rules below
+  // because `.envrc` is not `.env.`-prefixed and would otherwise fall
+  // through to `null`. FX17 item 2.
+  const stem = base === '.envrc' || base.startsWith('.envrc.') ? '.envrc' : '.env'
+  if (base !== stem && !base.startsWith(`${stem}.`)) return null
+  const suffix = base.slice(stem.length)
   const segments = suffix.split('.').filter((s) => s.length > 0)
   return segments.some((s) => READABLE_ENV_MARKERS.has(s)) ? 'readable' : 'secret'
 }
@@ -461,8 +475,119 @@ export function globPatternTargetsSecret(pattern: string): boolean {
   // is left is a name rather than a wildcard. A leading `*` is left alone: it
   // makes `*.pem` resolve to `.pem`, which IS a secret extension.
   const stem = base.replace(/^\*+/, '').replace(/\*+$/, '')
-  if (stem.length === 0 || GLOB_META.test(stem)) return false
-  return isSecretAgentPath(stem)
+  // Only `**\/*` and `**\/.*` reach here with nothing left: their last segment
+  // carries no name at all, and refusing them would refuse ordinary search.
+  if (stem.length === 0) return false
+  if (!GLOB_META.test(stem)) return isSecretAgentPath(stem)
+  // FX17 item 3a. This used to `return false` — a stem still holding a glob
+  // metacharacter was treated as not aimed at anything, so `**\/.en?`,
+  // `**\/.en[v]`, `**\/.env{,.local}` and `**\/[.]env` all walked past the
+  // scope check while matching the same file `**\/.env` was refused for.
+  // Now the segment is compiled and asked the question directly: could it
+  // match a name this policy calls a secret?
+  return segmentCouldMatchSecret(base)
+}
+
+/**
+ * Names a metacharacter-bearing glob segment is asked about.
+ *
+ * These are examples, not the policy — the policy is `isSecretAgentPath`.
+ * The list only has to be broad enough that a pattern AIMED at a secret has
+ * something to match: one spelling per rule that predicate has, plus the two
+ * `.env`/`.envrc` shapes with a suffix, because `?` and `{}` are most often
+ * used to reach exactly those.
+ */
+const SECRET_NAME_SAMPLES: readonly string[] = [
+  ...[...SECRET_BASENAMES].map((n) => n.toLowerCase()),
+  ...[...SECRET_EXACT].map((p) => p.toLowerCase().slice(p.lastIndexOf('/') + 1)),
+  '.env',
+  '.env.local',
+  '.env.production',
+  '.envrc.local',
+  // Two lengths per key extension, because `?` matches exactly one
+  // character: a sample list with only long names would answer "no" to
+  // `?.pem`, which matches `x.pem`.
+  ...SECRET_EXTENSIONS.map((ext) => `secret${ext}`),
+  ...SECRET_EXTENSIONS.map((ext) => `x${ext}`),
+]
+
+/** Longest segment, and most wildcards in one, this will compile. */
+const GLOB_SEGMENT_MAX_CHARS = 200
+const GLOB_SEGMENT_MAX_WILDCARDS = 20
+
+/**
+ * Could this ONE glob segment match a name the secret policy refuses?
+ *
+ * Fails CLOSED in every direction it cannot answer: a segment too long to
+ * compile, one with more wildcards than the cap, or one that does not compile
+ * at all is treated as aimed at a secret. A refusal the model can work around
+ * by narrowing its pattern costs a round trip; the other error serves a
+ * credential.
+ *
+ * The caps are also the ReDoS guard. The compiled expression is a glob
+ * translation, so its only backtracking source is repeated `[^/]*`, and 20 of
+ * them against names under 40 characters is bounded work. Without a cap a
+ * model-supplied `*a*a*a*…` would not be.
+ */
+function segmentCouldMatchSecret(segment: string): boolean {
+  if (segment.length > GLOB_SEGMENT_MAX_CHARS) return true
+  const wildcards = (segment.match(/[*?]/g) ?? []).length
+  if (wildcards > GLOB_SEGMENT_MAX_WILDCARDS) return true
+  let re: RegExp
+  try {
+    re = new RegExp(`^${globSegmentToRegExpSource(segment)}$`, 'i')
+  } catch {
+    return true
+  }
+  return SECRET_NAME_SAMPLES.some((name) => re.test(name))
+}
+
+/**
+ * Translate one glob segment to regular-expression source.
+ *
+ * Handles the four metacharacter forms the shells and `fs.glob` accept in a
+ * single path segment: `*`, `?`, a `[...]` character class, and `{a,b}`
+ * alternation. Anything else is escaped literally. An unterminated `[` or `{`
+ * is emitted as a literal, which is what the glob engines themselves do with
+ * it, so the translation stays faithful rather than guessing.
+ */
+function globSegmentToRegExpSource(segment: string): string {
+  let out = ''
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]
+    if (ch === '*') {
+      out += '[^/]*'
+      continue
+    }
+    if (ch === '?') {
+      out += '[^/]'
+      continue
+    }
+    if (ch === '[') {
+      const close = segment.indexOf(']', i + 1)
+      if (close === -1) {
+        out += '\\['
+        continue
+      }
+      const body = segment.slice(i + 1, close)
+      out += `[${body.startsWith('!') ? `^${body.slice(1)}` : body}]`
+      i = close
+      continue
+    }
+    if (ch === '{') {
+      const close = segment.indexOf('}', i + 1)
+      if (close === -1) {
+        out += '\\{'
+        continue
+      }
+      const alts = segment.slice(i + 1, close).split(',')
+      out += `(?:${alts.map((a) => globSegmentToRegExpSource(a)).join('|')})`
+      i = close
+      continue
+    }
+    out += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  }
+  return out
 }
 
 /**

@@ -23,11 +23,27 @@
  * It refuses whole calls. It cannot filter results, because `PreToolUse` runs
  * before the tool. On the SDK lane a broad `Glob` that happens to enumerate
  * `.env` therefore still reports the NAME — the neutral lane, which owns its
- * own Glob, omits it with a note. Names are not contents, and the content
- * paths (Read, and a Grep scoped at the file) are both closed here. That
- * residual difference is stated rather than papered over; closing it would
- * mean rewriting the SDK's tool output from a `PostToolUse` hook, which
- * depends on an output shape the SDK does not contract.
+ * own Glob, omits it with a note. Names are not contents, and every path that
+ * returns contents is closed here instead of filtered.
+ *
+ * **That is what FX17 item 3b had to fix, and the old wording of this
+ * paragraph is why it was missed.** It said "the content paths (Read, and a
+ * Grep scoped at the file) are both closed here", which quietly assumed a
+ * content-returning Grep is always scoped at a file. It is not: `Grep` in
+ * `output_mode: "content"` with no `glob` and no `path` returns matching
+ * LINES from the whole tree, `.env` included, and every branch above passed
+ * it. A content-mode Grep is now refused unless its scope is provably free of
+ * credential files — see `grepContentScopeIsSecretFree`, which can prove that
+ * for exactly one shape, a `path` naming a single non-credential file.
+ *
+ * The alternative was a `PostToolUse` rewrite of the tool's output. The
+ * installed SDK does contract one (`updatedToolOutput`, "replaces the tool
+ * output before it is sent to the model"), so the older claim here that it
+ * does not is out of date. It was still not taken: redacting would mean
+ * parsing ripgrep's output shape to decide which lines came from which file,
+ * and a parse that is wrong serves the credential it was meant to remove. A
+ * refusal costs the model one round trip and cannot be wrong in that
+ * direction.
  *
  * The gate keeps its own copy of the same check. That is the both-ends rule,
  * not redundancy: this hook is registered per turn in `run-chat-turn-sdk.ts`,
@@ -43,6 +59,11 @@ import {
   isSecretAgentPath,
   secretPathDenial,
 } from './protected-paths'
+import {
+  editorToolSecretRefusal,
+  grepContentDenial,
+  grepContentScopeIsSecretFree,
+} from './secret-scope'
 
 export interface SecretReadGuardOptions {
   /** Absolute path to the worktree the SDK is running against. */
@@ -69,12 +90,14 @@ function deny(reason: string) {
 const ALLOW = { continue: true } as const
 
 /**
- * A `PreToolUse` hook for matcher `Read|Glob|Grep` that refuses to let the
- * agent read a credential.
+ * A `PreToolUse` hook that refuses to let the agent read a credential.
  *
- * Register it in `run-chat-turn-sdk.ts` alongside the read-snapshot hook. The
- * two are independent: the snapshot hook observes and always continues, this
- * one decides.
+ * Register it in `run-chat-turn-sdk.ts` alongside the read-snapshot hook,
+ * with NO matcher: it covers the built-in read tools and Editor's own
+ * `mcp__editor__*` tools, and a matcher list is the thing that left the
+ * second group out until FX17. It returns allow immediately for any tool it
+ * has no rule for. The two hooks are independent: the snapshot hook observes
+ * and always continues, this one decides.
  */
 export function createSecretReadGuard(opts: SecretReadGuardOptions): HookCallback {
   return async (input) => {
@@ -86,6 +109,7 @@ export function createSecretReadGuard(opts: SecretReadGuardOptions): HookCallbac
       pattern?: unknown
       glob?: unknown
       path?: unknown
+      output_mode?: unknown
     }
 
     if (pre.tool_name === 'Read') {
@@ -123,6 +147,28 @@ export function createSecretReadGuard(opts: SecretReadGuardOptions): HookCallbac
           return deny(secretPathDenial(scope, 'search'))
         }
       }
+      // FX17 item 3b. Refusing an AIMED scope is the whole policy only on a
+      // lane that can filter results. This one cannot — see the module
+      // header — so a Grep in `output_mode: "content"` returned the matching
+      // LINES of `.env` whenever its scope was broad enough to reach the
+      // file, which a Grep with no `glob` and no `path` always is. No clever
+      // spelling was needed; the policy was decorative on this path.
+      if (pre.tool_name === 'Grep' && toolInput.output_mode === 'content') {
+        const free = await grepContentScopeIsSecretFree(opts.worktreeRoot, toolInput)
+        if (!free) return deny(grepContentDenial())
+      }
+      return ALLOW
+    }
+
+    // FX17 item 4 + item 5. Editor's own tools are namespaced
+    // `mcp__editor__*` and this hook used to be registered for
+    // `Read|Glob|Grep` only, so `read_file_at_commit`, `diff_file`,
+    // `session_diff` and `rename_file` reached neither guard. It is now
+    // registered UNMATCHED — see `run-chat-turn-sdk.ts` — which is why this
+    // branch is reachable at all.
+    if (pre.tool_name.startsWith('mcp__editor__')) {
+      const refusal = await editorToolSecretRefusal(opts.worktreeRoot, pre.tool_input)
+      if (refusal !== null) return deny(refusal)
       return ALLOW
     }
 

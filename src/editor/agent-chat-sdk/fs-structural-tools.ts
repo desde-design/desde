@@ -42,6 +42,7 @@ import {
   extensionOf,
   toRel as toRepoRel,
 } from './edit-ack'
+import { isSecretAgentPath, secretPathDenial } from './protected-paths'
 import type { GetGrounding } from './grounding-tools'
 
 interface DeleteFileHandlerOpts {
@@ -204,6 +205,13 @@ interface RenameFileHandlerOpts {
   input: { from: string; to: string }
   /** See `DeleteFileHandlerOpts.acquireTreeGate` (A2). */
   acquireTreeGate?: AcquireTreeGate
+  /**
+   * The project's secret-read permission, threaded from the chat dispatch.
+   * Default OFF, on the same `=== true` discipline as every other opt-in
+   * gate. See the refusal in the handler for what it gates and why a RENAME
+   * is a read.
+   */
+  allowSecretReads?: boolean
 }
 
 /**
@@ -223,6 +231,21 @@ export async function renameFileHandler(
           text: 'rename_file is not configured with an editable repo root for this run.',
         },
       ],
+      isError: true,
+    }
+  }
+  // FX17 item 5. A rename is a READ when the source is a credential: `.env`
+  // is not on the write-protected list (it is not an execution sink, which
+  // is that list's rule) and `.txt`/`.md`/`.json` are all allowed rename
+  // destinations, so `rename_file(from: '.env', to: 'notes.txt')` followed
+  // by `Read('notes.txt')` returned the whole file — neither spelling is a
+  // secret by name, so both lanes' Read guards allowed the second call.
+  // Refused here as well as in the shared gate, which is the both-ends rule:
+  // the gate is the policy, and this handler is the code that moves the
+  // file.
+  if (opts.allowSecretReads !== true && isSecretAgentPath(input.from)) {
+    return {
+      content: [{ type: 'text', text: secretPathDenial(input.from) }],
       isError: true,
     }
   }

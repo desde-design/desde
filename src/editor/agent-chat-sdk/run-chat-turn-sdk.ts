@@ -290,6 +290,8 @@ async function runChatTurnSdkInner(
     resolveLlmProvider: opts.resolveLlmProvider,
     canvasEnabled: opts.canvasEnabled,
     acquireTreeGate: opts.acquireTreeGate,
+    // `rename_file`'s own half of the secret-read policy (FX17 item 5).
+    ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
   })
 
   // Phase 4a §2 — per-turn fileReads accumulator. Seeded from any
@@ -704,10 +706,18 @@ async function runChatTurnSdkInner(
             { matcher: 'Read', hooks: [readSnapshotHook] },
             // Registered SEPARATELY from the snapshot hook above, and after
             // it, because the two do different jobs: that one observes and
-            // always continues, this one refuses. Matched on all three read
-            // tools — Read, Glob and Grep — since none of them reaches
-            // `canUseTool` on this lane.
-            { matcher: 'Read|Glob|Grep', hooks: [secretReadGuard] },
+            // always continues, this one refuses.
+            //
+            // Deliberately UNMATCHED (FX17 item 4). It used to carry
+            // `matcher: 'Read|Glob|Grep'`, which is exactly the list someone
+            // writes when they are thinking about the built-in read tools —
+            // and it left Editor's OWN read tools, `mcp__editor__*`, outside
+            // the policy on this lane. Rather than lengthen the list and
+            // leave the next tool outside it too, the guard now sees every
+            // call and decides for itself; it returns allow immediately for
+            // any tool it has no rule for. Same reasoning as the
+            // `PermissionDenied` registration below.
+            { hooks: [secretReadGuard] },
             {
               matcher: 'Write|Edit',
               hooks: [writeGuard.preToolUse],

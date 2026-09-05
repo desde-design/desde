@@ -50,6 +50,12 @@ import {
   protectedPathDenial,
   secretPathDenial,
 } from './protected-paths'
+import {
+  editorToolSecretRefusal,
+  grepContentDenial,
+  grepContentScopeIsSecretFree,
+  type GrepScope,
+} from './secret-scope'
 import type { EditProposalPayload } from '../agent-tools/types'
 import type { ReadRoot, ReadRootRegistry } from '../core/read-roots'
 import type { WebPolicy } from '../core/web-policy'
@@ -301,6 +307,18 @@ export function buildToolPermissionGate(
     if (toolName.startsWith('mcp__') && !toolName.startsWith('mcp__editor__')) {
       return handleExtensionTool(toolName, opts)
     }
+    // FX17 item 4 + item 5. Editor's OWN tools used to fall straight through
+    // to `allow()` below, on both lanes, so the secret-read policy did not
+    // apply to any of them. `read_file_at_commit(path: '.env', sha: 'HEAD')`
+    // returned committed contents, `diff_file` returned the same bytes as
+    // hunks, and `rename_file(from: '.env', to: 'notes.txt')` moved a
+    // credential to a name neither Read guard refuses. The check reads the
+    // ARGUMENTS, so an editor tool added later is covered the day it is
+    // added rather than the day someone remembers this list.
+    if (toolName.startsWith('mcp__editor__') && opts.allowSecretReads !== true) {
+      const refusal = await editorToolSecretRefusal(opts.worktreeRoot, toolInput)
+      if (refusal !== null) return deny(refusal)
+    }
     // Defense in depth: for Read, validate the file_path is in-root
     // even when the SDK didn't preset blockedPath. Matches the legacy
     // `read_file` tool's traversal protection.
@@ -345,7 +363,12 @@ export function buildToolPermissionGate(
     // the file does not exist and send it looking under other names.
     if (toolName === 'Glob' || toolName === 'Grep') {
       if (opts.allowSecretReads !== true) {
-        const input = toolInput as { pattern?: unknown; glob?: unknown; path?: unknown }
+        const input = toolInput as {
+          pattern?: unknown
+          glob?: unknown
+          path?: unknown
+          output_mode?: unknown
+        }
         // For Glob, `pattern` IS the path pattern. For Grep it is the regular
         // expression and the path scope is `glob` / `path`, so Grep's
         // `pattern` is deliberately not tested against a path policy.
@@ -358,6 +381,23 @@ export function buildToolPermissionGate(
           if (typeof scope === 'string' && globPatternTargetsSecret(scope)) {
             return deny(secretPathDenial(scope, 'search'))
           }
+        }
+        // FX17 item 3b. An AIMED scope is refused above, and a broad one has
+        // its results filtered — but only on the neutral lane, which owns
+        // its Grep. The SDK's Grep in `output_mode: "content"` returns
+        // matching LINES, and a `PreToolUse` hook cannot filter a result it
+        // runs before, so on that lane a broad content search returned `.env`
+        // lines verbatim with no clever spelling needed at all. This is the
+        // shared gate's copy of the refusal; the SDK lane's own copy is in
+        // `secret-read-guard.ts`, because the SDK does not always route these
+        // tools through the permission callback.
+        //
+        // The neutral lane never reaches it: its Grep declares no
+        // `output_mode` at all, so the branch is false for every call it
+        // makes, and its result filter stays the mechanism there.
+        if (toolName === 'Grep' && input.output_mode === 'content') {
+          const free = await grepContentScopeIsSecretFree(opts.worktreeRoot, input as GrepScope)
+          if (!free) return deny(grepContentDenial())
         }
       }
     }

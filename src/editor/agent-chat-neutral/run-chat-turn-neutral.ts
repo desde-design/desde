@@ -381,6 +381,8 @@ async function runInner(
       resolveLlmProvider: opts.resolveLlmProvider,
       canvasEnabled: opts.canvasEnabled,
       acquireTreeGate: opts.acquireTreeGate,
+      // `rename_file`'s own half of the secret-read policy (FX17 item 5).
+      ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
     },
     ...(opts.builtinTools ? { builtinTools: opts.builtinTools } : {}),
     ...(opts.disallowedTools ? { disallowedTools: opts.disallowedTools } : {}),

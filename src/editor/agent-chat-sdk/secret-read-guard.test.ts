@@ -155,3 +155,147 @@ describe('SDK lane — the shared gate, its second end', () => {
     expect((await gate(true)('Glob', { pattern: '.env*' }, {})).behavior).toBe('allow')
   })
 })
+
+/**
+ * FX17 item 3b. On this lane a `PreToolUse` hook cannot filter results, so
+ * an AIMED-scope refusal is not the whole policy: `Grep` in `output_mode:
+ * "content"` with no scope at all returned matching LINES from the whole
+ * tree, `.env` included, and every branch of both guards passed it. No
+ * clever spelling was needed — the aimed-scope check was decorative on this
+ * path.
+ */
+describe('SDK lane — a content-mode Grep (FX17 item 3b)', () => {
+  function gate(allowSecretReads?: boolean) {
+    return buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true, editId: '' }),
+      ...(allowSecretReads === true ? { allowSecretReads: true } : {}),
+    })
+  }
+
+  it('is refused with no scope at all — the shape that needed no bypass', async () => {
+    const { decision, reason } = await guardDecision('Grep', {
+      pattern: 'KEY',
+      output_mode: 'content',
+    })
+    expect(decision).toBe('deny')
+    expect(reason).toContain('output_mode')
+    expect(reason).not.toContain(FAKE_KEY)
+  })
+
+  it('is refused for a directory scope, which cannot be proven secret-free', async () => {
+    for (const input of [
+      { pattern: 'KEY', output_mode: 'content', path: 'src' },
+      { pattern: 'KEY', output_mode: 'content', path: '.' },
+      { pattern: 'KEY', output_mode: 'content', glob: '**/*.ts' },
+    ]) {
+      expect((await guardDecision('Grep', input)).decision, JSON.stringify(input)).toBe('deny')
+    }
+  })
+
+  it('runs as written when the scope is one non-credential file', async () => {
+    const { decision } = await guardDecision('Grep', {
+      pattern: 'App',
+      output_mode: 'content',
+      path: 'src/App.tsx',
+    })
+    expect(decision).toBeUndefined()
+  })
+
+  it('refuses even a single-file scope when that file is the credential', async () => {
+    expect(
+      (await guardDecision('Grep', { pattern: 'KEY', output_mode: 'content', path: '.env' }))
+        .decision,
+    ).toBe('deny')
+  })
+
+  it('leaves the other output modes alone — a name is not a content', async () => {
+    for (const mode of [undefined, 'files_with_matches', 'count']) {
+      const input = { pattern: 'KEY', ...(mode ? { output_mode: mode } : {}) }
+      expect((await guardDecision('Grep', input)).decision, String(mode)).toBeUndefined()
+    }
+  })
+
+  it('is allowed with the project override on', async () => {
+    expect(
+      (await guardDecision('Grep', { pattern: 'KEY', output_mode: 'content' }, true)).decision,
+    ).toBeUndefined()
+  })
+
+  it('is refused at the shared gate too, which is the other end', async () => {
+    const out = await gate()('Grep', { pattern: 'KEY', output_mode: 'content' }, {})
+    expect(out.behavior).toBe('deny')
+    expect((await gate(true)('Grep', { pattern: 'KEY', output_mode: 'content' }, {})).behavior).toBe(
+      'allow',
+    )
+  })
+
+  it("does not touch the neutral lane's Grep, which declares no output_mode", async () => {
+    // The neutral lane owns its own Grep and filters secret hits out of the
+    // RESULTS. Its tool schema has `pattern`, `glob` and `case_insensitive`
+    // and nothing else, so this branch is false for every call it makes.
+    const out = await gate()('Grep', { pattern: 'KButton', glob: 'src/**/*.vue' }, {})
+    expect(out.behavior).toBe('allow')
+  })
+})
+
+/**
+ * FX17 item 4. Editor's own tools are namespaced `mcp__editor__*` and
+ * existed on BOTH lanes. The SDK hook was registered for `Read|Glob|Grep`,
+ * and the shared gate routed only NON-editor MCP tools to a policy, so
+ * `read_file_at_commit(path: '.env', sha: 'HEAD')` returned committed
+ * contents and `diff_file` returned the same bytes as hunks.
+ */
+describe("the editor's own tools reach the policy (FX17 item 4)", () => {
+  function gate(allowSecretReads?: boolean) {
+    return buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true, editId: '' }),
+      ...(allowSecretReads === true ? { allowSecretReads: true } : {}),
+    })
+  }
+
+  const SECRET_CALLS: ReadonlyArray<[string, Record<string, unknown>]> = [
+    ['mcp__editor__read_file_at_commit', { root: 'worktree', path: '.env', sha: 'HEAD' }],
+    ['mcp__editor__diff_file', { root: 'worktree', path: '.env' }],
+    ['mcp__editor__session_diff', { path: '.env.local' }],
+    ['mcp__editor__delete_file', { path: 'packages/api/.env' }],
+    ['mcp__editor__read_file_at_commit', { root: 'prod', path: '.envrc', sha: 'HEAD' }],
+    ['mcp__editor__rename_file', { from: '.env', to: 'notes.txt' }],
+    ['mcp__editor__search_external_files', { root: 'prod', query: 'KEY', paths: ['**/.en?'] }],
+  ]
+
+  it.each(SECRET_CALLS)('the PreToolUse hook denies %s', async (tool, input) => {
+    const { decision, reason } = await guardDecision(tool, input)
+    expect(decision).toBe('deny')
+    expect(reason).not.toContain(FAKE_KEY)
+  })
+
+  it.each(SECRET_CALLS)('the shared gate denies %s', async (tool, input) => {
+    expect((await gate()(tool, input, {})).behavior).toBe('deny')
+  })
+
+  it.each(SECRET_CALLS)('the project override allows %s', async (tool, input) => {
+    expect((await guardDecision(tool, input, true)).decision).toBeUndefined()
+    expect((await gate(true)(tool, input, {})).behavior).toBe('allow')
+  })
+
+  it('leaves ordinary editor-tool calls alone', async () => {
+    for (const [tool, input] of [
+      ['mcp__editor__read_file_at_commit', { path: 'src/App.tsx', sha: 'HEAD' }],
+      ['mcp__editor__diff_file', { path: 'src/App.tsx' }],
+      ['mcp__editor__session_diff', {}],
+      ['mcp__editor__rename_file', { from: 'src/App.tsx', to: 'src/Main.tsx' }],
+      ['mcp__editor__get_selection', {}],
+    ] as ReadonlyArray<[string, Record<string, unknown>]>) {
+      expect((await guardDecision(tool, input)).decision, tool).toBeUndefined()
+      expect((await gate()(tool, input, {})).behavior, tool).toBe('allow')
+    }
+  })
+
+  it('catches an in-repo symlink pointing at the credential', async () => {
+    symlinkSync(join(root, '.env'), join(root, 'src/notes.md'))
+    const { decision } = await guardDecision('mcp__editor__diff_file', { path: 'src/notes.md' })
+    expect(decision).toBe('deny')
+  })
+})

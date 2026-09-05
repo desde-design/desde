@@ -37,6 +37,36 @@ describe('isSecretAgentPath', () => {
     })
   })
 
+  /**
+   * FX17 item 2. `.envrc` is direnv's per-directory shell file and its
+   * documented use is `export AWS_SECRET_ACCESS_KEY=…`. It is not
+   * `.env`-shaped — it does not end in `.env`, is not `.env`, and does not
+   * start with `.env.` — so it classified as non-secret and a plain
+   * `Read('.envrc')` returned its contents on BOTH lanes.
+   */
+  describe('.envrc — direnv (FX17 item 2)', () => {
+    it('refuses .envrc and its suffixed forms, at any depth', () => {
+      for (const p of ['.envrc', '.envrc.local', '.envrc.production', 'app/.envrc']) {
+        expect(isSecretAgentPath(p), p).toBe(true)
+      }
+    })
+
+    it('goes through the same normalisation as every other entry', () => {
+      // Case folded: `.ENVRC` is the same file on macOS and Windows.
+      expect(isSecretAgentPath('.ENVRC')).toBe(true)
+      expect(isSecretAgentPath('.EnvRc.Local')).toBe(true)
+      expect(isSecretAgentPath('APP/.EnvRc')).toBe(true)
+      // Trailing dot stripped, the Win32 hole the write list already closes.
+      expect(isSecretAgentPath('.envrc.')).toBe(true)
+      expect(isSecretAgentPath('.ENVRC. ')).toBe(true)
+    })
+
+    it('keeps the documentation spelling readable, as .env.example is', () => {
+      expect(isSecretAgentPath('.envrc.example')).toBe(false)
+      expect(isSecretAgentPath('.envrc.sample')).toBe(false)
+    })
+  })
+
   describe('documentation stays readable — the point of the list', () => {
     it('reads .env.example and .env.sample', () => {
       expect(isSecretAgentPath('.env.example')).toBe(false)
@@ -214,6 +244,57 @@ describe('globPatternTargetsSecret', () => {
 
   it('is false for an empty pattern', () => {
     expect(globPatternTargetsSecret('')).toBe(false)
+  })
+
+  /**
+   * FX17 item 3a. Every spelling below returned FALSE before the fix while
+   * matching the very file `**\/.env` was refused for, because the check
+   * stripped leading and trailing `*` and then gave up on any stem that
+   * still held a metacharacter. On the SDK lane, where results cannot be
+   * filtered after the fact, that turned a `Grep` in `output_mode:
+   * "content"` into a way to read `.env` verbatim.
+   */
+  describe('a metacharacter in the stem fails CLOSED (FX17 item 3a)', () => {
+    it.each([
+      '**/.en?',
+      '**/.en[v]',
+      '**/.env{,.local}',
+      '**/[.]env',
+      '**/.npmr?',
+      '**/id_rs?',
+      '**/.envr?',
+      '**/{.env,README.md}',
+      '**/?.pem',
+      '**/terraform.tfvar?',
+      '**/.ENV{,.local}',
+    ])('refuses %s', (pattern) => {
+      expect(globPatternTargetsSecret(pattern)).toBe(true)
+    })
+
+    it('still allows the ordinary metacharacter patterns real searches use', () => {
+      for (const p of [
+        'src/**/*.{ts,tsx}',
+        '**/*.test.?s',
+        'packages/*/src/**/*.ts',
+        '**/[A-Z]*.vue',
+        '**/index.{js,ts}',
+      ]) {
+        expect(globPatternTargetsSecret(p), p).toBe(false)
+      }
+    })
+
+    it('treats an unterminated bracket as a literal, the way glob engines do', () => {
+      expect(globPatternTargetsSecret('**/[unterminated')).toBe(false)
+      expect(globPatternTargetsSecret('**/[.env')).toBe(false)
+    })
+
+    it('refuses a segment too long or too wildcarded to answer for', () => {
+      // Fail-closed on the inputs the compiler declines rather than
+      // guessing. A refusal costs the model a round trip; the other error
+      // serves a credential.
+      expect(globPatternTargetsSecret(`**/${'a'.repeat(250)}?`)).toBe(true)
+      expect(globPatternTargetsSecret(`**/${'?'.repeat(25)}x`)).toBe(true)
+    })
   })
 })
 
