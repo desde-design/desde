@@ -174,6 +174,40 @@ describe('isProtectedAgentPath', () => {
       }
     })
   })
+
+  describe('trailing dots and spaces (Windows aliases, unreachable on macOS)', () => {
+    // Win32 strips a trailing `.` or space from every path component at the
+    // syscall boundary, so `.claude.` and `.claude ` open the real `.claude`.
+    // MEASURED on macOS: they are distinct names there and the write ENOENTs,
+    // so none of this is reachable on the only platform Desde ships on. It is
+    // here so a future Windows build does not reopen the hook-write bypass.
+    it('protects a directory prefix spelled with a trailing dot or space', () => {
+      for (const p of [
+        '.claude./settings.json',
+        '.claude /settings.local.json',
+        '.claude../agents/x.md',
+        '.desde./config.json',
+        '.git ./config',
+        '.Claude./hooks.json',
+      ]) {
+        expect(isProtectedAgentPath(p), p).toBe(true)
+      }
+    })
+
+    it('protects an exact path and a root config spelled with a trailing dot', () => {
+      for (const p of ['CLAUDE.md.', 'claude.md ', '.mcp.json.', 'vite.config.ts.', 'vite.config.ts ']) {
+        expect(isProtectedAgentPath(p), p).toBe(true)
+      }
+    })
+
+    it('leaves interior dots and ordinary names alone', () => {
+      expect(normalizeRepoRelative('src/App.vue')).toBe('src/App.vue')
+      expect(normalizeRepoRelative('.claude./settings.json')).toBe('.claude/settings.json')
+      for (const p of ['src/App.vue.', 'README. ', 'notes .md']) {
+        expect(isProtectedAgentPath(p), p).toBe(false)
+      }
+    })
+  })
 })
 
 describe('protectedPathDenial', () => {

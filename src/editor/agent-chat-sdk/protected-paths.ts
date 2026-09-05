@@ -147,7 +147,22 @@ const PROTECTED_ROOT_CONFIGS: ReadonlySet<string> = new Set(
  */
 export function normalizeRepoRelative(repoRelative: string): string {
   const posix = repoRelative.split('\\').join('/').normalize('NFC')
-  return posix.startsWith('./') ? posix.slice(2) : posix
+  const rel = posix.startsWith('./') ? posix.slice(2) : posix
+  // Trailing dots and spaces are stripped per segment because Win32 strips
+  // them at the syscall boundary while Node's `path` keeps them in the
+  // string, so `.claude./settings.json` and `CLAUDE.md.` would miss the
+  // tables below and then land on the real files — the same hook-write bypass
+  // the case folding closed. This is WINDOWS-ONLY and UNREACHABLE TODAY:
+  // measured on macOS, `.claude.` is a distinct directory and the write
+  // ENOENTs, and Desde ships a macOS build only. It is here so a future
+  // Windows build does not reopen the hole. A segment that is entirely dots
+  // or spaces is left alone rather than emptied: callers pass an
+  // already-resolved path, and blanking `..` would corrupt the display path
+  // `protectedPathDenial` echoes.
+  return rel
+    .split('/')
+    .map((segment) => segment.replace(/[. ]+$/, '') || segment)
+    .join('/')
 }
 
 /**
