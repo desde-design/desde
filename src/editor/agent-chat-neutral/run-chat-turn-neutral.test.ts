@@ -261,7 +261,10 @@ describe('runChatTurnNeutral: the tool loop', () => {
     ])
     const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; error: string }
     expect(res.ok).toBe(false)
-    expect(res.error).toMatch(/EISDIR|illegal operation on a directory|cannot read/i)
+    // The reason is now named rather than relayed as an errno: FX16 item 2
+    // decides the SHAPE of the path with `stat` before anything is opened, so
+    // a directory is refused by name and a FIFO cannot block the open at all.
+    expect(res.error).toMatch(/is a directory/i)
     // The turn kept going: the model got the result and answered.
     expect(calls).toHaveLength(2)
     expect(events.at(-1)).toMatchObject({ kind: 'turn_complete', stopReason: 'end_turn' })

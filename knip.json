@@ -16,7 +16,8 @@
     "electron"
   ],
   "ignoreBinaries": [
-    "rg"
+    "rg",
+    "mkfifo"
   ],
   "workspaces": {
     ".": {

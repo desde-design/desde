@@ -37,7 +37,8 @@
 
 import { createHash } from 'node:crypto'
 import { existsSync, realpathSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import type { Stats } from 'node:fs'
+import { readFile, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve as resolvePath, sep as pathSep } from 'node:path'
 
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
@@ -697,6 +698,38 @@ export async function reconstructWriteEdit(
     : reconstructEdit(toolInput, worktreeRoot)
 }
 
+/**
+ * Refuse a path that is not a regular file BEFORE it is opened.
+ *
+ * FX16 item 2 (2026-09-05), applied to the third reader of a model-supplied
+ * path. `readFile` blocks in `open(2)` on a FIFO with no writer, and the
+ * verifier MEASURED that block on Grep at past 12 seconds with both a deadline
+ * and an abort ignored. Here it would hang the permission gate, which the
+ * neutral loop awaits inside the tool call: the turn never returns and Stop
+ * cannot end it. `stat` does not block on a FIFO; only `open` does.
+ *
+ * A directory keeps its own wording, which is the case a model actually hits
+ * (`Write src/components` for `Write src/components/Foo.vue`) and which used
+ * to arrive here as an EISDIR from the read below.
+ */
+async function regularFileRefusal(
+  toolName: 'Write' | 'Edit',
+  absPath: string,
+  repoRel: string,
+): Promise<string | null> {
+  let info: Stats
+  try {
+    info = await stat(absPath)
+  } catch (err) {
+    return `${toolName} denied: cannot read '${repoRel}': ${(err as Error).message}`
+  }
+  if (info.isFile()) return null
+  if (info.isDirectory()) {
+    return `${toolName} denied: '${repoRel}' is a directory, not a file`
+  }
+  return `${toolName} denied: '${repoRel}' is not a regular file`
+}
+
 async function reconstructWrite(
   toolInput: Record<string, unknown>,
   worktreeRoot: string,
@@ -728,6 +761,8 @@ async function reconstructWrite(
     // instead of `Write src/components/Foo.vue` is an ordinary model slip and
     // used to throw EISDIR out of the permission gate, which on the neutral
     // lane ended the whole turn (2026-09-04 adversarial review, P2-1).
+    const shapeRefusal = await regularFileRefusal('Write', safe.absolute, safeRel)
+    if (shapeRefusal !== null) return { ok: false, reason: shapeRefusal }
     let currentBytes: Buffer
     try {
       // Read once, undecoded, and derive the string from it — see
@@ -819,6 +854,8 @@ async function reconstructEdit(
       reason: `Edit denied: file not found '${repoRel}'. Use Write to create new files`,
     }
   }
+  const shapeRefusal = await regularFileRefusal('Edit', safe.absolute, repoRel)
+  if (shapeRefusal !== null) return { ok: false, reason: shapeRefusal }
   let currentBytes: Buffer
   try {
     // Read once, undecoded — see `priorBytes` on `WriteReconstruction`.

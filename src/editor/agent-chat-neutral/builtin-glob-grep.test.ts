@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -195,5 +196,28 @@ describe('Grep cannot freeze the process', () => {
     expect(Date.now() - startedAt).toBeLessThan(GREP_DEADLINE_MS)
     expect(out.isError).toBeUndefined()
     expect(out.content[0].text).toBe('src/App.vue:1:<template><KButton/></template>')
+  })
+})
+
+describe('Grep: a path that is not a regular file', () => {
+  // FX16 item 2 (2026-09-05). MEASURED by the adversarial verifier: a real
+  // `mkfifo` in the scanned tree hung Grep past 12 seconds with the 3000 ms
+  // deadline AND an abort at 2000 ms both ignored, and the process had to be
+  // killed. Neither guard could reach it: `readFile` blocks in `open(2)` on a
+  // FIFO with no writer, and the deadline is enforced inside `scanner.scan`,
+  // which is only called AFTER the read returns. The turn's
+  // `await runOneTool(...)` therefore never returns either, so Stop cannot end
+  // the turn and the user restarts the CLI.
+  //
+  // `stat` does not block on a FIFO. Only `open` does.
+  it('skips a FIFO instead of blocking on open, and still reports the files around it', async () => {
+    execFileSync('mkfifo', [join(root, 'src/pipe.vue')])
+    writeFileSync(join(root, 'src/Zed.vue'), '<template><KButton/></template>\n', 'utf8')
+    const out = await buildGrepToolSpec({ worktreeRoot: root }).handler({ pattern: 'KButton' }, {})
+    expect(out.isError).toBeUndefined()
+    expect(out.content[0].text.split('\n')).toEqual([
+      'src/App.vue:1:<template><KButton/></template>',
+      'src/Zed.vue:1:<template><KButton/></template>',
+    ])
   })
 })

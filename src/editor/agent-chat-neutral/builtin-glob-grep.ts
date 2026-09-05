@@ -11,7 +11,7 @@
  * turn's context on a single call.
  */
 
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import * as fsPromises from 'node:fs/promises'
 import { sep as pathSep } from 'node:path'
 
@@ -319,6 +319,27 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
           if (!safe.ok) continue
           let text: string
           try {
+            // The SHAPE of the path is decided before anything is opened.
+            //
+            // FX16 item 2 (2026-09-05). MEASURED by the adversarial verifier:
+            // a real `mkfifo` in the scanned tree hung this loop past 12
+            // seconds with the 3000 ms deadline AND an abort at 2000 ms both
+            // ignored, and the process had to be killed. `readFile` blocks in
+            // `open(2)` on a FIFO with no writer, and neither guard can reach
+            // that: the deadline is enforced inside `scanner.scan` below,
+            // which only runs after the read RETURNS, and `fs.promises`
+            // honours a signal between chunks, never during the open. The
+            // turn's `await runOneTool(...)` then never returns either, so
+            // Stop cannot end the turn and the user restarts the CLI.
+            //
+            // `stat` does not block on a FIFO; only `open` does. It follows
+            // symlinks, which is what we want here — a symlink to a regular
+            // file is readable, a symlink to a FIFO is not. Anything that is
+            // not a regular file is skipped: a directory (which `**/*`
+            // enumerates and `readFile` used to reject with EISDIR), a
+            // socket, a device.
+            const info = await stat(safe.absolute)
+            if (!info.isFile()) continue
             const raw = await readFile(safe.absolute)
             if (raw.byteLength > GREP_MAX_FILE_BYTES) continue
             // A NUL byte in the first kilobyte is the cheap binary test. A false

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -112,5 +113,20 @@ describe('Read', () => {
     const out = await spec.handler({ file_path: 'src/big.txt' }, {})
     expect(out.isError).toBeUndefined()
     expect(out.content[0].text).toMatch(/truncated/)
+  })
+})
+
+describe('Read: a path that is not a regular file', () => {
+  // FX16 item 2 (2026-09-05). Same block as Grep's, on the same syscall:
+  // `readFile` blocks in `open(2)` on a FIFO with no writer, so the handler
+  // never returns, so the turn's `await runOneTool(...)` never returns and
+  // Stop cannot end the turn. `stat` does not block on a FIFO, so the shape
+  // of the path is decided before anything is opened.
+  it('refuses a FIFO by name instead of blocking on open', async () => {
+    execFileSync('mkfifo', [join(root, 'src/pipe.txt')])
+    const spec = buildReadToolSpec({ worktreeRoot: root })
+    const out = await spec.handler({ file_path: 'src/pipe.txt' }, {})
+    expect(out.isError).toBe(true)
+    expect(out.content[0].text).toMatch(/not a regular file/i)
   })
 })

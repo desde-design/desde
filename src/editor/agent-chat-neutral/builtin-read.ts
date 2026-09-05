@@ -9,7 +9,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 
 import { z } from 'zod'
 
@@ -117,6 +117,37 @@ export function buildReadToolSpec(opts: BuiltinReadOpts) {
         (isSecretAgentPath(filePath) || isSecretAgentPath(safe.absolute))
       ) {
         return err(secretPathDenial(filePath))
+      }
+      // The SHAPE of the path is decided before it is opened.
+      //
+      // FX16 item 2 (2026-09-05). `readFile` blocks in `open(2)` on a FIFO
+      // with no writer, and nothing above it can interrupt that: the turn's
+      // signal aborts `fs.promises` between chunks, never during the open. The
+      // handler then never returns, so the turn's `await runOneTool(...)` never
+      // returns, so Stop cannot end the turn and the user restarts the CLI.
+      // The verifier measured the same block on Grep at past 12 seconds with
+      // both its deadline and its abort ignored.
+      //
+      // `stat` does not block on a FIFO; only `open` does. It follows
+      // symlinks, so a link to a regular file still reads.
+      try {
+        const info = await stat(safe.absolute)
+        if (info.isDirectory()) {
+          return err(`Read: '${filePath}' is a directory. Use Glob to list what is inside it.`)
+        }
+        if (!info.isFile()) {
+          return err(
+            `Read: '${filePath}' is not a regular file, so it cannot be read. Reading a pipe, socket or device would block until something wrote to it.`,
+          )
+        }
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code
+        if (code === 'ENOENT') {
+          return err(
+            `Read: file not found '${filePath}'. Use Glob or Grep to locate it, or ask the user for the right path.`,
+          )
+        }
+        return err(`Read failed for '${filePath}': ${(e as Error).message}`)
       }
       let raw: Buffer
       try {
