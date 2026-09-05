@@ -247,6 +247,48 @@ describe('FX11', () => {
   })
 
   /**
+   * Item 5 of the same review was REFUTED, and this pins the behaviour that
+   * refuted it, because item 4 above changed the very field it rests on: the
+   * precondition's expected bytes. The claim was that a stale precondition
+   * could erase a concurrent write from the CLI edit route. It cannot. The
+   * precondition is built from the same read that produced the new content,
+   * and it is evaluated inside the broker's path locks, so a writer landing
+   * in between refuses the batch with the other writer's bytes intact. Both
+   * tools, because a whole-file Write is the clobber-prone shape.
+   */
+  for (const tool of ['Write', 'Edit'] as const) {
+    it(`refuses a ${tool} when another writer landed after the file was read, and keeps their content`, async () => {
+      const theirs = 'THEIRS\n'
+      const spec =
+        tool === 'Write'
+          ? buildWriteToolSpec({
+              ...opts(),
+              acquireTreeGate: async () => {
+                writeFileSync(join(root, 'src/App.vue'), theirs, 'utf8')
+                return () => {}
+              },
+            })
+          : buildEditToolSpec({
+              ...opts(),
+              acquireTreeGate: async () => {
+                writeFileSync(join(root, 'src/App.vue'), theirs, 'utf8')
+                return () => {}
+              },
+            })
+      const input =
+        tool === 'Write'
+          ? { file_path: 'src/App.vue', content: 'MINE\n' }
+          : { file_path: 'src/App.vue', old_string: 'Old', new_string: 'New' }
+
+      const out = await spec.handler(input, {})
+
+      expect(out.isError).toBe(true)
+      expect(out.content[0].text).toMatch(/changed on disk/)
+      expect(readFileSync(join(root, 'src/App.vue'), 'utf8')).toBe(theirs)
+    })
+  }
+
+  /**
    * Item 3. The uniqueness scan resumed past the end of the first match, so
    * two matches that OVERLAP counted as one. A string that borders itself is
    * ordinary in source: repeated closing tags, repeated blank lines, repeated
