@@ -6,6 +6,7 @@ import {
   EDITOR_TOOLS_BLOCK_BODY,
   GROUNDING_QUERY_TOOLS_BLOCK,
   SCREENSHOT_PLAN_APPEND_BLOCK,
+  SECRET_READS_ALLOWED_BLOCK,
   VERIFY_EDITS_BLOCK,
 } from '../agent-chat-sdk/system-prompt'
 import {
@@ -111,6 +112,18 @@ describe('buildNeutralSystemPrompt', () => {
     expect(buildNeutralSystemPrompt({})).not.toContain(SCREENSHOT_PLAN_APPEND_BLOCK)
     expect(buildNeutralSystemPrompt({ canvasEnabled: true })).toContain(
       SCREENSHOT_PLAN_APPEND_BLOCK,
+    )
+  })
+
+  it('carries the secret-file handling rules by default, and drops them when blocked', () => {
+    // Same condition as the SDK lane, and the same imported block, so one
+    // policy cannot be described two ways.
+    expect(buildNeutralSystemPrompt({})).toContain(SECRET_READS_ALLOWED_BLOCK)
+    expect(buildNeutralSystemPrompt({ blockSecretReads: false })).toContain(
+      SECRET_READS_ALLOWED_BLOCK,
+    )
+    expect(buildNeutralSystemPrompt({ blockSecretReads: true })).not.toContain(
+      SECRET_READS_ALLOWED_BLOCK,
     )
   })
 

@@ -30,7 +30,7 @@ const CAPABILITY_ICON: Record<string, typeof Figma> = {
   "web-search": Globe,
 }
 import { cn } from "@/lib/utils"
-import { EDITOR_SECRET_READS } from "@/lib/editor-feature-flags"
+import { EDITOR_BLOCK_SECRET_READS } from "@/lib/editor-feature-flags"
 import { useEditorCapabilities, type CapabilityRow } from "@/hooks/useEditorCapabilities"
 import { ExtensionKeyDialog } from "./extension-key-dialog"
 
@@ -165,25 +165,27 @@ export function CapabilitiesPanel({
       )}
 
       {/*
-        Reported, never offered. Turning this on means the agent may read
+        Reported, never offered. Turning this on stops the agent reading
         credentials, which is a decision to make deliberately in a config file
         rather than from a button in a panel. Rendered only when it is ON,
-        because the default state is the safe one and a row saying "off" every
-        time would be noise. Outside the list branches above so it still shows
-        while the catalog is loading or empty.
+        because that is the state the project chose and the one a reader would
+        not otherwise guess; a row saying "off" every time would be noise.
+        Outside the list branches above so it still shows while the catalog is
+        loading or empty.
       */}
-      {EDITOR_SECRET_READS ? (
+      {EDITOR_BLOCK_SECRET_READS ? (
         <section className="mt-2 flex flex-col gap-1.5 border-t pt-3">
           <div className="flex items-center gap-1.5">
             <Eyebrow size="sm">Secret files</Eyebrow>
-            <Badge variant="secondary">On</Badge>
+            <Badge variant="secondary">Blocked</Badge>
           </div>
           <p className="text-xs text-muted-foreground">
-            The agent can read files that hold credentials in this prototype,
-            such as <code className="text-code">.env</code> and private keys.
-            Set <code className="text-code">editor.secretReads</code> to false
-            in <code className="text-code">.desde/config.json</code> to block
-            them again.
+            The agent cannot read files that hold credentials in this
+            prototype, such as <code className="text-code">.env</code> and
+            private keys. Set{" "}
+            <code className="text-code">editor.blockSecretReads</code> to false
+            in <code className="text-code">.desde/config.json</code> to let it
+            read them again.
           </p>
         </section>
       ) : null}

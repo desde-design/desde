@@ -16,6 +16,7 @@ import {
   FILESYSTEM_SCOPE_BLOCK,
   MISSING_REFERENCE_BLOCK,
   SCREENSHOT_PLAN_APPEND_BLOCK,
+  SECRET_READS_ALLOWED_BLOCK,
   VERIFY_EDITS_BLOCK,
   WORKING_STYLE_BLOCK,
 } from './system-prompt'
@@ -211,6 +212,25 @@ describe('buildSdkSystemPrompt', () => {
     expect(figmaIdx).toBeGreaterThan(-1)
     expect(knowledgeIdx).toBeGreaterThan(-1)
     expect(figmaIdx).toBeLessThan(knowledgeIdx)
+  })
+
+  it('carries the secret-file handling rules by default, and drops them when blocked', () => {
+    // FX18: reads are allowed unless the prototype blocks them, so the block
+    // rides on the DEFAULT. It is the only place that tells the model not to
+    // echo a credential it can open, so losing it here would lose the rule.
+    const allowed = buildSdkSystemPrompt()
+    expect(allowed).toContain(SECRET_READS_ALLOWED_BLOCK)
+    expect(allowed).toContain('# Secret files')
+    expect(allowed).toMatch(/prompt injection/)
+    expect(allowed).toMatch(/do NOT echo a secret/)
+    // A prototype that blocks reads gets nothing: the refusal explains the
+    // refusal, and a standing list of unreadable files would be an index of
+    // where this repository keeps its credentials.
+    const blocked = buildSdkSystemPrompt({ blockSecretReads: true })
+    expect(blocked).not.toContain(SECRET_READS_ALLOWED_BLOCK)
+    expect(blocked).not.toContain('# Secret files')
+    // Explicit false is the same state as absent.
+    expect(buildSdkSystemPrompt({ blockSecretReads: false })).toBe(allowed)
   })
 
   it('is byte-stable across calls when figmaEnabled is the same value (cache-friendly)', () => {

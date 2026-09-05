@@ -67,7 +67,12 @@ async function pickFreePort(): Promise<number> {
   })
 }
 
-type EditorConfig = { codeView?: boolean; notes?: boolean; canvas?: boolean }
+type EditorConfig = {
+  codeView?: boolean
+  notes?: boolean
+  canvas?: boolean
+  blockSecretReads?: boolean
+}
 
 async function boot(editor?: EditorConfig): Promise<void> {
   bundleDir = await mkdtemp(join(tmpdir(), "editor-cli-bundle-"))
@@ -294,5 +299,31 @@ describe("dormant surfaces over HTTP — opted in", () => {
     await boot()
     expect((await readBootstrapPayload()).notes).toBe(true)
     expect((await get("/api/editor/notes")).status).toBe(200)
+  })
+})
+
+/**
+ * The secret-read policy is not a surface, but it rides the same
+ * one-function-two-callers gate, and the bootstrap field is the REPORTING
+ * half of it. This asserts the wire value the capabilities panel reads.
+ *
+ * FX18 (2026-09-05) made blocking the opt-in, so the default here is `false`
+ * and it means "the agent reads credential files", which is what the Editor
+ * did before the policy existed.
+ */
+describe("the secret-read policy over HTTP", () => {
+  it("the bootstrap reports no blocking when nothing opted in", async () => {
+    await boot()
+    expect((await readBootstrapPayload()).blockSecretReads).toBe(false)
+  })
+
+  it("the bootstrap reports blocking when the project opted in", async () => {
+    await boot({ blockSecretReads: true })
+    expect((await readBootstrapPayload()).blockSecretReads).toBe(true)
+  })
+
+  it("opting a dormant surface in does not turn blocking on", async () => {
+    await boot({ canvas: true })
+    expect((await readBootstrapPayload()).blockSecretReads).toBe(false)
   })
 })

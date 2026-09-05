@@ -43,7 +43,7 @@ import {
   EDIT_LIFECYCLE_BLOCK,
   EDITOR_TOOLS_BLOCK_BODY,
   FILESYSTEM_SCOPE_BLOCK,
-  SECRET_READS_ENABLED_BLOCK,
+  SECRET_READS_ALLOWED_BLOCK,
   GROUNDING_QUERY_TOOLS_BLOCK,
   MISSING_REFERENCE_BLOCK,
   SCREENSHOT_PLAN_APPEND_BLOCK,
@@ -163,11 +163,12 @@ export interface BuildNeutralSystemPromptOptions {
   /** Section naming capabilities that exist but are off. Appended last. */
   disabledCapabilities?: string | null
   /**
-   * Set when the project has turned secret reads ON. Appends the SAME block
-   * the SDK lane appends — imported, not paraphrased, so the two lanes cannot
-   * describe one policy two ways.
+   * Set when the project has turned secret-read BLOCKING on. Omitted or
+   * false — the default — appends the SAME block the SDK lane appends,
+   * imported and not paraphrased, so the two lanes cannot describe one
+   * policy two ways.
    */
-  allowSecretReads?: boolean
+  blockSecretReads?: boolean
 }
 
 export function buildNeutralSystemPrompt(
@@ -192,7 +193,7 @@ export function buildNeutralSystemPrompt(
     WORKING_STYLE_BLOCK,
     VERIFY_EDITS_BLOCK,
   ]
-  if (opts.allowSecretReads === true) parts.push(SECRET_READS_ENABLED_BLOCK)
+  if (opts.blockSecretReads !== true) parts.push(SECRET_READS_ALLOWED_BLOCK)
   if (opts.canvasEnabled === true) parts.push(SCREENSHOT_PLAN_APPEND_BLOCK)
   if (opts.groundingEnabled === true) parts.push(GROUNDING_QUERY_TOOLS_BLOCK)
   if (opts.groundingDigest) parts.push(opts.groundingDigest)
