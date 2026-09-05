@@ -13,6 +13,7 @@ import { readFile } from 'node:fs/promises'
 
 import { z } from 'zod'
 
+import { isSecretAgentPath, secretPathDenial } from '../agent-chat-sdk/protected-paths'
 import { READ_FILE_MAX_BYTES, resolveRepoPath } from '../agent-tools/read-tools'
 
 /**
@@ -46,6 +47,20 @@ export interface BuiltinReadOpts {
    * lane's equivalent hook awaits for the same reason.
    */
   onFileRead?: (observation: FileReadObservation) => void | Promise<void>
+  /**
+   * The per-project override that lets the agent read secret-bearing files.
+   * Default OFF, on the same `=== true` discipline as every other opt-in gate.
+   *
+   * The shared gate (`buildToolPermissionGate`) refuses these before the
+   * handler runs, so this is the SECOND of the two ends CLAUDE.md asks for
+   * rather than the only one. It is here because this is the code that opens
+   * the file: a caller that assembles the tool catalog without the gate — the
+   * edit-fix mini turn, a future runtime, a test — would otherwise get a Read
+   * with no policy at all, which is exactly the "UI-only gating leaves the API
+   * open" shape the rule exists to prevent. The LIST is not duplicated; only
+   * the call is.
+   */
+  allowSecretReads?: boolean
 }
 
 const DESCRIPTION =
@@ -93,6 +108,16 @@ export function buildReadToolSpec(opts: BuiltinReadOpts) {
       if (filePath.length === 0) return err('Read needs a non-empty file_path.')
       const safe = await resolveRepoPath(opts.worktreeRoot, filePath)
       if (!safe.ok) return err(`Read denied: ${safe.reason}`)
+      // BOTH spellings: the one the model asked for, and the realpath'd
+      // target. The pair is what closes an in-repo symlink — `docs/notes.md`
+      // pointing at `.env` passes containment, because the link and its
+      // target are both inside the repository.
+      if (
+        opts.allowSecretReads !== true &&
+        (isSecretAgentPath(filePath) || isSecretAgentPath(safe.absolute))
+      ) {
+        return err(secretPathDenial(filePath))
+      }
       let raw: Buffer
       try {
         raw = await readFile(safe.absolute)

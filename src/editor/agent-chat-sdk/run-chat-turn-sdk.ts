@@ -67,6 +67,7 @@ import {
 } from './cross-session-write-log'
 import { buildCanUseTool, type OverwriteConflictDetected } from './edit-ack'
 import { createReadSnapshotHook, type FileReadRecord } from './file-read-snapshot'
+import { createSecretReadGuard } from './secret-read-guard'
 import { createSdkWriteGuard } from './sdk-write-guard'
 import { createWriteInvalidateHook } from './write-invalidate-hook'
 import { writeProposalBlob } from './proposal-blob-store'
@@ -316,6 +317,16 @@ async function runChatTurnSdkInner(
     },
   })
 
+  // FX15 — the read policy's enforcement point on THIS lane. It has to be a
+  // hook rather than a `canUseTool` branch: the SDK auto-allows Read without
+  // firing the permission callback (measured; see `file-read-snapshot.ts`),
+  // so the gate's own copy of this check never runs for the SDK's Read.
+  // `PreToolUse` fires for every tool and runs before the permission system.
+  const secretReadGuard = createSecretReadGuard({
+    worktreeRoot: opts.worktreeRoot,
+    ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
+  })
+
   // Audit Task 13 — write safety for the SDK's BUILT-IN Write/Edit, which
   // execute inside the SDK runtime and so bypass FileLockManager and the
   // backup journal every other Editor lane goes through. The guard
@@ -408,6 +419,7 @@ async function runChatTurnSdkInner(
     emitEditProposal: emitWriteEditProposal,
     readRoots: opts.readRoots,
     webPolicy: opts.webPolicy,
+    ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
     figmaAllowedToolPrefixes: opts.figmaConfig?.allowedToolPrefixes,
     // Per-extension read-only policy, keyed by MCP namespace id. Built from
     // the SAME list that gets registered above, so a server can never be
@@ -481,6 +493,7 @@ async function runChatTurnSdkInner(
     groundingEnabled: opts.getGrounding !== undefined,
     groundingDigest: groundingDigest ?? undefined,
     canvasEnabled: opts.canvasEnabled === true,
+    allowSecretReads: opts.allowSecretReads === true,
   })
 
   const userMessageWithContext = buildUserMessageWithContext(
@@ -689,6 +702,12 @@ async function runChatTurnSdkInner(
         hooks: {
           PreToolUse: [
             { matcher: 'Read', hooks: [readSnapshotHook] },
+            // Registered SEPARATELY from the snapshot hook above, and after
+            // it, because the two do different jobs: that one observes and
+            // always continues, this one refuses. Matched on all three read
+            // tools — Read, Glob and Grep — since none of them reaches
+            // `canUseTool` on this lane.
+            { matcher: 'Read|Glob|Grep', hooks: [secretReadGuard] },
             {
               matcher: 'Write|Edit',
               hooks: [writeGuard.preToolUse],

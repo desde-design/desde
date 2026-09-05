@@ -17,6 +17,12 @@ import { sep as pathSep } from 'node:path'
 
 import { z } from 'zod'
 
+import {
+  globPatternTargetsSecret,
+  isSecretAgentPath,
+  secretPathDenial,
+  secretPathOmissionNote,
+} from '../agent-chat-sdk/protected-paths'
 import { resolveRepoPath } from '../agent-tools/read-tools'
 
 import { createRegexLineScanner, GREP_DEADLINE_MS } from './regex-line-scanner'
@@ -78,6 +84,28 @@ const EXCLUDED_DIRS = ['node_modules', '.git', 'dist', '.desde', '.next', 'cover
 
 export interface BuiltinSearchOpts {
   worktreeRoot: string
+  /**
+   * The per-project override that lets the agent read secret-bearing files.
+   * Default OFF, on the same `=== true` discipline as every other opt-in gate.
+   *
+   * With it off, an enumeration that HAPPENS to reach `.env` drops it from the
+   * results and says how many were dropped; a pattern that AIMS at one is
+   * refused outright by the shared gate before the handler runs. The two
+   * treatments are deliberately different — see `globPatternTargetsSecret`.
+   */
+  allowSecretReads?: boolean
+}
+
+/** What an enumeration returned, and what it withheld on the way. */
+interface Enumeration {
+  paths: string[]
+  /**
+   * How many in-scope files were dropped for holding credentials. Counted
+   * rather than discarded, because a short result set with no explanation
+   * reads to the model as "the repository does not contain that", which is
+   * both false and the belief that makes it keep searching under other names.
+   */
+  omittedSecrets: number
 }
 
 function isExcluded(repoRel: string): boolean {
@@ -89,9 +117,11 @@ async function matchingPaths(
   worktreeRoot: string,
   pattern: string,
   cap: number,
-  signal?: AbortSignal | undefined,
-): Promise<string[]> {
+  signal: AbortSignal | undefined,
+  allowSecretReads: boolean,
+): Promise<Enumeration> {
   const out: string[] = []
+  let omittedSecrets = 0
   for await (const entry of globFn(pattern, { cwd: worktreeRoot })) {
     // Enumeration is an async loop, so unlike the scan below it genuinely
     // yields between entries and a plain check is enough. It matters: a
@@ -111,11 +141,21 @@ async function matchingPaths(
     // machine handed to the provider.
     const safe = await resolveRepoPath(worktreeRoot, repoRel)
     if (!safe.ok) continue
+    // Both spellings, for the same reason Read checks both: an in-repo
+    // symlink pointing at `.env` passes containment because the link and its
+    // target are both inside the repository.
+    if (
+      !allowSecretReads &&
+      (isSecretAgentPath(repoRel) || isSecretAgentPath(safe.absolute))
+    ) {
+      omittedSecrets++
+      continue
+    }
     out.push(repoRel)
     if (out.length >= cap) break
   }
   out.sort()
-  return out
+  return { paths: out, omittedSecrets }
 }
 
 /**
@@ -141,20 +181,43 @@ export function buildGlobToolSpec(opts: BuiltinSearchOpts) {
     handler: async (input: Record<string, unknown>, ctx?: unknown) => {
       const pattern = typeof input.pattern === 'string' ? input.pattern : ''
       if (pattern.length === 0) return err('Glob needs a non-empty pattern.')
+      const allowSecretReads = opts.allowSecretReads === true
+      // The shared gate refuses this before the handler runs. Repeating it
+      // here is the second of the two ends CLAUDE.md asks for: a caller that
+      // assembles the catalog without the gate would otherwise get a Glob with
+      // no policy on it at all. The LIST is not duplicated, only the call.
+      if (!allowSecretReads && globPatternTargetsSecret(pattern)) {
+        return err(secretPathDenial(pattern, 'search'))
+      }
       const signal = signalOf(ctx)
       try {
-        const found = await matchingPaths(opts.worktreeRoot, pattern, GLOB_MAX_RESULTS, signal)
+        const found = await matchingPaths(
+          opts.worktreeRoot,
+          pattern,
+          GLOB_MAX_RESULTS,
+          signal,
+          allowSecretReads,
+        )
         if (signal?.aborted === true) {
           return { content: [{ type: 'text' as const, text: 'Search cancelled.' }], isError: undefined }
         }
-        if (found.length === 0) {
-          return { content: [{ type: 'text' as const, text: 'No files matched.' }], isError: undefined }
+        const omissionNotice = secretPathOmissionNote(found.omittedSecrets)
+        if (found.paths.length === 0) {
+          return {
+            content: [{ type: 'text' as const, text: `No files matched.${omissionNotice}` }],
+            isError: undefined,
+          }
         }
         const notice =
-          found.length >= GLOB_MAX_RESULTS
+          found.paths.length >= GLOB_MAX_RESULTS
             ? `\n\n[stopped at ${GLOB_MAX_RESULTS} results; narrow the pattern]`
             : ''
-        return { content: [{ type: 'text' as const, text: `${found.join('\n')}${notice}` }], isError: undefined }
+        return {
+          content: [
+            { type: 'text' as const, text: `${found.paths.join('\n')}${notice}${omissionNotice}` },
+          ],
+          isError: undefined,
+        }
       } catch (e) {
         return err(`Glob failed: ${(e as Error).message}`)
       }
@@ -204,12 +267,28 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
       const signal = signalOf(ctx)
       const deadlineAt = Date.now() + GREP_DEADLINE_MS
       const pattern = typeof input.glob === 'string' && input.glob.length > 0 ? input.glob : '**/*'
-      let paths: string[]
+      const allowSecretReads = opts.allowSecretReads === true
+      // The SCOPE is what can name a secret file. `input.pattern` is a regular
+      // expression, not a path, so it is deliberately not tested against a
+      // path policy. The verifier's own repro was `glob: '.env*'`, which is
+      // this branch.
+      if (!allowSecretReads && globPatternTargetsSecret(pattern)) {
+        return err(secretPathDenial(pattern, 'search'))
+      }
+      let enumeration: Enumeration
       try {
-        paths = await matchingPaths(opts.worktreeRoot, pattern, GLOB_MAX_RESULTS, signal)
+        enumeration = await matchingPaths(
+          opts.worktreeRoot,
+          pattern,
+          GLOB_MAX_RESULTS,
+          signal,
+          allowSecretReads,
+        )
       } catch (e) {
         return err(`Grep failed to enumerate files: ${(e as Error).message}`)
       }
+      const paths = enumeration.paths
+      const secretOmissionNotice = secretPathOmissionNote(enumeration.omittedSecrets)
       // Enumeration itself is capped at GLOB_MAX_RESULTS files, independent of
       // the match cap below. Without this notice a repo with more candidate
       // files than the cap gets silently under-searched: "No matches." reads
@@ -304,7 +383,12 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
       if (hits.length === 0) {
         const head = cutShort === null ? 'No matches.' : 'No matches found before the search was cut short.'
         return {
-          content: [{ type: 'text' as const, text: `${head}${cutShortNotice}${enumerationNotice}` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `${head}${cutShortNotice}${enumerationNotice}${secretOmissionNotice}`,
+            },
+          ],
           // A deadline means the question was not answered, and "no matches"
           // would read to the model as "not in the repository". An abort is
           // not a failure: the user asked for it.
@@ -322,7 +406,8 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
         (clampedAny
           ? `\n\n[at least one match sat on a line longer than ${GREP_MAX_LINE_CHARS} characters and was cut short; open that file with Read to see the whole line]`
           : '') +
-        enumerationNotice
+        enumerationNotice +
+        secretOmissionNotice
       return {
         content: [{ type: 'text' as const, text: `${hits.join('\n')}${notice}` }],
         isError: cutShort === 'deadline' ? (true as const) : undefined,

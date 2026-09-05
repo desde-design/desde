@@ -35,8 +35,14 @@ export function buildBuiltinToolSpecs(opts: BuiltinToolOpts): ToolSpec[] {
   const store = opts.todoStore ?? createTodoStore()
   const specs: ToolSpec[] = [
     buildReadToolSpec(opts),
-    buildGlobToolSpec({ worktreeRoot: opts.worktreeRoot }),
-    buildGrepToolSpec({ worktreeRoot: opts.worktreeRoot }),
+    buildGlobToolSpec({
+      worktreeRoot: opts.worktreeRoot,
+      ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
+    }),
+    buildGrepToolSpec({
+      worktreeRoot: opts.worktreeRoot,
+      ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
+    }),
     buildTodoToolSpec(store),
   ]
   if (opts.writeToolsEnabled === true && opts.writeOpts) {

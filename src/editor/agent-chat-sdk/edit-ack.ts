@@ -43,7 +43,13 @@ import { isAbsolute, relative, resolve as resolvePath, sep as pathSep } from 'no
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 
 import { resolveRepoPath } from '../agent-tools/read-tools'
-import { isProtectedAgentPath, protectedPathDenial } from './protected-paths'
+import {
+  globPatternTargetsSecret,
+  isProtectedAgentPath,
+  isSecretAgentPath,
+  protectedPathDenial,
+  secretPathDenial,
+} from './protected-paths'
 import type { EditProposalPayload } from '../agent-tools/types'
 import type { ReadRoot, ReadRootRegistry } from '../core/read-roots'
 import type { WebPolicy } from '../core/web-policy'
@@ -241,6 +247,19 @@ export interface BuildCanUseToolOpts {
    * didn't configure, and neither should get tool access.
    */
   extensionToolPolicy?: ReadonlyMap<string, ReadonlyArray<string> | null>
+  /**
+   * The per-project override that lets the agent read secret-bearing files
+   * (`.env`, private keys, `.npmrc`, …). Default OFF — an omitted value means
+   * refused, on the same `=== true` discipline every other opt-in gate in the
+   * product uses, so a missing key, a malformed value and an explicit `false`
+   * are indistinguishable.
+   *
+   * The CLI computes it once (`isSecretReadsEnabled` in
+   * `editor-cli/src/server/dormant-surfaces.ts`) and both the client offering
+   * and this dispatch read that one function, per the both-ends rule in
+   * CLAUDE.md.
+   */
+  allowSecretReads?: boolean
 }
 
 /**
@@ -293,6 +312,52 @@ export function buildToolPermissionGate(
           return deny(
             buildReadDenyMessage(filePath, safe.reason, opts.worktreeRoot, opts.readRoots),
           )
+        }
+        // Containment says the path is inside the repository. It says nothing
+        // about whether the CONTENT is a credential, and until 2026-09-05
+        // nothing else asked: `isProtectedAgentPath` had write call sites
+        // only, so `Read .env` returned the key verbatim into a transcript
+        // sent to a model vendor. Repository content alone steers the model
+        // here (a README saying "the key is in .env"), which is why this is a
+        // default rather than a prompt-time judgement.
+        //
+        // BOTH spellings are tested: the one the model asked for, and the
+        // realpath'd target `resolveRepoPath` returned. An in-repo symlink
+        // (`docs/notes.md` -> `.env`) passes containment, because the link and
+        // its target are both inside the repository.
+        if (
+          opts.allowSecretReads !== true &&
+          (isSecretAgentPath(filePath) || isSecretAgentPath(safe.absolute))
+        ) {
+          return deny(secretPathDenial(filePath))
+        }
+      }
+    }
+    // Glob and Grep name paths through a PATTERN rather than a `file_path`,
+    // so they need their own branch — they used to fall straight through to
+    // `allow()` below and were never mentioned in this gate at all.
+    //
+    // Only an AIMED pattern is refused here. Broad enumeration is allowed and
+    // the secret hits are filtered out of the RESULTS instead, with a note
+    // saying how many were withheld — see `secretPathOmissionNote`. The
+    // difference matters: refusing `**\/*` would break ordinary search, while
+    // silently returning a short list for `**\/.env` would teach the model
+    // the file does not exist and send it looking under other names.
+    if (toolName === 'Glob' || toolName === 'Grep') {
+      if (opts.allowSecretReads !== true) {
+        const input = toolInput as { pattern?: unknown; glob?: unknown; path?: unknown }
+        // For Glob, `pattern` IS the path pattern. For Grep it is the regular
+        // expression and the path scope is `glob` / `path`, so Grep's
+        // `pattern` is deliberately not tested against a path policy.
+        const scopes = [
+          toolName === 'Glob' ? input.pattern : undefined,
+          input.glob,
+          input.path,
+        ]
+        for (const scope of scopes) {
+          if (typeof scope === 'string' && globPatternTargetsSecret(scope)) {
+            return deny(secretPathDenial(scope, 'search'))
+          }
         }
       }
     }
