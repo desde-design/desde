@@ -191,9 +191,48 @@ export class DesdeDirSymlinkError extends Error {
   }
 }
 
-/** Splits `'chat-sessions'` / `'a/b'` alike into single path segments. */
-function toSegments(segments: readonly string[]): string[] {
-  return segments.flatMap((segment) => segment.split(/[\\/]+/)).filter((s) => s.length > 0)
+/**
+ * Thrown when a caller asks for a path segment that is `.` or `..`.
+ *
+ * A subclass of {@link DesdeDirSymlinkError} on purpose: every writer and
+ * deleter under `.desde/` already catches that type to report a typed refusal,
+ * and {@link desdePathOrNull} already degrades it to `null` for the boot and
+ * serving paths. A new unrelated error type would have sailed past all of
+ * them and turned a caller bug into an uncaught throw on a boot path.
+ */
+export class DesdeDirSegmentError extends DesdeDirSymlinkError {
+  constructor(path: string, segment: string) {
+    super(path, `the path segment '${segment}' is not a literal name.`)
+    this.name = 'DesdeDirSegmentError'
+  }
+}
+
+/**
+ * Splits `'chat-sessions'` / `'a/b'` alike into single path segments, and
+ * refuses `.` and `..`.
+ *
+ * The dot-segment refusal is defence in depth, not a live bug fix. All 37
+ * call sites constrain their segments today — URLs normalise dot segments
+ * before a handler sees them, ids are `randomUUID()` or regex-validated, and
+ * the GC sweeps pass `readdir` names — so nothing can currently reach it. But
+ * the module header above claims this resolver is "the one place that check
+ * lives" for `.desde` containment, and until 2026-09-04 that was true only
+ * because every caller happened to behave: `desdeRemovalPath(root,
+ * 'canvases', '../..')` returned the repository ROOT (the second guard allows
+ * the root deliberately), and the caller's own recursive `rm` then deleted
+ * the repository. Reproduced in a temp repo. The 38th caller that forgets is
+ * what this refuses.
+ */
+function toSegments(repoRoot: string, segments: readonly string[]): string[] {
+  const parts = segments
+    .flatMap((segment) => segment.split(/[\\/]+/))
+    .filter((s) => s.length > 0)
+  for (const part of parts) {
+    if (part === '.' || part === '..') {
+      throw new DesdeDirSegmentError(join(repoRoot, '.desde'), part)
+    }
+  }
+  return parts
 }
 
 /**
@@ -209,9 +248,13 @@ function toSegments(segments: readonly string[]): string[] {
  * Pass the whole subpath, not just `.desde`: `desdePath(root,
  * 'chat-sessions', id)` is guarded at three levels, whereas
  * `join(desdePath(root), 'chat-sessions', id)` is guarded at one.
+ *
+ * A `.` or `..` segment is refused outright with {@link DesdeDirSegmentError}
+ * before any of that — the resolver enforces containment itself rather than
+ * trusting its callers to have validated their own segments.
  */
 export function desdePath(repoRoot: string, ...segments: string[]): string {
-  const parts = ['.desde', ...toSegments(segments)]
+  const parts = ['.desde', ...toSegments(repoRoot, segments)]
   const full = join(repoRoot, ...parts)
   let current = repoRoot
   for (let i = 0; i < parts.length; i++) {

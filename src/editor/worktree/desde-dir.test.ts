@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  DesdeDirSegmentError,
   DesdeDirSymlinkError,
   desdeDir,
   desdeDirOrNull,
@@ -74,6 +75,39 @@ describe('desdePath', () => {
     symlinkSync(outside, join(root, '.desde', 'manifests'))
     expect(() => desdePath(root, 'manifests/pkg.json')).toThrow(DesdeDirSymlinkError)
   })
+
+  // The resolver's own containment property, asserted on the resolver rather
+  // than through a caller. Every caller today constrains its segments, so a
+  // caller-level test would pass no matter what this function did.
+  describe('dot segments', () => {
+    it('refuses a `..` segment instead of letting the join leave .desde', () => {
+      expect(() => desdePath(root, 'canvases', '..', '..')).toThrow(DesdeDirSegmentError)
+      expect(() => desdePath(root, 'canvases', '..', '..')).toThrow(/'\.\.'/)
+    })
+
+    it('refuses a `..` hidden inside a single string segment', () => {
+      expect(() => desdePath(root, 'canvases', '../..')).toThrow(DesdeDirSegmentError)
+      expect(() => desdePath(root, 'chat-sessions/../../..')).toThrow(DesdeDirSegmentError)
+    })
+
+    it('refuses a `.` segment as well, so the split is exhaustive', () => {
+      expect(() => desdePath(root, 'chat-sessions', '.')).toThrow(DesdeDirSegmentError)
+    })
+
+    it('refuses a backslash-spelled `..`, the way the splitter reads one', () => {
+      expect(() => desdePath(root, 'canvases\\..\\..')).toThrow(DesdeDirSegmentError)
+    })
+
+    it('still accepts a name that merely starts with dots', () => {
+      expect(desdePath(root, '..hidden')).toBe(join(root, '.desde', '..hidden'))
+      expect(desdePath(root, 'a..b')).toBe(join(root, '.desde', 'a..b'))
+    })
+
+    it('is a DesdeDirSymlinkError too, so every existing catch still holds', () => {
+      expect(() => desdePath(root, '..')).toThrow(DesdeDirSymlinkError)
+      expect(desdePathOrNull(root, '..')).toBeNull()
+    })
+  })
 })
 
 describe('desdePathOrNull', () => {
@@ -112,6 +146,14 @@ describe('desdeRemovalPath', () => {
     mkdirSync(join(root, '.desde'), { recursive: true })
     symlinkSync(outside, join(root, '.desde', 'backups'))
     expect(() => desdeRemovalPath(root, 'backups', 'one')).toThrow(DesdeDirSymlinkError)
+  })
+
+  it('refuses a dot segment rather than returning the repository root', () => {
+    // Reproduced before the fix: this returned `root` itself, and the second
+    // guard allows the root deliberately, so the caller's recursive `rm`
+    // deleted the whole repository.
+    mkdirSync(join(root, '.desde', 'canvases'), { recursive: true })
+    expect(() => desdeRemovalPath(root, 'canvases', '../..')).toThrow(DesdeDirSegmentError)
   })
 })
 
