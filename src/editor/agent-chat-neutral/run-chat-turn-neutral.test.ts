@@ -1037,3 +1037,69 @@ describe('conflict recovery on the neutral lane', () => {
     expect(readFileSync(join(root, 'src/App.vue'), 'utf8')).toBe('A\nb\nC\n')
   })
 })
+
+describe('stopping a turn', () => {
+  it("reports an aborted turn as aborted, not as the model giving up", async () => {
+    const controller = new AbortController()
+    const abortedStep: ProviderEvent[] = [
+      {
+        kind: 'message_complete',
+        stopReason: 'error',
+        vendorStopReason: 'aborted',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'partial' }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    ]
+    const { provider } = scriptedProvider([abortedStep])
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      minimalOpts({
+        signal: controller.signal,
+        emit: (e: ChatStreamEvent) => events.push(e),
+      }) as never,
+      { buildProvider: () => provider },
+    )
+    expect(result.turn.error).toBe('turn aborted')
+    expect(result.turn.error).not.toMatch(/stopped before finishing/)
+  })
+
+  it('does not run tool calls queued behind the one the user stopped, and says so', async () => {
+    const controller = new AbortController()
+    const twoCalls: ProviderEvent[] = [
+      { kind: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'src/App.vue' } },
+      { kind: 'tool_use', id: 'tu_2', name: 'Write', input: { file_path: 'src/Late.vue', content: 'nope\n' } },
+      {
+        kind: 'message_complete',
+        stopReason: 'tool_use',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'src/App.vue' } },
+            { type: 'tool_use', id: 'tu_2', name: 'Write', input: { file_path: 'src/Late.vue', content: 'nope\n' } },
+          ],
+        },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    ]
+    const { provider } = scriptedProvider([twoCalls, textStep('unused')])
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      minimalOpts({
+        signal: controller.signal,
+        emit: (e: ChatStreamEvent) => {
+          events.push(e)
+          // Stop the moment the first tool answers: the second call is queued
+          // behind it and must not run.
+          if (e.kind === 'tool_result' && e.toolUseId === 'tu_1') controller.abort()
+        },
+      }) as never,
+      { buildProvider: () => provider },
+    )
+    expect(existsSync(join(root, 'src/Late.vue'))).toBe(false)
+    const second = result.turn.toolResults?.tu_2
+    expect(second?.ok).toBe(false)
+    expect(second?.error).toMatch(/not run/i)
+    const frame = events.find((e) => e.kind === 'tool_result' && e.toolUseId === 'tu_2')
+    expect(frame).toBeDefined()
+  })
+})

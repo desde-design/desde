@@ -579,10 +579,20 @@ async function runInner(
             if (ev.stopReason !== 'end_turn') {
               stopReason = 'error'
               vendorStopReason = ev.vendorStopReason ?? ev.stopReason
-              // Name the reason. "The turn did not finish" tells the user
-              // nothing they can act on, and 'max_tokens' and 'refusal' are
-              // two very different next steps.
-              errorMessage = `The model stopped before finishing the turn: ${vendorStopReason}.`
+              // A cancelled turn is the USER's doing, and it must not read as
+              // the model giving up. Both providers COMPLETE the message on
+              // abort rather than throwing (`vendorStopReason: 'aborted'`), so
+              // the loop breaks normally and the catch's 'turn aborted' path
+              // below never runs. Without this branch, pressing Stop
+              // mid-generation put "The model stopped before finishing the
+              // turn: aborted." in the banner.
+              errorMessage =
+                vendorStopReason === 'aborted' || opts.signal?.aborted === true
+                  ? 'turn aborted'
+                  : // Name the reason otherwise. "The turn did not finish"
+                    // tells the user nothing they can act on, and 'max_tokens'
+                    // and 'refusal' are two very different next steps.
+                    `The model stopped before finishing the turn: ${vendorStopReason}.`
             }
           }
         }
@@ -610,7 +620,23 @@ async function runInner(
       if (!lastStep) {
         const results: ChatUserContent[] = []
         for (const call of pending) {
-          const result = await runOneTool(call, byName, gate, opts.signal)
+          // Stop means stop, including for the calls QUEUED behind the one
+          // the user was watching. A model emits N parallel tool calls; the
+          // window between them is seconds wide (`capture_screenshot` alone
+          // waits up to 20s), and without this check a Write landed in the
+          // working tree after an explicit Stop.
+          //
+          // The untried calls are RECORDED as failed results rather than
+          // dropped. Every `tool_use` needs a matching `tool_result` for the
+          // message to be well-formed, the client's tool disclosure has to
+          // resolve rather than spin, and a transcript that simply omits them
+          // would say the calls never happened.
+          const cancelled = opts.signal?.aborted === true
+          const result = cancelled
+            ? errResult(
+                `${call.name} was not run: the turn was stopped before this call started.`,
+              )
+            : await runOneTool(call, byName, gate, opts.signal)
           toolResults[call.id] =
             result.isError === true
               ? { ok: false, error: toolResultContent(result) }
