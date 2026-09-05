@@ -167,8 +167,10 @@ export interface ProjectConfig {
     notes?: boolean
     /**
      * Secret-file read policy for the chat agent. Default `false` (opt-IN,
-     * same shape as `canvas` and `codeView`). `EDITOR_SECRET_READS=1` also
-     * enables it (either enables).
+     * the same `=== true` shape as `codeView`). This key is the ONLY way to
+     * turn it on — there is no env var, because a process-wide variable
+     * cannot express a per-project permission. See `isSecretReadsEnabled` in
+     * `dormant-surfaces.ts` (FX17 item 6).
      *
      * With it off, the agent's Read, Glob and Grep refuse credential-bearing
      * files — `.env` and its variants, private keys, `.npmrc`, cloud

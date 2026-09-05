@@ -211,9 +211,10 @@ export interface RunChatTurnOpts {
    * one the SDK's Read actually passes through — `canUseTool` never fires for
    * it; see `file-read-snapshot.ts`).
    *
-   * The CLI computes it from `editor.secretReads` in `.desde/config.json` OR
-   * `EDITOR_SECRET_READS=1`, through `isSecretReadsEnabled` in
-   * `dormant-surfaces.ts`, which the client bootstrap reads too.
+   * The CLI computes it from `editor.secretReads` in `.desde/config.json`
+   * and nothing else, through `isSecretReadsEnabled` in
+   * `dormant-surfaces.ts`, which the client bootstrap reads too. That gate
+   * has no env var on purpose — see its doc comment.
    */
   allowSecretReads?: boolean
   emit: (event: ChatStreamEvent) => void

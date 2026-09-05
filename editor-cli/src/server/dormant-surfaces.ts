@@ -95,7 +95,6 @@ const CODE_VIEW_ENV = "EDITOR_CODE_VIEW"
 const NOTES_ENV = "EDITOR_NOTES"
 const VSCODE_LINK_ENV = "EDITOR_VSCODE_LINK"
 const CANVAS_ENV = "EDITOR_CANVAS"
-const SECRET_READS_ENV = "EDITOR_SECRET_READS"
 const NEUTRAL_CHAT_ENV = "EDITOR_NEUTRAL_CHAT"
 
 function enabled(configured: boolean | undefined, envVar: string): boolean {
@@ -158,9 +157,31 @@ export function isVscodeLinkEnabled(ctx: DormantSurfaceConfig): boolean {
  * value). A UI-only gate would leave the agent reading secrets for a user who
  * never turned it on; a dispatch-only gate would leave the panel silent about
  * a permission the project actually has.
+ *
+ * **There is no `EDITOR_SECRET_READS` env var, and that is a decision rather
+ * than an omission (FX17 item 6).** Every other gate in this module takes
+ * one, because for a dormant SURFACE an environment escape hatch is
+ * harmless: the worst it does is show a Canvas tab in a project that did not
+ * ask for one. This is not a surface. It is a credential-read permission,
+ * and it was asked for PER PROJECT — which an environment variable cannot
+ * be. The launcher spawns one CLI child per project
+ * (`launcher-server.ts`), and the desktop shell spawns the payload CLI with
+ * full environment inheritance (`desktop/child.ts`), so
+ * `EDITOR_SECRET_READS=1` in a shell profile — or a single
+ * `EDITOR_SECRET_READS=1 desde` launch — silently allowed credential reads
+ * in EVERY prototype the user opened afterwards, with one row in the
+ * Extensions panel as the only signal.
+ *
+ * Scrubbing the variable at each spawn seam was the alternative, and
+ * `desktop/child.ts` already does exactly that for
+ * `EDITOR_CLAUDE_EXECUTABLE_PATH`. It was rejected because it needs the
+ * scrub repeated at every seam that ever spawns a CLI, and a seam added
+ * later inherits the hole by default. Not reading the variable needs nothing
+ * repeated anywhere.
  */
 export function isSecretReadsEnabled(ctx: DormantSurfaceConfig): boolean {
-  return enabled(ctx.editor?.secretReads, SECRET_READS_ENV)
+  // `enabled()` is deliberately NOT used here — see the paragraph above.
+  return ctx.editor?.secretReads === true
 }
 
 /**

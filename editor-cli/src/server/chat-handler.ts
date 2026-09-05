@@ -487,8 +487,9 @@ export interface ChatHandlerContext {
    * omitted means refused, on the `=== true` discipline.
    *
    * `http-server.ts` computes it from `editor.secretReads` in
-   * `.desde/config.json` OR `EDITOR_SECRET_READS=1`, through
-   * `isSecretReadsEnabled`, which the client bootstrap reads too. Threaded
+   * `.desde/config.json` and nothing else, through `isSecretReadsEnabled`,
+   * which the client bootstrap reads too. No env var — see that gate's doc
+   * comment. Threaded
    * into BOTH chat runtimes: the SDK lane enforces it in a `PreToolUse` hook
    * (its Read never reaches `canUseTool`), the neutral lane in the shared
    * permission gate and in its own Read/Glob/Grep.

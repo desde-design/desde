@@ -46,11 +46,6 @@ const GATES = [
   { name: "codeView", read: isCodeViewEnabled, env: "EDITOR_CODE_VIEW" },
   { name: "notes", read: isNotesEnabled, env: "EDITOR_NOTES" },
   { name: "canvas", read: isCanvasEnabled, env: "EDITOR_CANVAS" },
-  // Not a surface: a policy relaxation that lets the agent read credential
-  // files. It is in the table because it is the same `=== true` gate with the
-  // same two callers, and because the safe default is the one a typo must not
-  // be able to flip.
-  { name: "secretReads", read: isSecretReadsEnabled, env: "EDITOR_SECRET_READS" },
 ] as const
 
 describe.each(GATES)("$name gate", ({ name, read, env }) => {
@@ -93,6 +88,50 @@ describe.each(GATES)("$name gate", ({ name, read, env }) => {
     // dormant and a second way to say "off" buys nothing.
     setEnv(env, "0")
     expect(read({ editor: { [name]: true } })).toBe(true)
+  })
+})
+
+/**
+ * `secretReads` is the one gate in the module with NO env var, and FX17
+ * item 6 is why. It is not a dormant surface, it is a credential-read
+ * permission, and it was asked for per project. `EDITOR_SECRET_READS=1` in a
+ * shell profile was inherited by every per-project CLI child the launcher
+ * and the desktop shell spawn, so one project's permission became every
+ * project's.
+ *
+ * It keeps the `=== true` config discipline the surfaces above have, so the
+ * same falsy table runs against it — just without the two env cases.
+ */
+describe("secretReads gate", () => {
+  it("is off with no editor block, an omitted key, or an explicit false", () => {
+    expect(isSecretReadsEnabled({})).toBe(false)
+    expect(isSecretReadsEnabled({ editor: {} })).toBe(false)
+    expect(isSecretReadsEnabled({ editor: { secretReads: false } })).toBe(false)
+  })
+
+  it("is off on a truthy value that is not true", () => {
+    expect(isSecretReadsEnabled({ editor: { secretReads: 1 } } as never)).toBe(false)
+    expect(isSecretReadsEnabled({ editor: { secretReads: "true" } } as never)).toBe(false)
+  })
+
+  it("is on for this project on an explicit true", () => {
+    expect(isSecretReadsEnabled({ editor: { secretReads: true } })).toBe(true)
+  })
+
+  it("is NOT enabled by an environment variable", () => {
+    // The whole point. A process-wide variable cannot express a per-project
+    // permission, and it propagates to every CLI child the launcher and the
+    // desktop shell spawn.
+    setEnv("EDITOR_SECRET_READS", "1")
+    expect(isSecretReadsEnabled({})).toBe(false)
+    expect(isSecretReadsEnabled({ editor: {} })).toBe(false)
+    expect(isSecretReadsEnabled({ editor: { secretReads: false } })).toBe(false)
+  })
+
+  it("does not read any other surface's env var either", () => {
+    setEnv("EDITOR_CANVAS", "1")
+    setEnv("EDITOR_NOTES", "1")
+    expect(isSecretReadsEnabled({})).toBe(false)
   })
 })
 

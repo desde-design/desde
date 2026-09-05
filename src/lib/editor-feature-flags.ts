@@ -69,10 +69,9 @@ type CliBootstrap = {
   vscodeLink?: boolean
   /**
    * Secret-file read policy for the chat agent. Populated by the CLI
-   * bootstrap from `editor.secretReads` in `.desde/config.json` OR the
-   * `EDITOR_SECRET_READS=1` env var (either enables). Default `false`.
-   * Absent on the web shell — always `false` there.
-   * See {@link EDITOR_SECRET_READS}.
+   * bootstrap from `editor.secretReads` in `.desde/config.json` — and from
+   * nothing else. Default `false`. Absent on the web shell — always `false`
+   * there. See {@link EDITOR_SECRET_READS}.
    */
   secretReads?: boolean
   /**
@@ -255,7 +254,12 @@ export const EDITOR_CODE_VIEW: boolean = cliBootstrap?.codeView === true
  * files in this project (`.env` and its variants, private keys, `.npmrc`,
  * cloud credential stores). Default **false** — opt-IN, same shape as
  * {@link EDITOR_CODE_VIEW}. Set `editor.secretReads: true` in
- * `.desde/config.json`, or `EDITOR_SECRET_READS=1`, to allow them.
+ * `.desde/config.json` to allow them. That is the ONLY way to turn it on:
+ * unlike every other flag here it has no environment escape hatch, because
+ * an env var is process-wide and is inherited by every per-project CLI child
+ * the launcher and the desktop shell spawn, so it could not express the
+ * per-project permission this is. See `isSecretReadsEnabled` in
+ * `editor-cli/src/server/dormant-surfaces.ts` (FX17 item 6).
  *
  * This one does NOT gate a surface, and it is not a dormant feature. It is a
  * POLICY: with it off the agent's Read, Glob and Grep refuse those files,

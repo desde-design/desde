@@ -383,8 +383,8 @@ export interface BuildSdkSystemPromptOptions {
    */
   canvasEnabled?: boolean
   /**
-   * Set when the project has turned secret reads ON (`editor.secretReads` in
-   * `.desde/config.json`, or `EDITOR_SECRET_READS=1`). Appends
+   * Set when the project has turned secret reads ON (`editor.secretReads`
+   * in `.desde/config.json` — the only source). Appends
    * SECRET_READS_ENABLED_BLOCK. When false — the default — the prompt is
    * byte-identical to its pre-FX15 form, so no existing prompt-cache key
    * shifts for a prototype that never opted in.
