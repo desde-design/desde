@@ -164,6 +164,44 @@ describe('containment battery', () => {
     expect(existsSync(join(root, '.desde/backups'))).toBe(false)
   })
 
+  /**
+   * FX11 (2026-09-05, codex review + adversarial verification). A create used
+   * to skip the broker's handle-based, symlink-refusing write, so an ancestor
+   * directory swapped for a symlink AFTER `resolveSafeCreatePath` walked it
+   * sent the new file outside the working tree while the tool reported
+   * success. The prototype repository is untrusted, so anything in it that can
+   * make a symlink while a turn runs can do this; the verifier won the real
+   * cross-process race in eleven attempts.
+   *
+   * `acquireTreeGate` is a genuine option, and it fires exactly in the gap the
+   * race exploits (after reconstruction, before the broker's snapshot), so it
+   * stands in for that concurrent process deterministically.
+   */
+  it('refuses a create whose parent directory is swapped for a symlink after the path was validated, and writes nothing outside', async () => {
+    const out = await buildWriteToolSpec({
+      ...writeOpts(),
+      acquireTreeGate: async () => {
+        rmSync(join(root, 'src'), { recursive: true, force: true })
+        symlinkSync(outside, join(root, 'src'))
+        return () => {}
+      },
+    }).handler({ file_path: 'src/Pwn.vue', content: 'PWNED' }, {})
+
+    expect(out.isError).toBe(true)
+    expect(existsSync(join(outside, 'Pwn.vue'))).toBe(false)
+    expect(readFileSync(join(outside, 'secret.txt'), 'utf8')).toBe('ORIGINAL SECRET')
+  })
+
+  it('refuses to create a file whose parent is already a symlink out of the worktree', async () => {
+    symlinkSync(outside, join(root, 'src/link'))
+    const out = await buildWriteToolSpec(writeOpts()).handler(
+      { file_path: 'src/link/brand-new.md', content: 'PWNED' },
+      {},
+    )
+    expect(out.isError).toBe(true)
+    expect(existsSync(join(outside, 'brand-new.md'))).toBe(false)
+  })
+
   it('refuses a write when .desde is a symlink out of the worktree, and leaves the target file and the symlink target untouched', async () => {
     symlinkSync(outside, join(root, '.desde'))
     const before = readFileSync(join(root, 'src/App.vue'), 'utf8')

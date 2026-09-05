@@ -68,7 +68,7 @@
 import { randomUUID } from 'node:crypto'
 import { constants as fsConstants, existsSync } from 'node:fs'
 import { lstat, mkdir, open, readFile, realpath, rename as fsRename, rm, unlink, writeFile } from 'node:fs/promises'
-import { basename, dirname, sep as pathSep } from 'node:path'
+import { basename, dirname, join, sep as pathSep } from 'node:path'
 
 import { isProtectedAgentPath, protectedPathDenial } from './protected-paths'
 import { desdeRemovalPath, DesdeDirSymlinkError } from '../worktree/desde-dir'
@@ -500,8 +500,7 @@ async function captureSnapshot(
       )
     }
     const real = await realpath(absPath)
-    const rootWithSep = preconditionRootReal.endsWith(pathSep) ? preconditionRootReal : preconditionRootReal + pathSep
-    if (real !== preconditionRootReal && !real.startsWith(rootWithSep)) {
+    if (!realPathIsUnder(real, preconditionRootReal)) {
       throw new PreconditionIntegrityError(`'${absPath}' resolves outside the repo root. Refusing.`)
     }
   }
@@ -601,28 +600,20 @@ async function restorePath(
  * provably written to the file `open` validated — a directory-entry
  * replacement after `open` succeeds cannot retarget an already-open fd.
  *
- * Only applies to a precondition-backed, non-`exclusive`, non-`isNew`
- * overwrite — the three op shapes this does NOT cover are each already
- * safe or out of scope for a different reason:
+ * Applies to an OVERWRITE of an existing file. A create (`isNew`) has its
+ * own guarded path, {@link createNoFollow} — see that function for why
+ * the reasoning that used to sit here, which said a create needed no
+ * guard at all, was wrong.
  *
- *  - `exclusive` (`{ flag: 'wx' }`, i.e. `O_CREAT | O_EXCL`) already
- *    refuses if ANYTHING exists at the target path — including a
- *    symlink, dangling or not — without ever following it. There's
- *    nothing for a symlink swap to redirect: the create either lands on
- *    a path with nothing there, or fails closed.
- *  - `isNew` (no precondition, no prior caller read) has nothing a
- *    symlink swap could falsify — the caller never read bytes through
- *    this path before calling `brokeredWrite`, so there is no "the file
- *    still holds what I read" claim for a swap to defeat.
- *  - An ordinary op target with NO precondition (the common case — a
- *    fresh `insert_component` write, a deterministic applicator edit)
- *    gets the same treatment `captureSnapshot`'s doc comment gives it:
- *    deliberately unguarded, because paying `lstat`/`realpath`/`open`
- *    overhead for a check that protects a claim nobody made would be
- *    pure cost. If that gap is worth closing, it is a SEPARATE, broader
- *    finding than this one — P1-1 is specifically about the guard this
- *    file already has (`captureSnapshot`'s precondition check) not
- *    reaching all the way to the write it exists to protect.
+ * The one op shape neither function guards is an ordinary overwrite with
+ * NO precondition (a deterministic applicator edit, an
+ * `insert_component` write). It gets the same treatment
+ * `captureSnapshot`'s doc comment gives it: deliberately unguarded,
+ * because paying `lstat`/`realpath`/`open` overhead for a check that
+ * protects a claim nobody made would be pure cost. Closing that gap is a
+ * SEPARATE, broader finding — P1-1 is specifically about the guard this
+ * file already has (`captureSnapshot`'s precondition check) not reaching
+ * all the way to the write it exists to protect.
  *
  * `restorePath` (below) uses the SAME mechanism (via `openAndWriteNoFollow`)
  * when restoring a precondition-backed path — not just the primary write
@@ -653,15 +644,134 @@ async function openAndWriteNoFollow(absPath: string, content: string | Buffer): 
   }
 }
 
-async function applyOp(op: BrokerOp, preconditionAbsPaths: ReadonlySet<string>): Promise<void> {
+/**
+ * Whether a path that has ALREADY been through `realpath` sits inside a
+ * repo root that has also already been through `realpath`. Both arguments
+ * must be resolved: this is a string containment test, and it is only a
+ * containment PROOF because neither side can still hold a symlink.
+ */
+function realPathIsUnder(real: string, rootReal: string): boolean {
+  const rootWithSep = rootReal.endsWith(pathSep) ? rootReal : rootReal + pathSep
+  return real === rootReal || real.startsWith(rootWithSep)
+}
+
+/**
+ * **FX11 (codex review + adversarial verification, 2026-09-05, SECURITY).**
+ * Create a file that provably lands inside the repo.
+ *
+ * The create used to be a plain `writeFile`, on the reasoning quoted above
+ * {@link openAndWriteNoFollow}: an `isNew` op has no prior caller read, so
+ * there is no "the bytes I read are still there" claim for a symlink swap
+ * to falsify. That reasoning was about the wrong claim. A create makes a
+ * DIFFERENT one — "this file lands inside the repository" — and a plain
+ * `writeFile` cannot keep it. `resolveSafeCreatePath` lstat-walks every
+ * ancestor at reconstruction time, but nothing re-anchored that walk at
+ * write time, and `captureSnapshot`'s lstat/realpath proof returns early
+ * on ENOENT, which a not-yet-created leaf always is. So an ancestor
+ * directory replaced with a symlink in between sent the new file wherever
+ * the symlink pointed, and the model was told the write succeeded. The
+ * user's prototype repository is untrusted, so anything running in it can
+ * do that: a build script, an `npm postinstall`, a second agent session.
+ * The verifier won the race against a real, separate OS process in eleven
+ * attempts.
+ *
+ * Three steps, in this order:
+ *
+ *  1. `realpath` the parent directory and require it under `rootReal`.
+ *     `realpath` resolves EVERY component, so this catches an ancestor
+ *     swap that an `lstat` of the leaf alone cannot see. It runs before
+ *     anything is created, so the ordinary attack — a symlink already in
+ *     place when we get here — creates nothing at all.
+ *  2. Create at `<resolved parent>/<basename>` with
+ *     `O_CREAT | O_EXCL | O_NOFOLLOW`. `O_EXCL` refuses atomically if
+ *     ANYTHING is already at that name, a symlink included, so the create
+ *     can never follow one; addressing the resolved parent means the
+ *     lookup cannot re-traverse a symlink we just resolved away.
+ *  3. Prove, against the OPEN HANDLE, that what we created is still the
+ *     file that path names, before writing a single byte: re-`realpath`
+ *     the parent, and compare the handle's `dev`/`ino` with an `lstat` of
+ *     the path. If either disagrees, the parent was swapped between step 1
+ *     and step 2, so we unlink the (still empty) file we made and refuse.
+ *
+ * What remains racy, stated plainly: step 2 is a path lookup, so a swap
+ * landing in the window between step 1 and step 2 can still place a
+ * ZERO-BYTE file outside the repo. Closing that completely needs `openat`
+ * against a directory handle, which Node does not expose. Step 3 is what
+ * keeps the residue harmless: the caller's content is never written, the
+ * empty file is unlinked whenever the path still names it, and the op
+ * fails, so the model is told the write did not happen. Measured on macOS
+ * against the verifier's own swapper process, 20 seconds of continuous
+ * toggling: 627 refusals, every escaped entry 0 bytes, and no escape ever
+ * reported as a success. That is the intended trade — refuse a write we
+ * cannot prove rather than complete one.
+ */
+async function createNoFollow(
+  absPath: string,
+  content: string | Buffer,
+  rootReal: string,
+): Promise<void> {
+  const parentReal = await realpath(dirname(absPath))
+  if (!realPathIsUnder(parentReal, rootReal)) {
+    throw new Error(
+      `'${absPath}' would be created outside the repository (its parent resolves to '${parentReal}'). Refusing.`,
+    )
+  }
+  const target = join(parentReal, basename(absPath))
+  const handle = await open(
+    target,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+    0o666,
+  )
+  try {
+    const [parentAfter, onHandle, onPath] = await Promise.all([
+      realpath(dirname(target)).catch(() => null),
+      handle.stat(),
+      lstat(target).catch(() => null),
+    ])
+    const stillTheSameFile =
+      onPath !== null && onPath.dev === onHandle.dev && onPath.ino === onHandle.ino
+    if (parentAfter !== parentReal || !stillTheSameFile) {
+      if (stillTheSameFile) {
+        // Only reachable when the path still names OUR inode, so this
+        // unlink can only remove the empty file we just created.
+        await unlink(target).catch(() => {})
+      }
+      throw new Error(
+        `'${absPath}' moved out of the repository while it was being created. Refusing to write it.`,
+      )
+    }
+    // Strings default to utf8; Buffers are written byte-for-byte.
+    await handle.writeFile(content)
+  } finally {
+    await handle.close()
+  }
+}
+
+async function applyOp(
+  op: BrokerOp,
+  preconditionAbsPaths: ReadonlySet<string>,
+  resolveRootReal: () => Promise<string>,
+): Promise<void> {
   switch (op.kind) {
     case 'write':
       if (op.ensureDir) await mkdir(dirname(op.absPath), { recursive: true })
-      if (!op.exclusive && !op.isNew && preconditionAbsPaths.has(op.absPath)) {
+      if (op.isNew) {
+        // Every create goes through the guarded path, whether or not the
+        // caller also declared `exclusive`: `exclusive` only ever meant
+        // `O_CREAT | O_EXCL`, which `createNoFollow` always uses. A create
+        // that was not marked `exclusive` therefore becomes create-only
+        // too — strictly a refusal where it used to clobber, and every
+        // `isNew` caller already asserts non-existence before calling.
+        await createNoFollow(op.absPath, op.content, await resolveRootReal())
+        return
+      }
+      if (!op.exclusive && preconditionAbsPaths.has(op.absPath)) {
         await openAndWriteNoFollow(op.absPath, op.content)
         return
       }
       // Strings default to utf8; Buffers are written byte-for-byte.
+      // `exclusive` without `isNew` is rejected as a caller bug before we
+      // get here, so the flag below is belt-and-braces, not a live path.
       await writeFile(op.absPath, op.content, op.exclusive ? { flag: 'wx' } : undefined)
       return
     case 'delete':
@@ -922,6 +1032,21 @@ async function brokeredWriteImpl<E = void>(
   }
   const preconditionAbsPaths = new Set((opts.preconditions ?? []).map((p) => p.absPath))
 
+  // FX11: `createNoFollow` needs the realpath'd root too, and a batch can
+  // carry a create without carrying a precondition (`scaffold_route`, the
+  // CLI's `allowCreate` route, `fetch_media`). Resolved on first use rather
+  // than unconditionally, so a batch with neither a precondition nor a
+  // create still makes no extra syscall, and cached so a multi-create batch
+  // makes one. A failure here propagates out of `applyOp` as an ordinary
+  // write-stage failure, which is the right outcome: a root we cannot
+  // resolve is a containment check we cannot make, and an unprovable create
+  // is refused rather than completed.
+  let cachedRootReal: string | undefined = preconditionRootReal
+  const resolveRootReal = async (): Promise<string> => {
+    if (cachedRootReal === undefined) cachedRootReal = await realpath(opts.canonicalRoot)
+    return cachedRootReal
+  }
+
   type BatchOutcome =
     | { ok: true }
     | { failure: BrokerOp; reason: string; rolledBack: string[]; restoreErrors: string[] }
@@ -1047,7 +1172,7 @@ async function brokeredWriteImpl<E = void>(
       const applied: BrokerOp[] = []
       for (const op of opts.ops) {
         try {
-          await applyOp(op, preconditionAbsPaths)
+          await applyOp(op, preconditionAbsPaths, resolveRootReal)
           applied.push(op)
         } catch (err) {
           const rolledBack: string[] = []

@@ -652,11 +652,22 @@ describe('brokeredWrite', () => {
     expect(readFileSync(join(root, 'Created.vue'), 'utf8')).toBe('ALREADY-THERE')
   })
 
-  it('a non-exclusive isNew write DOES overwrite if the path is unexpectedly occupied (baseline contrast)', async () => {
-    // Without `exclusive`, `isNew` only controls ROLLBACK semantics
-    // (unlink vs restore) — it doesn't protect the initial write itself.
-    // This pins the pre-Task-14 default so `exclusive`'s opt-in behavior
-    // above reads as a deliberate narrowing, not the only possible outcome.
+  it('a non-exclusive isNew write refuses if the path is unexpectedly occupied, and leaves it untouched', async () => {
+    // Changed by FX11 (2026-09-05). This used to pin the opposite: a
+    // non-`exclusive` `isNew` write clobbered an occupied path, because
+    // `isNew` only chose ROLLBACK semantics (unlink vs restore) and did
+    // not protect the initial write. FX11 routes every create through
+    // `createNoFollow`, whose `O_CREAT | O_EXCL | O_NOFOLLOW` open is what
+    // makes the containment proof hold, so create-only is now the rule
+    // rather than `exclusive`'s opt-in.
+    //
+    // That is a strict improvement even setting containment aside. The
+    // sibling test below spells out the shape this closes: the loser of a
+    // create race used to overwrite the winner's file and then unlink it
+    // during `isNew` rollback, destroying a file it never created. Callers
+    // lose nothing, because every `isNew` caller already asserts
+    // non-existence before it calls (`resolveSafeCreatePath`, an
+    // `existsSync` guard, or an `exists: false` precondition).
     writeFileSync(join(root, 'Created.vue'), 'ALREADY-THERE')
 
     const result = await brokeredWrite({
@@ -674,8 +685,10 @@ describe('brokeredWrite', () => {
       lockManager,
     })
 
-    expect(result.ok).toBe(true)
-    expect(readFileSync(join(root, 'Created.vue'), 'utf8')).toBe('OVERWRITTEN')
+    expect(result.ok).toBe(false)
+    if (result.ok || result.stage !== 'write') return
+    expect(result.reason).toMatch(/^EEXIST:/)
+    expect(readFileSync(join(root, 'Created.vue'), 'utf8')).toBe('ALREADY-THERE')
   })
 
   it('two concurrent scaffold-shaped batches for the same new page: one wins, one EEXISTs', async () => {
