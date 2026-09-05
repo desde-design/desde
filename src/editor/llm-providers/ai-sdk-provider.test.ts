@@ -90,6 +90,34 @@ function providerFor(model: MockLanguageModelV4): AiSdkProvider {
   })
 }
 
+/**
+ * A stream that ANSWERS: one text delta, then a `stop` finish.
+ *
+ * Request-shape tests read `model.doStreamCalls` and do not care what came
+ * back — but a `stop` finish carrying no content at all is now a failed step
+ * (see "fails the step when the model finishes on `stop` having produced
+ * nothing"), which would throw before the assertion is reached. One token of
+ * text is what makes these fixtures a response rather than a silent refusal,
+ * and it is what a real `stop` finish always carries.
+ */
+function answeredStream() {
+  return streamOf([
+    { type: 'stream-start', warnings: [] },
+    { type: 'text-start', id: '1' },
+    { type: 'text-delta', id: '1', delta: 'ok' },
+    { type: 'text-end', id: '1' },
+    { type: 'finish', finishReason: finishOf('stop'), usage: USAGE },
+  ])
+}
+
+/** A response that finishes on `stop` having said nothing. The refusal shape. */
+function emptyStopStream() {
+  return streamOf([
+    { type: 'stream-start', warnings: [] },
+    { type: 'finish', finishReason: finishOf('stop'), usage: USAGE },
+  ])
+}
+
 async function collect(it: AsyncIterable<ProviderEvent>): Promise<ProviderEvent[]> {
   const out: ProviderEvent[] = []
   for await (const ev of it) out.push(ev)
@@ -329,10 +357,7 @@ describe('AiSdkProvider.streamConversation', () => {
 
   it('passes tools as definitions with no execute, so the library returns the call instead of running it', async () => {
     const model = new MockLanguageModelV4({
-      doStream: streamOf([
-        { type: 'stream-start', warnings: [] },
-        { type: 'finish', finishReason: finishOf('stop'), usage: USAGE },
-      ]),
+      doStream: answeredStream(),
     })
     const schema = { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] }
     await collect(
@@ -350,10 +375,7 @@ describe('AiSdkProvider.streamConversation', () => {
 
   it('translates tool_result blocks into a tool message carrying the call name', async () => {
     const model = new MockLanguageModelV4({
-      doStream: streamOf([
-        { type: 'stream-start', warnings: [] },
-        { type: 'finish', finishReason: finishOf('stop'), usage: USAGE },
-      ]),
+      doStream: answeredStream(),
     })
     await collect(
       providerFor(model).streamConversation({
@@ -381,10 +403,7 @@ describe('AiSdkProvider.streamConversation', () => {
 
   it('marks an error tool_result as error-text', async () => {
     const model = new MockLanguageModelV4({
-      doStream: streamOf([
-        { type: 'stream-start', warnings: [] },
-        { type: 'finish', finishReason: finishOf('stop'), usage: USAGE },
-      ]),
+      doStream: answeredStream(),
     })
     await collect(
       providerFor(model).streamConversation({
@@ -443,10 +462,7 @@ describe('AiSdkProvider.streamConversation', () => {
 
   it('sends an ImageContent block as an image part with its media type', async () => {
     const model = new MockLanguageModelV4({
-      doStream: streamOf([
-        { type: 'stream-start', warnings: [] },
-        { type: 'finish', finishReason: finishOf('stop'), usage: USAGE },
-      ]),
+      doStream: answeredStream(),
     })
     await collect(
       providerFor(model).streamConversation({
@@ -470,10 +486,7 @@ describe('AiSdkProvider.streamConversation', () => {
 
   it('nests StreamOpts.providerOptions under the descriptor key', async () => {
     const model = new MockLanguageModelV4({
-      doStream: streamOf([
-        { type: 'stream-start', warnings: [] },
-        { type: 'finish', finishReason: finishOf('stop'), usage: USAGE },
-      ]),
+      doStream: answeredStream(),
     })
     await collect(
       providerFor(model).streamConversation({
@@ -557,6 +570,96 @@ describe('AiSdkProvider.streamConversation', () => {
     const done = events.find((e) => e.kind === 'message_complete')
     if (done?.kind !== 'message_complete') throw new Error('expected message_complete')
     expect(done.stopReason).toBe('error')
+    expect(done.vendorStopReason).toBe('aborted')
+  })
+
+  it('fails the step when the model finishes on `stop` having produced nothing', async () => {
+    // A Responses `refusal` content part is not modelled by @ai-sdk/openai at
+    // all: `response.refusal.delta` / `.done` are not in its chunk table, so
+    // they are discarded as unknown chunks, `incomplete_details` stays null,
+    // and the finish maps to `stop`. The step therefore used to complete as an
+    // `end_turn` carrying an EMPTY assistant message — no text, no error, no
+    // failure badge, and the request still billed. The user saw a chat turn
+    // that did nothing and was told nothing.
+    const model = new MockLanguageModelV4({
+      doStream: emptyStopStream(),
+    })
+    await expect(
+      collect(
+        providerFor(model).streamConversation({
+          system: 's',
+          messages: [{ role: 'user', content: 'u' }],
+          tools: [],
+        }),
+      ),
+    ).rejects.toThrow(/without producing any content/i)
+  })
+
+  it('still reports the tokens the empty step spent before it fails', async () => {
+    // The failure must not lose the accounting. The request was made and is
+    // billed by the vendor whether or not the model answered, so the `usage`
+    // event is emitted BEFORE the throw and the turn's cost stays honest.
+    const model = new MockLanguageModelV4({
+      doStream: emptyStopStream(),
+    })
+    const seen: ProviderEvent[] = []
+    await expect(
+      (async () => {
+        for await (const ev of providerFor(model).streamConversation({
+          system: 's',
+          messages: [{ role: 'user', content: 'u' }],
+          tools: [],
+        })) {
+          seen.push(ev)
+        }
+      })(),
+    ).rejects.toThrow()
+    expect(seen).toEqual([{ kind: 'usage', inputTokens: 9, outputTokens: 7 }])
+  })
+
+  it('leaves the content-filter path alone: it is already reported as a refusal', async () => {
+    // The control for the case above, and the boundary it must not cross.
+    // `content_filter` DOES reach the adapter as a finish reason, maps to
+    // `refusal`, and is already surfaced with the vendor's own wording. That
+    // path is correct and stays exactly as it is.
+    const model = new MockLanguageModelV4({
+      doStream: streamOf([
+        { type: 'stream-start', warnings: [] },
+        { type: 'finish', finishReason: finishOf('content-filter'), usage: USAGE },
+      ]),
+    })
+    const events = await collect(
+      providerFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [],
+      }),
+    )
+    const done = events.find((e) => e.kind === 'message_complete')
+    if (done?.kind !== 'message_complete') throw new Error('expected message_complete')
+    expect(done.stopReason).toBe('refusal')
+    expect(done.vendorStopReason).toBe('content-filter')
+  })
+
+  it('leaves an aborted empty step alone: stopping a turn is the user\'s doing, not a refusal', async () => {
+    // The other boundary. Pressing Stop before the model has said anything
+    // also finishes with zero blocks, and it must keep reporting as an abort
+    // rather than accusing the model of declining.
+    const model = new MockLanguageModelV4({
+      doStream: emptyStopStream(),
+    })
+    const controller = new AbortController()
+    controller.abort()
+    const events = await collect(
+      providerFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [],
+        signal: controller.signal,
+      }),
+    )
+    const done = events.find((e) => e.kind === 'message_complete')
+    if (done?.kind !== 'message_complete') throw new Error('expected message_complete')
     expect(done.vendorStopReason).toBe('aborted')
   })
 

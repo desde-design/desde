@@ -306,6 +306,36 @@ export class AiSdkProvider implements LLMProvider {
     if (opts.signal?.aborted) aborted = true
 
     yield { kind: 'usage', inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }
+
+    // A finished response that said nothing is a failed step, not an empty
+    // successful one.
+    //
+    // The case this exists for: OpenAI's Responses API can answer with a
+    // structured `refusal` content part, and `@ai-sdk/openai` does not model
+    // refusals at all — `response.refusal.delta` / `.done` are absent from its
+    // chunk table, so they are dropped as unknown chunks and the refusal text
+    // never reaches this loop. Such a response is COMPLETE, its
+    // `incomplete_details` is null, and the finish reason is therefore `stop`.
+    // Mapped naively that is `end_turn`, and the neutral runtime raises an
+    // error only for a stop reason that is NOT `end_turn` and only for a
+    // missing message, never for a present-but-empty one. The user got an
+    // assistant turn with no text, no error, no failure badge — and a charge.
+    //
+    // Deliberately narrow. `content-filter` already arrives as its own finish
+    // reason and is already reported as a refusal with the vendor's wording;
+    // that path is untouched. An abort is the user's doing and keeps reporting
+    // as an abort. Only `stop` with nothing to show for it lands here.
+    //
+    // The `usage` event above is emitted first on purpose: the request was
+    // made and the vendor bills it whether or not the model answered, so the
+    // turn's accounting stays honest even though the step fails.
+    if (!aborted && finishReason === 'stop' && blocks.length === 0) {
+      throw new Error(
+        'The model ended the turn without producing any content, which usually means it ' +
+          'declined to answer. Rephrase the request, or try a different model.',
+      )
+    }
+
     yield {
       kind: 'message_complete',
       stopReason: aborted ? 'error' : mapFinishReason(finishReason),
