@@ -576,7 +576,25 @@ function toModelMessages(messages: readonly Message[]): ModelMessage[] {
       type: 'tool-result'
       toolCallId: string
       toolName: string
-      output: { type: 'text'; value: string } | { type: 'error-text'; value: string }
+      output:
+        | { type: 'text'; value: string }
+        | { type: 'error-text'; value: string }
+        // The `content` variant is what carries an IMAGE back from a tool.
+        // The OpenAI Responses mapping turns each `file` part whose media type
+        // is an image into an `input_image` on the `function_call_output`, so
+        // `capture_screenshot` reaches the model as pixels rather than as a
+        // sentence saying pixels exist.
+        | {
+            type: 'content'
+            value: Array<
+              | { type: 'text'; text: string }
+              // The tagged `data` shape, not the bare base64 string the USER
+              // message's file part still takes. A tool result's file part is
+              // the newer of the two declarations, and only this form reaches
+              // the Responses mapping's `input_image` branch.
+              | { type: 'file'; data: { type: 'data'; data: string }; mediaType: string }
+            >
+          }
     }> = []
     for (const block of msg.content) {
       if (block.type === 'text') {
@@ -584,10 +602,15 @@ function toModelMessages(messages: readonly Message[]): ModelMessage[] {
       } else if (block.type === 'image') {
         userParts.push({ type: 'file', data: block.data, mediaType: block.mediaType })
       } else {
+        const parts = typeof block.content === 'string' ? [] : block.content
+        const images = parts.filter((c) => c.type === 'image')
         const value =
           typeof block.content === 'string'
             ? block.content
-            : block.content.map((c) => c.text).join('\n')
+            : parts
+                .filter((c) => c.type === 'text')
+                .map((c) => c.text)
+                .join('\n')
         toolParts.push({
           type: 'tool-result',
           toolCallId: block.toolUseId,
@@ -600,9 +623,29 @@ function toModelMessages(messages: readonly Message[]): ModelMessage[] {
           // Anthropic's `is_error` does survive, so the two lanes disagreed.
           // Marking the text is what closes that gap without inventing a
           // field the vendor does not have.
-          output: block.isError
-            ? { type: 'error-text', value: markAsError(value) }
-            : { type: 'text', value },
+          //
+          // An image forces the `content` variant, which has no error member
+          // at all — so the marker stays in the text there too, which is the
+          // same trade this comment already describes.
+          output:
+            images.length > 0
+              ? {
+                  type: 'content',
+                  value: [
+                    {
+                      type: 'text' as const,
+                      text: block.isError ? markAsError(value) : value,
+                    },
+                    ...images.map((c) => ({
+                      type: 'file' as const,
+                      data: { type: 'data' as const, data: c.data },
+                      mediaType: c.mediaType,
+                    })),
+                  ],
+                }
+              : block.isError
+                ? { type: 'error-text', value: markAsError(value) }
+                : { type: 'text', value },
         })
       }
     }

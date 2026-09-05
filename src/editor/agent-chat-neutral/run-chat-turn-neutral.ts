@@ -98,6 +98,7 @@ import {
   createNeutralEventAdapter,
   toolResultContent,
   toolResultEvent,
+  toolResultMessageContent,
 } from './neutral-event-adapter'
 import { buildNeutralSystemPrompt } from './system-prompt-neutral'
 import { buildNeutralToolCatalog } from './tool-catalog'
@@ -645,7 +646,10 @@ async function runInner(
           results.push({
             type: 'tool_result',
             toolUseId: call.id,
-            content: toolResultContent(result),
+            // The MODEL's copy, which keeps an image part as an image. The
+            // two lines above are the CLIENT's copy, which flattens it — see
+            // `toolResultMessageContent`.
+            content: toolResultMessageContent(result),
             // Stated on every result, `undefined` for a success. Both shipped
             // providers drop an undefined flag on the way to the wire, and
             // one shape for both outcomes is one less thing to read wrong.

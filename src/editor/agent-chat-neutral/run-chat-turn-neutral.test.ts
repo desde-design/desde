@@ -1038,6 +1038,62 @@ describe('conflict recovery on the neutral lane', () => {
   })
 })
 
+describe('a tool result carrying an image', () => {
+  const PNG = 'data:image/png;base64,AAAA'
+  const screenshotBridge: BridgeClient = {
+    send: async (channel: string) =>
+      channel === 'chat:capture_screenshot'
+        ? ({ dataUrl: PNG, width: 1280, height: 800 } as never)
+        : null,
+  }
+
+  it('sends the image to the model as an image block, not as a description of one', async () => {
+    const { provider, calls } = scriptedProvider([
+      toolStep('tu_1', 'mcp__editor__capture_screenshot', { scope: 'viewport' }),
+      textStep('looks right'),
+    ])
+    await runChatTurnNeutral(
+      minimalOpts({ bridge: screenshotBridge }) as never,
+      { buildProvider: () => provider },
+    )
+    const second = calls[1]
+    const toolResultMessage = second.messages.find(
+      (m) =>
+        m.role === 'user' &&
+        typeof m.content !== 'string' &&
+        m.content.some((b) => b.type === 'tool_result'),
+    )!
+    const block = (toolResultMessage.content as readonly unknown[]).find(
+      (b) => (b as { type: string }).type === 'tool_result',
+    ) as { content: string | readonly { type: string; data?: string }[] }
+    expect(typeof block.content).not.toBe('string')
+    const parts = block.content as readonly { type: string; data?: string }[]
+    expect(parts.some((p) => p.type === 'image' && p.data === 'AAAA')).toBe(true)
+    expect(parts.some((p) => p.type === 'text')).toBe(true)
+  })
+
+  it('still gives the client a renderable string on the tool_result stream event', async () => {
+    const { events } = await (async () => {
+      const { provider } = scriptedProvider([
+        toolStep('tu_1', 'mcp__editor__capture_screenshot', { scope: 'viewport' }),
+        textStep('ok'),
+      ])
+      const seen: ChatStreamEvent[] = []
+      await runChatTurnNeutral(
+        minimalOpts({
+          bridge: screenshotBridge,
+          emit: (e: ChatStreamEvent) => seen.push(e),
+        }) as never,
+        { buildProvider: () => provider },
+      )
+      return { events: seen }
+    })()
+    const frame = events.find((e) => e.kind === 'tool_result')!
+    expect(typeof (frame as { output?: unknown }).output).toBe('string')
+    expect((frame as { output: string }).output).toMatch(/image\/png image returned/)
+  })
+})
+
 describe('stopping a turn', () => {
   it("reports an aborted turn as aborted, not as the model giving up", async () => {
     const controller = new AbortController()

@@ -230,6 +230,19 @@ function CapabilityRowItem({
         <span className="text-sm text-muted-foreground">{capability.summary}</span>
 
         {/*
+          A standing fact about the capability, not a reading of whichever
+          model is picked right now. The model changes per message and this
+          panel never sees that choice, so a row cannot honestly say "on for
+          this turn". Without the line, a row read "Active" while a turn on an
+          OpenAI model had no such tools at all.
+        */}
+        {capability.claudeModelsOnly ? (
+          <span className="mt-1 text-sm text-muted-foreground">
+            Only available with Claude models.
+          </span>
+        ) : null}
+
+        {/*
           A button, not instructions. This block used to read "Enabled, but
           FIGMA_API_KEY isn't set in this shell", print `export FIGMA_API_KEY=…`
           and say to restart — three things a reader who never opens a terminal

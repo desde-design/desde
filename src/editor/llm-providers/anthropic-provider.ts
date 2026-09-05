@@ -490,7 +490,23 @@ function toAnthropicMessage(msg: Message): Anthropic.Messages.MessageParam {
         content:
           typeof b.content === 'string'
             ? b.content
-            : b.content.map((c) => ({ type: 'text' as const, text: c.text })),
+            : b.content.map((c) =>
+                c.type === 'image'
+                  ? {
+                      type: 'image' as const,
+                      source: {
+                        type: 'base64' as const,
+                        // Same narrowing note as the user-message image block
+                        // above: a media type the model's vision input does
+                        // not accept is a 400 from Anthropic, which is a
+                        // better error than one invented here.
+                        media_type:
+                          c.mediaType as Anthropic.Messages.Base64ImageSource['media_type'],
+                        data: c.data,
+                      },
+                    }
+                  : { type: 'text' as const, text: c.text },
+              ),
         is_error: b.isError,
       }
     })

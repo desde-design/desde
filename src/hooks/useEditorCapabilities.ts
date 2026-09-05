@@ -34,6 +34,15 @@ export interface CapabilityRow {
   enableable: boolean
   /** False ⇒ declared but inert until a key is supplied. */
   envReady: boolean
+  /**
+   * True ⇒ only the Claude runtime serves this one.
+   *
+   * A standing fact about the capability, not a reading of the model picked
+   * right now: the model can change per message, and this panel never sees
+   * that choice. Stated because a row that said "Active" while an OpenAI turn
+   * had no such tools was telling the user something untrue.
+   */
+  claudeModelsOnly: boolean
 }
 
 export interface CapabilitiesState {

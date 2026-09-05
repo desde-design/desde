@@ -86,6 +86,14 @@ export async function handleCapabilitiesRoute(
         target: c.target,
         activation: c.activation,
         requiresEnv: c.requiresEnv ?? null,
+        // True when the capability only works on the Claude Agent SDK
+        // runtime. The panel has no model picker in scope and the user can
+        // change models per message, so the row states the standing fact
+        // rather than guessing which lane the next message takes. Saying
+        // nothing was the defect: a row read "Active" while a turn on the
+        // neutral lane had no such tools, because that lane composes builtins
+        // plus editor tools and registers no MCP server.
+        claudeModelsOnly: !c.runtimes.includes("neutral"),
         // Whether WE hold a key for it. Drives the difference between "Add
         // key" and "Replace key", and whether Remove is offered at all —
         // offering Remove for a key we did not write would be a button that

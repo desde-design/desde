@@ -17,7 +17,11 @@
 
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
 import type { ToolHandlerResult } from '../agent-chat/tool-spec'
-import type { ProviderEvent } from '../llm-providers/types'
+import type {
+  ImageContent,
+  ProviderEvent,
+  TextContent,
+} from '../llm-providers/types'
 
 export interface NeutralEventAdapter {
   adapt(ev: ProviderEvent): Iterable<ChatStreamEvent>
@@ -67,10 +71,12 @@ export function createNeutralEventAdapter(turnId: string): NeutralEventAdapter {
 }
 
 /**
- * Flatten a handler result into the text the model and the transcript both
- * see. An image part is NAMED rather than inlined: the base64 is already
- * riding into the model on the tool_result message, and putting it in the SSE
- * frame as well would push megabytes through the chat UI for no gain.
+ * Flatten a handler result into the text the CLIENT sees — the `tool_result`
+ * stream frame and the persisted transcript.
+ *
+ * An image part is NAMED rather than inlined, because putting base64 in the
+ * SSE frame would push megabytes through the chat UI for no gain. The pixels
+ * reach the MODEL by the other function below.
  */
 export function toolResultContent(result: ToolHandlerResult): string {
   return result.content
@@ -78,6 +84,33 @@ export function toolResultContent(result: ToolHandlerResult): string {
       part.type === 'text' ? part.text : `[${part.mimeType} image returned]`,
     )
     .join('\n')
+}
+
+/**
+ * The same result, shaped for the `tool_result` message sent to the MODEL.
+ *
+ * Text-only results collapse to a plain string, which is what every provider
+ * handled before this existed and what keeps the wire byte-identical for the
+ * overwhelmingly common case. A result carrying an image keeps its parts, so
+ * the model receives the picture.
+ *
+ * This used to be the same function as {@link toolResultContent}, and that was
+ * the whole defect: `capture_screenshot` is the agent's only sight of the
+ * running prototype, and on this lane the model was handed the sentence
+ * "[image/png image returned]" and asked to judge what it showed. The failure
+ * mode was confabulation, not an error.
+ */
+export function toolResultMessageContent(
+  result: ToolHandlerResult,
+): string | readonly (TextContent | ImageContent)[] {
+  if (!result.content.some((part) => part.type === 'image')) {
+    return toolResultContent(result)
+  }
+  return result.content.map((part) =>
+    part.type === 'text'
+      ? { type: 'text' as const, text: part.text }
+      : { type: 'image' as const, mediaType: part.mimeType, data: part.data },
+  )
 }
 
 export function toolResultEvent(

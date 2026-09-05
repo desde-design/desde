@@ -159,11 +159,21 @@ export interface ToolResultContent {
   type: 'tool_result'
   toolUseId: string
   /**
-   * Either a plain string OR a list of text blocks. The Anthropic
-   * provider passes either through; other providers may stringify
-   * non-strings.
+   * Either a plain string OR a list of text and image blocks.
+   *
+   * The image member is what lets a tool RETURN a picture. Without it,
+   * `capture_screenshot` reported success, produced a caption with real
+   * dimensions, and handed the model nothing to look at — so the model
+   * described a screenshot it had never seen. Both shipped providers carry
+   * it natively: Anthropic as an `image` block inside `tool_result.content`,
+   * the AI SDK as a `content` tool output whose `file` parts the OpenAI
+   * Responses mapping turns into `input_image`.
+   *
+   * A provider whose model has no vision input must still send something the
+   * API will not reject, exactly as for {@link ImageContent} on a user
+   * message.
    */
-  content: string | readonly TextContent[]
+  content: string | readonly (TextContent | ImageContent)[]
   /** Set to true if the tool failed (so the model knows). */
   isError?: boolean
 }

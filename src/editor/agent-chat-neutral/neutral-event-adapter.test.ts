@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { createNeutralEventAdapter, toolResultContent, toolResultEvent } from './neutral-event-adapter'
+import {
+  createNeutralEventAdapter,
+  toolResultContent,
+  toolResultEvent,
+  toolResultMessageContent,
+} from './neutral-event-adapter'
 
 const TURN = 't1'
 const take = (ev: Parameters<ReturnType<typeof createNeutralEventAdapter>['adapt']>[0]) => [
@@ -78,5 +83,27 @@ describe('toolResultContent', () => {
         ],
       }),
     ).toBe('here it is\n[image/png image returned]')
+  })
+})
+
+describe('toolResultMessageContent', () => {
+  it('keeps an image part as an image block, so the model sees the pixels', () => {
+    expect(
+      toolResultMessageContent({
+        content: [
+          { type: 'text', text: 'here it is' },
+          { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+        ],
+      }),
+    ).toEqual([
+      { type: 'text', text: 'here it is' },
+      { type: 'image', mediaType: 'image/png', data: 'AAAA' },
+    ])
+  })
+
+  it('collapses a text-only result to a plain string, as before', () => {
+    expect(
+      toolResultMessageContent({ content: [{ type: 'text', text: 'done' }] }),
+    ).toBe('done')
   })
 })

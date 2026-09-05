@@ -1007,12 +1007,22 @@ export async function handleChatRequest(
     const { computeEnabledCapabilityIds, describeDisabledCapabilities } = await import(
       "../../../src/editor/core/capability-catalog.js"
     )
+    // The LANE is half the answer, not a refinement of it. `.mcp.json` says a
+    // server is declared; only the runtime says whether anything registers it.
+    // The neutral lane composes builtins plus editor tools and reads neither
+    // `extensions` nor `figmaConfig`, so reporting Figma or Web search as ON
+    // there told the user about tools the model could not call.
+    const capabilityRuntime = resolveChatRuntimeKind(turnProviderId, process.env)
     const enabledCapabilityIds = computeEnabledCapabilityIds({
       enabledExtensionIds: (extensions ?? []).map((e) => e.id),
       webFetchAllowedHosts: webPolicy?.webFetchAllowedHosts ?? [],
       webSearchEnabled: webPolicy?.webSearchEnabled ?? false,
+      chatRuntime: capabilityRuntime,
     })
-    const disabledCapabilities = describeDisabledCapabilities(enabledCapabilityIds)
+    const disabledCapabilities = describeDisabledCapabilities(
+      enabledCapabilityIds,
+      capabilityRuntime,
+    )
 
     // Offer the fix in the flow. Detection reads the USER's message and
     // NOTHING else — assistant prose, tool output and MCP results are excluded
@@ -1025,7 +1035,12 @@ export async function handleChatRequest(
       )
       // Detect against LIVE ids first — the overwhelmingly common case is no
       // gap at all, and that path must add no I/O to a turn.
-      const candidates = detectCapabilityGaps(body.userMessage, enabledCapabilityIds)
+      const candidates = detectCapabilityGaps(
+        body.userMessage,
+        enabledCapabilityIds,
+        undefined,
+        capabilityRuntime,
+      )
       // Only now consult what is DECLARED. An entry whose ${VAR} is unset is
       // written to .mcp.json but skipped by the loader, so offering to enable
       // it would post to a route that answers 409. (The prompt block above
