@@ -23,6 +23,7 @@
 
 import { z } from 'zod'
 
+import type { ToolHandlerContext } from '../agent-chat/tool-spec'
 import type { OverwriteConflictDetected } from '../agent-chat-sdk/edit-ack'
 import { reconstructWriteEdit, sha256 } from '../agent-chat-sdk/edit-ack'
 import {
@@ -107,8 +108,8 @@ export function buildWriteToolSpec(opts: BuiltinWriteOpts) {
       file_path: z.string().describe('Repository-relative path of the file to write.'),
       content: z.string().describe('The complete new contents of the file.'),
     },
-    handler: (input: Record<string, unknown>, _ctx?: unknown): Promise<TextToolResult> =>
-      applyWrite('Write', input, opts),
+    handler: (input: Record<string, unknown>, ctx?: ToolHandlerContext): Promise<TextToolResult> =>
+      applyWrite('Write', input, opts, ctx),
   }
 }
 
@@ -128,8 +129,8 @@ export function buildEditToolSpec(opts: BuiltinWriteOpts) {
         .optional()
         .describe('Replace every occurrence instead of requiring a unique match.'),
     },
-    handler: (input: Record<string, unknown>, _ctx?: unknown): Promise<TextToolResult> =>
-      applyWrite('Edit', input, opts),
+    handler: (input: Record<string, unknown>, ctx?: ToolHandlerContext): Promise<TextToolResult> =>
+      applyWrite('Edit', input, opts, ctx),
   }
 }
 
@@ -137,73 +138,114 @@ async function applyWrite(
   toolName: 'Write' | 'Edit',
   input: Record<string, unknown>,
   opts: BuiltinWriteOpts,
+  ctx?: ToolHandlerContext,
 ): Promise<TextToolResult> {
+  // FX16 item 1 (2026-09-05). This context used to be named `_ctx` and
+  // dropped, which is how a write landed after an explicit Stop: the loop
+  // checks the signal before the call, but `brokeredWrite` below then waits
+  // for the repo's tree gate, and a Commit or a Publish holds that for
+  // seconds. The handler is the only code left inside that window, so it
+  // reads the signal too.
+  if (isStopped(ctx)) return err(stoppedRefusal(toolName))
   const built = await reconstructWriteEdit(toolName, input, opts.worktreeRoot)
   if (!built.ok) return err(prefixRefusal(toolName, built.reason))
+  // Read a second time, after the reconstruction's own filesystem work: that
+  // is a `resolveRepoPath`, an `existsSync` and a whole-file read, all of
+  // which yield to the event loop, so Stop can arrive during them.
+  if (isStopped(ctx)) return err(stoppedRefusal(toolName))
 
-  const result = await brokeredWrite({
-    canonicalRoot: opts.worktreeRoot,
-    // The RAW bytes, not `priorContent`'s UTF-8 decode, for both the journal
-    // and the precondition below — see `priorBytes` on `WriteReconstruction`.
-    // A file holding invalid UTF-8 re-encodes to different bytes than the ones
-    // on disk, so the precondition could never match and every edit to such a
-    // file was refused as "changed on disk".
-    journal: built.priorBytes === null ? [] : [{ file: built.repoRel, content: built.priorBytes }],
-    ops: [
-      {
-        kind: 'write',
-        repoRel: built.repoRel,
-        absPath: built.absPath,
-        content: built.newSource,
-        ...(built.isNew ? { ensureDir: true, isNew: true as const } : {}),
-      },
-    ],
-    // Closes the window between reconstruction (which read the file outside
-    // any lock) and the batch's own locks. A file that changed in between
-    // refuses the batch rather than clobbering whoever wrote it.
-    preconditions: [
-      {
-        repoRel: built.repoRel,
-        absPath: built.absPath,
-        expect: {
-          exists: !built.isNew,
-          content: built.priorBytes,
+  // The LAST place a Stop can still be honoured, and the widest window of the
+  // three. `brokeredWrite` asks for the repo's tree gate before it touches
+  // anything, and a Commit, a Publish or another chat session holds that for
+  // as long as its own operation takes — seconds, not microseconds. Refusing
+  // the moment the gate is handed over leaves nothing on disk: the journal,
+  // the file locks and the write all happen after this point.
+  //
+  // Throwing is how the batch is stopped, because `brokeredWrite` awaits this
+  // callback OUTSIDE its own try: the throw reaches `applyWrite` before any
+  // broker work has begun. The gate is released first, so a stopped turn does
+  // not park Commit behind it.
+  const acquireTreeGate = opts.acquireTreeGate
+  const gatedByStop: AcquireTreeGate | undefined = acquireTreeGate
+    ? async () => {
+        const release = await acquireTreeGate()
+        if (isStopped(ctx)) {
+          release()
+          throw new TurnStopped()
+        }
+        return release
+      }
+    : undefined
+
+  let result: Awaited<ReturnType<typeof brokeredWrite<{ ok: true; editId: string } | { ok: false; reason: string }>>>
+  try {
+    result = await brokeredWrite({
+      canonicalRoot: opts.worktreeRoot,
+      // The RAW bytes, not `priorContent`'s UTF-8 decode, for both the journal
+      // and the precondition below — see `priorBytes` on `WriteReconstruction`.
+      // A file holding invalid UTF-8 re-encodes to different bytes than the ones
+      // on disk, so the precondition could never match and every edit to such a
+      // file was refused as "changed on disk".
+      journal: built.priorBytes === null ? [] : [{ file: built.repoRel, content: built.priorBytes }],
+      ops: [
+        {
+          kind: 'write',
+          repoRel: built.repoRel,
+          absPath: built.absPath,
+          content: built.newSource,
+          ...(built.isNew ? { ensureDir: true, isNew: true as const } : {}),
         },
-      },
-    ],
-    ...(opts.invalidateFiles ? { invalidate: opts.invalidateFiles } : {}),
-    // The ack is awaited AFTER the bytes are on disk, and that is deliberate.
-    // It differs from the SDK lane's BUILT-IN Write/Edit, where a failed ack
-    // is a `deny` in the permission gate and the write never happens — but
-    // that lane has no other option: the SDK owns the write syscall, so the
-    // gate is the only place it can intervene. Every tool that performs its
-    // OWN write through `brokeredWrite` acks afterwards, including all six of
-    // the SDK lane's structural tools (`fs-structural-tools.ts`, which report
-    // the same "the change IS on disk" on a failed ack). Acking first here
-    // would make Write and Edit the odd pair on their own lane, and would
-    // record an edit proposal and persist its blob for a write the broker's
-    // precondition check may then refuse. Raised as P3-2 in the 2026-09-04
-    // adversarial review and kept as it stands for those reasons.
-    emit: () =>
-      opts.emitEdit({
-        type: 'overwrite',
-        file: built.repoRel,
-        newSource: built.newSource,
-        ...(built.baseHash ? { baseHash: built.baseHash } : {}),
-        ...(built.isNew ? { allowCreate: true } : {}),
-        appliedByAgent: true,
-      }),
-    ...(opts.recordHistory !== false
-      ? { record: { history: getSharedEditHistory(), label: `${toolName}: ${built.repoRel}` } }
-      : {}),
-    // 'write' / 'edit' are the kinds the ledger already knows (LEDGER_KINDS in
-    // ledger/describe-entry.ts), and the same ones the SDK lane records for the
-    // same tool call. Inventing a spelling here would make every row of this
-    // lane read as the humanised fallback in the Activity panel, and the log is
-    // append-only, so those rows could never be repaired.
-    describe: { kind: toolName === 'Write' ? 'write' : 'edit', lane: 'chat' as const },
-    ...(opts.acquireTreeGate ? { acquireTreeGate: opts.acquireTreeGate } : {}),
-  })
+      ],
+      // Closes the window between reconstruction (which read the file outside
+      // any lock) and the batch's own locks. A file that changed in between
+      // refuses the batch rather than clobbering whoever wrote it.
+      preconditions: [
+        {
+          repoRel: built.repoRel,
+          absPath: built.absPath,
+          expect: {
+            exists: !built.isNew,
+            content: built.priorBytes,
+          },
+        },
+      ],
+      ...(opts.invalidateFiles ? { invalidate: opts.invalidateFiles } : {}),
+      // The ack is awaited AFTER the bytes are on disk, and that is deliberate.
+      // It differs from the SDK lane's BUILT-IN Write/Edit, where a failed ack
+      // is a `deny` in the permission gate and the write never happens — but
+      // that lane has no other option: the SDK owns the write syscall, so the
+      // gate is the only place it can intervene. Every tool that performs its
+      // OWN write through `brokeredWrite` acks afterwards, including all six of
+      // the SDK lane's structural tools (`fs-structural-tools.ts`, which report
+      // the same "the change IS on disk" on a failed ack). Acking first here
+      // would make Write and Edit the odd pair on their own lane, and would
+      // record an edit proposal and persist its blob for a write the broker's
+      // precondition check may then refuse. Raised as P3-2 in the 2026-09-04
+      // adversarial review and kept as it stands for those reasons.
+      emit: () =>
+        opts.emitEdit({
+          type: 'overwrite',
+          file: built.repoRel,
+          newSource: built.newSource,
+          ...(built.baseHash ? { baseHash: built.baseHash } : {}),
+          ...(built.isNew ? { allowCreate: true } : {}),
+          appliedByAgent: true,
+        }),
+      ...(opts.recordHistory !== false
+        ? { record: { history: getSharedEditHistory(), label: `${toolName}: ${built.repoRel}` } }
+        : {}),
+      // 'write' / 'edit' are the kinds the ledger already knows (LEDGER_KINDS in
+      // ledger/describe-entry.ts), and the same ones the SDK lane records for the
+      // same tool call. Inventing a spelling here would make every row of this
+      // lane read as the humanised fallback in the Activity panel, and the log is
+      // append-only, so those rows could never be repaired.
+      describe: { kind: toolName === 'Write' ? 'write' : 'edit', lane: 'chat' as const },
+        ...(gatedByStop ? { acquireTreeGate: gatedByStop } : {}),
+    })
+  } catch (e) {
+    if (e instanceof TurnStopped) return err(stoppedRefusal(toolName))
+    throw e
+  }
 
   if (!result.ok) {
     // A protected-path refusal is phrased as itself. The generic branches read
@@ -303,6 +345,30 @@ async function reportOverwriteConflict(
   } catch {
     // Telemetry must never turn a landed write into a failure.
   }
+}
+
+/**
+ * Read through a function rather than inline, so the compiler cannot narrow
+ * one check's result onto the next: the whole point of the later checks is
+ * that the signal may have changed while an await was in flight.
+ */
+function isStopped(ctx: ToolHandlerContext | undefined): boolean {
+  return ctx?.signal?.aborted === true
+}
+
+/**
+ * Thrown out of the tree-gate callback to stop a batch the user cancelled.
+ * Never escapes `applyWrite`.
+ */
+class TurnStopped extends Error {}
+
+/**
+ * One wording for every refusal point, because they are one fact: the user
+ * pressed Stop and this write did not happen. Naming which internal await the
+ * signal arrived during would tell the model nothing it can act on.
+ */
+function stoppedRefusal(toolName: 'Write' | 'Edit'): string {
+  return `${toolName} was not run: the turn was stopped before anything was written.`
 }
 
 function err(text: string): TextToolResult {

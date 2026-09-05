@@ -1196,4 +1196,80 @@ describe('stopping a turn', () => {
     const frame = events.find((e) => e.kind === 'tool_result' && e.toolUseId === 'tu_2')
     expect(frame).toBeDefined()
   })
+
+  it('does not write when Stop lands while the permission gate is still deciding', async () => {
+    // FX16 item 1 (2026-09-05). The queued-call refusal above reads the signal
+    // ONCE, before `runOneTool`. The adversarial verifier fired Stop AFTER
+    // that read and MEASURED the write landing on disk with
+    // `signal.aborted === true`. The window is not a few instructions: the
+    // gate reconstructs the write (`resolveRepoPath`, `existsSync`, a
+    // whole-file read) before it can decide, and `brokeredWrite` then waits
+    // for the repo's tree gate.
+    //
+    // The wrapper fires Stop while the REAL gate's promise is still pending,
+    // which is the interleaving the verifier measured. A timer cannot do this
+    // reliably: it lands wherever the event loop puts it, which across runs
+    // was sometimes inside the gate and sometimes inside the broker.
+    const controller = new AbortController()
+    const target = join(root, 'src/App.vue')
+    const before = readFileSync(target, 'utf8')
+    const { provider } = scriptedProvider([
+      toolStep('tu_1', 'Write', {
+        file_path: 'src/App.vue',
+        content: '<div>NEW FROM AGENT</div>\n',
+      }),
+      textStep('unused'),
+    ])
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      minimalOpts({
+        signal: controller.signal,
+        emit: (e: ChatStreamEvent) => events.push(e),
+      }) as never,
+      {
+        buildProvider: () => provider,
+        wrapGate: (gate) => (name, input, ctx) => {
+          const decision = gate(name, input, ctx)
+          controller.abort()
+          return decision
+        },
+      },
+    )
+    expect(readFileSync(target, 'utf8')).toBe(before)
+    const res = result.turn.toolResults?.tu_1
+    expect(res?.ok).toBe(false)
+    expect(res?.error).toMatch(/stopped while this call was being checked/i)
+    expect(events.some((e) => e.kind === 'edit_proposed')).toBe(false)
+  })
+
+  it('does not write when Stop lands while the broker is waiting for the tree gate', async () => {
+    // The same defect at its widest point, which is the one the verifier
+    // called out by name: "A tree gate contended by a Commit, a Publish or
+    // another chat session holds there for as long as that operation takes —
+    // seconds, not microseconds." Stop arrives while the write is queued
+    // behind that operation, which is AFTER every check the loop can make.
+    const controller = new AbortController()
+    const target = join(root, 'src/App.vue')
+    const before = readFileSync(target, 'utf8')
+    const { provider } = scriptedProvider([
+      toolStep('tu_1', 'Write', {
+        file_path: 'src/App.vue',
+        content: '<div>NEW FROM AGENT</div>\n',
+      }),
+      textStep('unused'),
+    ])
+    const result = await runChatTurnNeutral(
+      minimalOpts({
+        signal: controller.signal,
+        // Stands in for the Commit that was already holding it.
+        acquireTreeGate: async () => {
+          controller.abort()
+          return () => {}
+        },
+      }) as never,
+      { buildProvider: () => provider },
+    )
+    expect(readFileSync(target, 'utf8')).toBe(before)
+    expect(result.turn.toolResults?.tu_1?.ok).toBe(false)
+  })
 })

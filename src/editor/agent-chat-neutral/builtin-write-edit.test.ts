@@ -468,3 +468,41 @@ describe('FX14: a concurrent write is never overwritten silently', () => {
     expect(warnings).toEqual([])
   })
 })
+
+/**
+ * FX16 item 1 (2026-09-05). The loop rechecks the signal between the gate's
+ * `allow` and the handler, but `brokeredWrite` then waits for the repo's tree
+ * gate, which a Commit or a Publish can hold for seconds. The handler is the
+ * only code left inside that window, so it reads the signal too rather than
+ * naming its context `_ctx` and dropping it.
+ */
+describe('FX16: a stopped turn does not write', () => {
+  it('refuses a Write whose turn was already stopped, and touches no bytes', async () => {
+    const abs = join(root, 'src/App.vue')
+    const before = readFileSync(abs, 'utf8')
+    const controller = new AbortController()
+    controller.abort()
+    const out = await buildWriteToolSpec(opts()).handler(
+      { file_path: 'src/App.vue', content: 'MINE\n' },
+      { signal: controller.signal },
+    )
+    expect(out.isError).toBe(true)
+    expect(out.content[0].text).toMatch(/turn was stopped/i)
+    expect(readFileSync(abs, 'utf8')).toBe(before)
+    expect(emitted).toEqual([])
+  })
+
+  it('refuses an Edit whose turn was already stopped', async () => {
+    const abs = join(root, 'src/App.vue')
+    const before = readFileSync(abs, 'utf8')
+    const controller = new AbortController()
+    controller.abort()
+    const out = await buildEditToolSpec(opts()).handler(
+      { file_path: 'src/App.vue', old_string: 'Old', new_string: 'New' },
+      { signal: controller.signal },
+    )
+    expect(out.isError).toBe(true)
+    expect(out.content[0].text).toMatch(/turn was stopped/i)
+    expect(readFileSync(abs, 'utf8')).toBe(before)
+  })
+})

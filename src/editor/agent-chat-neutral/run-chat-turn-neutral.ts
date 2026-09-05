@@ -134,6 +134,19 @@ export interface RunChatTurnNeutralDeps {
    * environment; production never sets it.
    */
   buildProvider?: (input: { providerId: string; model?: string }) => LLMProvider
+  /**
+   * Wrap the permission gate this turn runs. Defaults to the identity.
+   *
+   * Only tests inject this, and only one thing needs it: the window between
+   * the gate's decision and the tool handler (FX16 item 1) cannot be entered
+   * from outside, because the loop builds its own gate and every other
+   * observable moment in a turn is either before the loop's pre-call signal
+   * check or inside the handler. A wrapper that fires Stop while the real
+   * gate's promise is still pending reproduces the interleaving the verifier
+   * measured, instead of approximating it with a timer that lands wherever
+   * the event loop happens to put it. Production never sets it.
+   */
+  wrapGate?: (gate: ToolPermissionGate) => ToolPermissionGate
 }
 
 export async function runChatTurnNeutral(
@@ -393,7 +406,7 @@ async function runInner(
   })
   const byName = new Map(catalog.map((spec) => [spec.name, spec]))
 
-  const gate = buildToolPermissionGate({
+  const builtGate = buildToolPermissionGate({
     worktreeRoot: opts.worktreeRoot,
     ...(opts.allowSecretReads === true ? { allowSecretReads: true } : {}),
     // A gate built for the neutral lane never emits: on this lane the write
@@ -420,6 +433,7 @@ async function runInner(
     // The baseline is advanced from `builtin-edit.ts` instead, on the broker's
     // success path. See `recordOwnWrite` on `BuiltinWriteOpts` (FX11 item 2).
   })
+  const gate = deps.wrapGate ? deps.wrapGate(builtGate) : builtGate
 
   const system = buildNeutralSystemPrompt({
     writeToolsEnabled: byName.has('Write'),
@@ -829,6 +843,27 @@ async function runOneTool(
       toolUseId: call.id,
     })
     if (decision.behavior === 'deny') return errResult(decision.message)
+    // Stop is read AGAIN here, and this is the recheck that makes "Stop stops"
+    // true rather than nearly true.
+    //
+    // FX16 item 1 (2026-09-05). The loop's pre-call check refuses the calls
+    // QUEUED behind the one in flight, but nothing re-read the signal between
+    // that check and the write syscall. The adversarial verifier fired Stop
+    // after the check and MEASURED the write landing on disk with
+    // `signal.aborted === true`. The window is not a few instructions: the
+    // gate above reconstructs the write (`resolveRepoPath`, `existsSync`, a
+    // whole-file read), and `brokeredWrite` below then waits for the repo's
+    // tree gate, which a Commit, a Publish or another chat session holds for
+    // as long as that operation takes.
+    //
+    // This closes the gate's share of that window. The broker's share is
+    // closed inside the write tools themselves, which read the same signal
+    // (`builtin-edit.ts`) — the both-ends rule, applied to cancellation.
+    if (signal?.aborted === true) {
+      return errResult(
+        `${call.name} was not run: the turn was stopped while this call was being checked.`,
+      )
+    }
     const parsed = z.object(spec.inputShape).safeParse(input)
     if (!parsed.success) {
       return errResult(
