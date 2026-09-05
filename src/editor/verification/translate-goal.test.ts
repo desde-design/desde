@@ -242,6 +242,53 @@ describe('translateGoal', () => {
     }
   })
 
+  it('drops a zero tolerance so the alignment default survives a padded answer', async () => {
+    // `toStrictJsonSchema` turns every optional property into a REQUIRED,
+    // nullable one, because that is the only shape OpenAI's strict structured
+    // output accepts. MEASURED: `predicates[].args.required` is now
+    // `["other","axis","tol","min","expected"]`. So the model can no longer
+    // omit `tol` — it has to answer something on every predicate, and the
+    // value a padding model reaches for is `0`.
+    //
+    // A zero tolerance is never a useful answer: `aligned()` applies its 2px
+    // `ALIGN_TOL` band only when `tol` is `undefined`, so a `0` that survived
+    // here would false-fail a sub-pixel offset on an alignment the user
+    // actually met. Absent and zero have to stay distinguishable.
+    const provider = fakeProvider({
+      predicates: [
+        { predicate: 'aligned', args: { other: '.x', axis: 'left', tol: 0 } },
+        { predicate: 'aligned', args: { other: '.x', axis: 'left', tol: 1.5 } },
+      ],
+    })
+    const r = await translateGoal({ goal: 'align with .x', selector: '.btn', provider })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.predicates[0].args).toEqual({ other: '.x', axis: 'left' })
+      // A real, positive tolerance is still honoured.
+      expect(r.predicates[1].args).toEqual({ other: '.x', axis: 'left', tol: 1.5 })
+    }
+  })
+
+  it('treats an explicit null arg as absent, leaving every default in place', async () => {
+    // The other half of the strict-schema shape: the model answers the
+    // now-required properties with `null`. `dropSyntheticNulls` normally
+    // strips those before they reach here, but the boundary must not depend
+    // on that — this is the LLM trust boundary, and a null has to read as
+    // "not answered" rather than as a value.
+    const provider = fakeProvider({
+      predicates: [
+        { predicate: 'aligned', args: { other: '.x', axis: 'left', tol: null, min: null, expected: null } },
+        { predicate: 'contrastRatio', args: { other: null, axis: null, tol: null, min: null, expected: null } },
+      ],
+    })
+    const r = await translateGoal({ goal: 'align with .x and stay readable', selector: '.btn', provider })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.predicates[0].args).toEqual({ other: '.x', axis: 'left' })
+      expect(r.predicates[1].args).toEqual({})
+    }
+  })
+
   it('drops a predicate missing a non-selector required arg', async () => {
     const provider = fakeProvider({
       predicates: [

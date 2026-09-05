@@ -126,7 +126,7 @@ interface RawPredicate {
 
 /**
  * Keep only the args keys we recognize, with correct types AND sane ranges.
- * A nonsensical numeric (negative `tol` → guaranteed false-fail; `min <= 0` →
+ * A nonsensical numeric (a non-positive `tol` → guaranteed false-fail; `min <= 0` →
  * always-pass contrast) is dropped, not accepted — the predicate then falls
  * back to its safe default rather than inheriting a poisoned threshold. This
  * is the LLM trust boundary; the providers don't enforce schemas strictly.
@@ -139,8 +139,14 @@ function sanitizeArgs(raw: unknown): PredicateArgs {
   if (typeof a.axis === 'string' && (ALIGN_AXES as readonly string[]).includes(a.axis)) {
     out.axis = a.axis as AlignAxis
   }
-  // Tolerance is a non-negative pixel distance.
-  if (typeof a.tol === 'number' && Number.isFinite(a.tol) && a.tol >= 0) out.tol = a.tol
+  // Tolerance is a POSITIVE pixel distance. Zero is rejected on purpose, not
+  // as a range check but to keep "absent" and "zero" distinguishable: the
+  // strict-output schema makes every arg required-and-nullable, so the model
+  // must answer `tol` on every predicate and a padding answer is `0`. A zero
+  // band makes `aligned()` false-fail a sub-pixel offset the user cannot see,
+  // whereas dropping it restores the 2px `ALIGN_TOL` default. A deliberate
+  // "exactly aligned" request is the rarer reading and the unsafe one.
+  if (typeof a.tol === 'number' && Number.isFinite(a.tol) && a.tol > 0) out.tol = a.tol
   // WCAG contrast ratios live in [1, 21]; a min below 1 would false-pass any
   // text and above 21 would false-fail everything, so reject out-of-range
   // values → the predicate falls back to its safe 4.5 default.
