@@ -28,7 +28,11 @@ import {
 import { newSecurityContext } from "../auth.js"
 import { startHttpServer, type HttpServerHandle } from "../http-server.js"
 import { pickFreePort } from "../launcher-server.js"
-import { modelCatalogResolver, setModelCatalogLiveSourcesForTests } from "../model-catalog-source.js"
+import {
+  modelCatalogResolver,
+  resolvedDefaultModelFor,
+  setModelCatalogLiveSourcesForTests,
+} from "../model-catalog-source.js"
 import { assertChatCredentials } from "../../../../src/editor/llm-providers/assert-chat-credentials.js"
 
 // The BYO-key cutover: chat dispatch now refuses without a model credential,
@@ -1392,10 +1396,14 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
     const loaders = makeModelConfigLoaders({ saved: [], capturedRunOpts, seedSession })
     await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
 
-    // Falls back to the default the picker shows, not to the retired id and
-    // not to whatever the runtime would have guessed.
-    expect(capturedRunOpts.value?.model).not.toBe("claude-retired-1")
-    expect(capturedRunOpts.value?.model).toBeTruthy()
+    // Falls back to the default the picker shows — named, and resolved from
+    // the SAME function the handler resolves it from. A `not.toBe(retired)`
+    // plus `toBeTruthy()` pair would also have passed on another provider's
+    // default, on a stale id, or on any non-empty string at all.
+    const expectedDefault = await resolvedDefaultModelFor("anthropic")
+    expect(expectedDefault).toBeTruthy()
+    expect(expectedDefault).not.toBe("claude-retired-1")
+    expect(capturedRunOpts.value?.model).toBe(expectedDefault)
   })
 
   // M3 — the spec requires the silent fallback above to announce itself
@@ -1426,9 +1434,13 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
       )
     expect(note).toBeDefined()
     expect(note?.reason).toMatch(/default model for this turn/i)
-    // Still non-blocking: the turn ran on the catalog's default.
-    expect(capturedRunOpts.value?.model).not.toBe("claude-retired-1")
-    expect(capturedRunOpts.value?.model).toBeTruthy()
+    // Still non-blocking: the turn ran on the catalog's default, named from
+    // the same source the handler resolves it from rather than merely being
+    // "not the retired id".
+    const expectedDefault = await resolvedDefaultModelFor("anthropic")
+    expect(expectedDefault).toBeTruthy()
+    expect(expectedDefault).not.toBe("claude-retired-1")
+    expect(capturedRunOpts.value?.model).toBe(expectedDefault)
   })
 
   // M3 — the spec calls for a ONE-TIME notice. The notes ride the
