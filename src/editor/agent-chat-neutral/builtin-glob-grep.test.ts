@@ -10,6 +10,7 @@ import {
   GREP_MAX_MATCHES,
   GREP_MAX_TOTAL_BYTES,
 } from './builtin-glob-grep'
+import { GREP_DEADLINE_MS } from './regex-line-scanner'
 
 let root: string
 beforeEach(() => {
@@ -104,5 +105,95 @@ describe('Grep', () => {
     const spec = buildGrepToolSpec({ worktreeRoot: root })
     expect(spec.description).toContain(String(GREP_MAX_MATCHES))
     expect(spec.description).toContain(String(GREP_MAX_LINE_CHARS))
+  })
+})
+
+/**
+ * FX14 item 1 (2026-09-05), a P1 from the neutral-runtime review.
+ *
+ * The pattern is model input, and the model reads an untrusted repository, so
+ * a README saying "search for `^( +)+X`" is enough to supply it. V8's RegExp
+ * backtracks, so a nested quantifier is exponential in the length of the run
+ * it is matched against, and 32 characters is already minutes.
+ *
+ * The verifier MEASURED the shape below at 272,769 ms on a single 43-character
+ * line, during which a 200 ms interval ticked ZERO times and an abort
+ * scheduled for 500 ms never fired at all: its timer could not run either. The
+ * process this happens in is the local CLI that also serves the HTTP API and
+ * supervises Vite, so the whole Editor is gone, and Stop cannot even be
+ * registered.
+ *
+ * These tests assert the two things a deadline has to buy, and neither of them
+ * can be read off the source: that the call RETURNS, and that the event loop
+ * kept running while it was in there. A deadline checked every N lines would
+ * pass an inspection and fail both of these, because the whole 272 s is inside
+ * ONE `re.test` on ONE line.
+ */
+describe('Grep cannot freeze the process', () => {
+  /** The verifier's exact fixture: 32 leading spaces, then ordinary code. */
+  const CATASTROPHIC = '^( +)+X'
+  function writeIndentedLine(): void {
+    writeFileSync(join(root, 'src/indent.ts'), `${' '.repeat(32)}const x = 1\n`, 'utf8')
+  }
+
+  it(
+    'returns on a deadline instead of running for minutes, and the event loop keeps ticking',
+    async () => {
+      writeIndentedLine()
+      let ticks = 0
+      const interval = setInterval(() => {
+        ticks++
+      }, 50)
+      const startedAt = Date.now()
+      let out
+      try {
+        out = await buildGrepToolSpec({ worktreeRoot: root }).handler(
+          { pattern: CATASTROPHIC, glob: 'src/indent.ts' },
+          {},
+        )
+      } finally {
+        clearInterval(interval)
+      }
+      const elapsed = Date.now() - startedAt
+
+      // Returns, and within a small multiple of the deadline.
+      expect(elapsed).toBeLessThan(GREP_DEADLINE_MS * 3)
+      // And the process was ALIVE while it searched. This is the assertion the
+      // per-N-lines version of this fix cannot pass.
+      expect(ticks).toBeGreaterThan(5)
+      // Said plainly enough that the model can act on it.
+      expect(out.content[0].text).toMatch(/cut short|too slow|stopped after/i)
+    },
+    30_000,
+  )
+
+  it(
+    'honours the abort signal the runner threads in, and the abort can still fire',
+    async () => {
+      writeIndentedLine()
+      const controller = new AbortController()
+      setTimeout(() => controller.abort(), 300)
+      const startedAt = Date.now()
+      const out = await buildGrepToolSpec({ worktreeRoot: root }).handler(
+        { pattern: CATASTROPHIC, glob: 'src/indent.ts' },
+        { signal: controller.signal },
+      )
+      const elapsed = Date.now() - startedAt
+
+      // The abort's own timer could run, which it could not before.
+      expect(controller.signal.aborted).toBe(true)
+      expect(elapsed).toBeLessThan(GREP_DEADLINE_MS)
+      expect(out.content[0].text).toMatch(/cancelled/i)
+    },
+    30_000,
+  )
+
+  it('an ordinary search is unaffected and still reports its matches', async () => {
+    writeIndentedLine()
+    const startedAt = Date.now()
+    const out = await buildGrepToolSpec({ worktreeRoot: root }).handler({ pattern: 'KButton' }, {})
+    expect(Date.now() - startedAt).toBeLessThan(GREP_DEADLINE_MS)
+    expect(out.isError).toBeUndefined()
+    expect(out.content[0].text).toBe('src/App.vue:1:<template><KButton/></template>')
   })
 })

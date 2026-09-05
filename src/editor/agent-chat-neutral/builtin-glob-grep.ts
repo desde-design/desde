@@ -19,6 +19,22 @@ import { z } from 'zod'
 
 import { resolveRepoPath } from '../agent-tools/read-tools'
 
+import { createRegexLineScanner, GREP_DEADLINE_MS } from './regex-line-scanner'
+
+/**
+ * The context the runner threads into every tool handler. Both handlers here
+ * used to take `_ctx?: unknown` and ignore it, which is how a search could
+ * outlive a cancelled turn.
+ */
+interface SearchToolContext {
+  signal?: AbortSignal
+}
+
+function signalOf(ctx: unknown): AbortSignal | undefined {
+  const signal = (ctx as SearchToolContext | undefined)?.signal
+  return signal instanceof AbortSignal ? signal : undefined
+}
+
 /**
  * `@types/node` is pinned to the ^20 line repo-wide, whose `fs/promises`
  * typings predate `glob` (added in Node 22). The runtime here is Node
@@ -73,9 +89,15 @@ async function matchingPaths(
   worktreeRoot: string,
   pattern: string,
   cap: number,
+  signal?: AbortSignal | undefined,
 ): Promise<string[]> {
   const out: string[] = []
   for await (const entry of globFn(pattern, { cwd: worktreeRoot })) {
+    // Enumeration is an async loop, so unlike the scan below it genuinely
+    // yields between entries and a plain check is enough. It matters: a
+    // pattern the model can write (`../../**/*`) walks the real filesystem,
+    // and MEASURED by the verifier at 793 ms for one level above the repo.
+    if (signal?.aborted === true) break
     const repoRel = String(entry).split(pathSep).join('/')
     if (isExcluded(repoRel)) continue
     // The pattern is model input, and the model reads an untrusted repo
@@ -116,11 +138,15 @@ export function buildGlobToolSpec(opts: BuiltinSearchOpts) {
         .string()
         .describe('Glob pattern, relative to the repository root. For example `src/**/*.vue`.'),
     },
-    handler: async (input: Record<string, unknown>, _ctx?: unknown) => {
+    handler: async (input: Record<string, unknown>, ctx?: unknown) => {
       const pattern = typeof input.pattern === 'string' ? input.pattern : ''
       if (pattern.length === 0) return err('Glob needs a non-empty pattern.')
+      const signal = signalOf(ctx)
       try {
-        const found = await matchingPaths(opts.worktreeRoot, pattern, GLOB_MAX_RESULTS)
+        const found = await matchingPaths(opts.worktreeRoot, pattern, GLOB_MAX_RESULTS, signal)
+        if (signal?.aborted === true) {
+          return { content: [{ type: 'text' as const, text: 'Search cancelled.' }], isError: undefined }
+        }
         if (found.length === 0) {
           return { content: [{ type: 'text' as const, text: 'No files matched.' }], isError: undefined }
         }
@@ -145,9 +171,11 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
       '`path:line:text`. Use this to find where a component is used, where a string appears, or ' +
       'where a value is set. Scope it with `glob` when you already know which part of the tree ' +
       `to look in. Capped at ${GREP_MAX_MATCHES} matches, ${GREP_MAX_LINE_CHARS} characters per ` +
-      `line and ${GREP_MAX_TOTAL_BYTES} bytes of output in total; if you hit a cap, make the ` +
-      'pattern more specific rather than reading everything. Build output, dependencies and ' +
-      'version-control internals are never searched.',
+      `line, ${GREP_MAX_TOTAL_BYTES} bytes of output in total and ${GREP_DEADLINE_MS}ms of ` +
+      'searching; if you hit a cap, make the pattern more specific rather than reading ' +
+      'everything. Avoid nested quantifiers such as `(a+)+` or `( +)+`: they backtrack ' +
+      'exponentially and will hit the time limit without finding anything. Build output, ' +
+      'dependencies and version-control internals are never searched.',
     kind: 'builtin' as const,
     inputShape: {
       pattern: z.string().describe('JavaScript regular expression source, for example `KButton`.'),
@@ -160,19 +188,25 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
         .optional()
         .describe('Match without regard to case. Defaults to false.'),
     },
-    handler: async (input: Record<string, unknown>, _ctx?: unknown) => {
+    handler: async (input: Record<string, unknown>, ctx?: unknown) => {
       const source = typeof input.pattern === 'string' ? input.pattern : ''
       if (source.length === 0) return err('Grep needs a non-empty pattern.')
-      let re: RegExp
+      const flags = input.case_insensitive === true ? 'i' : ''
+      // Compiled here only to reject a malformed pattern with a message the
+      // model can act on. Compilation is linear; it is EXECUTION that can
+      // backtrack forever, and that happens on another thread (see
+      // `regex-line-scanner.ts`).
       try {
-        re = new RegExp(source, input.case_insensitive === true ? 'i' : '')
+        new RegExp(source, flags)
       } catch (e) {
         return err(`Grep: '${source}' is not a valid regular expression: ${(e as Error).message}`)
       }
+      const signal = signalOf(ctx)
+      const deadlineAt = Date.now() + GREP_DEADLINE_MS
       const pattern = typeof input.glob === 'string' && input.glob.length > 0 ? input.glob : '**/*'
       let paths: string[]
       try {
-        paths = await matchingPaths(opts.worktreeRoot, pattern, GLOB_MAX_RESULTS)
+        paths = await matchingPaths(opts.worktreeRoot, pattern, GLOB_MAX_RESULTS, signal)
       } catch (e) {
         return err(`Grep failed to enumerate files: ${(e as Error).message}`)
       }
@@ -190,56 +224,97 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
       let byteCapped = false
       let clampedAny = false
       let totalBytes = 0
-      for (const repoRel of paths) {
-        if (capped || byteCapped) break
-        const safe = await resolveRepoPath(opts.worktreeRoot, repoRel)
-        if (!safe.ok) continue
-        let text: string
-        try {
-          const raw = await readFile(safe.absolute)
-          if (raw.byteLength > GREP_MAX_FILE_BYTES) continue
-          // A NUL byte in the first kilobyte is the cheap binary test. A false
-          // negative costs one unreadable line of output, not correctness.
-          if (raw.subarray(0, 1024).includes(0)) continue
-          text = raw.toString('utf8')
-        } catch {
-          continue
-        }
-        const lines = text.split('\n')
-        for (let i = 0; i < lines.length; i++) {
-          if (!re.test(lines[i])) continue
-          const raw = lines[i]
-          const clamped = raw.length > GREP_MAX_LINE_CHARS
-          if (clamped) clampedAny = true
-          const shown = clamped
-            ? `${raw.slice(0, GREP_MAX_LINE_CHARS)} …[line truncated at ${GREP_MAX_LINE_CHARS} characters]`
-            : raw
-          const hit = `${repoRel}:${i + 1}:${shown}`
-          const size = Buffer.byteLength(hit, 'utf8') + 1
-          // Checked BEFORE the push, and the first hit is always kept: a cap
-          // that could return zero matches for a pattern that matched would
-          // read to the model as "not in the repo".
-          if (hits.length > 0 && totalBytes + size > GREP_MAX_TOTAL_BYTES) {
-            byteCapped = true
+      /** Set when the search was cut short rather than finished. */
+      let cutShort: 'deadline' | 'aborted' | null = null
+      let scanFailed: string | null = null
+      // The regex runs on another thread and the deadline is enforced by
+      // terminating it, because the whole cost of a backtracking pattern lands
+      // inside ONE `re.test` on ONE line: a check between lines is never
+      // reached. See the header of `regex-line-scanner.ts` for the
+      // measurements behind that.
+      const scanner = createRegexLineScanner({ source, flags, deadlineAt, signal })
+      try {
+        for (const repoRel of paths) {
+          if (capped || byteCapped) break
+          const safe = await resolveRepoPath(opts.worktreeRoot, repoRel)
+          if (!safe.ok) continue
+          let text: string
+          try {
+            const raw = await readFile(safe.absolute)
+            if (raw.byteLength > GREP_MAX_FILE_BYTES) continue
+            // A NUL byte in the first kilobyte is the cheap binary test. A false
+            // negative costs one unreadable line of output, not correctness.
+            if (raw.subarray(0, 1024).includes(0)) continue
+            text = raw.toString('utf8')
+          } catch {
+            continue
+          }
+          const lines = text.split('\n')
+          const outcome = await scanner.scan(lines, GREP_MAX_MATCHES)
+          if (outcome.status === 'failed') {
+            scanFailed = outcome.message
             break
           }
-          hits.push(hit)
-          totalBytes += size
-          if (hits.length >= GREP_MAX_MATCHES) {
-            capped = true
+          if (outcome.status !== 'ok') {
+            cutShort = outcome.status
             break
           }
+          for (const i of outcome.lineIndexes) {
+            const raw = lines[i]
+            const clamped = raw.length > GREP_MAX_LINE_CHARS
+            if (clamped) clampedAny = true
+            const shown = clamped
+              ? `${raw.slice(0, GREP_MAX_LINE_CHARS)} …[line truncated at ${GREP_MAX_LINE_CHARS} characters]`
+              : raw
+            const hit = `${repoRel}:${i + 1}:${shown}`
+            const size = Buffer.byteLength(hit, 'utf8') + 1
+            // Checked BEFORE the push, and the first hit is always kept: a cap
+            // that could return zero matches for a pattern that matched would
+            // read to the model as "not in the repo".
+            if (hits.length > 0 && totalBytes + size > GREP_MAX_TOTAL_BYTES) {
+              byteCapped = true
+              break
+            }
+            hits.push(hit)
+            totalBytes += size
+            if (hits.length >= GREP_MAX_MATCHES) {
+              capped = true
+              break
+            }
+          }
         }
+      } finally {
+        scanner.dispose()
       }
+      if (scanFailed !== null && hits.length === 0) {
+        return err(`Grep could not run the search: ${scanFailed}`)
+      }
+      // Attributed to the pattern rather than to the repository, because a
+      // pattern is the only thing that reaches this limit in practice and it
+      // is the only thing the model can change.
+      const cutShortNotice =
+        cutShort === 'deadline'
+          ? `\n\n[stopped after ${GREP_DEADLINE_MS}ms; the search was cut short before every file ` +
+            'was checked. A pattern with nested quantifiers such as `(a+)+` or `( +)+` backtracks ' +
+            'exponentially and will never finish: rewrite it. Otherwise narrow the scope with ' +
+            '`glob`.]'
+          : cutShort === 'aborted'
+            ? '\n\n[search cancelled.]'
+            : ''
       if (hits.length === 0) {
+        const head = cutShort === null ? 'No matches.' : 'No matches found before the search was cut short.'
         return {
-          content: [{ type: 'text' as const, text: `No matches.${enumerationNotice}` }],
-          isError: undefined,
+          content: [{ type: 'text' as const, text: `${head}${cutShortNotice}${enumerationNotice}` }],
+          // A deadline means the question was not answered, and "no matches"
+          // would read to the model as "not in the repository". An abort is
+          // not a failure: the user asked for it.
+          isError: cutShort === 'deadline' ? (true as const) : undefined,
         }
       }
       // The match cap and the enumeration cap are independent: a search can
       // hit either, both, or neither, so both notices can appear together.
       const notice =
+        cutShortNotice +
         (capped ? `\n\n[stopped at ${GREP_MAX_MATCHES} matches; narrow the pattern or pass a glob]` : '') +
         (byteCapped
           ? `\n\n[stopped at the ${GREP_MAX_TOTAL_BYTES}-byte output limit; narrow the pattern or pass a glob]`
@@ -248,7 +323,10 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
           ? `\n\n[at least one match sat on a line longer than ${GREP_MAX_LINE_CHARS} characters and was cut short; open that file with Read to see the whole line]`
           : '') +
         enumerationNotice
-      return { content: [{ type: 'text' as const, text: `${hits.join('\n')}${notice}` }], isError: undefined }
+      return {
+        content: [{ type: 'text' as const, text: `${hits.join('\n')}${notice}` }],
+        isError: cutShort === 'deadline' ? (true as const) : undefined,
+      }
     },
   }
 }
