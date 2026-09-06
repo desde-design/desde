@@ -709,7 +709,7 @@ function realPathIsUnder(real: string, rootReal: string): boolean {
 
 /**
  * **FX11 (codex review + adversarial verification, 2026-09-05, SECURITY),
- * corrected by FX17 and again by FX19 the same day.**
+ * corrected by FX17, by FX19 the same day, and by FX20 on 2026-09-06.**
  * Create a file that provably lands inside the repo.
  *
  * The create used to be a plain `writeFile`, on the reasoning quoted above
@@ -750,69 +750,125 @@ function realPathIsUnder(real: string, rootReal: string): boolean {
  * residue of a lost race is an empty file, and that the escapes which
  * remained were all the unpreventable shape.
  *
+ * **A THIRD measurement disproved the replacement claim.** FX19's comment
+ * said the residue of a lost race is "an EMPTY file outside the repository".
+ * FX19's guard pinned the write's IMMEDIATE PARENT. `rename(2)` moves the
+ * renamed directory's status-change time and NOT its children's, so a
+ * swapper that renames a GRANDPARENT leaves the parent looking untouched
+ * throughout — same realpath, same inode, same ctime — while the whole
+ * subtree, the parent included, sits outside the repository with the bytes
+ * flowing into it. The verifier measured 7 escapes in 6000 attempts, each
+ * 32 MiB of content reachable at an outside path while the call reported
+ * success; its direct-parent control was 0 in 3000. Reproduced here on the
+ * same harness at 20 escapes in 2100 attempts.
+ *
+ * So a third claim is retracted: that the parent proof bounded the residue
+ * at all. It bounded it for one level of the chain.
+ *
  * ## What the code does now
  *
  *  1. `realpath` the parent directory and require it under `rootReal`.
  *     `realpath` resolves EVERY component, so this catches an ancestor
  *     swap that an `lstat` of the leaf alone cannot see. It runs before
  *     anything is created, so the ordinary attack — a symlink already in
- *     place when we get here — creates nothing at all. Record that
- *     directory's own `dev`/`ino`.
+ *     place when we get here — creates nothing at all. Record the
+ *     `dev`/`ino`/`ctimeNs` of every directory from that parent up to the
+ *     repository root, not just the parent's: renaming a directory does not
+ *     touch its children's status-change times, so a proof anchored on the
+ *     parent alone is blind to every level above it (FX20 item 2).
  *  2. Create at `<resolved parent>/<basename>` with
  *     `O_CREAT | O_EXCL | O_NOFOLLOW`. `O_EXCL` refuses atomically if
  *     ANYTHING is already at that name, a symlink included, so the create
  *     can never follow one.
- *  3. Prove three things before writing a single byte: the parent path
- *     still resolves to itself, the parent is still the same directory
- *     inode recorded in step 1, and the target path names the inode the
- *     open handle holds.
+ *  3. Prove four things before writing a single byte: the parent path
+ *     still resolves to itself, every directory in the chain is still the
+ *     inode recorded in step 1, no ancestor's status-change time has moved
+ *     since step 1, and the target path names the inode the open handle
+ *     holds.
  *  4. Sample the parent directory's `ctimeNs` — its status-change time.
  *     Sampled HERE, after the create, because creating the entry is itself
  *     a change to the parent and moves it.
  *  5. Write the caller's bytes through the open handle, which is anchored
  *     to the inode step 3 proved.
- *  6. Re-run step 3's proof AND require the parent's `ctimeNs` to be
- *     BYTE-IDENTICAL to step 4's. If either disagrees, `ftruncate(0)` the
+ *  6. Re-run step 3's proof, require every ANCESTOR's `ctimeNs` to be
+ *     byte-identical to step 1's, AND require the parent's `ctimeNs` to be
+ *     byte-identical to step 4's. The ancestors are compared against the
+ *     PRE-OPEN sample because this create adds no entry to any of them, so
+ *     their window is wider than the parent's and covers the open itself.
+ *     If any of it disagrees, `ftruncate(0)` the
  *     handle — the fd still names our inode wherever it has been moved to,
  *     so this empties it — unlink the path when it still names that inode,
  *     and fail the op, so the model is told the write did not happen.
  *
  * ## What step 6 guarantees, and what it does not
  *
- * It guarantees this: **the parent directory was not renamed, and gained
- * and lost no entry, between the sample and the re-check.** It rests on two
- * platform facts, and neither is asserted here on anyone's say-so: both are
- * pinned by a test in `write-broker-create-containment.test.ts` that
- * re-checks them on every suite run, on the machine the suite runs on.
- * They are that `rename(2)` moves the renamed directory's status-change
- * time even when the parent and the inode stay the same, and that writing a
- * file's CONTENT does not move its directory's — the second is what makes
- * an unchanged sample meaningful across step 5. To those the standard adds
- * that an unprivileged process cannot move a status-change time BACKWARDS:
- * `utimensat` sets it to now, and only the system clock could rewind it,
- * which is not a repository's to set.
+ * It guarantees this: **no directory from the parent up to the repository
+ * root was renamed, and the parent gained and lost no entry, between the
+ * sample and the re-check.** It rests on three platform facts, and none is
+ * asserted here on anyone's say-so: all three are pinned by a test in
+ * `write-broker-create-containment.test.ts` that re-checks them on every
+ * suite run, on the machine the suite runs on. They are that `rename(2)`
+ * moves the renamed directory's status-change time even when the parent and
+ * the inode stay the same; that writing a file's CONTENT does not move its
+ * directory's — the second is what makes an unchanged sample meaningful
+ * across step 5; and that renaming a directory does NOT move its children's,
+ * which is why the chain has to be walked rather than inferred from the
+ * parent. To those the standard adds that an unprivileged process cannot
+ * move a status-change time BACKWARDS: `utimensat` sets it to now, and only
+ * the system clock could rewind it, which is not a repository's to set.
  *
- * It does NOT guarantee containment across the whole call. Node exposes no
- * `openat`, so step 2 is a path lookup and steps 1-4 cannot be made atomic
- * with respect to a rename. A swap landing between them can still create
- * an EMPTY file outside the repository, which step 3 refuses and unlinks
- * whenever the path still names it. **How wide that remaining window is,
- * and how often it can be hit, is UNPROVEN — no measurement here or by the
- * verifier bounds it, and the previous two attempts at a number were both
- * disproved.** Treat it as open, and measure independently before writing
- * any figure here.
+ * ## The residual, stated as narrowly as it can honestly be stated
  *
- * The check is also only as fine as the filesystem's timestamp
- * granularity. On APFS that is nanoseconds; on a filesystem with
- * one-second timestamps a whole rename-out-and-back inside one tick would
- * be invisible to it, and the inode proofs of step 3 are all that is left.
+ * **This BOUNDS the window. It does not close it, and this comment does not
+ * claim it does.** Three previous versions of this paragraph made a claim a
+ * later measurement disproved, so what follows separates what was measured
+ * from what is argued.
  *
- * It fails CLOSED in one more direction than it strictly must: another
- * process adding or removing ANY entry in the same directory during step 5
- * also moves the status-change time, and that refuses the create too. The
- * model is told the write did not happen, which is true — the empty file
- * is unlinked — and it can retry. A spurious round trip is the cheaper
- * error.
+ * The invariant that WOULD close the class is: every byte is written through
+ * a descriptor whose entire directory chain was pinned before the open, so
+ * that no path lookup happens after the pinning. Expressing it needs
+ * `openat(2)` against a directory descriptor, or `O_PATH`-relative
+ * operations — walk the chain once, hold a descriptor per level, and open
+ * the leaf relative to the descriptor you already proved. **Node exposes
+ * neither.** `fs.open` takes a path and performs its own lookup, and there
+ * is no `dirfd` argument anywhere in `node:fs`. So steps 1-4 cannot be made
+ * atomic with respect to a rename in this runtime, whatever order they are
+ * written in.
+ *
+ * What the chain check does instead is make every level of the chain carry
+ * the same nanosecond ctime bound the parent already had. An attacker still
+ * has a window: a rename that lands and is undone entirely between two of
+ * our `stat` calls, on a filesystem whose timestamp granularity cannot
+ * separate them, is invisible. **An unpinned-ancestor race therefore
+ * remains.** Its width is not measured, and no number for it should be
+ * written here without one.
+ *
+ * MEASURED, on the shape that WAS fixed — a same-inode round trip of an
+ * ancestor across the write, two OS processes, 32 MiB payloads, an escape
+ * counted only when a link taken at an outside path fell inside one call's
+ * window AND that call returned success AND the inode still held the full
+ * payload at the end:
+ *
+ *   - before this change: **20 escapes in 2100 attempts**
+ *   - after it: **0 escapes in 3600 attempts**, with 11 links taken inside a
+ *     call window (so the race was genuinely reached), every one of them
+ *     empty at the end, and none of them during an accepted call.
+ *
+ * That is the same discriminating shape the direct-parent control had after
+ * FX19, and it says the ancestor round trip now behaves like the parent one.
+ * It does not say the window is gone.
+ *
+ * The check is also only as fine as the filesystem's timestamp granularity.
+ * On APFS that is nanoseconds; on a filesystem with one-second timestamps a
+ * whole rename-out-and-back inside one tick would be invisible to it, and
+ * the inode proofs of step 3 are all that is left.
+ *
+ * It fails CLOSED in one more direction than it strictly must, and the chain
+ * widens that: another process adding or removing ANY entry in the parent
+ * during step 5 refuses the create, and so does a rename of any directory
+ * above it. The model is told the write did not happen, which is true — the
+ * partial file is truncated and unlinked — and it can retry. A spurious
+ * round trip is the cheaper error.
  *
  * ## Why the bytes are not staged elsewhere first
  *
@@ -842,7 +898,12 @@ export async function createNoFollow(
       `'${absPath}' would be created outside the repository (its parent resolves to '${parentReal}'). Refusing.`,
     )
   }
-  const parentAtStart = await stat(parentReal, { bigint: true })
+  // Every directory from the parent up to the repository root, pinned before
+  // anything is created. FX20 item 2: pinning the parent alone left an
+  // ANCESTOR rename invisible, because `rename(2)` moves the renamed inode's
+  // status-change time and not its children's.
+  const chain = ancestorChain(parentReal, rootReal)
+  const chainAtStart = await Promise.all(chain.map((dir) => stat(dir, { bigint: true })))
   const target = join(parentReal, basename(absPath))
 
   const handle = await open(
@@ -855,13 +916,26 @@ export async function createNoFollow(
     // `null` when the parent could not be stat'd at all, which every caller
     // below treats as a failed proof.
     const stillProven = async (): Promise<{ parentCtimeNs: bigint } | null> => {
-      const [resolvedNow, parentNow, onPath] = await Promise.all([
+      const [resolvedNow, chainNow, onPath] = await Promise.all([
         realpath(parentReal).catch(() => null),
-        stat(parentReal, { bigint: true }).catch(() => null),
+        Promise.all(chain.map((dir) => stat(dir, { bigint: true }).catch(() => null))),
         lstat(target).catch(() => null),
       ])
-      if (resolvedNow !== parentReal || parentNow === null) return null
-      if (parentNow.dev !== parentAtStart.dev || parentNow.ino !== parentAtStart.ino) return null
+      if (resolvedNow !== parentReal) return null
+      for (let i = 0; i < chain.length; i++) {
+        const now = chainNow[i]
+        const start = chainAtStart[i]!
+        if (now === null) return null
+        if (now.dev !== start.dev || now.ino !== start.ino) return null
+        // The parent's own status-change time moves when the create adds its
+        // entry, so it is sampled after that and compared before-vs-after by
+        // the caller. Every ancestor ABOVE the parent gains no entry from
+        // this create, so its status-change time must still be the one taken
+        // before the open — which is a strictly wider window than the
+        // parent's, and covers the open itself.
+        if (i > 0 && now.ctimeNs !== start.ctimeNs) return null
+      }
+      const parentNow = chainNow[0]!
       if (onPath === null || onPath.dev !== onHandle.dev || onPath.ino !== onHandle.ino) return null
       return { parentCtimeNs: parentNow.ctimeNs }
     }
@@ -870,7 +944,9 @@ export async function createNoFollow(
     if (before === null) {
       await discardCreated(target, onHandle)
       throw new Error(
-        `'${absPath}' moved out of the repository while it was being created. Refusing to write it.`,
+        `'${absPath}' could not be proven to stay inside the repository while it was being ` +
+          `created: its directory, or one above it, changed under it. Nothing was left at that ` +
+          `path, so retrying is safe.`,
       )
     }
     // Strings default to utf8; Buffers are written byte-for-byte.
@@ -882,12 +958,33 @@ export async function createNoFollow(
       await handle.truncate(0).catch(() => {})
       await discardCreated(target, onHandle)
       throw new Error(
-        `'${absPath}' moved out of the repository while it was being created. Refusing to write it.`,
+        `'${absPath}' could not be proven to stay inside the repository while it was being ` +
+          `created: its directory, or one above it, changed under it. Nothing was left at that ` +
+          `path, so retrying is safe.`,
       )
     }
   } finally {
     await handle.close()
   }
+}
+
+/**
+ * Every directory from `parentReal` up to `rootReal`, parent first.
+ *
+ * `realPathIsUnder` has already proven the containment both arguments are
+ * resolved paths, so the walk terminates at the root; the identity guard is
+ * there because a silent infinite loop is a worse failure than a short chain.
+ */
+function ancestorChain(parentReal: string, rootReal: string): string[] {
+  const chain = [parentReal]
+  let cur = parentReal
+  while (cur !== rootReal) {
+    const next = dirname(cur)
+    if (next === cur) break
+    chain.push(next)
+    cur = next
+  }
+  return chain
 }
 
 /**

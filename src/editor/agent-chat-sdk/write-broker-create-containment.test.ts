@@ -82,9 +82,51 @@ const writeHookState = vi.hoisted(() => ({
   observed: null as { existedInsideRepoDuringWrite: boolean } | null,
 }))
 
+/**
+ * The SAME-INODE ROUND TRIP OF AN ANCESTOR, armed at the same statement.
+ *
+ * FX20 item 2. `sub` above is the write's own parent. This one moves a
+ * directory FURTHER UP — the grandparent, or the repository root's child —
+ * out of the repository and back. Renaming a directory moves the renamed
+ * inode's status-change time and NOT its children's, so the parent the guard
+ * had pinned looks untouched throughout: same realpath, same inode, same
+ * ctime. Every proof passed while the whole subtree, the parent included,
+ * sat outside the repository with the caller's bytes flowing into it.
+ *
+ * Measured by the verifier before the fix at 7 escapes in 6000 attempts, each
+ * one 32 MiB of content reachable at a path outside the repository while the
+ * call reported success; the direct-parent control was 0 in 3000.
+ */
+const ancestorHookState = vi.hoisted(() => ({
+  current: null as { targetPath: string; swap: string; outside: string } | null,
+  observed: null as { existedInsideRepoDuringWrite: boolean } | null,
+  fired: 0,
+}))
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   const open: typeof actual.open = async (path, flags, mode) => {
+    const ancestor = ancestorHookState.current
+    if (ancestor !== null && path === ancestor.targetPath) {
+      ancestorHookState.current = null
+      const handle = await actual.open(path, flags, mode)
+      const original = handle.writeFile.bind(handle)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(handle as any).writeFile = async (content: any) => {
+        await actual.rename(ancestor.swap, ancestor.outside)
+        const result = await original(content)
+        ancestorHookState.observed = {
+          existedInsideRepoDuringWrite: await actual
+            .stat(ancestor.targetPath)
+            .then(() => true)
+            .catch(() => false),
+        }
+        await actual.rename(ancestor.outside, ancestor.swap)
+        ancestorHookState.fired++
+        return result
+      }
+      return handle
+    }
     const write = writeHookState.current
     if (write !== null && path === write.targetPath) {
       writeHookState.current = null
@@ -194,6 +236,9 @@ beforeEach(async () => {
   raceHookState.current = null
   writeHookState.current = null
   writeHookState.observed = null
+  ancestorHookState.current = null
+  ancestorHookState.observed = null
+  ancestorHookState.fired = 0
   base = await realpath(await mkdtemp(join(tmpdir(), 'create-containment-')))
   await mkdir(join(base, 'repo', 'sub'), { recursive: true })
   await mkdir(join(base, 'outdir'), { recursive: true })
@@ -203,6 +248,7 @@ beforeEach(async () => {
 afterEach(async () => {
   raceHookState.current = null
   writeHookState.current = null
+  ancestorHookState.current = null
   await rm(base, { recursive: true, force: true })
 })
 
@@ -264,7 +310,7 @@ describe('createNoFollow containment (FX17 item 1)', () => {
     }
 
     await expect(createNoFollow(target, 'AGENT-SECRET-PAYLOAD', rootReal)).rejects.toThrow(
-      /moved out of the repository/,
+      /could not be proven to stay inside the repository/,
     )
 
     // The hook is one-shot and fires only on a real production `open` of
@@ -295,7 +341,7 @@ describe('createNoFollow containment (FX17 item 1)', () => {
     writeHookState.current = { targetPath: target, sub, outside: join(base, 'outside-sub') }
 
     await expect(createNoFollow(target, 'AGENT-SECRET-PAYLOAD', rootReal)).rejects.toThrow(
-      /moved out of the repository/,
+      /could not be proven to stay inside the repository/,
     )
 
     // Anti-vacuity: the hook is one-shot and fires only on a production
@@ -310,6 +356,70 @@ describe('createNoFollow containment (FX17 item 1)', () => {
     for (const entry of await readdir(sub)) {
       expect((await readFile(join(sub, entry))).length).toBe(0)
     }
+  })
+
+  /**
+   * FX20 item 2, as a LOOP over the shape rather than one arranged attempt.
+   *
+   * One attempt would prove the grandparent case and say nothing about the
+   * others, and "the others" is where this defect has hidden twice: the
+   * FX17 guard held for a different directory, FX19's for the parent's own
+   * round trip, and both missed the level above whichever one they pinned.
+   * So every level from the parent's parent up to the repository root is
+   * driven, repeatedly, and each iteration asserts it actually fired.
+   */
+  it('refuses a same-inode round trip of any ancestor, at every depth', async () => {
+    const depth = 4
+    // `repo/l0/l1/l2/l3`, with the file created in the deepest one, so the
+    // swappable ancestors are `l0`…`l2` plus the repository root's child.
+    let dir = join(base, 'repo')
+    const levels: string[] = []
+    for (let i = 0; i < depth; i++) {
+      dir = join(dir, `l${i}`)
+      levels.push(dir)
+      await mkdir(dir, { recursive: true })
+    }
+    const parent = levels[depth - 1]!
+    // Every directory ABOVE the parent. `levels[depth - 1]` is the parent
+    // itself, which the FX19 check already covered.
+    const ancestors = levels.slice(0, depth - 1)
+    expect(ancestors.length).toBeGreaterThan(1)
+
+    const ROUNDS = 5
+    let attempts = 0
+    for (let round = 0; round < ROUNDS; round++) {
+      for (const [index, swap] of ancestors.entries()) {
+        attempts++
+        const target = join(parent, `note-${round}-${index}.txt`)
+        ancestorHookState.current = {
+          targetPath: target,
+          swap,
+          outside: join(base, `outside-l${index}`),
+        }
+        ancestorHookState.observed = null
+
+        await expect(createNoFollow(target, 'AGENT-SECRET-PAYLOAD', rootReal)).rejects.toThrow(
+          /could not be proven to stay inside the repository/,
+        )
+
+        // Anti-vacuity, per attempt. The hook is one-shot and fires only on a
+        // production `open` of this exact path, and the attack is only
+        // interesting if the bytes really did land while no path inside the
+        // repository named the file.
+        expect(ancestorHookState.current, `${swap} round ${round}`).toBeNull()
+        expect(ancestorHookState.observed, `${swap} round ${round}`).toEqual({
+          existedInsideRepoDuringWrite: false,
+        })
+
+        // Refused means refused: nothing non-empty is left at the name it
+        // was aimed at, nor anywhere else in the parent.
+        for (const entry of await readdir(parent)) {
+          expect((await readFile(join(parent, entry))).length, entry).toBe(0)
+        }
+        await rm(join(parent, '*'), { force: true }).catch(() => {})
+      }
+    }
+    expect(ancestorHookState.fired).toBe(attempts)
   })
 
   it('refuses, and writes nothing outside, when the parent is already a symlink out of the repository', async () => {
@@ -358,6 +468,18 @@ describe('createNoFollow containment (FX17 item 1)', () => {
     const afterRename = await stat(dir, { bigint: true })
     expect(afterRename.ino).toBe(inoBefore)
     expect(afterRename.ctimeNs).not.toBe(afterWrite.ctimeNs)
+
+    // Fact 3, and the whole reason FX20 item 2 exists: renaming a directory
+    // does NOT move its CHILDREN's status-change times. A proof anchored on
+    // the write's own parent is therefore blind to every level above it, and
+    // the chain has to be checked rather than inferred.
+    const childBefore = await stat(file, { bigint: true })
+    const parentDirBefore = await stat(dir, { bigint: true })
+    const grandparentMoved = join(base, 'repo-moved')
+    await rename(join(base, 'repo'), grandparentMoved)
+    await rename(grandparentMoved, join(base, 'repo'))
+    expect((await stat(dir, { bigint: true })).ctimeNs).toBe(parentDirBefore.ctimeNs)
+    expect((await stat(file, { bigint: true })).ctimeNs).toBe(childBefore.ctimeNs)
   })
 
   it('creates the file, with the caller bytes, when nothing is racing it', async () => {
