@@ -146,9 +146,24 @@ export async function downloadAsset(opts: {
   resolveHost?: (hostname: string) => Promise<string[]>
   /** Injectable for tests; production builds one pinned to the vetted IPs. */
   dispatcher?: unknown
+  /**
+   * The turn's abort signal (FX20 item 3). Without it, Stop reached nothing
+   * here: the DNS lookup, the request and the body read all ran to
+   * completion, and the caller then wrote the file. It is checked before the
+   * lookup, handed to `fetch`, and checked again per body chunk — the last
+   * because a test double, or a `fetchImpl` that ignores `signal`, would
+   * otherwise stream to the end anyway.
+   */
+  signal?: AbortSignal
 }): Promise<DownloadResult> {
   const pre = checkDownloadRequest(opts)
   if (!pre.ok) return pre
+  // A function, not a bare `opts.signal?.aborted` test: the compiler narrows
+  // a repeated property read to the value it saw the first time, and this
+  // property is mutated by another part of the runtime. Written as a
+  // comparison it typechecks as dead code from the second check onward.
+  const aborted = (): boolean => opts.signal?.aborted ?? false
+  if (aborted()) return CANCELLED
 
   const maxBytes = opts.maxBytes ?? MAX_ASSET_BYTES
   const doFetch = opts.fetchImpl ?? fetch
@@ -199,10 +214,13 @@ export async function downloadAsset(opts: {
     response = await doFetch(pre.url.toString(), {
       redirect: 'error',
       dispatcher,
+      ...(opts.signal ? { signal: opts.signal } : {}),
     } as RequestInit)
   } catch (err) {
+    if (aborted()) return CANCELLED
     return { ok: false, code: 'fetch-failed', reason: (err as Error).message }
   }
+  if (aborted()) return CANCELLED
 
   if (!response.ok) {
     return {
@@ -250,9 +268,10 @@ export async function downloadAsset(opts: {
   // limit and drive the process into OOM before we ever checked.
   let bytes: Buffer
   try {
-    bytes = await readCapped(response, maxBytes)
+    bytes = await readCapped(response, maxBytes, opts.signal)
   } catch (err) {
     const message = (err as Error).message
+    if (message === CANCELLED_MARKER || aborted()) return CANCELLED
     if (message === TOO_LARGE) {
       return {
         ok: false,
@@ -267,6 +286,18 @@ export async function downloadAsset(opts: {
 }
 
 const TOO_LARGE = '__asset_too_large__'
+const CANCELLED_MARKER = '__asset_cancelled__'
+
+/**
+ * What a cancelled download returns. `fetch-failed` rather than a new code:
+ * every caller already handles it, and the reason line is what the model
+ * reads. A cancel is not a failure of the host, so the text says so.
+ */
+const CANCELLED = {
+  ok: false as const,
+  code: 'fetch-failed' as const,
+  reason: 'the turn was stopped before the download finished; nothing was written.',
+}
 
 async function defaultResolveHost(hostname: string): Promise<string[]> {
   const results = await lookup(hostname, { all: true })
@@ -279,7 +310,11 @@ async function defaultResolveHost(hostname: string): Promise<string[]> {
  * Falls back to `arrayBuffer()` only when the body is not streamable (some
  * test doubles), where the cap is then applied after the fact.
  */
-async function readCapped(response: Response, maxBytes: number): Promise<Buffer> {
+async function readCapped(
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<Buffer> {
   const body = response.body
   if (!body || typeof body.getReader !== 'function') {
     const buffered = Buffer.from(await response.arrayBuffer())
@@ -290,6 +325,10 @@ async function readCapped(response: Response, maxBytes: number): Promise<Buffer>
   const chunks: Uint8Array[] = []
   let total = 0
   for (;;) {
+    if (signal?.aborted ?? false) {
+      await reader.cancel().catch(() => {})
+      throw new Error(CANCELLED_MARKER)
+    }
     const { done, value } = await reader.read()
     if (done) break
     if (!value) continue

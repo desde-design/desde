@@ -129,6 +129,84 @@ describe('downloadAsset', () => {
     })
   })
 
+  /**
+   * FX20 item 3. `download_asset` was the write tool the previous wave's
+   * count left out, and the one where it mattered most: it makes a network
+   * call BEFORE it writes, so Stop reached nothing at all — the request ran
+   * to completion and the file then landed.
+   */
+  describe('the turn signal', () => {
+    it('reaches the fetch', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue(PNG) as unknown as typeof fetch
+      const controller = new AbortController()
+      await downloadAsset({
+        url: 'https://cdn.example.com/hero.png',
+        destPath: 'public/hero.png',
+        policy: POLICY,
+        resolveHost: publicDns,
+        fetchImpl,
+        signal: controller.signal,
+      })
+      const init = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0]![1] as {
+        signal?: AbortSignal
+      }
+      expect(init.signal).toBe(controller.signal)
+    })
+
+    it('makes no request at all when the turn is already stopped', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue(PNG) as unknown as typeof fetch
+      const controller = new AbortController()
+      controller.abort()
+      const r = await downloadAsset({
+        url: 'https://cdn.example.com/hero.png',
+        destPath: 'public/hero.png',
+        policy: POLICY,
+        resolveHost: publicDns,
+        fetchImpl,
+        signal: controller.signal,
+      })
+      expect(r.ok).toBe(false)
+      expect(r.ok === false && r.reason).toContain('stopped')
+      expect(fetchImpl as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+    })
+
+    it('stops reading the body when the turn is stopped mid-stream', async () => {
+      // A `fetchImpl` that ignores `signal` — a test double, or any custom
+      // transport — must not be able to stream to the end anyway. The per
+      // chunk check is what covers that.
+      const controller = new AbortController()
+      let chunks = 0
+      const body = {
+        getReader: () => ({
+          read: async () => {
+            chunks++
+            if (chunks === 2) controller.abort()
+            return chunks > 20
+              ? { done: true, value: undefined }
+              : { done: false, value: new Uint8Array(16) }
+          },
+          cancel: async () => {},
+        }),
+      }
+      const r = await downloadAsset({
+        url: 'https://cdn.example.com/hero.png',
+        destPath: 'public/hero.png',
+        policy: POLICY,
+        resolveHost: publicDns,
+        fetchImpl: vi.fn().mockResolvedValue({
+          ok: true,
+          headers: new Headers({ 'content-type': 'image/png' }),
+          body,
+        }) as never,
+        signal: controller.signal,
+      })
+      expect(r.ok).toBe(false)
+      expect(r.ok === false && r.reason).toContain('stopped')
+      // It stopped early rather than draining the stream.
+      expect(chunks).toBeLessThan(6)
+    })
+  })
+
   it('refuses a non-image content type', async () => {
     const r = await downloadAsset({
       url: 'https://cdn.example.com/x.png',

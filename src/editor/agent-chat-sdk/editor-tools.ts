@@ -370,6 +370,7 @@ export function buildEditorToolSpecs(opts: BuildEditorToolServerOpts): ToolSpec[
               getGrounding,
               input: { componentName, file, line, column, destIndex, props, text },
               acquireTreeGate,
+              ...(signal ? { signal } : {}),
             })
           },
         },
@@ -707,6 +708,7 @@ export function buildEditorToolSpecs(opts: BuildEditorToolServerOpts): ToolSpec[
           emitEdit,
           input: { path },
           acquireTreeGate,
+          ...(signal ? { signal } : {}),
         })
       },
     },
@@ -731,6 +733,10 @@ export function buildEditorToolSpecs(opts: BuildEditorToolServerOpts): ToolSpec[
           ...(webPolicy ? { webPolicy } : {}),
           input: { url, destPath },
           acquireTreeGate,
+          // Reaches the network fetch as well as the write. Stop during a
+          // slow download used to do nothing at all, and then the file
+          // landed (FX20 item 3).
+          ...(signal ? { signal } : {}),
         })
       },
     },
@@ -757,6 +763,7 @@ export function buildEditorToolSpecs(opts: BuildEditorToolServerOpts): ToolSpec[
           input: { from, to },
           acquireTreeGate,
           ...(blockSecretReads === true ? { blockSecretReads: true } : {}),
+          ...(signal ? { signal } : {}),
         })
       },
     },
@@ -808,6 +815,7 @@ export function buildEditorToolSpecs(opts: BuildEditorToolServerOpts): ToolSpec[
           emitEdit,
           input: { snippet, file, line, column, destIndex, contentKind },
           acquireTreeGate,
+          ...(signal ? { signal } : {}),
         })
       },
     },
@@ -849,6 +857,7 @@ export function buildEditorToolSpecs(opts: BuildEditorToolServerOpts): ToolSpec[
           emitEdit,
           input: { path, name, heading, routerFile },
           acquireTreeGate,
+          ...(signal ? { signal } : {}),
         })
       },
     },

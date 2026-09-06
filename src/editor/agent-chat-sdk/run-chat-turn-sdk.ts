@@ -290,7 +290,9 @@ async function runChatTurnSdkInner(
     resolveLlmProvider: opts.resolveLlmProvider,
     canvasEnabled: opts.canvasEnabled,
     acquireTreeGate: opts.acquireTreeGate,
-    // `rename_file`'s own half of the secret-read policy (FX17 item 5).
+    // The tool-side half of the secret-read policy: `rename_file`'s
+    // source check (FX17 item 5), and the resolved-path filters in
+    // `search_external_files` and `session_diff` (FX20 item 1).
     ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
   })
 

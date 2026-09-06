@@ -46,6 +46,13 @@ import { isSecretAgentPath, secretPathDenial } from './protected-paths'
 import type { GetGrounding } from './grounding-tools'
 
 interface DeleteFileHandlerOpts {
+  /**
+   * The turn's abort signal (FX20 item 3). Forwarded to `brokeredWrite`,
+   * whose Stop check runs before any file is touched — so a Stop pressed
+   * while this batch is queued behind the shared per-file lock ends it
+   * instead of waiting an unbounded time and then writing.
+   */
+  signal?: AbortSignal
   worktreeRoot: string | undefined
   invalidateFiles?: (files: string[]) => void
   emitEdit: (payload: EditProposalPayload) => Promise<EmitEditResult>
@@ -77,7 +84,7 @@ interface DeleteFileHandlerOpts {
 export async function deleteFileHandler(
   opts: DeleteFileHandlerOpts,
 ): Promise<FileWriteToolResult> {
-  const { worktreeRoot, invalidateFiles, emitEdit, input, acquireTreeGate } = opts
+  const { worktreeRoot, invalidateFiles, emitEdit, input, acquireTreeGate, signal } = opts
   if (!worktreeRoot) {
     return {
       content: [
@@ -152,6 +159,7 @@ export async function deleteFileHandler(
     record: { history: getSharedEditHistory(), label: `delete_file: ${repoRel}` },
     describe: { kind: 'delete_file', lane: 'chat' },
     acquireTreeGate,
+    ...(signal ? { signal } : {}),
   })
   if (!broker.ok) {
     // Protected-path refusal: surface the denial verbatim. The generic
@@ -160,6 +168,9 @@ export async function deleteFileHandler(
     // signal here, since the refusal text tells the model not to route around
     // the block.
     if (broker.stage === 'refused') return fwError(broker.reason)
+    if (broker.stage === 'stopped') {
+      return fwError(`delete_file: ${broker.reason}. '${repoRel}' was not modified.`)
+    }
     return broker.stage === 'backup'
       ? fwError(
           `delete_file: ${broker.reason}. Delete aborted; '${repoRel}' was not modified.`,
@@ -199,6 +210,13 @@ export async function deleteFileHandler(
 }
 
 interface RenameFileHandlerOpts {
+  /**
+   * The turn's abort signal (FX20 item 3). Forwarded to `brokeredWrite`,
+   * whose Stop check runs before any file is touched — so a Stop pressed
+   * while this batch is queued behind the shared per-file lock ends it
+   * instead of waiting an unbounded time and then writing.
+   */
+  signal?: AbortSignal
   worktreeRoot: string | undefined
   invalidateFiles?: (files: string[]) => void
   emitEdit: (payload: EditProposalPayload) => Promise<EmitEditResult>
@@ -222,7 +240,7 @@ interface RenameFileHandlerOpts {
 export async function renameFileHandler(
   opts: RenameFileHandlerOpts,
 ): Promise<FileWriteToolResult> {
-  const { worktreeRoot, invalidateFiles, emitEdit, input, acquireTreeGate } = opts
+  const { worktreeRoot, invalidateFiles, emitEdit, input, acquireTreeGate, signal } = opts
   if (!worktreeRoot) {
     return {
       content: [
@@ -358,11 +376,15 @@ export async function renameFileHandler(
     },
     describe: { kind: 'rename_file', lane: 'chat', fields: { from: fromRel, to: toRel } },
     acquireTreeGate,
+    ...(signal ? { signal } : {}),
   })
   if (!broker.ok) {
     // See the note on the sibling handlers: a protected-path refusal must not
     // be phrased as a transient write failure.
     if (broker.stage === 'refused') return fwError(broker.reason)
+    if (broker.stage === 'stopped') {
+      return fwError(`rename_file: ${broker.reason}. '${fromRel}' was not modified.`)
+    }
     if (broker.stage === 'backup') {
       return fwError(
         `rename_file: ${broker.reason}. Rename aborted; '${fromRel}' was not modified.`,
@@ -408,6 +430,13 @@ export async function renameFileHandler(
 }
 
 interface InsertComponentHandlerOpts {
+  /**
+   * The turn's abort signal (FX20 item 3). Forwarded to `brokeredWrite`,
+   * whose Stop check runs before any file is touched — so a Stop pressed
+   * while this batch is queued behind the shared per-file lock ends it
+   * instead of waiting an unbounded time and then writing.
+   */
+  signal?: AbortSignal
   worktreeRoot: string | undefined
   invalidateFiles?: (files: string[]) => void
   emitEdit: (payload: EditProposalPayload) => Promise<EmitEditResult>
@@ -486,7 +515,8 @@ function buildComponentSnippet(
 export async function insertComponentHandler(
   opts: InsertComponentHandlerOpts,
 ): Promise<FileWriteToolResult> {
-  const { worktreeRoot, invalidateFiles, emitEdit, getGrounding, input, acquireTreeGate } = opts
+  const { worktreeRoot, invalidateFiles, emitEdit, getGrounding, input, acquireTreeGate, signal } =
+    opts
   if (!worktreeRoot) {
     return fwError(
       'insert_component is not configured with an editable repo root for this run.',
@@ -628,6 +658,7 @@ export async function insertComponentHandler(
     record: { history: getSharedEditHistory(), label: `insert_component: ${repoRel}` },
     describe: { kind: 'insert_component', lane: 'chat', fields: { componentName: tag } },
     acquireTreeGate,
+    ...(signal ? { signal } : {}),
   })
   if (!broker.ok) {
     // Protected-path refusal: surface the denial verbatim. The generic
@@ -636,6 +667,9 @@ export async function insertComponentHandler(
     // signal here, since the refusal text tells the model not to route around
     // the block.
     if (broker.stage === 'refused') return fwError(broker.reason)
+    if (broker.stage === 'stopped') {
+      return fwError(`insert_component: ${broker.reason}. '${repoRel}' was not modified.`)
+    }
     return broker.stage === 'backup'
       ? fwError(
           `insert_component: ${broker.reason}. Insert aborted; '${repoRel}' was not modified.`,
@@ -666,6 +700,13 @@ export async function insertComponentHandler(
 }
 
 interface ScaffoldRouteHandlerOpts {
+  /**
+   * The turn's abort signal (FX20 item 3). Forwarded to `brokeredWrite`,
+   * whose Stop check runs before any file is touched — so a Stop pressed
+   * while this batch is queued behind the shared per-file lock ends it
+   * instead of waiting an unbounded time and then writing.
+   */
+  signal?: AbortSignal
   worktreeRoot: string | undefined
   invalidateFiles?: (files: string[]) => void
   emitEdit: (payload: EditProposalPayload) => Promise<EmitEditResult>
@@ -697,7 +738,7 @@ interface ScaffoldRouteHandlerOpts {
 export async function scaffoldRouteHandler(
   opts: ScaffoldRouteHandlerOpts,
 ): Promise<FileWriteToolResult> {
-  const { worktreeRoot, invalidateFiles, emitEdit, input, acquireTreeGate } = opts
+  const { worktreeRoot, invalidateFiles, emitEdit, input, acquireTreeGate, signal } = opts
   if (!worktreeRoot) {
     return fwError(
       'scaffold_route is not configured with an editable repo root for this run.',
@@ -804,11 +845,15 @@ export async function scaffoldRouteHandler(
     record: { history: getSharedEditHistory(), label: `scaffold_route: ${sfcRepoRel}` },
     describe: { kind: 'scaffold_route', lane: 'chat', fields: { routePath: plan.routePath } },
     acquireTreeGate,
+    ...(signal ? { signal } : {}),
   })
   if (!broker.ok) {
     // See the note on the sibling handlers: a protected-path refusal must not
     // be phrased as a transient write failure.
     if (broker.stage === 'refused') return fwError(broker.reason)
+    if (broker.stage === 'stopped') {
+      return fwError(`scaffold_route: ${broker.reason}. Nothing was written.`)
+    }
     if (broker.stage === 'backup') {
       return fwError(`scaffold_route: ${broker.reason}. Scaffold aborted; nothing was written.`)
     }
@@ -851,6 +896,13 @@ export async function scaffoldRouteHandler(
 }
 
 interface InsertElementHandlerOpts {
+  /**
+   * The turn's abort signal (FX20 item 3). Forwarded to `brokeredWrite`,
+   * whose Stop check runs before any file is touched — so a Stop pressed
+   * while this batch is queued behind the shared per-file lock ends it
+   * instead of waiting an unbounded time and then writing.
+   */
+  signal?: AbortSignal
   worktreeRoot: string | undefined
   invalidateFiles?: (files: string[]) => void
   emitEdit: (payload: EditProposalPayload) => Promise<EmitEditResult>
@@ -883,7 +935,7 @@ interface InsertElementHandlerOpts {
 export async function insertElementHandler(
   opts: InsertElementHandlerOpts,
 ): Promise<FileWriteToolResult> {
-  const { worktreeRoot, invalidateFiles, emitEdit, input, acquireTreeGate } = opts
+  const { worktreeRoot, invalidateFiles, emitEdit, input, acquireTreeGate, signal } = opts
   if (!worktreeRoot) {
     return fwError(
       'insert_element is not configured with an editable repo root for this run.',
@@ -967,6 +1019,7 @@ export async function insertElementHandler(
     record: { history: getSharedEditHistory(), label: `insert_element: ${repoRel}` },
     describe: { kind: 'insert_element', lane: 'chat' },
     acquireTreeGate,
+    ...(signal ? { signal } : {}),
   })
   if (!broker.ok) {
     // Protected-path refusal: surface the denial verbatim. The generic
@@ -975,6 +1028,9 @@ export async function insertElementHandler(
     // signal here, since the refusal text tells the model not to route around
     // the block.
     if (broker.stage === 'refused') return fwError(broker.reason)
+    if (broker.stage === 'stopped') {
+      return fwError(`insert_element: ${broker.reason}. '${repoRel}' was not modified.`)
+    }
     return broker.stage === 'backup'
       ? fwError(
           `insert_element: ${broker.reason}. Insert aborted; '${repoRel}' was not modified.`,
@@ -1340,8 +1396,16 @@ export async function downloadAssetHandler(opts: {
   fetchImpl?: typeof fetch
   /** See `DeleteFileHandlerOpts.acquireTreeGate` (A2). */
   acquireTreeGate?: AcquireTreeGate
+  /**
+   * The turn's abort signal (FX20 item 3). This handler is the one that
+   * needed it most and was the one the previous wave's count left out: it
+   * makes a NETWORK call before it writes, so without a signal a Stop
+   * pressed during a slow download did nothing at all, and then the file
+   * landed. It is forwarded to the fetch as well as to `brokeredWrite`.
+   */
+  signal?: AbortSignal
 }): Promise<FileWriteToolResult> {
-  const { worktreeRoot, invalidateFiles, emitEdit, input, acquireTreeGate } = opts
+  const { worktreeRoot, invalidateFiles, emitEdit, input, acquireTreeGate, signal } = opts
   if (!worktreeRoot) {
     return fwError('download_asset is not configured with an editable repo root for this run.')
   }
@@ -1433,6 +1497,7 @@ export async function downloadAssetHandler(opts: {
     destPath: input.destPath,
     policy: opts.webPolicy,
     ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+    ...(signal ? { signal } : {}),
   })
   if (!fetched.ok) return fwError(`download_asset denied: ${fetched.reason}`)
   // Host only — never the full URL, which can carry a signed-token query.
@@ -1483,8 +1548,15 @@ export async function downloadAssetHandler(opts: {
     record: { history: getSharedEditHistory(), label: `download_asset: ${repoRel}` },
     describe: { kind: 'download_asset', lane: 'chat' },
     acquireTreeGate,
+    ...(signal ? { signal } : {}),
   })
   if (!broker.ok) {
+    if (broker.stage === 'refused') return fwError(broker.reason)
+    if (broker.stage === 'stopped') {
+      return fwError(
+        `download_asset: ${broker.reason}. The bytes were fetched but nothing was written to '${repoRel}'.`,
+      )
+    }
     return fwError(`download_asset: write failed: ${broker.reason}${rollbackWarning(broker)}`)
   }
 
