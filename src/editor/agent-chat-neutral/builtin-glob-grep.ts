@@ -11,7 +11,6 @@
  * turn's context on a single call.
  */
 
-import { readFile, stat } from 'node:fs/promises'
 import * as fsPromises from 'node:fs/promises'
 import { sep as pathSep } from 'node:path'
 
@@ -25,6 +24,7 @@ import {
 } from '../agent-chat-sdk/protected-paths'
 import { resolveRepoPath } from '../agent-tools/read-tools'
 
+import { readRegularFile } from './read-regular-file'
 import { createRegexLineScanner, GREP_DEADLINE_MS } from './regex-line-scanner'
 
 /**
@@ -321,28 +321,21 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
           if (!safe.ok) continue
           let text: string
           try {
-            // The SHAPE of the path is decided before anything is opened.
+            // One open, one `fstat` on it, and the bytes through the same
+            // handle — see `readRegularFile`. Anything that is not a regular
+            // file is skipped: a directory (which `**/*` enumerates), a
+            // pipe, a socket, a device.
             //
-            // FX16 item 2 (2026-09-05). MEASURED by the adversarial verifier:
-            // a real `mkfifo` in the scanned tree hung this loop past 12
-            // seconds with the 3000 ms deadline AND an abort at 2000 ms both
-            // ignored, and the process had to be killed. `readFile` blocks in
-            // `open(2)` on a FIFO with no writer, and neither guard can reach
-            // that: the deadline is enforced inside `scanner.scan` below,
-            // which only runs after the read RETURNS, and `fs.promises`
-            // honours a signal between chunks, never during the open. The
-            // turn's `await runOneTool(...)` then never returns either, so
-            // Stop cannot end the turn and the user restarts the CLI.
-            //
-            // `stat` does not block on a FIFO; only `open` does. It follows
-            // symlinks, which is what we want here — a symlink to a regular
-            // file is readable, a symlink to a FIFO is not. Anything that is
-            // not a regular file is skipped: a directory (which `**/*`
-            // enumerates and `readFile` used to reject with EISDIR), a
-            // socket, a device.
-            const info = await stat(safe.absolute)
-            if (!info.isFile()) continue
-            const raw = await readFile(safe.absolute)
+            // FX16 item 2 established WHY the shape has to be checked at
+            // all: a real `mkfifo` in the scanned tree hung this loop past
+            // 12 seconds with the 3000 ms deadline AND an abort at 2000 ms
+            // both ignored, and the process had to be killed. FX19 item 5
+            // is why the check and the read now share a handle — checking
+            // the path and then opening it again is two lookups, and a
+            // `rename` between them puts the hang back.
+            const opened = await readRegularFile(safe.absolute)
+            if (!opened.ok) continue
+            const raw = opened.bytes
             if (raw.byteLength > GREP_MAX_FILE_BYTES) continue
             // A NUL byte in the first kilobyte is the cheap binary test. A false
             // negative costs one unreadable line of output, not correctness.

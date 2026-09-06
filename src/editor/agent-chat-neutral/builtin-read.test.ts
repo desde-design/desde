@@ -1,8 +1,59 @@
+// @vitest-environment node
+/**
+ * The `node` environment above is load-bearing: `vi.mock` of a node builtin
+ * is silently INERT under this project's default (jsdom) environment — the
+ * factory never runs — so the stub below would leave the ordinary FIFO
+ * refusal in place and the test would prove nothing. The `lied` counter is
+ * what caught that.
+ *
+ * FX19 item 5. `stat` is stubbed to report a regular file for every path.
+ *
+ * That is not a contrivance, it is the defect stated as a test. The guard
+ * inspected the path with one handle and then opened it again with another,
+ * so anything the first lookup learned could be false by the time the second
+ * ran. The verifier won that race with an ordinary `rename` loop — 12,273
+ * attempts in 15 seconds, ending in a process that had to be SIGKILLed. A
+ * loop cannot be a unit test, so the same disagreement is produced directly:
+ * the check says regular, the path is a FIFO. Only a read that does not
+ * trust a separate lookup can survive it.
+ */
+const fsSpy = vi.hoisted(() => ({
+  factoryRan: false,
+  /** Path lookups the handler made that were NOT the single open. */
+  statByPath: 0,
+  readFileByPath: 0,
+  /** When on, every `stat` by path claims the target is a regular file. */
+  lie: false,
+}))
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  fsSpy.factoryRan = true
+  return {
+    ...actual,
+    stat: (async (...args: Parameters<typeof actual.stat>) => {
+      fsSpy.statByPath++
+      const info = await actual.stat(...args)
+      if (!fsSpy.lie) return info
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const lying: any = info
+      lying.isFile = () => true
+      lying.isDirectory = () => false
+      lying.isFIFO = () => false
+      return lying
+    }) as typeof actual.stat,
+    readFile: (async (...args: Parameters<typeof actual.readFile>) => {
+      if (typeof args[0] === 'string') fsSpy.readFileByPath++
+      return actual.readFile(...args)
+    }) as typeof actual.readFile,
+  }
+})
+
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { buildReadToolSpec } from './builtin-read'
 
@@ -11,7 +62,12 @@ beforeEach(() => {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'neutral-read-')))
   mkdirSync(join(root, 'src'), { recursive: true })
 })
-afterEach(() => rmSync(root, { recursive: true, force: true }))
+afterEach(() => {
+  fsSpy.lie = false
+  fsSpy.statByPath = 0
+  fsSpy.readFileByPath = 0
+  rmSync(root, { recursive: true, force: true })
+})
 
 describe('Read', () => {
   it('returns cat -n numbered lines from a repo-relative path', async () => {
@@ -128,5 +184,54 @@ describe('Read: a path that is not a regular file', () => {
     const out = await spec.handler({ file_path: 'src/pipe.txt' }, {})
     expect(out.isError).toBe(true)
     expect(out.content[0].text).toMatch(/not a regular file/i)
+  })
+
+  it('refuses a FIFO even when the shape check is told it is a regular file', async () => {
+    execFileSync('mkfifo', [join(root, 'src/pipe.txt')])
+    fsSpy.lie = true
+    const spec = buildReadToolSpec({ worktreeRoot: root })
+
+    // The assertion is that the handler RETURNS. A read that opens the path
+    // a second time blocks in `open(2)` on a FIFO with no writer, and no
+    // signal or deadline above it can interrupt that — which is the whole
+    // failure: the turn never ends and Stop cannot end it.
+    const settled = await Promise.race([
+      spec.handler({ file_path: 'src/pipe.txt' }, {}),
+      new Promise<'HUNG'>((r) => setTimeout(() => r('HUNG'), 2000)),
+    ])
+    // Anti-vacuity: under this project's DEFAULT environment the factory
+    // never runs, the stub is inert, and the ordinary FIFO refusal would
+    // make this pass while proving nothing.
+    expect(fsSpy.factoryRan).toBe(true)
+    expect(settled).not.toBe('HUNG')
+    if (settled === 'HUNG') return
+    expect(settled.isError).toBe(true)
+    expect(settled.content[0].text).toMatch(/not a regular file/i)
+  }, 10_000)
+
+  it('looks the path up exactly once, through the handle it reads from', async () => {
+    // The defect stated structurally rather than behaviourally: the shape
+    // verdict and the bytes must come from ONE open file description. A
+    // second lookup by path is the window, whatever it happens to find.
+    writeFileSync(join(root, 'src/ok.txt'), 'hello\n', 'utf8')
+    const spec = buildReadToolSpec({ worktreeRoot: root })
+    const out = await spec.handler({ file_path: 'src/ok.txt' }, {})
+    expect(out.isError).toBeUndefined()
+    expect(fsSpy.statByPath).toBe(0)
+    expect(fsSpy.readFileByPath).toBe(0)
+  })
+
+  it('still reads an ordinary file, and still names a missing one, with the lying check on', async () => {
+    // Anti-vacuity for the tests above: the stub is only allowed to change
+    // the FIFO verdict, not to break the ordinary paths around it.
+    writeFileSync(join(root, 'src/ok.txt'), 'hello\n', 'utf8')
+    fsSpy.lie = true
+    const spec = buildReadToolSpec({ worktreeRoot: root })
+    const good = await spec.handler({ file_path: 'src/ok.txt' }, {})
+    expect(good.isError).toBeUndefined()
+    expect(good.content[0].text).toBe('     1\thello')
+    const missing = await spec.handler({ file_path: 'src/nope.txt' }, {})
+    expect(missing.isError).toBe(true)
+    expect(missing.content[0].text).toMatch(/file not found/i)
   })
 })

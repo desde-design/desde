@@ -9,12 +9,11 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readFile, stat } from 'node:fs/promises'
-
 import { z } from 'zod'
 
 import { isSecretAgentPath, secretPathDenial } from '../agent-chat-sdk/protected-paths'
 import { READ_FILE_MAX_BYTES, resolveRepoPath } from '../agent-tools/read-tools'
+import { readRegularFile } from './read-regular-file'
 
 /**
  * Byte cap on one Read. Imported rather than redeclared: `read-tools.ts` has
@@ -120,52 +119,30 @@ export function buildReadToolSpec(opts: BuiltinReadOpts) {
       ) {
         return err(secretPathDenial(filePath))
       }
-      // The SHAPE of the path is decided before it is opened.
-      //
-      // FX16 item 2 (2026-09-05). `readFile` blocks in `open(2)` on a FIFO
-      // with no writer, and nothing above it can interrupt that: the turn's
-      // signal aborts `fs.promises` between chunks, never during the open. The
-      // handler then never returns, so the turn's `await runOneTool(...)` never
-      // returns, so Stop cannot end the turn and the user restarts the CLI.
-      // The verifier measured the same block on Grep at past 12 seconds with
-      // both its deadline and its abort ignored.
-      //
-      // `stat` does not block on a FIFO; only `open` does. It follows
-      // symlinks, so a link to a regular file still reads.
-      try {
-        const info = await stat(safe.absolute)
-        if (info.isDirectory()) {
+      // The shape of the path and its bytes come from ONE open file
+      // description — see `readRegularFile`. This used to `stat` the path
+      // and then `readFile` it, which is two independent lookups, and a
+      // `rename` of a FIFO onto the path between them hung the turn past
+      // any signal or deadline. Every wording below is unchanged; only
+      // where the verdict comes from is.
+      const opened = await readRegularFile(safe.absolute)
+      if (!opened.ok) {
+        if (opened.reason === 'not-found') {
+          return err(
+            `Read: file not found '${filePath}'. Use Glob or Grep to locate it, or ask the user for the right path.`,
+          )
+        }
+        if (opened.reason === 'directory') {
           return err(`Read: '${filePath}' is a directory. Use Glob to list what is inside it.`)
         }
-        if (!info.isFile()) {
+        if (opened.reason === 'not-regular') {
           return err(
             `Read: '${filePath}' is not a regular file, so it cannot be read. Reading a pipe, socket or device would block until something wrote to it.`,
           )
         }
-      } catch (e) {
-        const code = (e as NodeJS.ErrnoException).code
-        if (code === 'ENOENT') {
-          return err(
-            `Read: file not found '${filePath}'. Use Glob or Grep to locate it, or ask the user for the right path.`,
-          )
-        }
-        return err(`Read failed for '${filePath}': ${(e as Error).message}`)
+        return err(`Read failed for '${filePath}': ${opened.message}`)
       }
-      let raw: Buffer
-      try {
-        raw = await readFile(safe.absolute)
-      } catch (e) {
-        const code = (e as NodeJS.ErrnoException).code
-        if (code === 'ENOENT') {
-          return err(
-            `Read: file not found '${filePath}'. Use Glob or Grep to locate it, or ask the user for the right path.`,
-          )
-        }
-        if (code === 'EISDIR') {
-          return err(`Read: '${filePath}' is a directory. Use Glob to list what is inside it.`)
-        }
-        return err(`Read failed for '${filePath}': ${(e as Error).message}`)
-      }
+      const raw = opened.bytes
       await opts.onFileRead?.({
         absolutePath: safe.absolute,
         repoRel: filePath,
