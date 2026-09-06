@@ -64,9 +64,47 @@ const raceHookState = vi.hoisted(() => ({
   current: null as { targetPath: string; sub: string; hidden: string; outdir: string } | null,
 }))
 
+/**
+ * The SAME-INODE ROUND TRIP, armed at the only statement that runs between
+ * the pre-write proof and the post-write proof.
+ *
+ * FX19 item 1. The hook above swaps a DIFFERENT directory in, which is what
+ * the parent-inode comparison refuses. This one moves the SAME directory
+ * out of the repository, lets the bytes land in it, and moves it back to
+ * the same name — so `realpath`, the parent inode and the target inode all
+ * agree afterwards, and every proof the function had passed while a
+ * complete payload was written at a location no path inside the repository
+ * named. Reproduced against this file's own code before the fix was
+ * written, and it reported success.
+ */
+const writeHookState = vi.hoisted(() => ({
+  current: null as { targetPath: string; sub: string; outside: string } | null,
+  observed: null as { existedInsideRepoDuringWrite: boolean } | null,
+}))
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   const open: typeof actual.open = async (path, flags, mode) => {
+    const write = writeHookState.current
+    if (write !== null && path === write.targetPath) {
+      writeHookState.current = null
+      const handle = await actual.open(path, flags, mode)
+      const original = handle.writeFile.bind(handle)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(handle as any).writeFile = async (content: any) => {
+        await actual.rename(write.sub, write.outside)
+        const result = await original(content)
+        writeHookState.observed = {
+          existedInsideRepoDuringWrite: await actual
+            .stat(write.sub)
+            .then(() => true)
+            .catch(() => false),
+        }
+        await actual.rename(write.outside, write.sub)
+        return result
+      }
+      return handle
+    }
     const hook = raceHookState.current
     if (hook !== null && path === hook.targetPath) {
       raceHookState.current = null
@@ -154,6 +192,8 @@ let rootReal: string
 
 beforeEach(async () => {
   raceHookState.current = null
+  writeHookState.current = null
+  writeHookState.observed = null
   base = await realpath(await mkdtemp(join(tmpdir(), 'create-containment-')))
   await mkdir(join(base, 'repo', 'sub'), { recursive: true })
   await mkdir(join(base, 'outdir'), { recursive: true })
@@ -162,6 +202,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   raceHookState.current = null
+  writeHookState.current = null
   await rm(base, { recursive: true, force: true })
 })
 
@@ -248,6 +289,29 @@ describe('createNoFollow containment (FX17 item 1)', () => {
     }
   })
 
+  it('refuses a same-inode round trip of the parent across the content write', async () => {
+    const sub = join(base, 'repo', 'sub')
+    const target = join(sub, 'note.txt')
+    writeHookState.current = { targetPath: target, sub, outside: join(base, 'outside-sub') }
+
+    await expect(createNoFollow(target, 'AGENT-SECRET-PAYLOAD', rootReal)).rejects.toThrow(
+      /moved out of the repository/,
+    )
+
+    // Anti-vacuity: the hook is one-shot and fires only on a production
+    // `open` of this exact path, and the attack is only interesting if the
+    // bytes really did land while no path inside the repository named the
+    // directory.
+    expect(writeHookState.current).toBeNull()
+    expect(writeHookState.observed).toEqual({ existedInsideRepoDuringWrite: false })
+
+    // Refused means refused: the model is told the write did not happen,
+    // and no payload is left behind at the name it was aimed at.
+    for (const entry of await readdir(sub)) {
+      expect((await readFile(join(sub, entry))).length).toBe(0)
+    }
+  })
+
   it('refuses, and writes nothing outside, when the parent is already a symlink out of the repository', async () => {
     await rm(join(base, 'repo', 'sub'), { recursive: true, force: true })
     await symlink(join(base, 'outdir'), join(base, 'repo', 'sub'))
@@ -257,6 +321,43 @@ describe('createNoFollow containment (FX17 item 1)', () => {
     ).rejects.toThrow(/outside the repository/)
 
     expect(await readdir(join(base, 'outdir'))).toEqual([])
+  })
+
+  /**
+   * The two platform facts step 6 of `createNoFollow` rests on.
+   *
+   * FX19 item 1. They are asserted here rather than stated as a measurement
+   * in a comment, because this branch has twice shipped a security comment
+   * whose measured claim a later measurement disproved. A fact the suite
+   * re-checks on every run on the machine it runs on is worth more than a
+   * number someone took once.
+   *
+   * If either of these ever fails on a supported platform, the ctime check
+   * is not a guard there and the comment on `createNoFollow` is wrong.
+   */
+  it("pins the platform facts the parent's status-change time check rests on", async () => {
+    const dir = join(base, 'repo', 'facts')
+    await mkdir(dir)
+    const file = join(dir, 'f.txt')
+    await writeFile(file, '')
+
+    // Fact 1: writing a file's CONTENT does not move its directory's
+    // status-change time. Without this, every create would refuse itself.
+    const beforeWrite = await stat(dir, { bigint: true })
+    await writeFile(file, 'x'.repeat(64 * 1024))
+    const afterWrite = await stat(dir, { bigint: true })
+    expect(afterWrite.ctimeNs).toBe(beforeWrite.ctimeNs)
+
+    // Fact 2: renaming a directory moves its own status-change time, even
+    // when it keeps the same parent and the same inode. This is what makes
+    // a same-inode round trip detectable at all.
+    const inoBefore = (await stat(dir, { bigint: true })).ino
+    const moved = join(base, 'repo', 'facts-moved')
+    await rename(dir, moved)
+    await rename(moved, dir)
+    const afterRename = await stat(dir, { bigint: true })
+    expect(afterRename.ino).toBe(inoBefore)
+    expect(afterRename.ctimeNs).not.toBe(afterWrite.ctimeNs)
   })
 
   it('creates the file, with the caller bytes, when nothing is racing it', async () => {

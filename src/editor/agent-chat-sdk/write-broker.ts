@@ -668,7 +668,7 @@ function realPathIsUnder(real: string, rootReal: string): boolean {
 
 /**
  * **FX11 (codex review + adversarial verification, 2026-09-05, SECURITY),
- * corrected by FX17 the same day.**
+ * corrected by FX17 and again by FX19 the same day.**
  * Create a file that provably lands inside the repo.
  *
  * The create used to be a plain `writeFile`, on the reasoning quoted above
@@ -685,26 +685,29 @@ function realPathIsUnder(real: string, rootReal: string): boolean {
  * user's prototype repository is untrusted, so anything running in it can
  * do that: a build script, an `npm postinstall`, a second agent session.
  *
- * ## The FX17 correction, and the claim it retracts
+ * ## Two corrections, and the claims they retract
  *
- * FX11's first fix added a three-step guard and closed its own doc comment
- * with a measured-sounding claim: that a lost race could only ever leave a
+ * FX11 added a three-step guard and closed its doc comment with a
+ * measured-sounding claim: that a lost race could only ever leave a
  * ZERO-BYTE file outside the repository, and that no escape was ever
- * reported as a success. **Both halves were false.** The adversarial
- * verifier disproved them with two ordinary user processes. Its swapper
- * renamed the destination directory out of the repository, let the create
- * land in the replacement, renamed the replacement BACK into the
- * repository so the guard's `realpath` and `lstat` both agreed, and then
- * carried it out again. Sixteen complete, non-empty payloads left the
- * repository in twenty-five seconds; every one of them was reported to the
- * model as a success. Reproduced here before this change was written.
+ * reported as a success. FX17 added a parent-INODE comparison to the
+ * re-proof and restated the same claim with numbers beside it.
  *
- * The mistake was believing an inode comparison anchored the write.
- * `handle.stat()` is anchored to the created inode, but `realpath` and
- * `lstat` are PATH lookups, so the pair answered "does this path name my
- * inode right now" — not "is my inode in the directory I checked". A
- * DIFFERENT directory moved into the same name answers yes to the first
- * question and no to the second.
+ * **An independent measurement disproved it a second time.** FX17's
+ * comparison asks "does this path name my inode NOW". `rename(2)` moves a
+ * directory without changing its inode, so a swapper that renames the
+ * destination directory OUT of the repository, lets the bytes land in it,
+ * and renames THE SAME directory back to THE SAME name satisfies every
+ * clause of that re-proof. The verifier's deterministic reproduction wrote
+ * a complete payload at a location no path inside the repository named,
+ * and it was reported to the model as a success; a 25-second two-process
+ * race captured 78 PARTIAL payloads outside, which is the discriminator —
+ * a finished file is always full size, so a partial one proves the bytes
+ * were flowing while the directory was outside.
+ *
+ * Two claims are therefore retracted and are not restated below: that the
+ * residue of a lost race is an empty file, and that the escapes which
+ * remained were all the unpreventable shape.
  *
  * ## What the code does now
  *
@@ -719,17 +722,56 @@ function realPathIsUnder(real: string, rootReal: string): boolean {
  *     ANYTHING is already at that name, a symlink included, so the create
  *     can never follow one.
  *  3. Prove three things before writing a single byte: the parent path
- *     still resolves to itself, the parent is still the SAME DIRECTORY
- *     INODE recorded in step 1, and the target path names the inode the
- *     open handle holds. The middle one is the FX17 addition and it is
- *     what refuses the verifier's swap-in.
- *  4. Write the caller's bytes through the open handle, which is anchored
+ *     still resolves to itself, the parent is still the same directory
+ *     inode recorded in step 1, and the target path names the inode the
+ *     open handle holds.
+ *  4. Sample the parent directory's `ctimeNs` — its status-change time.
+ *     Sampled HERE, after the create, because creating the entry is itself
+ *     a change to the parent and moves it.
+ *  5. Write the caller's bytes through the open handle, which is anchored
  *     to the inode step 3 proved.
- *  5. Re-run step 3's proof AFTER the write. If it now disagrees,
- *     `ftruncate(0)` the handle — the fd still names our inode wherever it
- *     has been moved to, so this empties it — unlink the path when it still
- *     names that inode, and fail the op, so the model is told the write did
- *     not happen.
+ *  6. Re-run step 3's proof AND require the parent's `ctimeNs` to be
+ *     BYTE-IDENTICAL to step 4's. If either disagrees, `ftruncate(0)` the
+ *     handle — the fd still names our inode wherever it has been moved to,
+ *     so this empties it — unlink the path when it still names that inode,
+ *     and fail the op, so the model is told the write did not happen.
+ *
+ * ## What step 6 guarantees, and what it does not
+ *
+ * It guarantees this: **the parent directory was not renamed, and gained
+ * and lost no entry, between the sample and the re-check.** It rests on two
+ * platform facts, and neither is asserted here on anyone's say-so: both are
+ * pinned by a test in `write-broker-create-containment.test.ts` that
+ * re-checks them on every suite run, on the machine the suite runs on.
+ * They are that `rename(2)` moves the renamed directory's status-change
+ * time even when the parent and the inode stay the same, and that writing a
+ * file's CONTENT does not move its directory's — the second is what makes
+ * an unchanged sample meaningful across step 5. To those the standard adds
+ * that an unprivileged process cannot move a status-change time BACKWARDS:
+ * `utimensat` sets it to now, and only the system clock could rewind it,
+ * which is not a repository's to set.
+ *
+ * It does NOT guarantee containment across the whole call. Node exposes no
+ * `openat`, so step 2 is a path lookup and steps 1-4 cannot be made atomic
+ * with respect to a rename. A swap landing between them can still create
+ * an EMPTY file outside the repository, which step 3 refuses and unlinks
+ * whenever the path still names it. **How wide that remaining window is,
+ * and how often it can be hit, is UNPROVEN — no measurement here or by the
+ * verifier bounds it, and the previous two attempts at a number were both
+ * disproved.** Treat it as open, and measure independently before writing
+ * any figure here.
+ *
+ * The check is also only as fine as the filesystem's timestamp
+ * granularity. On APFS that is nanoseconds; on a filesystem with
+ * one-second timestamps a whole rename-out-and-back inside one tick would
+ * be invisible to it, and the inode proofs of step 3 are all that is left.
+ *
+ * It fails CLOSED in one more direction than it strictly must: another
+ * process adding or removing ANY entry in the same directory during step 5
+ * also moves the status-change time, and that refuses the create too. The
+ * model is told the write did not happen, which is true — the empty file
+ * is unlinked — and it can retry. A spurious round trip is the cheaper
+ * error.
  *
  * ## Why the bytes are not staged elsewhere first
  *
@@ -738,52 +780,15 @@ function realPathIsUnder(real: string, rootReal: string): boolean {
  * publish it with `link`. It was implemented and then rejected, because it
  * is strictly WEAKER here. `link` is itself a path lookup: a swap landing
  * in its window publishes a directory entry that ALREADY HOLDS the caller's
- * bytes, outside the repository, with no check between. The order above
- * never puts a byte anywhere until a proof has passed, so the residue of a
- * lost race is an empty file.
+ * bytes, outside the repository, with no check between. Nothing above ever
+ * puts a byte anywhere until a proof has passed.
  *
- * ## The residual, measured rather than assumed
- *
- * Node exposes no `openat` against a directory handle, so step 2 is a path
- * lookup and a swap landing between steps 1 and 2 can still CREATE an empty
- * file outside the repository. Step 3 refuses that and unlinks it whenever
- * the path still names it.
- *
- * What no version of this function can prevent is a directory that is
- * genuinely inside the repository when the write happens and is moved out
- * of it afterwards. That is not specific to a create: any file written
- * anywhere in a repository can be renamed out of it a moment later by a
- * process that can rename its parent. Such a write is reported as a
- * success, correctly — at the moment it completed, the file was in the
- * repository.
- *
- * Measured on macOS, 25 seconds each, against the verifier's own swapper
- * process. Before this change: 345,679 create attempts, 58 successes, 16
- * complete non-empty payloads captured outside the repository, 16 of those
- * 16 reported as a success. After: 329,552 attempts, 3 successes, 2
- * payloads captured outside — and both of those two are the unpreventable
- * shape above, a write into a directory that was inside the repository at
- * write time and was renamed out of it afterwards.
- *
- * The other half of the measurement isolates what IS preventable. A second
- * swapper empties its outside directory before every flip, so anything it
- * finds there was put there by the create it is racing, and it looks while
- * the repository path is still a symlink — the moment when no path inside
- * the repository names the file. 25 seconds: 440,919 attempts, 14,643
- * flips, 17 creates that did land outside the repository, 0 of them
- * non-empty. That is the ZERO-BYTE-residue claim FX11 made without
- * measuring it; it is stated here only because it has now been measured,
- * and `write-broker-create-containment.test.ts` re-runs a shortened form of
- * the same loop on every suite run. Note honestly that the pre-FX17 code
- * scores 0 on that metric too — the loop pins the invariant, and the
- * deterministic test beside it is what pins THIS defect.
- *
- * Exported for that test only. It has to drive this primitive tens of
- * thousands of times against a real second OS process; going through
- * `brokeredWrite` would add locking, journalling and ledger work per
- * attempt and cut the attempt count by three orders of magnitude, which is
- * the difference between a test that can lose the race and one that cannot
- * reach it.
+ * Exported for `write-broker-create-containment.test.ts` only. That suite
+ * has to drive this primitive tens of thousands of times against a real
+ * second OS process; going through `brokeredWrite` would add locking,
+ * journalling and ledger work per attempt and cut the attempt count by
+ * three orders of magnitude, which is the difference between a test that
+ * can lose the race and one that cannot reach it.
  */
 export async function createNoFollow(
   absPath: string,
@@ -796,7 +801,7 @@ export async function createNoFollow(
       `'${absPath}' would be created outside the repository (its parent resolves to '${parentReal}'). Refusing.`,
     )
   }
-  const parentAtStart = await stat(parentReal)
+  const parentAtStart = await stat(parentReal, { bigint: true })
   const target = join(parentReal, basename(absPath))
 
   const handle = await open(
@@ -806,18 +811,22 @@ export async function createNoFollow(
   )
   try {
     const onHandle = await handle.stat()
-    const stillProven = async (): Promise<boolean> => {
+    // `null` when the parent could not be stat'd at all, which every caller
+    // below treats as a failed proof.
+    const stillProven = async (): Promise<{ parentCtimeNs: bigint } | null> => {
       const [resolvedNow, parentNow, onPath] = await Promise.all([
         realpath(parentReal).catch(() => null),
-        stat(parentReal).catch(() => null),
+        stat(parentReal, { bigint: true }).catch(() => null),
         lstat(target).catch(() => null),
       ])
-      if (resolvedNow !== parentReal || parentNow === null) return false
-      if (parentNow.dev !== parentAtStart.dev || parentNow.ino !== parentAtStart.ino) return false
-      return onPath !== null && onPath.dev === onHandle.dev && onPath.ino === onHandle.ino
+      if (resolvedNow !== parentReal || parentNow === null) return null
+      if (parentNow.dev !== parentAtStart.dev || parentNow.ino !== parentAtStart.ino) return null
+      if (onPath === null || onPath.dev !== onHandle.dev || onPath.ino !== onHandle.ino) return null
+      return { parentCtimeNs: parentNow.ctimeNs }
     }
 
-    if (!(await stillProven())) {
+    const before = await stillProven()
+    if (before === null) {
       await discardCreated(target, onHandle)
       throw new Error(
         `'${absPath}' moved out of the repository while it was being created. Refusing to write it.`,
@@ -825,7 +834,8 @@ export async function createNoFollow(
     }
     // Strings default to utf8; Buffers are written byte-for-byte.
     await handle.writeFile(content)
-    if (!(await stillProven())) {
+    const after = await stillProven()
+    if (after === null || after.parentCtimeNs !== before.parentCtimeNs) {
       // The fd is anchored to the inode we wrote, so truncating it empties
       // the bytes wherever that inode has been moved to.
       await handle.truncate(0).catch(() => {})

@@ -438,14 +438,23 @@ describe('brokeredWrite', () => {
     // "Recover from '<dir that never existed>'" — `backupDir` was reported
     // unconditionally on the write-stage failure even though the success
     // path already knew to omit it for an empty journal.
+    //
+    // A lives in a SUBDIRECTORY, and that is load-bearing rather than
+    // incidental (FX19 item 1). The sabotage below churns directory
+    // entries while B's content write is in flight, and `createNoFollow`
+    // now refuses a create whose parent directory's status-change time
+    // moved across that write. With A beside B at the root, the sabotage
+    // would refuse B's create and the batch would never reach the rollback
+    // this test is about. In a subdirectory it touches a different parent,
+    // so the rollback path is exercised exactly as before.
     async function* sabotageA(): AsyncGenerator<string> {
       // Runs while B's write is in flight, right after A has already
       // landed — turns A into a non-empty directory so ITS OWN rollback
       // (unlink, since it's unjournaled/new) fails for real, not just by
       // simulation.
-      rmSync(join(root, 'a-new.vue'))
-      mkdirSync(join(root, 'a-new.vue'))
-      writeFileSync(join(root, 'a-new.vue', 'inner'), 'x')
+      rmSync(join(root, 'sub', 'a-new.vue'))
+      mkdirSync(join(root, 'sub', 'a-new.vue'))
+      writeFileSync(join(root, 'sub', 'a-new.vue', 'inner'), 'x')
       yield 'B-NEW'
     }
 
@@ -455,8 +464,8 @@ describe('brokeredWrite', () => {
       ops: [
         {
           kind: 'write',
-          repoRel: 'a-new.vue',
-          absPath: join(root, 'a-new.vue'),
+          repoRel: 'sub/a-new.vue',
+          absPath: join(root, 'sub', 'a-new.vue'),
           ensureDir: true,
           isNew: true,
           content: 'A-NEW',
@@ -480,7 +489,7 @@ describe('brokeredWrite', () => {
     // unlink on a non-empty directory).
     expect(result.rolledBack).toEqual(['b-new.vue'])
     expect(result.restoreErrors).toHaveLength(1)
-    expect(result.restoreErrors[0]).toContain('a-new.vue')
+    expect(result.restoreErrors[0]).toContain('sub/a-new.vue')
     // The empty-journal fact, carried through to the failure result.
     expect(result.backupDir).toBeUndefined()
 
