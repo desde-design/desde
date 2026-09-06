@@ -4938,6 +4938,10 @@ async function runEditAndAutoCommit(
       miniTurnPolicy,
       // Dormant lanes (detach / swap) this prototype opted back in to.
       enabledLanes: ctx.enabledLanes,
+      // The same secret-read policy the visible chat lane runs under. The
+      // mini-turn fallback reads this repository with Read/Glob/Grep, so it
+      // is the same question with the same answer (FX19 item 4).
+      blockSecretReads: isSecretReadsBlocked(ctx),
       // WS4: give the mini-turn fallback the same design-system grounding
       // the chat route gets.
       getGrounding: () => getGroundingService(ctx.canonicalRoot, ctx.groundingLoaders),
@@ -5089,6 +5093,8 @@ async function handleEditStreaming(
           // Same reason: `llm-patch` is not a dormant kind, but the two entry
           // points must not disagree about the gate they apply.
           enabledLanes: ctx.enabledLanes,
+          // Same reason again, for the secret-read policy.
+          blockSecretReads: isSecretReadsBlocked(ctx),
           // Same grounding provider `runEditAndAutoCommit` gets — resolves
           // the style-context block's tokens (see edit-handler.ts's
           // handleLLMPatch). Tokens must never block an edit; the handler

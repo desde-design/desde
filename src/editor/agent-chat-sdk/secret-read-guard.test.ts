@@ -309,13 +309,56 @@ describe("the editor's own tools reach the policy (FX17 item 4)", () => {
     for (const [tool, input] of [
       ['mcp__editor__read_file_at_commit', { path: 'src/App.tsx', sha: 'HEAD' }],
       ['mcp__editor__diff_file', { path: 'src/App.tsx' }],
-      ['mcp__editor__session_diff', {}],
+      ['mcp__editor__session_diff', { path: 'src/App.tsx' }],
       ['mcp__editor__rename_file', { from: 'src/App.tsx', to: 'src/Main.tsx' }],
       ['mcp__editor__get_selection', {}],
+      ['mcp__editor__session_status', {}],
+      ['mcp__editor__run_verification', { check: 'lint' }],
     ] as ReadonlyArray<[string, Record<string, unknown>]>) {
       expect((await blockedDecision(tool, input)).decision, tool).toBeUndefined()
       expect((await blockedGate()(tool, input, {})).behavior, tool).toBe('allow')
     }
+  })
+
+  /**
+   * FX19 item 2. The check read `path`, `from` and `paths`, every one of
+   * them OPTIONAL, and allowed the call when they were absent. So the two
+   * editor tools that return CONTENT with no scope required — the full
+   * session diff, and an external-root `git grep` with no pathspec — went
+   * through with the policy on, while their scoped forms were refused. The
+   * guard's own comment listed `session_diff` as covered, which made it
+   * two facts out of step rather than one.
+   *
+   * An absent scope is not a narrow call. It is a call whose reach cannot
+   * be proven, which is the same rule `grepContentScopeIsSecretFree`
+   * already applies to a `Grep` in content mode.
+   */
+  const UNSCOPED_CONTENT_CALLS: ReadonlyArray<[string, Record<string, unknown>]> = [
+    ['mcp__editor__session_diff', {}],
+    ['mcp__editor__session_diff', { maxLines: 2000 }],
+    ['mcp__editor__search_external_files', { root: 'prod', query: 'KEY' }],
+    ['mcp__editor__search_external_files', { root: 'prod', query: 'KEY', paths: [] }],
+  ]
+
+  it.each(UNSCOPED_CONTENT_CALLS)(
+    'the PreToolUse hook denies unscoped %s',
+    async (tool, input) => {
+      const { decision, reason } = await blockedDecision(tool, input)
+      expect(decision).toBe('deny')
+      // The refusal has to name the scoped form, or the model has no route
+      // left and starts asking the user to paste things.
+      expect(reason).toMatch(/scope|path/i)
+      expect(reason).not.toContain(FAKE_KEY)
+    },
+  )
+
+  it.each(UNSCOPED_CONTENT_CALLS)('the shared gate denies unscoped %s', async (tool, input) => {
+    expect((await blockedGate()(tool, input, {})).behavior).toBe('deny')
+  })
+
+  it.each(UNSCOPED_CONTENT_CALLS)('the default allows unscoped %s', async (tool, input) => {
+    expect((await guardDecision(tool, input)).decision).toBeUndefined()
+    expect((await gate()(tool, input, {})).behavior).toBe('allow')
   })
 
   it('catches an in-repo symlink pointing at the credential', async () => {

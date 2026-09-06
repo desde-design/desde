@@ -38,6 +38,29 @@ function turnResultWithText(text: string): RunChatTurnSdkResult {
 }
 
 describe('runEditFixMiniTurn', () => {
+  /**
+   * FX19 item 4. The field did not exist, so the CLI could not pass the
+   * project's setting even though it had already computed it, and the turn
+   * ran with `undefined` — which every gate reads as "allow". This is the
+   * lane an ordinary inspector prop edit falls into when the deterministic
+   * applicator cannot splice the value, and it hands the model Read, Edit,
+   * Write, Glob and Grep over the untrusted repository.
+   */
+  it('forwards the prototype secret-read policy to the turn', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mini-turn-'))
+    const seen: Array<boolean | undefined> = []
+    for (const setting of [true, false, undefined]) {
+      await runEditFixMiniTurn(makeInput(dir, { blockSecretReads: setting }), {
+        runTurn: async (opts) => {
+          seen.push(opts.blockSecretReads)
+          return turnResultWithText('EDIT_APPLIED: done')
+        },
+      })
+    }
+    rmSync(dir, { recursive: true, force: true })
+    expect(seen).toEqual([true, false, undefined])
+  })
+
   it('constrains the turn: budget, built-ins, disallowed interactive tools', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'mini-turn-'))
     let captured: RunChatTurnSdkOpts | null = null

@@ -99,6 +99,23 @@ export interface EditFixMiniTurnInput {
    * field never picks one.
    */
   providerId?: string
+  /**
+   * The prototype's `editor.blockSecretReads` setting, forwarded to the
+   * turn.
+   *
+   * FX19 item 4. This field did not exist, so the CLI could not pass the
+   * value even though it had already computed it, and the turn ran with
+   * `undefined` — which every gate reads as "allow" on its `=== true`
+   * discipline. That mattered because this is not a niche lane: it is what
+   * runs when a designer changes a prop in the inspector and the
+   * deterministic applicator cannot splice it (a bound binding, a v-model,
+   * a dynamic v-bind). The model gets `Read`, `Edit`, `Write`, `Glob` and
+   * `Grep` over the same untrusted repository the visible chat lane reads
+   * with the policy on.
+   *
+   * Absent means allow, exactly as the setting's own default does.
+   */
+  blockSecretReads?: boolean
 }
 
 export interface EditFixMiniTurnResult {
@@ -204,6 +221,7 @@ export async function runEditFixMiniTurn(
       costCeilingUsd: input.costCeilingUsd ?? 1.0,
       builtinTools: MINI_TURN_BUILTIN_TOOLS,
       disallowedTools: MINI_TURN_DISALLOWED_TOOLS,
+      blockSecretReads: input.blockSecretReads,
       model: input.model,
       providerId: input.providerId,
       // The write guard must NOT record undo history for this lane's writes

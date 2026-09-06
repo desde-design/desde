@@ -167,9 +167,15 @@ export function createSecretReadGuard(opts: SecretReadGuardOptions): HookCallbac
     // `Read|Glob|Grep` only, so `read_file_at_commit`, `diff_file`,
     // `session_diff` and `rename_file` reached neither guard. It is now
     // registered UNMATCHED — see `run-chat-turn-sdk.ts` — which is why this
-    // branch is reachable at all.
+    // branch is reachable at all. FX19 item 2: the SCOPED forms of those
+    // were covered; `session_diff` with no `path` was not, and this comment
+    // claimed it was.
     if (pre.tool_name.startsWith('mcp__editor__')) {
-      const refusal = await editorToolSecretRefusal(opts.worktreeRoot, pre.tool_input)
+      const refusal = await editorToolSecretRefusal(
+        pre.tool_name,
+        opts.worktreeRoot,
+        pre.tool_input,
+      )
       if (refusal !== null) return deny(refusal)
       return ALLOW
     }

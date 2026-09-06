@@ -317,7 +317,7 @@ export function buildToolPermissionGate(
     // ARGUMENTS, so an editor tool added later is covered the day it is
     // added rather than the day someone remembers this list.
     if (toolName.startsWith('mcp__editor__') && opts.blockSecretReads === true) {
-      const refusal = await editorToolSecretRefusal(opts.worktreeRoot, toolInput)
+      const refusal = await editorToolSecretRefusal(toolName, opts.worktreeRoot, toolInput)
       if (refusal !== null) return deny(refusal)
     }
     // Defense in depth: for Read, validate the file_path is in-root

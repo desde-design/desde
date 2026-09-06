@@ -318,6 +318,14 @@ export interface ApplyEditOpts {
    * had before per-provider dispatch existed.
    */
   chatLoaders?: ChatHandlerLoaders
+  /**
+   * The prototype's `editor.blockSecretReads` setting, for the agent
+   * mini-turn fallback (FX19 item 4). The route computes it with
+   * `isSecretReadsBlocked(ctx)` — the same call `http-server.ts` already
+   * makes for the visible chat lane. Absent in older callers and tests,
+   * which is the setting's own default: allow.
+   */
+  blockSecretReads?: boolean
 }
 
 export async function applyEdit(
@@ -1381,6 +1389,7 @@ async function handleApplicatorRefusal(args: {
           correlationId: body.correlationId,
           llmProviderId: opts.llmProviderId,
           chatLoaders: opts.chatLoaders,
+          blockSecretReads: opts.blockSecretReads,
         })
         if (fallbackResult !== null) return fallbackResult
       } else if (body.edit.llmFallback === "chat") {
@@ -1762,6 +1771,8 @@ async function tryPropEditLLMFallback(args: {
   llmProviderId?: string
   /** See `ApplyEditOpts.chatLoaders`. */
   chatLoaders?: ChatHandlerLoaders
+  /** See `ApplyEditOpts.blockSecretReads`. */
+  blockSecretReads?: boolean
 }): Promise<EditResult | null> {
   const escalateToChatOnRefusal = (reason: string): EditResult => ({
     ok: false,
@@ -1873,6 +1884,9 @@ async function tryPropEditLLMFallback(args: {
         getGrounding: args.getGrounding,
         model,
         providerId,
+        // FX19 item 4. The mini-turn used to run with no secret-read
+        // policy at all, on a lane an ordinary inspector edit reaches.
+        blockSecretReads: args.blockSecretReads,
         ...(reviewSurface ? { reviewSurface } : {}),
       },
       { runTurn },
