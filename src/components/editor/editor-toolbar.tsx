@@ -220,6 +220,9 @@ export function EditorToolbar({
           // No track of its own: the toolbar pill IS the container, and a
           // second one inside it was a box in a box (Mo, 2026-08-18).
           variant="plain"
+          // Icon on top, label below in tiny type (Mo, 2026-09-06) — this
+          // is the only tool picker asking for it, not every SegmentedToggle.
+          stacked
         />
       ) : null}
       {/*

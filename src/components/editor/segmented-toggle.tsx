@@ -75,6 +75,20 @@ interface SegmentedToggleProps<TValue extends string> {
    *   comment buttons").
    */
   variant?: "contained" | "plain"
+  /**
+   * Icon above the label instead of beside it, label shrunk to the type
+   * scale's floor (`text-2xs`). For a strip whose labels read as wide
+   * side-by-side text in a toolbar this thin (Mo, 2026-09-06, the toolbar's
+   * tool picker: Navigate / Select / Comment).
+   *
+   * Overrides use Tailwind's trailing `!` rather than relying on class
+   * order: the base trigger's size classes are gated behind a
+   * `group-data-[size=default]/tabs-list:` modifier, which compiles through
+   * `:where()` to the same zero specificity as a plain utility (see the
+   * height comment in `ui/tabs.tsx`), so an unmarked override class is not
+   * guaranteed to win.
+   */
+  stacked?: boolean
 }
 
 export function SegmentedToggle<TValue extends string>({
@@ -84,6 +98,7 @@ export function SegmentedToggle<TValue extends string>({
   ariaLabel,
   className,
   variant = "contained",
+  stacked = false,
 }: SegmentedToggleProps<TValue>) {
   const plain = variant === "plain"
   return (
@@ -101,7 +116,12 @@ export function SegmentedToggle<TValue extends string>({
         // The track, the padding and the rounding all belong to the
         // container look; `plain` drops the three together, or a track-less
         // strip keeps a 3px inset nothing sits in.
-        className={plain ? "gap-0.5 bg-transparent p-0" : undefined}
+        className={cn(
+          plain && "gap-0.5 bg-transparent p-0",
+          // The fixed track height assumes one line of content; a stacked
+          // trigger is two, so let the list size to its tallest child instead.
+          stacked && "h-auto! items-stretch py-1!"
+        )}
       >
         {options.map((opt) => (
           <TabsTrigger
@@ -125,19 +145,21 @@ export function SegmentedToggle<TValue extends string>({
             // replaces its white-card treatment rather than layering over
             // it. The accent at 10% is the same fill the option cards use
             // for a chosen row — one idea, one weight, two surfaces.
-            className={
-              plain
-                ? // `font-medium` on the active segment (Mo, 2026-08-18).
-                  // Without a track behind it, colour was carrying the whole
-                  // signal; weight is the second cue, and it is the one that
-                  // still reads when the fill is only 10%.
-                  // `hover:` too, or the primitive's own `hover:text-foreground`
-                  // wins on the active segment and the teal label goes near-black
-                  // under the cursor — a picked tool looking momentarily unpicked
-                  // (Mo, 2026-08-18).
-                  "data-active:bg-primary/10 data-active:font-medium data-active:text-primary data-active:hover:text-primary"
-                : undefined
-            }
+            className={cn(
+              plain &&
+                // `font-medium` on the active segment (Mo, 2026-08-18).
+                // Without a track behind it, colour was carrying the whole
+                // signal; weight is the second cue, and it is the one that
+                // still reads when the fill is only 10%.
+                // `hover:` too, or the primitive's own `hover:text-foreground`
+                // wins on the active segment and the teal label goes near-black
+                // under the cursor — a picked tool looking momentarily unpicked
+                // (Mo, 2026-08-18).
+                "data-active:bg-primary/10 data-active:font-medium data-active:text-primary data-active:hover:text-primary",
+              // Icon on top, label under, at the type scale's floor. No
+              // `leading-*`: `text-2xs` carries its own line-height.
+              stacked && "h-auto! flex-col! gap-0.5! px-1.5! py-1.5! text-2xs!"
+            )}
           >
             {opt.icon}
             <span>{opt.label}</span>
