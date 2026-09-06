@@ -105,14 +105,41 @@ describe('SDK lane — the PreToolUse guard, with blocking turned on', () => {
     expect((await blockedDecision('Read', { file_path: 'src/App.tsx' })).decision).toBeUndefined()
   })
 
-  it('denies a Glob whose pattern names the file', async () => {
-    expect((await blockedDecision('Glob', { pattern: '**/.env*' })).decision).toBe('deny')
-    expect((await blockedDecision('Glob', { pattern: '**/*.pem' })).decision).toBe('deny')
+  /**
+   * FX20 item 1. These four used to be denied by a pattern analysis, and
+   * they are not any more. The analysis decided reach by SPELLING, and a
+   * measurement found seven of eight brace and character-class spellings of
+   * a secret directory passing where the literal spelling was refused — so
+   * it refused the naive spelling and served the rest, which reads as a
+   * control and is not one.
+   *
+   * What these calls can still reach is a NAME. `Glob` returns paths;
+   * `Grep` without `output_mode: "content"` returns paths. A broad pattern
+   * always could, and this lane cannot filter a result it runs before. The
+   * CONTENT shape is covered separately, and that coverage is what the
+   * next describe block pins.
+   */
+  it('allows a name-only Glob or Grep, whatever its pattern names', async () => {
+    for (const input of [
+      ['Glob', { pattern: '**/.env*' }],
+      ['Glob', { pattern: '**/*.pem' }],
+      ['Grep', { pattern: 'KEY', glob: '.env*' }],
+      ['Grep', { pattern: 'KEY', path: '.env' }],
+    ] as ReadonlyArray<[string, Record<string, unknown>]>) {
+      expect((await blockedDecision(input[0], input[1])).decision, input[0]).toBeUndefined()
+    }
   })
 
-  it('denies a Grep scoped at the file, by glob or by path', async () => {
-    expect((await blockedDecision('Grep', { pattern: 'KEY', glob: '.env*' })).decision).toBe('deny')
-    expect((await blockedDecision('Grep', { pattern: 'KEY', path: '.env' })).decision).toBe('deny')
+  it('still denies the CONTENT shape of the same scopes', async () => {
+    for (const input of [
+      { pattern: 'KEY', glob: '.env*', output_mode: 'content' },
+      { pattern: 'KEY', path: '.env', output_mode: 'content' },
+      { pattern: 'KEY', output_mode: 'content' },
+    ]) {
+      const { decision, reason } = await blockedDecision('Grep', input)
+      expect(decision).toBe('deny')
+      expect(reason).not.toContain(FAKE_KEY)
+    }
   })
 
   it("does not read Grep's regular expression as a path", async () => {
@@ -161,10 +188,19 @@ describe('SDK lane — the shared gate, its second end', () => {
       blockSecretReads: true,
     })
 
-  it('denies Read, Glob and Grep for a secret path', async () => {
+  it('denies a Read of a secret path, and a Grep that would return its lines', async () => {
     expect((await blockedGate()('Read', { file_path: '.env' }, {})).behavior).toBe('deny')
-    expect((await blockedGate()('Glob', { pattern: '.env*' }, {})).behavior).toBe('deny')
-    expect((await blockedGate()('Grep', { pattern: 'K', glob: '**/.env' }, {})).behavior).toBe('deny')
+    expect(
+      (await blockedGate()('Grep', { pattern: 'K', glob: '**/.env', output_mode: 'content' }, {}))
+        .behavior,
+    ).toBe('deny')
+  })
+
+  it('allows the name-only shapes, the same as the hook (FX20 item 1)', async () => {
+    expect((await blockedGate()('Glob', { pattern: '.env*' }, {})).behavior).toBe('allow')
+    expect((await blockedGate()('Grep', { pattern: 'K', glob: '**/.env' }, {})).behavior).toBe(
+      'allow',
+    )
   })
 
   it('allows them by default', async () => {
@@ -287,7 +323,6 @@ describe("the editor's own tools reach the policy (FX17 item 4)", () => {
     ['mcp__editor__delete_file', { path: 'packages/api/.env' }],
     ['mcp__editor__read_file_at_commit', { root: 'prod', path: '.envrc', sha: 'HEAD' }],
     ['mcp__editor__rename_file', { from: '.env', to: 'notes.txt' }],
-    ['mcp__editor__search_external_files', { root: 'prod', query: 'KEY', paths: ['**/.en?'] }],
   ]
 
   it.each(SECRET_CALLS)('the PreToolUse hook denies %s', async (tool, input) => {
@@ -321,40 +356,41 @@ describe("the editor's own tools reach the policy (FX17 item 4)", () => {
   })
 
   /**
-   * FX19 item 2. The check read `path`, `from` and `paths`, every one of
-   * them OPTIONAL, and allowed the call when they were absent. So the two
-   * editor tools that return CONTENT with no scope required — the full
-   * session diff, and an external-root `git grep` with no pathspec — went
-   * through with the policy on, while their scoped forms were refused. The
-   * guard's own comment listed `session_diff` as covered, which made it
-   * two facts out of step rather than one.
+   * **FX19 item 2, reversed by FX20 item 1.**
    *
-   * An absent scope is not a narrow call. It is a call whose reach cannot
-   * be proven, which is the same rule `grepContentScopeIsSecretFree`
-   * already applies to a `Grep` in content mode.
+   * FX19 refused a `session_diff` or `search_external_files` that carried no
+   * scope, on the reasoning that an absent scope is UNPROVEN rather than
+   * narrow. The next review round showed what that bought: `paths: []` was
+   * refused and `paths: ["."]`, `["*"]`, `["**"]` were served, over the same
+   * tree, by the same `git grep`; `session_diff` with no `path` was refused
+   * and `path: "."` was served. The refusal held for exactly one spelling of
+   * the call.
+   *
+   * So the scope is no longer judged here at all. Both tools withhold by
+   * RESOLVED PATH inside the tool, where git has already turned the scope
+   * into concrete file names — `git-tools-secret-scope.test.ts` is that
+   * test, and it asserts the property over every spelling in the verifier's
+   * table rather than over the one this file could name. What is asserted
+   * here is the consequence: the guards let these calls through, because
+   * refusing them was the part that did not work.
    */
   const UNSCOPED_CONTENT_CALLS: ReadonlyArray<[string, Record<string, unknown>]> = [
     ['mcp__editor__session_diff', {}],
     ['mcp__editor__session_diff', { maxLines: 2000 }],
+    ['mcp__editor__session_diff', { path: '.' }],
     ['mcp__editor__search_external_files', { root: 'prod', query: 'KEY' }],
     ['mcp__editor__search_external_files', { root: 'prod', query: 'KEY', paths: [] }],
+    ['mcp__editor__search_external_files', { root: 'prod', query: 'KEY', paths: ['.'] }],
+    ['mcp__editor__search_external_files', { root: 'prod', query: 'KEY', paths: ['**/.en?'] }],
   ]
 
   it.each(UNSCOPED_CONTENT_CALLS)(
-    'the PreToolUse hook denies unscoped %s',
+    'the guards no longer judge the scope of %s, the tool does',
     async (tool, input) => {
-      const { decision, reason } = await blockedDecision(tool, input)
-      expect(decision).toBe('deny')
-      // The refusal has to name the scoped form, or the model has no route
-      // left and starts asking the user to paste things.
-      expect(reason).toMatch(/scope|path/i)
-      expect(reason).not.toContain(FAKE_KEY)
+      expect((await blockedDecision(tool, input)).decision).toBeUndefined()
+      expect((await blockedGate()(tool, input, {})).behavior).toBe('allow')
     },
   )
-
-  it.each(UNSCOPED_CONTENT_CALLS)('the shared gate denies unscoped %s', async (tool, input) => {
-    expect((await blockedGate()(tool, input, {})).behavior).toBe('deny')
-  })
 
   it.each(UNSCOPED_CONTENT_CALLS)('the default allows unscoped %s', async (tool, input) => {
     expect((await guardDecision(tool, input)).decision).toBeUndefined()

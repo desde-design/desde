@@ -205,11 +205,15 @@ export interface BuildEditorToolServerOpts {
   canvasEnabled?: boolean
   /**
    * The project's secret-read policy (`editor.blockSecretReads` in
-   * `.desde/config.json`). Default OFF — nothing is blocked. Only
-   * `rename_file` reads it today: a rename whose SOURCE is a credential file
-   * is a READ of that file under a new name, and the shared permission gate
-   * refuses the same call. This is the tool-side half of that both-ends
-   * pair. See FX17 item 5.
+   * `.desde/config.json`). Default OFF — nothing is blocked.
+   *
+   * Three tools read it. `rename_file`, because a rename whose SOURCE is a
+   * credential file is a READ of that file under a new name (FX17 item 5).
+   * `search_external_files` and `session_diff`, because both return file
+   * CONTENT from a scope that can cover a whole tree, and both now decide
+   * what they may return from the paths git resolved rather than from the
+   * scope's spelling (FX20 item 1). Each is the tool-side half of a
+   * both-ends pair whose other half is the shared permission gate.
    */
   blockSecretReads?: boolean
 }
@@ -241,7 +245,17 @@ export function buildEditorToolSpecs(opts: BuildEditorToolServerOpts): ToolSpec[
     acquireTreeGate,
     blockSecretReads,
   } = opts
-  const rootCtx = { bridge, signal, readRoots, rootCommitSha, verificationAdapter }
+  const rootCtx = {
+    bridge,
+    signal,
+    readRoots,
+    rootCommitSha,
+    verificationAdapter,
+    // Both lanes build their catalog through this function, so passing the
+    // policy here is what puts `search_external_files` and `session_diff`
+    // under it on the SDK lane AND the neutral one. FX20 item 1.
+    ...(blockSecretReads === true ? { blockSecretReads: true } : {}),
+  }
 
   // Read-only design-system grounding tools — registered only when a
   // GroundingService resolver is available (CLI/worktree-session mode). The

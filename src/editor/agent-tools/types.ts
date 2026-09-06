@@ -142,6 +142,20 @@ export interface ToolContext {
    * adapter; other substrates plug in behind the same interface.
    */
   verificationAdapter?: import('../core/verification-adapter').VerificationAdapter
+  /**
+   * The prototype's secret-read policy (`editor.blockSecretReads` in
+   * `.desde/config.json`). Default OFF, on the same `=== true` discipline as
+   * every other opt-in gate, so a context that never sets it behaves as it
+   * did before the policy existed.
+   *
+   * The two tools that read it — `search_external_files` and `session_diff`
+   * — are the only ones here that return file CONTENT from a scope wider
+   * than one named path. With it on they withhold, by RESOLVED PATH, the
+   * matches and the per-file diffs that came out of a credential file. See
+   * `withholdSecretPaths` in `git-tools.ts` for why that is done on the
+   * resolved set rather than on the model's spelling of the scope.
+   */
+  blockSecretReads?: boolean
   signal?: AbortSignal
   /**
    * Buffer a proposed edit. The orchestrator wires this to emit an

@@ -101,17 +101,21 @@ describe('neutral lane — the shared gate, with blocking turned on', () => {
     expect((await blockedGate()('Read', { file_path: '.env.example' }, {})).behavior).toBe('allow')
   })
 
-  it('denies a Glob whose pattern names the file', async () => {
-    expect((await blockedGate()('Glob', { pattern: '**/.env*' }, {})).behavior).toBe('deny')
-  })
-
-  it('denies a Grep whose glob scope names the file', async () => {
-    const d = await blockedGate()('Grep', { pattern: 'KEY', glob: '.env*' }, {})
-    expect(d.behavior).toBe('deny')
-  })
-
-  it('allows a broad Glob, because the results are filtered instead', async () => {
-    expect((await blockedGate()('Glob', { pattern: '**/.*' }, {})).behavior).toBe('allow')
+  /**
+   * FX20 item 1. The gate used to refuse a pattern an analyser judged to be
+   * AIMED at a credential file. It does not any more, on this lane least of
+   * all: the handler enumerates every path itself and drops the credential
+   * ones, so the gate had nothing to add but a spelling test — and glob
+   * syntax has unbounded spellings for identical reach.
+   */
+  it('allows every pattern, aimed or broad, because the handler filters the results', async () => {
+    for (const input of [
+      ['Glob', { pattern: '**/.env*' }],
+      ['Glob', { pattern: '**/.*' }],
+      ['Grep', { pattern: 'KEY', glob: '.env*' }],
+    ] as ReadonlyArray<[string, Record<string, unknown>]>) {
+      expect((await blockedGate()(input[0], input[1], {})).behavior, input[0]).toBe('allow')
+    }
   })
 
   it("does not treat Grep's regular expression as a path", async () => {
@@ -156,23 +160,23 @@ describe('neutral lane — Glob, with blocking turned on', () => {
     expect(text).toContain('2 files were left out')
   })
 
-  it('refuses a pattern aimed straight at the file', async () => {
-    const out = await buildGlobToolSpec({ worktreeRoot: root, blockSecretReads: true }).handler(
-      { pattern: '.env*' },
-      {},
-    )
-    expect(out.isError).toBe(true)
-    expect(out.content[0].text).toContain('cannot be searched')
-  })
-
-  it('refuses rather than silently emptying when nothing else matched', async () => {
-    const out = await buildGlobToolSpec({ worktreeRoot: root, blockSecretReads: true }).handler(
-      { pattern: '**/.env.local' },
-      {},
-    )
-    // `**/.env.local` is an aimed pattern, so it is refused rather than
-    // silently emptied. The note path is covered by the broad case above.
-    expect(out.isError).toBe(true)
+  /**
+   * FX20 item 1. A pattern aimed straight at the file used to be refused
+   * outright; now it is enumerated and emptied, with the count said out
+   * loud. The objection to that — "an empty answer teaches the model the
+   * file does not exist" — is what the note answers, and the note is
+   * asserted here rather than assumed.
+   */
+  it('empties an aimed pattern and says the file was left out, rather than lying about it', async () => {
+    for (const pattern of ['.env*', '**/.env.local']) {
+      const out = await buildGlobToolSpec({ worktreeRoot: root, blockSecretReads: true }).handler(
+        { pattern },
+        {},
+      )
+      expect(out.content[0].text, pattern).not.toMatch(/^\.env(\.local)?$/m)
+      expect(out.content[0].text, pattern).toContain('left out')
+      expect(out.content[0].text, pattern).not.toContain(FAKE_KEY)
+    }
   })
 })
 
@@ -186,12 +190,15 @@ describe('neutral lane — Grep, with blocking turned on', () => {
     expect(out.content[0].text).toContain('left out')
   })
 
-  it('refuses a scope aimed straight at the file', async () => {
+  it('returns no line of the file when the scope is aimed straight at it (FX20 item 1)', async () => {
     const out = await buildGrepToolSpec({ worktreeRoot: root, blockSecretReads: true }).handler(
       { pattern: 'KEY', glob: '.env' },
       {},
     )
-    expect(out.isError).toBe(true)
+    // Not refused any more — enumerated, and the one file it enumerated was
+    // dropped. The property that matters is unchanged and is asserted the
+    // same way: no byte of the credential comes back.
     expect(out.content[0].text).not.toContain(FAKE_KEY)
+    expect(out.content[0].text).toContain('left out')
   })
 })

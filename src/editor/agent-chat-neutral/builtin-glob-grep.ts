@@ -17,9 +17,7 @@ import { sep as pathSep } from 'node:path'
 import { z } from 'zod'
 
 import {
-  globPatternTargetsSecret,
   isSecretAgentPath,
-  secretPathDenial,
   secretPathOmissionNote,
 } from '../agent-chat-sdk/protected-paths'
 import { resolveRepoPath } from '../agent-tools/read-tools'
@@ -90,10 +88,14 @@ export interface BuiltinSearchOpts {
    * opt-in gate, so absent means these tools behave as they did before the
    * policy existed.
    *
-   * With it ON, an enumeration that HAPPENS to reach `.env` drops it from the
-   * results and says how many were dropped; a pattern that AIMS at one is
-   * refused outright by the shared gate before the handler runs. The two
-   * treatments are deliberately different — see `globPatternTargetsSecret`.
+   * With it ON, every enumerated path the policy refuses is dropped from the
+   * results and the count is reported. That is the ONLY treatment now: FX20
+   * item 1 removed the separate refusal for a pattern judged to be AIMED at a
+   * credential, because that judgement was made on the pattern's spelling and
+   * glob syntax has unbounded spellings for identical reach. The objection it
+   * was there to answer — that omitting `.env` from `**\/.env` tells the model
+   * the file does not exist — is answered instead by the note, which says how
+   * many files were left out and why.
    */
   blockSecretReads?: boolean
 }
@@ -183,14 +185,11 @@ export function buildGlobToolSpec(opts: BuiltinSearchOpts) {
     handler: async (input: Record<string, unknown>, ctx?: unknown) => {
       const pattern = typeof input.pattern === 'string' ? input.pattern : ''
       if (pattern.length === 0) return err('Glob needs a non-empty pattern.')
+      // The filter lives in `matchingPaths` below, which is BOTH ends at
+      // once on this lane: the handler owns the enumeration, so the gate has
+      // nothing to duplicate. FX20 item 1 removed the pattern refusal that
+      // used to sit here.
       const blockSecretReads = opts.blockSecretReads === true
-      // The shared gate refuses this before the handler runs. Repeating it
-      // here is the second of the two ends CLAUDE.md asks for: a caller that
-      // assembles the catalog without the gate would otherwise get a Glob with
-      // no policy on it at all. The LIST is not duplicated, only the call.
-      if (blockSecretReads && globPatternTargetsSecret(pattern)) {
-        return err(secretPathDenial(pattern, 'search'))
-      }
       const signal = signalOf(ctx)
       try {
         const found = await matchingPaths(
@@ -269,14 +268,10 @@ export function buildGrepToolSpec(opts: BuiltinSearchOpts) {
       const signal = signalOf(ctx)
       const deadlineAt = Date.now() + GREP_DEADLINE_MS
       const pattern = typeof input.glob === 'string' && input.glob.length > 0 ? input.glob : '**/*'
+      // No scope test: `matchingPaths` drops every credential path it
+      // enumerates, whatever the scope was spelled as, and this handler only
+      // ever reads the files that survive that. FX20 item 1.
       const blockSecretReads = opts.blockSecretReads === true
-      // The SCOPE is what can name a secret file. `input.pattern` is a regular
-      // expression, not a path, so it is deliberately not tested against a
-      // path policy. The verifier's own repro was `glob: '.env*'`, which is
-      // this branch.
-      if (blockSecretReads && globPatternTargetsSecret(pattern)) {
-        return err(secretPathDenial(pattern, 'search'))
-      }
       let enumeration: Enumeration
       try {
         enumeration = await matchingPaths(

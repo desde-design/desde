@@ -45,7 +45,6 @@ import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sd
 
 import { resolveRepoPath } from '../agent-tools/read-tools'
 import {
-  globPatternTargetsSecret,
   isProtectedAgentPath,
   isSecretAgentPath,
   protectedPathDenial,
@@ -317,7 +316,7 @@ export function buildToolPermissionGate(
     // ARGUMENTS, so an editor tool added later is covered the day it is
     // added rather than the day someone remembers this list.
     if (toolName.startsWith('mcp__editor__') && opts.blockSecretReads === true) {
-      const refusal = await editorToolSecretRefusal(toolName, opts.worktreeRoot, toolInput)
+      const refusal = await editorToolSecretRefusal(opts.worktreeRoot, toolInput)
       if (refusal !== null) return deny(refusal)
     }
     // Defense in depth: for Read, validate the file_path is in-root
@@ -357,36 +356,27 @@ export function buildToolPermissionGate(
     // so they need their own branch — they used to fall straight through to
     // `allow()` below and were never mentioned in this gate at all.
     //
-    // Only an AIMED pattern is refused here. Broad enumeration is allowed and
-    // the secret hits are filtered out of the RESULTS instead, with a note
-    // saying how many were withheld — see `secretPathOmissionNote`. The
-    // difference matters: refusing `**\/*` would break ordinary search, while
-    // silently returning a short list for `**\/.env` would teach the model
-    // the file does not exist and send it looking under other names.
+    // **What this branch no longer does, and why.** It used to refuse a
+    // pattern the analyser judged to be AIMED at a credential file. FX20
+    // item 1 removed that: glob syntax has unbounded spellings for identical
+    // reach, an independent measurement found seven of eight brace and
+    // character-class spellings of a secret DIRECTORY walking past the rule
+    // that refused the literal spelling, and each of five review rounds
+    // bought exactly one more spelling. An unsound refusal that reads as a
+    // control is worse than no refusal, because the next reader trusts it.
+    //
+    // What remains is decided on RESOLVED PATHS, which have no spellings:
+    // the neutral lane owns its Glob and Grep and drops every enumerated
+    // path the policy refuses, counting them (`secretPathOmissionNote`), and
+    // the content-returning shape below is refused unless its scope is one
+    // provable file. Names — not contents — can still reach the model from
+    // the SDK's own Glob, which no `PreToolUse` hook can filter; that was
+    // already true of every broad pattern and is stated in
+    // `secret-read-guard.ts`'s header.
     if (toolName === 'Glob' || toolName === 'Grep') {
       if (opts.blockSecretReads === true) {
-        const input = toolInput as {
-          pattern?: unknown
-          glob?: unknown
-          path?: unknown
-          output_mode?: unknown
-        }
-        // For Glob, `pattern` IS the path pattern. For Grep it is the regular
-        // expression and the path scope is `glob` / `path`, so Grep's
-        // `pattern` is deliberately not tested against a path policy.
-        const scopes = [
-          toolName === 'Glob' ? input.pattern : undefined,
-          input.glob,
-          input.path,
-        ]
-        for (const scope of scopes) {
-          if (typeof scope === 'string' && globPatternTargetsSecret(scope)) {
-            return deny(secretPathDenial(scope, 'search'))
-          }
-        }
-        // FX17 item 3b. An AIMED scope is refused above, and a broad one has
-        // its results filtered — but only on the neutral lane, which owns
-        // its Grep. The SDK's Grep in `output_mode: "content"` returns
+        const input = toolInput as { glob?: unknown; path?: unknown; output_mode?: unknown }
+        // FX17 item 3b. The SDK's Grep in `output_mode: "content"` returns
         // matching LINES, and a `PreToolUse` hook cannot filter a result it
         // runs before, so on that lane a broad content search returned `.env`
         // lines verbatim with no clever spelling needed at all. This is the

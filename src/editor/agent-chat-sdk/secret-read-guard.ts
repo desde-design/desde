@@ -21,10 +21,10 @@
  * ## What it does NOT do
  *
  * It refuses whole calls. It cannot filter results, because `PreToolUse` runs
- * before the tool. On the SDK lane a broad `Glob` that happens to enumerate
- * `.env` therefore still reports the NAME — the neutral lane, which owns its
- * own Glob, omits it with a note. Names are not contents, and every path that
- * returns contents is closed here instead of filtered.
+ * before the tool. On the SDK lane a `Glob` that enumerates `.env` therefore
+ * reports the NAME — the neutral lane, which owns its own Glob, omits it with
+ * a note. Names are not contents, and every path that returns contents is
+ * closed here instead of filtered.
  *
  * **That is what FX17 item 3b had to fix, and the old wording of this
  * paragraph is why it was missed.** It said "the content paths (Read, and a
@@ -36,14 +36,27 @@
  * credential files — see `grepContentScopeIsSecretFree`, which can prove that
  * for exactly one shape, a `path` naming a single non-credential file.
  *
- * The alternative was a `PostToolUse` rewrite of the tool's output. The
- * installed SDK does contract one (`updatedToolOutput`, "replaces the tool
- * output before it is sent to the model"), so the older claim here that it
- * does not is out of date. It was still not taken: redacting would mean
- * parsing ripgrep's output shape to decide which lines came from which file,
- * and a parse that is wrong serves the credential it was meant to remove. A
- * refusal costs the model one round trip and cannot be wrong in that
- * direction.
+ * **FX20 item 1 narrowed the name paragraph above from "a broad Glob" to any
+ * Glob.** Until then this hook also refused a pattern an analyser judged to
+ * be AIMED at a credential name, and that analysis is gone. It decided reach
+ * by SPELLING, and glob syntax has unbounded spellings for identical reach:
+ * an independent measurement found seven of eight brace and character-class
+ * spellings of a secret directory passing where the literal spelling was
+ * refused, and five consecutive review rounds each bought exactly one more
+ * spelling. Keeping it would have left a rule that reads like a control and
+ * is not one.
+ *
+ * So on this lane, name-level enumeration of credential files is NOT refused,
+ * for any pattern. What would close it is not a better pattern test but a
+ * `PostToolUse` filter on Glob's OUTPUT, which is a list of paths and can be
+ * filtered exactly, per resolved path, the way the neutral lane already
+ * filters its own. That is a real option — the installed SDK contracts
+ * `updatedToolOutput` — and it is not taken here only because the same
+ * mechanism cannot be trusted for Grep, where deciding which line came from
+ * which file is a parse, and a parse that is wrong serves the credential it
+ * was meant to remove. A refusal costs the model one round trip and cannot be
+ * wrong in that direction, which is why Grep's content shape is refused
+ * rather than redacted.
  *
  * The gate keeps its own copy of the same check. That is the both-ends rule,
  * not redundancy: this hook is registered per turn in `run-chat-turn-sdk.ts`,
@@ -54,11 +67,7 @@
 import type { HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk'
 
 import { resolveRepoPath } from '../agent-tools/read-tools'
-import {
-  globPatternTargetsSecret,
-  isSecretAgentPath,
-  secretPathDenial,
-} from './protected-paths'
+import { isSecretAgentPath, secretPathDenial } from './protected-paths'
 import {
   editorToolSecretRefusal,
   grepContentDenial,
@@ -136,25 +145,12 @@ export function createSecretReadGuard(opts: SecretReadGuardOptions): HookCallbac
     }
 
     if (pre.tool_name === 'Glob' || pre.tool_name === 'Grep') {
-      // For Glob, `pattern` IS the path pattern. For Grep it is the regular
-      // expression and the path scope is `glob` / `path`, so Grep's `pattern`
-      // is deliberately not tested against a path policy.
-      const scopes = [
-        pre.tool_name === 'Glob' ? toolInput.pattern : undefined,
-        toolInput.glob,
-        toolInput.path,
-      ]
-      for (const scope of scopes) {
-        if (typeof scope === 'string' && globPatternTargetsSecret(scope)) {
-          return deny(secretPathDenial(scope, 'search'))
-        }
-      }
-      // FX17 item 3b. Refusing an AIMED scope is the whole policy only on a
-      // lane that can filter results. This one cannot — see the module
-      // header — so a Grep in `output_mode: "content"` returned the matching
-      // LINES of `.env` whenever its scope was broad enough to reach the
-      // file, which a Grep with no `glob` and no `path` always is. No clever
-      // spelling was needed; the policy was decorative on this path.
+      // A pattern AIMED at a credential file used to be refused here by a
+      // glob analyser. FX20 item 1 removed it — see the module header's
+      // "What it does NOT do", which now says what that leaves. Contents
+      // are still closed on this lane by the content-mode rule below; what
+      // an aimed pattern can reach is a NAME, which a broad pattern could
+      // already reach and which no `PreToolUse` hook can filter out.
       if (pre.tool_name === 'Grep' && toolInput.output_mode === 'content') {
         const free = await grepContentScopeIsSecretFree(opts.worktreeRoot, toolInput)
         if (!free) return deny(grepContentDenial())
@@ -171,11 +167,7 @@ export function createSecretReadGuard(opts: SecretReadGuardOptions): HookCallbac
     // were covered; `session_diff` with no `path` was not, and this comment
     // claimed it was.
     if (pre.tool_name.startsWith('mcp__editor__')) {
-      const refusal = await editorToolSecretRefusal(
-        pre.tool_name,
-        opts.worktreeRoot,
-        pre.tool_input,
-      )
+      const refusal = await editorToolSecretRefusal(opts.worktreeRoot, pre.tool_input)
       if (refusal !== null) return deny(refusal)
       return ALLOW
     }

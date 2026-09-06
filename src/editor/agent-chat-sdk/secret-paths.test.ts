@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  globPatternTargetsSecret,
   isSecretAgentPath,
   secretPathDenial,
   secretPathOmissionNote,
@@ -218,158 +217,65 @@ describe('isSecretAgentPath', () => {
   })
 })
 
-describe('globPatternTargetsSecret', () => {
-  it('is true when the pattern names a secret file directly', () => {
-    for (const p of ['.env', '**/.env', 'packages/*/.env', '.env*', '**/.env*', '.env.*']) {
-      expect(globPatternTargetsSecret(p), p).toBe(true)
+/**
+ * **FX20 item 1 — `globPatternTargetsSecret` is gone, and this is what its
+ * tests became.**
+ *
+ * The deleted function read a Glob or pathspec PATTERN and judged whether it
+ * aimed at a credential name. It was removed for being unsound rather than
+ * unused: glob syntax has unbounded spellings for identical reach, five
+ * review rounds each found one more, and the last measured seven of eight
+ * brace and character-class spellings of a secret directory passing where
+ * the literal spelling was refused.
+ *
+ * The probe tables it was tested against are still worth keeping, so they
+ * are kept — pointed at the predicate that replaced it. Every CONCRETE path
+ * those patterns reached must be refused by `isSecretAgentPath`, because
+ * that is now the only question anyone asks: the callers enumerate first
+ * (`matchingPaths`, `withholdSecretPaths`) and ask about resolved paths.
+ *
+ * If a future reader is tempted to reintroduce a pattern analysis, the list
+ * below is the evidence that it does not converge. What converges is asking
+ * about the file.
+ */
+describe('the concrete paths the retired pattern analysis was tested on (FX20 item 1)', () => {
+  it.each([
+    // FX19 item 3's probe table, reduced to the file each pattern reached.
+    '.ssh/id_rsa',
+    '.ssh/config',
+    '.ssh/notes.txt',
+    '.aws/credentials',
+    '.gnupg/secring.gpg',
+    '.config/gcloud/credentials.db',
+    '.docker/config.json',
+    '.env.production.local',
+    '.env.staging',
+    '.envrc.production',
+    'prod.env',
+    'abc.pem',
+    'server.pem',
+    'ca.key',
+    'terraform.tfvars.json',
+    // FX17 item 3a's, likewise.
+    '.env',
+    '.env.local',
+    '.npmrc',
+    'id_rsa',
+    '[.env',
+  ])('refuses %s by name', (concrete) => {
+    expect(isSecretAgentPath(concrete)).toBe(true)
+  })
+
+  it('still serves the ordinary files a repository search reaches', () => {
+    for (const p of [
+      'src/components/Button.vue',
+      'src/index.ts',
+      'packages/ui/src/index.ts',
+      '.env.example',
+      'README.md',
+    ]) {
+      expect(isSecretAgentPath(p), p).toBe(false)
     }
-  })
-
-  it('is true when the pattern names a class of key files', () => {
-    expect(globPatternTargetsSecret('**/*.pem')).toBe(true)
-    expect(globPatternTargetsSecret('certs/*.key')).toBe(true)
-    expect(globPatternTargetsSecret('**/id_rsa')).toBe(true)
-  })
-
-  it('is false for an ordinary repository search', () => {
-    for (const p of ['**/*', '**/.*', 'src/**/*.vue', '*', 'src/*', '**/Button*']) {
-      expect(globPatternTargetsSecret(p), p).toBe(false)
-    }
-  })
-
-  it('is false for a documentation pattern', () => {
-    expect(globPatternTargetsSecret('.env.example')).toBe(false)
-    expect(globPatternTargetsSecret('**/*.vue')).toBe(false)
-  })
-
-  it('is false for an empty pattern', () => {
-    expect(globPatternTargetsSecret('')).toBe(false)
-  })
-
-  /**
-   * FX17 item 3a. Every spelling below returned FALSE before the fix while
-   * matching the very file `**\/.env` was refused for, because the check
-   * stripped leading and trailing `*` and then gave up on any stem that
-   * still held a metacharacter. On the SDK lane, where results cannot be
-   * filtered after the fact, that turned a `Grep` in `output_mode:
-   * "content"` into a way to read `.env` verbatim.
-   */
-  describe('a metacharacter in the stem fails CLOSED (FX17 item 3a)', () => {
-    it.each([
-      '**/.en?',
-      '**/.en[v]',
-      '**/.env{,.local}',
-      '**/[.]env',
-      '**/.npmr?',
-      '**/id_rs?',
-      '**/.envr?',
-      '**/{.env,README.md}',
-      '**/?.pem',
-      '**/terraform.tfvar?',
-      '**/.ENV{,.local}',
-    ])('refuses %s', (pattern) => {
-      expect(globPatternTargetsSecret(pattern)).toBe(true)
-    })
-
-    it('still allows the ordinary metacharacter patterns real searches use', () => {
-      for (const p of [
-        'src/**/*.{ts,tsx}',
-        'packages/*/src/**/*.ts',
-        // Twenty-six expansions, none of which can match a secret name, so
-        // an exact answer rather than a lucky one (FX19 item 3).
-        '**/[A-Z]*.vue',
-        '**/index.{js,ts}',
-      ]) {
-        expect(globPatternTargetsSecret(p), p).toBe(false)
-      }
-    })
-
-    it('treats an unterminated bracket as a literal, the way glob engines do', () => {
-      expect(globPatternTargetsSecret('**/[unterminated')).toBe(false)
-      // `[.env` names a file literally called `[.env`, and a name ending in
-      // `.env` is a secret by this module's own rules — `isSecretAgentPath`
-      // has always said so. Allowing the pattern while refusing the file was
-      // the two halves of the file disagreeing (FX19 item 3).
-      expect(isSecretAgentPath('[.env')).toBe(true)
-      expect(globPatternTargetsSecret('**/[.env')).toBe(true)
-    })
-
-    it('refuses a segment too long or too wildcarded to answer for', () => {
-      // Fail-closed on the inputs the compiler declines rather than
-      // guessing. A refusal costs the model a round trip; the other error
-      // serves a credential.
-      expect(globPatternTargetsSecret(`**/${'a'.repeat(250)}?`)).toBe(true)
-      expect(globPatternTargetsSecret(`**/${'?'.repeat(25)}x`)).toBe(true)
-    })
-  })
-
-  /**
-   * FX19 item 3. Every pattern below was ALLOWED while a concrete path it
-   * matches is a secret by `isSecretAgentPath` — 17 of the verifier's 21
-   * probes were holes of that shape. Two causes: the check only ever looked
-   * at the LAST segment, so the `SECRET_DIRS` subtrees were invisible to it;
-   * and it decided a metacharacter segment by testing a fixed list of
-   * example names, which answers "no" to any spelling of the right meaning
-   * and the wrong length.
-   *
-   * The list is the verifier's, verbatim, so a regression is measured
-   * against the same probes rather than against a restatement of them.
-   */
-  describe('the whole pattern is asked, not one segment against a sample list (FX19 item 3)', () => {
-    it.each([
-      // A secret DIRECTORY subtree, whatever the last segment says.
-      ['.ssh/*', '.ssh/id_rsa'],
-      ['**/.ssh/*', '.ssh/id_rsa'],
-      ['.ssh/conf?g', '.ssh/config'],
-      ['.ssh/note?.txt', '.ssh/notes.txt'],
-      ['.aws/*', '.aws/credentials'],
-      ['.aws/cred*', '.aws/credentials'],
-      ['.gnupg/*.*', '.gnupg/secring.gpg'],
-      ['.config/gcloud/*', '.config/gcloud/credentials.db'],
-      ['.docker/config.jso?', '.docker/config.json'],
-      // Env shapes the sample list did not happen to contain.
-      ['.env.produc?ion.local', '.env.production.local'],
-      ['.env.stag?ng', '.env.staging'],
-      ['.env.{staging,qa}', '.env.staging'],
-      ['.env.[s]taging', '.env.staging'],
-      ['.envrc.produc?ion', '.envrc.production'],
-      ['prod.en?', 'prod.env'],
-      ['{prod,dev}.env', 'prod.env'],
-      // Key extensions, reached with a single-character wildcard.
-      ['ab?.pem', 'abc.pem'],
-      ['server.p?m', 'server.pem'],
-      ['ca.ke?', 'ca.key'],
-      ['**/terraform.tfvars.jso?', 'terraform.tfvars.json'],
-    ])('refuses %s, which matches %s', (pattern, concrete) => {
-      // Both halves, so the test cannot pass by the concrete path quietly
-      // ceasing to be a secret.
-      expect(isSecretAgentPath(concrete)).toBe(true)
-      expect(globPatternTargetsSecret(pattern)).toBe(true)
-    })
-
-    it('refuses a `*`-only spelling whose stem is not itself a secret name', () => {
-      // Stripping the wildcard tail may prove a pattern IS aimed; it may
-      // never prove the opposite. `.en` is not a secret name, and `.en*`
-      // matches `.env`.
-      expect(isSecretAgentPath('.en')).toBe(false)
-      expect(globPatternTargetsSecret('.en*')).toBe(true)
-      expect(globPatternTargetsSecret('.envr*')).toBe(true)
-    })
-
-    it('refuses a character class it cannot enumerate', () => {
-      expect(globPatternTargetsSecret('**/[!a]env')).toBe(true)
-      expect(globPatternTargetsSecret('**/[^a]env')).toBe(true)
-    })
-
-    it('still lists a whole directory, including a secret one by omission', () => {
-      // `*` and `.*` name nothing, so they are a listing rather than an aim
-      // and stay allowed — the omission note is what covers them. The
-      // directory rules above run first, which is why `.ssh/*` is refused
-      // and `src/*` is not.
-      for (const p of ['**/*', '**/.*', 'src/*', 'src/**/*.vue', '**/Button*']) {
-        expect(globPatternTargetsSecret(p), p).toBe(false)
-      }
-    })
   })
 })
 
