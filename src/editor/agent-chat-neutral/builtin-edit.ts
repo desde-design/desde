@@ -154,12 +154,21 @@ async function applyWrite(
   // which yield to the event loop, so Stop can arrive during them.
   if (isStopped(ctx)) return err(stoppedRefusal(toolName))
 
-  // The LAST place a Stop can still be honoured, and the widest window of the
-  // three. `brokeredWrite` asks for the repo's tree gate before it touches
-  // anything, and a Commit, a Publish or another chat session holds that for
-  // as long as its own operation takes — seconds, not microseconds. Refusing
-  // the moment the gate is handed over leaves nothing on disk: the journal,
-  // the file locks and the write all happen after this point.
+  // The last place a Stop can be honoured IN THIS FILE, and the widest of
+  // the three windows this file can see. `brokeredWrite` asks for the repo's
+  // tree gate before it touches anything, and a Commit, a Publish or another
+  // chat session holds that for as long as its own operation takes — seconds,
+  // not microseconds.
+  //
+  // FX19 item 6 corrects what the previous wave wrote here. This was NOT the
+  // last window, and the remainder after it was not a sub-millisecond span
+  // inside the broker's own locks. Two things follow it: `writeBackupJournal`
+  // writes to disk, and `withPathLocks` waits an UNBOUNDED time on the shared
+  // per-file lock manager — a wait no tree gate can shorten, because the CLI
+  // edit route and undo/redo take those same locks with no tree gate at all.
+  // Measured at 2,952 ms against a 3-second holder, with a write landing
+  // after it. `brokeredWrite` now takes the turn's signal and rechecks it the
+  // instant those locks are handed over; see `BrokeredWriteOptions.signal`.
   //
   // Throwing is how the batch is stopped, because `brokeredWrite` awaits this
   // callback OUTSIDE its own try: the throw reaches `applyWrite` before any
@@ -210,6 +219,12 @@ async function applyWrite(
         },
       ],
       ...(opts.invalidateFiles ? { invalidate: opts.invalidateFiles } : {}),
+      // FX19 item 6. The gate check above is not the last window: the broker
+      // then journals to disk and waits an unbounded time on the shared file
+      // locks, which the CLI edit route and undo/redo hold without any tree
+      // gate. The broker rechecks this the instant those locks are handed
+      // over, which is the last moment a Stop can still mean anything.
+      ...(ctx?.signal ? { signal: ctx.signal } : {}),
       // The ack is awaited AFTER the bytes are on disk, and that is deliberate.
       // It differs from the SDK lane's BUILT-IN Write/Edit, where a failed ack
       // is a `deny` in the permission gate and the write never happens — but
@@ -251,6 +266,10 @@ async function applyWrite(
     // A protected-path refusal is phrased as itself. The generic branches read
     // as transient and invite a retry, which is exactly the wrong signal.
     if (result.stage === 'refused') return err(result.reason)
+    // Same fact as the three checks above it, so the same wording: the user
+    // pressed Stop and this write did not happen. The broker caught it after
+    // the file locks were handed over, which no check in this file can reach.
+    if (result.stage === 'stopped') return err(stoppedRefusal(toolName))
     if (result.stage === 'backup') {
       return err(`${toolName} aborted: ${result.reason}. '${built.repoRel}' was not modified.`)
     }

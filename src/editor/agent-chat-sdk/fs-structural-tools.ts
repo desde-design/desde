@@ -1195,6 +1195,14 @@ export async function managePackageHandler(
       // holds the gate (see above). Passing it to `brokeredWrite` too
       // would just be a second, pointless acquisition of a gate that's
       // reentrant-safe but adds nothing.
+      //
+      // The turn's signal, on the other hand, IS passed (FX19 item 6). This
+      // is the only structural tool that already has one in hand, and this
+      // call runs BEFORE `install()`, so a Stop here leaves package.json
+      // untouched and nothing has been installed. The signal must not be
+      // threaded anywhere after the install step for the opposite reason:
+      // by then npm has already rewritten the tree.
+      ...(signal ? { signal } : {}),
     })
     if (!broker.ok) {
       // Protected-path refusal: surface the denial verbatim. The generic
@@ -1203,6 +1211,11 @@ export async function managePackageHandler(
       // signal here, since the refusal text tells the model not to route around
       // the block.
       if (broker.stage === 'refused') return fwError(broker.reason)
+      if (broker.stage === 'stopped') {
+        return fwError(
+          `manage_package: ${broker.reason}. package.json was not modified and nothing was installed.`,
+        )
+      }
       return broker.stage === 'backup'
         ? fwError(
             `manage_package: ${broker.reason}. Operation aborted; package.json was not modified.`,

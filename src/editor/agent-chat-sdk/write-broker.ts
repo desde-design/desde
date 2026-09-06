@@ -303,6 +303,35 @@ export interface BrokeredWriteOptions<E = void> {
    * `acquireTreeGateShared` is the concrete impl the CLI supplies.
    */
   acquireTreeGate?: AcquireTreeGate
+  /**
+   * The turn's cancellation signal, checked ONCE — the instant this batch's
+   * file locks are handed over, before anything is snapshotted or written.
+   *
+   * FX19 item 6 (2026-09-05, SECURITY). A caller that checks Stop at its own
+   * door and then calls this function is not covered for the rest of the
+   * call, and the uncovered part is not small. Two things sit between a
+   * caller's last check and the first byte: `writeBackupJournal`, which
+   * writes to disk, and `withPathLocks`, which waits an UNBOUNDED time on
+   * the shared per-file lock manager. That wait cannot be shortened by a
+   * tree gate, because the CLI's deterministic edit route
+   * (`edit-handler.ts`) and the undo/redo history (`edit-history.ts`) both
+   * take these same locks and neither holds a tree gate. The adversarial
+   * verifier measured 2,952 ms of post-Stop waiting against a 3-second
+   * holder, and a write landing after it.
+   *
+   * It is checked here rather than in each lane because both lanes and the
+   * CLI edit route reach disk through this one function — the same argument
+   * the protected-path check and the ledger already won.
+   *
+   * Placed INSIDE the locks on purpose. A check before them would be a
+   * fourth caller-side check with the same gap after it; the point is to be
+   * the last thing that happens before the batch commits to mutating.
+   * Everything after the check — snapshots, preconditions, `applyOp` — is
+   * bounded local work, so no further check would have anything to catch.
+   *
+   * Absent means no cancellation, exactly as before this existed.
+   */
+  signal?: AbortSignal
 }
 
 export type BrokeredWriteResult<E = void> =
@@ -320,6 +349,18 @@ export type BrokeredWriteResult<E = void> =
       emitted: E
     }
   | { ok: false; stage: 'backup'; reason: string }
+  | {
+      /**
+       * The turn was cancelled while this batch waited for its file locks
+       * (FX19 item 6). Nothing was written and the journal directory was
+       * discarded. Callers with a Stop vocabulary of their own should say
+       * that instead of `reason`; the rest fall through to their generic
+       * branch, which reads correctly because `reason` states the fact.
+       */
+      ok: false
+      stage: 'stopped'
+      reason: string
+    }
   | {
       ok: false
       /**
@@ -1168,6 +1209,7 @@ async function brokeredWriteImpl<E = void>(
     | { ok: true }
     | { failure: BrokerOp; reason: string; rolledBack: string[]; restoreErrors: string[] }
     | { preconditionFailure: { repoRel: string; reason: string } }
+    | { stopped: true }
 
   /**
    * Attribute a path-carrying fs error to whichever op or precondition
@@ -1217,6 +1259,9 @@ async function brokeredWriteImpl<E = void>(
       snapshotPaths,
       lockOpts,
       async (): Promise<BatchOutcome> => {
+      // The locks are ours as of this line. See `BrokeredWriteOptions.signal`
+      // for why the check belongs here and not at the caller's door.
+      if (opts.signal?.aborted === true) return { stopped: true }
       for (const p of allPaths) {
         try {
           snapshots.set(
@@ -1363,6 +1408,19 @@ async function brokeredWriteImpl<E = void>(
       ...(opts.journal.length > 0 ? { backupDir: backup.backupDir } : {}),
       rolledBack: [],
       restoreErrors: [],
+    }
+  }
+
+  if ('stopped' in outcome) {
+    // Nothing was mutated, so there is nothing to roll back — but the
+    // journal directory was written before the locks were taken, and an
+    // orphaned backup for a batch that never happened is the same lie a
+    // failed precondition's would be.
+    if (opts.journal.length > 0) await discardBackupDir(opts.canonicalRoot, backup.backupDir)
+    return {
+      ok: false,
+      stage: 'stopped',
+      reason: 'the turn was stopped before anything was written',
     }
   }
 

@@ -10,6 +10,7 @@ import { buildToolPermissionGate } from '../agent-chat-sdk/edit-ack'
 import type { EditProposalPayload } from '../agent-tools/types'
 import type { LedgerEditEntry } from '../ledger/entry'
 import { describeLedgerEntry } from '../ledger/describe-entry'
+import { getSharedFileLockManager } from '../edit-service/file-lock-manager'
 import { buildEditToolSpec, buildWriteToolSpec } from './builtin-edit'
 
 /** The ledger rows this lane appended, newest last. */
@@ -559,5 +560,55 @@ describe('FX16: a stopped turn does not write', () => {
     expect(out.isError).toBe(true)
     expect(out.content[0].text).toMatch(/turn was stopped/i)
     expect(readFileSync(abs, 'utf8')).toBe(before)
+  })
+
+  /**
+   * FX19 item 6. The tree gate was not the last window, and it was not the
+   * widest one either. After the handler's own gate check come
+   * `writeBackupJournal`'s disk writes and an UNBOUNDED wait on the shared
+   * per-file lock manager — a wait the tree gate cannot shorten, because
+   * the CLI edit route and the undo/redo history route both take those
+   * locks with no tree gate at all. The verifier measured 2,952 ms of
+   * post-Stop waiting against a modest 3-second holder, and a write still
+   * landed at the end of it.
+   *
+   * This test holds the target's file lock from outside, presses Stop while
+   * the write is parked on it, and then releases. Nothing may be written.
+   */
+  it('refuses a Write stopped while it waits for a contended file lock', async () => {
+    const abs = join(root, 'src/App.vue')
+    const before = readFileSync(abs, 'utf8')
+    const controller = new AbortController()
+
+    // Stand in for the CLI edit route or an undo step: both hold these
+    // locks and neither holds a tree gate.
+    let releaseHolder: () => void = () => {}
+    const holderHasLock = new Promise<void>((resolve) => {
+      void getSharedFileLockManager().withWriteLock(abs, async () => {
+        resolve()
+        await new Promise<void>((r) => {
+          releaseHolder = r
+        })
+      })
+    })
+    await holderHasLock
+
+    const pending = buildWriteToolSpec(opts()).handler(
+      { file_path: 'src/App.vue', content: 'MINE\n' },
+      { signal: controller.signal },
+    )
+    // The write is now parked on the contended lock. Anti-vacuity: if it
+    // had already finished, the file would differ before Stop is pressed.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(readFileSync(abs, 'utf8')).toBe(before)
+
+    controller.abort()
+    releaseHolder()
+    const out = await pending
+
+    expect(out.isError).toBe(true)
+    expect(out.content[0].text).toMatch(/turn was stopped/i)
+    expect(readFileSync(abs, 'utf8')).toBe(before)
+    expect(emitted).toEqual([])
   })
 })

@@ -3028,7 +3028,11 @@ async function writePatchedFilesThroughBroker(args: {
         ok: false,
         status: 500,
         reason:
-          broker.stage === "backup"
+          // `stage: "stopped"` cannot occur here — this route passes no
+          // `signal` to `brokeredWrite` — but it carries no `repoRel`, so
+          // the branch below cannot name a file for it. Grouped with
+          // `backup`, which is the other "nothing was written" outcome.
+          broker.stage === "backup" || broker.stage === "stopped"
             ? `${broker.reason}. Patch aborted; no source files modified.`
             : // `rollbackWarning` is empty unless a rollback ALSO failed —
               // in which case a file still holds the patched content while
