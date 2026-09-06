@@ -207,6 +207,89 @@ function withheldNote(count: number, what: string): string | undefined {
   )
 }
 
+/**
+ * Parse `git grep -n -z` output into `{ path, line, text }` records.
+ *
+ * ## The shape, measured rather than assumed
+ *
+ * `git grep -z` emits `<path>NUL<lineno>NUL<text>` per match, terminated by a
+ * newline, with a `<tree-ish>:` prefix on the path when the search was scoped
+ * to a tree (measured against git 2.54.0; `--no-index` produces the same
+ * record without the prefix). Only the PATH and the LINE NUMBER are
+ * NUL-delimited — the record terminator is still a newline.
+ *
+ * ## Why this does not split on newlines first
+ *
+ * A newline is a legal byte in a POSIX filename, exactly as a colon is, and
+ * `-z` exists so that no filename byte is load-bearing. Splitting the stream
+ * on newlines to find records would reintroduce the same class of bug one
+ * byte over: a path containing a newline would be cut in half, and the second
+ * half is a path this repository does not contain. So the newline is only
+ * ever read where it cannot be ambiguous — inside the third field, where it
+ * separates the match text from the NEXT record's path. A match text cannot
+ * itself contain a newline, because it is one line of one file.
+ *
+ * A record that does not have both of its NUL fields is returned with
+ * `path: null`. The caller fails those closed: they carry bytes from a file
+ * that could not be named, so no filter can clear them.
+ */
+function parseNulGrepRecords(
+  stdout: string,
+): Array<{ path: string; line: string; text: string } | { path: null; text: string }> {
+  const out: Array<{ path: string; line: string; text: string } | { path: null; text: string }> = []
+  if (stdout.length === 0) return out
+  const fields = stdout.split(RECORD_SEP)
+  // fields[0] is the first path; thereafter each record contributes a line
+  // number field and a `<text>\n<next path>` field.
+  let path: string | null = fields[0]
+  for (let i = 1; path !== null && i < fields.length; i += 2) {
+    if (i + 1 >= fields.length) {
+      // A path with no line number and no text following it. Cannot happen
+      // with a complete stream — `runGit` caps by `maxBuffer`, which errors
+      // rather than truncating — but it fails closed if it ever does.
+      if (path.length > 0) out.push({ path: null, text: path })
+      return out
+    }
+    const line = fields[i]
+    const rest = fields[i + 1]
+    const nl = rest.indexOf('\n')
+    out.push({ path, line, text: nl >= 0 ? rest.slice(0, nl) : rest })
+    const next = nl >= 0 ? rest.slice(nl + 1) : ''
+    path = next.length > 0 ? next : null
+  }
+  return out
+}
+
+/**
+ * Parse `git diff --name-status -z` output into one item per CHANGE.
+ *
+ * The record is `<status>NUL<path>NUL`, except that a rename (`R<score>`) or
+ * a copy (`C<score>`) is `<status>NUL<old>NUL<new>NUL` — measured against git
+ * 2.54.0. Grouping by change rather than by name is the point: the secret
+ * filter has to see both halves of a rename as one thing, because a rename
+ * out of a credential file is a single change whose innocent-looking half
+ * carries the credential bytes.
+ *
+ * A trailing record missing one of its paths ends the parse rather than
+ * guessing. `runGit` caps output with `maxBuffer`, which errors instead of
+ * truncating, so a partial record means output this parser does not
+ * understand — and a misparsed path is a path the filter cannot judge.
+ */
+function parseNameStatusRecords(raw: string): Array<{ status: string; paths: string[] }> {
+  const out: Array<{ status: string; paths: string[] }> = []
+  const fields = raw.split(RECORD_SEP)
+  for (let i = 0; i < fields.length; i++) {
+    const status = fields[i]
+    if (status.length === 0) continue
+    const wanted = status[0] === 'R' || status[0] === 'C' ? 2 : 1
+    const paths = fields.slice(i + 1, i + 1 + wanted)
+    if (paths.length < wanted || paths.some((path) => path.length === 0)) return out
+    out.push({ status, paths })
+    i += wanted
+  }
+  return out
+}
+
 function validatePath(path: unknown): { ok: true; path: string } | { ok: false; error: string } {
   if (typeof path !== 'string' || path.length === 0) {
     return { ok: false, error: 'path must be a non-empty string' }
@@ -705,7 +788,16 @@ export const searchExternalFilesTool: ToolEntry<SearchExternalFilesInput> = {
     // the match cap: one binary asset can crowd out real source results.
     // Applied to both kinds of root, because the two should answer the same
     // shape of result.
-    const args = ['grep', '-n', '-E', '-I', '--no-color', '--full-name', '-e', input.query]
+    // `-z` is a SECURITY flag here, not a formatting one. Without it git
+    // separates path, line number and text with colons, and a colon is a
+    // legal byte in a POSIX filename that git tracks without complaint
+    // (measured: `foo:.env` and `a:b/.env` on macOS 24.6 / APFS, git 2.54.0).
+    // The parser below then reads `foo:.env:1:KEY=…` as path `foo`, and the
+    // resolved-path filter is asked about a file that does not exist instead
+    // of about the credential file the search actually read. With `-z` the
+    // path and line number are NUL-delimited, so no filename byte can be
+    // mistaken for a separator.
+    const args = ['grep', '-n', '-z', '-E', '-I', '--no-color', '--full-name', '-e', input.query]
     if (tree) {
       args.push(tree)
       if (paths.length > 0) args.push('--', ...paths)
@@ -733,49 +825,33 @@ export const searchExternalFilesTool: ToolEntry<SearchExternalFilesInput> = {
     }
 
     const treePrefix = tree ? `${tree}:` : ''
-    /**
-     * The path git reported BEFORE the root's own prefix is stripped, kept
-     * alongside the one the model sees. Both are asked about: a read root
-     * that points inside `.ssh/` produces short paths that look ordinary,
-     * and it is the full name that says otherwise.
-     */
-    const parsed = stdout
-      .split('\n')
-      .filter((l) => l.length > 0)
-      .map((line) => {
-        // Format with tree-ish: `<tree>:<path>:<lineno>:<text>`. Strip
-        // the tree prefix before applying the no-tree parser below so
-        // the model never sees `HEAD:` polluting the path field.
-        const fullName =
-          treePrefix.length > 0 && line.startsWith(treePrefix)
-            ? line.slice(treePrefix.length)
-            : line
-        let stripped = fullName
-        // Then strip the root's own position inside its repo. `--full-name`
-        // reports repo-root-relative paths, so a root of `/repo/packages/ui`
-        // yields `packages/ui/Button.ts` — which `read_file_at_commit` would
-        // prefix AGAIN, asking for `packages/ui/packages/ui/Button.ts`. Every
-        // path the model sees must be relative to the folder it was granted,
-        // so search-then-read round-trips.
-        if (root.gitPrefix.length > 0 && stripped.startsWith(root.gitPrefix)) {
-          stripped = stripped.slice(root.gitPrefix.length)
-        }
-        const firstColon = stripped.indexOf(':')
-        const secondColon = firstColon >= 0 ? stripped.indexOf(':', firstColon + 1) : -1
-        if (firstColon < 0 || secondColon < 0) {
-          return { match: { raw: stripped }, paths: null }
-        }
-        const path = stripped.slice(0, firstColon)
-        const fullColon = fullName.indexOf(':')
-        return {
-          match: {
-            path,
-            line: parseInt(stripped.slice(firstColon + 1, secondColon), 10),
-            text: stripped.slice(secondColon + 1),
-          },
-          paths: fullColon > 0 ? [path, fullName.slice(0, fullColon)] : [path],
-        }
-      })
+    const parsed = parseNulGrepRecords(stdout).map((record) => {
+      if (record.path === null) return { match: { raw: record.text }, paths: null }
+      // Strip the tree prefix so the model never sees `HEAD:` polluting the
+      // path field. The tree-ish is ours (the literal `'HEAD'` above), never
+      // model input, so stripping it as a literal is safe.
+      const fullName =
+        treePrefix.length > 0 && record.path.startsWith(treePrefix)
+          ? record.path.slice(treePrefix.length)
+          : record.path
+      // Then strip the root's own position inside its repo. `--full-name`
+      // reports repo-root-relative paths, so a root of `/repo/packages/ui`
+      // yields `packages/ui/Button.ts` — which `read_file_at_commit` would
+      // prefix AGAIN, asking for `packages/ui/packages/ui/Button.ts`. Every
+      // path the model sees must be relative to the folder it was granted,
+      // so search-then-read round-trips.
+      const stripped =
+        root.gitPrefix.length > 0 && fullName.startsWith(root.gitPrefix)
+          ? fullName.slice(root.gitPrefix.length)
+          : fullName
+      return {
+        match: { path: stripped, line: parseInt(record.line, 10), text: record.text },
+        // Both names are asked about: a read root that points inside `.ssh/`
+        // produces short paths that look ordinary, and it is the full name
+        // that says otherwise.
+        paths: fullName !== stripped ? [stripped, fullName] : [stripped],
+      }
+    })
 
     // The resolved-set rule. git has already turned the model's pathspecs
     // into concrete paths; this asks about those, so no spelling of the
@@ -1042,12 +1118,17 @@ export const sessionDiffTool: ToolEntry<SessionDiffInput> = {
       // `path: "src"` and no path at all all resolve to a file list, and the
       // list is what is judged.
       //
-      // `--no-renames` so a rename contributes BOTH of its names to the
-      // list; with rename detection on, only the destination appears, and
-      // the diff below would then be missing the half git needs to pair
-      // them back up. `-z` so a path containing a quote or a newline arrives
-      // verbatim instead of C-quoted.
-      const nameArgs = ['diff', '--name-only', '--no-renames', '-z', rev]
+      // `--name-status -M` so a rename arrives as ONE change carrying BOTH
+      // of its names, which is the only shape the filter can judge: a rename
+      // of a credential file to an innocent name is a single change whose
+      // secret half is the one being removed, and `withholdSecretPaths`
+      // withholds an item when ANY of its paths is secret. Enumerating the
+      // halves separately (the earlier `--name-only --no-renames`) judged
+      // them independently, cleared the innocent one, and then asked git for
+      // it by name — a scope too narrow to pair the rename, so git printed
+      // the whole file as an addition. `-z` so a path containing a quote or
+      // a newline arrives verbatim instead of C-quoted.
+      const nameArgs = ['diff', '--name-status', '-M', '-z', rev]
       if (pathArg !== null) nameArgs.push('--', pathArg)
       let names: string
       try {
@@ -1055,8 +1136,42 @@ export const sessionDiffTool: ToolEntry<SessionDiffInput> = {
       } catch (err) {
         return { ok: false, error: redactRootPath(root, gitErrorMessage(err)) }
       }
-      const listed = names.split(RECORD_SEP).filter((n) => n.length > 0)
-      const split = withholdSecretPaths(listed, (n) => [n])
+      const listed = parseNameStatusRecords(names)
+
+      // Rename detection is SCOPED BY THE PATHSPEC. `git diff -M <base> --
+      // notes.txt` reports a plain addition, because the deletion half is
+      // outside the scope git was asked about — so a per-invocation fix
+      // would close `path: "."` and leave `path: "notes.txt"` open, which is
+      // the refused-in-one-spelling-served-in-its-synonym shape this whole
+      // module exists to stop. So when a scope was given, the change set is
+      // ALSO enumerated whole, and each rename's partner name is carried
+      // onto the in-scope half before it is judged.
+      let partners: Map<string, readonly string[]> | null = null
+      if (pathArg !== null) {
+        let allNames: string
+        try {
+          allNames = await runGit(root.path, ['diff', '--name-status', '-M', '-z', rev], {
+            signal: ctx.signal,
+            maxBytes: 4 * 1024 * 1024,
+          })
+        } catch (err) {
+          return { ok: false, error: redactRootPath(root, gitErrorMessage(err)) }
+        }
+        partners = new Map()
+        for (const record of parseNameStatusRecords(allNames)) {
+          if (record.paths.length < 2) continue
+          for (const name of record.paths) partners.set(name, record.paths)
+        }
+      }
+
+      const split = withholdSecretPaths(listed, (record) => {
+        if (partners === null) return record.paths
+        const named = new Set(record.paths)
+        for (const name of record.paths) {
+          for (const partner of partners.get(name) ?? []) named.add(partner)
+        }
+        return [...named]
+      })
       withheld = split.withheld
       if (split.kept.length === 0) {
         // Every file in scope was a credential file. Emitting no pathspec
@@ -1077,9 +1192,11 @@ export const sessionDiffTool: ToolEntry<SessionDiffInput> = {
       // `:(literal)` so a filename containing a glob character is asked for
       // as itself. Without it a file legitimately named `x[1].ts` would be
       // read as a pattern, and the pathspec list is git's own output.
+      // Sliced by CHANGE, not by name, so the cap can never cut a rename in
+      // half and hand git the unpairable scope described above.
       const asked = split.kept.slice(0, SESSION_DIFF_MAX_PATHSPECS)
       scopeTruncated = split.kept.length > asked.length
-      args.push('--', ...asked.map((n) => `:(literal)${n}`))
+      args.push('--', ...asked.flatMap((r) => r.paths.map((n) => `:(literal)${n}`)))
     } else if (pathArg !== null) {
       args.push('--', pathArg)
     }

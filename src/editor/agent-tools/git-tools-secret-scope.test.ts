@@ -277,3 +277,207 @@ describe('read-root tools decide on the resolved set (FX20 item 1)', () => {
     })
   })
 })
+
+/**
+ * FX21 (codex review + adversarial verification, 2026-09-06, SECURITY) — the
+ * two tools ask git for machine-readable output instead of parsing its
+ * human-readable output.
+ *
+ * Both cases below are the same mistake in two places: a field git prints for
+ * a person to read was split on a byte that can legally appear in a path, so
+ * the classifier was asked about a path the repository does not contain.
+ *
+ * Neither was reachable by the agent in the shipped configuration — the
+ * verifier downgraded them to P3 and P4 for that reason. They are here
+ * because the filter's whole claim is that it judges the CONCRETE path git
+ * resolved, and a parser that invents a path breaks that claim at the root.
+ *
+ * Fixtures are the verifier's, and every secret value in them is fake.
+ */
+
+/** Obviously fake. In a file whose path contains a colon. */
+const FAKE_COLON_FILE_KEY = 'AKIA_FAKE_COLON_LEAK=zzz-fake-colon-1'
+/** Obviously fake. In an ordinary `.env` under a directory containing a colon. */
+const FAKE_COLON_DIR_KEY = 'AKIA_FAKE_DIRCOLON=zzz-fake-colon-2'
+/** Obviously fake. Lives in a `.env` the fixture then renames to an innocent name. */
+const FAKE_RENAMED_KEY = 'AWS_SECRET_ACCESS_KEY=zzz-fake-rename-leak'
+
+describe('git output is parsed as data, not as prose (FX21)', () => {
+  let worktree: string
+  let external: string
+  let ctx: ToolContext
+
+  beforeEach(async () => {
+    worktree = await mkdtemp(join(tmpdir(), 'fx21-wt-'))
+    external = await mkdtemp(join(tmpdir(), 'fx21-ext-'))
+  })
+
+  afterEach(async () => {
+    await rm(worktree, { recursive: true, force: true })
+    await rm(external, { recursive: true, force: true })
+  })
+
+  /**
+   * A colon is a legal byte in a POSIX filename and git tracks it happily —
+   * measured on macOS 24.6 / APFS with git 2.54.0. `git grep`'s default
+   * output separates path, line number and text with colons, so the path
+   * field is ambiguous the moment a path contains one.
+   */
+  describe('search_external_files with a colon in the path', () => {
+    beforeEach(async () => {
+      // `loadReadRoots` reads the worktree's own git config, so the worktree
+      // has to be a repo even though this case only searches the external one.
+      await execFileP('git', ['init', '-q', '-b', 'main'], { cwd: worktree })
+      await execFileP('git', ['init', '-q', '-b', 'main'], { cwd: external })
+      await execFileP('git', ['config', 'user.email', 'test@example.com'], { cwd: external })
+      await execFileP('git', ['config', 'user.name', 'Test'], { cwd: external })
+      // The credential file's own NAME carries the colon.
+      await writeFile(join(external, 'foo:.env'), `${FAKE_COLON_FILE_KEY}\n`, 'utf8')
+      // The stronger variant: an ordinary `.env`, made ambiguous only by a
+      // colon in a DIRECTORY name above it.
+      await mkdir(join(external, 'a:b'), { recursive: true })
+      await writeFile(join(external, 'a:b', '.env'), `${FAKE_COLON_DIR_KEY}\n`, 'utf8')
+      // The anti-vacuity line: an ordinary file the search must still return.
+      await writeFile(join(external, 'app.ts'), 'const AKIA_FAKE_NAME = "example"\n', 'utf8')
+      await execFileP('git', ['add', '-A', '-f'], { cwd: external })
+      await execFileP('git', ['commit', '-q', '-m', 'seed'], { cwd: external })
+
+      await writeFile(
+        join(worktree, 'desde.config.json'),
+        JSON.stringify({ readRoots: { ext: { path: external, description: 'External' } } }),
+        'utf8',
+      )
+      const roots = await loadReadRoots({ worktreeRoot: worktree })
+      if (!roots.ok) throw new Error(`fixture setup failed: ${roots.errors.join('; ')}`)
+      ctx = {
+        bridge: fakeBridge,
+        repoRoot: worktree,
+        readRoots: roots.registry,
+        blockSecretReads: true,
+      }
+    })
+
+    it('withholds a credential file whose own name contains a colon', async () => {
+      const r = await searchExternalFilesTool.run({ root: 'ext', query: 'AKIA_FAKE' }, ctx)
+      expect(resultText(r)).not.toContain(FAKE_COLON_FILE_KEY)
+    })
+
+    it('withholds a credential file under a directory whose name contains a colon', async () => {
+      const r = await searchExternalFilesTool.run({ root: 'ext', query: 'AKIA_FAKE' }, ctx)
+      expect(resultText(r)).not.toContain(FAKE_COLON_DIR_KEY)
+    })
+
+    it('reports the colon paths verbatim, and still returns the ordinary match', async () => {
+      const r = await searchExternalFilesTool.run({ root: 'ext', query: 'AKIA_FAKE' }, ctx)
+      expect(r.ok).toBe(true)
+      if (!r.ok) return
+      const out = r.output as {
+        matches: Array<{ path?: string; line?: number; text?: string }>
+        withheld?: number
+      }
+      // Anti-vacuity: an empty result would satisfy the two assertions above
+      // for the wrong reason.
+      const kept = out.matches.find((m) => m.path === 'app.ts')
+      expect(kept).toBeDefined()
+      // A truncated path is the visible tell of the old parser, and so is a
+      // line number parsed out of the rest of the filename.
+      expect(out.matches.some((m) => m.path === 'foo' || m.path === 'a')).toBe(false)
+      expect(kept?.line).toBe(1)
+      expect(kept?.text).toContain('AKIA_FAKE_NAME')
+      expect(out.withheld).toBe(2)
+    })
+
+    it('returns the colon-pathed files when the project has not opted in', async () => {
+      // The policy is opt-in and OFF by default; a green run with the gate
+      // off would prove the filter rather than the gate.
+      const r = await searchExternalFilesTool.run(
+        { root: 'ext', query: 'AKIA_FAKE' },
+        { ...ctx, blockSecretReads: false },
+      )
+      const text = resultText(r)
+      expect(text).toContain(FAKE_COLON_FILE_KEY)
+      expect(text).toContain(FAKE_COLON_DIR_KEY)
+    })
+  })
+
+  /**
+   * `session_diff` enumerates the files its scope covers and judges each one.
+   * A rename is one change with two names, and the credential half is the
+   * one being dropped, so the two names have to be judged together.
+   *
+   * This is defense-in-depth, not a closed escalation: the agent cannot
+   * perform the rename (`rename_file` refuses a secret source, and `Bash` is
+   * not among its tools), and once a user has renamed the file themselves
+   * the same bytes are readable through a plain `Read` of the new name.
+   */
+  describe('session_diff across a rename', () => {
+    let baseSha: string
+
+    beforeEach(async () => {
+      await execFileP('git', ['init', '-q', '-b', 'main'], { cwd: worktree })
+      await execFileP('git', ['config', 'user.email', 'test@example.com'], { cwd: worktree })
+      await execFileP('git', ['config', 'user.name', 'Test'], { cwd: worktree })
+      await writeFile(join(worktree, '.env'), `${FAKE_RENAMED_KEY}\n`, 'utf8')
+      await writeFile(join(worktree, 'app.ts'), 'export const ok = 1\n', 'utf8')
+      await execFileP('git', ['add', '-A', '-f'], { cwd: worktree })
+      await execFileP('git', ['commit', '-q', '-m', 'base'], { cwd: worktree })
+      baseSha = (await execFileP('git', ['rev-parse', 'HEAD'], { cwd: worktree })).stdout.trim()
+      // The user's own rename, staged. An UNSTAGED `mv` leaves the new name
+      // untracked and git reports nothing, so staging is the precondition.
+      await execFileP('git', ['mv', '.env', 'notes.txt'], { cwd: worktree })
+      // An ordinary edit alongside it, so the diff is not empty once the
+      // rename is withheld.
+      await writeFile(join(worktree, 'app.ts'), 'export const ok = 2\n', 'utf8')
+
+      const roots = await loadReadRoots({ worktreeRoot: worktree })
+      if (!roots.ok) throw new Error(`fixture setup failed: ${roots.errors.join('; ')}`)
+      ctx = {
+        bridge: fakeBridge,
+        repoRoot: worktree,
+        readRoots: roots.registry,
+        rootCommitSha: baseSha,
+        blockSecretReads: true,
+      }
+    })
+
+    const SCOPES: ReadonlyArray<{ label: string; path?: string }> = [
+      { label: 'no path at all' },
+      { label: 'dot', path: '.' },
+      // The scope that names the destination directly. Under a scoped
+      // rename detection git reports a plain addition, so this spelling is
+      // the one a per-invocation fix would leave open.
+      { label: 'the new name', path: 'notes.txt' },
+    ]
+
+    for (const scope of SCOPES) {
+      it(`withholds the renamed credential file for ${scope.label}`, async () => {
+        const r = await sessionDiffTool.run(scope.path === undefined ? {} : { path: scope.path }, ctx)
+        expect(resultText(r)).not.toContain(FAKE_RENAMED_KEY)
+      })
+    }
+
+    it('still returns the ordinary change, and says what it withheld', async () => {
+      const r = await sessionDiffTool.run({}, ctx)
+      expect(r.ok).toBe(true)
+      if (!r.ok) return
+      const out = r.output as { diff: string; withheld?: number; note?: string }
+      expect(out.diff).toContain('app.ts')
+      expect(out.withheld).toBe(1)
+      expect(out.note ?? '').toContain('withheld')
+    })
+
+    it('shows the rename, and no credential bytes, when the project has not opted in', async () => {
+      // Worth stating plainly, because it inverts the usual shape of these
+      // cases: with the policy OFF there is nothing to leak here. git's own
+      // rename detection is on by default, so an unfiltered `git diff` prints
+      // a `rename from`/`rename to` record and no file content at all. The
+      // bytes appeared only once the policy rewrote the scope into a literal
+      // pathspec for the destination, which is a scope too narrow for git to
+      // pair the halves — so it printed the whole file as an addition.
+      const r = await sessionDiffTool.run({}, { ...ctx, blockSecretReads: false })
+      const text = resultText(r)
+      expect(text).toContain('rename to notes.txt')
+      expect(text).not.toContain(FAKE_RENAMED_KEY)
+    })
+  })
+})
