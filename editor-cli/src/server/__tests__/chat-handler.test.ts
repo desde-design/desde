@@ -284,11 +284,29 @@ describe("handleChatRequest", () => {
     // The control. Without it the refusal above would also pass if chat were
     // simply broken, and the opt-in path used for local dogfooding would go
     // untested.
+    //
+    // It asserts the DISPATCH, not the absence of a phrase. It used to pass no
+    // loaders, so it ran the real bundled `claude` binary, and it asserted the
+    // response never said "Anthropic API key". Both halves were wrong. The
+    // phrase appears in two unrelated places — the refusal this case exists to
+    // rule out, raised BEFORE dispatch, and the remediation copy for a vendor
+    // 401 raised AFTER a successful dispatch — so the assertion could not tell
+    // the two apart. On any machine whose bundled binary is not signed in the
+    // turn dispatched, 401'd, and failed this case; it blocked a release on
+    // 2026-09-07 and fails identically on commits from before that work.
     vi.stubEnv("ANTHROPIC_API_KEY", "")
     vi.stubEnv("EDITOR_USE_CLAUDE_SUBSCRIPTION", "1")
+    const base = makeLoaders({ scriptedEvents: [] })
+    const loadRunChatTurnSdk = vi.fn(base.loadRunChatTurnSdk)
     const mock = makeMockReqRes()
     mock.setBody({ userMessage: "hi" })
-    await handleChatRequest(mock.req, mock.res, { repoRoot } as ChatHandlerContext)
+    await handleChatRequest(mock.req, mock.res, {
+      repoRoot,
+      loaders: { ...base, loadRunChatTurnSdk },
+    })
+    // The turn reached a runtime: that is what "dispatches normally" means,
+    // and it is exactly what the refusal case above must NOT do.
+    expect(loadRunChatTurnSdk).toHaveBeenCalled()
     expect(mock.writes.join("")).not.toMatch(/Anthropic API key/i)
   })
 
