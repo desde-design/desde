@@ -62,6 +62,8 @@
 import { readdir, readFile, rm, stat } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
+import { desdePath, desdePathOrNull, DesdeDirSymlinkError } from '../worktree/desde-dir'
+
 /** Delete unreferenced base files older than this many days. */
 export const DEFAULT_READ_SNAPSHOT_MAX_AGE_DAYS = 14
 /** Never delete a base file younger than this, regardless of reference status. */
@@ -86,7 +88,18 @@ export async function gcReadSnapshotBases(
 ): Promise<ReadSnapshotGcResult> {
   const maxAgeMs = (opts.maxAgeDays ?? DEFAULT_READ_SNAPSHOT_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000
   const now = (opts.now ?? Date.now)()
-  const chatSessionsDir = join(repoRoot, '.desde', 'chat-sessions')
+  let chatSessionsDir: string
+  try {
+    chatSessionsDir = desdePath(repoRoot, 'chat-sessions')
+  } catch (err) {
+    // Refuse and log rather than sweep whatever a hostile `.desde`
+    // symlink points at — same tolerance as `backups-gc.ts`.
+    if (err instanceof DesdeDirSymlinkError) {
+      console.warn(`[read-snapshot-gc] refusing to sweep '${repoRoot}': ${err.message}`)
+      return { sessionsSwept: 0, deleted: 0 }
+    }
+    throw err
+  }
 
   let sessionDirNames: string[]
   try {
@@ -106,7 +119,15 @@ export async function gcReadSnapshotBases(
   let sessionsSwept = 0
   let deleted = 0
   for (const sessionId of sessionDirNames) {
-    const basesDir = join(chatSessionsDir, sessionId, 'bases')
+    // Guarded per session, not once for the sweep root: a hostile
+    // `<id>/bases -> elsewhere` is the same escape one level down.
+    const basesDir = desdePathOrNull(repoRoot, 'chat-sessions', sessionId, 'bases')
+    if (basesDir === null) {
+      console.warn(
+        `[read-snapshot-gc] refusing to sweep session '${sessionId}': its bases directory is a symbolic link`,
+      )
+      continue
+    }
     let files: string[]
     try {
       files = await readdir(basesDir)

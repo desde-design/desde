@@ -48,12 +48,10 @@ function fakeHookOpts(): { signal: AbortSignal } {
 
 describe("createReadSnapshotHook — Phase 4 spike", () => {
   let dir: string
-  let snapshotRoot: string
   let records: FileReadRecord[]
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "phase4-spike-"))
-    snapshotRoot = join(dir, ".desde", "chat-sessions", "sess-spike")
     records = []
   })
 
@@ -67,7 +65,7 @@ describe("createReadSnapshotHook — Phase 4 spike", () => {
 
     const hook = createReadSnapshotHook({
       worktreeRoot: dir,
-      snapshotRoot,
+      sessionId: "sess-spike",
       onReadObserved: (r) => records.push(r),
     })
     const result = await hook(
@@ -92,7 +90,7 @@ describe("createReadSnapshotHook — Phase 4 spike", () => {
   it("returns {continue: true} so the SDK proceeds with the Read", async () => {
     const hook = createReadSnapshotHook({
       worktreeRoot: dir,
-      snapshotRoot,
+      sessionId: "sess-spike",
     })
     const result = await hook(
       preToolUseInput("Read", { file_path: "nope.vue" }),
@@ -106,7 +104,7 @@ describe("createReadSnapshotHook — Phase 4 spike", () => {
     writeFileSync(join(dir, "App.vue"), "<template>x</template>\n")
     const hook = createReadSnapshotHook({
       worktreeRoot: dir,
-      snapshotRoot,
+      sessionId: "sess-spike",
       onReadObserved: (r) => records.push(r),
     })
     await hook(
@@ -121,7 +119,7 @@ describe("createReadSnapshotHook — Phase 4 spike", () => {
   it("ignores non-PreToolUse hook events", async () => {
     const hook = createReadSnapshotHook({
       worktreeRoot: dir,
-      snapshotRoot,
+      sessionId: "sess-spike",
       onReadObserved: (r) => records.push(r),
     })
     const result = await hook(
@@ -142,7 +140,7 @@ describe("createReadSnapshotHook — Phase 4 spike", () => {
   it("swallows snapshot errors and still returns continue:true", async () => {
     const hook = createReadSnapshotHook({
       worktreeRoot: dir,
-      snapshotRoot,
+      sessionId: "sess-spike",
       onReadObserved: (r) => records.push(r),
     })
     const result = await hook(
@@ -157,7 +155,7 @@ describe("createReadSnapshotHook — Phase 4 spike", () => {
   it("swallows path-escape errors without throwing", async () => {
     const hook = createReadSnapshotHook({
       worktreeRoot: dir,
-      snapshotRoot,
+      sessionId: "sess-spike",
       onReadObserved: (r) => records.push(r),
     })
     const result = await hook(
@@ -175,7 +173,7 @@ describe("createReadSnapshotHook — Phase 4 spike", () => {
 
     const hook = createReadSnapshotHook({
       worktreeRoot: dir,
-      snapshotRoot,
+      sessionId: "sess-spike",
       onReadObserved: (r) => records.push(r),
     })
 
@@ -195,7 +193,7 @@ describe("createReadSnapshotHook — Phase 4 spike", () => {
 
     const hook = createReadSnapshotHook({
       worktreeRoot: dir,
-      snapshotRoot,
+      sessionId: "sess-spike",
       onReadObserved: (r) => records.push(r),
     })
 
@@ -219,7 +217,7 @@ describe("createReadSnapshotHook — Phase 4 spike", () => {
 
     const hook = createReadSnapshotHook({
       worktreeRoot: dir,
-      snapshotRoot,
+      sessionId: "sess-spike",
       onReadObserved: (r) => records.push(r),
     })
 
@@ -247,7 +245,7 @@ describe("createReadSnapshotHook — Phase 4 spike", () => {
   it("rejects empty / non-string file_path gracefully (no snapshot, no throw)", async () => {
     const hook = createReadSnapshotHook({
       worktreeRoot: dir,
-      snapshotRoot,
+      sessionId: "sess-spike",
       onReadObserved: (r) => records.push(r),
     })
     await hook(preToolUseInput("Read", { file_path: "" }), "x", fakeHookOpts())

@@ -14,10 +14,19 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
-  resolveThinkingConfig,
-  supportsAdaptiveThinking,
+  resolveAnthropicThinkingConfig,
+  supportsAnthropicAdaptiveThinking,
 } from './run-chat-turn-sdk'
 import { ANTHROPIC_MODEL_CATALOG } from '../llm-providers/anthropic-model-catalog'
+
+/**
+ * The coverage table is scoped to the ANTHROPIC catalog by name now.
+ *
+ * Adaptive-versus-fixed-budget thinking is an Anthropic concept with no
+ * analogue elsewhere, so iterating "every catalog" once a second provider
+ * exists would demand an expectation for `gpt-5.2` that means nothing. Scoping
+ * the guard is what keeps it a guard rather than noise.
+ */
 
 /**
  * Ground truth from the Anthropic API docs: Opus 4.6/4.7/4.8, Opus 5,
@@ -41,8 +50,8 @@ const FIXED_BUDGET_CONFIG = {
   display: 'summarized',
 } as const
 
-describe('resolveThinkingConfig — catalog coverage', () => {
-  it('covers every catalog model (add new models to EXPECTED_ADAPTIVE)', () => {
+describe('resolveAnthropicThinkingConfig: Anthropic catalog coverage', () => {
+  it('covers every ANTHROPIC catalog model (add new ones to EXPECTED_ADAPTIVE)', () => {
     const catalogIds = ANTHROPIC_MODEL_CATALOG.models.map((m) => m.id).sort()
     expect(catalogIds).toEqual(Object.keys(EXPECTED_ADAPTIVE).sort())
   })
@@ -54,7 +63,7 @@ describe('resolveThinkingConfig — catalog coverage', () => {
         adaptive,
         `no EXPECTED_ADAPTIVE entry for catalog model '${model.id}'`,
       ).toBeTypeOf('boolean')
-      expect(resolveThinkingConfig(model.id)).toEqual(
+      expect(resolveAnthropicThinkingConfig(model.id)).toEqual(
         adaptive ? ADAPTIVE_CONFIG : FIXED_BUDGET_CONFIG,
       )
     })
@@ -67,14 +76,21 @@ describe('resolveThinkingConfig — catalog coverage', () => {
     for (const model of ANTHROPIC_MODEL_CATALOG.models) {
       if (model.effortLevels === null) continue
       expect(
-        resolveThinkingConfig(model.id).type,
+        resolveAnthropicThinkingConfig(model.id).type,
         `${model.id} offers effort but resolves to a fixed thinking budget`,
       ).toBe('adaptive')
     }
   })
+
+  it('says nothing about another provider\'s ids', () => {
+    // Not a capability claim: an OpenAI id simply is not an adaptive-thinking
+    // Claude family, and the SDK lane never sees one.
+    expect(supportsAnthropicAdaptiveThinking('gpt-5.2')).toBe(false)
+    expect(supportsAnthropicAdaptiveThinking('gpt-5.6-terra')).toBe(false)
+  })
 })
 
-describe('supportsAdaptiveThinking', () => {
+describe('supportsAnthropicAdaptiveThinking', () => {
   it('accepts every adaptive-thinking family, including ones not in the catalog', () => {
     for (const id of [
       'claude-opus-4-6',
@@ -86,7 +102,7 @@ describe('supportsAdaptiveThinking', () => {
       'claude-fable-5',
       'claude-fable-5-1',
     ]) {
-      expect(supportsAdaptiveThinking(id), id).toBe(true)
+      expect(supportsAnthropicAdaptiveThinking(id), id).toBe(true)
     }
   })
 
@@ -98,30 +114,30 @@ describe('supportsAdaptiveThinking', () => {
       'claude-sonnet-4-5',
       'claude-3-7-sonnet-20250219',
     ]) {
-      expect(supportsAdaptiveThinking(id), id).toBe(false)
+      expect(supportsAnthropicAdaptiveThinking(id), id).toBe(false)
     }
   })
 
   it('lets a catalog hint override the family rule, in both directions', () => {
     // A live alias the family rule cannot place, and a family the rule
     // would call adaptive that the source says is not.
-    expect(resolveThinkingConfig('default', true)).toEqual(ADAPTIVE_CONFIG)
-    expect(resolveThinkingConfig('sonnet', true)).toEqual(ADAPTIVE_CONFIG)
-    expect(resolveThinkingConfig('claude-opus-5', false)).toEqual(FIXED_BUDGET_CONFIG)
+    expect(resolveAnthropicThinkingConfig('default', true)).toEqual(ADAPTIVE_CONFIG)
+    expect(resolveAnthropicThinkingConfig('sonnet', true)).toEqual(ADAPTIVE_CONFIG)
+    expect(resolveAnthropicThinkingConfig('claude-opus-5', false)).toEqual(FIXED_BUDGET_CONFIG)
     // No hint: the family rule, as before.
-    expect(resolveThinkingConfig('haiku', undefined)).toEqual(FIXED_BUDGET_CONFIG)
-    expect(resolveThinkingConfig('claude-opus-5', undefined)).toEqual(ADAPTIVE_CONFIG)
+    expect(resolveAnthropicThinkingConfig('haiku', undefined)).toEqual(FIXED_BUDGET_CONFIG)
+    expect(resolveAnthropicThinkingConfig('claude-opus-5', undefined)).toEqual(ADAPTIVE_CONFIG)
   })
 
   it('tolerates a dated-snapshot suffix', () => {
-    expect(supportsAdaptiveThinking('claude-opus-5-20260401')).toBe(true)
-    expect(supportsAdaptiveThinking('claude-sonnet-4-6-20251114')).toBe(true)
+    expect(supportsAnthropicAdaptiveThinking('claude-opus-5-20260401')).toBe(true)
+    expect(supportsAnthropicAdaptiveThinking('claude-sonnet-4-6-20251114')).toBe(true)
   })
 
   it('does not match a different family by bare prefix', () => {
     // The separator is required, so a hypothetical future id that merely
     // starts with an adaptive family's characters is not swept in.
-    expect(supportsAdaptiveThinking('claude-opus-50')).toBe(false)
-    expect(supportsAdaptiveThinking('claude-opus-4-80')).toBe(false)
+    expect(supportsAnthropicAdaptiveThinking('claude-opus-50')).toBe(false)
+    expect(supportsAnthropicAdaptiveThinking('claude-opus-4-80')).toBe(false)
   })
 })

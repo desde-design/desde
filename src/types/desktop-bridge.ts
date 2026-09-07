@@ -97,8 +97,19 @@ export interface DesktopBridge {
     getState: () => Promise<DesktopClaudeRuntimeState>
     /** Returns an unsubscribe function — same shape as `updates.onState`. */
     onState: (cb: (state: DesktopClaudeRuntimeState) => void) => () => void
-    /** Re-triggers the install. Safe to call anytime — a no-op while one is already in flight, and the only way to recover from phase `"error"` without restarting the app. */
-    retry: () => void
+    /**
+     * Re-triggers the install. Safe to call anytime — a no-op while one is
+     * already in flight, and the only way to recover from phase `"error"`
+     * without restarting the app.
+     *
+     * Resolves once main has decided, not once the install finishes — the
+     * ongoing progress still arrives through `onState`. `started: false`
+     * means the gate refused (a configured provider no longer needs the
+     * runtime); `skippedReason` then carries the short, user-facing line
+     * explaining why nothing happened, so the caller who clicked Retry can
+     * show it instead of the click silently doing nothing.
+     */
+    retry: () => Promise<{ started: boolean; skippedReason?: string }>
   }
   /**
    * Native folder chooser — `dialog.showOpenDialog` under the hood, replacing

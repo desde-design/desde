@@ -24,6 +24,7 @@ const FIGMA_OFF = {
   envReady: false,
   secretStored: false,
   secretFromEnvironment: false,
+  claudeModelsOnly: true,
 }
 
 function listBody(over: Partial<Record<string, unknown>> = {}) {
@@ -169,6 +170,27 @@ describe("CapabilitiesPanel", () => {
     // the block is a missing key, which is the only blocked case today.
     expect(await screen.findByTestId("capability-key-figma")).toBeInTheDocument()
     expect(screen.queryByText("Active")).toBeNull()
+  })
+
+  it("says which models a Claude-only capability works with, on or off", async () => {
+    // The row used to read "Active" while a turn on an OpenAI model had no
+    // such tools: that lane registers no MCP server at all.
+    fetchMock.mockResolvedValue(
+      jsonRes(listBody({ capabilities: [{ ...FIGMA_OFF, enabled: true, envReady: true }] })),
+    )
+    render(<CapabilitiesPanel open />)
+    expect(
+      await screen.findByText("Only available with Claude models."),
+    ).toBeInTheDocument()
+  })
+
+  it("stays quiet for a capability every model can use", async () => {
+    fetchMock.mockResolvedValue(
+      jsonRes(listBody({ capabilities: [{ ...FIGMA_OFF, claudeModelsOnly: false }] })),
+    )
+    render(<CapabilitiesPanel open />)
+    await screen.findByTestId("capability-row-figma")
+    expect(screen.queryByText("Only available with Claude models.")).toBeNull()
   })
 })
 

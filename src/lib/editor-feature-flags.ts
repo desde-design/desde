@@ -68,6 +68,13 @@ type CliBootstrap = {
    */
   vscodeLink?: boolean
   /**
+   * Secret-file read policy for the chat agent. Populated by the CLI
+   * bootstrap from `editor.blockSecretReads` in `.desde/config.json` — and
+   * from nothing else. Default `false`. Absent on the web shell — always
+   * `false` there. See {@link EDITOR_BLOCK_SECRET_READS}.
+   */
+  blockSecretReads?: boolean
+  /**
    * Dormant edit-lane gates. Populated by the CLI bootstrap from the `lanes`
    * block of `desde.config.json` (the same file `hosts` lives in),
    * and always emitted exhaustively — every dormant lane appears with an
@@ -241,6 +248,36 @@ export const EDITOR_CANVAS: boolean = cliBootstrap?.canvas === true
  * none of this machinery.
  */
 export const EDITOR_CODE_VIEW: boolean = cliBootstrap?.codeView === true
+
+/**
+ * Secret-file reads — whether this project STOPS the chat agent reading
+ * credential-bearing files (`.env` and its variants, private keys, `.npmrc`,
+ * cloud credential stores). Default **false** — opt-IN, same shape as
+ * {@link EDITOR_CODE_VIEW}. Set `editor.blockSecretReads: true` in
+ * `.desde/config.json` to turn the refusals on. That is the ONLY way to turn
+ * it on: unlike every other flag here it has no environment escape hatch,
+ * because an env var is process-wide and is inherited by every per-project
+ * CLI child the launcher and the desktop shell spawn, so it could not
+ * express the per-project permission this is. See `isSecretReadsBlocked` in
+ * `editor-cli/src/server/dormant-surfaces.ts` (FX17 item 6).
+ *
+ * This one does NOT gate a surface, and it is not a dormant feature. It is a
+ * POLICY: with it ON the agent's Read, Glob and Grep refuse those files,
+ * because their content would otherwise land in a transcript sent to a model
+ * vendor. Off is the default, decided by the product owner on 2026-09-05
+ * (FX18) after the blocking default proved too costly in ordinary work.
+ * `.env.example` and the other documentation spellings are readable either
+ * way.
+ *
+ * Gated at BOTH ends, the same discipline as the flags above. This flag is
+ * the REPORTING half — the capabilities panel says the project has turned
+ * blocking on. The CLI enforces independently on the same config, in the
+ * shared permission gate and in the SDK lane's `PreToolUse` guard, so a
+ * stale client cannot talk the chat route into reading a secret in a project
+ * that blocks them.
+ */
+export const EDITOR_BLOCK_SECRET_READS: boolean =
+  cliBootstrap?.blockSecretReads === true
 
 /**
  * Notes — the second kind of DOM-anchored annotation, alongside comments.

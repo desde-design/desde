@@ -164,7 +164,7 @@ describe("LauncherPage — the settings gear and its update chrome", () => {
       claudeRuntime: {
         getState: async () => ({ phase: "ready" }),
         onState: () => () => {},
-        retry: () => {},
+        retry: async () => ({ started: true }),
       },
       pickFolder: async () => null,
     }
@@ -193,7 +193,7 @@ describe("LauncherPage — the settings gear and its update chrome", () => {
       claudeRuntime: {
         getState: async () => ({ phase: "ready" }),
         onState: () => () => {},
-        retry: () => {},
+        retry: async () => ({ started: true }),
       },
       pickFolder: async () => null,
     }
@@ -497,7 +497,7 @@ describe("LauncherPage — Check for updates", () => {
       claudeRuntime: {
         getState: async () => ({ phase: "ready" }),
         onState: () => () => {},
-        retry: () => {},
+        retry: async () => ({ started: true }),
       },
       pickFolder: async () => null,
     }

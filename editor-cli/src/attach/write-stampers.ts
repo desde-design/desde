@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs"
 import { createRequire } from "node:module"
 import { dirname, join, relative, resolve } from "node:path"
 import { build } from "vite"
+import { desdePathOrNull } from "../../../src/editor/worktree/desde-dir.js"
 import type { RequiredStamperFile } from "../attach-preflight/index.js"
 import {
   resolveEditorCliPackageJson,
@@ -112,6 +113,20 @@ export interface WriteStampersResult {
   ms: number
 }
 
+/**
+ * The absolute path a stamper file should be written to, or `null` when it
+ * lives under a `.desde` that is a symbolic link.
+ *
+ * Only paths that actually start with `.desde` are guarded — the Next lane
+ * writes its loader into a per-user cache directory outside the repository,
+ * and that has no `.desde` to check.
+ */
+function guardedTarget(destDir: string, filePath: string): string | null {
+  const segments = filePath.split(/[\\/]+/).filter((s) => s.length > 0)
+  if (segments[0] !== ".desde") return resolve(destDir, filePath)
+  return desdePathOrNull(destDir, ...segments.slice(1))
+}
+
 export async function writeStamperFiles(
   req: WriteStampersRequest,
 ): Promise<WriteStampersResult> {
@@ -121,7 +136,33 @@ export async function writeStamperFiles(
   let rebuilt = false
 
   for (const file of req.files) {
-    const target = resolve(req.destDir, file.path)
+    // `.desde/…` paths go through the guard; anything else (the Next lane's
+    // per-user cache dir, which is not in the repo at all) is resolved as
+    // before. A prototype that ships `.desde` — or `.desde/stamp` — as a
+    // symbolic link would otherwise have its generated source-tag plugins
+    // written outside the working tree. Refusing is reported through the
+    // `warnings` channel this function already returns, because this runs on
+    // the boot path: the user gets an editor without stamping, not a CLI
+    // that will not start.
+    const target = guardedTarget(req.destDir, file.path)
+    if (target === null) {
+      // Deliberately soft, even though it means edits will not attribute
+      // (no source-tag stamps ⇒ every edit dispatch is refused): the
+      // Next-loader lane's write, by contrast, throws and stops the CLI
+      // from booting at all (`loader-cache.ts`) — but that failure is the
+      // CLI's own cache directory being unwritable, unrelated to the
+      // repository's content and no different on a retry. This one is
+      // caused by the (untrusted) prototype repo itself, and refusing to
+      // boot would hand a hostile `.desde` symlink the power to lock the
+      // user out of the Editor entirely. An editor that boots with edits
+      // refused, and says why in this warning, is the boot path's version
+      // of "read a credential file you cannot parse as no credentials"
+      // rather than "cannot start at all" — see `desde-dir.ts`'s header.
+      warnings.push(
+        `Refusing to write '${file.path}': '.desde' in this project is a symbolic link, so Desde cannot install its source-tag helpers.`,
+      )
+      continue
+    }
     await fs.mkdir(dirname(target), { recursive: true })
 
     if (file.role === "type-declaration") {

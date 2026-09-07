@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
@@ -200,5 +201,24 @@ describe('gcReadSnapshotBases — conflicts map protection (audit Task 15, codex
     const result = await gcReadSnapshotBases(root, { maxAgeDays: 14, now: () => now })
     expect(result.deleted).toBe(1)
     expect(existsSync(orphanBase)).toBe(false)
+  })
+
+  it('CX7 item 6: refuses to sweep, and removes nothing, when .desde is a symlink out of the worktree', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'read-snapshot-gc-outside-'))
+    mkdirSync(join(outside, 'chat-sessions', 'sess-a', 'bases'), { recursive: true })
+    writeFileSync(join(outside, 'chat-sessions', 'sess-a', 'bases', 'orphanhash.txt'), 'content')
+    symlinkSync(outside, join(root, '.desde'))
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const now = Date.now()
+    const result = await gcReadSnapshotBases(root, { maxAgeDays: 14, now: () => now })
+    expect(result).toEqual({ sessionsSwept: 0, deleted: 0 })
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+
+    expect(
+      existsSync(join(outside, 'chat-sessions', 'sess-a', 'bases', 'orphanhash.txt')),
+    ).toBe(true)
+    rmSync(outside, { recursive: true, force: true })
   })
 })

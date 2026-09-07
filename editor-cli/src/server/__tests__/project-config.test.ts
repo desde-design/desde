@@ -648,3 +648,47 @@ describe("editor.notes", () => {
     }
   })
 })
+
+describe("the llm block", () => {
+  it("accepts a default provider and per-provider overrides", async () => {
+    await writeConfig({
+      version: 1,
+      llm: {
+        defaultProvider: "openai",
+        providers: { openai: { model: "gpt-5.4-mini", baseUrl: "https://gw.internal" } },
+      },
+    })
+    const result = await readProjectConfig(repoRoot)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.config.llm).toEqual({
+      defaultProvider: "openai",
+      providers: { openai: { model: "gpt-5.4-mini", baseUrl: "https://gw.internal" } },
+    })
+  })
+
+  it("refuses a non-string defaultProvider", async () => {
+    await writeConfig({ version: 1, llm: { defaultProvider: 7 } })
+    const result = await readProjectConfig(repoRoot)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe("malformed")
+    expect(result.message).toContain("llm.defaultProvider")
+  })
+
+  it("refuses a provider override that is not an object of strings", async () => {
+    await writeConfig({ version: 1, llm: { providers: { openai: { model: 3 } } } })
+    const result = await readProjectConfig(repoRoot)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.message).toContain("llm.providers.openai.model")
+  })
+
+  it("omits the block entirely when it is absent", async () => {
+    await writeConfig({ version: 1 })
+    const result = await readProjectConfig(repoRoot)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.config.llm).toBeUndefined()
+  })
+})

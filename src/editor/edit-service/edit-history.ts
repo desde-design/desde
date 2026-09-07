@@ -318,7 +318,11 @@ export class EditorEditHistory {
           return {
             ok: false,
             reason:
-              res.stage === 'backup' || res.stage === 'refused'
+              // `stopped` cannot occur here — undo/redo passes no `signal`
+              // to `brokeredWrite` — and like `backup` and `refused` it
+              // carries no `repoRel` to name, so it takes the bare-reason
+              // branch rather than the file-naming one.
+              res.stage === 'backup' || res.stage === 'refused' || res.stage === 'stopped'
                 ? res.reason
                 : `Could not ${direction} '${res.repoRel}': ${res.reason}`,
             state: this.stateUnsafe(),

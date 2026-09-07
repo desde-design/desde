@@ -33,7 +33,7 @@
 // purpose — they are assistant-ui's own export names for its message-editor
 // widget, unrelated to this product's former name. Renaming them would just
 // break the import.
-import { memo, useCallback, useEffect, useMemo } from "react"
+import { memo, useCallback, useEffect, useMemo, useState } from "react"
 import {
   AssistantRuntimeProvider,
   AttachmentPrimitive,
@@ -48,6 +48,7 @@ import { Alert } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { editorFetch } from "@/lib/editor-fetch"
 import { useEditorChatRuntime } from "@/hooks/useEditorChatRuntime"
 import { ChatStatusBanners } from "@/components/editor/chat-status-banners"
 import { useEditorCapabilities } from "@/hooks/useEditorCapabilities"
@@ -132,6 +133,36 @@ function EditorChatPanelImpl({
   // panel's own fetch is not wanted here; we only need the action.
   const { enable: enableCapability } = useEditorCapabilities(false)
 
+  // Fetch model catalog to get the active provider's capabilities
+  const [catalog, setCatalog] = useState<Array<{ providerId: string; capabilities?: { vendorRateLimitEvents?: boolean } }> | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await editorFetch("/api/editor/chat/model-catalog")
+        if (!res.ok) return
+        const body = await res.json()
+        if (!body || !Array.isArray(body.catalogs)) return
+        if (!cancelled) setCatalog(body.catalogs)
+      } catch {
+        // Catalog unavailable — pass true (default) so banners render unchanged
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Extract vendorRateLimitEvents from the active provider's capabilities
+  // Defaults to true when catalog hasn't loaded yet (safe default)
+  const vendorRateLimitEvents = (() => {
+    if (!catalog || !chat.modelConfig) return true
+    const entry = catalog.find(c => c.providerId === chat.modelConfig!.provider)
+    return entry?.capabilities?.vendorRateLimitEvents ?? true
+  })()
+
+
   // Conversational messages (user + assistant) for the runtime.
   // Status messages are rendered by ChatStatusBanners below the thread.
   const hasConversation = chat.messages.some(
@@ -193,6 +224,7 @@ function EditorChatPanelImpl({
             messages={chat.messages}
             onDismiss={chat.dismissMessage}
             onEnableCapability={enableCapability}
+            vendorRateLimitEvents={vendorRateLimitEvents}
           />
           <ResendingSteerRows steers={chat.resendingSteers} />
 

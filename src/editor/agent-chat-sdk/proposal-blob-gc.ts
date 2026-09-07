@@ -32,9 +32,9 @@
  */
 
 import { readFile, readdir } from 'node:fs/promises'
-import { join } from 'node:path'
 
 import { deleteProposalBlobsForSession } from './proposal-blob-store'
+import { desdePath, desdePathOrNull, DesdeDirSymlinkError } from '../worktree/desde-dir'
 
 /**
  * Sweep every chat-session under the worktree's
@@ -46,7 +46,18 @@ import { deleteProposalBlobsForSession } from './proposal-blob-store'
  * counted.
  */
 export async function gcAllProposalBlobs(repoRoot: string): Promise<number> {
-  const dir = join(repoRoot, '.desde', 'chat-sessions')
+  let dir: string
+  try {
+    dir = desdePath(repoRoot, 'chat-sessions')
+  } catch (err) {
+    // Refuse and log rather than sweep whatever a hostile `.desde`
+    // symlink points at — same tolerance as `backups-gc.ts`.
+    if (err instanceof DesdeDirSymlinkError) {
+      console.warn(`[proposal-blob-gc] refusing to sweep '${repoRoot}': ${err.message}`)
+      return 0
+    }
+    throw err
+  }
   let entries: string[]
   try {
     entries = await readdir(dir, { withFileTypes: true }).then((dirents) =>
@@ -92,7 +103,10 @@ async function sessionHasUnresolvedConflicts(
   repoRoot: string,
   sessionId: string,
 ): Promise<boolean> {
-  const sessionFile = join(repoRoot, '.desde', 'chat-sessions', `${sessionId}.json`)
+  // Built through the guard like every other `.desde` path: a hand-rolled
+  // `join(repoRoot, '.desde', …)` here is exactly how a site skips it.
+  const sessionFile = desdePathOrNull(repoRoot, 'chat-sessions', `${sessionId}.json`)
+  if (sessionFile === null) return false
   try {
     const raw = await readFile(sessionFile, 'utf8')
     const parsed = JSON.parse(raw) as { conflicts?: Record<string, unknown> }

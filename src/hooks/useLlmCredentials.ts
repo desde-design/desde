@@ -1,7 +1,7 @@
 "use client"
 
 /**
- * Client state for the Anthropic credential surface.
+ * Client state for the multi-provider LLM credential surface.
  *
  * The hook NEVER holds a full key in state. `saveKey` passes the value
  * straight to the server and keeps only the masked status that comes back, so
@@ -16,15 +16,17 @@
  */
 
 import { useCallback, useEffect, useState } from "react"
+import { invalidateModelCatalogCache } from "@/lib/model-catalog-cache"
 
 export type CredentialSource = "subscription" | "env" | "stored" | "none"
 
-export interface LlmCredentialsStatus {
-  /** Which credential is ACTIVE right now. */
+export interface ProviderCredentialStatus {
+  id: string
+  label: string
+  /** Which credential is ACTIVE for this provider right now. */
   source: CredentialSource
   /** Masked form of the active credential, when it is a key. */
   maskedHint?: string
-  devMode: boolean
   /**
    * Whether a key sits in the app's store, independent of `source`. Dev mode
    * makes `source` `subscription` even with a key stored behind it, so the
@@ -33,8 +35,85 @@ export interface LlmCredentialsStatus {
   hasStoredKey: boolean
   /** Masked form of the STORED key, whether or not it is active. */
   storedHint?: string
+  baseUrl?: string
+  apiKeyEnvVar: string
+  baseUrlEnvVar?: string
+  consoleUrl: string
+  maskPrefix: string
+  /** Whether the dev-mode row belongs in this provider's tab. Anthropic only. */
+  hasSubscriptionRuntime: boolean
+}
+
+export interface LlmCredentialsStatus {
+  /** One entry per provider the server serves, in its registration order. */
+  providers: Record<string, ProviderCredentialStatus>
+  /** Global; Anthropic-only in meaning. */
+  devMode: boolean
   /** First-run dismissal, held machine-level rather than in localStorage. */
   promptDismissed: boolean
+}
+
+/**
+ * The server's status shape, checked at the boundary. A CLI older than this
+ * UI (or the self-host harness, whose mock backend answers unlisted routes
+ * with `{ ok: true }`) returns something else, and the old hook simply read
+ * `undefined` off it. The map-shaped status would throw instead, in render,
+ * on every page. Checking here turns that into `error` and a null status.
+ */
+const CREDENTIAL_SOURCES: readonly CredentialSource[] = ["subscription", "env", "stored", "none"]
+
+/** Every row must carry a real source and the required strings, or the whole status is rejected. */
+function isProviderCredentialStatus(value: unknown): value is ProviderCredentialStatus {
+  if (typeof value !== "object" || value === null) return false
+  const p = value as Record<string, unknown>
+  if (
+    typeof p.id !== "string" ||
+    typeof p.label !== "string" ||
+    typeof p.apiKeyEnvVar !== "string" ||
+    typeof p.consoleUrl !== "string" ||
+    typeof p.maskPrefix !== "string"
+  ) {
+    return false
+  }
+  if (!CREDENTIAL_SOURCES.includes(p.source as CredentialSource)) return false
+  if (typeof p.hasStoredKey !== "boolean" || typeof p.hasSubscriptionRuntime !== "boolean") {
+    return false
+  }
+  for (const key of ["maskedHint", "storedHint", "baseUrl", "baseUrlEnvVar"] as const) {
+    if (p[key] !== undefined && typeof p[key] !== "string") return false
+  }
+  return true
+}
+
+export function isLlmCredentialsStatus(value: unknown): value is LlmCredentialsStatus {
+  if (typeof value !== "object" || value === null) return false
+  const v = value as Record<string, unknown>
+  if (
+    typeof v.providers !== "object" ||
+    v.providers === null ||
+    Array.isArray(v.providers) ||
+    typeof v.devMode !== "boolean" ||
+    typeof v.promptDismissed !== "boolean"
+  ) {
+    return false
+  }
+  return Object.values(v.providers as Record<string, unknown>).every(isProviderCredentialStatus)
+}
+
+/**
+ * The single boolean the settings dot and the first-run prompt both need.
+ *
+ * Defined once because two definitions is how "Anthropic is unconfigured" and
+ * "nothing is configured" drift apart, and the first of those would ask a
+ * working OpenAI user for a key they do not need. `null` (not yet loaded) and
+ * a status this shape check does not recognise both report false, so nothing
+ * flashes on load or throws on a stale server's answer.
+ */
+export function everyProviderUncredentialed(
+  status: LlmCredentialsStatus | null,
+): boolean {
+  if (status === null || !isLlmCredentialsStatus(status)) return false
+  return Object.values(status.providers).every((p) => p.source === "none")
 }
 
 const ROUTE = "/api/editor/llm-credentials"
@@ -43,8 +122,8 @@ export interface UseLlmCredentials {
   status: LlmCredentialsStatus | null
   loading: boolean
   error: string | null
-  saveKey: (apiKey: string) => Promise<boolean>
-  removeKey: () => Promise<boolean>
+  saveKey: (providerId: string, apiKey: string | undefined, baseUrl?: string) => Promise<boolean>
+  removeKey: (providerId: string) => Promise<boolean>
   setDevMode: (value: boolean) => Promise<boolean>
   dismissPrompt: () => Promise<boolean>
   refresh: () => Promise<void>
@@ -60,7 +139,13 @@ export function useLlmCredentials(): UseLlmCredentials {
     try {
       const res = await fetch(ROUTE)
       if (!res.ok) throw new Error(`Status request failed (${res.status}).`)
-      setStatus((await res.json()) as LlmCredentialsStatus)
+      const json: unknown = await res.json()
+      if (!isLlmCredentialsStatus(json)) {
+        throw new Error(
+          "The credentials status had an unexpected shape. Restart the editor after updating.",
+        )
+      }
+      setStatus(json)
       setError(null)
     } catch (err) {
       setError((err as Error).message)
@@ -86,12 +171,22 @@ export function useLlmCredentials(): UseLlmCredentials {
           headers: body ? { "Content-Type": "application/json" } : undefined,
           body: body ? JSON.stringify(body) : undefined,
         })
-        const json = (await res.json()) as Record<string, unknown>
+        const json: unknown = await res.json()
+        const record = (typeof json === "object" && json !== null ? json : {}) as Record<
+          string,
+          unknown
+        >
         if (!res.ok) {
-          setError((json.error as string) ?? `Request failed (${res.status}).`)
+          setError((record.error as string) ?? `Request failed (${res.status}).`)
           return false
         }
-        setStatus(json as unknown as LlmCredentialsStatus)
+        if (!isLlmCredentialsStatus(json)) {
+          setError(
+            "The credentials status had an unexpected shape. Restart the editor after updating.",
+          )
+          return false
+        }
+        setStatus(json)
         return true
       } catch (err) {
         setError((err as Error).message)
@@ -101,13 +196,43 @@ export function useLlmCredentials(): UseLlmCredentials {
     [],
   )
 
+  // The three mutations below change which provider is credentialed, so a
+  // success invalidates the model catalog cache the chip reads — otherwise
+  // the picker keeps offering (or hiding) a provider based on the
+  // credential state from BEFORE this save, for as long as its ten-minute
+  // cache lives. `dismissPrompt` changes no credential, so it does not.
   const saveKey = useCallback(
-    (apiKey: string) => mutate(ROUTE, "PUT", { apiKey }),
+    async (providerId: string, apiKey: string | undefined, baseUrl?: string) => {
+      const ok = await mutate(`${ROUTE}/${encodeURIComponent(providerId)}`, "PUT", {
+        // Forward `apiKey` and `baseUrl` the SAME way: only when the caller
+        // actually passed a value, INCLUDING "" for baseUrl (that is how a
+        // cleared field reaches the server as "clear the stored value"
+        // rather than "leave it as it was"). An `undefined` `apiKey` means
+        // the draft was never touched, so the server reuses the key already
+        // on disk — this hook never holds the plaintext key itself, so
+        // there is nothing else it could resend.
+        ...(apiKey !== undefined ? { apiKey } : {}),
+        ...(baseUrl !== undefined ? { baseUrl } : {}),
+      })
+      if (ok) invalidateModelCatalogCache()
+      return ok
+    },
     [mutate],
   )
-  const removeKey = useCallback(() => mutate(ROUTE, "DELETE"), [mutate])
+  const removeKey = useCallback(
+    async (providerId: string) => {
+      const ok = await mutate(`${ROUTE}/${encodeURIComponent(providerId)}`, "DELETE")
+      if (ok) invalidateModelCatalogCache()
+      return ok
+    },
+    [mutate],
+  )
   const setDevMode = useCallback(
-    (value: boolean) => mutate(`${ROUTE}/dev-mode`, "PUT", { devMode: value }),
+    async (value: boolean) => {
+      const ok = await mutate(`${ROUTE}/dev-mode`, "PUT", { devMode: value })
+      if (ok) invalidateModelCatalogCache()
+      return ok
+    },
     [mutate],
   )
   const dismissPrompt = useCallback(

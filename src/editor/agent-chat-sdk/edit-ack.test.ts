@@ -3,6 +3,7 @@ import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sd
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -19,6 +20,8 @@ import {
   ALLOWED_COMPONENT_EXTENSIONS,
   ALLOWED_NEW_FILE_EXTENSIONS,
   buildCanUseTool,
+  buildToolPermissionGate,
+  reconstructWriteEdit,
   toRel,
   type OverwriteConflictDetected,
 } from './edit-ack'
@@ -1220,5 +1223,132 @@ describe('canUseTool — protected config files', () => {
       fakeOpts(),
     )
     expect(r.behavior).toBe('deny')
+  })
+})
+
+describe('buildToolPermissionGate', () => {
+  let root: string
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'editor-tool-gate-')))
+  })
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('denies a Read outside the worktree, which the SDK callback never sees', async () => {
+    const gate = buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true as const, editId: 'e1' }),
+    })
+    const decision = await gate('Read', { file_path: '/etc/passwd' }, {})
+    expect(decision.behavior).toBe('deny')
+    expect((decision as { message: string }).message).toMatch(/Read denied/)
+  })
+
+  it('allows an in-worktree Read', async () => {
+    const gate = buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true as const, editId: 'e1' }),
+    })
+    mkdirSync(join(root, 'src'), { recursive: true })
+    writeFileSync(join(root, 'src/App.vue'), '<template><div/></template>', 'utf8')
+    const decision = await gate('Read', { file_path: 'src/App.vue' }, {})
+    expect(decision).toEqual({ behavior: 'allow', updatedInput: {} })
+  })
+
+  it('honours a runtime-supplied blockedPath from the context', async () => {
+    const gate = buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true as const, editId: 'e1' }),
+    })
+    const decision = await gate('Glob', { pattern: '**' }, { blockedPath: '/etc' })
+    expect(decision.behavior).toBe('deny')
+    expect((decision as { message: string }).message).toMatch(/out of bounds/)
+  })
+
+  it('is the same closure buildCanUseTool wraps: a protected path is denied on both', async () => {
+    const opts = {
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true as const, editId: 'e1' }),
+    }
+    const gate = buildToolPermissionGate(opts)
+    const canUseTool = buildCanUseTool(opts)
+    const input = { file_path: '.mcp.json', content: '{}' }
+    const viaGate = await gate('Write', input, {})
+    const viaSdk = await canUseTool('Write', input, {} as never)
+    expect(viaGate.behavior).toBe('deny')
+    expect(viaSdk).not.toBeNull()
+    expect(viaSdk!.behavior).toBe('deny')
+    expect((viaSdk as { message: string }).message).toBe((viaGate as { message: string }).message)
+  })
+})
+
+describe('reconstructWriteEdit', () => {
+  let root: string
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'editor-reconstruct-')))
+    mkdirSync(join(root, 'src'), { recursive: true })
+    writeFileSync(join(root, 'src/App.vue'), '<template>\n  <div>Old</div>\n</template>\n', 'utf8')
+  })
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('reports the spliced source, the prior bytes and the base hash for an Edit', async () => {
+    const built = await reconstructWriteEdit(
+      'Edit',
+      { file_path: 'src/App.vue', old_string: 'Old', new_string: 'New' },
+      root,
+    )
+    expect(built.ok).toBe(true)
+    if (!built.ok) return
+    expect(built.repoRel).toBe('src/App.vue')
+    expect(built.absPath).toBe(join(root, 'src/App.vue'))
+    expect(built.newSource).toContain('<div>New</div>')
+    expect(built.priorContent).toContain('<div>Old</div>')
+    expect(built.baseHash).toBe(sha256('<template>\n  <div>Old</div>\n</template>\n'))
+    expect(built.isNew).toBe(false)
+  })
+
+  it('reports a create with no prior bytes and no base hash', async () => {
+    const built = await reconstructWriteEdit(
+      'Write',
+      { file_path: 'docs/plan.md', content: '# Plan\n' },
+      root,
+    )
+    expect(built).toMatchObject({
+      ok: true,
+      repoRel: 'docs/plan.md',
+      newSource: '# Plan\n',
+      priorContent: null,
+      isNew: true,
+    })
+    expect((built as { baseHash?: string }).baseHash).toBeUndefined()
+  })
+
+  it('refuses with the same message the gate denies with, so neither lane can drift', async () => {
+    const input = { file_path: 'setup.sh', content: 'x' }
+    const built = await reconstructWriteEdit('Write', input, root)
+    expect(built.ok).toBe(false)
+    const gate = buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: async () => ({ ok: true as const, editId: 'e1' }),
+    })
+    const decision = await gate('Write', input, {})
+    expect(decision.behavior).toBe('deny')
+    expect((decision as { message: string }).message).toBe((built as { reason: string }).reason)
+  })
+
+  it('writes nothing itself: reconstruction is a pure read', async () => {
+    await reconstructWriteEdit(
+      'Edit',
+      { file_path: 'src/App.vue', old_string: 'Old', new_string: 'New' },
+      root,
+    )
+    expect(readFileSync(join(root, 'src/App.vue'), 'utf8')).toContain('<div>Old</div>')
   })
 })

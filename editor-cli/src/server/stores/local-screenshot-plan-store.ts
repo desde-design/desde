@@ -27,6 +27,7 @@ import {
   nowIso,
   readJsonFile,
   resolveStorePath,
+  resolveStoreRemovalPath,
   writeJsonFile,
 } from "./local-store-base.js"
 
@@ -44,8 +45,10 @@ function planScreenshotsPath(repoRoot: string, id: string): string {
   return resolveStorePath(repoRoot, PLANS_SUBDIR, id, "screenshots.json")
 }
 
+// Only ever `rm(..., { recursive: true })`'d — resolved through the
+// removal-time guard rather than `resolveStorePath`.
 function planScreenshotsDir(repoRoot: string, id: string): string {
-  return resolveStorePath(repoRoot, PLANS_SUBDIR, id)
+  return resolveStoreRemovalPath(repoRoot, PLANS_SUBDIR, id)
 }
 
 export function createLocalScreenshotPlanStore(

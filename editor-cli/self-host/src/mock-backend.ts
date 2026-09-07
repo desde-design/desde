@@ -20,6 +20,8 @@
 import type { ChatSessionSummary } from "@/editor/agent-chat/session-store"
 import { defaultModelConfig } from "@/editor/core/model-catalog"
 import { ANTHROPIC_MODEL_CATALOG } from "@/editor/llm-providers/anthropic-model-catalog"
+import { ANTHROPIC_DESCRIPTOR } from "@/editor/llm-providers/descriptors/anthropic"
+import { OPENAI_DESCRIPTOR } from "@/editor/llm-providers/descriptors/openai"
 import { sampleCatalogEntries } from "@/components/editor/gallery/fixtures/sample-catalog"
 import { mockChatSession, mockThinkingStream } from "./mock-chat"
 
@@ -106,6 +108,32 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   })
+}
+
+/**
+ * Builds one provider row for `GET /api/editor/llm-credentials`, matching
+ * `ProviderCredentialStatus` (`src/hooks/useLlmCredentials.ts`). The generic
+ * `{ ok: true }` fallthrough below answered this route too, which is a
+ * different shape (no `providers` map) and crashed every page in render.
+ */
+function providerStatus(
+  d: typeof ANTHROPIC_DESCRIPTOR,
+  source: "stored" | "none",
+): Record<string, unknown> {
+  return {
+    id: d.id,
+    label: d.label,
+    source,
+    ...(source === "stored"
+      ? { maskedHint: `${d.credentials.maskPrefix}...a1b2`, storedHint: `${d.credentials.maskPrefix}...a1b2` }
+      : {}),
+    hasStoredKey: source === "stored",
+    apiKeyEnvVar: d.credentials.apiKeyEnvVar,
+    ...(d.credentials.baseUrlEnvVar ? { baseUrlEnvVar: d.credentials.baseUrlEnvVar } : {}),
+    consoleUrl: d.credentials.consoleUrl,
+    maskPrefix: d.credentials.maskPrefix,
+    hasSubscriptionRuntime: d.credentials.hasSubscriptionRuntime === true,
+  }
 }
 
 /**
@@ -203,6 +231,20 @@ async function route(
   if (p === "/api/editor/design-systems/suggestions") return json({ suggestions: [] })
   if (p === "/api/editor/design-systems") return json({ designSystems: [] })
   if (p === "/api/editor/smoke-test" && method === "GET") return json({ ok: true, runs: [] })
+  // `useLlmCredentials` reads `providers`, `devMode` and `promptDismissed`
+  // off this route and throws on render for anything else — see
+  // `providerStatus` above. PUT/DELETE on `/api/editor/llm-credentials/...`
+  // still fall through to the generic `{ ok: true }` below.
+  if (p === "/api/editor/llm-credentials" && method === "GET") {
+    return json({
+      providers: {
+        anthropic: providerStatus(ANTHROPIC_DESCRIPTOR, "stored"),
+        openai: providerStatus(OPENAI_DESCRIPTOR, "none"),
+      },
+      devMode: false,
+      promptDismissed: true,
+    })
+  }
   // The mock selection is a literal-text element, not conditional text —
   // `ok: false` makes the inspector's ConditionalTextSection not render
   // (a generic `{ ok: true }` would set data with undefined branches → crash).

@@ -37,19 +37,36 @@
 
 import { createHash } from 'node:crypto'
 import { existsSync, realpathSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import type { Stats } from 'node:fs'
+import { readFile, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve as resolvePath, sep as pathSep } from 'node:path'
 
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 
 import { resolveRepoPath } from '../agent-tools/read-tools'
-import { isProtectedAgentPath, protectedPathDenial } from './protected-paths'
+import {
+  isProtectedAgentPath,
+  isSecretAgentPath,
+  protectedPathDenial,
+  secretPathDenial,
+} from './protected-paths'
+import {
+  editorToolSecretRefusal,
+  grepContentDenial,
+  grepContentScopeIsSecretFree,
+  type GrepScope,
+} from './secret-scope'
 import type { EditProposalPayload } from '../agent-tools/types'
 import type { ReadRoot, ReadRootRegistry } from '../core/read-roots'
 import type { WebPolicy } from '../core/web-policy'
 import { isWebFetchAllowed } from '../core/web-policy'
 import { resolveSafeCreatePath } from '../edit-service/safe-create-path'
 import { isRootEscape } from './root-escape'
+import type {
+  PermissionDecision,
+  ToolPermissionContext,
+  ToolPermissionGate,
+} from '../agent-chat/tool-permission'
 
 /**
  * Renderable component / source-module extensions. Spans both
@@ -236,20 +253,40 @@ export interface BuildCanUseToolOpts {
    * didn't configure, and neither should get tool access.
    */
   extensionToolPolicy?: ReadonlyMap<string, ReadonlyArray<string> | null>
+  /**
+   * The per-project setting that stops the agent reading secret-bearing files
+   * (`.env`, private keys, `.npmrc`, …). Default OFF — an omitted value means
+   * the agent reads them, on the same `=== true` discipline every other
+   * opt-in gate in the product uses, so a missing key, a malformed value and
+   * an explicit `false` are indistinguishable.
+   *
+   * The CLI computes it once (`isSecretReadsBlocked` in
+   * `editor-cli/src/server/dormant-surfaces.ts`) and both the client offering
+   * and this dispatch read that one function, per the both-ends rule in
+   * CLAUDE.md.
+   */
+  blockSecretReads?: boolean
 }
 
 /**
- * Build the `canUseTool` callback. Allows safe non-write tool calls;
- * intercepts `Write`/`Edit` for the ack flow; denies anything the SDK
- * has flagged via `blockedPath`.
+ * The policy, as a Desde-owned closure. Every rule this module enforces lives
+ * here and is reached by both lanes: path containment, the protected-path
+ * list, the new-file extension allowlist, the WebFetch host allowlist, the
+ * per-extension read-verb prefixes, the no-op refusal, `old_string`
+ * uniqueness, and stale-base conflict detection.
+ *
+ * The neutral lane calls this for EVERY tool including Read. The SDK lane
+ * reaches the identical closure through `buildCanUseTool` below, so a rule
+ * added here is added to both lanes at once and neither can be forgotten.
  */
-export function buildCanUseTool(opts: BuildCanUseToolOpts): CanUseTool {
-  return async (toolName, toolInput, options) => {
-    // Always honor the SDK's own out-of-bounds signal. When set, the
-    // SDK has determined `blockedPath` is outside allowed
-    // directories — auto-allowing would let the model bypass that.
-    if (options && typeof options.blockedPath === 'string' && options.blockedPath.length > 0) {
-      return deny(`SDK flagged path '${options.blockedPath}' as out of bounds`)
+export function buildToolPermissionGate(
+  opts: BuildCanUseToolOpts,
+): ToolPermissionGate {
+  return async (toolName, toolInput, ctx: ToolPermissionContext) => {
+    // Always honour a runtime's own out-of-bounds signal. The SDK sets it on
+    // its callback options; the neutral lane never does.
+    if (typeof ctx.blockedPath === 'string' && ctx.blockedPath.length > 0) {
+      return deny(`SDK flagged path '${ctx.blockedPath}' as out of bounds`)
     }
 
     if (toolName === 'Write') {
@@ -270,6 +307,18 @@ export function buildCanUseTool(opts: BuildCanUseToolOpts): CanUseTool {
     if (toolName.startsWith('mcp__') && !toolName.startsWith('mcp__editor__')) {
       return handleExtensionTool(toolName, opts)
     }
+    // FX17 item 4 + item 5. Editor's OWN tools used to fall straight through
+    // to `allow()` below, on both lanes, so the secret-read policy did not
+    // apply to any of them. `read_file_at_commit(path: '.env', sha: 'HEAD')`
+    // returned committed contents, `diff_file` returned the same bytes as
+    // hunks, and `rename_file(from: '.env', to: 'notes.txt')` moved a
+    // credential to a name neither Read guard refuses. The check reads the
+    // ARGUMENTS, so an editor tool added later is covered the day it is
+    // added rather than the day someone remembers this list.
+    if (toolName.startsWith('mcp__editor__') && opts.blockSecretReads === true) {
+      const refusal = await editorToolSecretRefusal(opts.worktreeRoot, toolInput)
+      if (refusal !== null) return deny(refusal)
+    }
     // Defense in depth: for Read, validate the file_path is in-root
     // even when the SDK didn't preset blockedPath. Matches the legacy
     // `read_file` tool's traversal protection.
@@ -282,9 +331,88 @@ export function buildCanUseTool(opts: BuildCanUseToolOpts): CanUseTool {
             buildReadDenyMessage(filePath, safe.reason, opts.worktreeRoot, opts.readRoots),
           )
         }
+        // Containment says the path is inside the repository. It says nothing
+        // about whether the CONTENT is a credential: `isProtectedAgentPath`
+        // had write call sites only, so `Read .env` returned the key verbatim
+        // into a transcript sent to a model vendor. Repository content alone
+        // steers the model here (a README saying "the key is in .env"), which
+        // is why the refusal is a project setting rather than a prompt-time
+        // judgement. It is OFF by default since FX18: a project that wants
+        // this branch says so.
+        //
+        // BOTH spellings are tested: the one the model asked for, and the
+        // realpath'd target `resolveRepoPath` returned. An in-repo symlink
+        // (`docs/notes.md` -> `.env`) passes containment, because the link and
+        // its target are both inside the repository.
+        if (
+          opts.blockSecretReads === true &&
+          (isSecretAgentPath(filePath) || isSecretAgentPath(safe.absolute))
+        ) {
+          return deny(secretPathDenial(filePath))
+        }
+      }
+    }
+    // Glob and Grep name paths through a PATTERN rather than a `file_path`,
+    // so they need their own branch — they used to fall straight through to
+    // `allow()` below and were never mentioned in this gate at all.
+    //
+    // **What this branch no longer does, and why.** It used to refuse a
+    // pattern the analyser judged to be AIMED at a credential file. FX20
+    // item 1 removed that: glob syntax has unbounded spellings for identical
+    // reach, an independent measurement found seven of eight brace and
+    // character-class spellings of a secret DIRECTORY walking past the rule
+    // that refused the literal spelling, and each of five review rounds
+    // bought exactly one more spelling. An unsound refusal that reads as a
+    // control is worse than no refusal, because the next reader trusts it.
+    //
+    // What remains is decided on RESOLVED PATHS, which have no spellings:
+    // the neutral lane owns its Glob and Grep and drops every enumerated
+    // path the policy refuses, counting them (`secretPathOmissionNote`), and
+    // the content-returning shape below is refused unless its scope is one
+    // provable file. Names — not contents — can still reach the model from
+    // the SDK's own Glob, which no `PreToolUse` hook can filter; that was
+    // already true of every broad pattern and is stated in
+    // `secret-read-guard.ts`'s header.
+    if (toolName === 'Glob' || toolName === 'Grep') {
+      if (opts.blockSecretReads === true) {
+        const input = toolInput as { glob?: unknown; path?: unknown; output_mode?: unknown }
+        // FX17 item 3b. The SDK's Grep in `output_mode: "content"` returns
+        // matching LINES, and a `PreToolUse` hook cannot filter a result it
+        // runs before, so on that lane a broad content search returned `.env`
+        // lines verbatim with no clever spelling needed at all. This is the
+        // shared gate's copy of the refusal; the SDK lane's own copy is in
+        // `secret-read-guard.ts`, because the SDK does not always route these
+        // tools through the permission callback.
+        //
+        // The neutral lane never reaches it: its Grep declares no
+        // `output_mode` at all, so the branch is false for every call it
+        // makes, and its result filter stays the mechanism there.
+        if (toolName === 'Grep' && input.output_mode === 'content') {
+          const free = await grepContentScopeIsSecretFree(opts.worktreeRoot, input as GrepScope)
+          if (!free) return deny(grepContentDenial())
+        }
       }
     }
     return allow()
+  }
+}
+
+/**
+ * The SDK binding. `PermissionResult` and `PermissionDecision` are
+ * structurally identical, so this is a type cast around one call, not a
+ * translation: there is nowhere for the two lanes to disagree.
+ */
+export function buildCanUseTool(opts: BuildCanUseToolOpts): CanUseTool {
+  const gate = buildToolPermissionGate(opts)
+  return async (toolName, toolInput, options) => {
+    const blockedPath =
+      options && typeof options.blockedPath === 'string' && options.blockedPath.length > 0
+        ? options.blockedPath
+        : undefined
+    const decision = await gate(toolName, toolInput, {
+      ...(blockedPath !== undefined ? { blockedPath } : {}),
+    })
+    return decision as PermissionResult
   }
 }
 
@@ -418,7 +546,7 @@ function findMatchingExternalRoot(
 function handleWebFetch(
   toolInput: Record<string, unknown>,
   opts: BuildCanUseToolOpts,
-): PermissionResult {
+): PermissionDecision {
   const policy = opts.webPolicy
   if (!policy) {
     return deny(
@@ -433,7 +561,7 @@ function handleWebFetch(
   return allow()
 }
 
-function handleWebSearch(opts: BuildCanUseToolOpts): PermissionResult {
+function handleWebSearch(opts: BuildCanUseToolOpts): PermissionDecision {
   const policy = opts.webPolicy
   if (!policy || !policy.webSearchEnabled) {
     return deny(
@@ -454,7 +582,7 @@ function handleWebSearch(opts: BuildCanUseToolOpts): PermissionResult {
 function handleExtensionTool(
   toolName: string,
   opts: BuildCanUseToolOpts,
-): PermissionResult {
+): PermissionDecision {
   const rest = toolName.slice('mcp__'.length)
   const sep = rest.indexOf('__')
   const id = sep === -1 ? rest : rest.slice(0, sep)
@@ -503,71 +631,175 @@ function handleExtensionTool(
  * sufficient — a new lane must not need to remember anything.
  */
 
-async function handleWrite(
+/**
+ * What a `Write` or `Edit` call would produce on disk, with every refusal
+ * this module can decide from the input and the file alone already applied:
+ * containment, the protected-path list, the new-file extension allowlist, the
+ * `old_string` uniqueness rule and the no-op guard.
+ *
+ * Extracted so the permission gate and the neutral lane's OWN write tools run
+ * one implementation rather than two. On the SDK lane the gate reconstructs
+ * `newSource` for the `edit_proposed` carrier and the SDK then performs the
+ * write; on the neutral lane the tool needs the same string to hand to
+ * `brokeredWrite`. Two copies of an Edit splice is exactly the kind of drift
+ * that ends with the diff card and the file disagreeing.
+ *
+ * What it deliberately does NOT do: emit, detect conflicts, journal, lock or
+ * write. Those belong to the caller, and they differ per lane.
+ */
+export type WriteReconstruction =
+  | {
+      ok: true
+      /** Repo-relative POSIX path. */
+      repoRel: string
+      /** Absolute path inside the worktree. */
+      absPath: string
+      /** The file's full content after the call. */
+      newSource: string
+      /** sha256 of the current on-disk content. Absent when creating. */
+      baseHash?: string
+      /** Bytes currently on disk, decoded as UTF-8. Null when creating. */
+      priorContent: string | null
+      /**
+       * The SAME bytes, undecoded. Null when creating.
+       *
+       * FX11 item 4 (2026-09-05). `priorContent` is a UTF-8 decode, so a file
+       * holding bytes that are not valid UTF-8 comes back with replacement
+       * characters and no longer round-trips: re-encoding it produced
+       * different bytes than the ones on disk. A caller that compared those
+       * re-encoded bytes against the file — which is exactly what the write
+       * broker's precondition does — could never match, so every edit to such
+       * a file was refused as "changed on disk". That message is false and
+       * unactionable, and the model loops on it, because re-reading decodes
+       * identically. Use this field for anything BYTE-level (a precondition, a
+       * backup journal entry) and `priorContent` only for text work.
+       */
+      priorBytes: Buffer | null
+      isNew: boolean
+    }
+  | { ok: false; reason: string }
+
+export async function reconstructWriteEdit(
+  toolName: 'Write' | 'Edit',
   toolInput: Record<string, unknown>,
-  opts: BuildCanUseToolOpts,
-): Promise<PermissionResult> {
+  worktreeRoot: string,
+): Promise<WriteReconstruction> {
+  return toolName === 'Write'
+    ? reconstructWrite(toolInput, worktreeRoot)
+    : reconstructEdit(toolInput, worktreeRoot)
+}
+
+/**
+ * Refuse a path that is not a regular file BEFORE it is opened.
+ *
+ * FX16 item 2 (2026-09-05), applied to the third reader of a model-supplied
+ * path. `readFile` blocks in `open(2)` on a FIFO with no writer, and the
+ * verifier MEASURED that block on Grep at past 12 seconds with both a deadline
+ * and an abort ignored. Here it would hang the permission gate, which the
+ * neutral loop awaits inside the tool call: the turn never returns and Stop
+ * cannot end it. `stat` does not block on a FIFO; only `open` does.
+ *
+ * A directory keeps its own wording, which is the case a model actually hits
+ * (`Write src/components` for `Write src/components/Foo.vue`) and which used
+ * to arrive here as an EISDIR from the read below.
+ */
+async function regularFileRefusal(
+  toolName: 'Write' | 'Edit',
+  absPath: string,
+  repoRel: string,
+): Promise<string | null> {
+  let info: Stats
+  try {
+    info = await stat(absPath)
+  } catch (err) {
+    return `${toolName} denied: cannot read '${repoRel}': ${(err as Error).message}`
+  }
+  if (info.isFile()) return null
+  if (info.isDirectory()) {
+    return `${toolName} denied: '${repoRel}' is a directory, not a file`
+  }
+  return `${toolName} denied: '${repoRel}' is not a regular file`
+}
+
+/**
+ * The conflict baseline, hashed from the RAW bytes.
+ *
+ * FX16 item 4 (2026-09-05). This used to be `sha256(current)` — the hash of a
+ * UTF-8 DECODE, re-encoded. Its counterpart, `hashAtRead`, is the hash of the
+ * Buffer (`builtin-read.ts`, and `file-read-snapshot.ts` on the SDK lane), so
+ * on a file that is not valid UTF-8 the two could never agree and every first
+ * write after a read reported a conflict nobody caused. MEASURED by the
+ * adversarial verifier on `alpha ` + 0xFF + ` omega`: 36affec1… against
+ * f368cf6d…, with nothing else touching the file.
+ *
+ * It failed safe — the write still landed, because the broker's precondition
+ * uses `priorBytes` — so this was a spurious banner, not a refusal. Both
+ * consumers compare it against `hashAtRead`, and the third use, the
+ * `edit_proposed` carrier, is `appliedByAgent: true` on both chat lanes, so
+ * nothing re-applies it against a decode.
+ */
+function hashOfBytes(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+async function reconstructWrite(
+  toolInput: Record<string, unknown>,
+  worktreeRoot: string,
+): Promise<WriteReconstruction> {
   const rawPath = toolInput.file_path
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
-    return deny('Write requires a non-empty file_path')
+    return { ok: false, reason: 'Write requires a non-empty file_path' }
   }
   const content = toolInput.content
   if (typeof content !== 'string') {
-    return deny('Write requires a string `content` field')
+    return { ok: false, reason: 'Write requires a string `content` field' }
   }
 
   // resolveRepoPath validates containment (with realpath where the
   // leaf exists) and produces an absolute path inside the worktree.
   // It returns ok even when the leaf doesn't exist — we still need
   // to branch on whether this is a Write-overwrite or a Write-create.
-  const safe = await resolveRepoPath(opts.worktreeRoot, rawPath)
+  const safe = await resolveRepoPath(worktreeRoot, rawPath)
   if (!safe.ok) {
-    return deny(`Write denied: ${safe.reason}`)
+    return { ok: false, reason: `Write denied: ${safe.reason}` }
   }
-  if (isProtectedAgentPath(toRel(opts.worktreeRoot, safe.absolute))) {
-    return deny(protectedPathDenial(toRel(opts.worktreeRoot, safe.absolute)))
+  const safeRel = toRel(worktreeRoot, safe.absolute)
+  if (isProtectedAgentPath(safeRel)) {
+    return { ok: false, reason: protectedPathDenial(safeRel) }
   }
   if (existsSync(safe.absolute)) {
-    const repoRel = toRel(opts.worktreeRoot, safe.absolute)
-    const current = await readFile(safe.absolute, 'utf8')
-    if (current === content) {
-      return deny(`Write produces no change to '${repoRel}'`)
-    }
-    const currentHash = sha256(current)
-    await detectOverwriteConflict({
-      file: repoRel,
-      absolutePath: safe.absolute,
-      currentHash,
-      opts,
-    })
-    return emit({
-      type: 'overwrite',
-      file: repoRel,
-      newSource: content,
-      baseHash: currentHash,
-      appliedByAgent: true,
-    }, opts, { absPath: safe.absolute, nextHash: sha256(content) })
-  }
-
-  // Phase 4a — codex round-1 fix for finding #3 (write-after-delete
-  // is missed). If the session previously read this path but it no
-  // longer exists, another writer deleted it between Read and Write.
-  // Surface the conflict before going down the new-file branch.
-  // `hashAtWrite` is sha256 of empty content since "the file is gone"
-  // is morally an empty-file state.
-  const priorReads = opts.getFileReads?.()
-  const priorReadForDeleted = priorReads?.[safe.absolute]
-  if (priorReadForDeleted) {
-    const repoRel = toRel(opts.worktreeRoot, safe.absolute)
+    // Guarded the way `reconstructEdit` below already guards its read. The
+    // path exists but need not be a readable FILE: `Write src/components`
+    // instead of `Write src/components/Foo.vue` is an ordinary model slip and
+    // used to throw EISDIR out of the permission gate, which on the neutral
+    // lane ended the whole turn (2026-09-04 adversarial review, P2-1).
+    const shapeRefusal = await regularFileRefusal('Write', safe.absolute, safeRel)
+    if (shapeRefusal !== null) return { ok: false, reason: shapeRefusal }
+    let currentBytes: Buffer
     try {
-      await opts.onConflictDetected?.({
-        file: repoRel,
-        absolutePath: safe.absolute,
-        hashAtRead: priorReadForDeleted.hashAtRead,
-        hashAtWrite: sha256(''),
-      })
-    } catch {
-      // Telemetry must never break the edit-ack lane.
+      // Read once, undecoded, and derive the string from it — see
+      // `priorBytes` on `WriteReconstruction` for why the raw bytes have to
+      // survive this call.
+      currentBytes = await readFile(safe.absolute)
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `Write denied: cannot read '${safeRel}': ${(err as Error).message}`,
+      }
+    }
+    const current = currentBytes.toString('utf8')
+    if (current === content) {
+      return { ok: false, reason: `Write produces no change to '${safeRel}'` }
+    }
+    return {
+      ok: true,
+      repoRel: safeRel,
+      absPath: safe.absolute,
+      newSource: content,
+      baseHash: hashOfBytes(currentBytes),
+      priorContent: current,
+      priorBytes: currentBytes,
+      isNew: false,
     }
   }
 
@@ -575,98 +807,193 @@ async function handleWrite(
   // and refuses creation through a symlink (catches pre-staged
   // links pointing outside the repo — the attack the legacy
   // edit-handler defends against).
-  const create = await resolveSafeCreatePath(opts.worktreeRoot, rawPath)
+  const create = await resolveSafeCreatePath(worktreeRoot, rawPath)
   if (!create.ok) {
-    return deny(`Write denied: ${create.reason}`)
+    return { ok: false, reason: `Write denied: ${create.reason}` }
   }
-  const repoRel = toRel(opts.worktreeRoot, create.absolute)
+  const repoRel = toRel(worktreeRoot, create.absolute)
   const ext = extensionOf(repoRel)
   if (!ALLOWED_NEW_FILE_EXTENSIONS.has(ext)) {
-    return deny(
-      `Only ${[...ALLOWED_NEW_FILE_EXTENSIONS].join('/')} files can be created; '${repoRel}' has extension '${ext || '(none)'}'`,
-    )
+    return {
+      ok: false,
+      reason: `Only ${[...ALLOWED_NEW_FILE_EXTENSIONS].join('/')} files can be created; '${repoRel}' has extension '${ext || '(none)'}'`,
+    }
   }
-  return emit({
-    type: 'overwrite',
-    file: repoRel,
+  return {
+    ok: true,
+    repoRel,
+    absPath: create.absolute,
     newSource: content,
-    allowCreate: true,
-    appliedByAgent: true,
-  }, opts, { absPath: create.absolute, nextHash: sha256(content) })
+    priorContent: null,
+    priorBytes: null,
+    isNew: true,
+  }
 }
 
-async function handleEdit(
+async function reconstructEdit(
   toolInput: Record<string, unknown>,
-  opts: BuildCanUseToolOpts,
-): Promise<PermissionResult> {
+  worktreeRoot: string,
+): Promise<WriteReconstruction> {
   const rawPath = toolInput.file_path
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
-    return deny('Edit requires a non-empty file_path')
+    return { ok: false, reason: 'Edit requires a non-empty file_path' }
   }
   const oldString = typeof toolInput.old_string === 'string' ? toolInput.old_string : null
   const newString = typeof toolInput.new_string === 'string' ? toolInput.new_string : null
   if (oldString === null || newString === null) {
-    return deny('Edit requires `old_string` and `new_string` as strings')
+    return { ok: false, reason: 'Edit requires `old_string` and `new_string` as strings' }
   }
   if (oldString.length === 0) {
     // Match the SDK — empty old_string is a creation pattern, not an
     // edit. Refuse so the carrier shape stays unambiguous.
-    return deny('Edit `old_string` must be non-empty; use Write to create new files')
+    return {
+      ok: false,
+      reason: 'Edit `old_string` must be non-empty; use Write to create new files',
+    }
   }
 
-  const safe = await resolveRepoPath(opts.worktreeRoot, rawPath)
+  const safe = await resolveRepoPath(worktreeRoot, rawPath)
   if (!safe.ok) {
-    return deny(`Edit denied: ${safe.reason}`)
+    return { ok: false, reason: `Edit denied: ${safe.reason}` }
   }
-  if (isProtectedAgentPath(toRel(opts.worktreeRoot, safe.absolute))) {
-    return deny(protectedPathDenial(toRel(opts.worktreeRoot, safe.absolute)))
+  const repoRel = toRel(worktreeRoot, safe.absolute)
+  if (isProtectedAgentPath(repoRel)) {
+    return { ok: false, reason: protectedPathDenial(repoRel) }
   }
-  const repoRel = toRel(opts.worktreeRoot, safe.absolute)
   if (!existsSync(safe.absolute)) {
-    return deny(`Edit denied: file not found '${repoRel}'. Use Write to create new files`)
+    return {
+      ok: false,
+      reason: `Edit denied: file not found '${repoRel}'. Use Write to create new files`,
+    }
   }
-  let current: string
+  const shapeRefusal = await regularFileRefusal('Edit', safe.absolute, repoRel)
+  if (shapeRefusal !== null) return { ok: false, reason: shapeRefusal }
+  let currentBytes: Buffer
   try {
-    current = await readFile(safe.absolute, 'utf8')
+    // Read once, undecoded — see `priorBytes` on `WriteReconstruction`.
+    currentBytes = await readFile(safe.absolute)
   } catch (err) {
-    return deny(`Edit denied: cannot read '${repoRel}': ${(err as Error).message}`)
+    return { ok: false, reason: `Edit denied: cannot read '${repoRel}': ${(err as Error).message}` }
   }
+  const current = currentBytes.toString('utf8')
   const replaceAll = toolInput.replace_all === true
   let newSource: string
   if (replaceAll) {
     if (!current.includes(oldString)) {
-      return deny(`Edit old_string not found in '${repoRel}'`)
+      return { ok: false, reason: `Edit old_string not found in '${repoRel}'` }
     }
     newSource = current.split(oldString).join(newString)
   } else {
     const idx = current.indexOf(oldString)
     if (idx < 0) {
-      return deny(`Edit old_string not found in '${repoRel}'`)
+      return { ok: false, reason: `Edit old_string not found in '${repoRel}'` }
     }
-    if (current.indexOf(oldString, idx + oldString.length) >= 0) {
-      return deny(
-        `Edit old_string is not unique in '${repoRel}'; expand the match or set replace_all`,
-      )
+    // FX11 item 3 (2026-09-05): resume at `idx + 1`, not past the end of the
+    // first match. A string that borders itself — repeated closing tags,
+    // repeated blank lines, repeated import lines — has OVERLAPPING
+    // occurrences, and resuming past the first one made them invisible. The
+    // edit was then accepted as unique and applied to the first pair, which
+    // is a wrong-location edit the user has to spot on their own.
+    //
+    // This is the uniqueness check only. `replace_all` above stays on
+    // `split`/`join`, which counts non-overlapping occurrences, because that
+    // is what "replace every occurrence" means everywhere else and is the
+    // reference Edit semantics. The two branches disagreeing is the point:
+    // one refuses an ambiguous match, the other is told to take them all.
+    if (current.indexOf(oldString, idx + 1) >= 0) {
+      return {
+        ok: false,
+        reason: `Edit old_string is not unique in '${repoRel}'; expand the match or set replace_all`,
+      }
     }
     newSource = current.slice(0, idx) + newString + current.slice(idx + oldString.length)
   }
   if (newSource === current) {
-    return deny(`Edit produces no change to '${repoRel}'`)
+    return { ok: false, reason: `Edit produces no change to '${repoRel}'` }
   }
-  const currentHash = sha256(current)
+  return {
+    ok: true,
+    repoRel,
+    absPath: safe.absolute,
+    newSource,
+    baseHash: hashOfBytes(currentBytes),
+    priorContent: current,
+    priorBytes: currentBytes,
+    isNew: false,
+  }
+}
+
+async function handleWrite(
+  toolInput: Record<string, unknown>,
+  opts: BuildCanUseToolOpts,
+): Promise<PermissionDecision> {
+  const built = await reconstructWriteEdit('Write', toolInput, opts.worktreeRoot)
+  if (!built.ok) return deny(built.reason)
+  if (!built.isNew) {
+    await detectOverwriteConflict({
+      file: built.repoRel,
+      absolutePath: built.absPath,
+      currentHash: built.baseHash!,
+      opts,
+    })
+  } else {
+    // Phase 4a — codex round-1 fix for finding #3 (write-after-delete
+    // is missed). If the session previously read this path but it no
+    // longer exists, another writer deleted it between Read and Write.
+    // `hashAtWrite` is sha256 of empty content since "the file is gone"
+    // is morally an empty-file state.
+    const prior = opts.getFileReads?.()?.[built.absPath]
+    if (prior) {
+      try {
+        await opts.onConflictDetected?.({
+          file: built.repoRel,
+          absolutePath: built.absPath,
+          hashAtRead: prior.hashAtRead,
+          hashAtWrite: sha256(''),
+        })
+      } catch {
+        // Telemetry must never break the edit-ack lane.
+      }
+    }
+  }
+  return emit(
+    {
+      type: 'overwrite',
+      file: built.repoRel,
+      newSource: built.newSource,
+      ...(built.baseHash ? { baseHash: built.baseHash } : {}),
+      ...(built.isNew ? { allowCreate: true } : {}),
+      appliedByAgent: true,
+    },
+    opts,
+    { absPath: built.absPath, nextHash: sha256(built.newSource) },
+  )
+}
+
+async function handleEdit(
+  toolInput: Record<string, unknown>,
+  opts: BuildCanUseToolOpts,
+): Promise<PermissionDecision> {
+  const built = await reconstructWriteEdit('Edit', toolInput, opts.worktreeRoot)
+  if (!built.ok) return deny(built.reason)
+  // Edit never creates, so `baseHash` is always present here.
   await detectOverwriteConflict({
-    file: repoRel,
-    absolutePath: safe.absolute,
-    currentHash,
+    file: built.repoRel,
+    absolutePath: built.absPath,
+    currentHash: built.baseHash!,
     opts,
   })
-  return emit({
-    type: 'overwrite',
-    file: repoRel,
-    newSource,
-    baseHash: currentHash,
-    appliedByAgent: true,
-  }, opts, { absPath: safe.absolute, nextHash: sha256(newSource) })
+  return emit(
+    {
+      type: 'overwrite',
+      file: built.repoRel,
+      newSource: built.newSource,
+      ...(built.baseHash ? { baseHash: built.baseHash } : {}),
+      appliedByAgent: true,
+    },
+    opts,
+    { absPath: built.absPath, nextHash: sha256(built.newSource) },
+  )
 }
 
 /**
@@ -708,7 +1035,7 @@ async function emit(
   payload: EditProposalPayload,
   opts: BuildCanUseToolOpts,
   advance?: { absPath: string; nextHash: string },
-): Promise<PermissionResult> {
+): Promise<PermissionDecision> {
   const ack = await opts.emitEditProposal(payload)
   if (!ack.ok) {
     return deny(`User declined: ${ack.reason}`)
@@ -729,14 +1056,14 @@ async function emit(
   return allow()
 }
 
-function allow(): PermissionResult {
+function allow(): PermissionDecision {
   // SDK's runtime Zod schema requires `updatedInput` as a record even though
   // the TypeScript type marks it optional. Pass an empty object to signal
   // "use the original input unchanged" and pass validation.
   return { behavior: 'allow', updatedInput: {} }
 }
 
-function deny(message: string): PermissionResult {
+function deny(message: string): PermissionDecision {
   return { behavior: 'deny', message }
 }
 
@@ -780,6 +1107,6 @@ export function extensionOf(repoRel: string): string {
   return dot >= 0 ? base.slice(dot) : ''
 }
 
-function sha256(buf: string): string {
+export function sha256(buf: string): string {
   return createHash('sha256').update(Buffer.from(buf, 'utf8')).digest('hex')
 }

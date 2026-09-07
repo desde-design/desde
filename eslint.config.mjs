@@ -26,21 +26,6 @@ const eslintConfig = defineConfig([
   // sweep. `src/editor/llm-providers/ai-sdk-*.ts` is that directory-of-one.
   // Everything else reaches the SDK through `LLMProvider`, which is vendor
   // neutral and predates it.
-  //
-  // Ported here from `feat/multi-provider-llm` on 2026-09-04, ahead of the
-  // branch, because `tasks/` is ONE repository shared by every root branch
-  // while `eslint.config.mjs` is per-branch. `tasks/scripts/ai-sdk-transport-spike.mts`
-  // was committed to `tasks/` main carrying three `no-restricted-imports`
-  // disables for a rule that only existed on the branch, so on main those
-  // directives reported as unused and `npm run verify` failed its lint stage
-  // for everyone — including the deploy script, whose first step is a local
-  // `npm run verify`. Deleting the directives instead would have made the same
-  // three imports hard errors the moment the branch was checked out.
-  //
-  // Nothing on main imports `ai` or `@ai-sdk/*` today (the packages are not
-  // even installed here), so this restricts nothing that exists — it makes the
-  // spike's directives honest. Expect it to conflict trivially when the branch
-  // lands; keep the branch's copy.
   {
     ignores: ["src/editor/llm-providers/ai-sdk-*.ts"],
     rules: {
@@ -61,6 +46,20 @@ const eslintConfig = defineConfig([
                 "Import the AI SDK only from src/editor/llm-providers/ai-sdk-*.ts. Elsewhere, depend on the vendor-neutral LLMProvider in src/editor/llm-providers/types.ts.",
             },
           ],
+        },
+      ],
+      // `no-restricted-imports` does not see an `import()` EXPRESSION, so
+      // `const { streamText } = await import('ai')` walked straight through
+      // the rule above. That is the shape most likely to be reached for,
+      // because the rest of this codebase already loads runtimes lazily.
+      // `ai-sdk-import-boundary.test.ts` covers the same gap at test time.
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "ImportExpression > Literal[value=/^(ai|ai\\u002F[a-z]+|@ai-sdk\\u002F.+)$/]",
+          message:
+            "Import the AI SDK only from src/editor/llm-providers/ai-sdk-*.ts. A dynamic import() is still an import. Elsewhere, depend on the vendor-neutral LLMProvider in src/editor/llm-providers/types.ts.",
         },
       ],
     },
@@ -193,6 +192,12 @@ const eslintConfig = defineConfig([
     // on any machine that had ever run the desktop app in dev:
     // "RangeError: Invalid string length" out of eslint's own stylish
     // formatter, trying to table a bundle it should never have parsed.
+    //
+    // Added on main while this branch was open, and lost for a moment when the
+    // merge took the branch's whole copy of this file on main's own advice
+    // ("keep the branch's copy"). That advice was about the AI SDK rule below;
+    // this entry is why a blanket "take theirs" is not safe for a config both
+    // sides edit.
     "desktop/.payload-cache/**",
     // The website's static export. `out/**` above is anchored at the repo
     // root, so it does not cover website/out — which holds Next's minified

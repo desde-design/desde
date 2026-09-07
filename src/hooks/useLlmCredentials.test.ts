@@ -1,9 +1,20 @@
 import { act, renderHook, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { useLlmCredentials } from "./useLlmCredentials"
+import {
+  everyProviderUncredentialed,
+  isLlmCredentialsStatus,
+  useLlmCredentials,
+  type LlmCredentialsStatus,
+} from "./useLlmCredentials"
+
+const invalidateModelCatalogCache = vi.fn()
+vi.mock("@/lib/model-catalog-cache", () => ({
+  invalidateModelCatalogCache: () => invalidateModelCatalogCache(),
+}))
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  invalidateModelCatalogCache.mockClear()
 })
 
 /** Answers the mount GET with `status`, and any mutation with `onMutate`. */
@@ -23,18 +34,36 @@ function stubFetch(
   return impl
 }
 
+const anthropicOnly = (source: "none" | "stored" | "env" | "subscription", extra = {}) => ({
+  providers: {
+    anthropic: {
+      id: "anthropic",
+      label: "Anthropic",
+      source,
+      hasStoredKey: false,
+      apiKeyEnvVar: "ANTHROPIC_API_KEY",
+      consoleUrl: "https://console.anthropic.com/settings/keys",
+      maskPrefix: "sk-ant-",
+      hasSubscriptionRuntime: true,
+      ...extra,
+    },
+  },
+  devMode: false,
+  promptDismissed: false,
+})
+
 describe("useLlmCredentials", () => {
   it("loads status on mount", async () => {
-    stubFetch({ source: "stored", maskedHint: "sk-ant-…4f2a", devMode: false })
+    stubFetch(anthropicOnly("stored", { maskedHint: "sk-ant-…4f2a" }))
     const { result } = renderHook(() => useLlmCredentials())
     await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(result.current.status?.source).toBe("stored")
-    expect(result.current.status?.maskedHint).toBe("sk-ant-…4f2a")
+    expect(result.current.status?.providers.anthropic.source).toBe("stored")
+    expect(result.current.status?.providers.anthropic.maskedHint).toBe("sk-ant-…4f2a")
   })
 
   it("surfaces a save failure instead of silently succeeding", async () => {
     stubFetch(
-      { source: "none", devMode: false },
+      anthropicOnly("none"),
       () =>
         new Response(JSON.stringify({ error: "Anthropic rejected that key." }), {
           status: 400,
@@ -45,7 +74,7 @@ describe("useLlmCredentials", () => {
 
     let ok: boolean | undefined
     await act(async () => {
-      ok = await result.current.saveKey("sk-ant-bad")
+      ok = await result.current.saveKey("anthropic", "sk-ant-bad")
     })
     expect(ok).toBe(false)
     expect(result.current.error).toBe("Anthropic rejected that key.")
@@ -53,14 +82,10 @@ describe("useLlmCredentials", () => {
 
   it("adopts the status the server returns after a successful save", async () => {
     stubFetch(
-      { source: "none", devMode: false },
+      anthropicOnly("none"),
       () =>
         new Response(
-          JSON.stringify({
-            source: "stored",
-            maskedHint: "sk-ant-…9999",
-            devMode: false,
-          }),
+          JSON.stringify(anthropicOnly("stored", { maskedHint: "sk-ant-…9999" })),
           { status: 200 },
         ),
     )
@@ -68,18 +93,18 @@ describe("useLlmCredentials", () => {
     await waitFor(() => expect(result.current.loading).toBe(false))
 
     await act(async () => {
-      await result.current.saveKey("sk-ant-good9999")
+      await result.current.saveKey("anthropic", "sk-ant-good9999")
     })
-    expect(result.current.status?.source).toBe("stored")
+    expect(result.current.status?.providers.anthropic.source).toBe("stored")
     expect(result.current.error).toBeNull()
   })
 
   it("never keeps the submitted key in hook state", async () => {
     stubFetch(
-      { source: "none", devMode: false },
+      anthropicOnly("none"),
       () =>
         new Response(
-          JSON.stringify({ source: "stored", maskedHint: "sk-ant-…9999", devMode: false }),
+          JSON.stringify(anthropicOnly("stored", { maskedHint: "sk-ant-…9999" })),
           { status: 200 },
         ),
     )
@@ -87,13 +112,13 @@ describe("useLlmCredentials", () => {
     await waitFor(() => expect(result.current.loading).toBe(false))
 
     await act(async () => {
-      await result.current.saveKey("sk-ant-supersecret9999")
+      await result.current.saveKey("anthropic", "sk-ant-supersecret9999")
     })
     expect(JSON.stringify(result.current.status)).not.toContain("supersecret")
   })
 
   it("sends dev mode to its own route", async () => {
-    const impl = stubFetch({ source: "none", devMode: false })
+    const impl = stubFetch(anthropicOnly("none"))
     const { result } = renderHook(() => useLlmCredentials())
     await waitFor(() => expect(result.current.loading).toBe(false))
 
@@ -115,5 +140,275 @@ describe("useLlmCredentials", () => {
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current.error).toBe("offline")
     expect(result.current.status).toBeNull()
+  })
+})
+
+const bothNone = {
+  providers: {
+    anthropic: {
+      id: "anthropic",
+      label: "Anthropic",
+      source: "none",
+      hasStoredKey: false,
+      apiKeyEnvVar: "ANTHROPIC_API_KEY",
+      consoleUrl: "https://console.anthropic.com/settings/keys",
+      maskPrefix: "sk-ant-",
+      hasSubscriptionRuntime: true,
+    },
+    openai: {
+      id: "openai",
+      label: "OpenAI",
+      source: "none",
+      hasStoredKey: false,
+      apiKeyEnvVar: "OPENAI_API_KEY",
+      baseUrlEnvVar: "OPENAI_BASE_URL",
+      consoleUrl: "https://platform.openai.com/api-keys",
+      maskPrefix: "sk-",
+      hasSubscriptionRuntime: false,
+    },
+  },
+  devMode: false,
+  promptDismissed: false,
+}
+
+describe("useLlmCredentials: provider-scoped mutations", () => {
+  it("saves to the named provider's route and forwards a base URL", async () => {
+    const impl = stubFetch(bothNone)
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    await act(async () => {
+      await result.current.saveKey("openai", "sk-new", "https://gateway.internal")
+    })
+    const [url, init] = impl.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(url).toBe("/api/editor/llm-credentials/openai")
+    expect(init.method).toBe("PUT")
+    expect(JSON.parse(init.body as string)).toEqual({
+      apiKey: "sk-new",
+      baseUrl: "https://gateway.internal",
+    })
+  })
+
+  it("ledger #28: omits apiKey entirely when undefined, sending only baseUrl", async () => {
+    const impl = stubFetch(bothNone)
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    await act(async () => {
+      await result.current.saveKey("openai", undefined, "https://gateway.internal/v1")
+    })
+    const [, init] = impl.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({
+      baseUrl: "https://gateway.internal/v1",
+    })
+  })
+
+  it("omits baseUrl entirely when none is given", async () => {
+    const impl = stubFetch(bothNone)
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    await act(async () => {
+      await result.current.saveKey("anthropic", "sk-ant-new")
+    })
+    const [, init] = impl.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({ apiKey: "sk-ant-new" })
+  })
+
+  it("saveKey forwards an explicit empty base URL so the server can clear it", async () => {
+    const impl = stubFetch(bothNone)
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    await act(async () => {
+      await result.current.saveKey("openai", "sk-new", "")
+    })
+    const [, cleared] = impl.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(JSON.parse(cleared.body as string)).toEqual({ apiKey: "sk-new", baseUrl: "" })
+    await act(async () => {
+      await result.current.saveKey("openai", "sk-new")
+    })
+    const [, untouched] = impl.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(JSON.parse(untouched.body as string)).toEqual({ apiKey: "sk-new" })
+  })
+
+  it("removes from the named provider's route", async () => {
+    const impl = stubFetch(bothNone)
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    await act(async () => {
+      await result.current.removeKey("openai")
+    })
+    const [url, init] = impl.mock.calls.at(-1) as unknown as [string, RequestInit]
+    expect(url).toBe("/api/editor/llm-credentials/openai")
+    expect(init.method).toBe("DELETE")
+  })
+
+  it("keeps dev mode and dismissal on the base sub-routes", async () => {
+    const impl = stubFetch(bothNone)
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    await act(async () => {
+      await result.current.setDevMode(true)
+      await result.current.dismissPrompt()
+    })
+    const urls = impl.mock.calls.map((c) => c[0])
+    expect(urls).toContain("/api/editor/llm-credentials/dev-mode")
+    expect(urls).toContain("/api/editor/llm-credentials/dismiss-prompt")
+  })
+})
+
+describe("everyProviderUncredentialed", () => {
+  it("is true only when no provider reports a credential", () => {
+    expect(everyProviderUncredentialed(bothNone as never)).toBe(true)
+  })
+
+  it("is false when a provider other than the first one is configured", () => {
+    const oneConfigured = {
+      ...bothNone,
+      providers: {
+        ...bothNone.providers,
+        openai: { ...bothNone.providers.openai, source: "stored", hasStoredKey: true },
+      },
+    }
+    expect(everyProviderUncredentialed(oneConfigured as never)).toBe(false)
+  })
+
+  it("is false while the status has not loaded, so nothing flashes", () => {
+    expect(everyProviderUncredentialed(null)).toBe(false)
+  })
+})
+
+describe("a status the hook does not recognise", () => {
+  it("everyProviderUncredentialed reports false rather than throwing", () => {
+    expect(everyProviderUncredentialed({ ok: true } as unknown as LlmCredentialsStatus)).toBe(false)
+  })
+
+  it("refresh keeps status null and records an error when the server answers an unknown shape", async () => {
+    stubFetch({ ok: true })
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.status).toBeNull()
+    expect(result.current.error).toMatch(/unexpected|shape|update/i)
+  })
+
+  it("isLlmCredentialsStatus accepts the real shape and rejects the generic one", () => {
+    expect(isLlmCredentialsStatus({ providers: {}, devMode: false, promptDismissed: false })).toBe(true)
+    expect(isLlmCredentialsStatus({ ok: true })).toBe(false)
+    expect(isLlmCredentialsStatus(null)).toBe(false)
+  })
+
+})
+
+describe("useLlmCredentials: invalidates the picker's catalog cache on a credential change", () => {
+  it("saveKey invalidates the catalog cache on success, and not on failure", async () => {
+    const impl = stubFetch(
+      bothNone,
+      () =>
+        new Response(
+          JSON.stringify({ ...bothNone, providers: { ...bothNone.providers, openai: { ...bothNone.providers.openai, source: "stored" } } }),
+          { status: 200 },
+        ),
+    )
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.saveKey("openai", "sk-new")
+    })
+    expect(invalidateModelCatalogCache).toHaveBeenCalledTimes(1)
+
+    invalidateModelCatalogCache.mockClear()
+    impl.mockImplementationOnce(
+      async () => new Response(JSON.stringify({ error: "bad key" }), { status: 400 }),
+    )
+    await act(async () => {
+      await result.current.saveKey("openai", "sk-bad")
+    })
+    expect(invalidateModelCatalogCache).not.toHaveBeenCalled()
+  })
+
+  it("removeKey invalidates the catalog cache on success, and not on failure", async () => {
+    const impl = stubFetch(bothNone, () => new Response(JSON.stringify(bothNone), { status: 200 }))
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.removeKey("openai")
+    })
+    expect(invalidateModelCatalogCache).toHaveBeenCalledTimes(1)
+
+    invalidateModelCatalogCache.mockClear()
+    impl.mockImplementationOnce(
+      async () => new Response(JSON.stringify({ error: "nope" }), { status: 500 }),
+    )
+    await act(async () => {
+      await result.current.removeKey("openai")
+    })
+    expect(invalidateModelCatalogCache).not.toHaveBeenCalled()
+  })
+
+  it("setDevMode invalidates the catalog cache on success, and not on failure", async () => {
+    const impl = stubFetch(bothNone, () => new Response(JSON.stringify(bothNone), { status: 200 }))
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.setDevMode(true)
+    })
+    expect(invalidateModelCatalogCache).toHaveBeenCalledTimes(1)
+
+    invalidateModelCatalogCache.mockClear()
+    impl.mockImplementationOnce(
+      async () => new Response(JSON.stringify({ error: "nope" }), { status: 500 }),
+    )
+    await act(async () => {
+      await result.current.setDevMode(false)
+    })
+    expect(invalidateModelCatalogCache).not.toHaveBeenCalled()
+  })
+
+  it("dismissPrompt does not invalidate the catalog cache — it changes no credential", async () => {
+    stubFetch(bothNone, () => new Response(JSON.stringify(bothNone), { status: 200 }))
+    const { result } = renderHook(() => useLlmCredentials())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.dismissPrompt()
+    })
+    expect(invalidateModelCatalogCache).not.toHaveBeenCalled()
+  })
+})
+
+describe("a status the hook does not recognise — malformed shape", () => {
+  it("rejects a status whose provider row is null or missing its source", () => {
+    expect(
+      isLlmCredentialsStatus({
+        providers: { anthropic: null },
+        devMode: false,
+        promptDismissed: false,
+      }),
+    ).toBe(false)
+    expect(
+      isLlmCredentialsStatus({
+        providers: { anthropic: { id: "anthropic", label: "Anthropic" } },
+        devMode: false,
+        promptDismissed: false,
+      }),
+    ).toBe(false)
+    expect(
+      isLlmCredentialsStatus({
+        providers: {
+          anthropic: {
+            id: "anthropic",
+            label: "Anthropic",
+            source: "bogus",
+            hasStoredKey: false,
+            apiKeyEnvVar: "ANTHROPIC_API_KEY",
+            consoleUrl: "https://x",
+            maskPrefix: "sk-ant-",
+            hasSubscriptionRuntime: true,
+          },
+        },
+        devMode: false,
+        promptDismissed: false,
+      }),
+    ).toBe(false)
   })
 })

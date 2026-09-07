@@ -36,6 +36,19 @@ export interface ModelOption {
   /** Marks the provider's default model (exactly one per catalog). */
   isDefault?: boolean
   /**
+   * Where the picker's effort slider sits before the session has chosen
+   * anything, AND the level the turn runs at in that same state. One field
+   * for both halves on purpose: the picker displays it and the chat handler
+   * sends it, so they cannot disagree. Absent only when the model takes no
+   * effort at all.
+   *
+   * It travels on the catalog because only the server can see the provider
+   * descriptor that names it. The slider has no "Default" stop meaning
+   * "send nothing": every position is a real level (Mo, 2026-09-07), so the
+   * starting one has to be a real level too.
+   */
+  defaultEffort?: EffortLevel
+  /**
    * Whether the model takes adaptive thinking (the model decides when and
    * how much to think) rather than a fixed thinking budget. Set from a live
    * source when it says; absent means "decide from the id", which the chat
@@ -45,6 +58,44 @@ export interface ModelOption {
    * has to travel with the option.
    */
   adaptiveThinking?: boolean
+}
+
+/**
+ * Stamp `defaultEffort` onto every model in a catalog that has an effort
+ * ladder at all. Called wherever a served catalog is assembled — the static
+ * path and the live-merge path both — so a live-listed model carries the
+ * field too.
+ *
+ * A model with no ladder gets nothing: there is no level to start on and the
+ * picker shows no control.
+ *
+ * A model whose ladder does not contain `level` gets the MIDDLE of its own
+ * ladder instead. That case is real: a live list can ship a ladder the
+ * vendor's declared default is not part of. It used to leave the field
+ * unset, and then the two sides guessed separately — the picker's slider
+ * opened on the middle of the ladder while the chat handler, seeing no
+ * `defaultEffort`, sent no effort at all and let the vendor decide. The chip
+ * showed one level and the turn ran another, which is exactly what the
+ * picker's own invariant forbids. Deciding the fallback HERE, once, on the
+ * server, is what keeps the display and the request the same value.
+ */
+export function withDefaultEffort(
+  catalog: ProviderModelCatalog,
+  level: EffortLevel | null | undefined,
+): ProviderModelCatalog {
+  if (!level) return catalog
+  return {
+    ...catalog,
+    models: catalog.models.map((m) => {
+      const ladder = m.effortLevels
+      if (!ladder || ladder.length === 0) return m
+      const onLadder = ladder.includes(level)
+      // Same index the picker used to compute for itself, so the fallback is
+      // the position a reader of either side would predict.
+      const middle = ladder[Math.floor((ladder.length - 1) / 2)]!
+      return { ...m, defaultEffort: onLadder ? level : middle }
+    }),
+  }
 }
 
 export interface ProviderModelCatalog {

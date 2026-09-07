@@ -81,7 +81,7 @@ import type { ComponentManifest } from '../core'
 import { resolveTsconfig } from '../core/resolve-tsconfig'
 import type { VueDtsComponent } from '../adapters/vue-dts-meta'
 import {
-  CACHE_DIR_NAME,
+  manifestCacheDir,
   EXTRACTOR_VERSION,
   fingerprintFile,
   patchCachedComponent,
@@ -635,11 +635,12 @@ function cacheFilePathFor(
   importPath: string,
   packageVersion: string,
   context: string,
-): string {
+): string | null {
+  const dir = manifestCacheDir(prototypeRoot)
+  if (dir === null) return null
   const ctx = context ? `@${sanitize(context)}` : ''
   return join(
-    prototypeRoot,
-    CACHE_DIR_NAME,
+    dir,
     `${sanitize(importPath)}@${sanitize(packageVersion)}${ctx}@v${EXTRACTOR_VERSION}.json`,
   )
 }
@@ -659,11 +660,12 @@ function registeredCacheFilePathFor(
   entry: RegisteredDesignSystem,
   packageVersion: string,
   context: string,
-): string {
+): string | null {
+  const dir = manifestCacheDir(prototypeRoot)
+  if (dir === null) return null
   const ctx = context ? `@${sanitize(context)}` : ''
   return join(
-    prototypeRoot,
-    CACHE_DIR_NAME,
+    dir,
     `${sanitize(registeredCacheName(entry))}@${sanitize(packageVersion)}${ctx}@v${EXTRACTOR_VERSION}.json`,
   )
 }

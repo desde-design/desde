@@ -5,7 +5,14 @@ import {
   classifyTurnError,
   extractRetryAfterFromError,
   isAuthError,
+  redactSecrets,
 } from "./classify-turn-error"
+import { ANTHROPIC_DESCRIPTOR } from "../llm-providers/descriptors/anthropic"
+import { OPENAI_DESCRIPTOR } from "../llm-providers/descriptors/openai"
+// Real SDK error classes, re-exported from the one file allowed to import
+// the AI SDK. A hand-shaped stand-in is what let an earlier fix pass while
+// being wrong.
+import { APICallError, RetryError } from "../llm-providers/ai-sdk-provider"
 
 describe("classifyTurnError", () => {
   describe("rate-limited detection", () => {
@@ -80,14 +87,16 @@ describe("classifyTurnError", () => {
       )
     })
 
-    it("rate-limit takes precedence over auth when both markers present", () => {
-      // Defensive: a message that somehow carries both should classify
-      // as recoverable (rate-limited) rather than swap to the auth hint.
+    it("auth takes precedence over rate-limit when both markers present", () => {
+      // Task 39: auth is checked FIRST now. OpenAI answers an exhausted
+      // quota with a 429, so if rate-limit won this race a dead account
+      // would badge "recoverable, try again shortly" and the user would
+      // wait for a window that never opens.
       const out = classifyTurnError(
         "429 rate_limit_exceeded; failed to authenticate",
       )
-      expect(out.kind).toBe("rate-limited")
-      expect(out.message).not.toBe(AUTH_REAUTH_MESSAGE)
+      expect(out.kind).toBe("other")
+      expect(out.message).toBe(AUTH_REAUTH_MESSAGE)
     })
 
     it("does not throw on nullish / non-string input", () => {
@@ -229,5 +238,200 @@ describe("extractRetryAfterFromError (codex round-1 #1)", () => {
     expect(() => extractRetryAfterFromError(42)).not.toThrow()
     expect(() => extractRetryAfterFromError({})).not.toThrow()
     expect(() => extractRetryAfterFromError({ headers: null })).not.toThrow()
+  })
+})
+
+describe('classifyTurnError — provider error patterns', () => {
+  it('classifies an OpenAI quota failure as auth, with OpenAI remediation copy', () => {
+    const result = classifyTurnError('OpenAI answered 429: insufficient_quota', {
+      errorPatterns: OPENAI_DESCRIPTOR.errorPatterns,
+    })
+    expect(result.kind).toBe('other')
+    expect(result.message).toBe(OPENAI_DESCRIPTOR.errorPatterns!.reauthMessage)
+    // An exhausted quota is not a wait-and-retry, so it must not wear the
+    // rate-limit badge even though the vendor answered 429.
+    expect(result.retryAfterSeconds).toBeUndefined()
+  })
+
+  it('classifies an OpenAI bad key as auth', () => {
+    for (const message of [
+      'OpenAI answered 401: invalid_api_key',
+      'Incorrect API key provided: sk-abc***',
+    ]) {
+      const result = classifyTurnError(message, { errorPatterns: OPENAI_DESCRIPTOR.errorPatterns })
+      expect(result.message, message).toBe(OPENAI_DESCRIPTOR.errorPatterns!.reauthMessage)
+    }
+  })
+
+  it('classifies an OpenAI rate limit as rate-limited', () => {
+    const result = classifyTurnError('rate_limit_exceeded, retry after 12', {
+      errorPatterns: OPENAI_DESCRIPTOR.errorPatterns,
+    })
+    expect(result.kind).toBe('rate-limited')
+    expect(result.retryAfterSeconds).toBe(12)
+  })
+
+  it('still uses the Anthropic copy for the Anthropic descriptor', () => {
+    const result = classifyTurnError('Failed to authenticate. API Error: 401', {
+      errorPatterns: ANTHROPIC_DESCRIPTOR.errorPatterns,
+    })
+    expect(result.message).toBe(AUTH_REAUTH_MESSAGE)
+  })
+
+  it('keeps its old behaviour when no patterns are supplied', () => {
+    // Every existing call site passes nothing, so the generic sets must stay
+    // the whole answer for them.
+    expect(classifyTurnError('Failed to authenticate. API Error: 401').message).toBe(
+      AUTH_REAUTH_MESSAGE,
+    )
+    expect(classifyTurnError('429 Too Many Requests').kind).toBe('rate-limited')
+  })
+
+  it('does not let one provider\'s patterns leak into another\'s classification', () => {
+    // `insufficient_quota` is OpenAI's word. Classified without OpenAI's
+    // patterns it must stay generic, or a shared classifier becomes a place
+    // where vendors quietly inherit each other's error vocabulary.
+    expect(classifyTurnError('insufficient_quota').message).toBe('insufficient_quota')
+  })
+})
+
+describe("the OpenAI descriptor's copy, against errors OpenAI actually produces", () => {
+  /**
+   * The point of these cases: the descriptor's first patterns matched OpenAI
+   * error CODES (`insufficient_quota`, `invalid_api_key`,
+   * `rate_limit_exceeded`), and a code never reaches the classifier. The AI
+   * SDK builds `APICallError.message` from `data.error.message` alone, so
+   * only the vendor's PROSE is ever matched against. An exhausted quota
+   * therefore classified as generic `other` and the user never saw the
+   * billing-page remediation the descriptor exists to give.
+   *
+   * Each error below is a real `APICallError` built from the body OpenAI
+   * sends, not a hand-written string containing the code.
+   */
+  const patterns = { errorPatterns: OPENAI_DESCRIPTOR.errorPatterns }
+
+  function openAiError(body: {
+    message: string
+    code: string
+    type: string
+    status: number
+  }): APICallError {
+    return new APICallError({
+      message: body.message,
+      url: "https://api.openai.com/v1/responses",
+      requestBodyValues: {},
+      statusCode: body.status,
+      responseBody: JSON.stringify({
+        error: { message: body.message, type: body.type, code: body.code, param: null },
+      }),
+      data: { error: { message: body.message, type: body.type, code: body.code } },
+      isRetryable: body.status === 429,
+    })
+  }
+
+  it("sends an exhausted quota to the billing-page copy, not to a generic failure", () => {
+    const err = openAiError({
+      message:
+        "You exceeded your current quota, please check your plan and billing details.",
+      code: "insufficient_quota",
+      type: "insufficient_quota",
+      status: 429,
+    })
+    expect(classifyTurnError(err, patterns).message).toBe(
+      OPENAI_DESCRIPTOR.errorPatterns?.reauthMessage,
+    )
+  })
+
+  it("reaches the same copy through the SDK's RetryError envelope", () => {
+    const inner = openAiError({
+      message:
+        "You exceeded your current quota, please check your plan and billing details.",
+      code: "insufficient_quota",
+      type: "insufficient_quota",
+      status: 429,
+    })
+    const wrapped = new RetryError({
+      message: `Failed after 3 attempts. Last error: ${inner.message}`,
+      reason: "maxRetriesExceeded",
+      errors: [inner],
+    })
+    expect(classifyTurnError(wrapped, patterns).message).toBe(
+      OPENAI_DESCRIPTOR.errorPatterns?.reauthMessage,
+    )
+  })
+
+  it("sends a rejected key to the same copy", () => {
+    const err = openAiError({
+      message:
+        "Incorrect API key provided: sk-***. You can find your API key at https://platform.openai.com/account/api-keys.",
+      code: "invalid_api_key",
+      type: "invalid_request_error",
+      status: 401,
+    })
+    expect(classifyTurnError(err, patterns).message).toBe(
+      OPENAI_DESCRIPTOR.errorPatterns?.reauthMessage,
+    )
+  })
+
+  it("still classifies a real TPM rate limit as recoverable, not as an auth failure", () => {
+    const err = openAiError({
+      message:
+        "Rate limit reached for gpt-5.6 in organization org-x on tokens per min (TPM): Limit 30000, Used 29000, Requested 5000. Please try again in 2s.",
+      code: "rate_limit_exceeded",
+      type: "requests",
+      status: 429,
+    })
+    const out = classifyTurnError(err, patterns)
+    expect(out.kind).toBe("rate-limited")
+    expect(out.retryAfterSeconds).toBe(2)
+  })
+})
+
+describe("redactSecrets", () => {
+  // Defence in depth, not an incident response. Against both shipped vendors
+  // the one message that echoes a key back ("Incorrect API key provided: …")
+  // is already intercepted by the auth arm and replaced with the remediation
+  // copy, and neither vendor's error puts headers, URL or body into
+  // `.message`. What is missing is the guarantee: any vendor or gateway
+  // message that carries a key AND misses every auth pattern is persisted
+  // verbatim into `.desde/chat-sessions/<id>.json`. This closes that.
+  const FAKE_OPENAI_KEY = "sk-test-not-a-real-key-000000"
+  const FAKE_ANTHROPIC_KEY = "sk-ant-api03-test-not-a-real-key-000000"
+
+  it("masks an OpenAI-shaped key", () => {
+    const out = redactSecrets(`Forbidden: token ${FAKE_OPENAI_KEY} is not permitted on this route.`)
+    expect(out).not.toContain(FAKE_OPENAI_KEY)
+    expect(out).toContain("sk-***")
+    // The rest of the sentence survives, because the message is the only thing
+    // the user has to diagnose with.
+    expect(out).toContain("is not permitted on this route")
+  })
+
+  it("masks an Anthropic-shaped key", () => {
+    const out = redactSecrets(`request rejected for ${FAKE_ANTHROPIC_KEY}`)
+    expect(out).not.toContain(FAKE_ANTHROPIC_KEY)
+    expect(out).toContain("sk-***")
+  })
+
+  it("masks a bearer token that is not key-shaped", () => {
+    const out = redactSecrets("upstream said: Authorization: Bearer abcdef0123456789abcdef")
+    expect(out).not.toContain("abcdef0123456789abcdef")
+    expect(out).toContain("Bearer ***")
+  })
+
+  it("leaves an ordinary vendor message untouched", () => {
+    const message = "The model produced an invalid tool call for read_file (sk- is not a key here)."
+    expect(redactSecrets(message)).toBe(message)
+  })
+
+  it("is applied to the message classifyTurnError hands back for display", () => {
+    const out = classifyTurnError(
+      `Forbidden: token ${FAKE_OPENAI_KEY} is not permitted on this route.`,
+      { errorPatterns: OPENAI_DESCRIPTOR.errorPatterns },
+    )
+    // A 403 from a custom OPENAI_BASE_URL gateway matches no auth pattern, so
+    // this is the arm that returns the vendor's own words.
+    expect(out.kind).toBe("other")
+    expect(out.message).not.toContain(FAKE_OPENAI_KEY)
   })
 })

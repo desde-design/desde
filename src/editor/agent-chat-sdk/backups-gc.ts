@@ -26,6 +26,8 @@
 import { readdir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { desdePath, desdeRemovalPath, DesdeDirSymlinkError } from '../worktree/desde-dir'
+
 /**
  * Test-only dependency injection for the fs calls below. `node:fs/promises`
  * ESM exports are non-configurable at runtime, so `vi.spyOn` can't
@@ -88,7 +90,19 @@ export async function gcBackups(
   const maxAgeMs = (opts.maxAgeDays ?? DEFAULT_BACKUPS_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000
   const now = (opts.now ?? Date.now)()
   const fs = opts.fs ?? defaultFsDeps
-  const dir = join(repoRoot, '.desde', 'backups')
+  let dir: string
+  try {
+    dir = desdePath(repoRoot, 'backups')
+  } catch (err) {
+    // A recursive `rm` under a hostile symlink is worse than a plain
+    // write: refuse and log rather than sweep whatever the symlink
+    // points at.
+    if (err instanceof DesdeDirSymlinkError) {
+      console.warn(`[backups-gc] refusing to sweep '${repoRoot}': ${err.message}`)
+      return { deleted: [], kept: 0, errors: 0 }
+    }
+    throw err
+  }
 
   let entries: string[]
   try {
@@ -126,7 +140,13 @@ export async function gcBackups(
     const violatesAge = entry.ageMs > maxAgeMs
     if (!protectedByFloor && (violatesRank || violatesAge)) {
       try {
-        await fs.rm(join(dir, entry.name), { recursive: true, force: true })
+        // Re-resolved immediately before the `rm`, not once for the whole
+        // sweep: this is a RECURSIVE delete, and `desdeRemovalPath` refuses
+        // a target that resolves outside the repository.
+        await fs.rm(desdeRemovalPath(repoRoot, 'backups', entry.name), {
+          recursive: true,
+          force: true,
+        })
         deleted.push(entry.name)
         continue
       } catch (err) {

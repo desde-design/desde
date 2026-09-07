@@ -1,11 +1,24 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import type { ProjectKnowledge } from '../core/project-knowledge'
 import {
   buildSdkSystemPrompt,
+  CONTEXT_ENVELOPE_BLOCK,
+  EDIT_LIFECYCLE_BLOCK,
   EDITOR_APPEND_PROMPT,
+  EDITOR_TOOLS_BLOCK,
+  EDITOR_TOOLS_BLOCK_BODY,
+  EDITOR_TOOLS_HEADING_SDK,
   FIGMA_APPEND_BLOCK,
+  FILESYSTEM_SCOPE_BLOCK,
+  MISSING_REFERENCE_BLOCK,
   SCREENSHOT_PLAN_APPEND_BLOCK,
+  SECRET_READS_ALLOWED_BLOCK,
+  VERIFY_EDITS_BLOCK,
+  WORKING_STYLE_BLOCK,
 } from './system-prompt'
 
 describe('buildSdkSystemPrompt', () => {
@@ -201,6 +214,25 @@ describe('buildSdkSystemPrompt', () => {
     expect(figmaIdx).toBeLessThan(knowledgeIdx)
   })
 
+  it('carries the secret-file handling rules by default, and drops them when blocked', () => {
+    // FX18: reads are allowed unless the prototype blocks them, so the block
+    // rides on the DEFAULT. It is the only place that tells the model not to
+    // echo a credential it can open, so losing it here would lose the rule.
+    const allowed = buildSdkSystemPrompt()
+    expect(allowed).toContain(SECRET_READS_ALLOWED_BLOCK)
+    expect(allowed).toContain('# Secret files')
+    expect(allowed).toMatch(/prompt injection/)
+    expect(allowed).toMatch(/do NOT echo a secret/)
+    // A prototype that blocks reads gets nothing: the refusal explains the
+    // refusal, and a standing list of unreadable files would be an index of
+    // where this repository keeps its credentials.
+    const blocked = buildSdkSystemPrompt({ blockSecretReads: true })
+    expect(blocked).not.toContain(SECRET_READS_ALLOWED_BLOCK)
+    expect(blocked).not.toContain('# Secret files')
+    // Explicit false is the same state as absent.
+    expect(buildSdkSystemPrompt({ blockSecretReads: false })).toBe(allowed)
+  })
+
   it('is byte-stable across calls when figmaEnabled is the same value (cache-friendly)', () => {
     const a = buildSdkSystemPrompt({ figmaEnabled: true })
     const b = buildSdkSystemPrompt({ figmaEnabled: true })
@@ -266,5 +298,45 @@ describe('buildSdkSystemPrompt', () => {
       const d = buildSdkSystemPrompt({ canvasEnabled: false })
       expect(c).toBe(d)
     })
+  })
+})
+
+describe('EDITOR_APPEND_PROMPT after the block split', () => {
+  it('is byte-identical to what it was before the split', () => {
+    const fixture = readFileSync(
+      join(__dirname, '__fixtures__', 'editor-append-prompt.txt'),
+      'utf8',
+    )
+    expect(EDITOR_APPEND_PROMPT).toBe(fixture)
+  })
+
+  it('is composed of the exported blocks, so the neutral lane reuses text rather than copying it', () => {
+    for (const block of [
+      EDITOR_TOOLS_BLOCK,
+      FILESYSTEM_SCOPE_BLOCK,
+      MISSING_REFERENCE_BLOCK,
+      EDIT_LIFECYCLE_BLOCK,
+      CONTEXT_ENVELOPE_BLOCK,
+      WORKING_STYLE_BLOCK,
+      VERIFY_EDITS_BLOCK,
+    ]) {
+      expect(EDITOR_APPEND_PROMPT).toContain(block)
+    }
+  })
+})
+
+describe('EDITOR_TOOLS_BLOCK is the SDK heading joined to the shared body', () => {
+  it('is byte-identical to the heading and body joined', () => {
+    expect(EDITOR_TOOLS_BLOCK).toBe(`${EDITOR_TOOLS_HEADING_SDK}\n${EDITOR_TOOLS_BLOCK_BODY}`)
+    expect(EDITOR_TOOLS_HEADING_SDK).toBe(
+      '# Editor tools (in addition to the standard Claude Code tools)',
+    )
+  })
+})
+
+describe('VERIFY_EDITS_BLOCK no longer promises worktree commits', () => {
+  it('says backups, not worktree commits', () => {
+    expect(VERIFY_EDITS_BLOCK).not.toMatch(/worktree commit/i)
+    expect(VERIFY_EDITS_BLOCK).toMatch(/backup/i)
   })
 })

@@ -681,3 +681,63 @@ describe('createTurnInputChannel', () => {
     expect((await channel.stream().next()).done).toBe(true)
   })
 })
+
+describe('drainSteers: the non-blocking pull a self-driven loop needs', () => {
+  it('returns nothing when nothing was pushed', () => {
+    const channel = createTurnInputChannel()
+    channel.begin({ text: 'first' })
+    expect(channel.drainSteers()).toEqual([])
+  })
+
+  it('returns queued steers in push order and empties the queue', () => {
+    const channel = createTurnInputChannel()
+    channel.begin({ text: 'first' })
+    channel.push('one')
+    channel.push('two')
+    expect(channel.drainSteers()).toEqual([{ text: 'one' }, { text: 'two' }])
+    expect(channel.drainSteers()).toEqual([])
+  })
+
+  it('carries images verbatim', () => {
+    const channel = createTurnInputChannel()
+    channel.begin({ text: 'first' })
+    const images = [{ type: 'image' as const, data: 'AAAA', mimeType: 'image/png' }]
+    channel.push('look', images)
+    expect(channel.drainSteers()).toEqual([{ text: 'look', images }])
+  })
+
+  it('discards the opening message, which the self-driven caller built itself', () => {
+    const channel = createTurnInputChannel()
+    channel.push('typed during setup')
+    channel.begin({ text: 'the opening prompt' })
+    // `begin` puts the opening message at the HEAD, ahead of the early steer.
+    expect(channel.drainSteers()).toEqual([{ text: 'typed during setup' }])
+  })
+
+  it('leaves the channel open, unlike takeUndeliveredSteers', () => {
+    const channel = createTurnInputChannel()
+    channel.begin({ text: 'first' })
+    channel.drainSteers()
+    expect(channel.closed).toBe(false)
+    expect(() => channel.push('still works')).not.toThrow()
+  })
+
+  it('marks drained steers handed off, so a step that follows counts as delivery', () => {
+    const channel = createTurnInputChannel()
+    channel.begin({ text: 'first' })
+    channel.push('one')
+    channel.drainSteers()
+    channel.noteAssistantMessage('m1')
+    channel.close()
+    expect(channel.takeUndeliveredSteers()).toEqual([])
+  })
+
+  it('reports a drained steer that no step followed, because nothing read it', () => {
+    const channel = createTurnInputChannel()
+    channel.begin({ text: 'first' })
+    channel.push('one')
+    channel.drainSteers()
+    channel.close()
+    expect(channel.takeUndeliveredSteers()).toEqual([{ text: 'one' }])
+  })
+})

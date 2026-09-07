@@ -57,6 +57,7 @@
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { MessageParam } from '@anthropic-ai/sdk/resources'
 
+import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
 import type { ModelImageContent } from './media-content'
 
 /**
@@ -188,6 +189,47 @@ export interface TurnInputChannel {
    * away unreported — exactly the silent loss this method exists to surface.
    */
   takeUndeliveredSteers(): SteeredMessage[]
+  /**
+   * Declare that every steer already pulled out of this channel is recorded
+   * somewhere durable, so {@link takeUndeliveredSteers} must stop reporting
+   * them however the turn ends.
+   *
+   * For the SELF-DRIVEN lane only, and it is not a weakening of the evidence
+   * rule above — it is a different kind of evidence. That lane appends a
+   * drained steer into the request itself and records it on the turn it
+   * returns, and the turn is persisted even when the step then fails, so
+   * `history-replay.ts` replays the steer as a user message on the very next
+   * turn. The message is therefore not lost, and asking the user to send it
+   * again would put it in the transcript twice (2026-09-04 adversarial review,
+   * P3-4). Steers still QUEUED are untouched: nothing recorded those, and they
+   * are still reported.
+   *
+   * The SDK lane must never call this. There, "pulled" only means the bytes
+   * reached the child process, which is exactly the ambiguity the rule above
+   * resolves toward reporting.
+   */
+  noteSteersRecorded(): void
+  /**
+   * Take every message currently queued, without blocking and without closing.
+   *
+   * The generator in {@link stream} is the SDK lane's way in: the SDK pulls,
+   * and parks when the queue is dry. A runtime that drives its OWN loop cannot
+   * park, because there is no other consumer to wake it. So it pulls here, at
+   * a step boundary, and gets whatever is waiting.
+   *
+   * Each returned steer is stamped handed-off at the current assistant-message
+   * count, exactly as the generator stamps one, so
+   * {@link takeUndeliveredSteers} applies the SAME evidential rule to both
+   * lanes: a steer with no new assistant message after it is reported for
+   * resubmission. The self-driven caller marks each step with
+   * {@link noteAssistantMessage}.
+   *
+   * A queued entry with no steer record is the turn's OPENING message, which
+   * `begin` puts at the head. A self-driven caller has already built its own
+   * opening message from the same text, so that entry is discarded here rather
+   * than returned. Returning it would make the loop send the prompt twice.
+   */
+  drainSteers(): SteeredMessage[]
   /**
    * The generator handed to `query({ prompt })`. Repeated calls return the SAME
    * iterator — two consumers pulling from one queue would split the messages
@@ -387,10 +429,105 @@ export function createTurnInputChannel(): TurnInputChannel {
         ...(s.images ? { images: s.images } : {}),
       }))
     },
+    noteSteersRecorded(): void {
+      for (let i = steers.length - 1; i >= 0; i--) {
+        if (steers[i]!.handedOffAtMessageCount !== null) steers.splice(i, 1)
+      }
+    },
+    drainSteers(): SteeredMessage[] {
+      const out: SteeredMessage[] = []
+      while (queue.length > 0) {
+        const entry = queue.shift()!
+        if (!entry.steer) continue
+        entry.steer.handedOffAtMessageCount = assistantMessageCount
+        out.push({
+          text: entry.steer.text,
+          ...(entry.steer.images ? { images: entry.steer.images } : {}),
+        })
+      }
+      return out
+    },
     stream(): AsyncGenerator<SDKUserMessage> {
       return iterator
     },
   }
+}
+
+/**
+ * Close a turn's input channel and tell the client about every steer we
+ * cannot show reached the model, so it can send those messages again.
+ *
+ * Both chat runtimes (the SDK lane and the neutral lane) need this exact
+ * behaviour at the exact same two call sites — once in a `finally` after the
+ * turn's own loop, and once from an abort listener registered up front — so
+ * it lives here, next to the channel it closes, instead of being copied into
+ * each runtime.
+ *
+ * Close-then-drain, never the reverse: a steer accepted between the drain and
+ * the close would be closed away with nobody told, which is the exact loss
+ * this reconciliation exists to prevent. (Nothing is awaited between the two,
+ * so in practice the pair is atomic — the ordering is written down because
+ * getting it backwards is silently wrong.)
+ *
+ * Safe to call more than once. `close()` is idempotent and
+ * `takeUndeliveredSteers()` drains its tracking list, so a second call
+ * reports nothing rather than asking for a duplicate resubmit.
+ *
+ * Best-effort on the wire: if the client has already disconnected, `emit`
+ * writes into a closed SSE stream and drops. Nothing can be delivered to a
+ * client that is gone; the client's own steer-failure fallback covers the
+ * disconnect case.
+ *
+ * Also wires the abort path: if `signal` is given, this same close-and-report
+ * runs when the signal fires (immediately, if it is already aborted). Abort
+ * runs the FULL close-and-report, not a bare close, and it runs from the
+ * listener rather than leaning on the caller's own `finally`. Two reasons,
+ * and the second is why this is not merely belt-and-braces:
+ *
+ *  1. If a runtime's abort path ever waits for its own input stream to end
+ *     before finishing, the code that would reach the `finally` never runs.
+ *     Closing from the listener is what breaks that deadlock — and a close
+ *     that did not also report would leave the steers inside a channel
+ *     nobody will drain.
+ *  2. Stop is the MOST likely way a steer dies unconsumed: the user typed a
+ *     correction and then decided the agent was going the wrong way anyway.
+ *     Reporting only on the paths that unwind cleanly would leave the single
+ *     most common loss as the one path that stays silent.
+ *
+ * Returns the close-and-report function itself, so the caller can also invoke
+ * it directly from its own `finally` (the two triggers race safely — see
+ * "safe to call more than once" above).
+ */
+export function attachSteerReconciliation(params: {
+  channel: TurnInputChannel
+  sessionId: string
+  emit: (event: ChatStreamEvent) => void
+  signal?: AbortSignal
+}): () => void {
+  const { channel, sessionId, emit, signal } = params
+
+  const closeChannelAndReportUndelivered = (): void => {
+    channel.close()
+    for (const steer of channel.takeUndeliveredSteers()) {
+      emit({
+        kind: 'resubmit_required',
+        sessionId,
+        userMessage: steer.text,
+        ...(steer.images ? { images: steer.images } : {}),
+      })
+    }
+  }
+
+  if (signal) {
+    if (signal.aborted) closeChannelAndReportUndelivered()
+    else {
+      signal.addEventListener('abort', () => closeChannelAndReportUndelivered(), {
+        once: true,
+      })
+    }
+  }
+
+  return closeChannelAndReportUndelivered
 }
 
 /**

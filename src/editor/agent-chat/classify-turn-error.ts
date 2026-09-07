@@ -6,8 +6,16 @@
  * "Chat handler failed: <message>" string into `ChatSession.statusReason`.
  * The chat tab strip renders this verbatim as a tooltip; the toast
  * surface renders it as a description. Both are correct for generic
- * errors, but they're noisy for the most-common-cause case: Anthropic
+ * errors, but they're noisy for the most-common-cause case: provider
  * API rate limits.
+ *
+ * Multi-provider: the mechanism stays pure pattern-matching over the
+ * message. What varies per vendor is the vocabulary and the remediation
+ * copy, so each provider's descriptor can contribute its own `auth` /
+ * `rateLimited` patterns and its own `reauthMessage` via the optional
+ * `errorPatterns` opt (see `ProviderErrorPatterns` in
+ * `../llm-providers/provider-descriptor`). A call site with no provider
+ * in scope passes nothing and gets exactly the generic behaviour.
  *
  * Anthropic responses with HTTP 429 (rate limited) bubble up through
  * the SDK with an error message containing "429" and/or "rate_limit".
@@ -28,6 +36,7 @@
  * change could break detection — but the worst case is degrading to
  * generic "failed", which is what we have today.
  */
+import type { ProviderErrorPatterns } from '../llm-providers/provider-descriptor'
 
 /**
  * Classification kind. `rate-limited` covers Anthropic 429s + similar
@@ -50,11 +59,20 @@ export interface ClassifiedTurnError {
    */
   retryAfterSeconds?: number
   /**
-   * Sanitised message for display. We don't redact — Anthropic
-   * messages don't contain secrets — but we strip noisy prefixes
-   * the chat routes add (`Chat handler failed: `) so the toast /
-   * tooltip reads cleanly. Returns the original string when no
-   * known prefix was present.
+   * Sanitised message for display. Two passes: noisy prefixes the chat routes
+   * add (`Chat handler failed: `) are stripped so the toast / tooltip reads
+   * cleanly, and anything key-shaped is masked by {@link redactSecrets}.
+   * Returns the original string when neither had anything to do.
+   *
+   * The redaction pass is defence in depth, not a response to a known leak.
+   * This comment used to say "we don't redact — Anthropic messages don't
+   * contain secrets", which was written for the Anthropic-only lane and stopped
+   * being a safe assumption once a second vendor and a configurable base URL
+   * arrived. Against both shipped vendors the one message that echoes a key
+   * back is OpenAI's "Incorrect API key provided: …", and that one is caught by
+   * the auth arm below and replaced with the remediation copy before it is ever
+   * shown or persisted. What was missing was the guarantee for everything else,
+   * including whatever a gateway behind `OPENAI_BASE_URL` decides to say.
    */
   message: string
 }
@@ -118,6 +136,31 @@ const RETRY_AFTER_PATTERNS = [
 // certainly a misparsed number (e.g. a timestamp).
 const MAX_RETRY_AFTER_SECONDS = 3600
 
+/**
+ * Anything key-shaped in a vendor message, masked.
+ *
+ * Both shipped vendors use the `sk-` prefix (`sk-…` for OpenAI, `sk-ant-…` for
+ * Anthropic), and a self-hosted gateway can answer with an `Authorization`
+ * header echoed into its own error text, so a bare bearer token is masked too.
+ * The rest of the sentence is left alone: the message is the only thing the
+ * user has to diagnose with, and a message redacted down to nothing is a
+ * support ticket.
+ *
+ * The 12-character floor is what keeps this from firing on prose. A vendor
+ * that already partially redacts (`sk-abc***`) is left as it is, and a
+ * sentence that happens to contain "sk-" is not a key.
+ */
+const SECRET_PATTERNS: Array<[RegExp, string]> = [
+  [/\bsk-[A-Za-z0-9_-]{12,}/g, 'sk-***'],
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, 'Bearer ***'],
+]
+
+export function redactSecrets(message: string): string {
+  let out = message
+  for (const [pattern, mask] of SECRET_PATTERNS) out = out.replace(pattern, mask)
+  return out
+}
+
 const NOISE_PREFIXES = [
   /^Chat handler failed:\s*/,
   /^Failed to persist session:\s*/,
@@ -157,21 +200,28 @@ function toMessage(value: unknown): string {
  * Defensive: doesn't assume the SDK class name (which could change
  * between versions). Looks for `err.headers` shaped like a Fetch
  * Headers (with a `.get()` method) OR a plain record.
+ *
+ * `responseHeaders` is read as well, because that is what the AI SDK's
+ * `APICallError` actually calls the field — a Vercel-lane 429 carries its
+ * `retry-after` there and nowhere else, so reading only `headers` returned
+ * `undefined` for every one of them and the retry backoff fell through to
+ * its exponential guess.
  */
 export function extractRetryAfterFromError(err: unknown): number | undefined {
   if (!err || typeof err !== 'object') return undefined
-  const e = err as { headers?: unknown }
-  if (!e.headers) return undefined
+  const e = err as { headers?: unknown; responseHeaders?: unknown }
+  const headers = e.headers ?? e.responseHeaders
+  if (!headers) return undefined
   let raw: unknown = undefined
-  if (typeof e.headers === 'object' && e.headers !== null) {
-    const h = e.headers as { get?: (k: string) => string | null }
+  if (typeof headers === 'object' && headers !== null) {
+    const h = headers as { get?: (k: string) => string | null }
     if (typeof h.get === 'function') {
       raw = h.get('retry-after')
     } else {
       // Plain record shape — accept lowercase, mixed-case, and
       // capitalised header names (Node's `http` IncomingMessage
       // headers are lowercased; Fetch Headers normalise too).
-      const r = e.headers as Record<string, unknown>
+      const r = headers as Record<string, unknown>
       raw = r['retry-after'] ?? r['Retry-After'] ?? r['retryAfter']
     }
   }
@@ -187,9 +237,9 @@ export function extractRetryAfterFromError(err: unknown): number | undefined {
  * rewrite the LIVE streamed error event (not just the persisted status)
  * with the same detection logic. Pure; never throws.
  */
-export function isAuthError(rawError: unknown): boolean {
+export function isAuthError(rawError: unknown, opts: ClassifyTurnErrorOpts = {}): boolean {
   const raw = toMessage(rawError)
-  return AUTH_ERROR_PATTERNS.some((p) => p.test(raw))
+  return [...AUTH_ERROR_PATTERNS, ...(opts.errorPatterns?.auth ?? [])].some((p) => p.test(raw))
 }
 
 function stripNoise(message: string): string {
@@ -213,6 +263,15 @@ function parseRetryAfter(message: string): number | undefined {
   return undefined
 }
 
+export interface ClassifyTurnErrorOpts {
+  /**
+   * The active provider's own patterns and remediation copy, from its
+   * descriptor. Omitted means "generic only", which is what every pre-
+   * multi-provider call site wants and gets unchanged.
+   */
+  errorPatterns?: ProviderErrorPatterns
+}
+
 /**
  * Classify a chat-turn error. Pure: no I/O, no provider calls,
  * deterministic from the input message.
@@ -221,19 +280,27 @@ function parseRetryAfter(message: string): number | undefined {
  * coerces to `{ kind: 'other', message: '' }` so the tab strip /
  * toast renders SOMETHING and the route can persist a record.
  */
-export function classifyTurnError(rawError: unknown): ClassifiedTurnError {
+export function classifyTurnError(
+  rawError: unknown,
+  opts: ClassifyTurnErrorOpts = {},
+): ClassifiedTurnError {
   const raw = toMessage(rawError)
-  const message = stripNoise(raw)
-  const isRateLimited = RATE_LIMITED_PATTERNS.some((p) => p.test(raw))
-  if (!isRateLimited) {
-    // Auth failures stay `kind: 'other'` (they're not recoverable by
-    // waiting, so the rate-limit badge/retry UI doesn't apply) but get
-    // an actionable message instead of the raw 401 string.
-    if (isAuthError(raw)) {
-      return { kind: 'other', message: AUTH_REAUTH_MESSAGE }
-    }
-    return { kind: 'other', message }
+  // Patterns are matched against the RAW message, not the redacted one: a
+  // pattern could legitimately key off the shape of the credential, and
+  // masking first would make it miss. Only what is handed back is redacted.
+  const message = redactSecrets(stripNoise(raw))
+  const authPatterns = [...AUTH_ERROR_PATTERNS, ...(opts.errorPatterns?.auth ?? [])]
+  const ratePatterns = [...RATE_LIMITED_PATTERNS, ...(opts.errorPatterns?.rateLimited ?? [])]
+  // Auth is checked FIRST now, where it used to be checked only after the
+  // rate-limit arm declined. OpenAI answers an exhausted quota with a 429, so
+  // the generic `\b429\b` pattern would otherwise badge a dead account as
+  // "recoverable, try again shortly" and the user would wait forever.
+  const isAuth = authPatterns.some((p) => p.test(raw))
+  if (isAuth) {
+    return { kind: 'other', message: opts.errorPatterns?.reauthMessage ?? AUTH_REAUTH_MESSAGE }
   }
+  const isRateLimited = ratePatterns.some((p) => p.test(raw))
+  if (!isRateLimited) return { kind: 'other', message }
   const retryAfterSeconds = parseRetryAfter(raw)
   return retryAfterSeconds !== undefined
     ? { kind: 'rate-limited', retryAfterSeconds, message }

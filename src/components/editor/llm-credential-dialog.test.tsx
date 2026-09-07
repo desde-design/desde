@@ -1,6 +1,11 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { useLlmCredentials } from "@/hooks/useLlmCredentials"
+import {
+  useLlmCredentials,
+  type LlmCredentialsStatus,
+  type ProviderCredentialStatus,
+  type UseLlmCredentials,
+} from "@/hooks/useLlmCredentials"
 import { LlmCredentialDialog, shouldRevealDevMode } from "./llm-credential-dialog"
 
 /** The dialog takes credential state from its caller; this supplies it. */
@@ -12,6 +17,35 @@ function Harness() {
 afterEach(() => {
   vi.unstubAllGlobals()
 })
+
+/**
+ * Builds the `{ providers: { anthropic: ... } }` map the hook now returns,
+ * from just the Anthropic fields a given test cares about. The dialog reads
+ * Anthropic's row out of the map (Task 7 adds tabs for the rest).
+ */
+function anthropicStatus(
+  provider: Pick<ProviderCredentialStatus, "source"> &
+    Partial<Omit<ProviderCredentialStatus, "id" | "label" | "source">>,
+  rest: Partial<Pick<LlmCredentialsStatus, "devMode" | "promptDismissed">> = {},
+): LlmCredentialsStatus {
+  return {
+    providers: {
+      anthropic: {
+        id: "anthropic",
+        label: "Anthropic",
+        hasStoredKey: false,
+        apiKeyEnvVar: "ANTHROPIC_API_KEY",
+        consoleUrl: "https://console.anthropic.com/settings/keys",
+        maskPrefix: "sk-ant-",
+        hasSubscriptionRuntime: true,
+        ...provider,
+      },
+    },
+    devMode: false,
+    promptDismissed: false,
+    ...rest,
+  }
+}
 
 function stubStatus(status: unknown) {
   vi.stubGlobal(
@@ -67,46 +101,40 @@ describe("shouldRevealDevMode", () => {
 
 describe("LlmCredentialDialog", () => {
   it("hides the dev mode toggle until it is revealed", async () => {
-    stubStatus({ source: "none", devMode: false, hasStoredKey: false, promptDismissed: false })
+    stubStatus(anthropicStatus({ source: "none" }))
     render(<Harness />)
-    await waitFor(() => expect(screen.getByText("Anthropic API key")).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText("AI provider keys")).toBeInTheDocument())
     expect(screen.queryByLabelText("Dev mode")).toBeNull()
   })
 
   it("always shows the dev mode toggle when dev mode is on", async () => {
-    stubStatus({ source: "subscription", devMode: true, hasStoredKey: false, promptDismissed: false })
+    stubStatus(anthropicStatus({ source: "subscription" }, { devMode: true }))
     render(<Harness />)
     await waitFor(() => expect(screen.getByLabelText("Dev mode")).toBeInTheDocument())
   })
 
   it("offers no key controls when the key comes from the environment", async () => {
-    stubStatus({
-      source: "env",
-      maskedHint: "sk-ant-…4f2a",
-      devMode: false,
-      hasStoredKey: false,
-      promptDismissed: false,
-    })
+    stubStatus(anthropicStatus({ source: "env", maskedHint: "sk-ant-…4f2a" }))
     render(<Harness />)
     await waitFor(() =>
       expect(screen.getByText(/environment variable/i)).toBeInTheDocument(),
     )
     // Query the control, not a label: the dialog's own `aria-labelledby`
-    // points at the title "Anthropic API key" and matches a loose regex.
+    // points at the title "AI provider keys" and matches a loose regex.
     expect(screen.queryByPlaceholderText("sk-ant-...")).toBeNull()
     expect(screen.queryByRole("button", { name: "Save key" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Remove key" })).toBeNull()
   })
 
   it("offers Remove only when a key is stored", async () => {
-    stubStatus({
-      source: "stored",
-      maskedHint: "sk-ant-…4f2a",
-      storedHint: "sk-ant-…4f2a",
-      devMode: false,
-      hasStoredKey: true,
-      promptDismissed: false,
-    })
+    stubStatus(
+      anthropicStatus({
+        source: "stored",
+        maskedHint: "sk-ant-…4f2a",
+        storedHint: "sk-ant-…4f2a",
+        hasStoredKey: true,
+      }),
+    )
     render(<Harness />)
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Remove key" })).toBeInTheDocument(),
@@ -114,14 +142,14 @@ describe("LlmCredentialDialog", () => {
   })
 
   it("renders the masked hint and never a full key", async () => {
-    stubStatus({
-      source: "stored",
-      maskedHint: "sk-ant-…4f2a",
-      storedHint: "sk-ant-…4f2a",
-      devMode: false,
-      hasStoredKey: true,
-      promptDismissed: false,
-    })
+    stubStatus(
+      anthropicStatus({
+        source: "stored",
+        maskedHint: "sk-ant-…4f2a",
+        storedHint: "sk-ant-…4f2a",
+        hasStoredKey: true,
+      }),
+    )
     const { container } = render(<Harness />)
     await waitFor(() => expect(screen.getByText(/sk-ant-…4f2a/)).toBeInTheDocument())
     expect(container.ownerDocument.body.textContent).not.toMatch(/sk-ant-api/)
@@ -135,13 +163,12 @@ describe("LlmCredentialDialog", () => {
  */
 describe("LlmCredentialDialog in dev mode with a key stored", () => {
   it("still offers Remove, and labels the stored key as unused", async () => {
-    stubStatus({
-      source: "subscription",
-      devMode: true,
-      hasStoredKey: true,
-      storedHint: "sk-ant-…4f2a",
-      promptDismissed: false,
-    })
+    stubStatus(
+      anthropicStatus(
+        { source: "subscription", hasStoredKey: true, storedHint: "sk-ant-…4f2a" },
+        { devMode: true },
+      ),
+    )
     render(<Harness />)
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Remove key" })).toBeInTheDocument(),
@@ -164,12 +191,7 @@ describe("LlmCredentialDialog save race", () => {
       vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
         if (!init?.method || init.method === "GET") {
           return new Response(
-            JSON.stringify({
-              source: "none",
-              devMode: false,
-              hasStoredKey: false,
-              promptDismissed: false,
-            }),
+            JSON.stringify(anthropicStatus({ source: "none" })),
             { status: 200 },
           )
         }
@@ -178,14 +200,14 @@ describe("LlmCredentialDialog save race", () => {
           releaseSave = resolve
         })
         return new Response(
-          JSON.stringify({
-            source: "stored",
-            maskedHint: "sk-ant-…1111",
-            storedHint: "sk-ant-…1111",
-            devMode: false,
-            hasStoredKey: true,
-            promptDismissed: false,
-          }),
+          JSON.stringify(
+            anthropicStatus({
+              source: "stored",
+              maskedHint: "sk-ant-…1111",
+              storedHint: "sk-ant-…1111",
+              hasStoredKey: true,
+            }),
+          ),
           { status: 200 },
         )
       }),
@@ -221,5 +243,246 @@ describe("LlmCredentialDialog save race", () => {
 
     // It must NOT close the instance the user is now looking at.
     expect(onOpenChange).not.toHaveBeenCalledWith(false)
+  })
+})
+
+const twoProviders = {
+  providers: {
+    anthropic: {
+      id: "anthropic",
+      label: "Anthropic",
+      source: "none" as const,
+      hasStoredKey: false,
+      apiKeyEnvVar: "ANTHROPIC_API_KEY",
+      consoleUrl: "https://console.anthropic.com/settings/keys",
+      maskPrefix: "sk-ant-",
+      hasSubscriptionRuntime: true,
+    },
+    openai: {
+      id: "openai",
+      label: "OpenAI",
+      source: "none" as const,
+      hasStoredKey: false,
+      apiKeyEnvVar: "OPENAI_API_KEY",
+      baseUrlEnvVar: "OPENAI_BASE_URL",
+      consoleUrl: "https://platform.openai.com/api-keys",
+      maskPrefix: "sk-",
+      hasSubscriptionRuntime: false,
+    },
+  },
+  devMode: false,
+  promptDismissed: false,
+}
+
+function credentials(overrides: Partial<UseLlmCredentials> = {}): UseLlmCredentials {
+  return {
+    status: twoProviders,
+    loading: false,
+    error: null,
+    saveKey: vi.fn(async () => true),
+    removeKey: vi.fn(async () => true),
+    setDevMode: vi.fn(async () => true),
+    dismissPrompt: vi.fn(async () => true),
+    refresh: vi.fn(async () => {}),
+    ...overrides,
+  }
+}
+
+describe("LlmCredentialDialog: one tab per provider", () => {
+  it("renders a tab for every provider the server served", () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    expect(screen.getByRole("tab", { name: "Anthropic" })).toBeInTheDocument()
+    expect(screen.getByRole("tab", { name: "OpenAI" })).toBeInTheDocument()
+  })
+
+  it("saves against the provider whose tab is open", async () => {
+    const saveKey = vi.fn(async () => true)
+    render(
+      <LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials({ saveKey })} />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-typed" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }))
+    await waitFor(() =>
+      expect(saveKey).toHaveBeenCalledWith("openai", "sk-typed", undefined),
+    )
+  })
+
+  it("keeps each tab's draft separate", async () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-ant-draft" } })
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    expect(screen.getByLabelText("API key")).toHaveValue("")
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Anthropic" }))
+    expect(screen.getByLabelText("API key")).toHaveValue("sk-ant-draft")
+  })
+
+  it("offers a base URL field only for a provider that takes one", async () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    // Matched by pattern, not by exact text: this case is about which provider
+    // shows the field at all, so it should not fail when the label's wording
+    // changes. The wording itself is pinned by the case below.
+    expect(screen.queryByLabelText(/Base URL/)).not.toBeInTheDocument()
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    expect(screen.getByLabelText(/Base URL/)).toBeInTheDocument()
+  })
+
+  it("marks the base URL optional on the label, not in the hint", async () => {
+    // "(optional)" decides whether the field is read at all, so it belongs
+    // where a skimmer sees it. The hint used to open with "Optional." and the
+    // label said nothing, which is the arrangement this replaces.
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    // `\s*`, not a literal space: the gap is a margin on the span, so the
+    // label's text content is "Base URL(optional)" with nothing between.
+    expect(screen.getByLabelText(/Base URL\s*\(optional\)/)).toBeInTheDocument()
+    expect(screen.queryByText(/^Optional\./)).not.toBeInTheDocument()
+  })
+
+  const openaiStoredWithBaseUrl = {
+    ...twoProviders,
+    providers: {
+      ...twoProviders.providers,
+      openai: {
+        ...twoProviders.providers.openai,
+        baseUrl: "https://gateway.internal/v1",
+      },
+    },
+  }
+
+  it("sends no baseUrl when a provider with a stored one goes untouched", () => {
+    const saveKey = vi.fn().mockResolvedValue(true)
+    render(
+      <LlmCredentialDialog
+        open
+        onOpenChange={() => {}}
+        credentials={credentials({ status: openaiStoredWithBaseUrl, saveKey })}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: "sk-new" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }))
+    // Synchronous, deliberately: `saveKey` is called at the top of
+    // `handleSave`, before its first `await` suspends the function, so the
+    // call already happened by the time `fireEvent.click` returns.
+    expect(saveKey).toHaveBeenLastCalledWith("openai", "sk-new", undefined)
+  })
+
+  it("sends an explicit empty baseUrl when the user clears a previously stored value", () => {
+    const saveKey = vi.fn().mockResolvedValue(true)
+    render(
+      <LlmCredentialDialog
+        open
+        onOpenChange={() => {}}
+        credentials={credentials({ status: openaiStoredWithBaseUrl, saveKey })}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: "sk-new" } })
+    fireEvent.change(screen.getByLabelText(/Base URL/), { target: { value: "" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }))
+    expect(saveKey).toHaveBeenLastCalledWith("openai", "sk-new", "")
+  })
+
+  const openaiStoredKeyAndBaseUrl = {
+    ...twoProviders,
+    providers: {
+      ...twoProviders.providers,
+      openai: {
+        ...twoProviders.providers.openai,
+        hasStoredKey: true,
+        storedHint: "sk-…9999",
+        baseUrl: "https://wrong.internal",
+      },
+    },
+  }
+
+  it("ledger #28: Save is disabled with a stored key and no draft touched", () => {
+    render(
+      <LlmCredentialDialog
+        open
+        onOpenChange={() => {}}
+        credentials={credentials({ status: openaiStoredKeyAndBaseUrl })}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    expect(screen.getByRole("button", { name: "Save key" })).toBeDisabled()
+  })
+
+  it("ledger #28: Save is enabled and sends no apiKey for a base-URL-only fix", () => {
+    const saveKey = vi.fn().mockResolvedValue(true)
+    render(
+      <LlmCredentialDialog
+        open
+        onOpenChange={() => {}}
+        credentials={credentials({ status: openaiStoredKeyAndBaseUrl, saveKey })}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    // The API key field is left untouched. Only the base URL changes.
+    fireEvent.change(screen.getByLabelText(/Base URL/), {
+      target: { value: "https://gateway.internal/v1" },
+    })
+    expect(screen.getByRole("button", { name: "Save key" })).not.toBeDisabled()
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }))
+    expect(saveKey).toHaveBeenLastCalledWith(
+      "openai",
+      undefined,
+      "https://gateway.internal/v1",
+    )
+  })
+
+  it("names the provider's own environment variable when it manages the key", () => {
+    const envManaged = {
+      ...twoProviders,
+      providers: {
+        ...twoProviders.providers,
+        openai: { ...twoProviders.providers.openai, source: "env" as const },
+      },
+    }
+    render(
+      <LlmCredentialDialog
+        open
+        onOpenChange={() => {}}
+        credentials={credentials({ status: envManaged })}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    expect(screen.getByText("OPENAI_BASE_URL", { exact: false })).toBeDefined()
+    expect(screen.getByText("OPENAI_API_KEY")).toBeInTheDocument()
+  })
+})
+
+describe("the console link names the provider without an article", () => {
+  it("names the console link without an article that can disagree with the provider", () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    expect(screen.getByRole("link", { name: "Get a key from Anthropic" })).toBeInTheDocument()
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    expect(screen.getByRole("link", { name: "Get a key from OpenAI" })).toBeInTheDocument()
+  })
+})
+
+describe("dev mode stays inside the Anthropic tab", () => {
+  it("does not reveal the toggle from a tab with no subscription runtime", async () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "?",
+      code: "Slash",
+      ctrlKey: true,
+      shiftKey: true,
+    })
+    expect(screen.queryByLabelText("Dev mode")).not.toBeInTheDocument()
+  })
+
+  it("reveals it from the Anthropic tab", async () => {
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "?",
+      code: "Slash",
+      ctrlKey: true,
+      shiftKey: true,
+    })
+    expect(await screen.findByLabelText("Dev mode")).toBeInTheDocument()
   })
 })

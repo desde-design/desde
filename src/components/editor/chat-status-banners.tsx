@@ -453,8 +453,15 @@ interface ChatStatusBannersProps {
   onEnableCapability?: (
     capabilityId: string,
   ) => Promise<{ ok: boolean; envMissing?: string | null }>
+  /**
+   * Whether the session's provider reports vendor rate-limit events, from its
+   * descriptor's `capabilities.vendorRateLimitEvents`. Anthropic does; nothing
+   * else does, and `ANTHROPIC_ONLY_EVENT_KINDS` in chat-stream-events.ts is the
+   * enforcement of that. Defaults to true so an older caller that has not been
+   * updated keeps today's behaviour rather than silently losing a banner.
+   */
+  vendorRateLimitEvents?: boolean
 }
-
 /**
  * Wraps one banner with an optional dismiss control, positioned over the
  * banner's top-right. With no `onDismiss` the children render bare, so the
@@ -525,6 +532,7 @@ export function ChatStatusBanners({
   messages,
   onDismiss,
   onEnableCapability,
+  vendorRateLimitEvents = true,
 }: ChatStatusBannersProps) {
   const statusMessages = messages.filter(
     (m): m is Extract<
@@ -552,6 +560,11 @@ export function ChatStatusBanners({
   return (
     <div data-testid="chat-status-banners">
       {statusMessages.map((m) => {
+        // A provider with no such events cannot produce this message, so this
+        // is belt and braces rather than the gate. It matters anyway: the copy
+        // below names "this Claude account" and an overage credit pool, which
+        // would be a confident lie over an OpenAI session rather than a gap.
+        if (m.kind === "rate_limit_warning" && vendorRateLimitEvents === false) return null
         // `tone` is decided HERE and the banner picks its own `Alert` variant
         // below, so the two have to agree by hand. That is deliberate rather
         // than tidy: hoisting the variant up would mean every banner returning

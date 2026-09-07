@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -244,5 +244,26 @@ describe('appendArchivedTurns + readArchivedTurns round-trip', () => {
     writeFileSync(join(dir, 'sess-a.archive.jsonl'), `${good}\n{"id":"2","broken`, 'utf8')
     const readBack = await readArchivedTurns(root, 'sess-a')
     expect(readBack.map((t) => t.id)).toEqual(['1'])
+  })
+
+  it('CX7 fix round 1: the writer creates nothing at the target when .desde is a symlink out of the worktree', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'session-turns-archive-outside-'))
+    symlinkSync(outside, join(root, '.desde'))
+
+    await expect(appendArchivedTurns(root, 'sess-a', [makeTurn('1')])).rejects.toThrow(
+      /symbolic link/i,
+    )
+    expect(readdirSync(outside)).toEqual([])
+
+    rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('CX7 fix round 1: the reader also refuses rather than reading through the symlink', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'session-turns-archive-outside-'))
+    symlinkSync(outside, join(root, '.desde'))
+
+    await expect(readArchivedTurns(root, 'sess-a')).rejects.toThrow(/symbolic link/i)
+
+    rmSync(outside, { recursive: true, force: true })
   })
 })

@@ -24,11 +24,13 @@
  *   4. two mutations falling back into one file both survive (no clobber)
  *   5. it is framework-neutral, not a React special case
  */
-import { describe, expect, it, beforeEach, afterEach } from "vitest"
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest"
+import { execFileSync } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { applyEdit, type ApplicatorLoaders, type EditRequestBody } from "../edit-handler.js"
+import type { ChatHandlerLoaders } from "../chat-handler.js"
 
 let llmInvocations = 0
 
@@ -243,5 +245,134 @@ describe("deterministic text lane — consumer-callsite fallback", () => {
     expect(result.ok).toBe(true)
     expect(readFileSync(join(dir, "App.vue"), "utf8")).toContain("<Card>Goodbye</Card>")
     expect(llmInvocations).toBe(0)
+  })
+})
+
+const PROP_EDIT_ORIGINAL_SOURCE = [
+  "<template>",
+  '  <UiInput :placeholder="filterPlaceholder" />',
+  "</template>",
+  "<script setup>",
+  "const filterPlaceholder = 'Search...'",
+  "</script>",
+  "",
+].join("\n")
+
+const propEditBodyThatRefuses: EditRequestBody = {
+  edit: {
+    kind: "prop",
+    file: "App.vue",
+    line: 2,
+    column: 3,
+    propName: "placeholder",
+    value: "Filter results",
+  },
+} as EditRequestBody
+
+/**
+ * The interim behaviour was an inline capability refusal keyed on
+ * `llmProviderId`, because reaching for Anthropic credentials the user never
+ * gave is worse than declining. That trade is over: the mini-turn now
+ * resolves the same runtime chat does, for ANY project provider, rather than
+ * refusing everything but Anthropic (see Task 43,
+ * `src/editor/agent-chat-sdk/edit-fix-mini-turn.ts`'s module doc).
+ */
+describe("the edit-fix mini-turn runs on the project's own provider", () => {
+  let dir: string
+  const applicatorLoaders: ApplicatorLoaders = {
+    ...APPLICATORS,
+    loadApplyPropEdit: async () => ({
+      applyPropEdit: () => ({
+        ok: false,
+        reason: 'Cannot overwrite bound prop "placeholder" — source uses v-bind.',
+        fallback: { kind: "bound-binding" as const, expression: "filterPlaceholder" },
+      }),
+    }),
+  } as ApplicatorLoaders
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "editor-mini-turn-provider-gate-"))
+    writeFileSync(join(dir, "App.vue"), PROP_EDIT_ORIGINAL_SOURCE)
+    // Branch mode is git-native, and the mini-turn refuses to run when the
+    // working state can't be snapshotted (its cross-file writes would be
+    // unverifiable) — the fixture must be a real repo like every prototype.
+    execFileSync("git", ["init", "-q"], { cwd: dir })
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+      { cwd: dir },
+    )
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"],
+      { cwd: dir },
+    )
+  })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  it("runs for an OpenAI project instead of refusing with a capability message", async () => {
+    const seen: Array<{ model?: string; providerId?: string }> = []
+    const loadRunEditFixMiniTurn = vi.fn(async () => ({
+      runEditFixMiniTurn: async (input: { model?: string; providerId?: string }) => {
+        seen.push({ model: input.model, providerId: input.providerId })
+        return { outcome: "refused" as const, notes: "not the point of this test" }
+      },
+    }))
+    const result = await applyEdit(
+      propEditBodyThatRefuses,
+      dir,
+      { ...applicatorLoaders, loadRunEditFixMiniTurn } as unknown as ApplicatorLoaders,
+      undefined,
+      { llmProviderId: "openai" },
+    )
+    expect(loadRunEditFixMiniTurn).toHaveBeenCalled()
+    expect(seen).toEqual([{ model: "gpt-5.6", providerId: "openai" }])
+    expect(JSON.stringify(result)).not.toMatch(/capability/i)
+  })
+
+  it("still runs for an Anthropic project", async () => {
+    const loadRunEditFixMiniTurn = vi.fn(async () => ({
+      runEditFixMiniTurn: async () => ({ outcome: "refused" as const, notes: "no change" }),
+    }))
+    await applyEdit(
+      propEditBodyThatRefuses,
+      dir,
+      { ...applicatorLoaders, loadRunEditFixMiniTurn } as unknown as ApplicatorLoaders,
+      undefined,
+      { llmProviderId: "anthropic" },
+    )
+    expect(loadRunEditFixMiniTurn).toHaveBeenCalled()
+  })
+
+  it("a refused chat runtime answers with a clean refusal, not a throw", async () => {
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "0")
+    try {
+      const loadRunEditFixMiniTurn = vi.fn(async () => ({
+        runEditFixMiniTurn: async () => {
+          throw new Error("should not be called — resolveChatRuntime refuses first")
+        },
+      }))
+      const loadRunChatTurnNeutral = vi.fn(async () => {
+        throw new Error("should not be called — resolveChatRuntime refuses before any loader runs")
+      })
+      const result = await applyEdit(
+        propEditBodyThatRefuses,
+        dir,
+        { ...applicatorLoaders, loadRunEditFixMiniTurn } as unknown as ApplicatorLoaders,
+        undefined,
+        {
+          llmProviderId: "openai",
+          chatLoaders: { loadRunChatTurnNeutral } as unknown as ChatHandlerLoaders,
+        },
+      )
+      expect(result.ok).toBe(false)
+      expect(result.status).toBeGreaterThanOrEqual(400)
+      expect(result.status).toBeLessThan(500)
+      expect(result.reason).toMatch(/neutral|turned off|not available/i)
+      expect(JSON.stringify(result)).not.toMatch(/at .*\.ts:\d+/)
+      expect(loadRunChatTurnNeutral).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })

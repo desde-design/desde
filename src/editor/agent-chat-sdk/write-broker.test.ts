@@ -11,8 +11,8 @@
  */
 
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, symlinkSync } from 'node:fs'
 import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -91,7 +91,7 @@ describe('brokeredWrite', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(readFileSync(join(root, 'App.vue'), 'utf8')).toBe('AFTER')
-    expect(readFileSync(join(root, result.backupDir, 'App.vue'), 'utf8')).toBe('BEFORE')
+    expect(readFileSync(join(root, result.backupDir!, 'App.vue'), 'utf8')).toBe('BEFORE')
     expect(invalidated).toEqual([['App.vue']])
     // invalidate strictly before emit.
     expect(order).toEqual(['invalidate', 'emit'])
@@ -114,7 +114,7 @@ describe('brokeredWrite', () => {
         // .desde/backups/<iso-timestamp>-<uuid v4>
         /^\.desde[/\\]backups[/\\][\dTZ_:.-]+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       )
-      dirs.add(result.backupDir)
+      dirs.add(result.backupDir!)
     }
     // Five back-to-back ops (same millisecond on a fast machine) never
     // share a directory, so none can clobber another's originals.
@@ -142,6 +142,43 @@ describe('brokeredWrite', () => {
     // Nothing written, no lock even taken.
     expect(readFileSync(join(root, 'App.vue'), 'utf8')).toBe('BEFORE')
     expect(acquiredPaths()).toEqual([])
+  })
+
+  it('refuses every write when .desde is a symlink out of the worktree, before touching disk', async () => {
+    writeFileSync(join(root, 'App.vue'), 'original')
+    const outside = mkdtempSync(join(tmpdir(), 'desde-outside-'))
+    symlinkSync(outside, join(root, '.desde'))
+
+    const result = await brokeredWrite({
+      canonicalRoot: root,
+      journal: [{ file: 'App.vue', content: 'original' }],
+      ops: [{ kind: 'write', repoRel: 'App.vue', absPath: join(root, 'App.vue'), content: 'changed' }],
+      lockManager,
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.stage).toBe('backup')
+    expect(result.reason).toMatch(/\.desde.*symbolic link|symbolic link.*\.desde/i)
+    expect(existsSync(join(outside, 'backups'))).toBe(false)
+    expect(existsSync(join(outside, 'edit-log.jsonl'))).toBe(false)
+    expect(readFileSync(join(root, 'App.vue'), 'utf8')).toBe('original')
+
+    rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('reports no backupDir for a write whose journal is empty', async () => {
+    const result = await brokeredWrite({
+      canonicalRoot: root,
+      journal: [],
+      ops: [
+        { kind: 'write', repoRel: 'New.vue', absPath: join(root, 'New.vue'), ensureDir: true, isNew: true, content: 'new' },
+      ],
+      lockManager,
+    })
+
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.backupDir).toBeUndefined()
   })
 
   it('acquires per-file locks in sorted absolute-path order', async () => {
@@ -379,15 +416,86 @@ describe('brokeredWrite', () => {
     expect(result.rolledBack).toEqual([])
     expect(result.restoreErrors).toHaveLength(1)
     expect(result.restoreErrors[0]).toContain('sub/a.vue')
-    // The journal survives, so the caller's "recover from …" pointer is real.
-    expect(readFileSync(join(root, result.backupDir, 'sub', 'a.vue'), 'utf8')).toBe(
+    // The journal survives (this batch's journal was non-empty), so the
+    // caller's "recover from …" pointer is real — `backupDir` is only
+    // absent for an all-new-file (empty-journal) batch, not this one.
+    expect(result.backupDir).toBeDefined()
+    expect(readFileSync(join(root, result.backupDir!, 'sub', 'a.vue'), 'utf8')).toBe(
       'A-ORIGINAL',
     )
     // And the caller-facing suffix names the file + the recovery path.
     const warning = rollbackWarning(result)
     expect(warning).toContain('could not restore')
     expect(warning).toContain('sub/a.vue')
-    expect(warning).toContain(result.backupDir)
+    expect(warning).toContain(result.backupDir!)
+  })
+
+  it('CX7 item 5: a failed rollback of an all-new-file batch (empty journal) names no directory in the warning', async () => {
+    // Two brand-new files, so `journal` is empty and `writeBackupJournal`
+    // never creates the backup directory on disk (same fact
+    // `writeBackupJournal`'s own doc comment and the "reports no backupDir"
+    // test above establish). A rollback failure on THIS shape used to say
+    // "Recover from '<dir that never existed>'" — `backupDir` was reported
+    // unconditionally on the write-stage failure even though the success
+    // path already knew to omit it for an empty journal.
+    //
+    // A lives in a SUBDIRECTORY, and that is load-bearing rather than
+    // incidental (FX19 item 1). The sabotage below churns directory
+    // entries while B's content write is in flight, and `createNoFollow`
+    // now refuses a create whose parent directory's status-change time
+    // moved across that write. With A beside B at the root, the sabotage
+    // would refuse B's create and the batch would never reach the rollback
+    // this test is about. In a subdirectory it touches a different parent,
+    // so the rollback path is exercised exactly as before.
+    async function* sabotageA(): AsyncGenerator<string> {
+      // Runs while B's write is in flight, right after A has already
+      // landed — turns A into a non-empty directory so ITS OWN rollback
+      // (unlink, since it's unjournaled/new) fails for real, not just by
+      // simulation.
+      rmSync(join(root, 'sub', 'a-new.vue'))
+      mkdirSync(join(root, 'sub', 'a-new.vue'))
+      writeFileSync(join(root, 'sub', 'a-new.vue', 'inner'), 'x')
+      yield 'B-NEW'
+    }
+
+    const result = await brokeredWrite({
+      canonicalRoot: root,
+      journal: [],
+      ops: [
+        {
+          kind: 'write',
+          repoRel: 'sub/a-new.vue',
+          absPath: join(root, 'sub', 'a-new.vue'),
+          ensureDir: true,
+          isNew: true,
+          content: 'A-NEW',
+        },
+        {
+          kind: 'write',
+          repoRel: 'b-new.vue',
+          absPath: join(root, 'b-new.vue'),
+          ensureDir: true,
+          isNew: true,
+          content: sabotageA() as unknown as Buffer,
+        },
+        sentinelOp(),
+      ],
+      lockManager,
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok || result.stage !== 'write') return
+    // B rolled back cleanly (plain unlink); A's rollback failed (EPERM:
+    // unlink on a non-empty directory).
+    expect(result.rolledBack).toEqual(['b-new.vue'])
+    expect(result.restoreErrors).toHaveLength(1)
+    expect(result.restoreErrors[0]).toContain('sub/a-new.vue')
+    // The empty-journal fact, carried through to the failure result.
+    expect(result.backupDir).toBeUndefined()
+
+    const warning = rollbackWarning(result)
+    expect(warning).toContain('could not restore')
+    expect(warning).not.toContain('Recover from')
   })
 
   it('a concurrent writer cannot be clobbered by a later rollback (codex batch-5 P2)', async () => {
@@ -553,11 +661,22 @@ describe('brokeredWrite', () => {
     expect(readFileSync(join(root, 'Created.vue'), 'utf8')).toBe('ALREADY-THERE')
   })
 
-  it('a non-exclusive isNew write DOES overwrite if the path is unexpectedly occupied (baseline contrast)', async () => {
-    // Without `exclusive`, `isNew` only controls ROLLBACK semantics
-    // (unlink vs restore) — it doesn't protect the initial write itself.
-    // This pins the pre-Task-14 default so `exclusive`'s opt-in behavior
-    // above reads as a deliberate narrowing, not the only possible outcome.
+  it('a non-exclusive isNew write refuses if the path is unexpectedly occupied, and leaves it untouched', async () => {
+    // Changed by FX11 (2026-09-05). This used to pin the opposite: a
+    // non-`exclusive` `isNew` write clobbered an occupied path, because
+    // `isNew` only chose ROLLBACK semantics (unlink vs restore) and did
+    // not protect the initial write. FX11 routes every create through
+    // `createNoFollow`, whose `O_CREAT | O_EXCL | O_NOFOLLOW` open is what
+    // makes the containment proof hold, so create-only is now the rule
+    // rather than `exclusive`'s opt-in.
+    //
+    // That is a strict improvement even setting containment aside. The
+    // sibling test below spells out the shape this closes: the loser of a
+    // create race used to overwrite the winner's file and then unlink it
+    // during `isNew` rollback, destroying a file it never created. Callers
+    // lose nothing, because every `isNew` caller already asserts
+    // non-existence before it calls (`resolveSafeCreatePath`, an
+    // `existsSync` guard, or an `exists: false` precondition).
     writeFileSync(join(root, 'Created.vue'), 'ALREADY-THERE')
 
     const result = await brokeredWrite({
@@ -575,8 +694,10 @@ describe('brokeredWrite', () => {
       lockManager,
     })
 
-    expect(result.ok).toBe(true)
-    expect(readFileSync(join(root, 'Created.vue'), 'utf8')).toBe('OVERWRITTEN')
+    expect(result.ok).toBe(false)
+    if (result.ok || result.stage !== 'write') return
+    expect(result.reason).toMatch(/^EEXIST:/)
+    expect(readFileSync(join(root, 'Created.vue'), 'utf8')).toBe('ALREADY-THERE')
   })
 
   it('two concurrent scaffold-shaped batches for the same new page: one wins, one EEXISTs', async () => {
@@ -837,7 +958,7 @@ describe('brokeredWrite', () => {
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(readFileSync(join(root, result.backupDir, 'package-lock.json'), 'utf8')).toBe('LOCK')
+    expect(readFileSync(join(root, result.backupDir!, 'package-lock.json'), 'utf8')).toBe('LOCK')
     expect(readFileSync(join(root, 'package-lock.json'), 'utf8')).toBe('LOCK')
   })
 
@@ -1074,6 +1195,36 @@ describe('brokeredWrite', () => {
       expect(result.reason).toContain('App.vue')
       // Nothing mutated.
       expect(readFileSync(join(root, 'App.vue'), 'utf8')).toBe('ACTUALLY-ON-DISK')
+    })
+
+    it('leaves no backup directory behind for a precondition refusal', async () => {
+      // 2026-09-04 adversarial review, P3-1. The journal is written BEFORE the
+      // locks, so a precondition refusal — decided inside the locks, before
+      // any mutation — used to return leaving a directory on disk holding
+      // bytes that were never the pre-write state of anything.
+      writeFileSync(join(root, 'App.vue'), 'ACTUALLY-ON-DISK')
+
+      const result = await brokeredWrite({
+        canonicalRoot: root,
+        journal: [{ file: 'App.vue', content: 'ACTUALLY-ON-DISK' }],
+        ops: [{ kind: 'write', repoRel: 'App.vue', absPath: join(root, 'App.vue'), content: 'AFTER' }],
+        lockManager,
+        preconditions: [
+          {
+            repoRel: 'App.vue',
+            absPath: join(root, 'App.vue'),
+            expect: { exists: true, content: Buffer.from('STALE-EXPECTATION') },
+          },
+        ],
+      })
+
+      expect(result.ok).toBe(false)
+      expect(readFileSync(join(root, 'App.vue'), 'utf8')).toBe('ACTUALLY-ON-DISK')
+      // The `backups` tree may exist from an earlier write in this file's
+      // fixture, so the assertion is that it holds no directory, not that it
+      // is absent.
+      const backupsDir = join(root, '.desde/backups')
+      expect(existsSync(backupsDir) ? readdirSync(backupsDir) : []).toEqual([])
     })
 
     it('existence mismatch (expected present, now absent) refuses', async () => {
@@ -1728,25 +1879,32 @@ describe('brokeredWrite', () => {
       }
       try {
         // A documented `writeFile` data form (see the "MUTATES in caller
-        // order" test above) that isn't a `Buffer` or `string` — the same
-        // trick, smuggled past `BrokerOp`'s declared type.
+        // order" test above) that isn't a `Buffer` or `string`. `BrokerOp`
+        // declares `content: string | Buffer`; `WriteOpWithArbitraryContent`
+        // widens ONLY this op's `content` to `unknown` so the test says what
+        // it means — "this op's content deliberately isn't the declared
+        // type" — instead of asserting the generator itself IS a `Buffer`
+        // (which `gen() as unknown as Buffer` used to claim, wrongly).
         async function* gen(): AsyncGenerator<string> {
           yield 'NEW'
+        }
+        type WriteOpWithArbitraryContent = Omit<
+          Extract<BrokerOp, { kind: 'write' }>,
+          'content'
+        > & { content: unknown }
+        const op: WriteOpWithArbitraryContent = {
+          kind: 'write',
+          repoRel: 'pages/New.vue',
+          absPath: join(root, 'pages', 'New.vue'),
+          content: gen(),
+          ensureDir: true,
+          isNew: true,
         }
 
         const result = await brokeredWrite({
           canonicalRoot: root,
           journal: [],
-          ops: [
-            {
-              kind: 'write',
-              repoRel: 'pages/New.vue',
-              absPath: join(root, 'pages', 'New.vue'),
-              content: gen() as unknown as Buffer,
-              ensureDir: true,
-              isNew: true,
-            },
-          ],
+          ops: [op as BrokerOp],
           lockManager,
           record: { history: spyHistory(calls), label: 'create New.vue' },
         })

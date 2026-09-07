@@ -5,6 +5,7 @@ import {
   describeDisabledCapabilities,
   detectCapabilityGaps,
   findCapability,
+  runtimeSupportsCapability,
 } from './capability-catalog'
 
 const NONE = { enabledExtensionIds: [], webFetchAllowedHosts: [], webSearchEnabled: false }
@@ -63,6 +64,44 @@ describe('computeEnabledCapabilityIds', () => {
   it('ignores an extension that is not in the catalog', () => {
     const on = computeEnabledCapabilityIds({ ...NONE, enabledExtensionIds: ['some-custom-thing'] })
     expect([...on]).toEqual([])
+  })
+
+  it('does not report an extension as enabled on a runtime that cannot run it', () => {
+    // The neutral lane composes builtins plus editor tools only: it never
+    // registers an MCP server. Reporting Figma as on there told the user a
+    // tool existed that the model could not call.
+    const on = computeEnabledCapabilityIds({
+      ...NONE,
+      enabledExtensionIds: ['figma'],
+      webSearchEnabled: true,
+      chatRuntime: 'neutral',
+    })
+    expect(on.has('figma')).toBe(false)
+    expect(on.has('web-search')).toBe(false)
+  })
+
+  it('is unchanged on the SDK lane, which does register them', () => {
+    const on = computeEnabledCapabilityIds({
+      ...NONE,
+      enabledExtensionIds: ['figma'],
+      chatRuntime: 'claude-agent-sdk',
+    })
+    expect(on.has('figma')).toBe(true)
+  })
+})
+
+describe('runtimeSupportsCapability', () => {
+  it('says every catalog entry needs the Claude runtime today', () => {
+    for (const c of CAPABILITY_CATALOG) {
+      expect(runtimeSupportsCapability(c, 'claude-agent-sdk'), c.id).toBe(true)
+      expect(runtimeSupportsCapability(c, 'neutral'), c.id).toBe(false)
+    }
+  })
+
+  it('makes every entry state its runtimes rather than defaulting', () => {
+    for (const c of CAPABILITY_CATALOG) {
+      expect(c.runtimes.length, `${c.id} must name its runtimes`).toBeGreaterThan(0)
+    }
   })
 })
 
@@ -129,6 +168,17 @@ describe('describeDisabledCapabilities', () => {
   it('omits capabilities that are already on', () => {
     const block = describeDisabledCapabilities(new Set(['figma']))
     expect(block).not.toContain('**Figma**')
+  })
+
+  it('does not tell a neutral-lane model to point at a panel that cannot help', () => {
+    const block = describeDisabledCapabilities(new Set(), 'neutral')!
+    expect(block).toContain('Figma')
+    expect(block).toMatch(/cannot be used with the model/i)
+  })
+
+  it('keeps the panel wording on the SDK lane', () => {
+    const block = describeDisabledCapabilities(new Set(), 'claude-agent-sdk')!
+    expect(block).toContain('Extensions panel')
   })
 })
 

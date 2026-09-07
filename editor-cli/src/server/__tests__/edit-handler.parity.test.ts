@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest"
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, existsSync, writeFileSync, readFileSync } from "node:fs"
 import { join, basename } from "node:path"
 import { tmpdir } from "node:os"
 import { validateEditRequest } from "../../../../src/editor/edit-service/validate-edit-request"
@@ -766,6 +766,48 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
     expect(backedUp).toBe(ORIGINAL_SOURCE)
   })
 
+  // CX7 item 6: the mini-turn backup writer used to join `.desde/backups/…`
+  // straight onto `args.rootReal` with no symlink guard — a hostile
+  // `.desde` could send the backup (and later, on Undo, a restore write)
+  // outside the worktree. It now builds the path through `desdeDir`,
+  // which throws for a symlinked `.desde`; the surrounding block already
+  // treats a backup failure as best-effort (never fails a landed edit), so
+  // the edit still lands and the ledger entry simply carries no
+  // `backupDir` — same as any other run where the loop never wrote a file.
+  it("refuses to write the mini-turn backup, and writes nothing at the target, when .desde is a symlink out of the worktree", async () => {
+    writeFileSync(join(dir, "App.vue"), ORIGINAL_SOURCE)
+    const outside = mkdtempSync(join(tmpdir(), "editor-llm-fallback-outside-"))
+    symlinkSync(outside, join(dir, ".desde"))
+
+    const body: EditRequestBody = {
+      edit: {
+        kind: "prop",
+        file: "App.vue",
+        line: 2,
+        column: 3,
+        propName: "placeholder",
+        value: "Filter results",
+      },
+    }
+
+    const result = await applyEdit(body, dir, makeLoaders())
+    // Best-effort: the landed edit must not fail over a backup problem.
+    expect(result.ok).toBe(true)
+    expect(readFileSync(join(dir, "App.vue"), "utf8")).toBe(REWRITTEN_SOURCE)
+
+    // The ledger append goes through the same guarded `desdeDir` (via
+    // `ledgerPath`) and is itself best-effort, so a symlinked `.desde`
+    // means no ledger entry lands either — `readLedger` degrades to `[]`
+    // the same way it does for a missing file.
+    const { readLedger } = await import("../../../../src/editor/ledger/edit-ledger")
+    expect(await readLedger(dir)).toEqual([])
+    // Nothing was created at the symlink target.
+    expect(existsSync(join(outside, "backups"))).toBe(false)
+    expect(existsSync(join(outside, "edit-log.jsonl"))).toBe(false)
+
+    rmSync(outside, { recursive: true, force: true })
+  })
+
   // P2-1 (codex review round 6, 2026-08-20): the consolidated ledger
   // entry above never stated `createdFiles`, even for an `otherChanged`
   // file the mini-turn wrote as a brand-new, never-before-tracked side
@@ -1426,5 +1468,160 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
     const undoResult = await getSharedEditHistory().undo({ canonicalRoot: dir })
     expect(undoResult.ok).toBe(true)
     expect(readFileSync(join(dir, "App.vue"), "utf8")).toBe(ORIGINAL_SOURCE)
+  })
+})
+
+/**
+ * Task 43. Part A left an INLINE refusal in the mini-turn fallback for
+ * anything but Anthropic — reaching for Anthropic credentials an OpenAI-only
+ * project never provided was worse than declining. That was the honest
+ * interim. Now the mini-turn resolves the same runtime chat does
+ * (`resolveChatRuntime`), and threads the resolved provider's default model
+ * in alongside — a Claude model id sent to OpenAI is a 400 deep inside a
+ * save flow.
+ */
+describe("the edit-fix mini-turn runs on the project's default provider (Task 43)", () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "editor-mini-turn-provider-dispatch-"))
+    execFileSync("git", ["init", "-q"], { cwd: dir })
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"],
+      { cwd: dir },
+    )
+    writeFileSync(
+      join(dir, "App.vue"),
+      [
+        "<template>",
+        "  <UiInput :placeholder=\"filterPlaceholder\" />",
+        "</template>",
+        "<script setup>",
+        "const filterPlaceholder = 'Search...'",
+        "</script>",
+        "",
+      ].join("\n"),
+    )
+  })
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  const boundBindingPropEdit: EditRequestBody = {
+    edit: {
+      kind: "prop",
+      file: "App.vue",
+      line: 2,
+      column: 3,
+      propName: "placeholder",
+      value: "Filter results",
+    },
+  }
+
+  const APPLICATORS_REFUSING_BOUND_BINDING: Pick<ApplicatorLoaders, "loadApplyPropEdit"> = {
+    loadApplyPropEdit: async () => ({
+      applyPropEdit: () => ({
+        ok: false,
+        reason: 'Cannot overwrite bound prop "placeholder" — source uses v-bind.',
+        fallback: { kind: "bound-binding" as const, expression: "filterPlaceholder" },
+      }),
+    }),
+  }
+
+  // Minimal `ChatHandlerLoaders` stub — `resolveChatRuntime` only needs the
+  // loader shape to dispatch; this test cares about what edit-handler.ts
+  // hands the mini-turn, not what the loaded runtime itself does.
+  const STUB_CHAT_LOADERS = {
+    loadSessionStore: async () => ({}) as never,
+    loadRunChatTurnSdk: async () => ({ runChatTurnSdk: async () => ({}) }) as never,
+    loadRunChatTurnNeutral: async () => ({ runChatTurnNeutral: async () => ({}) }) as never,
+  }
+
+  it("runs the mini-turn on the project's default provider instead of refusing", async () => {
+    // The interim behaviour was an inline capability refusal keyed on
+    // args.llmProviderId, because reaching for Anthropic credentials the user
+    // never gave is worse than declining. That trade is over: the mini-turn now
+    // resolves the same runtime chat does.
+    const seen: Array<{ model?: string; providerId?: string }> = []
+    const loaders: ApplicatorLoaders = {
+      ...APPLICATORS_REFUSING_BOUND_BINDING,
+      loadRunEditFixMiniTurn: async () =>
+        ({
+          runEditFixMiniTurn: async (input: { model?: string; providerId?: string }) => {
+            seen.push({ model: input.model, providerId: input.providerId })
+            return { outcome: "refused", notes: "not the point of this test" }
+          },
+        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+    } as ApplicatorLoaders
+
+    const result = await applyEdit(boundBindingPropEdit, dir, loaders, undefined, {
+      llmProviderId: "openai",
+      chatLoaders: STUB_CHAT_LOADERS,
+    })
+
+    expect(seen).toEqual([{ model: "gpt-5.6", providerId: "openai" }])
+    expect(JSON.stringify(result)).not.toMatch(/capability/i)
+  })
+
+  it("dispatches a claude_code (subscription) project to the Anthropic runtime instead of throwing", async () => {
+    // `resolveLlmConfig(...).provider` is `'claude_code'` whenever
+    // EDITOR_USE_CLAUDE_SUBSCRIPTION=1 is set and ANTHROPIC_API_KEY is
+    // unset — the interim gate's deleted check explicitly allowed this id.
+    // `claude_code` has no entry in the provider-registry descriptor table
+    // (it is `resolveLlmConfig`'s synthetic id for the subscription lane),
+    // so a naive `resolveChatRuntime('claude_code', ...)` throws
+    // "no provider named 'claude_code'". It must be mapped onto the
+    // Anthropic runtime instead.
+    const seen: Array<{ model?: string; providerId?: string }> = []
+    const loaders: ApplicatorLoaders = {
+      ...APPLICATORS_REFUSING_BOUND_BINDING,
+      loadRunEditFixMiniTurn: async () =>
+        ({
+          runEditFixMiniTurn: async (input: { model?: string; providerId?: string }) => {
+            seen.push({ model: input.model, providerId: input.providerId })
+            return { outcome: "refused", notes: "not the point of this test" }
+          },
+        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+    } as ApplicatorLoaders
+
+    const result = await applyEdit(boundBindingPropEdit, dir, loaders, undefined, {
+      llmProviderId: "claude_code",
+      chatLoaders: STUB_CHAT_LOADERS,
+    })
+
+    // The raw `claude_code` id still reaches the mini-turn (it's what
+    // `args.llmProviderId` carries) — only the RUNTIME lookup is remapped.
+    expect(seen).toEqual([{ model: "claude-opus-4-8", providerId: "claude_code" }])
+    expect(JSON.stringify(result)).not.toMatch(/capability/i)
+    expect(JSON.stringify(result)).not.toMatch(/no provider named/i)
+  })
+
+  it("turns a resolveChatRuntime failure into a 422 refusal instead of an uncaught throw", async () => {
+    // Before this task, a refused or unknown runtime (e.g.
+    // EDITOR_NEUTRAL_CHAT=0 against an OpenAI project, or any other
+    // resolveChatRuntime throw) surfaced as a clean 422 via
+    // escalateToChatOnRefusal. An unguarded await turned that into an
+    // uncaught exception out of applyEdit. This proves the guard is back:
+    // an unresolvable provider id must not crash the save flow.
+    const runEditFixMiniTurn = vi.fn(async () => ({
+      outcome: "refused" as const,
+      notes: "should never be reached — resolveChatRuntime must throw first",
+    }))
+    const loaders: ApplicatorLoaders = {
+      ...APPLICATORS_REFUSING_BOUND_BINDING,
+      loadRunEditFixMiniTurn: async () =>
+        ({ runEditFixMiniTurn }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+    } as ApplicatorLoaders
+
+    const result = await applyEdit(boundBindingPropEdit, dir, loaders, undefined, {
+      llmProviderId: "not-a-real-provider",
+      chatLoaders: STUB_CHAT_LOADERS,
+    })
+
+    expect(runEditFixMiniTurn).not.toHaveBeenCalled()
+
+    expect(result.ok).toBe(false)
+    expect((result as { status?: number }).status).toBe(422)
+    expect(JSON.stringify(result)).toMatch(/no provider named/i)
   })
 })

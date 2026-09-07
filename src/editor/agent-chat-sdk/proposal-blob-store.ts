@@ -29,7 +29,9 @@
  */
 
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
+
+import { desdePath, desdeRemovalPath, DesdeDirSymlinkError } from '../worktree/desde-dir'
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 
@@ -53,14 +55,7 @@ export function proposalBlobPath(
 ): string {
   assertValidId(sessionId, 'sessionId')
   assertValidId(editId, 'editId')
-  return join(
-    repoRoot,
-    '.desde',
-    'chat-sessions',
-    sessionId,
-    'proposals',
-    `${editId}.txt`,
-  )
+  return desdePath(repoRoot, 'chat-sessions', sessionId, 'proposals', `${editId}.txt`)
 }
 
 /**
@@ -96,7 +91,13 @@ export async function writeProposalBlob(
 /**
  * Read a proposal blob. Returns `null` when the blob doesn't exist —
  * the save dialog uses this to gracefully degrade ("Use mine" button
- * hidden when no blob is available) rather than fail loudly.
+ * hidden when no blob is available) rather than fail loudly. A
+ * symlinked `.desde` is a different case: `proposalBlobPath` throws
+ * `DesdeDirSymlinkError` before any read is attempted, and this
+ * function deliberately lets that throw through rather than treating
+ * it as a missing blob — refusing is the safer default for a property
+ * of the repo itself, not a per-blob condition the save dialog should
+ * silently paper over.
  */
 export async function readProposalBlob(
   repoRoot: string,
@@ -122,13 +123,20 @@ export async function deleteProposalBlobsForSession(
   sessionId: string,
 ): Promise<void> {
   assertValidId(sessionId, 'sessionId')
-  const dir = join(
-    repoRoot,
-    '.desde',
-    'chat-sessions',
-    sessionId,
-    'proposals',
-  )
+  let dir: string
+  try {
+    dir = desdeRemovalPath(repoRoot, 'chat-sessions', sessionId, 'proposals')
+  } catch (err) {
+    // A recursive `rm` under a hostile symlink is worse than a plain
+    // write: refuse and log rather than delete whatever the symlink
+    // points at. Never re-thrown — this is a best-effort deleter, same
+    // tolerance as the retention sweeps below.
+    if (err instanceof DesdeDirSymlinkError) {
+      console.warn(`[proposal-blob-store] refusing to delete under '${repoRoot}': ${err.message}`)
+      return
+    }
+    throw err
+  }
   try {
     await rm(dir, { recursive: true, force: true })
   } catch {

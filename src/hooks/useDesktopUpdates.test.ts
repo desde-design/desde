@@ -44,7 +44,7 @@ function installBridge(overrides: Partial<DesktopBridge["updates"]> = {}): {
     claudeRuntime: {
       getState: vi.fn(async () => ({ phase: "ready" }) as DesktopClaudeRuntimeState),
       onState: () => () => {},
-      retry: vi.fn(),
+      retry: vi.fn(async () => ({ started: true })),
     },
     pickFolder: vi.fn(async () => null),
   }

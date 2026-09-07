@@ -1,5 +1,14 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+  mkdirSync,
+} from 'node:fs'
 import { realpathSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
@@ -137,6 +146,19 @@ describe('edit ledger', () => {
     // A path that cannot hold `.desde/` — append must swallow it.
     await expect(appendLedgerEntry(join(root, 'no', 'such', '\0bad'), edit('e1', ['a.vue'])))
       .resolves.toBeUndefined()
+  })
+
+  it('writes nothing outside the worktree when .desde is a symlink', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'edit-ledger-outside-'))
+    symlinkSync(outside, join(root, '.desde'))
+
+    // Best-effort by contract (a ledger failure must never fail the
+    // source write it accompanies) — it resolves, not rejects, and
+    // writes nothing at the symlink target.
+    await expect(appendLedgerEntry(root, edit('e1', ['a.vue']))).resolves.toBeUndefined()
+    expect(existsSync(join(outside, 'edit-log.jsonl'))).toBe(false)
+
+    rmSync(outside, { recursive: true, force: true })
   })
 
   describe('backupDir containment (P1, codex review round 5, SECURITY)', () => {

@@ -32,6 +32,14 @@ export interface TranslateGoalInput extends TranslateGoalPromptInput {
   /** Optional LLM provider injection (tests pass a fake). */
   provider?: CompletionProvider
   /**
+   * Lazily resolves the LLM provider when `provider` is not supplied. The
+   * CLI's `verify_goal` tool injects the session's resolved provider here
+   * (see `EditorToolContext.resolveLlmProvider`) so this lane never falls
+   * back to the process-wide registry default on its own. Absent →
+   * `getProvider()`.
+   */
+  resolveProvider?: () => CompletionProvider
+  /**
    * Model id. When omitted, the PROVIDER's own `defaultModel` is used (Anthropic
    * / claude_code → sonnet, OpenAI → its default) — NOT a hardcoded Claude model,
    * which a non-Anthropic provider would reject. Pass one only to override.
@@ -76,7 +84,7 @@ const ALIGN_AXES: readonly AlignAxis[] = [
   'centerY',
 ]
 
-const TRANSLATE_RESPONSE_SCHEMA = {
+export const TRANSLATE_RESPONSE_SCHEMA = {
   type: 'object' as const,
   required: ['predicates'] as const,
   additionalProperties: false,
@@ -118,7 +126,7 @@ interface RawPredicate {
 
 /**
  * Keep only the args keys we recognize, with correct types AND sane ranges.
- * A nonsensical numeric (negative `tol` → guaranteed false-fail; `min <= 0` →
+ * A nonsensical numeric (a non-positive `tol` → guaranteed false-fail; `min <= 0` →
  * always-pass contrast) is dropped, not accepted — the predicate then falls
  * back to its safe default rather than inheriting a poisoned threshold. This
  * is the LLM trust boundary; the providers don't enforce schemas strictly.
@@ -131,8 +139,14 @@ function sanitizeArgs(raw: unknown): PredicateArgs {
   if (typeof a.axis === 'string' && (ALIGN_AXES as readonly string[]).includes(a.axis)) {
     out.axis = a.axis as AlignAxis
   }
-  // Tolerance is a non-negative pixel distance.
-  if (typeof a.tol === 'number' && Number.isFinite(a.tol) && a.tol >= 0) out.tol = a.tol
+  // Tolerance is a POSITIVE pixel distance. Zero is rejected on purpose, not
+  // as a range check but to keep "absent" and "zero" distinguishable: the
+  // strict-output schema makes every arg required-and-nullable, so the model
+  // must answer `tol` on every predicate and a padding answer is `0`. A zero
+  // band makes `aligned()` false-fail a sub-pixel offset the user cannot see,
+  // whereas dropping it restores the 2px `ALIGN_TOL` default. A deliberate
+  // "exactly aligned" request is the rarer reading and the unsafe one.
+  if (typeof a.tol === 'number' && Number.isFinite(a.tol) && a.tol > 0) out.tol = a.tol
   // WCAG contrast ratios live in [1, 21]; a min below 1 would false-pass any
   // text and above 21 would false-fail everything, so reject out-of-range
   // values → the predicate falls back to its safe 4.5 default.
@@ -182,7 +196,6 @@ export async function translateGoal(
   const {
     goal,
     selector,
-    provider = getProvider(),
     // No hardcoded default — undefined lets each provider's complete() fall back
     // to its OWN defaultModel (`opts.model ?? this.defaultModel`), so an
     // OpenAI-configured session doesn't get a Claude model id it would reject.
@@ -190,6 +203,19 @@ export async function translateGoal(
     maxTokens = 1000,
     signal,
   } = input
+
+  // Resolved inside the function, not as a parameter default. `getProvider()`
+  // throws on missing credentials, and this lane's caller is a chat TOOL: an
+  // escaping throw surfaces to the agent as "verify_goal failed" rather than as
+  // the translate-error skip reason the tool is written to explain.
+  let provider = input.provider
+  if (!provider) {
+    try {
+      provider = (input.resolveProvider ?? getProvider)()
+    } catch (err) {
+      return { ok: false, reason: (err as Error).message, kind: 'error' }
+    }
+  }
 
   if (!goal || goal.trim().length === 0) {
     return { ok: false, reason: 'Goal is empty: nothing to translate', kind: 'error' }

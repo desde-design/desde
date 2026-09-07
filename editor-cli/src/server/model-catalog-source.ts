@@ -1,51 +1,101 @@
 /**
- * Which model list the chat picker gets, and where it comes from.
+ * Which model lists the chat picker gets, and where each comes from.
  *
- * Three answers, tried in this order (Mo, 2026-09-02: "add the live
- * functionality and have the hard coded as a back up ... the live list should
- * also work in dev mode, using the CLI"):
+ * One entry per SERVABLE provider descriptor (`chatRuntimeServable` below),
+ * each resolved independently and merged into the response together. Per
+ * provider, three answers are tried in this order (Mo, 2026-09-02, said of
+ * Anthropic originally: "add the live functionality and have the hard coded
+ * as a back up ... the live list should also work in dev mode, using the
+ * CLI" — the same order now applies to every provider that has a live
+ * source):
  *
- *  - `api`: an API key is active (`ANTHROPIC_API_KEY` in the process env,
- *    which is where `apply-llm-credentials.ts` puts a stored key too). The
- *    Anthropic Models API lists what that key can use.
- *  - `cli`: no key, but dev mode / `EDITOR_USE_CLAUDE_SUBSCRIPTION` is on.
- *    The bundled `claude` binary is asked, through the Agent SDK's
- *    `supportedModels()` control request, what it offers on the account it
- *    is signed into. That is the only source that can see a subscription.
- *  - `static`: neither, or a live source failed or timed out. The hand-kept
- *    `ANTHROPIC_MODEL_CATALOG`, unchanged from before this existed.
+ *  - `api`: the provider's API key is active (in the process env, which is
+ *    where `apply-llm-credentials.ts` puts a stored key too). The
+ *    descriptor's `listLiveModels` lists what that key can use.
+ *  - `cli`: Anthropic only, and only when no key is active but dev mode /
+ *    `EDITOR_USE_CLAUDE_SUBSCRIPTION` is on. The bundled `claude` binary is
+ *    asked, through the Agent SDK's `supportedModels()` control request,
+ *    what it offers on the account it is signed into. That is the only
+ *    source that can see a subscription, and only Anthropic has one.
+ *  - `static`: neither, the descriptor has no live source, or a live source
+ *    failed or timed out. The provider's own hand-kept static catalog.
  *
  * A live list is merged over the static one (`live-model-catalog.ts`), so a
- * model Anthropic ships appears here without a code change, and a model the
+ * model a vendor ships appears here without a code change, and a model the
  * static file still names but the account cannot use does not.
  *
- * Cached in-process, keyed on the mode and the key, for ten minutes on
+ * A provider whose chat runtime cannot dispatch today is filtered out
+ * entirely before any of this runs (`chatRuntimeServable`). It reads the
+ * environment only, same as the dispatch half in `chat-runtime-dispatch.ts`
+ * (see the comment there for why) — see `chatRuntimeServable`'s own doc
+ * comment for why that is the client half of a both-ends gate.
+ *
+ * **Only a credentialed provider is served** (codex fix, 2026-09-04). A
+ * provider whose chat runtime CAN dispatch but has no key and no
+ * subscription opt-in used to still get a static-catalog entry, so the
+ * picker offered a provider the chat gate then refused every turn. Now a
+ * provider with no credential is left out of `catalogs[]` entirely. When
+ * NOTHING is credentialed, the picker still needs a default to show on
+ * first run, so the precedence default's own static catalog is served
+ * alone — the chat gate still refuses the turn, same as it always has.
+ *
+ * Cached in-process, keyed on every served provider's credential state
+ * (INCLUDING its base URL — an OpenAI-compatible gateway swap is a
+ * different provider identity even with the same key), for ten minutes on
  * success and one minute after a fall-back, so a transient failure does not
- * pin the static list for the rest of the session. One fetch at a time: the
- * picker mounts and the chat handler validates against the same list, and
- * both may ask before the first answer lands. Both consumers read through
- * `modelCatalogResolver`, which is what keeps a live-only model that the
- * picker offered from being refused by the chat handler a second later.
+ * pin the static list for the rest of the session. A partial fall-back
+ * (one provider live, another static) is cached at the shorter, failure TTL
+ * too — `source` reports the WEAKEST source among served providers, so one
+ * struggling vendor does not buy the whole response the long TTL. One fetch
+ * at a time: the picker mounts and the chat handler validates against the
+ * same list, and both may ask before the first answer lands. Both
+ * consumers read through `modelCatalogResolver`, which is what keeps a
+ * live-only model that the picker offered from being refused by the chat
+ * handler a second later.
  */
 
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
-import Anthropic from "@anthropic-ai/sdk"
-import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
-import { EFFORT_LEVELS, type ProviderModelCatalog } from "../../../src/editor/core/model-catalog.js"
+// Type-only: erased at compile time, so this alone does not pull the SDK
+// onto the boot graph. `query` itself is a DYNAMIC import inside
+// `listViaClaudeCli`, below, for the same reason — see that function's doc
+// comment.
+import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
+import type { ProviderModelCatalog } from "../../../src/editor/core/model-catalog.js"
+import { EFFORT_LEVELS, withDefaultEffort } from "../../../src/editor/core/model-catalog.js"
 import { ANTHROPIC_MODEL_CATALOG } from "../../../src/editor/llm-providers/anthropic-model-catalog.js"
-import {
-  fromAgentSdk,
-  fromModelsApi,
-  mergeLiveModels,
-  type LiveModel,
-} from "../../../src/editor/llm-providers/live-model-catalog.js"
-import { isClaudeSubscriptionOptIn } from "../../../src/editor/llm-providers/registry.js"
+import { listAnthropicLiveModels, fromAgentSdk } from "../../../src/editor/llm-providers/anthropic-live-models.js"
+import { mergeLiveModels, type LiveModel } from "../../../src/editor/llm-providers/live-model-catalog.js"
+import { isClaudeSubscriptionOptIn } from "../../../src/editor/llm-providers/claude-subscription.js"
 import {
   assertClaudeRuntimeReady,
   resolveClaudeExecutablePath,
 } from "../../../src/editor/llm-providers/resolve-claude-executable.js"
-import { supportsAdaptiveThinking } from "../../../src/editor/agent-chat-sdk/run-chat-turn-sdk.js"
+// From the SDK-FREE sibling, not `run-chat-turn-sdk.js` (which imports the
+// Agent SDK at module scope): this module is on the boot graph, so pulling
+// that in here would put the SDK on every boot, OpenAI-only included (M1,
+// final-review-report.md).
+import { supportsAnthropicAdaptiveThinking } from "../../../src/editor/llm-providers/anthropic-adaptive-thinking.js"
+import {
+  DEFAULT_PROVIDER_PRECEDENCE,
+  PROVIDER_DESCRIPTORS,
+  credentialsFromEnv,
+  getDescriptor,
+  isCredentialedFromEnv,
+} from "../../../src/editor/llm-providers/provider-registry.js"
+import type { ProviderDescriptor } from "../../../src/editor/llm-providers/provider-descriptor.js"
+import { getRateCard, UNKNOWN_MODEL_RATE } from "../../../src/editor/llm-providers/rate-cards.js"
+import { isNeutralChatEnabled } from "./dormant-surfaces.js"
 
+/**
+ * `source` describes the WEAKEST live source among the providers this
+ * resolution served, or "static" when any of them fell back to it. It is
+ * informational (the catalog response carries it for diagnostics); it is
+ * not how any consumer decides which provider to use —
+ * `resolveDefaultProviderId` is. The weakest-not-strongest choice is what
+ * routes a partial fallback (one provider live, another static) into the
+ * shorter failure TTL below, rather than the longer success one.
+ */
 export type ModelCatalogSource = "api" | "cli" | "static"
 
 export interface ResolvedModelCatalogs {
@@ -53,15 +103,43 @@ export interface ResolvedModelCatalogs {
   source: ModelCatalogSource
 }
 
+/**
+ * The pre-resolution fallback: Anthropic's static catalog alone. Used as
+ * `buildModelCatalogResponse`'s default parameter, for a caller that has not
+ * awaited the resolver yet.
+ */
 export const STATIC_MODEL_CATALOGS: ResolvedModelCatalogs = {
-  catalogs: [ANTHROPIC_MODEL_CATALOG],
+  catalogs: [
+    withDefaultEffort(ANTHROPIC_MODEL_CATALOG, getDescriptor("anthropic")?.effort.defaultLevel),
+  ],
   source: "static",
 }
+
+/** One provider's live-source call, keyed form: the shape every descriptor's `listLiveModels` already takes. */
+export type ListLive = (input: {
+  apiKey: string
+  baseUrl?: string
+  signal: AbortSignal
+}) => Promise<LiveModel[]>
 
 export interface ModelCatalogResolverDeps {
   /** Read at call time, so a key saved mid-session is seen. Default `process.env`. */
   env?: () => NodeJS.ProcessEnv
-  listViaApi?: (apiKey: string, signal: AbortSignal) => Promise<LiveModel[]>
+  /**
+   * Either shape works.
+   *
+   * A bare function is the legacy shape: it applies to Anthropic ONLY,
+   * called with the `(apiKey, signal)` two-arg form the existing test suite
+   * pins, and defaults to the Anthropic descriptor's own `listLiveModels`.
+   *
+   * A record keyed by provider id lets a test (or a future caller) inject
+   * EVERY provider's live source, so no unit test has to fall through to a
+   * descriptor's real `listLiveModels` and reach the network. A descriptor
+   * with no entry in the record, and no legacy bare-function override
+   * naming it, falls through to its own `listLiveModels` — production's
+   * behaviour, unchanged.
+   */
+  listViaApi?: ((apiKey: string, signal: AbortSignal) => Promise<LiveModel[]>) | Record<string, ListLive>
   listViaCli?: (signal: AbortSignal) => Promise<LiveModel[]>
   now?: () => number
   /** How long a live answer is trusted. */
@@ -71,6 +149,12 @@ export interface ModelCatalogResolverDeps {
   /** Ceiling on one live attempt. Covers a process spawn on the `cli` path. */
   timeoutMs?: number
   log?: (message: string) => void
+  /**
+   * Which descriptors this resolution may serve at all. Defaults to
+   * `chatRuntimeServable`. Tests override this to reach a second provider
+   * without needing the neutral-chat flag on.
+   */
+  includeDescriptor?: (d: ProviderDescriptor) => boolean
 }
 
 export interface ModelCatalogResolver {
@@ -79,26 +163,43 @@ export interface ModelCatalogResolver {
   invalidate(): void
 }
 
-/** A brand-new model nobody has described yet: effort if its family thinks adaptively. */
-function effortFallback(id: string) {
-  return supportsAdaptiveThinking(id) ? [...EFFORT_LEVELS] : null
+/**
+ * A descriptor's own static catalog, stamped with its default effort level.
+ *
+ * The static path is one of the two places a served catalog is assembled;
+ * the live-merge path (`mergeLiveModels`, given `defaultEffort` below) is the
+ * other. Both have to stamp it, or a model reaches the picker with no
+ * starting stop for its effort slider depending only on whether the vendor's
+ * Models API happened to answer.
+ */
+function servedStaticCatalog(descriptor: ProviderDescriptor): ProviderModelCatalog {
+  return withDefaultEffort(descriptor.staticCatalog, descriptor.effort.defaultLevel)
 }
 
-type Mode = { kind: "api"; key: string; apiKey: string } | { kind: "cli"; key: string } | { kind: "none" }
-
-function modeFor(env: NodeJS.ProcessEnv): Mode {
-  const apiKey = env.ANTHROPIC_API_KEY?.trim()
-  if (apiKey) return { kind: "api", key: `api:${apiKey}`, apiKey }
-  if (isClaudeSubscriptionOptIn(env)) return { kind: "cli", key: "cli" }
-  return { kind: "none" }
+/** The Anthropic-only effort fallback, matched by provider id. */
+function effortFallbackFor(descriptor: ProviderDescriptor) {
+  if (descriptor.id === ANTHROPIC_MODEL_CATALOG.providerId) {
+    return (id: string) => (supportsAnthropicAdaptiveThinking(id) ? [...EFFORT_LEVELS] : null)
+  }
+  return () => descriptor.effort.levels
 }
 
-/** Live list from the Models API, on the key the editor is using. */
-export async function listViaModelsApi(apiKey: string, signal: AbortSignal): Promise<LiveModel[]> {
-  const client = new Anthropic({ apiKey, maxRetries: 0 })
-  const models = []
-  for await (const m of client.models.list({ limit: 100 }, { signal })) models.push(m)
-  return fromModelsApi(models)
+/**
+ * Which providers this resolution may serve at all.
+ *
+ * A provider whose chat runtime cannot dispatch yet must not appear in the
+ * picker, or the picker offers a model the chat handler refuses a second
+ * later. That is the client half of a both-ends gate whose server half is
+ * `resolveChatRuntime`. Env-only: the resolver is a process-wide singleton
+ * created once at import time, with no project config in scope, so there is
+ * no `.desde/config.json` key for this gate at all — see
+ * `isNeutralChatEnabled`'s own doc comment in `dormant-surfaces.ts` for why.
+ * The dispatch half reads the identical environment variable independently,
+ * which is what keeps the two halves from drifting.
+ */
+export function chatRuntimeServable(descriptor: ProviderDescriptor): boolean {
+  if (descriptor.chatRuntime === "claude-agent-sdk") return true
+  return isNeutralChatEnabled()
 }
 
 /**
@@ -106,10 +207,19 @@ export async function listViaModelsApi(apiKey: string, signal: AbortSignal): Pro
  * that never yields, the models control request is answered, and the process
  * is closed: no turn runs, no tokens are spent. The spawn is the cost, which
  * is why this is cached and bounded by the resolver's timeout.
+ *
+ * `query` is a DYNAMIC import (M1, final-review-report.md). This module sits
+ * on the boot graph (`core.ts` -> `http-server.ts` -> `model-catalog-handler`
+ * -> here), and this function is the ONLY thing in it that needs the Agent
+ * SDK — Anthropic's `cli` live-model source, reached only when no API key is
+ * active and dev mode / subscription opt-in is on. A static top-level import
+ * would put the SDK on every boot, including an OpenAI-only one, which is
+ * exactly the laziness `resolveChatRuntime`'s loaders exist to preserve.
  */
 export async function listViaClaudeCli(signal: AbortSignal): Promise<LiveModel[]> {
   const claudeExecutablePath = resolveClaudeExecutablePath()
   assertClaudeRuntimeReady(claudeExecutablePath)
+  const { query } = await import("@anthropic-ai/claude-agent-sdk")
   const idle = (async function* (): AsyncGenerator<SDKUserMessage, void> {
     await new Promise<void>((resolve) => {
       if (signal.aborted) resolve()
@@ -140,36 +250,154 @@ export async function listViaClaudeCli(signal: AbortSignal): Promise<LiveModel[]
   }
 }
 
+function defaultListViaApi(apiKey: string, signal: AbortSignal): Promise<LiveModel[]> {
+  return listAnthropicLiveModels({ apiKey, signal })
+}
+
 export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}): ModelCatalogResolver {
   const env = deps.env ?? (() => process.env)
-  const listViaApi = deps.listViaApi ?? listViaModelsApi
+  const listViaApi = deps.listViaApi ?? defaultListViaApi
   const listViaCli = deps.listViaCli ?? listViaClaudeCli
   const now = deps.now ?? Date.now
   const ttlMs = deps.ttlMs ?? 10 * 60_000
   const failureTtlMs = deps.failureTtlMs ?? 60_000
   const timeoutMs = deps.timeoutMs ?? 8_000
   const log = deps.log ?? ((message: string) => console.error(`[model-catalog] ${message}`))
+  const includeDescriptor = deps.includeDescriptor ?? chatRuntimeServable
 
   let cached: { key: string; value: ResolvedModelCatalogs; at: number } | null = null
   let inFlight: { key: string; promise: Promise<ResolvedModelCatalogs> } | null = null
+  /** (provider, model) pairs already warned about — logged once per resolver, not once per `get()`. */
+  const loggedUnknownRateCards = new Set<string>()
 
-  async function fetchLive(mode: Exclude<Mode, { kind: "none" }>): Promise<ResolvedModelCatalogs> {
+  function servableDescriptors(): ProviderDescriptor[] {
+    return PROVIDER_DESCRIPTORS.filter(includeDescriptor)
+  }
+
+  /**
+   * Cache key over EVERY served provider's credential state, not Anthropic's
+   * alone — and over the BASE URL too, since an OpenAI-compatible gateway
+   * swap is a different provider identity even under the same key. The key
+   * itself is hashed rather than stored raw, so nothing that logs or
+   * inspects this cache's key can recover a credential from it.
+   */
+  function cacheKeyFor(currentEnv: NodeJS.ProcessEnv, descriptors: ProviderDescriptor[]): string {
+    return descriptors
+      .map((d) => {
+        const creds = credentialsFromEnv(d, currentEnv)
+        const keyHash = creds.apiKey ? createHash("sha256").update(creds.apiKey).digest("hex") : ""
+        const sub =
+          d.credentials.hasSubscriptionRuntime === true && isClaudeSubscriptionOptIn(currentEnv)
+            ? "sub"
+            : ""
+        return `${d.id}:${keyHash}:${creds.baseUrl ?? ""}:${sub}`
+      })
+      .join("|")
+  }
+
+  /** Resolve one descriptor's live source, honouring either `listViaApi` shape (see its doc comment). */
+  function liveSourceFor(descriptor: ProviderDescriptor): ListLive | undefined {
+    if (typeof listViaApi === "function") {
+      if (descriptor.id !== ANTHROPIC_MODEL_CATALOG.providerId) return descriptor.listLiveModels
+      return ({ apiKey, signal }) => listViaApi(apiKey, signal)
+    }
+    return listViaApi[descriptor.id] ?? descriptor.listLiveModels
+  }
+
+  function logUnknownRateCardsOnce(descriptor: ProviderDescriptor, catalog: ProviderModelCatalog): void {
+    for (const model of catalog.models) {
+      if (getRateCard(model.id) !== UNKNOWN_MODEL_RATE) continue
+      const key = `${descriptor.id}/${model.id}`
+      if (loggedUnknownRateCards.has(key)) continue
+      loggedUnknownRateCards.add(key)
+      log(`no rate card for ${descriptor.id}/${model.id}; pricing at the conservative fallback`)
+    }
+  }
+
+  async function catalogFor(
+    descriptor: ProviderDescriptor,
+    currentEnv: NodeJS.ProcessEnv,
+    signal: AbortSignal,
+  ): Promise<{ catalog: ProviderModelCatalog; source: ModelCatalogSource }> {
+    const creds = credentialsFromEnv(descriptor, currentEnv)
+    const apiKey = creds.apiKey
+    const useCli =
+      descriptor.credentials.hasSubscriptionRuntime === true &&
+      !apiKey &&
+      isClaudeSubscriptionOptIn(currentEnv)
+    if (!apiKey && !useCli) return { catalog: servedStaticCatalog(descriptor), source: "static" }
+    try {
+      const source = liveSourceFor(descriptor)
+      const live = useCli
+        ? await listViaCli(signal)
+        : source
+          ? await source({ apiKey: apiKey!, baseUrl: creds.baseUrl, signal })
+          : []
+      const merged = mergeLiveModels(descriptor.staticCatalog, live, {
+        effortFallback: effortFallbackFor(descriptor),
+        defaultAlias: descriptor.defaultAlias,
+        defaultEffort: descriptor.effort.defaultLevel,
+      })
+      if (!merged) {
+        log(`the ${descriptor.id} source listed no models; using the built-in list`)
+        return { catalog: servedStaticCatalog(descriptor), source: "static" }
+      }
+      return { catalog: merged, source: useCli ? "cli" : "api" }
+    } catch (err) {
+      log(
+        `could not list ${descriptor.id} models: ${(err as Error).message}; using the built-in list`,
+      )
+      return { catalog: servedStaticCatalog(descriptor), source: "static" }
+    }
+  }
+
+  async function resolveAll(currentEnv: NodeJS.ProcessEnv): Promise<ResolvedModelCatalogs> {
+    const descriptors = servableDescriptors()
+    const credentialed = descriptors.filter((d) => isCredentialedFromEnv(d, currentEnv))
+    if (credentialed.length === 0) {
+      // Nobody is credentialed: the picker still needs a default model name
+      // to show on first run, so the precedence default's own static
+      // catalog is served alone. The chat gate refuses the turn exactly as
+      // it always has — this is display-only.
+      //
+      // The precedence id itself may not be SERVABLE (`descriptors` is
+      // already filtered by `chatRuntimeServable`, e.g. a neutral-chat-only
+      // provider with the flag off) — pick the first precedence id that IS
+      // in `descriptors`, falling back to whichever descriptor is servable
+      // at all, rather than unconditionally trusting
+      // `DEFAULT_PROVIDER_PRECEDENCE[0]`.
+      const precedenceId = DEFAULT_PROVIDER_PRECEDENCE.find((id) =>
+        descriptors.some((d) => d.id === id),
+      )
+      const fallback = precedenceId ? getDescriptor(precedenceId) : descriptors[0]
+      if (fallback) logUnknownRateCardsOnce(fallback, fallback.staticCatalog)
+      return { catalogs: fallback ? [servedStaticCatalog(fallback)] : [], source: "static" }
+    }
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      const live =
-        mode.kind === "api"
-          ? await listViaApi(mode.apiKey, controller.signal)
-          : await listViaCli(controller.signal)
-      const merged = mergeLiveModels(ANTHROPIC_MODEL_CATALOG, live, { effortFallback })
-      if (!merged) {
-        log(`the ${mode.kind} source listed no models; using the built-in list`)
-        return STATIC_MODEL_CATALOGS
+      const results = await Promise.all(
+        credentialed.map((d) => catalogFor(d, currentEnv, controller.signal)),
+      )
+      const catalogs = results.map((r) => r.catalog)
+      // Checked over the FINAL served catalogs, not just a live-source
+      // success inside `catalogFor` — a provider that fell back to its
+      // static catalog (no key, live source failed, or nothing credentialed
+      // at all) still serves models, and those deserve the same rate-card
+      // check a live-sourced model gets.
+      for (let i = 0; i < credentialed.length; i++) {
+        logUnknownRateCardsOnce(credentialed[i], catalogs[i])
       }
-      return { catalogs: [merged], source: mode.kind }
-    } catch (err) {
-      log(`could not list models via ${mode.kind}: ${(err as Error).message}; using the built-in list`)
-      return STATIC_MODEL_CATALOGS
+      // The WEAKEST source among served providers, not the strongest: a
+      // partial fall-back (one provider live, another static) has to read as
+      // "static" so the cache below holds it for the shorter failure TTL,
+      // not the full success one.
+      const source: ModelCatalogSource = results.some((r) => r.source === "static")
+        ? "static"
+        : results.some((r) => r.source === "cli")
+          ? "cli"
+          : "api"
+      return { catalogs, source }
     } finally {
       clearTimeout(timer)
     }
@@ -177,19 +405,20 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
 
   return {
     async get() {
-      const mode = modeFor(env())
-      if (mode.kind === "none") return STATIC_MODEL_CATALOGS
+      const currentEnv = env()
+      const descriptors = servableDescriptors()
+      const key = cacheKeyFor(currentEnv, descriptors)
       const at = now()
-      if (cached && cached.key === mode.key) {
+      if (cached && cached.key === key) {
         const ttl = cached.value.source === "static" ? failureTtlMs : ttlMs
         if (at - cached.at < ttl) return cached.value
       }
-      if (inFlight && inFlight.key === mode.key) return inFlight.promise
-      const promise = fetchLive(mode).then((value) => {
-        cached = { key: mode.key, value, at: now() }
+      if (inFlight && inFlight.key === key) return inFlight.promise
+      const promise = resolveAll(currentEnv).then((value) => {
+        cached = { key, value, at: now() }
         return value
       })
-      inFlight = { key: mode.key, promise }
+      inFlight = { key, promise }
       void promise.finally(() => {
         if (inFlight?.promise === promise) inFlight = null
       })
@@ -201,5 +430,58 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
   }
 }
 
+let inner: ModelCatalogResolver = createModelCatalogResolver()
+
 /** The process-wide resolver every consumer reads through. */
-export const modelCatalogResolver: ModelCatalogResolver = createModelCatalogResolver()
+export const modelCatalogResolver: ModelCatalogResolver = {
+  get: () => inner.get(),
+  invalidate: () => inner.invalidate(),
+}
+
+/**
+ * Test-only: swap the live sources behind the process-wide resolver so a
+ * suite that boots the real HTTP server never reaches a vendor's Models API.
+ * `null` restores the defaults. Always invalidates the cache (a fresh
+ * resolver has none, but this also drops any answer cached under the old
+ * sources).
+ */
+export function setModelCatalogLiveSourcesForTests(
+  deps: {
+    listViaApi?: ModelCatalogResolverDeps["listViaApi"]
+    listViaCli?: ModelCatalogResolverDeps["listViaCli"]
+  } | null,
+): void {
+  inner = createModelCatalogResolver(deps ?? {})
+}
+
+/**
+ * The default model for `providerId` as the PICKER computes it: the merged
+ * live catalog's default, read through this same cached resolver.
+ *
+ * It exists because the two chat dispatch sites used to fall back to the
+ * STATIC catalog's default instead, and the two agree only while the bare
+ * static default id is in the account's live list. On an account without it
+ * — tiered access is routine — the picker showed a model that works while
+ * the very first turn requested one the account cannot call, and the user's
+ * first message failed with a 404. It also defeated the `defaultAlias` rule:
+ * with the bare default id retired and the vendor still serving its named
+ * alias, the picker followed the alias and the dispatch did not.
+ *
+ * The resolver only serves CREDENTIALED providers, so a provider with no key
+ * has no merged catalog here at all. That falls back to the descriptor's
+ * static default rather than to `undefined`: it is the old behaviour, and it
+ * is the right floor — this function should only ever improve on the static
+ * answer, never withdraw it.
+ *
+ * `undefined` only when the provider is unknown or its catalog names no
+ * default. The runtime then picks, which is what it did before this existed.
+ */
+export async function resolvedDefaultModelFor(
+  providerId: string,
+): Promise<string | undefined> {
+  const { catalogs } = await modelCatalogResolver.get()
+  const catalog =
+    catalogs.find((c) => c.providerId === providerId) ??
+    getDescriptor(providerId)?.staticCatalog
+  return catalog?.models.find((m) => m.isDefault)?.id
+}

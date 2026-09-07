@@ -30,6 +30,7 @@ const CAPABILITY_ICON: Record<string, typeof Figma> = {
   "web-search": Globe,
 }
 import { cn } from "@/lib/utils"
+import { EDITOR_BLOCK_SECRET_READS } from "@/lib/editor-feature-flags"
 import { useEditorCapabilities, type CapabilityRow } from "@/hooks/useEditorCapabilities"
 import { ExtensionKeyDialog } from "./extension-key-dialog"
 
@@ -164,6 +165,32 @@ export function CapabilitiesPanel({
       )}
 
       {/*
+        Reported, never offered. Turning this on stops the agent reading
+        credentials, which is a decision to make deliberately in a config file
+        rather than from a button in a panel. Rendered only when it is ON,
+        because that is the state the project chose and the one a reader would
+        not otherwise guess; a row saying "off" every time would be noise.
+        Outside the list branches above so it still shows while the catalog is
+        loading or empty.
+      */}
+      {EDITOR_BLOCK_SECRET_READS ? (
+        <section className="mt-2 flex flex-col gap-1.5 border-t pt-3">
+          <div className="flex items-center gap-1.5">
+            <Eyebrow size="sm">Secret files</Eyebrow>
+            <Badge variant="secondary">Blocked</Badge>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            The agent cannot read files that hold credentials in this
+            prototype, such as <code className="text-code">.env</code> and
+            private keys. Set{" "}
+            <code className="text-code">editor.blockSecretReads</code> to false
+            in <code className="text-code">.desde/config.json</code> to let it
+            read them again.
+          </p>
+        </section>
+      ) : null}
+
+      {/*
         Mounted once, outside the list, keyed by id. Rendering one per row
         would put a Dialog inside every card and make the panel's DOM depend
         on how many extensions happen to exist.
@@ -228,6 +255,19 @@ function CapabilityRowItem({
           ) : null}
         </div>
         <span className="text-sm text-muted-foreground">{capability.summary}</span>
+
+        {/*
+          A standing fact about the capability, not a reading of whichever
+          model is picked right now. The model changes per message and this
+          panel never sees that choice, so a row cannot honestly say "on for
+          this turn". Without the line, a row read "Active" while a turn on an
+          OpenAI model had no such tools at all.
+        */}
+        {capability.claudeModelsOnly ? (
+          <span className="mt-1 text-sm text-muted-foreground">
+            Only available with Claude models.
+          </span>
+        ) : null}
 
         {/*
           A button, not instructions. This block used to read "Enabled, but

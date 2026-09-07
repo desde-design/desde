@@ -4,13 +4,22 @@ import {
   isCodeViewEnabled,
   isCanvasEnabled,
   isNotesEnabled,
+  isNeutralChatEnabled,
+  isSecretReadsBlocked,
+  chatRuntimeOverride,
 } from "../dormant-surfaces.js"
 
 // Every gate's env var, because this list does double duty: `setEnv` is typed
 // from it, and the save/restore around each test reads it. A surface added to
 // GATES but not here fails typecheck rather than silently leaking its variable
 // into the next case.
-const ENV_KEYS = ["EDITOR_CODE_VIEW", "EDITOR_NOTES", "EDITOR_CANVAS"] as const
+const ENV_KEYS = [
+  "EDITOR_CODE_VIEW",
+  "EDITOR_NOTES",
+  "EDITOR_CANVAS",
+  "EDITOR_BLOCK_SECRET_READS",
+  "EDITOR_NEUTRAL_CHAT",
+] as const
 const saved = new Map<string, string | undefined>()
 
 afterEach(() => {
@@ -82,6 +91,63 @@ describe.each(GATES)("$name gate", ({ name, read, env }) => {
   })
 })
 
+/**
+ * `blockSecretReads` is the one gate in the module with NO env var, and FX17
+ * item 6 is why. It is not a dormant surface, it is a credential-read
+ * permission, and it was asked for per project. `EDITOR_BLOCK_SECRET_READS=1`
+ * in a shell profile would be inherited by every per-project CLI child the
+ * launcher and the desktop shell spawn, so one project's answer would become
+ * every project's.
+ *
+ * FX18 (2026-09-05) flipped which way it points. Blocking is now what a
+ * project OPTS IN to, so the falsy table below asserts "not blocked" where it
+ * used to assert "not allowed". The `=== true` discipline is unchanged: an
+ * absent key, a malformed value and an explicit `false` are one state.
+ */
+describe("blockSecretReads gate", () => {
+  it("does not block with no editor block, an omitted key, or an explicit false", () => {
+    expect(isSecretReadsBlocked({})).toBe(false)
+    expect(isSecretReadsBlocked({ editor: {} })).toBe(false)
+    expect(isSecretReadsBlocked({ editor: { blockSecretReads: false } })).toBe(false)
+  })
+
+  it("does not block on a truthy value that is not true", () => {
+    expect(isSecretReadsBlocked({ editor: { blockSecretReads: 1 } } as never)).toBe(false)
+    expect(isSecretReadsBlocked({ editor: { blockSecretReads: "true" } } as never)).toBe(false)
+  })
+
+  it("blocks for this project on an explicit true", () => {
+    expect(isSecretReadsBlocked({ editor: { blockSecretReads: true } })).toBe(true)
+  })
+
+  it("is NOT turned on by an environment variable", () => {
+    // The whole point. A process-wide variable cannot express a per-project
+    // permission, and it propagates to every CLI child the launcher and the
+    // desktop shell spawn.
+    setEnv("EDITOR_BLOCK_SECRET_READS", "1")
+    expect(isSecretReadsBlocked({})).toBe(false)
+    expect(isSecretReadsBlocked({ editor: {} })).toBe(false)
+    expect(isSecretReadsBlocked({ editor: { blockSecretReads: false } })).toBe(false)
+  })
+
+  it("does not read any other surface's env var either", () => {
+    setEnv("EDITOR_CANVAS", "1")
+    setEnv("EDITOR_NOTES", "1")
+    expect(isSecretReadsBlocked({})).toBe(false)
+  })
+
+  it("ignores the old key name, which shipped only on an unmerged branch", () => {
+    // FX18 renamed `editor.secretReads` (allow) to `editor.blockSecretReads`
+    // (block). There is no compatibility alias, deliberately: the old key
+    // shipped only on this unmerged branch, and reading a renamed permission
+    // key under its old spelling is how a permission ends up meaning
+    // something nobody wrote. An unknown `editor.*` key is left untouched by
+    // `project-config.ts` (it preserves keys it does not know), so a stale
+    // `secretReads` simply decides nothing.
+    expect(isSecretReadsBlocked({ editor: { secretReads: true } } as never)).toBe(false)
+  })
+})
+
 describe("the two gates are independent", () => {
   it("does not leak config across surfaces", () => {
     expect(isCodeViewEnabled({ editor: { notes: true } })).toBe(false)
@@ -92,6 +158,68 @@ describe("the two gates are independent", () => {
     setEnv("EDITOR_NOTES", "1")
     expect(isNotesEnabled({})).toBe(true)
     expect(isCodeViewEnabled({})).toBe(false)
+  })
+})
+
+describe("chatRuntimeOverride", () => {
+  it("is undefined when the env var is unset", () => {
+    expect(chatRuntimeOverride({})).toBeUndefined()
+  })
+
+  it("returns 'neutral' only for the exact value 'neutral'", () => {
+    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "neutral" })).toBe("neutral")
+    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "1" })).toBeUndefined()
+    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "true" })).toBeUndefined()
+  })
+
+  it("is a separate switch from isNeutralChatEnabled", () => {
+    // Forcing the override does not depend on the lane's own on/off switch,
+    // and the lane's switch does not itself force a provider onto it.
+    expect(isNeutralChatEnabled()).toBe(true)
+    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "neutral" })).toBe("neutral")
+  })
+})
+
+describe("isNeutralChatEnabled", () => {
+  it("is ON with no configuration at all", () => {
+    // The inversion, and the one line that changes what users get. Every other
+    // surface in this module is opt-IN because it is unfinished. This one is
+    // finished, so it is opt-OUT: the absent state means enabled.
+    expect(isNeutralChatEnabled()).toBe(true)
+  })
+
+  // No "is off when the project config says so" case: this gate takes no
+  // `DormantSurfaceConfig` at all and has no config-key off-switch. See the
+  // function's own doc comment for why (the model catalog resolver is a
+  // process-wide singleton with no project config in scope, so a config key
+  // could only ever reach the dispatch half). The off-switch this module
+  // must prove is the env var, and proving it through this direct call is
+  // exactly what let the dead config branch go unnoticed before — see
+  // `chatRuntimeServable`'s and `resolveChatRuntime`'s own test suites for
+  // the off-switch proven through the real callers instead.
+
+  it("is off when EDITOR_NEUTRAL_CHAT is exactly 0", () => {
+    const previous = process.env.EDITOR_NEUTRAL_CHAT
+    process.env.EDITOR_NEUTRAL_CHAT = "0"
+    try {
+      expect(isNeutralChatEnabled()).toBe(false)
+    } finally {
+      if (previous === undefined) delete process.env.EDITOR_NEUTRAL_CHAT
+      else process.env.EDITOR_NEUTRAL_CHAT = previous
+    }
+  })
+
+  it("stays on for any other value of the variable", () => {
+    const previous = process.env.EDITOR_NEUTRAL_CHAT
+    process.env.EDITOR_NEUTRAL_CHAT = "yes"
+    try {
+      // Only an exact "0" disables, mirroring the exact-"1" rule the opt-in
+      // surfaces use. A typo must not silently turn chat off for a provider.
+      expect(isNeutralChatEnabled()).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.EDITOR_NEUTRAL_CHAT
+      else process.env.EDITOR_NEUTRAL_CHAT = previous
+    }
   })
 })
 

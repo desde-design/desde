@@ -23,6 +23,14 @@
 
 import { randomUUID } from "node:crypto"
 import { assertChatCredentials } from "../../../src/editor/llm-providers/assert-chat-credentials.js"
+import { getProvider } from "../../../src/editor/llm-providers/registry.js"
+import {
+  getDescriptor,
+  isCredentialedFromEnv,
+  resolveDefaultProviderId,
+} from "../../../src/editor/llm-providers/provider-registry.js"
+import { resolveLlmConfig } from "./llm-config.js"
+import { resolveChatRuntime, resolveChatRuntimeKind } from "./chat-runtime-dispatch.js"
 import type { IncomingMessage, ServerResponse } from "node:http"
 
 import { projectIdForRepoRoot, withSessionStatus } from "../../../src/editor/agent-chat/session-store.js"
@@ -46,9 +54,10 @@ import type { ProjectKnowledgeConfig } from "../../../src/editor/edit-service/lo
 import type { GroundingService } from "../../../src/editor/core"
 import {
   validateSessionModelConfig,
+  type EffortLevel,
   type SessionModelConfig,
 } from "../../../src/editor/core/model-catalog.js"
-import { modelCatalogResolver } from "./model-catalog-source.js"
+import { modelCatalogResolver, resolvedDefaultModelFor } from "./model-catalog-source.js"
 import { resolveCostCeilingUsd } from "../../../src/editor/core/chat-cost-ceiling.js"
 import { acquireFileEditLock, acquireTreeGateShared } from "./session-lock.js"
 import { openSseStream } from "./sse.js"
@@ -121,6 +130,15 @@ export interface ChatHandlerLoaders {
    * view+drive ops fall back to the bridge → user's live iframe.
    */
   loadReviewSurface?: () => Promise<typeof import("../review-surface")>
+  /**
+   * The neutral chat runtime. Was optional while `agent-chat-neutral/` did not
+   * exist; required now, because an optional loader means an `if` that decides
+   * dispatch, and a dispatch decision that lives in two places is the drift
+   * this seam exists to prevent.
+   */
+  loadRunChatTurnNeutral: () => Promise<{
+    runChatTurnNeutral: import("./chat-runtime-dispatch.js").RunChatTurn
+  }>
 }
 
 export const defaultChatLoaders: ChatHandlerLoaders = {
@@ -129,6 +147,8 @@ export const defaultChatLoaders: ChatHandlerLoaders = {
     import("../../../src/editor/edit-service/load-project-knowledge"),
   loadRunChatTurnSdk: () =>
     import("../../../src/editor/agent-chat-sdk/run-chat-turn-sdk"),
+  loadRunChatTurnNeutral: () =>
+    import("../../../src/editor/agent-chat-neutral/run-chat-turn-neutral"),
   loadVerificationAdapter: () =>
     import("../../../src/editor/adapters/node-npm/verification-adapter"),
   loadPackageManagerAdapter: () =>
@@ -211,8 +231,76 @@ interface LiveTurn {
    * position there is.
    */
   steers: ChatSteeredMessage[]
+  /**
+   * True when this turn's runtime emits `steered` itself, so the `/steer`
+   * route must NOT emit one.
+   *
+   * Exactly one `steered` frame must reach the client per steer: the client
+   * draws the bubble on it AND cuts the transcript there, so a second frame
+   * duplicates the bubble and cuts twice. Which side emits is not a style
+   * choice — it has to be the side that knows where the steer landed. The SDK
+   * runtime emits none, and accept time is the only position it has, so the
+   * route emits for that lane. The neutral runtime appends the message itself
+   * at a step boundary and stamps `afterAssistantBlocks` there, so it emits
+   * for its own lane and the route stands down; emitting from the route would
+   * cut the live transcript at accept time while hydration replays the
+   * delivery position, and the two would disagree.
+   *
+   * Set when this entry is CREATED, from the provider the request names (or
+   * the default when it names none), so the very first steer the route accepts
+   * already gets the right answer. It used to be set after the runtime was
+   * resolved, many awaits later, and a steer accepted in that window drew two
+   * bubbles on the neutral lane: one from the route, one from the runtime at
+   * delivery (2026-09-04 adversarial review, P2-2).
+   */
+  runtimeEmitsSteered: boolean
+  /**
+   * False until the turn's provider has been resolved with its FULL
+   * precedence — request config, then the session's persisted config, then the
+   * default. Only the first and third are in hand when this entry is created,
+   * so a session whose persisted model sits on the other lane can still flip
+   * `runtimeEmitsSteered` once, right after the session loads.
+   */
+  laneConfirmed: boolean
+  /**
+   * The `steered` frames the route BUILT while `laneConfirmed` was false,
+   * whether or not it emitted them.
+   *
+   * Kept so the one-frame-per-steer invariant survives that flip. If the lane
+   * turns out to be neutral the route already announced these and the runtime
+   * will announce them again, so the runtime's duplicates are dropped; if it
+   * turns out to be the SDK lane the route stood down for a runtime that emits
+   * nothing, so these are sent then. Emptied at confirmation.
+   */
+  setupSteerFrames: ChatStreamEvent[]
 }
 const liveTurns = new Map<string, LiveTurn>()
+
+/**
+ * The provider a turn runs on when nothing names one.
+ *
+ * Both inputs are available at live-turn registration (before the session
+ * loads) and again once the effective model config is known, so the two call
+ * sites can never disagree about the default, only about what overrides it.
+ *
+ * `configuredDefault` is the project's `llm.defaultProvider`, and passing it
+ * is what makes the turn run on the provider the picker chip is showing.
+ * Omitting it was a billing bug, not a cosmetic one: with both providers
+ * credentialed, `DEFAULT_PROVIDER_PRECEDENCE` handed every unconfigured turn
+ * to Anthropic while the catalog — which DOES read the configured default —
+ * served an OpenAI model as the chip's value. The first chat in an
+ * OpenAI-configured project therefore showed "gpt-5.6", ran on Claude, billed
+ * the Anthropic key, and persisted a Claude model into the transcript. It also
+ * flipped the lane, so the mid-turn-steering behaviour the picker advertised
+ * for OpenAI was not the behaviour the turn had.
+ */
+function defaultProviderIdForTurn(configuredDefault: string | undefined): string {
+  return resolveDefaultProviderId({
+    env: process.env,
+    ...(configuredDefault ? { configuredDefault } : {}),
+    isCredentialed: (d) => isCredentialedFromEnv(d, process.env),
+  })
+}
 
 /**
  * Test hook: clear the active-turn set between tests. Clears the live-channel
@@ -341,6 +429,16 @@ export interface ChatHandlerContext {
     }
   }
   /**
+   * `llm` block from `.desde/config.json` — which provider this project runs
+   * on. Two consumers here: `verify_goal`'s translate step
+   * (`resolveLlmProvider`, built below), and `defaultProviderIdForTurn`, which
+   * reads `llm.defaultProvider` so a chat turn that names no model of its own
+   * runs on the provider the model picker is showing as the default. A turn
+   * that DOES name a model still dispatches on that model's provider; this is
+   * the fallback only.
+   */
+  llm?: import("./project-config.js").ProjectConfig["llm"]
+  /**
    * Phase 3 — "Use repo conventions". When `useRepoConventions` is false
    * the chat agent's system prompt is not grounded in the repo's
    * documented conventions; `excludeFiles` drops specific files from
@@ -384,6 +482,19 @@ export interface ChatHandlerContext {
    * Omitted (tests) → tools stay off, matching the default.
    */
   canvasEnabled?: boolean
+  /**
+   * Whether this project stops the agent READING credential-bearing files
+   * (`.env`, private keys, `.npmrc`, cloud credential stores). Default OFF —
+   * omitted means the agent reads them, on the `=== true` discipline.
+   *
+   * `http-server.ts` computes it from `editor.blockSecretReads` in
+   * `.desde/config.json` and nothing else, through `isSecretReadsBlocked`,
+   * which the client bootstrap reads too. No env var — see that gate's doc
+   * comment. Threaded into BOTH chat runtimes: the SDK lane enforces it in a
+   * `PreToolUse` hook (its Read never reaches `canUseTool`), the neutral lane
+   * in the shared permission gate and in its own Read/Glob/Grep.
+   */
+  blockSecretReads?: boolean
 }
 
 /** Best-effort pathname+hash from the request's page snapshot (mirror the user's route). */
@@ -577,6 +688,15 @@ export async function handleChatRequest(
   // written and something after that threw", so it can't double-append.
   const turnStartedAt = new Date().toISOString()
   let completedTurnId: string | undefined
+  // Hoisted so the outer catch's turn-recovery write (below) can pass the
+  // same provider's error patterns to `classifyTurnError` that the turn
+  // itself ran on — the `const` inside the try is a sibling block scope
+  // to the catch, not a parent, so the catch can't see it otherwise.
+  let turnProviderId: string | undefined
+  // Set only on the rare turn whose lane changes at session load (see the
+  // reconciliation below). Counts the `steered` frames the neutral runtime is
+  // about to repeat because the route already announced them.
+  let suppressRuntimeSteered = 0
   try {
     stream = openSseStream(req, res)
     // Surface the resolved sessionId as the very first SSE event so the
@@ -592,12 +712,24 @@ export async function handleChatRequest(
     // the turn runtime seeds it via `begin()` — and a steer accepted before
     // then simply waits behind it. See `turn-input-channel.ts`.
     turnChannel = createTurnInputChannel()
+    // Which lane serves this turn decides who announces a steer, so it has to
+    // be known BEFORE the entry exists — the first steer the route accepts
+    // already needs the answer. Both inputs are in hand here: `modelConfig`
+    // came off the request body above, and the default rule reads env plus
+    // the project's `llm.defaultProvider`, both in hand. The one input that is
+    // not is the session's persisted model, which the reconciliation after the
+    // session load corrects for.
+    turnProviderId =
+      requestModelConfig?.provider ?? defaultProviderIdForTurn(ctx.llm?.defaultProvider)
     liveTurns.set(lockKey, {
       channel: turnChannel,
       emit: (ev) => {
         stream!.send(ev)
       },
       steers: acceptedSteers,
+      runtimeEmitsSteered: resolveChatRuntimeKind(turnProviderId, process.env) === "neutral",
+      laneConfirmed: false,
+      setupSteerFrames: [],
     })
 
     const abort = new AbortController()
@@ -665,7 +797,18 @@ export async function handleChatRequest(
         session.modelConfig,
         (await modelCatalogResolver.get()).catalogs,
       )
-      if (pv.ok) {
+      // The catalog above can be a few minutes stale (it is cached), so a
+      // provider whose key was JUST removed can still validate against it.
+      // Checking credentials directly here, instead of trusting the cached
+      // catalog alone, is what makes a lost key take effect on the very
+      // next turn rather than waiting out the cache.
+      const persistedProviderCredentialed =
+        pv.ok &&
+        (() => {
+          const persistedDescriptor = getDescriptor(pv.config.provider)
+          return persistedDescriptor !== undefined && isCredentialedFromEnv(persistedDescriptor, process.env)
+        })()
+      if (pv.ok && persistedProviderCredentialed) {
         // Forward the validator's SANITIZED config, not the raw
         // persisted object: a hand-edited session file carrying an
         // effort value on a model that has no effort parameter would
@@ -674,7 +817,9 @@ export async function handleChatRequest(
         modelNotes.push(...pv.warnings)
       } else {
         modelNotes.push(
-          `Saved model for this chat is no longer available. ${pv.error} Using the default model for this turn.`,
+          pv.ok
+            ? "Saved model for this chat is no longer available. Its provider's credentials were removed. Using the default model for this turn."
+            : `Saved model for this chat is no longer available. ${pv.error} Using the default model for this turn.`,
         )
         // Drop the dead choice so the notice is ONE-TIME (design spec)
         // rather than an every-turn nag. These notes ride the `error`
@@ -696,6 +841,66 @@ export async function handleChatRequest(
     for (const w of modelNotes) {
       stream!.send({ kind: "error", reason: w })
     }
+
+    // Both-ends gating for the BYO-key cutover, now per provider. The client
+    // already declines to present an uncredentialed provider (its catalog
+    // group is not served), and this is the server half: the dispatch refuses
+    // rather than trusting a client that could be stale or hand-built.
+    //
+    // `effectiveModelConfig` is resolved above (request > session > default)
+    // and carries `.provider`; a turn with no config at all runs on the same
+    // default rule the catalog response uses.
+    //
+    // Resolved here, BEFORE project knowledge, Figma config and the review
+    // surface below, so a turn the gate refuses never pays for any of that
+    // setup (project knowledge is a filesystem walk, review surface can
+    // launch a headless Chromium).
+    turnProviderId =
+      effectiveModelConfig?.provider ?? defaultProviderIdForTurn(ctx.llm?.defaultProvider)
+    assertChatCredentials(process.env, turnProviderId)
+
+    // The lane is now settled: `effectiveModelConfig` adds the session's
+    // persisted model, the one input the registration above could not see.
+    // Usually it agrees and this does nothing. It disagrees only when a
+    // request carried no `modelConfig` and the session's persisted one names a
+    // provider on the OTHER lane, and then a steer accepted in the meantime
+    // has to be repaired: exactly one `steered` frame must reach the client
+    // per steer, whichever side ends up sending it.
+    {
+      const laneIsNeutral = resolveChatRuntimeKind(turnProviderId, process.env) === "neutral"
+      const liveEntry = liveTurns.get(lockKey)
+      if (liveEntry) {
+        const framesFromSetup = liveEntry.setupSteerFrames
+        liveEntry.setupSteerFrames = []
+        liveEntry.laneConfirmed = true
+        if (liveEntry.runtimeEmitsSteered !== laneIsNeutral) {
+          liveEntry.runtimeEmitsSteered = laneIsNeutral
+          if (laneIsNeutral) {
+            // The route announced each of these; the neutral runtime will
+            // announce them again when it delivers them. Drop that many of
+            // the runtime's frames rather than un-drawing a bubble.
+            suppressRuntimeSteered = framesFromSetup.length
+          } else {
+            // The route stood down for a runtime that emits none, so these
+            // were never announced at all. Send them now, unmodified.
+            //
+            // Not reachable with today's two providers: the guess is neutral
+            // only when the default provider is OpenAI, which happens only
+            // when Anthropic has no credential, and then a persisted Anthropic
+            // model is dropped as uncredentialed before it can move the lane.
+            // Kept because losing a bubble is worse than duplicating one, and
+            // a third provider or a configured default makes it reachable.
+            for (const frame of framesFromSetup) stream.send(frame)
+          }
+        }
+      }
+    }
+
+    // One dispatch point. The SDK runtime is still the only one that exists,
+    // but which runtime serves a turn is now a decision the descriptor makes
+    // rather than a hardcoded import. Only the RESOLUTION happens here — the
+    // actual call is below, once `reviewSurface` exists.
+    const runChatTurn = await resolveChatRuntime(turnProviderId, loaders)
 
     // Phase 5 — mark the session in-flight BEFORE the orchestrator
     // runs. Persisted now so a CLI crash mid-turn leaves an
@@ -835,12 +1040,22 @@ export async function handleChatRequest(
     const { computeEnabledCapabilityIds, describeDisabledCapabilities } = await import(
       "../../../src/editor/core/capability-catalog.js"
     )
+    // The LANE is half the answer, not a refinement of it. `.mcp.json` says a
+    // server is declared; only the runtime says whether anything registers it.
+    // The neutral lane composes builtins plus editor tools and reads neither
+    // `extensions` nor `figmaConfig`, so reporting Figma or Web search as ON
+    // there told the user about tools the model could not call.
+    const capabilityRuntime = resolveChatRuntimeKind(turnProviderId, process.env)
     const enabledCapabilityIds = computeEnabledCapabilityIds({
       enabledExtensionIds: (extensions ?? []).map((e) => e.id),
       webFetchAllowedHosts: webPolicy?.webFetchAllowedHosts ?? [],
       webSearchEnabled: webPolicy?.webSearchEnabled ?? false,
+      chatRuntime: capabilityRuntime,
     })
-    const disabledCapabilities = describeDisabledCapabilities(enabledCapabilityIds)
+    const disabledCapabilities = describeDisabledCapabilities(
+      enabledCapabilityIds,
+      capabilityRuntime,
+    )
 
     // Offer the fix in the flow. Detection reads the USER's message and
     // NOTHING else — assistant prose, tool output and MCP results are excluded
@@ -853,7 +1068,12 @@ export async function handleChatRequest(
       )
       // Detect against LIVE ids first — the overwhelmingly common case is no
       // gap at all, and that path must add no I/O to a turn.
-      const candidates = detectCapabilityGaps(body.userMessage, enabledCapabilityIds)
+      const candidates = detectCapabilityGaps(
+        body.userMessage,
+        enabledCapabilityIds,
+        undefined,
+        capabilityRuntime,
+      )
       // Only now consult what is DECLARED. An entry whose ${VAR} is unset is
       // written to .mcp.json but skipped by the loader, so offering to enable
       // it would post to a route that answers 409. (The prompt block above
@@ -938,23 +1158,19 @@ export async function handleChatRequest(
       }
     }
 
-    // Both-ends gating for the BYO-key cutover. The client already declines to
-    // present chat as configured (the credential probe reports `none`), and
-    // this is the server half: with no key the SDK would spawn the bundled
-    // `claude` binary, which authenticates with whatever subscription it is
-    // signed in with. Anthropic's Agent SDK terms do not permit a distributed
-    // product to offer claude.ai login, so the dispatch refuses rather than
-    // trusting a client that could be stale or hand-built. See
-    // src/editor/llm-providers/assert-chat-credentials.ts.
-    assertChatCredentials(process.env)
+    const turnModel =
+      effectiveModelConfig?.model ?? (await resolvedDefaultModelFor(turnProviderId))
 
-    // The SDK runtime is the only chat runtime (the legacy in-house
-    // orchestrator was removed 2026-07-21 — see CLAUDE.md § Editor —
-    // Agent Orchestrator).
-    const { runChatTurnSdk } = await loaders.loadRunChatTurnSdk()
-    const result = await runChatTurnSdk({
+    const result = await runChatTurn({
       bridge,
+      providerId: turnProviderId,
       reviewSurface: reviewSurface ?? undefined,
+      // `verify_goal`'s translate step — the project's resolved provider,
+      // same per-request resolution the edit routes use. Lazy: constructing
+      // a provider throws on a missing key, and most turns never call
+      // verify_goal at all.
+      resolveLlmProvider: () =>
+        getProvider({ config: resolveLlmConfig({ llm: ctx.llm }, process.env) }),
       worktreeRoot: ctx.repoRoot,
       // Deterministic Vite invalidation for the structural write
       // tools (branch mode — see vite-invalidate.ts).
@@ -1001,8 +1217,18 @@ export async function handleChatRequest(
       extensions,
       disabledCapabilities,
       canvasEnabled: ctx.canvasEnabled,
+      blockSecretReads: ctx.blockSecretReads === true,
       awaitEditAck,
       emit: (ev) => {
+        // Normally a straight forward. The one exception is the lane
+        // reconciliation above: when this turn moved onto the neutral lane
+        // after the route had already announced a steer, the runtime is about
+        // to announce the same steer again at delivery, and the client would
+        // draw a second bubble and cut the transcript twice.
+        if (ev.kind === "steered" && suppressRuntimeSteered > 0) {
+          suppressRuntimeSteered--
+          return
+        }
         stream!.send(ev)
       },
       // Already registered as steerable (above, at lock time). The runtime
@@ -1012,13 +1238,22 @@ export async function handleChatRequest(
       inputChannel: turnChannel,
       signal: abort.signal,
       costCeilingUsd: resolveCostCeilingUsd(ctx.quotas?.costCeilingUsd),
-      ...(effectiveModelConfig
+      // The model for this turn: the chosen one when there is one, otherwise
+      // the default the PICKER would have shown for this provider. Falling
+      // back inside the runtime instead sent the static catalog's default,
+      // which is not always a model the account can call — see
+      // `resolvedDefaultModelFor`.
+      ...(turnModel
         ? {
-            model: effectiveModelConfig.model,
-            ...(effectiveModelConfig.effort ? { effort: effectiveModelConfig.effort } : {}),
+            model: turnModel,
+            // The chosen effort when the session has one, otherwise the level
+            // the picker's slider opens on for this model. The slider has no
+            // "Default" stop any more (Mo, 2026-09-07), so the level it shows
+            // has to be the level the turn runs at.
+            ...(await effortFor(turnProviderId, turnModel, effectiveModelConfig?.effort)),
             // The picker's catalog knows whether this model (or alias) thinks
             // adaptively; the turn cannot always tell from the id alone.
-            ...(await adaptiveThinkingFor(effectiveModelConfig.model)),
+            ...(await adaptiveThinkingFor(turnProviderId, turnModel)),
           }
         : {}),
     })
@@ -1040,7 +1275,9 @@ export async function handleChatRequest(
         : undefined
     let finalized: import("../../../src/editor/agent-chat/types").ChatSession
     if (turnError) {
-      const classified = classifyTurnError(turnError)
+      const classified = classifyTurnError(turnError, {
+        errorPatterns: getDescriptor(turnProviderId)?.errorPatterns,
+      })
       finalized = withSessionStatus(
         result.session,
         "failed",
@@ -1102,7 +1339,11 @@ export async function handleChatRequest(
         // sync, and nothing reads the return value after this.
         const { loadSession, saveSession } = await loaders.loadSessionStore()
         const { session: latest } = await loadSession(ctx.repoRoot, { sessionId })
-        const classified = classifyTurnError(err)
+        const classified = classifyTurnError(err, {
+          errorPatterns: turnProviderId
+            ? getDescriptor(turnProviderId)?.errorPatterns
+            : undefined,
+        })
         const reason = `Chat handler failed: ${classified.message}`
         // Record the submission that died here.
         //
@@ -1655,12 +1896,24 @@ export async function handleSteerRequest(
   // that did not happen. Like the HTTP answer, this event says the turn took
   // the message on — the same turn will emit `resubmit_required` if it later
   // cannot show the model saw it.
-  live.emit({
+  //
+  // Skipped when this turn's runtime emits its own frame at delivery: exactly
+  // one `steered` must reach the client per steer, and on that lane the
+  // runtime is the side that knows the position the client should cut at. See
+  // `LiveTurn.runtimeEmitsSteered`.
+  const frame: ChatStreamEvent = {
     kind: "steered",
     sessionId: body.sessionId,
     userMessage: body.userMessage,
     imageCount: validatedImages.length,
-  })
+  }
+  // Kept, emitted or not, while the turn's lane is still the pre-session
+  // guess. The chat route replays or cancels these once it knows the lane —
+  // see `LiveTurn.setupSteerFrames`.
+  if (!live.laneConfirmed) live.setupSteerFrames.push(frame)
+  if (!live.runtimeEmitsSteered) {
+    live.emit(frame)
+  }
   sendSteerResult(res, 200, { accepted: true })
 }
 
@@ -1682,18 +1935,73 @@ async function readBody(req: IncomingMessage): Promise<string> {
 }
 
 /**
- * `{ adaptiveThinking }` from the served catalog's entry for `model`, or
- * `{}` when the catalog does not say, so the turn falls back to the family
- * rule. Read through the resolver, which is cached, so this costs nothing
- * after the picker's own request.
+ * The served catalog entry for one (provider, model) PAIR, or undefined.
+ *
+ * The pair, never the model id alone. Two providers can serve the same id:
+ * an OpenAI-compatible base URL can be pointed at a gateway that lists a
+ * vendor's ids verbatim, which is the whole premise of a provider seam whose
+ * transport is shared. A scan across catalogs answers with whichever provider
+ * happens to come first, and its answer can be a level the selected model's
+ * own ladder does not contain. The picker was already forced onto the pair
+ * for exactly this reason — see `optionValue` in `model-picker-chip.tsx`.
+ *
+ * `turnProviderId` and `turnModel` are resolved together at the call site
+ * (request config > session config > that provider's default), so the pair is
+ * always the one the turn will actually run.
+ *
+ * No fall back to an unscoped scan when the provider's catalog is not served:
+ * that is the defect, not a safety net. Read through the resolver, which is
+ * cached, so this costs nothing after the picker's own request.
  */
-async function adaptiveThinkingFor(model: string): Promise<{ adaptiveThinking?: boolean }> {
+async function servedOptionFor(providerId: string, model: string) {
   const { catalogs } = await modelCatalogResolver.get()
-  for (const catalog of catalogs) {
-    const option = catalog.models.find((m) => m.id === model)
-    if (option && typeof option.adaptiveThinking === "boolean") {
-      return { adaptiveThinking: option.adaptiveThinking }
-    }
-  }
-  return {}
+  return catalogs
+    .find((c) => c.providerId === providerId)
+    ?.models.find((m) => m.id === model)
+}
+
+/**
+ * The effort this turn runs at.
+ *
+ * A session's own choice wins, unchanged. With no choice, the catalog's
+ * `defaultEffort` for this model applies — the same value the picker's slider
+ * opens on, put there by the provider descriptor. Before this, a session that
+ * never touched the slider sent no effort at all, and an Anthropic
+ * adaptive-thinking model decided per turn how hard to think.
+ *
+ * A model with no effort ladder has no `defaultEffort` and still sends
+ * nothing. A model whose ladder does not contain the vendor default now
+ * carries the middle of its own ladder instead of nothing, decided once in
+ * `withDefaultEffort` so this and the picker read the same value. This
+ * resolves effort ONLY: `thinking` is still `resolveAnthropicThinkingConfig`'s
+ * answer from the model id, untouched.
+ */
+async function effortFor(
+  providerId: string,
+  model: string,
+  chosen: EffortLevel | undefined,
+): Promise<{ effort?: EffortLevel }> {
+  if (chosen) return { effort: chosen }
+  const option = await servedOptionFor(providerId, model)
+  return option?.defaultEffort ? { effort: option.defaultEffort } : {}
+}
+
+/**
+ * `{ adaptiveThinking }` from the served catalog's entry for this
+ * (provider, model) pair, or `{}` when the catalog does not say, so the turn
+ * falls back to the family rule.
+ *
+ * Scoped to the provider for the same reason `effortFor` is: the id alone
+ * does not identify a model across vendors, and adaptive-vs-fixed thinking is
+ * a per-vendor answer. Reading another provider's entry could send a fixed
+ * thinking budget to a model that rejects one outright.
+ */
+async function adaptiveThinkingFor(
+  providerId: string,
+  model: string,
+): Promise<{ adaptiveThinking?: boolean }> {
+  const option = await servedOptionFor(providerId, model)
+  return typeof option?.adaptiveThinking === "boolean"
+    ? { adaptiveThinking: option.adaptiveThinking }
+    : {}
 }

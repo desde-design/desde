@@ -54,6 +54,13 @@ interface FontRef {
   resolvesTo: string
 }
 
+/**
+ * The production Vite build this hook runs takes about 12s cold on a laptop
+ * (measured 2026-09-03), and vitest gives a hook 10s by default. The suite
+ * timed out on main for that reason alone; the assertions never ran.
+ */
+const BUILD_HOOK_TIMEOUT_MS = 120_000
+
 let refs: FontRef[]
 
 beforeAll(() => {
@@ -111,7 +118,7 @@ beforeAll(() => {
     }
   }
   walk(DIST)
-})
+}, BUILD_HOOK_TIMEOUT_MS)
 
 describe("fonts referenced by the built CSS", () => {
   it("references none, because the product self-hosts no font any more", () => {

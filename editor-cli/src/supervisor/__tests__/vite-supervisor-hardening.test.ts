@@ -173,4 +173,40 @@ describe("hardenServerConfig — resolved against real Vite", () => {
     // …and ordinary prototype source is still served.
     expect(isFileLoadingAllowed(resolved, `${repo}/src/main.ts`)).toBe(true)
   })
+
+  it("denies .desde however its case is spelled, on a case-insensitive filesystem", async () => {
+    // The write side of this hole was real and was closed by folding case in
+    // `isProtectedAgentPath`. The READ side is closed already, but by Vite
+    // rather than by us: MEASURED in both the installed Vite 7 and Vite 8,
+    // `server.fs.deny` is compiled with picomatch's `{ nocase: true, dot: true }`,
+    // so `.DESDE/…` matches the `.desde` globs. Raw picomatch defaults to
+    // case-SENSITIVE, so reading the constant alone suggests the opposite —
+    // which is exactly why this belongs in a test rather than in a comment.
+    //
+    // Nothing here widens the deny list. It pins Vite's option, so an upgrade
+    // that drops `nocase` fails here instead of quietly serving a chat
+    // transcript to `GET /@fs/<root>/.DESDE/chat-sessions/<id>.json` on macOS.
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "pt-supervisor-case-")))
+    writeFileSync(join(repo, "index.html"), "<html></html>")
+    const { merged } = harden(repo, null)
+    const resolved = await resolveConfig(merged, "serve", "development")
+
+    for (const denied of [
+      ".DESDE/chat-sessions/s1.json",
+      ".Desde/chat-sessions/s1.json",
+      ".dEsDe/backups/2026-09-04-x/App.vue",
+      ".Desde/config.json",
+      ".DESDE",
+      ".ENV",
+      ".GIT/config",
+    ]) {
+      expect(isFileLoadingAllowed(resolved, `${repo}/${denied}`), denied).toBe(false)
+    }
+
+    // Case folding must not swallow names that merely LOOK like the private
+    // directory: a prototype's own `src/Desde/` is ordinary source.
+    for (const served of ["src/Desde/thing.ts", "src/.desdex/a.ts", "src/main.ts"]) {
+      expect(isFileLoadingAllowed(resolved, `${repo}/${served}`), served).toBe(true)
+    }
+  })
 })

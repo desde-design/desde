@@ -209,4 +209,23 @@ describe("DESDE_DIR placement", () => {
     await writeJsonFile(filePath, { ok: true })
     expect(existsSync(path.join(tmp, ".desde", "demo.json"))).toBe(true)
   })
+
+  /**
+   * A prototype repo is untrusted input, so `.desde` can be a symlink to
+   * anywhere. `mkdir(..., { recursive: true })` on a link to an existing
+   * directory is a no-op and the write then follows the link, which would put
+   * every note, comment, canvas and page status outside the working tree.
+   */
+  it("refuses to resolve a store path when .desde is a symlink, and writes nothing at the target", async () => {
+    const repo = path.join(tmp, "repo")
+    const elsewhere = path.join(tmp, "elsewhere")
+    await fs.mkdir(repo, { recursive: true })
+    await fs.mkdir(elsewhere, { recursive: true })
+    await fs.symlink(elsewhere, path.join(repo, ".desde"))
+
+    expect(() => resolveStorePath(repo, "notes.json")).toThrow(
+      /\.desde is a symbolic link/,
+    )
+    expect(await fs.readdir(elsewhere)).toEqual([])
+  })
 })

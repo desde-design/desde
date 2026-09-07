@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs"
-import { dirname, join } from "node:path"
+import { dirname } from "node:path"
 import { randomUUID } from "node:crypto"
 import type { ProjectKnowledgeConfig } from "../../../src/editor/edit-service/load-project-knowledge"
+import { desdePath } from "../../../src/editor/worktree/desde-dir.js"
 import {
   deriveSlug,
   mintProjectId,
@@ -165,6 +166,30 @@ export interface ProjectConfig {
      */
     notes?: boolean
     /**
+     * Secret-file read policy for the chat agent. Default `false` (opt-IN,
+     * the same `=== true` shape as `codeView`). This key is the ONLY way to
+     * turn it on — there is no env var, because a process-wide variable
+     * cannot express a per-project permission. See `isSecretReadsBlocked` in
+     * `dormant-surfaces.ts` (FX17 item 6).
+     *
+     * With it ON, the agent's Read, Glob and Grep refuse credential-bearing
+     * files — `.env` and its variants, private keys, `.npmrc`, cloud
+     * credential stores — while `.env.example` and friends stay readable.
+     * With it off, which is the default, they behave as they did before the
+     * policy existed. Set it when you would rather the agent could not put
+     * this repository's credentials into a transcript.
+     *
+     * FX18 (2026-09-05) inverted this key. It was `secretReads`, which
+     * ALLOWED reads that were blocked by default; the product owner reversed
+     * that default, and the key was renamed rather than left pointing the
+     * other way. There is no alias for the old spelling.
+     *
+     * Gates BOTH ends: the client bootstrap reports it, and the chat dispatch
+     * refuses independently. See `isSecretReadsBlocked` in
+     * `dormant-surfaces.ts`.
+     */
+    blockSecretReads?: boolean
+    /**
      * "Open in VS Code" gate — the right-click item that launches
      * `vscode://file/<abs>:<line>`. DORMANT by product decision
      * 2026-08-18; default `false` (opt-IN). `EDITOR_VSCODE_LINK=1` also
@@ -175,6 +200,12 @@ export interface ProjectConfig {
      * `dormant-surfaces.ts`.
      */
     vscodeLink?: boolean
+    // No `neutralChat` key here. The Desde-owned neutral chat runtime gate
+    // (every non-Anthropic provider's chat dispatch) is now opt-OUT by
+    // default and env-only: `EDITOR_NEUTRAL_CHAT=0` is the only way to turn
+    // it off, and there is deliberately no project-config equivalent. See
+    // `isNeutralChatEnabled`'s doc comment in `dormant-surfaces.ts` for why
+    // a config key here could only ever half-work.
   }
   /**
    * Audit Task 15 — on-disk retention for the growth points that had no
@@ -189,7 +220,7 @@ export interface ProjectConfig {
    * anywhere inside `retention` (same as anywhere inside `chat` /
    * `conventions` / `editor`) fails `readProjectConfig` entirely,
    * which degrades the WHOLE project association — `projectSlug`,
-   * `chatQuotas`, `conventions`, `editor`, AND `retention` all fall
+   * `chatQuotas`, `conventions`, `editor`, `retention`, AND `llm` all fall
    * back to "unset"/degraded mode, not just the offending block. A
    * scoped-degrade (keep the rest of the config, drop only the bad
    * `retention` sub-block with a warning) was considered and rejected:
@@ -220,6 +251,26 @@ export interface ProjectConfig {
       maxTurns?: number
     }
   }
+  /**
+   * Which model provider the NON-CHAT lanes use, and per-provider overrides.
+   *
+   * Chat is not configured here: the model picker's choice is per chat
+   * session. These lanes (the LLM patch, repair, iteration-data, goal
+   * translation and hint-generation lanes) run outside any session, so they
+   * need a project-level answer.
+   *
+   * `defaultProvider` is honoured only when that provider is actually
+   * credentialed, so naming a provider whose key is missing degrades to the
+   * one that works instead of failing every save.
+   *
+   * Note the file: this is `.desde/config.json`, the config Desde actually
+   * reads. `tasks/NEXT.md` names `desde.config.json` for this block and is
+   * wrong there.
+   */
+  llm?: {
+    defaultProvider?: string
+    providers?: Record<string, { model?: string; baseUrl?: string; apiKeyEnv?: string }>
+  }
 }
 
 export type ReadProjectConfigResult =
@@ -232,7 +283,17 @@ export type ReadProjectConfigResult =
       message: string
     }
 
-const CONFIG_RELATIVE_PATH = join(".desde", "config.json")
+/**
+ * `<repoRoot>/.desde/config.json`, guarded. `.desde` is joined through
+ * `desdeDir` so a prototype that ships it as a symlink cannot make the
+ * writers below drop the project config outside the working tree; see
+ * `src/editor/worktree/desde-dir.ts`. Throws `DesdeDirSymlinkError` on such
+ * a repo — the writers let it surface, and the reader below reports it as an
+ * unreadable config.
+ */
+function configPathFor(repoRoot: string): string {
+  return desdePath(repoRoot, "config.json")
+}
 const SUPPORTED_VERSION = 1
 /**
  * Versions this CLI can READ. Writes are always the newest (see
@@ -251,7 +312,19 @@ const SUPPORTED_VERSIONS = [1, 2]
 export async function readProjectConfig(
   repoRoot: string,
 ): Promise<ReadProjectConfigResult> {
-  const configPath = join(repoRoot, CONFIG_RELATIVE_PATH)
+  let configPath: string
+  try {
+    configPath = configPathFor(repoRoot)
+  } catch (err) {
+    // This runs on the CLI boot path, whose contract is to degrade rather
+    // than refuse to start. A repo whose `.desde` is a symlink reads as a
+    // config we cannot use, which is exactly what "malformed" means here.
+    return {
+      ok: false,
+      reason: "malformed",
+      message: (err as Error).message,
+    }
+  }
 
   let raw: string
   try {
@@ -551,6 +624,20 @@ export async function readProjectConfig(
       }
       out.notes = co.notes
     }
+    if (co.blockSecretReads !== undefined) {
+      // Explicit refusal, not a silent skip. A malformed value here reads as
+      // the default, which since FX18 is "do not block" — so a typo would
+      // quietly leave the agent able to read credentials for a user who
+      // deliberately turned the policy ON and believes they did.
+      if (typeof co.blockSecretReads !== 'boolean') {
+        return {
+          ok: false,
+          reason: 'malformed',
+          message: `${configPath}: 'editor.blockSecretReads' must be a boolean.`,
+        }
+      }
+      out.blockSecretReads = co.blockSecretReads
+    }
     if (co.vscodeLink !== undefined) {
       // Same explicit refusal as `codeView` / `notes` above, not a silent
       // `typeof` skip: a malformed value here would otherwise read as the
@@ -564,6 +651,11 @@ export async function readProjectConfig(
       }
       out.vscodeLink = co.vscodeLink
     }
+    // No `neutralChat` key: that gate is env-only (`EDITOR_NEUTRAL_CHAT`),
+    // with no project-config equivalent — see the type declaration above.
+    // A stray `neutralChat` key in an existing `.desde/config.json` is
+    // silently ignored here rather than rejected, since it already had no
+    // effect before this change either.
     editor = Object.keys(out).length > 0 ? out : undefined
   }
 
@@ -665,6 +757,69 @@ export async function readProjectConfig(
     retention = Object.keys(out).length > 0 ? out : undefined
   }
 
+  let llm: ProjectConfig['llm']
+  if (obj.llm !== undefined) {
+    if (typeof obj.llm !== 'object' || obj.llm === null || Array.isArray(obj.llm)) {
+      return {
+        ok: false,
+        reason: 'malformed',
+        message: `${configPath}: 'llm' must be an object when provided.`,
+      }
+    }
+    const l = obj.llm as Record<string, unknown>
+    const out: NonNullable<ProjectConfig['llm']> = {}
+    if (l.defaultProvider !== undefined) {
+      if (typeof l.defaultProvider !== 'string' || l.defaultProvider.length === 0) {
+        return {
+          ok: false,
+          reason: 'malformed',
+          message: `${configPath}: 'llm.defaultProvider' must be a non-empty string.`,
+        }
+      }
+      out.defaultProvider = l.defaultProvider
+    }
+    if (l.providers !== undefined) {
+      if (
+        typeof l.providers !== 'object' ||
+        l.providers === null ||
+        Array.isArray(l.providers)
+      ) {
+        return {
+          ok: false,
+          reason: 'malformed',
+          message: `${configPath}: 'llm.providers' must be an object when provided.`,
+        }
+      }
+      const providers: NonNullable<NonNullable<ProjectConfig['llm']>['providers']> = {}
+      for (const [id, raw] of Object.entries(l.providers as Record<string, unknown>)) {
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+          return {
+            ok: false,
+            reason: 'malformed',
+            message: `${configPath}: 'llm.providers.${id}' must be an object.`,
+          }
+        }
+        const entry = raw as Record<string, unknown>
+        const parsed: { model?: string; baseUrl?: string; apiKeyEnv?: string } = {}
+        for (const key of ['model', 'baseUrl', 'apiKeyEnv'] as const) {
+          const v = entry[key]
+          if (v === undefined) continue
+          if (typeof v !== 'string' || v.length === 0) {
+            return {
+              ok: false,
+              reason: 'malformed',
+              message: `${configPath}: 'llm.providers.${id}.${key}' must be a non-empty string.`,
+            }
+          }
+          parsed[key] = v
+        }
+        providers[id] = parsed
+      }
+      if (Object.keys(providers).length > 0) out.providers = providers
+    }
+    llm = Object.keys(out).length > 0 ? out : undefined
+  }
+
   return {
     ok: true,
     config: {
@@ -680,6 +835,7 @@ export async function readProjectConfig(
       ...(conventions !== undefined ? { conventions } : {}),
       ...(editor !== undefined ? { editor } : {}),
       ...(retention !== undefined ? { retention } : {}),
+      ...(llm !== undefined ? { llm } : {}),
     },
   }
 }
@@ -707,7 +863,7 @@ export async function writeProjectConfig(
   repoRoot: string,
   fields: ProjectLinkFields,
 ): Promise<Record<string, unknown>> {
-  const configPath = join(repoRoot, CONFIG_RELATIVE_PATH)
+  const configPath = configPathFor(repoRoot)
 
   let existing: Record<string, unknown> = {}
   try {
@@ -768,7 +924,7 @@ export async function ensureProjectIdentity(
   repoRoot: string,
   opts: { name: string },
 ): Promise<ProjectIdentity> {
-  const configPath = join(repoRoot, ".desde", "config.json")
+  const configPath = configPathFor(repoRoot)
 
   let existingText: string | null = null
   try {

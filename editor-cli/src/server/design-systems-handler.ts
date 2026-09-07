@@ -51,6 +51,7 @@ import {
   type StalenessResult,
 } from "../../../src/editor/onboarding/index.js"
 import type { ComponentManifest, ComponentManifestSource, GroundingHealth } from "../../../src/editor/core"
+import { desdePath, desdePathOrNull } from "../../../src/editor/worktree/desde-dir.js"
 import {
   loadDesignSystemDeclarations,
   appendDesignSystemDeclaration,
@@ -59,7 +60,7 @@ import {
 } from "../../../src/editor/core/design-system-declarations.js"
 import { CONFIG_FILENAME } from "../../../src/editor/core/read-roots.js"
 import { withFileEditLocks } from "./session-lock.js"
-import { CACHE_DIR_NAME, resolveHintsCacheVersion } from "../../../src/editor/adapters/cached/index.js"
+import { resolveHintsCacheVersion } from "../../../src/editor/adapters/cached/index.js"
 import { readHintCache, hintCacheFilePath } from "../../../src/editor/adapters/hints-cache/index.js"
 import {
   generateHintsRun,
@@ -168,13 +169,13 @@ export interface DesignSystemsHandlerCtx {
    */
   viteBaseUrl: string
   /**
-   * Phase 4 Task 5 (opt-in LLM hint generation) — injected provider
-   * override, purely for tests. Production wiring omits this: the LLM lane
-   * (`src/editor/hints/llm-generate-hints.ts`) falls back to the
-   * registry's default provider (`getProvider()`) when none is supplied —
-   * the SAME acquisition path `apply-llm-patch.ts`'s CLI caller relies on
-   * (auth via the bundled `claude` binary's Claude subscription, or
-   * `ANTHROPIC_API_KEY` when set — see `src/editor/llm-providers/registry.ts`).
+   * The project's resolved provider for the LLM hint-generation lane
+   * (`src/editor/hints/llm-generate-hints.ts`). Wired in production now,
+   * not only in tests: `http-server.ts` builds this from the same
+   * per-request `resolveLlmConfig` every other non-chat lane uses, so a
+   * project that names a provider in `.desde/config.json` reaches this
+   * lane too. Absent (older callers/tests) falls back to the registry's
+   * own default (`getProvider()`).
    */
   getLlmProvider?: () => CompletionProvider
 }
@@ -549,7 +550,11 @@ async function loadDeclaredIdentities(
  */
 function readHintCoverage(root: string, entry: RegisteredDesignSystem): HintCoverage | null {
   const packageVersion = resolveHintsCacheVersion(resolve(root), entry)
-  const file = hintCacheFilePath(join(root, CACHE_DIR_NAME), entry.package, packageVersion)
+  // Through the `.desde` guard: a linked-away `.desde` has no coverage to
+  // report, rather than coverage read from outside the working tree.
+  const cacheDir = desdePathOrNull(root, "manifests")
+  if (cacheDir === null) return null
+  const file = hintCacheFilePath(cacheDir, entry.package, packageVersion)
   const cache = readHintCache(file)
   if (!cache) return null
   return computeHintCoverage(cache.hints)
@@ -595,7 +600,15 @@ function isRepoIngestedEntry(entry: RegisteredDesignSystem): boolean {
 function resolveIngestedSourceRoot(root: string, entry: RegisteredDesignSystem): string | null {
   if (!entry.packageRoot) return null
   const realRoot = resolve(root)
-  const ingestedRoot = join(realRoot, ".desde", "ingested")
+  // Through the `.desde` guard: on a repo whose `.desde` is a symlink there
+  // is no containment to check, so the entry resolves to nothing rather than
+  // to a directory outside the working tree.
+  let ingestedRoot: string
+  try {
+    ingestedRoot = desdePath(realRoot, "ingested")
+  } catch {
+    return null
+  }
   const resolved = resolve(realRoot, entry.packageRoot)
   if (resolved !== ingestedRoot && !resolved.startsWith(ingestedRoot + sep)) return null
   return resolved
@@ -836,7 +849,11 @@ async function runGenerateHintsFor(
     designSystem: entry.designSystem,
     importPath: entry.importPath,
   }
-  const cacheDir = join(root, CACHE_DIR_NAME)
+  // Throws `DesdeDirSymlinkError` on a repo whose `.desde` is a symbolic
+  // link, which this route reports like any other run failure. A generate
+  // run WRITES the hint cache, so skipping quietly would report success
+  // with nothing written.
+  const cacheDir = desdePath(root, "manifests")
 
   const packageRootForDist = resolvePackageRootForDist(root, entry)
   const llm = useLlm

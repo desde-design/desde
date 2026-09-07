@@ -179,6 +179,13 @@ describe("handleChatRequest — turns-retention wiring (audit Task 15 codex roun
     // stale pre-save snapshot).
     let capturedSessionAtCallTime: ChatSession | undefined
     const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error(
+            "this suite's turns run on the SDK loader, not neutral",
+          )
+        },
+      }),
       // REAL session-store.ts — no mocking. The whole point is to
       // exercise saveSession's actual archive/trim logic.
       loadSessionStore: () =>

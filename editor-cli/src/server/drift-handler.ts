@@ -22,7 +22,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http"
-import { join, resolve, sep } from "node:path"
+import { resolve, sep } from "node:path"
 import {
   DRIFT_KINDS,
   type ComponentManifest,
@@ -32,12 +32,13 @@ import {
   type DriftSignal,
 } from "../../../src/editor/core"
 import { triggerRepairForEntry, type RepairTriggerCtx } from "./repair-trigger.js"
+import { desdePath } from "../../../src/editor/worktree/desde-dir.js"
 import {
   createDefaultOnboardDeps,
   createLocalRegistryStore,
   type RegisteredDesignSystem,
 } from "../../../src/editor/onboarding/index.js"
-import { CACHE_DIR_NAME, resolveHintsCacheVersion } from "../../../src/editor/adapters/cached/index.js"
+import { resolveHintsCacheVersion } from "../../../src/editor/adapters/cached/index.js"
 import { generateHintsRun, type GenerateHintsRunResult } from "../../../src/editor/hints/generate-hints-run.js"
 import { probeComponent, type ProbePage } from "../../../src/editor/hints/probe-driver.js"
 import {
@@ -354,7 +355,9 @@ async function handleRegenerateHints(
     designSystem: found.designSystem,
     importPath: found.importPath,
   }
-  const cacheDir = join(canonicalRoot, CACHE_DIR_NAME)
+  // Throws `DesdeDirSymlinkError` on a repo whose `.desde` is a symbolic
+  // link; this route reports it like any other run failure.
+  const cacheDir = desdePath(canonicalRoot, "manifests")
   const components = [target]
 
   const disconnect = watchClientDisconnect(req, res)
@@ -487,7 +490,15 @@ async function resolveOneComponent(
 function resolveIngestedSourceRoot(root: string, entry: RegisteredDesignSystem): string | null {
   if (!entry.packageRoot) return null
   const realRoot = resolve(root)
-  const ingestedRoot = join(realRoot, ".desde", "ingested")
+  // Through the `.desde` guard: on a repo whose `.desde` is a symlink there
+  // is no containment to check, so the entry resolves to nothing rather than
+  // to a directory outside the working tree.
+  let ingestedRoot: string
+  try {
+    ingestedRoot = desdePath(realRoot, "ingested")
+  } catch {
+    return null
+  }
   const resolved = resolve(realRoot, entry.packageRoot)
   if (resolved !== ingestedRoot && !resolved.startsWith(ingestedRoot + sep)) return null
   return resolved

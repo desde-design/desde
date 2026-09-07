@@ -155,10 +155,12 @@ describe("buildDesktopBridge — claudeRuntime", () => {
     expect(ipc.invoke).toHaveBeenCalledWith("desktop:claude-runtime:get-state")
   })
 
-  it("retry() sends (not invokes) desktop:claude-runtime:retry — fire-and-forget", () => {
+  it("retry() invokes desktop:claude-runtime:retry and forwards its reply", async () => {
     const ipc = fakeIpc()
-    buildDesktopBridge(ipc, []).claudeRuntime.retry()
-    expect(ipc.send).toHaveBeenCalledWith("desktop:claude-runtime:retry")
+    ipc.invoke = vi.fn(async () => ({ started: false, skippedReason: "not wanted" }))
+    const result = await buildDesktopBridge(ipc, []).claudeRuntime.retry()
+    expect(ipc.invoke).toHaveBeenCalledWith("desktop:claude-runtime:retry")
+    expect(result).toEqual({ started: false, skippedReason: "not wanted" })
   })
 
   it("onState subscribe/unsubscribe: each window's unsubscribe removes only its own listener", () => {

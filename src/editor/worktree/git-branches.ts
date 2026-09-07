@@ -26,6 +26,8 @@ import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
+import { desdePath } from './desde-dir'
+
 const execFileAsync = promisify(execFile)
 
 // Force a stable, English, lock-free git environment so parsing + concurrent
@@ -971,6 +973,20 @@ export async function publishBranch(
     return { ok: false, reason: `No branch named '${branch}'.` }
   }
 
+  // The `.desde` guard runs BEFORE the auto-commit below, not at the
+  // ephemeral-worktree line further down. It used to run there, and a
+  // refused publish had by then committed the user's uncommitted work onto
+  // their branch — including sweeping the hostile `.desde` symlink into that
+  // commit, since the auto-commit is a `git add -A`. `PublishResult`'s
+  // failure branch carries no `committedBranch`, so nothing could even tell
+  // the user it had happened. Checked here, a refusal leaves the repository
+  // byte-identical.
+  try {
+    desdePath(root)
+  } catch (err) {
+    return { ok: false, reason: `Couldn't prepare publish: ${gitMessage(err)}` }
+  }
+
   // Commit uncommitted edits on the branch first — but only if it IS the
   // checked-out branch (only it has a working tree; a dirty tree while
   // publishing some OTHER branch belongs to the current branch, not this one).
@@ -1001,8 +1017,12 @@ export async function publishBranch(
   // Ephemeral worktree on the default branch (gitignored under
   // .desde/). Runs the squash-merge in isolation so the user's
   // checkout is untouched.
-  const tmp = path.join(root, '.desde', `publish-${randomUUID().slice(0, 8)}`)
+  let tmp: string
   try {
+    // `desdePath` refuses (and this catch converts that refusal into the
+    // same "couldn't prepare publish" shape as any other failure here) if
+    // `.desde` is a symlink — see `desde-dir.ts`.
+    tmp = desdePath(root, `publish-${randomUUID().slice(0, 8)}`)
     // `git worktree add` mkdir's the leaf but not `.desde/` itself.
     await fs.mkdir(path.dirname(tmp), { recursive: true })
     await execFileAsync('git', ['-C', root, 'worktree', 'add', '--quiet', tmp, defaultBranch], {
@@ -1310,6 +1330,20 @@ export async function updateBranchFromRef(
   // line (no `sha`) rather than a `commit` line (with one). Documented
   // here so this is the accepted class it already is, not a rediscovery
   // (whole-branch review, 2026-08-18).
+  // Same precondition as `publishBranch`, and for the same reason: the guard
+  // used to run at the ephemeral-worktree line below, so a refusal arrived
+  // with the user's work already committed. Checked here, a refusal leaves
+  // the repository byte-identical.
+  try {
+    desdePath(root)
+  } catch (err) {
+    return {
+      ok: false,
+      committedBranch: false,
+      reason: `Couldn't prepare the update: ${gitMessage(err)}.`,
+    }
+  }
+
   let committedBranch = false
   const current = await currentBranch(root)
   if (branch === current && (await isWorkingTreeDirty(root))) {
@@ -1369,8 +1403,12 @@ export async function updateBranchFromRef(
   // purpose: git refuses to check the checked-out branch into a second
   // worktree, and we don't want the branch ref moving until the merge is
   // known clean anyway.
-  const tmp = path.join(root, '.desde', `update-${randomUUID().slice(0, 8)}`)
+  let tmp: string
   try {
+    // `desdePath` refuses (and this catch converts that refusal into the
+    // same "couldn't prepare the update" shape as any other failure here)
+    // if `.desde` is a symlink — see `desde-dir.ts`.
+    tmp = desdePath(root, `update-${randomUUID().slice(0, 8)}`)
     await fs.mkdir(path.dirname(tmp), { recursive: true })
     await execFileAsync(
       'git',

@@ -158,6 +158,22 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
     <div>{children}</div>
   ),
   DropdownMenuSeparator: () => <hr />,
+  // The effort row is a menu item, so that it sits in the menu's own focus
+  // order — see `model-picker-chip.test.tsx` for the tests that cover it.
+  // This file only needs it to render.
+  DropdownMenuItem: ({
+    children,
+    onSelect: _onSelect,
+    ...rest
+  }: {
+    children: ReactNode
+    onSelect?: unknown
+    [key: string]: unknown
+  }) => (
+    <div role="menuitem" {...rest}>
+      {children}
+    </div>
+  ),
   DropdownMenuRadioGroup: ({
     value,
     onValueChange,

@@ -17,8 +17,10 @@ import { handleCapabilitiesRoute } from "./capabilities-handler.js"
 import {
   LLM_CREDENTIALS_DEV_MODE_ROUTE,
   LLM_CREDENTIALS_DISMISS_ROUTE,
+  LLM_CREDENTIALS_PROVIDER_ROUTE,
   LLM_CREDENTIALS_ROUTE,
   handleLlmCredentialsRoute,
+  providerIdFromPath,
 } from "./llm-credentials-handler.js"
 import { isClaudeRuntimeResolvable } from "./claude-runtime-available.js"
 import { VIEWER_PROBE_ROUTE, handleViewerProbe } from "./viewer-probe.js"
@@ -203,6 +205,7 @@ import { handleNotesRequest, matchesNotesRoute } from "./notes-handler.js"
 import {
   dormantSurfaceRefusal,
   isCanvasEnabled,
+  isSecretReadsBlocked,
   isCodeViewEnabled,
   isNotesEnabled,
   isVscodeLinkEnabled,
@@ -230,6 +233,8 @@ import {
 } from "./static-assets.js"
 import { runRetentionGc } from "../../../src/editor/agent-chat-sdk/retention-gc.js"
 import { gcAllProposalBlobs } from "../../../src/editor/agent-chat-sdk/proposal-blob-gc.js"
+import { resolveLlmConfig } from "./llm-config.js"
+import { getProvider } from "../../../src/editor/llm-providers/registry.js"
 
 export interface HttpServerOptions {
   /** Bind host. Defaults to 127.0.0.1. */
@@ -388,6 +393,8 @@ export interface HttpServerOptions {
     backups?: { keepNewest?: number; maxAgeDays?: number }
     chatSessionTurns?: { maxTurns?: number }
   }
+  /** `llm` block from the project config. See `llm-config.ts`. */
+  llm?: import("./project-config.js").ProjectConfig["llm"]
   /**
    * Phase 3 — "Use repo conventions". CLI bootstrap reads this from
    * `.desde/config.json` (project-config `conventions` section).
@@ -427,12 +434,26 @@ export interface HttpServerOptions {
      */
     notes?: boolean
     /**
+     * Secret-file read policy for the chat agent. Opt-IN, default false —
+     * absent means the agent reads them, as it did before the policy
+     * existed. Read through `isSecretReadsBlocked` — never compared here —
+     * so the bootstrap's `blockSecretReads` field and what the chat dispatch
+     * actually refuses cannot disagree. See `dormant-surfaces.ts`.
+     */
+    blockSecretReads?: boolean
+    /**
      * "Open in VS Code" gate. DORMANT by product decision 2026-08-18.
      * Read through `isVscodeLinkEnabled`. Unlike the two above it has no
      * route to refuse from — see that function for why the client gate is
      * the whole gate here.
      */
     vscodeLink?: boolean
+    // No `neutralChat` field here. That gate is opt-OUT and env-only
+    // (`EDITOR_NEUTRAL_CHAT=0` disables it) with no project-config
+    // equivalent, so there is nothing for the bootstrap to surface: the
+    // model catalog response is what tells the client whether the OpenAI
+    // group exists at all. See `isNeutralChatEnabled` in
+    // `dormant-surfaces.ts`.
   }
   /**
    * Resolved read-roots registry for the chat handler's git tools.
@@ -717,6 +738,15 @@ type HomeLauncherHolder = {
 }
 
 /**
+ * The provider this project's non-chat lanes run on, resolved per request so a
+ * key saved in the settings dialog takes effect on the next save rather than
+ * at the next restart.
+ */
+function llmConfigFor(ctx: RouteContext) {
+  return resolveLlmConfig({ llm: ctx.llm }, process.env)
+}
+
+/**
  * Narrow the route context down to what the read-roots handler needs.
  *
  * `pickFolder` is passed through so the settings dialog can pop the native
@@ -765,6 +795,7 @@ interface RouteContext extends Required<Pick<HttpServerOptions, "applicatorLoade
   enabledLanes?: ReadonlySet<DormantLaneId>
   /** Audit Task 15 — retention tunables (spread from opts). */
   retention?: HttpServerOptions["retention"]
+  llm?: HttpServerOptions["llm"]
   readRoots?: HttpServerOptions["readRoots"]
   /**
    * Live registry box. The settings dialog swaps `.current` after a write so a
@@ -2148,7 +2179,10 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     method: "GET",
     path: "/api/editor/chat/model-catalog",
     authPolicy: "bearer-origin-if-present",
-    handler: (req, res, ctx) => handleModelCatalogRequest(req, res, ctx.repoRoot),
+    handler: (req, res, ctx) =>
+      handleModelCatalogRequest(req, res, ctx.repoRoot, {
+        configuredDefaultProvider: ctx.llm?.defaultProvider,
+      }),
   },
   // LLM credentials. The GET is a same-origin browser poll that often omits
   // `Origin`, so it takes the lenient policy the other read-only GETs use — it
@@ -2158,24 +2192,6 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     method: "GET",
     path: LLM_CREDENTIALS_ROUTE,
     authPolicy: "bearer-origin-if-present",
-    handler: (req, res, _ctx, url) =>
-      handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
-      }),
-  },
-  {
-    method: "PUT",
-    path: LLM_CREDENTIALS_ROUTE,
-    authPolicy: "bearer-origin-required",
-    handler: (req, res, _ctx, url) =>
-      handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
-      }),
-  },
-  {
-    method: "DELETE",
-    path: LLM_CREDENTIALS_ROUTE,
-    authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
         claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
@@ -2193,6 +2209,30 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   {
     method: "PUT",
     path: LLM_CREDENTIALS_DISMISS_ROUTE,
+    authPolicy: "bearer-origin-required",
+    handler: (req, res, _ctx, url) =>
+      handleLlmCredentialsRoute(req, res, url, {
+        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+      }),
+  },
+  // Provider-scoped writes. These sit AFTER the two reserved sub-routes above:
+  // both live under the same prefix, and first-match resolution would give
+  // them to this matcher otherwise. `providerIdFromPath` refuses those two
+  // names as well, so the ordering and the matcher agree.
+  {
+    method: "PUT",
+    path: LLM_CREDENTIALS_PROVIDER_ROUTE,
+    match: (pathname) => providerIdFromPath(pathname) !== null,
+    authPolicy: "bearer-origin-required",
+    handler: (req, res, _ctx, url) =>
+      handleLlmCredentialsRoute(req, res, url, {
+        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+      }),
+  },
+  {
+    method: "DELETE",
+    path: LLM_CREDENTIALS_PROVIDER_ROUTE,
+    match: (pathname) => providerIdFromPath(pathname) !== null,
     authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
@@ -2482,6 +2522,7 @@ async function handleChatRoute(
     loaders: ctx.chatLoaders,
     quotas: ctx.chatQuotas,
     retention: ctx.retention,
+    llm: ctx.llm,
     conventions: ctx.conventions,
     // Holder first: it reflects edits made from the settings dialog since
     // boot. `ctx.readRoots` is the boot-time snapshot and is the fallback for
@@ -2507,6 +2548,11 @@ async function handleChatRoute(
     // `EDITOR_CANVAS=1` restores it — same either-enables contract
     // as the client bootstrap's `canvas` field below.
     canvasEnabled: isCanvasEnabled(ctx),
+    // Blocking secret-file reads — opt-IN, default OFF. The DISPATCH half of
+    // the both-ends gate: the client bootstrap reports the same boolean
+    // below, through the same function, so the panel cannot say a project
+    // blocks credential reads while this route lets one through.
+    blockSecretReads: isSecretReadsBlocked(ctx),
   })
 }
 
@@ -2923,6 +2969,10 @@ async function handleDesignSystemsRoute(
       }
     },
     viteBaseUrl: ctx.viteUrl,
+    // Wired in production now, not only in tests: the LLM hint lane used to
+    // fall through to the registry's argless default, which could not see the
+    // project's `llm` block.
+    getLlmProvider: () => getProvider({ config: llmConfigFor(ctx) }),
   })
 }
 
@@ -4888,6 +4938,10 @@ async function runEditAndAutoCommit(
       miniTurnPolicy,
       // Dormant lanes (detach / swap) this prototype opted back in to.
       enabledLanes: ctx.enabledLanes,
+      // The same secret-read policy the visible chat lane runs under. The
+      // mini-turn fallback reads this repository with Read/Glob/Grep, so it
+      // is the same question with the same answer (FX19 item 4).
+      blockSecretReads: isSecretReadsBlocked(ctx),
       // WS4: give the mini-turn fallback the same design-system grounding
       // the chat route gets.
       getGrounding: () => getGroundingService(ctx.canonicalRoot, ctx.groundingLoaders),
@@ -4910,6 +4964,11 @@ async function runEditAndAutoCommit(
           return null
         }
       },
+      // The project's resolved provider. Lazy: constructing one throws on a
+      // missing key, and most edits never reach an LLM lane at all.
+      getLlmProvider: () => getProvider({ config: llmConfigFor(ctx) }),
+      llmProviderId: llmConfigFor(ctx).provider,
+      chatLoaders: ctx.chatLoaders,
     },
   )
   if (!result.ok) {
@@ -4996,7 +5055,10 @@ async function handleEditStreaming(
   const mutations =
     body.edit.kind === "llm-patch" ? body.edit.mutations : []
   send("start", {
-    model: process.env.ANTHROPIC_API_KEY ? "anthropic-sdk" : "claude-code",
+    // The provider the lane will actually run on. This used to read
+    // `process.env.ANTHROPIC_API_KEY ? "anthropic-sdk" : "claude-code"`, which
+    // would report an OpenAI-backed patch as claude-code in the save dialog.
+    model: llmConfigFor(ctx).provider,
     mutationCount: mutations.length,
   })
 
@@ -5031,11 +5093,18 @@ async function handleEditStreaming(
           // Same reason: `llm-patch` is not a dormant kind, but the two entry
           // points must not disagree about the gate they apply.
           enabledLanes: ctx.enabledLanes,
+          // Same reason again, for the secret-read policy.
+          blockSecretReads: isSecretReadsBlocked(ctx),
           // Same grounding provider `runEditAndAutoCommit` gets — resolves
           // the style-context block's tokens (see edit-handler.ts's
           // handleLLMPatch). Tokens must never block an edit; the handler
           // wraps this in try/catch and degrades to `[]`.
           getGrounding: () => getGroundingService(ctx.canonicalRoot, ctx.groundingLoaders),
+          // The project's resolved provider. Lazy: constructing one throws on
+          // a missing key, and most edits never reach an LLM lane at all.
+          getLlmProvider: () => getProvider({ config: llmConfigFor(ctx) }),
+          llmProviderId: llmConfigFor(ctx).provider,
+          chatLoaders: ctx.chatLoaders,
         },
       )
       if (!r.ok) return { result: r, autoCommit: NO_OP_AUTO_COMMIT }
@@ -5100,6 +5169,7 @@ async function handleLLMFallbackRequest(
     ctx.llmFallbackLoaders,
     ctx.conventions,
     ctx.enabledLanes,
+    () => getProvider({ config: llmConfigFor(ctx) }),
   )
   sendJson(res, result.status, {
     ok: result.ok,
@@ -5240,6 +5310,12 @@ function serveBootstrapScript(
   const codeView = isCodeViewEnabled(ctx)
   const notes = isNotesEnabled(ctx)
   const vscodeLink = isVscodeLinkEnabled(ctx)
+  // Secret-file read policy — opt-IN, default OFF. The OFFERING half: the
+  // capabilities panel reports that this project STOPS the agent reading
+  // credential-bearing files, which is the non-default state and therefore
+  // the one worth a row. Same function the chat route reads, so what the
+  // panel says and what the agent may do cannot drift.
+  const blockSecretReads = isSecretReadsBlocked(ctx)
   // Editor runtime tunables from `.desde/config.json`. Only
   // emit the subkey if the user set something — keeps the bootstrap
   // payload clean for the common case and lets the shell distinguish
@@ -5298,6 +5374,9 @@ function serveBootstrapScript(
     codeView,
     notes,
     vscodeLink,
+    // Blocking secret-file reads — default false (opt-IN). Reported so the
+    // capabilities panel can say the project has turned it on.
+    blockSecretReads,
     // Dormant edit lanes — both default false (opt-IN). See EDITOR_LANE_DETACH
     // / EDITOR_LANE_SWAP in src/lib/editor-feature-flags.ts.
     lanes,

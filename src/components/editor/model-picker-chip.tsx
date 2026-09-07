@@ -31,62 +31,90 @@
  *    tolerates a stale PERSISTED value but hard-400s a stale REQUEST
  *    override, so resending one would brick every send while the chip
  *    hid itself.
+ *
+ * The module-level cache itself (and `invalidateModelCatalogCache`, re-
+ * exported below) lives in `src/lib/model-catalog-cache.ts` — see that
+ * file's doc comment for why. Saving, removing or toggling a credential
+ * invalidates it (`useLlmCredentials.ts`); this component reads the cache
+ * through `useSyncExternalStore`, so every mounted chip sees the cache go
+ * back to empty and the fetch effect below refetches it.
  */
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { ChevronDown } from "lucide-react"
 import { editorFetch } from "@/lib/editor-fetch"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuPortal,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { Slider } from "@/components/ui/slider"
 import { reconcileSessionModelConfig } from "@/editor/core/model-catalog"
-import type {
-  EffortLevel,
-  ProviderModelCatalog,
-  SessionModelConfig,
-} from "@/editor/core/model-catalog"
+import type { EffortLevel, SessionModelConfig } from "@/editor/core/model-catalog"
+import {
+  getCatalogCache,
+  getCatalogEpoch,
+  getCatalogVersion,
+  getPickedThisLoad,
+  setCatalogCacheIfVersion,
+  setPickedThisLoad,
+  subscribeCatalogCache,
+  invalidateModelCatalogCache,
+  type ModelCatalogResponse as CatalogResponse,
+} from "@/lib/model-catalog-cache"
 
-interface CatalogResponse {
-  catalogs: ProviderModelCatalog[]
-  default: SessionModelConfig
-  /**
-   * The model the user last chose in this project, already reconciled
-   * server-side. `null` = no chat has ever carried a choice (or every
-   * saved one is gone) → runtime default.
-   */
-  lastChosenModel?: SessionModelConfig | null
-}
+export { invalidateModelCatalogCache }
 
-let catalogCache: CatalogResponse | null = null
+/** One radio value has to identify BOTH halves: two providers may reuse an id. */
+const OPTION_VALUE_SEPARATOR = "::"
+const optionValue = (providerId: string, modelId: string) =>
+  `${providerId}${OPTION_VALUE_SEPARATOR}${modelId}`
 
 /**
- * What the user picked through this chip since the page loaded.
+ * Display label for a provider group's `DropdownMenuLabel`.
  *
- * MODULE scope, deliberately, and it has to match `catalogCache`'s lifetime
- * exactly. This value exists to outrank `catalog.lastChosenModel`, which is
- * only current as of the one fetch that filled that cache: pick Opus, then
- * hit "+ New", and the new chat has no choice of its own while the cached
+ * A small local map rather than an import from `src/editor/llm-providers` —
+ * that directory reaches node-only code and this module ships in the
+ * browser. Falls back to a capitalised provider id so a vendor added without
+ * a picker-side update still reads as a name, not raw casing.
+ */
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+}
+
+function providerLabel(providerId: string): string {
+  return (
+    PROVIDER_LABELS[providerId] ??
+    providerId.charAt(0).toUpperCase() + providerId.slice(1)
+  )
+}
+
+/**
+ * `pickedThisLoad` (what the user picked through this chip since the page
+ * loaded) exists to outrank `catalog.lastChosenModel`, which is only
+ * current as of the one fetch that filled the cache: pick Opus, then hit
+ * "+ New", and the new chat has no choice of its own while the cached
  * catalog still names whatever ran before Opus.
  *
  * It was a `useRef`, which is per-MOUNT. Hiding and re-showing the right rail
  * unmounts the chip and wipes the memory, while the module-level catalog
  * survives untouched, so the very next "+ New" adopted the stale value and
  * silently undid the user's most recent pick. Two lifetimes for one
- * correction is the bug; one lifetime is the fix.
- *
- * Both are plain module state, reset the same way the tests already reset the
- * catalog: `vi.resetModules()` and a fresh dynamic import.
+ * correction is the bug; one lifetime is the fix — both it and the catalog
+ * cache now live in `src/lib/model-catalog-cache.ts`, reset the same way the
+ * tests already reset the catalog: `vi.resetModules()` and a fresh dynamic
+ * import.
  */
-let pickedThisLoad: SessionModelConfig | null = null
-
-const NO_EFFORT_SENTINEL = "__default__"
-
 export interface ModelPickerChipProps {
   /** Current session choice; null = runtime default. */
   value: SessionModelConfig | null
@@ -124,8 +152,34 @@ export function ModelPickerChip({
   sessionId = null,
   onAdoptLastChosenModel,
 }: ModelPickerChipProps) {
-  const [catalog, setCatalog] = useState<CatalogResponse | null>(catalogCache)
+  // Read straight from the shared store rather than local state: a fetch
+  // (by this chip OR another mounted one) and `invalidateModelCatalogCache`
+  // both go through `setCatalogCache`, which notifies this subscription, so
+  // every mounted chip renders the same catalog without a `useEffect` ever
+  // having to call `setState` for a value that already changed elsewhere.
+  const catalog = useSyncExternalStore(subscribeCatalogCache, getCatalogCache, getCatalogCache)
+  // A separate snapshot from `catalog` itself: after a failed fetch,
+  // `catalog` stays `null`, and invalidating a cache that is already
+  // `null` is a null-to-null "change" `useSyncExternalStore` can't see —
+  // see `getCatalogVersion`'s doc comment in `model-catalog-cache.ts`. This
+  // counter changes on every invalidation regardless, so the fetch effect
+  // below keys off it instead of off `catalog`.
+  const catalogVersion = useSyncExternalStore(
+    subscribeCatalogCache,
+    getCatalogVersion,
+    getCatalogVersion,
+  )
   const [catalogFailed, setCatalogFailed] = useState(false)
+  /**
+   * Which provider's models the open menu is listing, or null for the one
+   * the running model belongs to. Browsing is deliberately separate from
+   * choosing: opening the other vendor's list changes nothing until a model
+   * in it is picked, and closing the menu forgets it.
+   */
+  const [browsing, setBrowsing] = useState<string | null>(null)
+  /** The provider submenu's own open state, so choosing one closes IT while
+   *  the root menu stays open on that provider's models. */
+  const [providerMenuOpen, setProviderMenuOpen] = useState(false)
   // The rail passes an inline arrow, so `onChange`'s identity changes
   // every render. Hold it in a ref so it stays out of the sync effect's
   // deps — otherwise that effect reruns on every render for no reason.
@@ -145,9 +199,19 @@ export function ModelPickerChip({
   const canAdoptLastChosenModel = onAdoptLastChosenModel !== undefined
 
   useEffect(() => {
-    if (catalogCache) return
+    // Already cached — either the first mount saw a warm cache, or another
+    // mounted chip's fetch (or this effect's own previous run) already
+    // filled it. Nothing to do: `catalog` above already reflects it.
+    if (getCatalogCache()) return
     let cancelled = false
+    // Captured synchronously, at the moment this effect run starts — not
+    // `catalogVersion` above, which only tells this effect WHEN to rerun.
+    // `setCatalogCacheIfVersion` gates on the narrower epoch counter so a
+    // second mounted chip's concurrent, equally-fresh fetch does not get
+    // discarded just because a sibling's write already bumped `version`.
+    const epochAtStart = getCatalogEpoch()
     void (async () => {
+      setCatalogFailed(false)
       try {
         const res = await editorFetch("/api/editor/chat/model-catalog")
         if (!res.ok) {
@@ -172,8 +236,12 @@ export function ModelPickerChip({
           if (!cancelled) setCatalogFailed(true)
           return
         }
-        catalogCache = body
-        if (!cancelled) setCatalog(body)
+        // An epoch-checked write, not a plain `setCatalogCache`: if
+        // `invalidateModelCatalogCache()` ran while this fetch was in
+        // flight, `epochAtStart` (captured when this effect started) no
+        // longer matches the live epoch, and the stale body is discarded
+        // instead of repopulating the cache the invalidation just cleared.
+        if (!cancelled) setCatalogCacheIfVersion(epochAtStart, body)
       } catch {
         // Catalog unavailable — chip stays hidden, chat uses defaults.
         if (!cancelled) setCatalogFailed(true)
@@ -182,7 +250,7 @@ export function ModelPickerChip({
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [catalogVersion])
 
   // Keep session state in agreement with what the server will run.
   // Idempotent by construction: every branch either leaves `value`
@@ -209,6 +277,15 @@ export function ModelPickerChip({
       // dropped to the runtime default instead of resent. A config that
       // only needs sanitizing (effort on a no-effort model) is
       // normalized in place rather than discarded.
+      //
+      // This already checks EVERY served catalog, not just the first —
+      // `reconcileSessionModelConfig` walks `catalog.catalogs` and matches
+      // on provider id. So a session whose provider stopped being served
+      // (an OpenAI key removed mid-session) reconciles to `null` here with
+      // no extra code: the provider it names is no longer in the array,
+      // the validator reports it unknown, and the chip drops to the
+      // runtime default rather than displaying a model the next turn
+      // would be refused for.
       const reconciled = reconcileSessionModelConfig(value, catalog.catalogs)
       if (reconciled === null) {
         onChangeRef.current(null)
@@ -231,7 +308,7 @@ export function ModelPickerChip({
     //
     // A pick made during this page-load outranks the catalog's copy,
     // which was resolved at mount and cannot know about it.
-    const lastChosen = pickedThisLoad ?? catalog.lastChosenModel
+    const lastChosen = getPickedThisLoad() ?? catalog.lastChosenModel
     if (!lastChosen) return
     if (sessionId === null) {
       onChangeRef.current(lastChosen)
@@ -241,11 +318,16 @@ export function ModelPickerChip({
   }, [catalog, catalogFailed, value, sessionId, canAdoptLastChosenModel])
 
   if (!catalog) return null
-  const provider = catalog.catalogs[0]
-  if (!provider) return null
   const effective = value ?? catalog.default
-  const option = provider.models.find((m) => m.id === effective.model)
-  if (!option) return null
+  // Keyed on the PAIR. Reading `catalogs[0]` here made a second provider
+  // invisible even when the server served it, and looking a model up by id
+  // alone assumed ids are globally unique across vendors, which nothing
+  // enforces.
+  const providerCatalog = catalog.catalogs.find(
+    (c) => c.providerId === effective.provider,
+  )
+  const option = providerCatalog?.models.find((m) => m.id === effective.model)
+  if (!providerCatalog || !option) return null
 
   const chipLabel = effective.effort
     ? `${option.label} · ${effective.effort}`
@@ -255,12 +337,56 @@ export function ModelPickerChip({
   // can never miss one. The config is built from the catalog, so it is
   // valid by construction and needs no reconciling before it is stored.
   const choose = (config: SessionModelConfig): void => {
-    pickedThisLoad = config
+    setPickedThisLoad(config)
     onChange(config)
   }
 
+  // Which provider's models the list is showing. Null means "the one the
+  // current model belongs to". Switching it only changes what is LISTED —
+  // the chip keeps running the chosen model until a model is picked, so
+  // browsing the other vendor costs nothing if you change your mind.
+  const browsingProvider = browsing ?? effective.provider
+  const listed =
+    catalog.catalogs.find((c) => c.providerId === browsingProvider) ?? providerCatalog
+  const multiProvider = catalog.catalogs.length > 1
+
+  // The slider's stops are the model's own ladder, and nothing else. There
+  // used to be a "Default" stop at index 0 meaning "send no effort, let the
+  // vendor decide". Mo, 2026-09-07: that word names an implementation detail
+  // rather than a level, and Claude Code, the reference, has no such
+  // position. Every stop is now a real level.
+  const effortStops: EffortLevel[] = option.effortLevels ?? []
+  // Where a session with no choice of its own starts. The catalog carries it
+  // as `defaultEffort`, and the chat handler sends that same value, so the
+  // slider's opening position IS the level the next turn runs at.
+  //
+  // The middle-of-the-ladder arm is a floor, not a second opinion: it only
+  // runs for a served catalog that omits the field entirely, and the server
+  // now stamps every model that has a ladder (`withDefaultEffort`). Guessing
+  // here while the server guessed differently was the bug — see that
+  // function's doc comment.
+  const defaultEffortIndex = Math.max(
+    0,
+    option.defaultEffort
+      ? effortStops.indexOf(option.defaultEffort)
+      : Math.floor((effortStops.length - 1) / 2),
+  )
+  const chosenEffortIndex = effective.effort
+    ? effortStops.indexOf(effective.effort)
+    : -1
+  const effortIndex = chosenEffortIndex >= 0 ? chosenEffortIndex : defaultEffortIndex
+
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      onOpenChange={(open) => {
+        // Reopening shows the running model's provider again, not wherever
+        // the last browse wandered to.
+        if (!open) {
+          setBrowsing(null)
+          setProviderMenuOpen(false)
+        }
+      }}
+    >
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
@@ -274,71 +400,176 @@ export function ModelPickerChip({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-56">
-        <DropdownMenuLabel className="text-xs">Model</DropdownMenuLabel>
+        {/* With two vendors credentialed the flat list ran to 24 rows and
+            filled the screen (Mo, 2026-09-07). The provider moves into its
+            own submenu at the top, so the list below is one vendor deep. */}
+        {multiProvider ? (
+          <>
+            <DropdownMenuSub open={providerMenuOpen} onOpenChange={setProviderMenuOpen}>
+              <DropdownMenuSubTrigger
+                className="text-sm"
+                data-testid="editor-provider-switcher"
+              >
+                {/* The vendor's name alone. A "Provider" label beside it
+                    named the row's category rather than its value, which the
+                    value already tells you (Mo, 2026-09-07). */}
+                <span className="truncate">{providerLabel(browsingProvider)}</span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuPortal>
+                <DropdownMenuSubContent>
+                  <DropdownMenuRadioGroup
+                    value={browsingProvider}
+                    onValueChange={setBrowsing}
+                  >
+                    {catalog.catalogs.map((group) => (
+                      <DropdownMenuRadioItem
+                        key={group.providerId}
+                        value={group.providerId}
+                        className="text-sm"
+                        data-testid={`editor-provider-option-${group.providerId}`}
+                        // A radio item dismisses the whole menu on select, and
+                        // the close handler below then forgets the provider
+                        // just chosen — so picking one shut the menu and
+                        // changed nothing (Mo, 2026-09-07). Preventing the
+                        // default keeps the root open on the newly listed
+                        // models; the submenu closes on its own, above.
+                        onSelect={(event) => {
+                          event.preventDefault()
+                          setProviderMenuOpen(false)
+                        }}
+                      >
+                        {providerLabel(group.providerId)}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuSubContent>
+              </DropdownMenuPortal>
+            </DropdownMenuSub>
+            <DropdownMenuSeparator />
+          </>
+        ) : (
+          <DropdownMenuLabel className="text-xs">Model</DropdownMenuLabel>
+        )}
         <DropdownMenuRadioGroup
-          value={effective.model}
-          onValueChange={(model) => {
-            const next = provider.models.find((m) => m.id === model)
-            if (!next) return
-            // Carry effort over only if the new model supports it.
+          value={optionValue(effective.provider, effective.model)}
+          onValueChange={(raw) => {
+            const [providerId, ...rest] = raw.split(OPTION_VALUE_SEPARATOR)
+            const modelId = rest.join(OPTION_VALUE_SEPARATOR)
+            const group = catalog.catalogs.find((c) => c.providerId === providerId)
+            const next = group?.models.find((m) => m.id === modelId)
+            if (!group || !next) return
+            // Carry effort over only if the new model supports it. Crossing
+            // providers is the common case for this to matter: the ladders
+            // are per model, not per vendor.
             const effort =
               effective.effort && next.effortLevels?.includes(effective.effort)
                 ? effective.effort
                 : undefined
             choose({
-              provider: provider.providerId,
-              model,
+              provider: group.providerId,
+              model: next.id,
               ...(effort ? { effort } : {}),
             })
           }}
         >
-          {provider.models.map((m) => (
+          {listed.models.map((m) => (
             <DropdownMenuRadioItem
-              key={m.id}
-              value={m.id}
+              key={optionValue(listed.providerId, m.id)}
+              value={optionValue(listed.providerId, m.id)}
               className="text-sm"
-              data-testid={`editor-model-option-${m.id}`}
+              data-testid={`editor-model-option-${listed.providerId}-${m.id}`}
             >
-              {/* Name and version, nothing else (Mo, 2026-09-02: "this menu
-                  is unnecessarily complex"). The description stays on the
-                  catalog entry for anything that wants it; the menu does
-                  not. */}
+              {/* Name and version, nothing else (Mo, 2026-09-02: "this
+                  menu is unnecessarily complex"). The description stays
+                  on the catalog entry for anything that wants it; the
+                  menu does not. */}
               <span className="truncate">{m.label}</span>
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
-        {option.effortLevels ? (
+        {/* One stop is not a slider, and no ladder is no control at all. */}
+        {effortStops.length > 1 ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-xs">Effort</DropdownMenuLabel>
-            <DropdownMenuRadioGroup
-              value={effective.effort ?? NO_EFFORT_SENTINEL}
-              onValueChange={(effort) => {
+            {/* A slider, not a radio list: effort is one ordered ladder, and
+                as rows it doubled the menu's length for a value most turns
+                never change.
+
+                The row is a MENU ITEM, which is what makes it reachable at
+                all. A menu's arrow keys move a roving focus between its
+                items, and only items are in that group; Radix also cancels
+                Tab inside menu content outright (`react-menu`'s content
+                `onKeyDown`). So a plain div holding a focusable thumb could
+                be reached by no key at all — pointer only. Being an item puts
+                the row in the same up/down order as the models above it.
+
+                Keys split by axis, which is the convention a menu already
+                sets: left/right belong to the row's VALUE, up/down/home/end
+                stay the menu's navigation. A vertical roving-focus group
+                ignores left/right, so taking them costs the menu nothing.
+
+                `onSelect` is prevented because Enter or Space on a menu item
+                dismisses the menu, and there is nothing here to select. */}
+            <DropdownMenuItem
+              className="flex-col items-stretch gap-0 px-2 pt-1 pb-2"
+              data-testid="editor-effort-row"
+              onSelect={(event) => event.preventDefault()}
+              onKeyDown={(event) => {
+                const delta =
+                  event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0
+                if (delta === 0) return
+                event.preventDefault()
+                const next = Math.min(
+                  effortStops.length - 1,
+                  Math.max(0, effortIndex + delta),
+                )
+                const level = effortStops[next]
+                if (!level || next === effortIndex) return
                 choose({
-                  provider: provider.providerId,
+                  provider: effective.provider,
                   model: effective.model,
-                  ...(effort !== NO_EFFORT_SENTINEL
-                    ? { effort: effort as EffortLevel }
-                    : {}),
+                  effort: level,
                 })
               }}
             >
-              <DropdownMenuRadioItem
-                value={NO_EFFORT_SENTINEL}
-                className="text-sm"
-              >
-                Default
-              </DropdownMenuRadioItem>
-              {option.effortLevels.map((level) => (
-                <DropdownMenuRadioItem
-                  key={level}
-                  value={level}
-                  className="text-sm"
-                >
-                  {level}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
+              <div className="flex items-baseline justify-between pb-2">
+                <span className="text-xs text-muted-foreground">Effort</span>
+                {/* Announced on change: with focus on the row rather than on
+                    the thumb, the slider's own value is not what a screen
+                    reader is tracking. */}
+                <span className="text-xs" aria-live="polite" data-testid="editor-effort-value">
+                  {effortStops[effortIndex]}
+                </span>
+              </div>
+              {/* Only KEY events are stopped, and only those raised INSIDE the
+                  slider — that is a pointer user who has clicked the thumb,
+                  and the thumb's own arrow handling must not also move the
+                  menu's focus. Keys pressed on the row itself never reach
+                  this handler, so the item handler above still gets them.
+
+                  Pointer events must NOT be stopped: swallowing pointerdown
+                  here left the menu needing two outside clicks to close, the
+                  first being spent restoring the state this handler had
+                  interrupted (Mo, 2026-09-07). */}
+              <div onKeyDown={(e) => e.stopPropagation()}>
+                <Slider
+                  aria-label="Effort"
+                  min={0}
+                  max={effortStops.length - 1}
+                  step={1}
+                  value={[effortIndex]}
+                  onValueChange={([next]) => {
+                    const level = effortStops[next ?? 0]
+                    if (!level) return
+                    choose({
+                      provider: effective.provider,
+                      model: effective.model,
+                      effort: level,
+                    })
+                  }}
+                />
+              </div>
+            </DropdownMenuItem>
           </>
         ) : null}
       </DropdownMenuContent>

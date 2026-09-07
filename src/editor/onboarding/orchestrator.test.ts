@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { ComponentManifestSource } from '@/editor/core/manifest'
 import { onboardDesignSystem, type OnboardDeps } from './orchestrator'
@@ -258,5 +261,31 @@ describe('onboardDesignSystem', () => {
     const { deps: d, added } = deps({ buildSource: vi.fn(() => null) })
     await expect(onboardDesignSystem(req(), d)).rejects.toThrow(/manifest source/i)
     expect(added).toHaveLength(0)
+  })
+})
+
+/**
+ * An npm install or a git clone lands under `<prototypeRoot>/.desde/ingested`.
+ * The prototype repo is untrusted input, so it can ship `.desde` as a symlink,
+ * and a package tree written through that link lands outside the working tree.
+ * See `src/editor/worktree/desde-dir.ts`.
+ */
+describe('a .desde that is a symlink', () => {
+  it('refuses to ingest, and never starts the install', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'onboard-symlink-'))
+    try {
+      const prototypeRoot = join(base, 'proto')
+      const target = join(base, 'target')
+      mkdirSync(prototypeRoot, { recursive: true })
+      mkdirSync(target, { recursive: true })
+      symlinkSync(target, join(prototypeRoot, '.desde'))
+      const { deps: d } = deps()
+      await expect(
+        onboardDesignSystem({ source: { kind: 'npm', spec: 'x' }, prototypeRoot }, d),
+      ).rejects.toThrow(/\.desde is a symbolic link/)
+      expect(d.ingestNpm).not.toHaveBeenCalled()
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 })

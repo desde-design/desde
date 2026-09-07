@@ -53,7 +53,7 @@ import {
 } from "./server/session-info.js"
 import { MCP_PROXY_TOOL_NAMES } from "./server/mcp-tool-handler.js"
 import type { ProjectIdentity } from "../../src/core/project-identity.js"
-import { readProjectConfig } from "./server/project-config.js"
+import { readProjectConfig, type ProjectConfig } from "./server/project-config.js"
 import { upsertProjectRegistryEntry } from "./server/projects-registry.js"
 import {
   detectFramework,
@@ -812,6 +812,12 @@ export interface ProjectAssociationStatus {
     canvas?: boolean
   }
   /**
+   * `llm` block from `.desde/config.json` — which provider the project's
+   * non-chat lanes run on. Forwarded to `startHttpServer` so `RouteContext`
+   * can resolve it once per request with `resolveLlmConfig`.
+   */
+  llm?: ProjectConfig["llm"]
+  /**
    * One-line warnings the CLI can surface to the user about why the
    * association is in a degraded state. Empty when fully wired.
    */
@@ -1510,6 +1516,7 @@ export async function startCore(opts: CoreOptions): Promise<CoreHandle> {
     conventions: projectAssociation.conventions,
     editor: projectAssociation.editor,
     retention: projectAssociation.retention,
+    llm: projectAssociation.llm,
     readRoots,
     readRootsHolder,
     enabledLanes,
@@ -1725,6 +1732,7 @@ async function bootstrapProjectAssociation(
   let conventions: ProjectAssociationStatus["conventions"]
   let editor: ProjectAssociationStatus["editor"]
   let retention: ProjectAssociationStatus["retention"]
+  let llm: ProjectAssociationStatus["llm"]
 
   const configResult = await readProjectConfig(repoRoot)
   if (configResult.ok) {
@@ -1736,6 +1744,7 @@ async function bootstrapProjectAssociation(
     conventions = configResult.config.conventions
     editor = configResult.config.editor
     retention = configResult.config.retention
+    llm = configResult.config.llm
   } else if (configResult.reason !== "missing") {
     // Malformed / unsupported version / missing-required: real errors
     // worth surfacing. "missing" is expected (user hasn't set up
@@ -1758,6 +1767,7 @@ async function bootstrapProjectAssociation(
     conventions,
     editor,
     retention,
+    llm,
     warnings,
   }
 }

@@ -196,7 +196,7 @@ export async function resolveRepoPath(
  * SFC and well within Claude's input budget even when several files
  * are read in one turn.
  */
-const READ_FILE_MAX_BYTES = 200 * 1024
+export const READ_FILE_MAX_BYTES = 200 * 1024
 
 export const readFileTool: ToolEntry<ReadFileInput> = {
   def: {

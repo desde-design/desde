@@ -13,6 +13,7 @@ import {
   resolveBranchCached,
 } from "../../../src/editor/ledger/edit-ledger"
 import { normalizeLedgerPath } from "../../../src/editor/ledger/normalize-path"
+import { desdePath } from "../../../src/editor/worktree/desde-dir.js"
 import {
   resolvePrototypeRoot,
   resolveCandidateWithinRoot,
@@ -20,6 +21,11 @@ import {
 } from "./resolve-editable-path"
 import { checkExtensionGate } from "./edit-extension-gate"
 import { dormantLaneRefusal, type DormantLaneId } from "./enabled-lanes"
+import { resolveLlmConfig } from "./llm-config.js"
+import { resolveChatRuntime, type RunChatTurn } from "./chat-runtime-dispatch.js"
+import { resolvedDefaultModelFor } from "./model-catalog-source.js"
+import type { ChatHandlerLoaders } from "./chat-handler.js"
+import { getDescriptor } from "../../../src/editor/llm-providers/provider-registry.js"
 
 export type { EditRequestBody } from "../../../src/editor/edit-service/validate-edit-request"
 
@@ -291,6 +297,35 @@ export interface ApplyEditOpts {
    * silently re-opening a lane the product decided not to offer.
    */
   enabledLanes?: ReadonlySet<DormantLaneId>
+  /**
+   * The provider the project's non-chat lanes run on, resolved once per
+   * request by the route (`resolveLlmConfig`). Absent in older callers and
+   * tests, which keeps the registry's own default.
+   */
+  getLlmProvider?: () => import("../../../src/editor/llm-providers/types").CompletionProvider
+  /**
+   * That provider's id, for the lane gates that must refuse rather than run.
+   * Separate from the factory because the refusal must NOT construct a
+   * provider (constructing one throws on a missing key, which is a different
+   * failure with a different message).
+   */
+  llmProviderId?: string
+  /**
+   * Loaders `resolveChatRuntime` needs to dispatch the mini-turn to the
+   * project's actual provider (Claude Agent SDK vs the neutral runtime).
+   * Absent in older callers/tests, which keeps the mini-turn's own built-in
+   * default (the Claude Agent SDK runtime) — the same behavior this project
+   * had before per-provider dispatch existed.
+   */
+  chatLoaders?: ChatHandlerLoaders
+  /**
+   * The prototype's `editor.blockSecretReads` setting, for the agent
+   * mini-turn fallback (FX19 item 4). The route computes it with
+   * `isSecretReadsBlocked(ctx)` — the same call `http-server.ts` already
+   * makes for the visible chat lane. Absent in older callers and tests,
+   * which is the setting's own default: allow.
+   */
+  blockSecretReads?: boolean
 }
 
 export async function applyEdit(
@@ -338,6 +373,7 @@ export async function applyEdit(
       body.edit.llmFallback,
       opts.getGrounding,
       body.correlationId,
+      opts.getLlmProvider,
     )
   }
 
@@ -1351,6 +1387,9 @@ async function handleApplicatorRefusal(args: {
           // P2-2 (codex review round 3, 2026-08-20) — see
           // `tryPropEditLLMFallback`'s own doc comment on this param.
           correlationId: body.correlationId,
+          llmProviderId: opts.llmProviderId,
+          chatLoaders: opts.chatLoaders,
+          blockSecretReads: opts.blockSecretReads,
         })
         if (fallbackResult !== null) return fallbackResult
       } else if (body.edit.llmFallback === "chat") {
@@ -1728,6 +1767,12 @@ async function tryPropEditLLMFallback(args: {
    * `activity-verification-join.ts`).
    */
   correlationId?: string
+  /** See `ApplyEditOpts.llmProviderId`. */
+  llmProviderId?: string
+  /** See `ApplyEditOpts.chatLoaders`. */
+  chatLoaders?: ChatHandlerLoaders
+  /** See `ApplyEditOpts.blockSecretReads`. */
+  blockSecretReads?: boolean
 }): Promise<EditResult | null> {
   const escalateToChatOnRefusal = (reason: string): EditResult => ({
     ok: false,
@@ -1776,21 +1821,76 @@ async function tryPropEditLLMFallback(args: {
     reviewSurface = await args.createReviewSurface().catch(() => null)
   }
 
+  // The mini-turn now runs on the SAME provider chat does for this project,
+  // instead of being refused for anything but Anthropic. `args.llmProviderId`
+  // is the id the route already resolved (`resolveLlmConfig` at the CLI
+  // route) — trust it when present rather than re-resolving from scratch.
+  const providerId = args.llmProviderId ?? resolveLlmConfig(undefined, process.env).provider
+  // `claude_code` is `resolveLlmConfig`'s synthetic id for the Claude
+  // subscription lane (opted in via EDITOR_USE_CLAUDE_SUBSCRIPTION, no
+  // ANTHROPIC_API_KEY set) — it has no entry in the provider-registry
+  // descriptor table, because it has always meant "the Anthropic runtime,
+  // reached through the subscription" rather than a distinct provider.
+  // `getDescriptor` and `resolveChatRuntime` only know real descriptor ids,
+  // so map it onto 'anthropic' for those two lookups. `providerId` itself
+  // stays the raw id passed to the mini-turn, since that is what
+  // `args.llmProviderId` already carries for other callers.
+  const runtimeProviderId = providerId === "claude_code" ? "anthropic" : providerId
+  const descriptor = getDescriptor(runtimeProviderId)
+  // The default model of the provider that will actually run, not the SDK's,
+  // and the one the PICKER would show rather than the static catalog's —
+  // those two disagree whenever the account's live list has dropped the bare
+  // static default id, and the mini-turn then requested a model the account
+  // cannot call. See `resolvedDefaultModelFor`. `undefined` when the provider
+  // has no default at all: the runtime then picks, which is better than
+  // pinning a model id from another vendor.
+  const model = descriptor
+    ? await resolvedDefaultModelFor(runtimeProviderId)
+    : undefined
+  // `chatLoaders` is absent for older callers/tests — they keep getting the
+  // mini-turn's own built-in default (the Claude Agent SDK runtime), same as
+  // before this change.
+  //
+  // `resolveChatRuntime` can throw (an unknown provider id, or a neutral
+  // runtime refused by `EDITOR_NEUTRAL_CHAT=0`). Before this task that exact
+  // configuration returned a clean 422 with an actionable reason; an uncaught
+  // throw here would turn it into a 500 raised deep inside a save flow, which
+  // is the one thing this fallback exists to avoid. Route it back through the
+  // same `escalateToChatOnRefusal` every other refusal in this function uses.
+  let runTurn: RunChatTurn | undefined
+  if (args.chatLoaders) {
+    try {
+      runTurn = await resolveChatRuntime(runtimeProviderId, args.chatLoaders)
+    } catch (err) {
+      return escalateToChatOnRefusal(
+        `${args.deterministicReason} (agent fallback unavailable: ${(err as Error).message})`,
+      )
+    }
+  }
+
   let miniResult: Awaited<ReturnType<typeof runEditFixMiniTurn>>
   try {
-    miniResult = await runEditFixMiniTurn({
-      repoRoot: args.rootReal,
-      file: args.file,
-      line: args.line,
-      column: args.column,
-      propName: args.propName,
-      newValue: args.newValue,
-      fallback: args.fallback,
-      deterministicReason: args.deterministicReason,
-      projectKnowledge,
-      getGrounding: args.getGrounding,
-      ...(reviewSurface ? { reviewSurface } : {}),
-    })
+    miniResult = await runEditFixMiniTurn(
+      {
+        repoRoot: args.rootReal,
+        file: args.file,
+        line: args.line,
+        column: args.column,
+        propName: args.propName,
+        newValue: args.newValue,
+        fallback: args.fallback,
+        deterministicReason: args.deterministicReason,
+        projectKnowledge,
+        getGrounding: args.getGrounding,
+        model,
+        providerId,
+        // FX19 item 4. The mini-turn used to run with no secret-read
+        // policy at all, on a lane an ordinary inspector edit reaches.
+        blockSecretReads: args.blockSecretReads,
+        ...(reviewSurface ? { reviewSurface } : {}),
+      },
+      { runTurn },
+    )
   } finally {
     await reviewSurface?.dispose().catch(() => {})
   }
@@ -1962,7 +2062,12 @@ async function tryPropEditLLMFallback(args: {
   let miniTurnBackedUpAny = false
   try {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-")
-    const backupDir = path.join(args.rootReal, ".desde", "backups", `${stamp}-mini-turn`)
+    // `desdePath` throws when `.desde`, or `backups` under it, is a
+    // symlink out of the worktree.
+    // That throw lands in the catch below (best-effort — the landed edit
+    // must never fail over a backup), so `miniTurnBackupDir` is left
+    // unset and nothing is written under the hostile target.
+    const backupDir = desdePath(args.rootReal, "backups", `${stamp}-mini-turn`)
     miniTurnBackupDir = backupDir
     if (targetChanged) {
       const backupPath = path.join(backupDir, args.file)
@@ -2307,6 +2412,8 @@ async function handleLLMPatch(
   getGrounding?: ApplyEditOpts["getGrounding"],
   /** See `EditRequestBody.correlationId`. */
   correlationId?: string,
+  /** See `ApplyEditOpts.getLlmProvider`. */
+  getLlmProvider?: ApplyEditOpts["getLlmProvider"],
 ): Promise<EditResult> {
   if (!applicatorLoaders.loadApplyLLMPatch || !applicatorLoaders.loadStyleGrounding) {
     return {
@@ -2749,6 +2856,7 @@ async function handleLLMPatch(
     // stream surfaces token-by-token in the save dialog instead of
     // blanking for 5–95s.
     ...(onTextDelta ? { onTextDelta } : {}),
+    ...(getLlmProvider ? { resolveProvider: getLlmProvider } : {}),
   })
 
   if (!result.ok) {
@@ -2864,7 +2972,7 @@ async function writePatchedFilesThroughBroker(args: {
   /** See `EditRequestBody.correlationId`. */
   correlationId?: string
 }): Promise<
-  { ok: true; backupDir: string } | { ok: false; error: EditResult }
+  { ok: true; backupDir?: string } | { ok: false; error: EditResult }
 > {
   // Journal + op keys use `repoRelOf` (derived from each file's already-
   // resolved absolute target path), NEVER the raw sourceLoc-derived
@@ -2934,7 +3042,11 @@ async function writePatchedFilesThroughBroker(args: {
         ok: false,
         status: 500,
         reason:
-          broker.stage === "backup"
+          // `stage: "stopped"` cannot occur here — this route passes no
+          // `signal` to `brokeredWrite` — but it carries no `repoRel`, so
+          // the branch below cannot name a file for it. Grouped with
+          // `backup`, which is the other "nothing was written" outcome.
+          broker.stage === "backup" || broker.stage === "stopped"
             ? `${broker.reason}. Patch aborted; no source files modified.`
             : // `rollbackWarning` is empty unless a rollback ALSO failed —
               // in which case a file still holds the patched content while

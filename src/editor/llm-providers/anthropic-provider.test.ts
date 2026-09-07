@@ -576,3 +576,100 @@ describe('AnthropicProvider.complete', () => {
     expect(params.model).toBe('claude-opus-4-7')
   })
 })
+
+function fakeAnthropicClient(
+  captured: Array<Record<string, unknown>>,
+  events: Array<Record<string, unknown>>,
+): { messages: { create: (body: Record<string, unknown>) => Promise<AsyncIterable<unknown>> } } {
+  return {
+    messages: {
+      create: async (body) => {
+        captured.push(body)
+        return (async function* () {
+          for (const e of events) yield e
+        })()
+      },
+    },
+  }
+}
+
+describe('streamConversation: additive provider-seam extensions', () => {
+  it('sends a user image block as an Anthropic base64 image source', async () => {
+    const captured: Array<Record<string, unknown>> = []
+    const provider = new AnthropicProvider({
+      apiKey: 'test',
+      client: fakeAnthropicClient(captured, []) as unknown as Anthropic,
+    })
+    const events = []
+    for await (const ev of provider.streamConversation({
+      system: 'sys',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'what colour is this' },
+            { type: 'image', mediaType: 'image/png', data: 'AAAA' },
+          ],
+        },
+      ],
+      tools: [],
+    })) {
+      events.push(ev)
+    }
+    const sent = captured[0] as { messages: Array<{ content: unknown[] }> }
+    expect(sent.messages[0].content[1]).toEqual({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: 'AAAA' },
+    })
+  })
+
+  it('merges providerOptions into the request body', async () => {
+    const captured: Array<Record<string, unknown>> = []
+    const provider = new AnthropicProvider({
+      apiKey: 'test',
+      client: fakeAnthropicClient(captured, []) as unknown as Anthropic,
+    })
+    for await (const _ of provider.streamConversation({
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [],
+      providerOptions: { thinking: { type: 'adaptive' } },
+    })) {
+      void _
+    }
+    expect(captured[0].thinking).toEqual({ type: 'adaptive' })
+  })
+
+  it('emits reasoning_delta for a thinking_delta and never puts it in the assistant message', async () => {
+    const provider = new AnthropicProvider({
+      apiKey: 'test',
+      client: fakeAnthropicClient([], [
+        { type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } },
+        { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: 'weighing it' },
+        },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'content_block_start', index: 1, content_block: { type: 'text' } },
+        { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'done' } },
+        { type: 'content_block_stop', index: 1 },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } },
+        { type: 'message_stop' },
+      ]) as unknown as Anthropic,
+    })
+    const events = []
+    for await (const ev of provider.streamConversation({
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [],
+    })) {
+      events.push(ev)
+    }
+    expect(events).toContainEqual({ kind: 'reasoning_delta', delta: 'weighing it' })
+    const complete = events.find((e) => e.kind === 'message_complete')
+    if (complete?.kind !== 'message_complete') throw new Error('expected message_complete')
+    expect(complete.message.content).toEqual([{ type: 'text', text: 'done' }])
+  })
+})

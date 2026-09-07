@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest"
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs"
+import { mkdtempSync, rmSync, mkdirSync, symlinkSync, writeFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { Readable } from "node:stream"
@@ -1143,6 +1143,55 @@ describe("handleDesignSystemsRequest", () => {
         expect(body.result.skipped).toEqual([
           { name: "KButton", reason: "probe failed and no inference available" },
         ])
+      })
+
+      /**
+       * `.desde` is inside the prototype repo, which is untrusted input, so it
+       * — or any directory under it — can be a symlink. The containment check
+       * is anchored on `<root>/.desde/ingested`; with `ingested` linked
+       * elsewhere there is no containment left to check, so the entry must
+       * resolve to nothing rather than to a directory outside the working
+       * tree.
+       *
+       * The symlink sits on `ingested` rather than on `.desde` itself because
+       * a `.desde` that is linked away no longer has a readable registry at
+       * all (the store reads empty, its documented fail-soft), so there would
+       * be no registered entry left for this route to run.
+       */
+      it("infers nothing when .desde/ingested is a symlink out of the prototype", async () => {
+        const outside = mkdtempSync(join(tmpdir(), "ds-outside-"))
+        try {
+          const relRoot = ".desde/ingested/@acme-ui-deadbeef/repo"
+          await createLocalRegistryStore(root).add(
+            entry({
+              id: "@acme/ui",
+              package: "@acme/ui",
+              designSystem: "@acme/ui",
+              source: { kind: "repo", url: "https://example.com/acme/ui.git" },
+              packageRoot: relRoot,
+            }),
+          )
+          symlinkSync(outside, join(root, ".desde", "ingested"))
+          writeIngestedVueSource(root, relRoot, "KButton", "<div>{{ label }}</div>")
+          const r = mockRes()
+          await handleDesignSystemsRequest(
+            mockReq("POST"),
+            r.res,
+            "/api/editor/design-systems/%40acme%2Fui/generate-hints",
+            ctx(
+              vi.fn(),
+              vi.fn(async () => null),
+              () => null,
+              {},
+              { getManifestSource: async () => fakeManifestSource([kButtonManifest()]) },
+            ),
+          )
+          expect(r.status()).toBe(200)
+          const body = r.json() as { result: { hinted: number } }
+          expect(body.result.hinted).toBe(0)
+        } finally {
+          rmSync(outside, { recursive: true, force: true })
+        }
       })
     })
 

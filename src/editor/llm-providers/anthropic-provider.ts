@@ -286,6 +286,10 @@ export class AnthropicProvider implements LLMProvider {
         Anthropic.Messages.MessageCreateParams['system'],
       messages: opts.messages.map(toAnthropicMessage),
       tools: opts.tools.map(toAnthropicTool),
+      // Descriptor-supplied vendor fields (`thinking`, cache knobs). Spread
+      // LAST so a descriptor can override a default we set above, and never
+      // the other way round: the descriptor is the thing that knows.
+      ...(opts.providerOptions ?? {}),
     }
 
     // The SDK exposes both `.stream()` (returns MessageStream helper)
@@ -342,6 +346,11 @@ export class AnthropicProvider implements LLMProvider {
           } else if (delta.type === 'input_json_delta') {
             inputJsonByIndex[event.index] =
               (inputJsonByIndex[event.index] ?? '') + delta.partial_json
+          } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+            // Ephemeral by declaration: yielded for the UI, never accumulated
+            // into `blocksByIndex`, so it cannot reach the reassembled
+            // assistant message or the persisted turn.
+            yield { kind: 'reasoning_delta', delta: delta.thinking }
           }
           break
         }
@@ -459,6 +468,21 @@ function toAnthropicMessage(msg: Message): Anthropic.Messages.MessageParam {
       if (b.type === 'text') {
         return { type: 'text' as const, text: b.text }
       }
+      if (b.type === 'image') {
+        return {
+          type: 'image' as const,
+          source: {
+            type: 'base64' as const,
+            // The SDK narrows `media_type` to its known vision-input MIME
+            // types. `ImageContent.mediaType` is deliberately plain
+            // `string` (see its doc comment) — a value the model's vision
+            // input doesn't accept is a 400 from Anthropic, which is a
+            // better error than one invented here.
+            media_type: b.mediaType as Anthropic.Messages.Base64ImageSource['media_type'],
+            data: b.data,
+          },
+        }
+      }
       // tool_result
       return {
         type: 'tool_result' as const,
@@ -466,7 +490,23 @@ function toAnthropicMessage(msg: Message): Anthropic.Messages.MessageParam {
         content:
           typeof b.content === 'string'
             ? b.content
-            : b.content.map((c) => ({ type: 'text' as const, text: c.text })),
+            : b.content.map((c) =>
+                c.type === 'image'
+                  ? {
+                      type: 'image' as const,
+                      source: {
+                        type: 'base64' as const,
+                        // Same narrowing note as the user-message image block
+                        // above: a media type the model's vision input does
+                        // not accept is a 400 from Anthropic, which is a
+                        // better error than one invented here.
+                        media_type:
+                          c.mediaType as Anthropic.Messages.Base64ImageSource['media_type'],
+                        data: c.data,
+                      },
+                    }
+                  : { type: 'text' as const, text: c.text },
+              ),
         is_error: b.isError,
       }
     })

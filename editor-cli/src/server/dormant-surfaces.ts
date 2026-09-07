@@ -1,7 +1,7 @@
 /**
  * Which DORMANT product surfaces this project has turned back on.
  *
- * Four surfaces live here. All are gates rather than deletions: every component,
+ * Five surfaces live here. All are gates rather than deletions: every component,
  * store, handler and colocated test stays intact and in the default test
  * run, because a dormant surface whose tests rot is one that cannot be
  * un-dormanted.
@@ -24,6 +24,21 @@
  *   endpoints, create/patch/delete included — with the surface switched
  *   off. That is precisely the drifted pair this module's own comment
  *   below warns about, in the module that warns about it.
+ * - **`neutralChat`** — the Desde-owned chat runtime that every non-Anthropic
+ *   provider dispatches on. Its first caller is the model catalog resolver
+ *   (`model-catalog-source.ts`), which will not serve a `neutral` provider's
+ *   group while this is off; `resolveChatRuntime`'s dispatch-side refusal is
+ *   the second caller. **This is the one entry in the module that is
+ *   opt-OUT, not opt-IN, and the one entry with no project-config half at
+ *   all.** Every other surface here is dormant because it is unfinished, so
+ *   absence means off and a project can opt back in through
+ *   `.desde/config.json`. Neutral chat shipped, so absence means on: a user
+ *   who has stored an OpenAI key sees a picker that offers something they
+ *   can run. There is no config key to turn it back off, only an exact
+ *   `EDITOR_NEUTRAL_CHAT=0` — see `isNeutralChatEnabled`'s own doc comment
+ *   for why the model catalog resolver's design rules a config-only
+ *   off-switch out. The `=== true` rule two paragraphs down does not apply
+ *   to it either.
  *
  * **Why this module exists at all.** Each gate is read in two places: the
  * bootstrap script, which decides what the client is allowed to OFFER, and
@@ -43,6 +58,19 @@
  * **The `=== true` comparison is the whole mechanism.** An opt-in flag
  * whose absent state reads as enabled is not a gate, so a missing key, a
  * malformed value and an explicit `false` all mean dormant.
+ *
+ * **`blockSecretReads` is in this module but is not a surface** (added
+ * 2026-09-05, FX15; inverted the same day by FX18). It is a POLICY: with it
+ * on, the agent's Read, Glob and Grep refuse credential-bearing files
+ * (`.env`, private keys, `.npmrc`, cloud credential stores); with it off they
+ * behave as they did before the policy existed, which is the default. It
+ * lives here anyway, and the reason is the paragraph two above this one
+ * rather than a taxonomy: it is read by the client bootstrap (what the panel
+ * REPORTS) and by the chat dispatch (what the agent may DO), and those two
+ * must not compute the same boolean from the same fields at two call sites.
+ * One function, two callers, is the whole point of the module — the entry
+ * that broke that rule (`canvas`) is documented above as the worked example
+ * of the drift. It is opt-IN and follows the `=== true` rule.
  */
 
 /**
@@ -55,6 +83,7 @@ export interface DormantSurfaceConfig {
     notes?: boolean
     vscodeLink?: boolean
     canvas?: boolean
+    blockSecretReads?: boolean
   }
 }
 
@@ -67,6 +96,7 @@ const CODE_VIEW_ENV = "EDITOR_CODE_VIEW"
 const NOTES_ENV = "EDITOR_NOTES"
 const VSCODE_LINK_ENV = "EDITOR_VSCODE_LINK"
 const CANVAS_ENV = "EDITOR_CANVAS"
+const NEUTRAL_CHAT_ENV = "EDITOR_NEUTRAL_CHAT"
 
 function enabled(configured: boolean | undefined, envVar: string): boolean {
   return configured === true || process.env[envVar] === "1"
@@ -108,6 +138,117 @@ export function isCanvasEnabled(ctx: DormantSurfaceConfig): boolean {
  */
 export function isVscodeLinkEnabled(ctx: DormantSurfaceConfig): boolean {
   return enabled(ctx.editor?.vscodeLink, VSCODE_LINK_ENV)
+}
+
+/**
+ * Is this project stopping the agent from READING credential-bearing files?
+ *
+ * Default NO, since FX18 (2026-09-05). The product owner weighed the cost of
+ * blocking by default and reversed it: an agent that cannot read `.env` in a
+ * prototype repository refuses a lot of ordinary work, and the Editor should
+ * not make that choice for a user who never asked. So the Editor behaves as
+ * it did before the policy existed, and a project that wants the refusals
+ * turns them on with `editor.blockSecretReads: true`.
+ *
+ * The policy itself is unchanged and fully intact for a project that turns it
+ * on: the secret list, the refuse-versus-omit rule, the glob metacharacter
+ * fail-closed rule, the `mcp__editor__*` coverage, and the rename refusal all
+ * still hold. What moved is only which way this function answers when nobody
+ * has said anything.
+ *
+ * Two callers, which is why it is a function here and not an expression at
+ * either of them: the client bootstrap (the capabilities panel REPORTS that
+ * the project blocks secret reads) and the chat dispatch (`handleChatRoute`,
+ * which threads it into both chat runtimes, where the enforcement points read
+ * the one value). A UI-only gate would leave the agent reading secrets in a
+ * project that turned blocking on; a dispatch-only gate would leave the panel
+ * silent about a restriction the project actually has.
+ *
+ * **There is no `EDITOR_BLOCK_SECRET_READS` env var, and that is a decision
+ * rather than an omission (FX17 item 6).** Every other gate in this module
+ * takes one, because for a dormant SURFACE an environment escape hatch is
+ * harmless: the worst it does is show a Canvas tab in a project that did not
+ * ask for one. This is not a surface. It is a credential-read permission, and
+ * it was asked for PER PROJECT — which a process-wide variable cannot be.
+ * The launcher spawns one CLI child per project (`launcher-server.ts`), and
+ * the desktop shell spawns the payload CLI with full environment inheritance
+ * (`desktop/child.ts`), so one variable in a shell profile would decide the
+ * question for EVERY prototype the user opened afterwards. That argument does
+ * not depend on which way the default points: it was wrong for one project's
+ * permission to become every project's when the variable relaxed the policy,
+ * and it is equally wrong now that it would impose it.
+ *
+ * Scrubbing the variable at each spawn seam was the alternative, and
+ * `desktop/child.ts` already does exactly that for
+ * `EDITOR_CLAUDE_EXECUTABLE_PATH`. It was rejected because it needs the
+ * scrub repeated at every seam that ever spawns a CLI, and a seam added
+ * later inherits the hole by default. Not reading the variable needs nothing
+ * repeated anywhere.
+ */
+export function isSecretReadsBlocked(ctx: DormantSurfaceConfig): boolean {
+  // `enabled()` is deliberately NOT used here — see the paragraph above.
+  return ctx.editor?.blockSecretReads === true
+}
+
+/**
+ * Is the neutral chat runtime available for a `neutral` descriptor?
+ *
+ * The ONE opt-OUT gate in this module, and the exception is deliberate rather
+ * than an oversight. Every other surface here is dormant because it is
+ * unfinished, so absence means off. This one shipped: with it off, a user who
+ * has stored an OpenAI key sees a picker that offers nothing they can run.
+ * Absence therefore means on, and only an exact `EDITOR_NEUTRAL_CHAT=0`
+ * turns it off, the mirror of the exact-"1" rule the opt-in surfaces use, so
+ * that a typo cannot silently take chat away from a provider.
+ *
+ * Env-only, and that is also deliberate rather than an oversight: unlike
+ * every other function in this module, this one takes no
+ * `DormantSurfaceConfig`, because there is no project-config half for it to
+ * read. The model catalog resolver (`chatRuntimeServable` in
+ * `model-catalog-source.ts`) is a process-wide singleton created once at
+ * import time, with no per-project config in scope, so a project-config key
+ * could only ever reach the dispatch half (`resolveChatRuntime`'s refusal)
+ * and never the catalog half — a project that set it would see the OpenAI
+ * group still offered in the picker for a dispatch that refuses it, which is
+ * a worse drift than the one this module exists to prevent. Rather than ship
+ * a config key that only half works, there is no config key: it remains
+ * gated at both ends, the catalog resolver and the chat handler, by reading
+ * the same environment variable independently.
+ */
+export function isNeutralChatEnabled(): boolean {
+  return process.env[NEUTRAL_CHAT_ENV] !== "0"
+}
+
+/**
+ * Dev-only: force the neutral runtime for a provider whose descriptor says
+ * otherwise. This is how the neutral loop gets proven against Anthropic, where
+ * a behaviour difference is the prompt rather than the provider.
+ *
+ * A separate switch from `isNeutralChatEnabled` on purpose. That one says the
+ * lane may run at all; this one says which lane a given provider takes.
+ * Folding them into one boolean would make "prove the loop against Anthropic"
+ * indistinguishable from "ship OpenAI chat".
+ */
+export function chatRuntimeOverride(
+  env: NodeJS.ProcessEnv,
+): "neutral" | undefined {
+  return env.EDITOR_CHAT_RUNTIME_OVERRIDE === "neutral" ? "neutral" : undefined
+}
+
+/**
+ * The refusal a dormant neutral-chat dispatch returns.
+ *
+ * It names the env var rather than 404-ing, for the reason
+ * `dormantSurfaceRefusal` gives about its own surfaces: a stale client or a
+ * direct caller should learn what to flip instead of guessing the route is
+ * gone. There is no config key to name — see `isNeutralChatEnabled`'s doc
+ * comment for why this gate is env-only.
+ */
+export function neutralChatRefusal(): string {
+  return (
+    "The neutral chat runtime is dormant (EDITOR_NEUTRAL_CHAT=0). Unset it, " +
+    "or set it to anything other than 0, to turn it back on."
+  )
 }
 
 /**

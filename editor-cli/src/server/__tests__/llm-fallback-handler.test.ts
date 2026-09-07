@@ -19,14 +19,19 @@ const REWRITTEN = "export default function App() {\n  return <main>repaired</mai
 // Stub the repair service so no LLM call happens — we only exercise the
 // endpoint's gates (extension + intent validation + path containment).
 const loaders: LLMFallbackLoaders = {
-  loadApplyRepairEdit: async () => ({
-    applyRepairEdit: async () => ({
-      ok: true as const,
-      newSource: REWRITTEN,
-      originalSourceHash: "deadbeef",
-      explanation: "stubbed repair",
-    }),
-  }),
+  // Cast because the loader's type is the WHOLE module and this stub is only
+  // the one function the handler calls. `repair-edit` also exports its
+  // response schema (read by `ai-sdk-strict-schema.test.ts`), which a stub
+  // has no business reproducing.
+  loadApplyRepairEdit: async () =>
+    ({
+      applyRepairEdit: async () => ({
+        ok: true as const,
+        newSource: REWRITTEN,
+        originalSourceHash: "deadbeef",
+        explanation: "stubbed repair",
+      }),
+    }) as unknown as Awaited<ReturnType<NonNullable<LLMFallbackLoaders["loadApplyRepairEdit"]>>>,
 }
 
 describe("handleLLMFallback — React (.tsx/.jsx) support", () => {
@@ -120,14 +125,17 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
 
   const iterationLoaders: LLMFallbackLoaders = {
     ...loaders,
-    loadApplyIterationDataLlm: async () => ({
-      applyIterationDataLlm: async () => ({
-        ok: true as const,
-        newSource: ITER_REWRITTEN,
-        originalSourceHash: "cafebabe",
-        explanation: "stubbed iteration edit",
-      }),
-    }),
+    loadApplyIterationDataLlm: async () =>
+      ({
+        applyIterationDataLlm: async () => ({
+          ok: true as const,
+          newSource: ITER_REWRITTEN,
+          originalSourceHash: "cafebabe",
+          explanation: "stubbed iteration edit",
+        }),
+      }) as unknown as Awaited<
+        ReturnType<NonNullable<LLMFallbackLoaders["loadApplyIterationDataLlm"]>>
+      >,
   }
 
   function iterationBody(

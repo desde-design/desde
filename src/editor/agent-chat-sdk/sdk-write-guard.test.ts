@@ -7,8 +7,8 @@
  * runtime), mirroring `write-invalidate-hook.test.ts`.
  */
 
-import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
-import { writeFileSync } from 'node:fs'
+import { mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -164,6 +164,26 @@ describe('createSdkWriteGuard — journaling', () => {
     // A denied write never executes, so the hold must not survive it.
     expect(release).toHaveBeenCalledOnce()
     expect(guard.heldPathsForTests()).toEqual([])
+  })
+
+  it('DENIES the write when .desde is a symlink out of the worktree (real writeJournal, no mock)', async () => {
+    await writeFile(join(root, 'App.vue'), 'ORIGINAL\n', 'utf8')
+    const outside = await mkdtemp(join(tmpdir(), 'sdk-write-guard-outside-'))
+    await symlink(outside, join(root, '.desde'))
+    // No `writeJournal` override — this exercises the real
+    // `writeBackupJournal`, which is what actually contains the guard.
+    const guard = createSdkWriteGuard({ worktreeRoot: root })
+
+    const out = (await guard.preToolUse(
+      preToolUse('Write', { file_path: 'App.vue', content: 'NEXT' }),
+      'tu-1',
+      HOOK_OPTS,
+    )) as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } }
+
+    expect(out.hookSpecificOutput?.permissionDecision).toBe('deny')
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toMatch(/\.desde/)
+    expect(existsSync(join(outside, 'backups'))).toBe(false)
+    await rm(outside, { recursive: true, force: true })
   })
 
   it('ignores non-Write/Edit tools, malformed input and paths outside the repo', async () => {

@@ -16,7 +16,7 @@
  */
 
 import { useCallback, useState } from "react"
-import type { LlmCredentialsStatus } from "./useLlmCredentials"
+import { everyProviderUncredentialed, type LlmCredentialsStatus } from "./useLlmCredentials"
 
 export interface FirstRunCredentialPrompt {
   shouldPrompt: boolean
@@ -40,9 +40,13 @@ export function useFirstRunCredentialPrompt(
 
   // `status === null` means the fetch has not resolved. Prompting then would
   // flash the dialog on every load for a fully configured user.
+  //
+  // The condition is EVERY provider, not one: a user with an OpenAI key and no
+  // Anthropic key is configured, and asking them again would be the
+  // single-provider assumption surviving into a multi-provider product.
   const shouldPrompt =
     status !== null &&
-    status.source === "none" &&
+    everyProviderUncredentialed(status) &&
     !status.promptDismissed &&
     !dismissedLocally
 

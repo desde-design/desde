@@ -1,10 +1,13 @@
 /**
- * Surface-gallery fixture for the Anthropic credential dialog.
+ * Surface-gallery fixture for the AI provider credential dialog.
  *
- * Every reachable status gets a state, because the four `source` values drive
- * genuinely different chrome: `env` removes the input and both write buttons,
- * `stored` adds Remove, and dev mode changes the description while leaving key
- * management enabled (which is the pairing most likely to regress).
+ * One tab per provider (Task 7), so the fixture states cover the
+ * combinations that render differently: both providers unconfigured, one
+ * provider stored while the other is not, both stored, one provider
+ * environment-managed while the other is stored, a provider with a base URL
+ * set, and dev mode on while a non-Anthropic tab has a key stored (the
+ * pairing most likely to regress, because dev mode must not disable the
+ * other tab).
  *
  * The status comes through `useFetchOverride` rather than a hand-built object:
  * the fixture owns a real `useLlmCredentials` and lets the override answer its
@@ -12,7 +15,11 @@
  */
 
 import { LlmCredentialDialog } from "@/components/editor/llm-credential-dialog"
-import { useLlmCredentials, type LlmCredentialsStatus } from "@/hooks/useLlmCredentials"
+import {
+  useLlmCredentials,
+  type LlmCredentialsStatus,
+  type ProviderCredentialStatus,
+} from "@/hooks/useLlmCredentials"
 import type { SurfaceEntry } from "../types"
 import { useFetchOverride } from "./fetch-override"
 
@@ -30,17 +37,76 @@ function CredentialDialogFixture({ status }: { status: LlmCredentialsStatus }) {
 /** Every state settles on the dialog title, which renders for all of them. */
 const READY_WHEN = "[data-slot='dialog-content']"
 
-/** Fills the fields every state shares, so each case names only its own. */
+/** Fields every Anthropic fixture state shares. */
+const ANTHROPIC_BASE = {
+  id: "anthropic",
+  label: "Anthropic",
+  apiKeyEnvVar: "ANTHROPIC_API_KEY",
+  consoleUrl: "https://console.anthropic.com/settings/keys",
+  maskPrefix: "sk-ant-",
+  hasSubscriptionRuntime: true,
+} as const
+
+/** Fields every OpenAI fixture state shares. */
+const OPENAI_BASE = {
+  id: "openai",
+  label: "OpenAI",
+  apiKeyEnvVar: "OPENAI_API_KEY",
+  baseUrlEnvVar: "OPENAI_BASE_URL",
+  consoleUrl: "https://platform.openai.com/api-keys",
+  maskPrefix: "sk-",
+  hasSubscriptionRuntime: false,
+} as const
+
+type PartialAnthropic = Omit<
+  ProviderCredentialStatus,
+  "hasStoredKey" | keyof typeof ANTHROPIC_BASE
+> &
+  Partial<Pick<ProviderCredentialStatus, "hasStoredKey">>
+type PartialOpenAI = Omit<
+  ProviderCredentialStatus,
+  "hasStoredKey" | keyof typeof OPENAI_BASE
+> &
+  Partial<Pick<ProviderCredentialStatus, "hasStoredKey">>
+
+function anthropicProvider(partial: PartialAnthropic): ProviderCredentialStatus {
+  return {
+    ...ANTHROPIC_BASE,
+    hasStoredKey: partial.storedHint !== undefined,
+    ...partial,
+  }
+}
+
+function openaiProvider(partial: PartialOpenAI): ProviderCredentialStatus {
+  return {
+    ...OPENAI_BASE,
+    hasStoredKey: partial.storedHint !== undefined,
+    ...partial,
+  }
+}
+
+/**
+ * Fills the fields every state shares, so each case names only what makes it
+ * different. Both providers default to unconfigured, so a case that cares
+ * about only one tab need not restate the other.
+ */
 function state(
   id: string,
   label: string,
-  status: Omit<LlmCredentialsStatus, "hasStoredKey" | "promptDismissed"> &
-    Partial<Pick<LlmCredentialsStatus, "hasStoredKey" | "promptDismissed">>,
+  providers: {
+    anthropic?: PartialAnthropic
+    openai?: PartialOpenAI
+  },
+  overrides: Partial<Pick<LlmCredentialsStatus, "devMode" | "promptDismissed">> = {},
 ) {
   const full: LlmCredentialsStatus = {
-    hasStoredKey: status.storedHint !== undefined,
+    providers: {
+      anthropic: anthropicProvider(providers.anthropic ?? { source: "none" }),
+      openai: openaiProvider(providers.openai ?? { source: "none" }),
+    },
+    devMode: false,
     promptDismissed: false,
-    ...status,
+    ...overrides,
   }
   return {
     id: `llm-credentials/${id}`,
@@ -52,34 +118,38 @@ function state(
 
 export const LLM_CREDENTIALS_SURFACE: SurfaceEntry = {
   id: "llm-credentials",
-  title: "Anthropic API key: first run, settings, dev mode",
+  title: "AI provider keys: first run, settings, dev mode",
   kind: "modal",
   sourceFile: "src/components/editor/llm-credential-dialog.tsx",
   states: [
-    state("none", "No credential (first run)", { source: "none", devMode: false }),
-    state("stored", "Stored key", {
-      source: "stored",
-      maskedHint: "sk-ant-…4f2a",
-      storedHint: "sk-ant-…4f2a",
-      devMode: false,
+    state("none", "No credential, either provider (first run)", {}),
+    state("anthropic-stored", "Anthropic stored, OpenAI unset", {
+      anthropic: { source: "stored", maskedHint: "sk-ant-…4f2a", storedHint: "sk-ant-…4f2a" },
     }),
-    state("env", "Set by environment variable", {
-      source: "env",
-      maskedHint: "sk-ant-…4f2a",
-      devMode: false,
+    state("both-stored", "Both providers stored", {
+      anthropic: { source: "stored", maskedHint: "sk-ant-…4f2a", storedHint: "sk-ant-…4f2a" },
+      openai: { source: "stored", maskedHint: "sk-…9a11", storedHint: "sk-…9a11" },
     }),
-    state("subscription", "Claude subscription", {
-      source: "subscription",
-      devMode: false,
+    state("openai-env", "OpenAI set by environment variable, Anthropic stored", {
+      anthropic: { source: "stored", maskedHint: "sk-ant-…4f2a", storedHint: "sk-ant-…4f2a" },
+      openai: { source: "env", maskedHint: "sk-…9a11" },
     }),
-    state("dev-mode", "Dev mode on, no key", {
-      source: "subscription",
-      devMode: true,
+    state("openai-base-url", "OpenAI with a base URL set", {
+      openai: {
+        source: "stored",
+        maskedHint: "sk-…9a11",
+        storedHint: "sk-…9a11",
+        baseUrl: "https://my-proxy.internal/v1",
+      },
     }),
-    state("dev-mode-with-key", "Dev mode on, key stored", {
-      source: "subscription",
-      storedHint: "sk-ant-…4f2a",
-      devMode: true,
-    }),
+    state(
+      "dev-mode-openai-key",
+      "Dev mode on, OpenAI key stored",
+      {
+        anthropic: { source: "subscription" },
+        openai: { source: "stored", maskedHint: "sk-…9a11", storedHint: "sk-…9a11" },
+      },
+      { devMode: true },
+    ),
   ],
 }

@@ -16,6 +16,7 @@
 import path from 'node:path'
 import type { ComponentManifestSource, FrameworkId } from '@/editor/core/manifest'
 import { resolveTsconfig } from '@/editor/core/resolve-tsconfig'
+import { desdePath } from '@/editor/worktree/desde-dir'
 import type { FrameworkDetection } from './detect-framework'
 import type { ComputeCoverageOptions } from './coverage'
 import type {
@@ -175,8 +176,17 @@ export async function onboardDesignSystem(
   }
 }
 
-/** Where ingested packages are installed (prototype-relative). */
-const INGEST_DIR = '.desde/ingested'
+/**
+ * Where ingested packages are installed. An npm install or a git clone lands
+ * here, so it goes through the `.desde` symlink guard like every other writer
+ * under `.desde/` — a prototype that ships `.desde` as a link would otherwise
+ * have a whole package tree written wherever the link points. Throws on a
+ * symlinked `.desde`, which `ingest` reports the same way it reports every
+ * other unusable source.
+ */
+function ingestScratchRoot(prototypeRoot: string): string {
+  return desdePath(prototypeRoot, 'ingested')
+}
 
 /**
  * Step 1 of the spec algorithm: resolve the source into a concrete package on
@@ -217,7 +227,7 @@ async function ingest(req: OnboardRequest, deps: OnboardDeps): Promise<Ingested>
     }
     const installed = await deps.ingestNpm({
       spec: req.source.spec,
-      scratchRoot: path.join(req.prototypeRoot, INGEST_DIR),
+      scratchRoot: ingestScratchRoot(req.prototypeRoot),
     })
     if (!isValidNpmPackageName(installed.package)) {
       throw new Error(`npm spec '${req.source.spec}' resolved to an invalid package name.`)
@@ -244,7 +254,7 @@ async function ingest(req: OnboardRequest, deps: OnboardDeps): Promise<Ingested>
       url: req.source.url,
       ref: req.source.ref,
       subdir: req.source.subdir,
-      scratchRoot: path.join(req.prototypeRoot, INGEST_DIR),
+      scratchRoot: ingestScratchRoot(req.prototypeRoot),
       allowBuild: req.allowBuild,
     })
     if (!isValidNpmPackageName(installed.package)) {
@@ -290,7 +300,7 @@ export async function createDefaultOnboardDeps(prototypeRoot: string): Promise<O
     { ReactDtsMetaManifestSource },
     { ingestNpmPackage },
     { ingestRepo },
-    { CACHE_DIR_NAME, resolvePackageVersion, CachedManifestSource, fingerprintFile },
+    { manifestCacheDir, resolvePackageVersion, CachedManifestSource, fingerprintFile },
   ] = await Promise.all([
     import('./detect-framework'),
     import('./coverage'),
@@ -304,7 +314,9 @@ export async function createDefaultOnboardDeps(prototypeRoot: string): Promise<O
     import('@/editor/ingest/git-repo'),
     import('@/editor/adapters/cached'),
   ])
-  const cacheDir = path.join(prototypeRoot, CACHE_DIR_NAME)
+  // `null` when `.desde` is a symbolic link — the built sources then run
+  // uncached instead of writing outside the working tree.
+  const cacheDir = manifestCacheDir(prototypeRoot)
 
   return {
     detectFramework,

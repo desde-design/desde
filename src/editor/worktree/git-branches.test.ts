@@ -301,6 +301,52 @@ describe('git-branches', () => {
       const mainSha = await run('git', ['-C', repo, 'rev-parse', 'main'])
       expect(branchSha.stdout.trim()).toBe(mainSha.stdout.trim())
     })
+
+    it('CX7 fix round 1: refuses, and creates nothing at the target, when .desde is a symlink out of the worktree', async () => {
+      await createBranch(repo, 'feature', 'default')
+      await fs.writeFile(path.join(repo, 'feat.txt'), 'feature work\n')
+      await run('git', ['-C', repo, 'add', '.'])
+      await run('git', ['-C', repo, 'commit', '-m', 'feat', '--quiet'])
+
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'git-branches-outside-'))
+      await fs.symlink(outside, path.join(repo, '.desde'))
+
+      const res = await publishBranch(repo, 'feature')
+      expect(res.ok).toBe(false)
+      expect(res.ok === false && res.reason).toMatch(/symbolic link/i)
+      // Nothing landed under the symlink target: no ephemeral worktree
+      // directory, and no `git worktree add` was ever attempted.
+      expect(await fs.readdir(outside)).toEqual([])
+
+      await fs.rm(outside, { recursive: true, force: true })
+    })
+
+    it('FX4 item 3: a refused publish leaves the repository byte-identical, with no commit made', async () => {
+      await createBranch(repo, 'feature', 'default')
+      await fs.writeFile(path.join(repo, 'feat.txt'), 'feature work\n')
+      await run('git', ['-C', repo, 'add', '.'])
+      await run('git', ['-C', repo, 'commit', '-m', 'feat', '--quiet'])
+
+      // Dirty tree PLUS a hostile `.desde`. The guard used to run after the
+      // auto-commit, so the refusal arrived with the user's work already
+      // committed — and `git add -A` had swept the hostile symlink into that
+      // commit as well.
+      await fs.writeFile(path.join(repo, 'feat.txt'), 'more work\n')
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'git-branches-outside-'))
+      await fs.symlink(outside, path.join(repo, '.desde'))
+
+      const headBefore = (await run('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim()
+      const statusBefore = (await run('git', ['-C', repo, 'status', '--porcelain'])).stdout
+
+      const res = await publishBranch(repo, 'feature')
+      expect(res.ok).toBe(false)
+      expect(res.ok === false && res.reason).toMatch(/symbolic link/i)
+
+      expect((await run('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim()).toBe(headBefore)
+      expect((await run('git', ['-C', repo, 'status', '--porcelain'])).stdout).toBe(statusBefore)
+
+      await fs.rm(outside, { recursive: true, force: true })
+    })
   })
 
   describe('commitWorkingTree', () => {
@@ -686,6 +732,43 @@ describe('git-branches', () => {
       } finally {
         await fs.chmod(path.join(repo, 'sub'), 0o755)
       }
+    })
+
+    it('CX7 fix round 1: refuses, and creates nothing at the target, when .desde is a symlink out of the worktree', async () => {
+      await divergeNonConflicting()
+
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'git-branches-outside-'))
+      await fs.symlink(outside, path.join(repo, '.desde'))
+
+      const res = await updateFromDefault(repo, 'feature')
+      expect(res.ok).toBe(false)
+      expect(res.ok === false && res.reason).toMatch(/symbolic link/i)
+      // Nothing landed under the symlink target: no ephemeral worktree
+      // directory, and no `git worktree add` was ever attempted.
+      expect(await fs.readdir(outside)).toEqual([])
+
+      await fs.rm(outside, { recursive: true, force: true })
+    })
+
+    it('FX4 item 3: a refused update leaves the repository byte-identical, with no commit made', async () => {
+      await divergeNonConflicting()
+      await fs.writeFile(path.join(repo, 'uncommitted.txt'), 'work in progress\n')
+
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'git-branches-outside-'))
+      await fs.symlink(outside, path.join(repo, '.desde'))
+
+      const headBefore = (await run('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim()
+      const statusBefore = (await run('git', ['-C', repo, 'status', '--porcelain'])).stdout
+
+      const res = await updateFromDefault(repo, 'feature')
+      expect(res.ok).toBe(false)
+      expect(res.ok === false && res.reason).toMatch(/symbolic link/i)
+      expect(res.ok === false && res.committedBranch).toBe(false)
+
+      expect((await run('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim()).toBe(headBefore)
+      expect((await run('git', ['-C', repo, 'status', '--porcelain'])).stdout).toBe(statusBefore)
+
+      await fs.rm(outside, { recursive: true, force: true })
     })
   })
 

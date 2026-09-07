@@ -67,10 +67,22 @@
 
 import { randomUUID } from 'node:crypto'
 import { constants as fsConstants, existsSync } from 'node:fs'
-import { lstat, mkdir, open, readFile, realpath, rename as fsRename, unlink, writeFile } from 'node:fs/promises'
-import { dirname, sep as pathSep } from 'node:path'
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  rename as fsRename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises'
+import { basename, dirname, join, sep as pathSep } from 'node:path'
 
 import { isProtectedAgentPath, protectedPathDenial } from './protected-paths'
+import { desdeRemovalPath, DesdeDirSymlinkError } from '../worktree/desde-dir'
 
 import {
   getSharedFileLockManager,
@@ -291,16 +303,64 @@ export interface BrokeredWriteOptions<E = void> {
    * `acquireTreeGateShared` is the concrete impl the CLI supplies.
    */
   acquireTreeGate?: AcquireTreeGate
+  /**
+   * The turn's cancellation signal, checked ONCE — the instant this batch's
+   * file locks are handed over, before anything is snapshotted or written.
+   *
+   * FX19 item 6 (2026-09-05, SECURITY). A caller that checks Stop at its own
+   * door and then calls this function is not covered for the rest of the
+   * call, and the uncovered part is not small. Two things sit between a
+   * caller's last check and the first byte: `writeBackupJournal`, which
+   * writes to disk, and `withPathLocks`, which waits an UNBOUNDED time on
+   * the shared per-file lock manager. That wait cannot be shortened by a
+   * tree gate, because the CLI's deterministic edit route
+   * (`edit-handler.ts`) and the undo/redo history (`edit-history.ts`) both
+   * take these same locks and neither holds a tree gate. The adversarial
+   * verifier measured 2,952 ms of post-Stop waiting against a 3-second
+   * holder, and a write landing after it.
+   *
+   * It is checked here rather than in each lane because both lanes and the
+   * CLI edit route reach disk through this one function — the same argument
+   * the protected-path check and the ledger already won.
+   *
+   * Placed INSIDE the locks on purpose. A check before them would be a
+   * fourth caller-side check with the same gap after it; the point is to be
+   * the last thing that happens before the batch commits to mutating.
+   * Everything after the check — snapshots, preconditions, `applyOp` — is
+   * bounded local work, so no further check would have anything to catch.
+   *
+   * Absent means no cancellation, exactly as before this existed.
+   */
+  signal?: AbortSignal
 }
 
 export type BrokeredWriteResult<E = void> =
   | {
       ok: true
-      /** Repo-relative backup directory (`.desde/backups/…`). */
-      backupDir: string
+      /**
+       * Repo-relative backup directory (`.desde/backups/…`). Absent when
+       * the batch's `journal` was empty (an allowCreate write of a brand-
+       * new file has no prior content to back up), because
+       * `writeBackupJournal` never creates the directory on disk in that
+       * case — reporting the never-created path here would send an ack-
+       * failure message, and Undo, looking for a backup that isn't there.
+       */
+      backupDir?: string
       emitted: E
     }
   | { ok: false; stage: 'backup'; reason: string }
+  | {
+      /**
+       * The turn was cancelled while this batch waited for its file locks
+       * (FX19 item 6). Nothing was written and the journal directory was
+       * discarded. Callers with a Stop vocabulary of their own should say
+       * that instead of `reason`; the rest fall through to their generic
+       * branch, which reads correctly because `reason` states the fact.
+       */
+      ok: false
+      stage: 'stopped'
+      reason: string
+    }
   | {
       ok: false
       /**
@@ -330,7 +390,15 @@ export type BrokeredWriteResult<E = void> =
       /** Repo-relative path of the failing op — for the caller's message. */
       repoRel: string
       op: BrokerOp
-      backupDir: string
+      /**
+       * Absent under the same condition as the `ok: true` case above: an
+       * empty `journal` (every op in the batch was `allowCreate`, so
+       * `writeBackupJournal` never created the directory on disk). A failed
+       * rollback of an all-new-file batch has nothing to point the user at
+       * — see `rollbackWarning`, which drops the "Recover from" clause when
+       * this is absent.
+       */
+      backupDir?: string
       /** Repo-relative paths successfully rolled back. */
       rolledBack: string[]
       /** Non-fatal rollback failures, formatted for logging. */
@@ -348,7 +416,12 @@ export type BrokeredWriteResult<E = void> =
 export function rollbackWarning(result: BrokeredWriteResult<unknown>): string {
   if (result.ok || result.stage !== 'write') return ''
   if (result.restoreErrors.length === 0) return ''
-  return ` WARNING: could not restore ${result.restoreErrors.join('; ')}. Recover from '${result.backupDir}'.`
+  // `backupDir` is absent for an all-new-file batch (empty journal — see
+  // its own doc comment above): there is no directory to point at, so the
+  // "Recover from" clause is dropped rather than naming a path that was
+  // never created on disk.
+  const recover = result.backupDir ? ` Recover from '${result.backupDir}'.` : ''
+  return ` WARNING: could not restore ${result.restoreErrors.join('; ')}.${recover}`
 }
 
 function defaultInvalidatePaths(ops: ReadonlyArray<BrokerOp>): string[] {
@@ -479,8 +552,7 @@ async function captureSnapshot(
       )
     }
     const real = await realpath(absPath)
-    const rootWithSep = preconditionRootReal.endsWith(pathSep) ? preconditionRootReal : preconditionRootReal + pathSep
-    if (real !== preconditionRootReal && !real.startsWith(rootWithSep)) {
+    if (!realPathIsUnder(real, preconditionRootReal)) {
       throw new PreconditionIntegrityError(`'${absPath}' resolves outside the repo root. Refusing.`)
     }
   }
@@ -580,28 +652,20 @@ async function restorePath(
  * provably written to the file `open` validated — a directory-entry
  * replacement after `open` succeeds cannot retarget an already-open fd.
  *
- * Only applies to a precondition-backed, non-`exclusive`, non-`isNew`
- * overwrite — the three op shapes this does NOT cover are each already
- * safe or out of scope for a different reason:
+ * Applies to an OVERWRITE of an existing file. A create (`isNew`) has its
+ * own guarded path, {@link createNoFollow} — see that function for why
+ * the reasoning that used to sit here, which said a create needed no
+ * guard at all, was wrong.
  *
- *  - `exclusive` (`{ flag: 'wx' }`, i.e. `O_CREAT | O_EXCL`) already
- *    refuses if ANYTHING exists at the target path — including a
- *    symlink, dangling or not — without ever following it. There's
- *    nothing for a symlink swap to redirect: the create either lands on
- *    a path with nothing there, or fails closed.
- *  - `isNew` (no precondition, no prior caller read) has nothing a
- *    symlink swap could falsify — the caller never read bytes through
- *    this path before calling `brokeredWrite`, so there is no "the file
- *    still holds what I read" claim for a swap to defeat.
- *  - An ordinary op target with NO precondition (the common case — a
- *    fresh `insert_component` write, a deterministic applicator edit)
- *    gets the same treatment `captureSnapshot`'s doc comment gives it:
- *    deliberately unguarded, because paying `lstat`/`realpath`/`open`
- *    overhead for a check that protects a claim nobody made would be
- *    pure cost. If that gap is worth closing, it is a SEPARATE, broader
- *    finding than this one — P1-1 is specifically about the guard this
- *    file already has (`captureSnapshot`'s precondition check) not
- *    reaching all the way to the write it exists to protect.
+ * The one op shape neither function guards is an ordinary overwrite with
+ * NO precondition (a deterministic applicator edit, an
+ * `insert_component` write). It gets the same treatment
+ * `captureSnapshot`'s doc comment gives it: deliberately unguarded,
+ * because paying `lstat`/`realpath`/`open` overhead for a check that
+ * protects a claim nobody made would be pure cost. Closing that gap is a
+ * SEPARATE, broader finding — P1-1 is specifically about the guard this
+ * file already has (`captureSnapshot`'s precondition check) not reaching
+ * all the way to the write it exists to protect.
  *
  * `restorePath` (below) uses the SAME mechanism (via `openAndWriteNoFollow`)
  * when restoring a precondition-backed path — not just the primary write
@@ -632,15 +696,337 @@ async function openAndWriteNoFollow(absPath: string, content: string | Buffer): 
   }
 }
 
-async function applyOp(op: BrokerOp, preconditionAbsPaths: ReadonlySet<string>): Promise<void> {
+/**
+ * Whether a path that has ALREADY been through `realpath` sits inside a
+ * repo root that has also already been through `realpath`. Both arguments
+ * must be resolved: this is a string containment test, and it is only a
+ * containment PROOF because neither side can still hold a symlink.
+ */
+function realPathIsUnder(real: string, rootReal: string): boolean {
+  const rootWithSep = rootReal.endsWith(pathSep) ? rootReal : rootReal + pathSep
+  return real === rootReal || real.startsWith(rootWithSep)
+}
+
+/**
+ * **FX11 (codex review + adversarial verification, 2026-09-05, SECURITY),
+ * corrected by FX17, by FX19 the same day, and by FX20 on 2026-09-06.**
+ * Create a file that provably lands inside the repo.
+ *
+ * The create used to be a plain `writeFile`, on the reasoning quoted above
+ * {@link openAndWriteNoFollow}: an `isNew` op has no prior caller read, so
+ * there is no "the bytes I read are still there" claim for a symlink swap
+ * to falsify. That reasoning was about the wrong claim. A create makes a
+ * DIFFERENT one — "this file lands inside the repository" — and a plain
+ * `writeFile` cannot keep it. `resolveSafeCreatePath` lstat-walks every
+ * ancestor at reconstruction time, but nothing re-anchored that walk at
+ * write time, and `captureSnapshot`'s lstat/realpath proof returns early
+ * on ENOENT, which a not-yet-created leaf always is. So an ancestor
+ * directory replaced with a symlink in between sent the new file wherever
+ * the symlink pointed, and the model was told the write succeeded. The
+ * user's prototype repository is untrusted, so anything running in it can
+ * do that: a build script, an `npm postinstall`, a second agent session.
+ *
+ * ## Two corrections, and the claims they retract
+ *
+ * FX11 added a three-step guard and closed its doc comment with a
+ * measured-sounding claim: that a lost race could only ever leave a
+ * ZERO-BYTE file outside the repository, and that no escape was ever
+ * reported as a success. FX17 added a parent-INODE comparison to the
+ * re-proof and restated the same claim with numbers beside it.
+ *
+ * **An independent measurement disproved it a second time.** FX17's
+ * comparison asks "does this path name my inode NOW". `rename(2)` moves a
+ * directory without changing its inode, so a swapper that renames the
+ * destination directory OUT of the repository, lets the bytes land in it,
+ * and renames THE SAME directory back to THE SAME name satisfies every
+ * clause of that re-proof. The verifier's deterministic reproduction wrote
+ * a complete payload at a location no path inside the repository named,
+ * and it was reported to the model as a success; a 25-second two-process
+ * race captured 78 PARTIAL payloads outside, which is the discriminator —
+ * a finished file is always full size, so a partial one proves the bytes
+ * were flowing while the directory was outside.
+ *
+ * Two claims are therefore retracted and are not restated below: that the
+ * residue of a lost race is an empty file, and that the escapes which
+ * remained were all the unpreventable shape.
+ *
+ * **A THIRD measurement disproved the replacement claim.** FX19's comment
+ * said the residue of a lost race is "an EMPTY file outside the repository".
+ * FX19's guard pinned the write's IMMEDIATE PARENT. `rename(2)` moves the
+ * renamed directory's status-change time and NOT its children's, so a
+ * swapper that renames a GRANDPARENT leaves the parent looking untouched
+ * throughout — same realpath, same inode, same ctime — while the whole
+ * subtree, the parent included, sits outside the repository with the bytes
+ * flowing into it. The verifier measured 7 escapes in 6000 attempts, each
+ * 32 MiB of content reachable at an outside path while the call reported
+ * success; its direct-parent control was 0 in 3000. Reproduced here on the
+ * same harness at 20 escapes in 2100 attempts.
+ *
+ * So a third claim is retracted: that the parent proof bounded the residue
+ * at all. It bounded it for one level of the chain.
+ *
+ * ## What the code does now
+ *
+ *  1. `realpath` the parent directory and require it under `rootReal`.
+ *     `realpath` resolves EVERY component, so this catches an ancestor
+ *     swap that an `lstat` of the leaf alone cannot see. It runs before
+ *     anything is created, so the ordinary attack — a symlink already in
+ *     place when we get here — creates nothing at all. Record the
+ *     `dev`/`ino`/`ctimeNs` of every directory from that parent up to the
+ *     repository root, not just the parent's: renaming a directory does not
+ *     touch its children's status-change times, so a proof anchored on the
+ *     parent alone is blind to every level above it (FX20 item 2).
+ *  2. Create at `<resolved parent>/<basename>` with
+ *     `O_CREAT | O_EXCL | O_NOFOLLOW`. `O_EXCL` refuses atomically if
+ *     ANYTHING is already at that name, a symlink included, so the create
+ *     can never follow one.
+ *  3. Prove four things before writing a single byte: the parent path
+ *     still resolves to itself, every directory in the chain is still the
+ *     inode recorded in step 1, no ancestor's status-change time has moved
+ *     since step 1, and the target path names the inode the open handle
+ *     holds.
+ *  4. Sample the parent directory's `ctimeNs` — its status-change time.
+ *     Sampled HERE, after the create, because creating the entry is itself
+ *     a change to the parent and moves it.
+ *  5. Write the caller's bytes through the open handle, which is anchored
+ *     to the inode step 3 proved.
+ *  6. Re-run step 3's proof, require every ANCESTOR's `ctimeNs` to be
+ *     byte-identical to step 1's, AND require the parent's `ctimeNs` to be
+ *     byte-identical to step 4's. The ancestors are compared against the
+ *     PRE-OPEN sample because this create adds no entry to any of them, so
+ *     their window is wider than the parent's and covers the open itself.
+ *     If any of it disagrees, `ftruncate(0)` the
+ *     handle — the fd still names our inode wherever it has been moved to,
+ *     so this empties it — unlink the path when it still names that inode,
+ *     and fail the op, so the model is told the write did not happen.
+ *
+ * ## What step 6 guarantees, and what it does not
+ *
+ * It guarantees this: **no directory from the parent up to the repository
+ * root was renamed, and the parent gained and lost no entry, between the
+ * sample and the re-check.** It rests on three platform facts, and none is
+ * asserted here on anyone's say-so: all three are pinned by a test in
+ * `write-broker-create-containment.test.ts` that re-checks them on every
+ * suite run, on the machine the suite runs on. They are that `rename(2)`
+ * moves the renamed directory's status-change time even when the parent and
+ * the inode stay the same; that writing a file's CONTENT does not move its
+ * directory's — the second is what makes an unchanged sample meaningful
+ * across step 5; and that renaming a directory does NOT move its children's,
+ * which is why the chain has to be walked rather than inferred from the
+ * parent. To those the standard adds that an unprivileged process cannot
+ * move a status-change time BACKWARDS: `utimensat` sets it to now, and only
+ * the system clock could rewind it, which is not a repository's to set.
+ *
+ * ## The residual, stated as narrowly as it can honestly be stated
+ *
+ * **This BOUNDS the window. It does not close it, and this comment does not
+ * claim it does.** Three previous versions of this paragraph made a claim a
+ * later measurement disproved, so what follows separates what was measured
+ * from what is argued.
+ *
+ * The invariant that WOULD close the class is: every byte is written through
+ * a descriptor whose entire directory chain was pinned before the open, so
+ * that no path lookup happens after the pinning. Expressing it needs
+ * `openat(2)` against a directory descriptor, or `O_PATH`-relative
+ * operations — walk the chain once, hold a descriptor per level, and open
+ * the leaf relative to the descriptor you already proved. **Node exposes
+ * neither.** `fs.open` takes a path and performs its own lookup, and there
+ * is no `dirfd` argument anywhere in `node:fs`. So steps 1-4 cannot be made
+ * atomic with respect to a rename in this runtime, whatever order they are
+ * written in.
+ *
+ * What the chain check does instead is make every level of the chain carry
+ * the same nanosecond ctime bound the parent already had. An attacker still
+ * has a window: a rename that lands and is undone entirely between two of
+ * our `stat` calls, on a filesystem whose timestamp granularity cannot
+ * separate them, is invisible. **An unpinned-ancestor race therefore
+ * remains.** Its width is not measured, and no number for it should be
+ * written here without one.
+ *
+ * MEASURED, on the shape that WAS fixed — a same-inode round trip of an
+ * ancestor across the write, two OS processes, 32 MiB payloads, an escape
+ * counted only when a link taken at an outside path fell inside one call's
+ * window AND that call returned success AND the inode still held the full
+ * payload at the end:
+ *
+ *   - before this change: **20 escapes in 2100 attempts**
+ *   - after it: **0 escapes in 3600 attempts**, with 11 links taken inside a
+ *     call window (so the race was genuinely reached), every one of them
+ *     empty at the end, and none of them during an accepted call.
+ *
+ * That is the same discriminating shape the direct-parent control had after
+ * FX19, and it says the ancestor round trip now behaves like the parent one.
+ * It does not say the window is gone.
+ *
+ * The check is also only as fine as the filesystem's timestamp granularity.
+ * On APFS that is nanoseconds; on a filesystem with one-second timestamps a
+ * whole rename-out-and-back inside one tick would be invisible to it, and
+ * the inode proofs of step 3 are all that is left.
+ *
+ * It fails CLOSED in one more direction than it strictly must, and the chain
+ * widens that: another process adding or removing ANY entry in the parent
+ * during step 5 refuses the create, and so does a rename of any directory
+ * above it. The model is told the write did not happen, which is true — the
+ * partial file is truncated and unlinked — and it can retry. A spurious
+ * round trip is the cheaper error.
+ *
+ * ## Why the bytes are not staged elsewhere first
+ *
+ * The obvious alternative, and the one the FX17 brief proposed, is to write
+ * the content into a staging file under the repository root and then
+ * publish it with `link`. It was implemented and then rejected, because it
+ * is strictly WEAKER here. `link` is itself a path lookup: a swap landing
+ * in its window publishes a directory entry that ALREADY HOLDS the caller's
+ * bytes, outside the repository, with no check between. Nothing above ever
+ * puts a byte anywhere until a proof has passed.
+ *
+ * Exported for `write-broker-create-containment.test.ts` only. That suite
+ * has to drive this primitive tens of thousands of times against a real
+ * second OS process; going through `brokeredWrite` would add locking,
+ * journalling and ledger work per attempt and cut the attempt count by
+ * three orders of magnitude, which is the difference between a test that
+ * can lose the race and one that cannot reach it.
+ */
+export async function createNoFollow(
+  absPath: string,
+  content: string | Buffer,
+  rootReal: string,
+): Promise<void> {
+  const parentReal = await realpath(dirname(absPath))
+  if (!realPathIsUnder(parentReal, rootReal)) {
+    throw new Error(
+      `'${absPath}' would be created outside the repository (its parent resolves to '${parentReal}'). Refusing.`,
+    )
+  }
+  // Every directory from the parent up to the repository root, pinned before
+  // anything is created. FX20 item 2: pinning the parent alone left an
+  // ANCESTOR rename invisible, because `rename(2)` moves the renamed inode's
+  // status-change time and not its children's.
+  const chain = ancestorChain(parentReal, rootReal)
+  const chainAtStart = await Promise.all(chain.map((dir) => stat(dir, { bigint: true })))
+  const target = join(parentReal, basename(absPath))
+
+  const handle = await open(
+    target,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+    0o666,
+  )
+  try {
+    const onHandle = await handle.stat()
+    // `null` when the parent could not be stat'd at all, which every caller
+    // below treats as a failed proof.
+    const stillProven = async (): Promise<{ parentCtimeNs: bigint } | null> => {
+      const [resolvedNow, chainNow, onPath] = await Promise.all([
+        realpath(parentReal).catch(() => null),
+        Promise.all(chain.map((dir) => stat(dir, { bigint: true }).catch(() => null))),
+        lstat(target).catch(() => null),
+      ])
+      if (resolvedNow !== parentReal) return null
+      for (let i = 0; i < chain.length; i++) {
+        const now = chainNow[i]
+        const start = chainAtStart[i]!
+        if (now === null) return null
+        if (now.dev !== start.dev || now.ino !== start.ino) return null
+        // The parent's own status-change time moves when the create adds its
+        // entry, so it is sampled after that and compared before-vs-after by
+        // the caller. Every ancestor ABOVE the parent gains no entry from
+        // this create, so its status-change time must still be the one taken
+        // before the open — which is a strictly wider window than the
+        // parent's, and covers the open itself.
+        if (i > 0 && now.ctimeNs !== start.ctimeNs) return null
+      }
+      const parentNow = chainNow[0]!
+      if (onPath === null || onPath.dev !== onHandle.dev || onPath.ino !== onHandle.ino) return null
+      return { parentCtimeNs: parentNow.ctimeNs }
+    }
+
+    const before = await stillProven()
+    if (before === null) {
+      await discardCreated(target, onHandle)
+      throw new Error(
+        `'${absPath}' could not be proven to stay inside the repository while it was being ` +
+          `created: its directory, or one above it, changed under it. Nothing was left at that ` +
+          `path, so retrying is safe.`,
+      )
+    }
+    // Strings default to utf8; Buffers are written byte-for-byte.
+    await handle.writeFile(content)
+    const after = await stillProven()
+    if (after === null || after.parentCtimeNs !== before.parentCtimeNs) {
+      // The fd is anchored to the inode we wrote, so truncating it empties
+      // the bytes wherever that inode has been moved to.
+      await handle.truncate(0).catch(() => {})
+      await discardCreated(target, onHandle)
+      throw new Error(
+        `'${absPath}' could not be proven to stay inside the repository while it was being ` +
+          `created: its directory, or one above it, changed under it. Nothing was left at that ` +
+          `path, so retrying is safe.`,
+      )
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
+/**
+ * Every directory from `parentReal` up to `rootReal`, parent first.
+ *
+ * `realPathIsUnder` has already proven the containment both arguments are
+ * resolved paths, so the walk terminates at the root; the identity guard is
+ * there because a silent infinite loop is a worse failure than a short chain.
+ */
+function ancestorChain(parentReal: string, rootReal: string): string[] {
+  const chain = [parentReal]
+  let cur = parentReal
+  while (cur !== rootReal) {
+    const next = dirname(cur)
+    if (next === cur) break
+    chain.push(next)
+    cur = next
+  }
+  return chain
+}
+
+/**
+ * Remove the file {@link createNoFollow} created, but only while the path
+ * still names that exact inode. A path that names something else now is a
+ * path this call has no business unlinking.
+ */
+async function discardCreated(
+  target: string,
+  onHandle: { dev: number; ino: number },
+): Promise<void> {
+  const onPath = await lstat(target).catch(() => null)
+  if (onPath !== null && onPath.dev === onHandle.dev && onPath.ino === onHandle.ino) {
+    await unlink(target).catch(() => {})
+  }
+}
+
+async function applyOp(
+  op: BrokerOp,
+  preconditionAbsPaths: ReadonlySet<string>,
+  resolveRootReal: () => Promise<string>,
+): Promise<void> {
   switch (op.kind) {
     case 'write':
       if (op.ensureDir) await mkdir(dirname(op.absPath), { recursive: true })
-      if (!op.exclusive && !op.isNew && preconditionAbsPaths.has(op.absPath)) {
+      if (op.isNew) {
+        // Every create goes through the guarded path, whether or not the
+        // caller also declared `exclusive`: `exclusive` only ever meant
+        // `O_CREAT | O_EXCL`, which `createNoFollow` always uses. A create
+        // that was not marked `exclusive` therefore becomes create-only
+        // too — strictly a refusal where it used to clobber, and every
+        // `isNew` caller already asserts non-existence before calling.
+        await createNoFollow(op.absPath, op.content, await resolveRootReal())
+        return
+      }
+      if (!op.exclusive && preconditionAbsPaths.has(op.absPath)) {
         await openAndWriteNoFollow(op.absPath, op.content)
         return
       }
       // Strings default to utf8; Buffers are written byte-for-byte.
+      // `exclusive` without `isNew` is rejected as a caller bug before we
+      // get here, so the flag below is belt-and-braces, not a live path.
       await writeFile(op.absPath, op.content, op.exclusive ? { flag: 'wx' } : undefined)
       return
     case 'delete':
@@ -694,6 +1080,39 @@ export async function brokeredWrite<E = void>(
     // typed refusal, or thrown caller-bug error) — including its ledger
     // append, which is the whole point.
     releaseTreeGate()
+  }
+}
+
+/**
+ * Remove the backup directory this batch wrote, best effort.
+ *
+ * A refusal that never touched a file must leave no journal behind. The
+ * journal is written BEFORE the locks (so a caller bug cannot leave a
+ * half-written file with no recoverable original), which means a precondition
+ * refusal — decided inside the locks, before any mutation — has already
+ * created a directory holding bytes that were never the pre-write state of
+ * anything (2026-09-04 adversarial review, P3-1). `containment.test.ts`
+ * asserted the no-orphan rule only for a containment refusal, which is
+ * refused before the journal is written and so never got this far.
+ *
+ * Never fatal. The write did not happen either way, and `backups-gc` sweeps a
+ * directory this fails to remove.
+ */
+async function discardBackupDir(canonicalRoot: string, backupDirRel: string): Promise<void> {
+  try {
+    // Re-resolved immediately before the `rm`, the same discipline
+    // `backups-gc` follows: this is a RECURSIVE delete and
+    // `desdeRemovalPath` refuses a target that resolves outside the repo.
+    await rm(desdeRemovalPath(canonicalRoot, 'backups', basename(backupDirRel)), {
+      recursive: true,
+      force: true,
+    })
+  } catch (err) {
+    console.warn(
+      `brokeredWrite: could not remove the backup directory left by a refused write: ${
+        (err as Error).message
+      }`,
+    )
   }
 }
 
@@ -801,7 +1220,7 @@ async function brokeredWriteImpl<E = void>(
   try {
     backup = await writeBackupJournal(opts.canonicalRoot, opts.journal)
   } catch (err) {
-    if (err instanceof BackupJournalPathEscapeError) {
+    if (err instanceof BackupJournalPathEscapeError || err instanceof DesdeDirSymlinkError) {
       return { ok: false, stage: 'backup', reason: err.message }
     }
     throw err
@@ -868,10 +1287,26 @@ async function brokeredWriteImpl<E = void>(
   }
   const preconditionAbsPaths = new Set((opts.preconditions ?? []).map((p) => p.absPath))
 
+  // FX11: `createNoFollow` needs the realpath'd root too, and a batch can
+  // carry a create without carrying a precondition (`scaffold_route`, the
+  // CLI's `allowCreate` route, `fetch_media`). Resolved on first use rather
+  // than unconditionally, so a batch with neither a precondition nor a
+  // create still makes no extra syscall, and cached so a multi-create batch
+  // makes one. A failure here propagates out of `applyOp` as an ordinary
+  // write-stage failure, which is the right outcome: a root we cannot
+  // resolve is a containment check we cannot make, and an unprovable create
+  // is refused rather than completed.
+  let cachedRootReal: string | undefined = preconditionRootReal
+  const resolveRootReal = async (): Promise<string> => {
+    if (cachedRootReal === undefined) cachedRootReal = await realpath(opts.canonicalRoot)
+    return cachedRootReal
+  }
+
   type BatchOutcome =
     | { ok: true }
     | { failure: BrokerOp; reason: string; rolledBack: string[]; restoreErrors: string[] }
     | { preconditionFailure: { repoRel: string; reason: string } }
+    | { stopped: true }
 
   /**
    * Attribute a path-carrying fs error to whichever op or precondition
@@ -921,6 +1356,9 @@ async function brokeredWriteImpl<E = void>(
       snapshotPaths,
       lockOpts,
       async (): Promise<BatchOutcome> => {
+      // The locks are ours as of this line. See `BrokeredWriteOptions.signal`
+      // for why the check belongs here and not at the caller's door.
+      if (opts.signal?.aborted === true) return { stopped: true }
       for (const p of allPaths) {
         try {
           snapshots.set(
@@ -993,7 +1431,7 @@ async function brokeredWriteImpl<E = void>(
       const applied: BrokerOp[] = []
       for (const op of opts.ops) {
         try {
-          await applyOp(op, preconditionAbsPaths)
+          await applyOp(op, preconditionAbsPaths, resolveRootReal)
           applied.push(op)
         } catch (err) {
           const rolledBack: string[] = []
@@ -1044,6 +1482,9 @@ async function brokeredWriteImpl<E = void>(
     // may propagate.
     const attribution = attributeFailure((err as NodeJS.ErrnoException)?.path)
     if (attribution.kind === 'precondition') {
+      // Lock acquisition threw, so nothing was mutated. Same no-orphan rule as
+      // the precondition refusal below.
+      if (opts.journal.length > 0) await discardBackupDir(opts.canonicalRoot, backup.backupDir)
       return {
         ok: false,
         stage: 'precondition',
@@ -1057,9 +1498,26 @@ async function brokeredWriteImpl<E = void>(
       reason: (err as Error).message,
       repoRel: attribution.op.repoRel,
       op: attribution.op,
-      backupDir: backup.backupDir,
+      // Same `journal.length > 0` condition the success path uses (see
+      // `writeBackupJournal`'s own note): an empty journal means the
+      // directory was never created on disk, so it must not be reported
+      // here either.
+      ...(opts.journal.length > 0 ? { backupDir: backup.backupDir } : {}),
       rolledBack: [],
       restoreErrors: [],
+    }
+  }
+
+  if ('stopped' in outcome) {
+    // Nothing was mutated, so there is nothing to roll back — but the
+    // journal directory was written before the locks were taken, and an
+    // orphaned backup for a batch that never happened is the same lie a
+    // failed precondition's would be.
+    if (opts.journal.length > 0) await discardBackupDir(opts.canonicalRoot, backup.backupDir)
+    return {
+      ok: false,
+      stage: 'stopped',
+      reason: 'the turn was stopped before anything was written',
     }
   }
 
@@ -1067,7 +1525,9 @@ async function brokeredWriteImpl<E = void>(
     // No backup/rollback bookkeeping to report: nothing was written, and
     // — critically — the `record` block below is never reached from this
     // return, so a failed precondition can never record a bogus undo/redo
-    // step for a batch that didn't happen.
+    // step for a batch that didn't happen. The journal directory the batch
+    // wrote before taking its locks goes with it — see `discardBackupDir`.
+    if (opts.journal.length > 0) await discardBackupDir(opts.canonicalRoot, backup.backupDir)
     return {
       ok: false,
       stage: 'precondition',
@@ -1083,7 +1543,9 @@ async function brokeredWriteImpl<E = void>(
       reason: outcome.reason,
       repoRel: outcome.failure.repoRel,
       op: outcome.failure,
-      backupDir: backup.backupDir,
+      // Same `journal.length > 0` condition as above and as the success
+      // path — an empty journal never created the directory on disk.
+      ...(opts.journal.length > 0 ? { backupDir: backup.backupDir } : {}),
       rolledBack: outcome.rolledBack,
       restoreErrors: outcome.restoreErrors,
     }
@@ -1223,7 +1685,11 @@ async function brokeredWriteImpl<E = void>(
   }
 
   const emitted = (opts.emit ? await opts.emit() : undefined) as E
-  return { ok: true, backupDir: backup.backupDir, emitted }
+  return {
+    ok: true,
+    ...(opts.journal.length > 0 ? { backupDir: backup.backupDir } : {}),
+    emitted,
+  }
 }
 
 /** Repo-relative label for one of an op's paths (renames own two). */

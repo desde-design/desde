@@ -13,7 +13,7 @@ import type { IncomingMessage, ServerResponse } from "node:http"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   __resetActiveTurnsForTest,
@@ -28,6 +28,13 @@ import {
 import { newSecurityContext } from "../auth.js"
 import { startHttpServer, type HttpServerHandle } from "../http-server.js"
 import { pickFreePort } from "../launcher-server.js"
+import {
+  modelCatalogResolver,
+  resolvedDefaultModelFor,
+  setModelCatalogLiveSourcesForTests,
+} from "../model-catalog-source.js"
+import { handleModelCatalogRequest } from "../model-catalog-handler.js"
+import { assertChatCredentials } from "../../../../src/editor/llm-providers/assert-chat-credentials.js"
 
 // The BYO-key cutover: chat dispatch now refuses without a model credential,
 // because the SDK would otherwise spawn the bundled `claude` binary and run on
@@ -42,6 +49,20 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs()
 })
+
+// A `modelConfig` on a request drives `modelCatalogResolver` down its live
+// branch. Without a stub here, a stubbed ANTHROPIC_API_KEY sends that
+// resolver to the REAL Anthropic Models API before falling back to the
+// static catalog — slow, flaky offline, and it logs a fallback error on
+// every run of this file. Same pair the neutral-gate suite
+// (`http-server-neutral-chat-gate.integration.test.ts`) already installs.
+beforeAll(() => {
+  setModelCatalogLiveSourcesForTests({
+    listViaApi: { anthropic: async () => [], openai: async () => [] },
+    listViaCli: async () => [],
+  })
+})
+afterAll(() => setModelCatalogLiveSourcesForTests(null))
 
 
 interface MockReqRes {
@@ -139,6 +160,11 @@ function makeLoaders(opts: {
   bridgeResponses?: Map<string, unknown>
 }): ChatHandlerLoaders {
   return {
+    loadRunChatTurnNeutral: async () => ({
+      runChatTurnNeutral: async () => {
+        throw new Error("makeLoaders: this suite's turns run on the SDK loader, not neutral")
+      },
+    }),
     loadRunChatTurnSdk: async () => {
       const { makeEmptySession } = await import(
         "../../../../src/editor/agent-chat/types.js"
@@ -264,6 +290,159 @@ describe("handleChatRequest", () => {
     mock.setBody({ userMessage: "hi" })
     await handleChatRequest(mock.req, mock.res, { repoRoot } as ChatHandlerContext)
     expect(mock.writes.join("")).not.toMatch(/Anthropic API key/i)
+  })
+
+  it("excludes an uncredentialed provider from the catalog, so its request 400s there rather than at the turn gate", async () => {
+    // MEASURED before this change: `assertChatCredentials(process.env)` ran at
+    // the turn gate with no provider argument, even though
+    // `effectiveModelConfig.provider` had already been resolved well above
+    // it. The data was in scope the whole time — the gate just never looked
+    // at it, so an OpenAI-configured session was checked against
+    // ANTHROPIC_API_KEY instead of OPENAI_API_KEY.
+    //
+    // Since the codex fix (model-catalog-source.ts only serving credentialed
+    // providers), an uncredentialed provider named on the REQUEST never
+    // reaches this gate at all — the catalog resolver excludes it and the
+    // request 400s at model-config validation instead, which checks OpenAI's
+    // own credential state (it is what decides whether OpenAI is even in the
+    // catalog), not Anthropic's. That is the same assertion this test always
+    // made, one step earlier.
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    // Anthropic is credentialed; OpenAI is not.
+    const mock = makeMockReqRes()
+    mock.setBody({
+      userMessage: "hi",
+      modelConfig: { provider: "openai", model: "gpt-5.6" },
+    })
+    await handleChatRequest(mock.req, mock.res, { repoRoot } as ChatHandlerContext)
+    expect((mock.res as unknown as { statusCode: number }).statusCode).toBe(400)
+    const body = JSON.parse(mock.endBody() ?? "{}")
+    expect(body.error).toMatch(/openai/i)
+  })
+
+  it("never reaches api.anthropic.com or api.openai.com for a chat request", async () => {
+    // Without the `setModelCatalogLiveSourcesForTests` stub above, a
+    // request carrying a `modelConfig` drives the resolver down its live
+    // branch, and a stubbed fake key would reach the REAL vendor Models
+    // API. This is the assertion that proves the stub is actually doing
+    // that job, for one representative POST — not just that the suite
+    // happens to run fast.
+    //
+    // The thrown error is also RECORDED, not just thrown: `catalogFor` in
+    // `model-catalog-source.ts` catches any live-source failure and falls
+    // back to the static catalog by design, so a network reach that throws
+    // here would otherwise be silently swallowed a few frames up and the
+    // test would pass for the wrong reason. The `calls` assertion below is
+    // what actually proves the network was never touched.
+    const realFetch = globalThis.fetch
+    const calls: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (/api\.anthropic\.com|api\.openai\.com/.test(url)) {
+        calls.push(url)
+        throw new Error(`network reached: ${url}`)
+      }
+      return realFetch(input)
+    }) as typeof fetch
+    try {
+      const mock = makeMockReqRes()
+      mock.setBody({
+        userMessage: "hi",
+        modelConfig: { provider: "anthropic", model: "claude-opus-4-8" },
+      })
+      await handleChatRequest(mock.req, mock.res, {
+        repoRoot,
+        loaders: makeLoaders({ scriptedEvents: [] }),
+      } as ChatHandlerContext)
+    } finally {
+      globalThis.fetch = realFetch
+    }
+    expect(calls).toEqual([])
+  })
+
+  it("assertChatCredentials checks the named provider's own credential, not Anthropic's", () => {
+    // Direct unit call: `assertChatCredentials(env, providerId)` takes the
+    // provider id as an argument (see its own doc comment for why), so a
+    // session that picked a non-Anthropic provider is checked against that
+    // provider's own key, never against ANTHROPIC_API_KEY.
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-unrelated-to-openai")
+    vi.stubEnv("OPENAI_API_KEY", "")
+    expect(() => assertChatCredentials(process.env, "openai")).toThrow(/OpenAI/i)
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-present")
+    expect(() => assertChatCredentials(process.env, "openai")).not.toThrow()
+  })
+
+  it("dispatches the turn on the provider the catalog serves as its default", async () => {
+    // The billing-correctness case. With BOTH providers credentialed and
+    // `llm.defaultProvider: "openai"` set, the model picker chip renders the
+    // catalog's default — an OpenAI model — while the turn used to run, and
+    // bill, on Anthropic. That is the first-ever chat in a project: no request
+    // `modelConfig`, no persisted session model, so the handler falls back to
+    // its own default rule, and that rule was the only one in the product
+    // that ignored `llm.defaultProvider`.
+    //
+    // The assertion is deliberately against what the CATALOG answers rather
+    // than against the literal "openai": the chip and the turn have to agree,
+    // and hardcoding both sides of an agreement proves nothing.
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    const llm = { defaultProvider: "openai" }
+    modelCatalogResolver.invalidate()
+
+    const catalogMock = makeMockReqRes()
+    await handleModelCatalogRequest(catalogMock.req, catalogMock.res, repoRoot, {
+      configuredDefaultProvider: llm.defaultProvider,
+    })
+    const catalogDefault = (
+      JSON.parse(catalogMock.endBody() ?? "{}") as { defaultProviderId?: string }
+    ).defaultProviderId
+    expect(catalogDefault).toBe("openai")
+
+    const base = makeLoaders({ scriptedEvents: [] })
+    let dispatchedProvider: string | undefined
+    let sdkLaneLoaded = false
+    const loaders: ChatHandlerLoaders = {
+      ...base,
+      loadRunChatTurnSdk: async () => {
+        sdkLaneLoaded = true
+        return base.loadRunChatTurnSdk()
+      },
+      loadRunChatTurnNeutral: async () => {
+        const { makeEmptySession } = await import(
+          "../../../../src/editor/agent-chat/types.js"
+        )
+        return {
+          runChatTurnNeutral: async (callOpts: { providerId?: string }) => {
+            dispatchedProvider = callOpts.providerId
+            return {
+              session: makeEmptySession("test-proj"),
+              turn: {
+                id: "t-default-provider",
+                startedAt: "x",
+                userMessage: "hi",
+                assistantContent: [],
+                toolResults: {},
+                editProposals: [],
+              },
+            }
+          },
+        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>>
+      },
+    }
+
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi" })
+    await handleChatRequest(mock.req, mock.res, {
+      repoRoot,
+      loaders,
+      llm,
+    } as ChatHandlerContext)
+    modelCatalogResolver.invalidate()
+
+    expect(dispatchedProvider).toBe(catalogDefault)
+    // And the lane followed the provider. Anthropic is the SDK lane and OpenAI
+    // is the neutral one, so a turn that silently ran on Anthropic would also
+    // have had different steering behaviour than the picker advertised.
+    expect(sdkLaneLoaded).toBe(false)
   })
 
   it("forwards orchestrator events to the SSE stream", async () => {
@@ -423,6 +602,11 @@ describe("handleChatRequest — per-session mutex (Phase 5)", () => {
       releaseFirst = resolve
     })
     const slowLoaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () =>
         ({
           runChatTurnSdk: async (
@@ -525,6 +709,11 @@ describe("handleChatRequest — per-session mutex (Phase 5)", () => {
       releaseSlow = resolve
     })
     const slowLoaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () =>
         ({
           runChatTurnSdk: async (
@@ -732,6 +921,11 @@ describe("handleChatRequest — Phase 5 rate-limit classification", () => {
     const saved: Array<import("../../../../src/editor/agent-chat/types").ChatSession> = []
     const sessionId = "rl-session"
     const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () => {
         const { makeEmptySession } = await import(
           "../../../../src/editor/agent-chat/types.js"
@@ -809,6 +1003,11 @@ describe("handleChatRequest — Phase 5 rate-limit classification", () => {
     const saved: Array<import("../../../../src/editor/agent-chat/types").ChatSession> = []
     const sessionId = "generic-fail"
     const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () => {
         const { makeEmptySession } = await import(
           "../../../../src/editor/agent-chat/types.js"
@@ -924,6 +1123,11 @@ describe("handleChatRequest — Phase 5 route-level lifecycle", () => {
     seedSession?: import("../../../../src/editor/agent-chat/types").ChatSession,
   ): ChatHandlerLoaders {
     return {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () =>
         ({ runChatTurnSdk: runChatTurnSdkImpl }) as unknown as Awaited<
           ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>
@@ -1108,6 +1312,11 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
     seedSession?: import("../../../../src/editor/agent-chat/types").ChatSession
   }): ChatHandlerLoaders {
     return {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () => {
         return {
           runChatTurnSdk: async (
@@ -1225,15 +1434,108 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
     expect(capturedRunOpts.value?.effort).toBeUndefined()
   })
 
-  it("passes no model when neither request nor session has a config", async () => {
+  it("dispatches the catalog default when neither request nor session has a config", async () => {
+    // This used to assert `model` was UNDEFINED, leaving the runtime to fall
+    // back to the STATIC catalog's default. That is the divergence: the
+    // picker's default comes from the merged live catalog, so on an account
+    // whose live list lacks the static id the two disagreed and the first
+    // turn 404'd on a model the UI said was in use. The turn now carries the
+    // same default the picker shows.
+    //
+    // Effort travels with it, which it did not before (Mo, 2026-09-07). The
+    // picker's slider has no "Default" stop any more, so the level it opens
+    // on has to be the level the turn runs at, or the chip would name one
+    // effort while the request carried none.
     const capturedRunOpts: { value?: Record<string, unknown> } = {}
     const mock = makeMockReqRes()
     mock.setBody({ userMessage: "hi" })
     const loaders = makeModelConfigLoaders({ saved: [], capturedRunOpts })
     await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
 
-    expect(capturedRunOpts.value?.model).toBeUndefined()
-    expect(capturedRunOpts.value?.effort).toBeUndefined()
+    const { catalogs } = await modelCatalogResolver.get()
+    const defaultOption = catalogs
+      .find((c) => c.providerId === "anthropic")
+      ?.models.find((m) => m.isDefault)
+    expect(defaultOption?.id).toBeTruthy()
+    expect(capturedRunOpts.value?.model).toBe(defaultOption!.id)
+    expect(defaultOption!.defaultEffort).toBe("medium")
+    expect(capturedRunOpts.value?.effort).toBe("medium")
+  })
+
+  it("reads the default effort from the SELECTED provider, not whichever catalog lists the id first", async () => {
+    // Two providers can serve the SAME model id. An OpenAI-compatible base
+    // URL can point at a gateway that lists a vendor's ids verbatim, which is
+    // the point of a provider seam with shared transport. The lookup scanned
+    // every catalog and took the first entry matching the id alone, so an
+    // OpenAI turn could run at Anthropic's answer for that id — the same
+    // class of bug that already forced the PICKER onto the (provider, model)
+    // pair.
+    //
+    // Both halves are asserted, because both were unscoped: the effort level,
+    // and whether the model thinks adaptively.
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    setModelCatalogLiveSourcesForTests({
+      listViaApi: {
+        // Anthropic's entry for the shared id: a ladder without the vendor
+        // default, so it lands on the middle ('low'), and adaptive thinking.
+        anthropic: async () => [
+          { id: "shared-id-1", label: "Shared", effortLevels: ["low", "high"], adaptiveThinking: true },
+        ],
+        // OpenAI's entry for the same id: no effort information, so it takes
+        // that descriptor's full ladder and its 'medium' default.
+        openai: async () => [{ id: "shared-id-1", label: "Shared" }],
+      },
+      listViaCli: async () => [],
+    })
+    modelCatalogResolver.invalidate()
+    try {
+      const capturedRunOpts: { value?: Record<string, unknown> } = {}
+      const base = makeModelConfigLoaders({ saved: [], capturedRunOpts })
+      const loaders: ChatHandlerLoaders = {
+        ...base,
+        // This turn runs on the neutral lane (OpenAI). Same fake runner, so
+        // the assertion reads the same captured opts.
+        loadRunChatTurnNeutral: async () => {
+          const { runChatTurnSdk } = await base.loadRunChatTurnSdk()
+          return { runChatTurnNeutral: runChatTurnSdk } as unknown as Awaited<
+            ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>
+          >
+        },
+      }
+
+      const { catalogs } = await modelCatalogResolver.get()
+      const anthropicEntry = catalogs
+        .find((c) => c.providerId === "anthropic")
+        ?.models.find((m) => m.id === "shared-id-1")
+      const openaiEntry = catalogs
+        .find((c) => c.providerId === "openai")
+        ?.models.find((m) => m.id === "shared-id-1")
+      // The premise: the two catalogs disagree about this id, and Anthropic's
+      // is the one an id-only scan reaches first.
+      expect(catalogs[0]?.providerId).toBe("anthropic")
+      expect(anthropicEntry?.defaultEffort).toBe("low")
+      expect(anthropicEntry?.adaptiveThinking).toBe(true)
+      expect(openaiEntry?.defaultEffort).toBe("medium")
+      expect(openaiEntry?.adaptiveThinking).toBeUndefined()
+
+      const mock = makeMockReqRes()
+      mock.setBody({
+        userMessage: "hi",
+        modelConfig: { provider: "openai", model: "shared-id-1" },
+      })
+      await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+
+      expect(capturedRunOpts.value?.model).toBe("shared-id-1")
+      expect(capturedRunOpts.value?.effort).toBe("medium")
+      expect(capturedRunOpts.value?.adaptiveThinking).toBeUndefined()
+    } finally {
+      setModelCatalogLiveSourcesForTests({
+        listViaApi: { anthropic: async () => [], openai: async () => [] },
+        listViaCli: async () => [],
+      })
+      modelCatalogResolver.invalidate()
+    }
   })
 
   it("ignores a persisted model that is no longer in the catalog", async () => {
@@ -1250,7 +1552,14 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
     const loaders = makeModelConfigLoaders({ saved: [], capturedRunOpts, seedSession })
     await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
 
-    expect(capturedRunOpts.value?.model).toBeUndefined() // falls back to runtime default
+    // Falls back to the default the picker shows — named, and resolved from
+    // the SAME function the handler resolves it from. A `not.toBe(retired)`
+    // plus `toBeTruthy()` pair would also have passed on another provider's
+    // default, on a stale id, or on any non-empty string at all.
+    const expectedDefault = await resolvedDefaultModelFor("anthropic")
+    expect(expectedDefault).toBeTruthy()
+    expect(expectedDefault).not.toBe("claude-retired-1")
+    expect(capturedRunOpts.value?.model).toBe(expectedDefault)
   })
 
   // M3 — the spec requires the silent fallback above to announce itself
@@ -1281,8 +1590,13 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
       )
     expect(note).toBeDefined()
     expect(note?.reason).toMatch(/default model for this turn/i)
-    // Still non-blocking: the turn ran on the runtime default.
-    expect(capturedRunOpts.value?.model).toBeUndefined()
+    // Still non-blocking: the turn ran on the catalog's default, named from
+    // the same source the handler resolves it from rather than merely being
+    // "not the retired id".
+    const expectedDefault = await resolvedDefaultModelFor("anthropic")
+    expect(expectedDefault).toBeTruthy()
+    expect(expectedDefault).not.toBe("claude-retired-1")
+    expect(capturedRunOpts.value?.model).toBe(expectedDefault)
   })
 
   // M3 — the spec calls for a ONE-TIME notice. The notes ride the
@@ -1598,6 +1912,11 @@ describe("bridge request/reply round trip", () => {
 
     // The fake runChatTurnSdk calls bridge.send() and emits the result.
     const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () =>
         ({
           runChatTurnSdk: async (callOpts: {
@@ -1693,6 +2012,11 @@ describe("bridge request/reply round trip", () => {
     mock.setBody({ userMessage: "x" })
     let captured: Error | null = null
     const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadRunChatTurnSdk: async () =>
         ({
           runChatTurnSdk: async (callOpts: {
@@ -1792,11 +2116,27 @@ describe("handleSteerRequest — mid-turn steering", () => {
     onRegistered: () => void
     /** Awaited before the runtime is even loaded — stands in for setup awaits. */
     beforeStart?: Promise<void>
+    /**
+     * Awaited inside the SESSION LOAD, which is earlier still: after the live
+     * turn is registered and before its provider has been resolved with the
+     * session's persisted model. That is the registration window proper, and
+     * `beforeStart` no longer sits inside it.
+     */
+    beforeSessionLoad?: Promise<void>
+    /**
+     * Make the NEUTRAL stub announce each delivered steer itself, the way the
+     * real neutral runtime does at its step boundary. Off by default, so a
+     * test that wants to see whether the ROUTE emitted still can.
+     */
+    neutralEmitsSteered?: { sessionId: string }
+    /** A `modelConfig` to persist on the loaded session. */
+    sessionModelConfig?: { provider: string; model: string }
   }): ChatHandlerLoaders {
     const base = makeLoaders({ scriptedEvents: [] })
-    return {
-      ...base,
-      loadRunChatTurnSdk: async () => {
+    // The same steerable stub serves BOTH lanes, so a test can flip the lane
+    // with `EDITOR_CHAT_RUNTIME_OVERRIDE` and still get a turn that accepts a
+    // steer.
+    const makeRuntime = async (announceSteers: { sessionId: string } | undefined) => {
         // Awaited HERE, where the real handler awaits session load, project
         // knowledge, web policy and the concurrency-cap queue: after the lock
         // is taken and before the turn runtime runs.
@@ -1822,10 +2162,18 @@ describe("handleSteerRequest — mid-turn steering", () => {
               for await (const m of channel.stream()) {
                 const content = m.message.content
                 const blocks = Array.isArray(content) ? content : []
-                opts.received.push({
-                  text: blocks.map((b) => (b.type === "text" ? b.text : "")).join(""),
-                  imageBlocks: blocks.filter((b) => b.type === "image").length,
-                })
+                const text = blocks.map((b) => (b.type === "text" ? b.text : "")).join("")
+                const imageBlocks = blocks.filter((b) => b.type === "image").length
+                opts.received.push({ text, imageBlocks })
+                // The opening prompt is not a steer; everything after it is.
+                if (announceSteers && opts.received.length > 1) {
+                  callOpts.emit({
+                    kind: "steered",
+                    sessionId: announceSteers.sessionId,
+                    userMessage: text,
+                    imageCount: imageBlocks,
+                  })
+                }
               }
             })()
             callOpts.emit({ kind: "turn_start", turnId: "t-steer" })
@@ -1849,7 +2197,35 @@ describe("handleSteerRequest — mid-turn steering", () => {
               },
             }
           },
-        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>>
+        }
+    }
+    return {
+      ...base,
+      loadSessionStore: async () => {
+        const store = await base.loadSessionStore()
+        if (!opts.beforeSessionLoad && !opts.sessionModelConfig) return store
+        return {
+          ...store,
+          loadSession: async (...args: Parameters<typeof store.loadSession>) => {
+            if (opts.beforeSessionLoad) await opts.beforeSessionLoad
+            const loaded = await store.loadSession(...args)
+            if (!opts.sessionModelConfig) return loaded
+            return {
+              ...loaded,
+              session: { ...loaded.session, modelConfig: opts.sessionModelConfig },
+            }
+          },
+        }
+      },
+      loadRunChatTurnSdk: async () =>
+        (await makeRuntime(undefined)) as unknown as Awaited<
+          ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>
+        >,
+      loadRunChatTurnNeutral: async () => {
+        const { runChatTurnSdk } = await makeRuntime(opts.neutralEmitsSteered)
+        return { runChatTurnNeutral: runChatTurnSdk } as unknown as Awaited<
+          ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>
+        >
       },
     }
   }
@@ -1858,7 +2234,14 @@ describe("handleSteerRequest — mid-turn steering", () => {
   async function startLiveTurn(
     sessionId: string,
     received: DeliveredMessage[],
-    opts: { beforeStart?: Promise<void> } = {},
+    opts: {
+      beforeStart?: Promise<void>
+      beforeSessionLoad?: Promise<void>
+      neutralEmitsSteered?: { sessionId: string }
+      sessionModelConfig?: { provider: string; model: string }
+      /** The project's `llm` block, as `.desde/config.json` supplies it. */
+      llm?: ChatHandlerContext["llm"]
+    } = {},
   ): Promise<{
     turn: MockReqRes
     done: Promise<void>
@@ -1877,14 +2260,18 @@ describe("handleSteerRequest — mid-turn steering", () => {
     turn.setBody({ userMessage: "start the work", sessionId })
     const done = handleChatRequest(turn.req, turn.res, {
       repoRoot,
+      ...(opts.llm ? { llm: opts.llm } : {}),
       loaders: makeSteerableLoaders({
         received,
         finish,
         onRegistered: () => signalStarted(),
         ...(opts.beforeStart ? { beforeStart: opts.beforeStart } : {}),
+        ...(opts.beforeSessionLoad ? { beforeSessionLoad: opts.beforeSessionLoad } : {}),
+        ...(opts.neutralEmitsSteered ? { neutralEmitsSteered: opts.neutralEmitsSteered } : {}),
+        ...(opts.sessionModelConfig ? { sessionModelConfig: opts.sessionModelConfig } : {}),
       }),
     })
-    if (opts.beforeStart) {
+    if (opts.beforeStart || opts.beforeSessionLoad) {
       // The caller is deliberately holding the turn in its setup awaits, so
       // waiting for the runtime would deadlock — the point of that test is
       // that the turn is steerable BEFORE the runtime is reached. Wait instead
@@ -2006,6 +2393,40 @@ describe("handleSteerRequest — mid-turn steering", () => {
     })
   })
 
+  it("stands down and lets the neutral runtime announce the steer itself", async () => {
+    // Exactly one `steered` frame must reach the client per steer: the client
+    // draws the bubble on that frame AND cuts the transcript there. On the
+    // neutral lane the RUNTIME emits, at the boundary where it delivers the
+    // steer and stamps its position, so the route must not emit a second one
+    // (final review I1: the duplicate drew two bubbles and cut twice). The
+    // stub runtime here emits nothing, so any `steered` on this stream could
+    // only have come from the route.
+    vi.stubEnv("EDITOR_CHAT_RUNTIME_OVERRIDE", "neutral")
+    try {
+      const received: DeliveredMessage[] = []
+      const { turn, done, release } = await startLiveTurn("s-neutral", received)
+
+      const { status, result } = await steer({
+        sessionId: "s-neutral",
+        userMessage: "actually, use the other component",
+      })
+      expect(status).toBe(200)
+      expect(result).toEqual({ accepted: true })
+
+      release()
+      await done
+
+      // Delivery still happens; only the announcement moved lanes.
+      expect(received.map((m) => m.text)).toEqual([
+        "start the work",
+        "actually, use the other component",
+      ])
+      expect(turn.events().filter((e) => e.kind === "steered")).toEqual([])
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it("delivers TWO steers into one live turn", async () => {
     // Finding 4 of tasks/chat-input-steering.md, in product form: a second
     // `streamInput()` call is silently discarded by the SDK, so the only
@@ -2112,6 +2533,162 @@ describe("handleSteerRequest — mid-turn steering", () => {
     ])
   })
 
+  it("stands down for the neutral lane even while the turn is still in setup", async () => {
+    // 2026-09-04 adversarial review, P2-2. The live-turn entry used to be
+    // registered with `runtimeEmitsSteered: false` and only corrected once the
+    // runtime had been resolved — after the concurrency-cap wait, the session
+    // load, project knowledge and the web policy. A steer accepted in that
+    // window got a frame from the ROUTE and, later, a second one from the
+    // neutral runtime at delivery. The client draws a bubble and cuts the
+    // transcript on each, so that steer showed up twice.
+    //
+    // The stub runtime emits no `steered` of its own on either lane, so any
+    // frame on this stream came from the route.
+    vi.stubEnv("EDITOR_CHAT_RUNTIME_OVERRIDE", "neutral")
+    try {
+      const received: DeliveredMessage[] = []
+      let releaseSetup: () => void = () => {}
+      const holdSetup = new Promise<void>((resolve) => {
+        releaseSetup = resolve
+      })
+      const { turn, done, release, started } = await startLiveTurn("s-setup-neutral", received, {
+        beforeSessionLoad: holdSetup,
+      })
+
+      const { status } = await steer({
+        sessionId: "s-setup-neutral",
+        userMessage: "typed while it was starting",
+      })
+      expect(status).toBe(200)
+      // The window itself: the runtime has not been reached yet.
+      expect(turn.events().filter((e) => e.kind === "steered")).toEqual([])
+
+      releaseSetup()
+      await started
+      release()
+      await done
+
+      // Still delivered — only the announcement belongs to the other side.
+      expect(received.map((m) => m.text)).toEqual([
+        "start the work",
+        "typed while it was starting",
+      ])
+      expect(turn.events().filter((e) => e.kind === "steered")).toEqual([])
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it("still announces a setup-window steer itself on the SDK lane", async () => {
+    // The control for the case above. The SDK runtime emits no `steered` at
+    // all, so if the route stopped emitting during setup the steer would draw
+    // no bubble at all — a worse failure than the duplicate.
+    const received: DeliveredMessage[] = []
+    let releaseSetup: () => void = () => {}
+    const holdSetup = new Promise<void>((resolve) => {
+      releaseSetup = resolve
+    })
+    const { turn, done, release, started } = await startLiveTurn("s-setup-sdk", received, {
+      beforeSessionLoad: holdSetup,
+    })
+
+    await steer({ sessionId: "s-setup-sdk", userMessage: "typed while it was starting" })
+    releaseSetup()
+    await started
+    release()
+    await done
+
+    expect(turn.events().filter((e) => e.kind === "steered")).toEqual([
+      {
+        kind: "steered",
+        sessionId: "s-setup-sdk",
+        userMessage: "typed while it was starting",
+        imageCount: 0,
+      },
+    ])
+  })
+
+  it("still sends exactly one frame when the persisted model moves the turn onto the neutral lane mid-setup", async () => {
+    // The residual case the registration fix cannot see. The live turn is
+    // registered from the REQUEST's provider (here: none, so the default,
+    // Anthropic — the SDK lane, where the route emits). The session's
+    // persisted model then names OpenAI, which is the neutral lane, where the
+    // runtime emits. A steer accepted in between would otherwise be announced
+    // by both sides.
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    try {
+      const received: DeliveredMessage[] = []
+      let releaseSetup: () => void = () => {}
+      const holdSetup = new Promise<void>((resolve) => {
+        releaseSetup = resolve
+      })
+      const { turn, done, release, started } = await startLiveTurn("s-flip-neutral", received, {
+        beforeSessionLoad: holdSetup,
+        sessionModelConfig: { provider: "openai", model: "gpt-5.6" },
+        neutralEmitsSteered: { sessionId: "s-flip-neutral" },
+      })
+
+      await steer({ sessionId: "s-flip-neutral", userMessage: "typed while it was starting" })
+      // The route emitted, because on the lane it knew about, it is the emitter.
+      expect(turn.events().filter((e) => e.kind === "steered")).toHaveLength(1)
+
+      releaseSetup()
+      await started
+      release()
+      await done
+
+      // And the runtime's own frame for the SAME steer was dropped.
+      expect(turn.events().filter((e) => e.kind === "steered")).toHaveLength(1)
+      expect(received.map((m) => m.text)).toEqual([
+        "start the work",
+        "typed while it was starting",
+      ])
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it("registers the live turn on the configured default provider's lane, not Anthropic's", async () => {
+    // The other half of the billing fix, at the EARLIER call site. Before the
+    // turn's session has loaded, the route has to know which lane will serve
+    // it — that is what decides who announces a steer. It resolved that from
+    // env alone and ignored `llm.defaultProvider`, so a project configured for
+    // OpenAI registered on Anthropic's SDK lane.
+    //
+    // Observable difference: on the SDK lane the ROUTE announces a steer at
+    // accept time, because that runtime emits none. On the neutral lane the
+    // runtime announces it later, at its own step boundary, so the route must
+    // stay quiet. A frame appearing here is the route saying "SDK lane".
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    const received: DeliveredMessage[] = []
+    let releaseSetup: () => void = () => {}
+    const holdSetup = new Promise<void>((resolve) => {
+      releaseSetup = resolve
+    })
+    const { turn, done, release, started } = await startLiveTurn("s-configured-default", received, {
+      beforeSessionLoad: holdSetup,
+      llm: { defaultProvider: "openai" },
+      neutralEmitsSteered: { sessionId: "s-configured-default" },
+    })
+
+    await steer({ sessionId: "s-configured-default", userMessage: "typed while it was starting" })
+    // The route stood down: this turn is on the neutral lane, where the
+    // runtime is the announcer.
+    expect(turn.events().filter((e) => e.kind === "steered")).toHaveLength(0)
+
+    releaseSetup()
+    await started
+    release()
+    await done
+
+    // And the steer was still announced exactly once, by the runtime.
+    expect(turn.events().filter((e) => e.kind === "steered")).toHaveLength(1)
+    expect(received.map((m) => m.text)).toEqual([
+      "start the work",
+      "typed while it was starting",
+    ])
+  })
+
   it("reports a steer for resubmission when the turn dies before it ever starts", async () => {
     // The other half of owning the channel from lock time: the paths that never
     // reach the turn runtime can now be holding a message the user typed. Here
@@ -2165,6 +2742,11 @@ describe("handleSteerRequest — mid-turn steering", () => {
     onStarted: () => void
   }): ChatHandlerLoaders {
     return {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: async () => {
+          throw new Error("this suite's turns run on the SDK loader, not neutral")
+        },
+      }),
       loadSessionStore: async () => {
         const { makeEmptySession } = await import(
           "../../../../src/editor/agent-chat/types.js"
@@ -2355,5 +2937,342 @@ describe("POST /api/editor/chat/steer — auth + Origin", () => {
     // is the handler's own answer rather than the gate's.
     expect(res.status).toBe(409)
     expect(await res.json()).toEqual({ accepted: false, reason: "no-live-turn" })
+  })
+})
+
+describe("the both-ends gate, from the route", () => {
+  let repoRoot: string
+
+  beforeEach(async () => {
+    repoRoot = await mkdtemp(join(tmpdir(), "desde-chat-neutral-gate-"))
+    __resetPendingBridgeRequestsForTest()
+    __resetActiveTurnsForTest()
+  })
+  afterEach(async () => {
+    await rm(repoRoot, { recursive: true, force: true })
+    __resetPendingBridgeRequestsForTest()
+    __resetActiveTurnsForTest()
+  })
+
+  /**
+   * A loader set with its own spies, so a case can assert which loader ran
+   * and what the turn function itself was called with (in particular
+   * `providerId`).
+   */
+  function makeGateLoaders() {
+    const runTurnSpy = vi.fn(async (_opts: { providerId?: string }) => {
+      const { makeEmptySession } = await import(
+        "../../../../src/editor/agent-chat/types.js"
+      )
+      return {
+        session: makeEmptySession("test-proj"),
+        turn: {
+          id: "test-turn",
+          startedAt: "x",
+          userMessage: "ignored",
+          assistantContent: [],
+          toolResults: {},
+          editProposals: [],
+        },
+      }
+    })
+    const loadRunChatTurnSdk = vi.fn(async () => ({ runChatTurnSdk: runTurnSpy }))
+    const loadRunChatTurnNeutral = vi.fn(async () => ({ runChatTurnNeutral: runTurnSpy }))
+    const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnSdk: loadRunChatTurnSdk as unknown as ChatHandlerLoaders["loadRunChatTurnSdk"],
+      loadRunChatTurnNeutral: loadRunChatTurnNeutral as unknown as ChatHandlerLoaders["loadRunChatTurnNeutral"],
+      loadSessionStore: async () => {
+        const { makeEmptySession } = await import(
+          "../../../../src/editor/agent-chat/types.js"
+        )
+        return {
+          loadSession: async () => ({ session: makeEmptySession("test-proj"), fresh: true }),
+          saveSession: async (_root: string, session: unknown) => session,
+        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadSessionStore"]>>
+      },
+    }
+    return { loaders, loadRunChatTurnSdk, loadRunChatTurnNeutral, runTurnSpy }
+  }
+
+  // An `openai` `modelConfig` is refused before it ever reaches
+  // `resolveChatRuntime`: the catalog resolver does not serve the OpenAI
+  // group while `EDITOR_NEUTRAL_CHAT` is explicitly off (`chatRuntimeServable`
+  // in `model-catalog-source.ts`; the gate is opt-OUT since Task 40, so this
+  // now requires an explicit `EDITOR_NEUTRAL_CHAT=0`), so the request 400s
+  // at model-config validation with the catalog's own "Unknown provider"
+  // message. That is the CLIENT half of the gate, proven in
+  // `http-server-neutral-chat-gate.integration.test.ts`. The only path that
+  // reaches the dispatch's OWN refusal — the SERVER half, which must not
+  // depend on catalog validation having run first — is the dev override,
+  // which reroutes an Anthropic session (always servable) onto the neutral
+  // runtime kind. That is what these cases use to reach it directly.
+  it("refuses an anthropic session forced onto the neutral runtime while the surface is explicitly off", async () => {
+    const { loaders, loadRunChatTurnNeutral, loadRunChatTurnSdk } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "0")
+    vi.stubEnv("EDITOR_CHAT_RUNTIME_OVERRIDE", "neutral")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "anthropic", model: "claude-opus-4-8" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    const error = mock.events().find((e) => e.kind === "error")
+    expect(error?.reason).toMatch(/neutral chat runtime is dormant/i)
+    expect(loadRunChatTurnNeutral).not.toHaveBeenCalled()
+    expect(loadRunChatTurnSdk).not.toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  it("names the env var so a stale client learns what to flip", async () => {
+    const { loaders } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "0")
+    vi.stubEnv("EDITOR_CHAT_RUNTIME_OVERRIDE", "neutral")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "anthropic", model: "claude-opus-4-8" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    const reason = mock.events().find((e) => e.kind === "error")?.reason as string
+    // No config key to name: this gate is env-only. See
+    // `isNeutralChatEnabled`'s doc comment in `dormant-surfaces.ts`.
+    expect(reason).toContain("EDITOR_NEUTRAL_CHAT=0")
+    vi.unstubAllEnvs()
+  })
+
+  it("dispatches to the neutral runtime with no configuration at all", async () => {
+    // The default this task shipped: absence means on.
+    const { loaders, loadRunChatTurnNeutral } = makeGateLoaders()
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.6" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    expect(loadRunChatTurnNeutral).toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  it("dispatches to the neutral runtime once the surface is on", async () => {
+    const { loaders, loadRunChatTurnNeutral } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.6" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    expect(loadRunChatTurnNeutral).toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  it("passes the session's own provider id into the turn", async () => {
+    const { loaders, runTurnSpy } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.6" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    expect(runTurnSpy.mock.calls[0][0]).toMatchObject({ providerId: "openai" })
+    vi.unstubAllEnvs()
+  })
+
+  it("still dispatches an anthropic session to the SDK runtime with the surface on", async () => {
+    const { loaders, loadRunChatTurnSdk } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "anthropic", model: "claude-opus-4-8" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    expect(loadRunChatTurnSdk).toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  it("excludes an uncredentialed provider from the catalog, so its request 400s there rather than at assertChatCredentials", async () => {
+    // With no OPENAI_API_KEY, OpenAI is not in the catalog at all (codex
+    // fix), so a request naming it 400s at model-config validation rather
+    // than reaching `assertChatCredentials` — still gated on OpenAI's own
+    // credential state, not Anthropic's, one step earlier than before.
+    const { loaders } = makeGateLoaders()
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    vi.stubEnv("OPENAI_API_KEY", "")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.6" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    expect((mock.res as unknown as { statusCode: number }).statusCode).toBe(400)
+    const body = JSON.parse(mock.endBody() ?? "{}")
+    expect(body.error).toMatch(/openai/i)
+    vi.unstubAllEnvs()
+  })
+
+  // codex fix (Task cx3): a provider id supplied by the CURRENT request
+  // stays a hard 400 when uncredentialed — unchanged from before this fix,
+  // just via the catalog exclusion rather than a dispatch-time refusal.
+  it("a provider supplied by the request itself is still refused when uncredentialed", async () => {
+    const { loaders, loadRunChatTurnSdk, loadRunChatTurnNeutral } = makeGateLoaders()
+    vi.stubEnv("OPENAI_API_KEY", "")
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", modelConfig: { provider: "openai", model: "gpt-5.6" } })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    expect((mock.res as unknown as { statusCode: number }).statusCode).toBe(400)
+    const body = JSON.parse(mock.endBody() ?? "{}")
+    expect(body.error).toMatch(/unknown provider/i)
+    expect(loadRunChatTurnSdk).not.toHaveBeenCalled()
+    expect(loadRunChatTurnNeutral).not.toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  // codex fix (Task cx3): a persisted provider whose key has since been
+  // removed degrades the SESSION to the credentialed default with a note,
+  // rather than refusing the turn outright — the opposite of the request
+  // case above, and the whole point of the distinction: a stale persisted
+  // choice must never brick the chat.
+  it("a persisted provider whose key is gone falls back to the credentialed default with a note, and runs", async () => {
+    const { makeEmptySession } = await import(
+      "../../../../src/editor/agent-chat/types.js"
+    )
+    const seedSession = makeEmptySession("test-proj") as import(
+      "../../../../src/editor/agent-chat/types"
+    ).ChatSession
+    seedSession.modelConfig = { provider: "openai", model: "gpt-5.6" }
+    vi.stubEnv("OPENAI_API_KEY", "")
+
+    const runTurnSpy = vi.fn(async (_opts: { providerId?: string }) => ({
+      session: seedSession,
+      turn: {
+        id: "test-turn",
+        startedAt: "x",
+        userMessage: "ignored",
+        assistantContent: [],
+        toolResults: {},
+        editProposals: [],
+      },
+    }))
+    const loadRunChatTurnSdk = vi.fn(async () => ({ runChatTurnSdk: runTurnSpy }))
+    const loadRunChatTurnNeutral = vi.fn(async () => ({ runChatTurnNeutral: runTurnSpy }))
+    const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnSdk: loadRunChatTurnSdk as unknown as ChatHandlerLoaders["loadRunChatTurnSdk"],
+      loadRunChatTurnNeutral: loadRunChatTurnNeutral as unknown as ChatHandlerLoaders["loadRunChatTurnNeutral"],
+      loadSessionStore: async () => {
+        return {
+          loadSession: async () => ({ session: seedSession, fresh: false }),
+          saveSession: async (_root: string, session: unknown) => session,
+        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadSessionStore"]>>
+      },
+    }
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi" })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+
+    expect((mock.res as unknown as { statusCode: number }).statusCode).toBe(200)
+    expect(loadRunChatTurnSdk).toHaveBeenCalled()
+    expect(loadRunChatTurnNeutral).not.toHaveBeenCalled()
+    const note = mock
+      .events()
+      .find(
+        (e) =>
+          e.kind === "error" &&
+          typeof e.reason === "string" &&
+          /no longer available/i.test(e.reason as string),
+      )
+    expect(note).toBeDefined()
+    vi.unstubAllEnvs()
+  })
+})
+
+describe("the model a turn dispatches on when the request carries no modelConfig", () => {
+  /**
+   * The runtime used to fall back to the STATIC catalog's default, while the
+   * picker showed the MERGED live catalog's. The two agree only while the
+   * bare static default id is in the account's live list. On an account
+   * without it — tiered access is routine — the picker showed a model that
+   * works and the very first turn requested one that 404s.
+   *
+   * It also defeated the `defaultAlias` rule: with `gpt-5.6` retired and
+   * `gpt-5.6-sol` still served, the picker followed the alias and the
+   * dispatch did not.
+   */
+  async function modelDispatchedFor(liveOpenAiIds: string[]): Promise<string | undefined> {
+    setModelCatalogLiveSourcesForTests({
+      listViaApi: {
+        anthropic: async () => [],
+        openai: async () => liveOpenAiIds.map((id) => ({ id, label: id })),
+      },
+      listViaCli: async () => [],
+    })
+    let dispatched: string | undefined
+    const loaders: ChatHandlerLoaders = {
+      loadRunChatTurnNeutral: async () => ({
+        runChatTurnNeutral: (async (callOpts: {
+          model?: string
+          emit: (
+            ev: import("../../../../src/editor/agent-chat/chat-stream-events").ChatStreamEvent,
+          ) => void
+        }) => {
+          dispatched = callOpts.model
+          const { makeEmptySession } = await import(
+            "../../../../src/editor/agent-chat/types.js"
+          )
+          callOpts.emit({ kind: "turn_complete", turnId: "t", stopReason: "end_turn" })
+          return {
+            session: makeEmptySession("p"),
+            turn: {
+              id: "t",
+              startedAt: "",
+              userMessage: "",
+              assistantContent: [],
+              toolResults: {},
+              editProposals: [],
+            },
+          }
+        }) as never,
+      }),
+      loadRunChatTurnSdk: async () =>
+        ({
+          runChatTurnSdk: async () => {
+            throw new Error("this case must take the neutral lane, not the SDK one")
+          },
+        }) as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>>,
+      loadSessionStore: async () => {
+        const { makeEmptySession } = await import(
+          "../../../../src/editor/agent-chat/types.js"
+        )
+        return {
+          loadSession: async () =>
+            ({ session: makeEmptySession("p"), fresh: true }) as never,
+          saveSession: async (_root: string, session: unknown) => session,
+        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadSessionStore"]>>
+      },
+    }
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi" })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+    return dispatched
+  }
+
+  let repoRoot: string
+  beforeEach(async () => {
+    repoRoot = await mkdtemp(join(tmpdir(), "desde-chat-default-model-"))
+    __resetPendingBridgeRequestsForTest()
+    __resetActiveTurnsForTest()
+    // OpenAI is the only credentialed provider, so it is the default one and
+    // the turn takes the neutral lane.
+    vi.stubEnv("ANTHROPIC_API_KEY", "")
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key-for-dispatch")
+  })
+
+  afterEach(async () => {
+    await rm(repoRoot, { recursive: true, force: true })
+    __resetPendingBridgeRequestsForTest()
+    __resetActiveTurnsForTest()
+    setModelCatalogLiveSourcesForTests({
+      listViaApi: { anthropic: async () => [], openai: async () => [] },
+      listViaCli: async () => [],
+    })
+  })
+
+  it("dispatches the live catalog's default, not a static id the account cannot call", async () => {
+    // No `gpt-5.6` and no `gpt-5.6-sol`: the merged catalog's default is what
+    // the picker shows, and it is what the turn must request.
+    expect(await modelDispatchedFor(["gpt-5.4", "gpt-5.4-mini"])).toBe("gpt-5.4")
+  })
+
+  it("follows the defaultAlias the picker follows when the bare default id retires", async () => {
+    expect(await modelDispatchedFor(["gpt-5.6-cyber", "gpt-5.6-sol", "gpt-5.4"])).toBe(
+      "gpt-5.6-sol",
+    )
+  })
+
+  it("still dispatches the static default when the live list carries it", async () => {
+    expect(await modelDispatchedFor(["gpt-5.6", "gpt-5.4"])).toBe("gpt-5.6")
   })
 })

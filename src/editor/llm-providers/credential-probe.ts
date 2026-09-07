@@ -11,39 +11,39 @@
  * See `docs/superpowers/specs/2026-08-13-editor-llm-credentials-design.md` §1.
  */
 
+import type { ProviderDescriptor } from './provider-descriptor'
+
 export type CredentialSource = 'subscription' | 'env' | 'stored' | 'none'
+
+/** One provider's slot in the store. Open string ids: a new vendor needs no schema change. */
+export interface StoredProviderCredentials {
+  apiKey?: string
+  baseUrl?: string
+}
 
 /** The persisted half of the ladder — the shape `llm-credential-store` holds. */
 export interface StoredCredentials {
-  apiKey?: string
+  providers: Record<string, StoredProviderCredentials>
+  /** Global, and Anthropic-only in MEANING. See the ladder's rung 0. */
   devMode: boolean
 }
 
 export interface CredentialProbeInput {
+  /** Which provider is being asked about. Rungs 0 and 3 read its credential spec. */
+  descriptor: ProviderDescriptor
   /**
-   * The `ANTHROPIC_API_KEY` the process INHERITED from its launch
-   * environment, before anything injected into it.
+   * This descriptor's key env var as the process INHERITED it, before
+   * anything injected into it.
    *
-   * **Not `process.env.ANTHROPIC_API_KEY`.** Boot copies a stored key into
-   * that variable, so reading it live makes every stored key report as
-   * externally managed, which disables the controls that manage it. The field
-   * is named for the distinction because passing the wrong one type-checks
-   * cleanly and produced exactly that bug. See
-   * `editor-cli/src/server/inherited-llm-env.ts`.
+   * **Not `process.env[...]`.** Boot copies a stored key into that variable,
+   * so reading it live makes every stored key report as externally managed,
+   * which disables the controls that manage it. The field is named for the
+   * distinction because passing the wrong one type-checks cleanly and
+   * produced exactly that bug. See `editor-cli/src/server/inherited-llm-env.ts`.
    */
   inheritedApiKey?: string
   stored: StoredCredentials
-  /**
-   * Whether the `claude` runtime resolves on disk. NOT whether it is logged
-   * in — see the heuristic note on `probeCredential`.
-   *
-   * As of the BYO-key cutover this no longer makes the ladder report
-   * credentialed on its own; it is consulted only when the subscription path
-   * has been opted into. See the "Why subscription is opt-in" note on
-   * `probeCredential`.
-   */
   claudeRuntimeResolvable: boolean
-
   /**
    * Whether the caller has explicitly opted into the Claude-subscription
    * path: dev mode in the settings dialog, or `EDITOR_USE_CLAUDE_SUBSCRIPTION`
@@ -60,21 +60,20 @@ export type CredentialProbeResult =
   | { credentialed: true; source: 'env' | 'stored'; maskedHint: string }
   | { credentialed: false; source: 'none' }
 
-const MASK_PREFIX = 'sk-ant-…'
 const MASK_TAIL_LENGTH = 4
 
 /**
  * Reduce a key to something safe to render. The tail is enough for a person to
- * recognise WHICH key is configured; the prefix is a constant, not read from
- * the key, so a malformed value can never leak its head.
+ * recognise WHICH key is configured; the prefix comes from the descriptor, not
+ * from the key, so a malformed value can never leak its head.
  *
  * A key too short to have a distinct tail is masked entirely — showing 3 of 3
  * characters would be the whole secret.
  */
-export function maskKey(key: string): string {
+export function maskKey(key: string, maskPrefix: string): string {
   const trimmed = key.trim()
-  if (trimmed.length <= MASK_TAIL_LENGTH) return MASK_PREFIX
-  return `${MASK_PREFIX}${trimmed.slice(-MASK_TAIL_LENGTH)}`
+  if (trimmed.length <= MASK_TAIL_LENGTH) return `${maskPrefix}…`
+  return `${maskPrefix}…${trimmed.slice(-MASK_TAIL_LENGTH)}`
 }
 
 function presentKey(value: string | undefined): string | undefined {
@@ -114,20 +113,40 @@ function presentKey(value: string | undefined): string | undefined {
  * refused otherwise, on the stated grounds that "routing silently to a
  * personal Claude subscription is a decision someone should take on purpose."
  * That reasoning was right and chat was the lane that had not adopted it.
+ *
+ * ## Rungs 0 and 3 are provider-gated, not id-compared
+ *
+ * Both dev-mode rungs check `descriptor.credentials.hasSubscriptionRuntime`
+ * rather than `descriptor.id === 'anthropic'`. That makes them unreachable
+ * for every other provider BY CONSTRUCTION — a new vendor with no
+ * subscription runtime never needs this file touched to stay excluded.
  */
 export function probeCredential(input: CredentialProbeInput): CredentialProbeResult {
-  if (input.stored.devMode) {
+  const { credentials } = input.descriptor
+  const hasSubscriptionRuntime = credentials.hasSubscriptionRuntime === true
+  const maskPrefix = credentials.maskPrefix
+
+  // Rung 0. Gated on the descriptor, so it is unreachable for a provider with
+  // no subscription runtime BY CONSTRUCTION rather than by an id comparison.
+  if (input.stored.devMode && hasSubscriptionRuntime) {
     return { credentialed: true, source: 'subscription' }
   }
   const envKey = presentKey(input.inheritedApiKey)
   if (envKey) {
-    return { credentialed: true, source: 'env', maskedHint: maskKey(envKey) }
+    return { credentialed: true, source: 'env', maskedHint: maskKey(envKey, maskPrefix) }
   }
-  const storedKey = presentKey(input.stored.apiKey)
+  const storedKey = presentKey(input.stored.providers[input.descriptor.id]?.apiKey)
   if (storedKey) {
-    return { credentialed: true, source: 'stored', maskedHint: maskKey(storedKey) }
+    return {
+      credentialed: true,
+      source: 'stored',
+      maskedHint: maskKey(storedKey, maskPrefix),
+    }
   }
-  if (input.subscriptionOptIn && input.claudeRuntimeResolvable) {
+  // Rung 3, same gate. `isClaudeRuntimeResolvable` is a presence heuristic for
+  // ONE bundled binary; generalising it would misdescribe every provider that
+  // has none, so it is simply never consulted for them.
+  if (hasSubscriptionRuntime && input.subscriptionOptIn && input.claudeRuntimeResolvable) {
     return { credentialed: true, source: 'subscription' }
   }
   return { credentialed: false, source: 'none' }

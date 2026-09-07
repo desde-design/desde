@@ -339,3 +339,62 @@ describe("EDITOR_NOTES", () => {
     expect(mod.EDITOR_CODE_VIEW).toBe(false)
   })
 })
+
+/**
+ * The REPORTING half of the secret-read policy's both-ends gate. The
+ * capabilities panel renders a "Secret files / Blocked" row off this flag,
+ * and it must render only for a project that actually turned blocking on.
+ *
+ * FX18 (2026-09-05) inverted the underlying key. Before it, the flag meant
+ * "this project ALLOWS credential reads"; now it means "this project BLOCKS
+ * them", and the default is not blocked. The bootstrap field was renamed with
+ * it, so a stale `secretReads` is asserted here to decide nothing.
+ */
+describe("EDITOR_BLOCK_SECRET_READS", () => {
+  const originalWindow = (globalThis as { window?: unknown }).window
+  afterEach(() => {
+    if (originalWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window
+    } else {
+      ;(globalThis as { window?: unknown }).window = originalWindow
+    }
+    vi.resetModules()
+  })
+
+  async function load(bootstrap: StubBootstrap | undefined) {
+    if (bootstrap === undefined) {
+      delete (globalThis as { window?: unknown }).window
+    } else {
+      ;(globalThis as { window?: StubWindow }).window = {
+        __DESDE_CLI__: bootstrap,
+      }
+    }
+    vi.resetModules()
+    return import("./editor-feature-flags")
+  }
+
+  it("does not block when the bootstrap omits the key", async () => {
+    expect((await load({})).EDITOR_BLOCK_SECRET_READS).toBe(false)
+  })
+
+  it("does not block on the web shell (no CLI bootstrap at all)", async () => {
+    expect((await load(undefined)).EDITOR_BLOCK_SECRET_READS).toBe(false)
+  })
+
+  it("does not block on an explicit false", async () => {
+    expect((await load({ blockSecretReads: false })).EDITOR_BLOCK_SECRET_READS).toBe(false)
+  })
+
+  it("does not block on a truthy-but-not-true value", async () => {
+    expect((await load({ blockSecretReads: 1 })).EDITOR_BLOCK_SECRET_READS).toBe(false)
+    expect((await load({ blockSecretReads: "true" })).EDITOR_BLOCK_SECRET_READS).toBe(false)
+  })
+
+  it("blocks on an explicit true", async () => {
+    expect((await load({ blockSecretReads: true })).EDITOR_BLOCK_SECRET_READS).toBe(true)
+  })
+
+  it("ignores the pre-FX18 spelling of the key", async () => {
+    expect((await load({ secretReads: true })).EDITOR_BLOCK_SECRET_READS).toBe(false)
+  })
+})

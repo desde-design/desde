@@ -159,17 +159,50 @@ export interface ToolResultContent {
   type: 'tool_result'
   toolUseId: string
   /**
-   * Either a plain string OR a list of text blocks. The Anthropic
-   * provider passes either through; other providers may stringify
-   * non-strings.
+   * Either a plain string OR a list of text and image blocks.
+   *
+   * The image member is what lets a tool RETURN a picture. Without it,
+   * `capture_screenshot` reported success, produced a caption with real
+   * dimensions, and handed the model nothing to look at — so the model
+   * described a screenshot it had never seen. Both shipped providers carry
+   * it natively: Anthropic as an `image` block inside `tool_result.content`,
+   * the AI SDK as a `content` tool output whose `file` parts the OpenAI
+   * Responses mapping turns into `input_image`.
+   *
+   * A provider whose model has no vision input must still send something the
+   * API will not reject, exactly as for {@link ImageContent} on a user
+   * message.
    */
-  content: string | readonly TextContent[]
+  content: string | readonly (TextContent | ImageContent)[]
   /** Set to true if the tool failed (so the model knows). */
   isError?: boolean
 }
 
+/**
+ * A vision input block on a user message.
+ *
+ * `data` is base64 WITHOUT the `data:` prefix, matching
+ * `ModelImageContent` in `agent-chat-sdk/media-content.ts` — the one place
+ * an image is validated and byte-capped before it reaches a provider. The
+ * field is named `mediaType` rather than `mimeType` because that is the
+ * name both wire formats use (`source.media_type`, and the `data:` URL's
+ * own media type); the translation from `ModelImageContent.mimeType`
+ * happens once, in the runtime that builds the message.
+ *
+ * A provider whose model has no vision input must still ACCEPT the block
+ * and send something the API will not reject. Silently dropping it would
+ * make the model answer a question about an image it never saw.
+ */
+export interface ImageContent {
+  type: 'image'
+  /** MIME type, e.g. `image/png`. */
+  mediaType: string
+  /** Base64 payload, no `data:` prefix. */
+  data: string
+}
+
 export type AssistantContent = TextContent | ToolUseContent
-export type ChatUserContent = TextContent | ToolResultContent
+export type ChatUserContent = TextContent | ToolResultContent | ImageContent
 
 /**
  * A turn in the conversation. Roles alternate user → assistant → user
@@ -190,6 +223,20 @@ export interface StreamOpts {
   model?: string
   maxTokens?: number
   signal?: AbortSignal
+  /**
+   * Provider-specific request fields, merged into the outgoing request
+   * body as-is. This is where `ProviderDescriptor.effort.toRequest(...)`
+   * lands: `{ thinking: {...} }` for Anthropic, `{ reasoning_effort: ... }`
+   * for OpenAI.
+   *
+   * Deliberately untyped and unvalidated. The descriptor that produced it
+   * is the only thing that knows what its own vendor accepts, and a
+   * whitelist here would have to be extended for every new provider,
+   * which is the coupling the descriptor table exists to remove. A wrong
+   * value is a 400 from the vendor with the vendor's own message, which
+   * is a better error than one we would invent.
+   */
+  providerOptions?: Record<string, unknown>
 }
 
 /**
@@ -208,9 +255,14 @@ export interface StreamOpts {
  * - `message_complete` — terminal event; carries the stop reason and
  *   the final assistant message (the full sequence of content blocks
  *   the orchestrator should append to `messages` for the next turn).
+ * - `reasoning_delta` — incremental extended-thinking / reasoning summary
+ *   text. Ephemeral: it is surfaced to the chat UI as a collapsible block
+ *   and is NEVER folded into `message_complete.message.content`, because
+ *   nothing persists it on the `ChatTurn`.
  */
 export type ProviderEvent =
   | { kind: 'text_delta'; delta: string }
+  | { kind: 'reasoning_delta'; delta: string }
   | { kind: 'tool_use'; id: string; name: string; input: unknown }
   | { kind: 'usage'; inputTokens: number; outputTokens: number }
   | {

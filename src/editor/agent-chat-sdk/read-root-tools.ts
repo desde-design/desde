@@ -59,6 +59,14 @@ export interface ReadRootToolContext extends EditorToolContext {
    * "not configured" error.
    */
   verificationAdapter?: VerificationAdapter
+  /**
+   * The prototype's secret-read policy. Forwarded to the tools so
+   * `search_external_files` and `session_diff` can withhold, by RESOLVED
+   * PATH, results that came out of a credential file. FX20 item 1 — the
+   * decision is taken on the paths git resolved, not on the scope the model
+   * spelled.
+   */
+  blockSecretReads?: boolean
 }
 
 export interface ListCommitsInput {
@@ -168,6 +176,7 @@ async function dispatchReadRootTool<Input>(
     rootCommitSha: ctx.rootCommitSha,
     verificationAdapter: ctx.verificationAdapter,
     signal: ctx.signal,
+    ...(ctx.blockSecretReads === true ? { blockSecretReads: true } : {}),
   }
   let result: ToolResult
   try {
