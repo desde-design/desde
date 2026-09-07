@@ -65,6 +65,19 @@ describe('the descriptor table', () => {
         for (const level of d.effort.levels ?? []) expect(typeof d.effort.toRequest(level)).toBe('object')
       })
 
+      it('names a default effort level, and it is one of its own stops', () => {
+        // The picker's slider has no "Default" stop any more: every position
+        // is a real level, so the vendor's own starting level has to travel
+        // from here. A level outside the ladder would put the slider on a
+        // stop that does not exist.
+        if (d.effort.levels === null) {
+          expect(d.effort.defaultLevel).toBeNull()
+          return
+        }
+        expect(d.effort.defaultLevel).not.toBeNull()
+        expect(d.effort.levels).toContain(d.effort.defaultLevel)
+      })
+
       it('builds a provider from explicit credentials without reading the environment', () => {
         const saved = process.env[d.credentials.apiKeyEnvVar]
         delete process.env[d.credentials.apiKeyEnvVar]

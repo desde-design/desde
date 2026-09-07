@@ -72,7 +72,12 @@ describe('createModelCatalogResolver', () => {
     const { resolver, listViaApi, listViaCli } = makeResolver({})
     const result = await resolver.get()
     expect(result.source).toBe('static')
-    expect(result.catalogs[0]).toEqual(ANTHROPIC_MODEL_CATALOG)
+    // Stamped with the descriptor's default effort on the way out (see the
+    // `defaultEffort` suite below), so this compares the models by id rather
+    // than the whole object against the unstamped source catalog.
+    expect(result.catalogs[0]!.models.map((m) => m.id)).toEqual(
+      ANTHROPIC_MODEL_CATALOG.models.map((m) => m.id),
+    )
     expect(result.catalogs.map((c) => c.providerId)).toEqual(['anthropic'])
     expect(listViaApi).not.toHaveBeenCalled()
     expect(listViaCli).not.toHaveBeenCalled()
@@ -288,6 +293,33 @@ describe("the resolver loops the descriptor table", () => {
     t += 600
     await resolver.get()
     expect(openaiCalls).toBe(2)
+  })
+})
+
+describe('every effort-capable served model carries the vendor default effort', () => {
+  // The browser cannot know a vendor's default, and the picker's slider no
+  // longer has a "Default" stop to hide behind, so `defaultEffort` has to
+  // ride the catalog. The catalog is assembled twice — the static path and
+  // the live-merge path — and a field set on only one of them is the defect
+  // this branch has hit before, so both are asserted here.
+  it('stamps the static path', async () => {
+    const { resolver } = makeResolver({})
+    const catalog = (await resolver.get()).catalogs[0]!
+    expect(catalog.providerId).toBe('anthropic')
+    for (const m of catalog.models) {
+      expect(m.defaultEffort, m.id).toBe(m.effortLevels === null ? undefined : 'medium')
+    }
+  })
+
+  it('stamps the live-merge path, including a model the static list never named', async () => {
+    const { resolver } = makeResolver({ ANTHROPIC_API_KEY: 'sk-ant-x' })
+    const result = await resolver.get()
+    expect(result.source).toBe('api')
+    const brandNew = result.catalogs[0]!.models.find((m) => m.id === 'claude-brand-new-7')!
+    expect(brandNew.effortLevels).toEqual(['low', 'high'])
+    expect(brandNew.defaultEffort).toBeUndefined()
+    const opus5 = result.catalogs[0]!.models.find((m) => m.id === 'claude-opus-5')!
+    expect(opus5.defaultEffort).toBe('medium')
   })
 })
 

@@ -54,6 +54,7 @@ import type { ProjectKnowledgeConfig } from "../../../src/editor/edit-service/lo
 import type { GroundingService } from "../../../src/editor/core"
 import {
   validateSessionModelConfig,
+  type EffortLevel,
   type SessionModelConfig,
 } from "../../../src/editor/core/model-catalog.js"
 import { modelCatalogResolver, resolvedDefaultModelFor } from "./model-catalog-source.js"
@@ -1245,7 +1246,11 @@ export async function handleChatRequest(
       ...(turnModel
         ? {
             model: turnModel,
-            ...(effectiveModelConfig?.effort ? { effort: effectiveModelConfig.effort } : {}),
+            // The chosen effort when the session has one, otherwise the level
+            // the picker's slider opens on for this model. The slider has no
+            // "Default" stop any more (Mo, 2026-09-07), so the level it shows
+            // has to be the level the turn runs at.
+            ...(await effortFor(turnModel, effectiveModelConfig?.effort)),
             // The picker's catalog knows whether this model (or alias) thinks
             // adaptively; the turn cannot always tell from the id alone.
             ...(await adaptiveThinkingFor(turnModel)),
@@ -1935,6 +1940,36 @@ async function readBody(req: IncomingMessage): Promise<string> {
  * rule. Read through the resolver, which is cached, so this costs nothing
  * after the picker's own request.
  */
+/**
+ * The effort this turn runs at.
+ *
+ * A session's own choice wins, unchanged. With no choice, the catalog's
+ * `defaultEffort` for this model applies — the same value the picker's slider
+ * opens on, put there by the provider descriptor. Before this, a session that
+ * never touched the slider sent no effort at all, and an Anthropic
+ * adaptive-thinking model decided per turn how hard to think.
+ *
+ * A model with no effort ladder (or one whose ladder does not contain the
+ * vendor default) has no `defaultEffort` and still sends nothing. This
+ * resolves effort ONLY: `thinking` is still `resolveAnthropicThinkingConfig`'s
+ * answer from the model id, untouched.
+ *
+ * Matched on model id across every served catalog, the same way
+ * `adaptiveThinkingFor` below does.
+ */
+async function effortFor(
+  model: string,
+  chosen: EffortLevel | undefined,
+): Promise<{ effort?: EffortLevel }> {
+  if (chosen) return { effort: chosen }
+  const { catalogs } = await modelCatalogResolver.get()
+  for (const catalog of catalogs) {
+    const option = catalog.models.find((m) => m.id === model)
+    if (option?.defaultEffort) return { effort: option.defaultEffort }
+  }
+  return {}
+}
+
 async function adaptiveThinkingFor(model: string): Promise<{ adaptiveThinking?: boolean }> {
   const { catalogs } = await modelCatalogResolver.get()
   for (const catalog of catalogs) {

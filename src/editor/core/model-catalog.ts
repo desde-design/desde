@@ -36,6 +36,19 @@ export interface ModelOption {
   /** Marks the provider's default model (exactly one per catalog). */
   isDefault?: boolean
   /**
+   * Where the picker's effort slider sits before the session has chosen
+   * anything. Absent when the model takes no effort at all, and also when
+   * the vendor's own default level is not on this model's ladder (a live
+   * model can ship a ladder the vendor default is not part of) — the picker
+   * then starts at the middle of the ladder instead.
+   *
+   * It travels on the catalog because only the server can see the provider
+   * descriptor that names it. The slider has no "Default" stop meaning
+   * "send nothing": every position is a real level (Mo, 2026-09-07), so the
+   * starting one has to be a real level too.
+   */
+  defaultEffort?: EffortLevel
+  /**
    * Whether the model takes adaptive thinking (the model decides when and
    * how much to think) rather than a fixed thinking budget. Set from a live
    * source when it says; absent means "decide from the id", which the chat
@@ -45,6 +58,28 @@ export interface ModelOption {
    * has to travel with the option.
    */
   adaptiveThinking?: boolean
+}
+
+/**
+ * Stamp `defaultEffort` onto every model in a catalog whose ladder can take
+ * it. Called wherever a served catalog is assembled — the static path and the
+ * live-merge path both — so a live-listed model carries the field too.
+ *
+ * A model with no ladder gets nothing, and neither does one whose ladder does
+ * not contain `level`: putting the slider on a stop the model does not offer
+ * is worse than letting the picker pick the middle.
+ */
+export function withDefaultEffort(
+  catalog: ProviderModelCatalog,
+  level: EffortLevel | null | undefined,
+): ProviderModelCatalog {
+  if (!level) return catalog
+  return {
+    ...catalog,
+    models: catalog.models.map((m) =>
+      m.effortLevels?.includes(level) ? { ...m, defaultEffort: level } : m,
+    ),
+  }
 }
 
 export interface ProviderModelCatalog {

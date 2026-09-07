@@ -1440,7 +1440,12 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
     // picker's default comes from the merged live catalog, so on an account
     // whose live list lacks the static id the two disagreed and the first
     // turn 404'd on a model the UI said was in use. The turn now carries the
-    // same default the picker shows. Effort still travels only when chosen.
+    // same default the picker shows.
+    //
+    // Effort travels with it, which it did not before (Mo, 2026-09-07). The
+    // picker's slider has no "Default" stop any more, so the level it opens
+    // on has to be the level the turn runs at, or the chip would name one
+    // effort while the request carried none.
     const capturedRunOpts: { value?: Record<string, unknown> } = {}
     const mock = makeMockReqRes()
     mock.setBody({ userMessage: "hi" })
@@ -1448,12 +1453,13 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
     await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
 
     const { catalogs } = await modelCatalogResolver.get()
-    const expected = catalogs
+    const defaultOption = catalogs
       .find((c) => c.providerId === "anthropic")
-      ?.models.find((m) => m.isDefault)?.id
-    expect(expected).toBeTruthy()
-    expect(capturedRunOpts.value?.model).toBe(expected)
-    expect(capturedRunOpts.value?.effort).toBeUndefined()
+      ?.models.find((m) => m.isDefault)
+    expect(defaultOption?.id).toBeTruthy()
+    expect(capturedRunOpts.value?.model).toBe(defaultOption!.id)
+    expect(defaultOption!.defaultEffort).toBe("medium")
+    expect(capturedRunOpts.value?.effort).toBe("medium")
   })
 
   it("ignores a persisted model that is no longer in the catalog", async () => {

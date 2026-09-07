@@ -84,6 +84,16 @@ export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
   },
   effort: {
     levels: [...EFFORT_LEVELS],
+    // Mo, 2026-09-07, measuring against Claude Code: effort is always a
+    // concrete level there, and its own copy recommends medium.
+    //
+    // This is a behaviour change, and it is the intended one. Absent effort
+    // used to mean the SDK query carried no `effort` at all, which left an
+    // adaptive-thinking model deciding per turn how hard to think. A session
+    // that never touches the slider now runs at medium. Nothing else moves:
+    // `thinking` is still resolved from the model id by
+    // `resolveAnthropicThinkingConfig`.
+    defaultLevel: 'medium',
     // The SDK lane resolves thinking from the model id
     // (`resolveAnthropicThinkingConfig`), so nothing rides provider options.
     toRequest: () => ({}),

@@ -62,7 +62,7 @@ import { tmpdir } from "node:os"
 // comment.
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
 import type { ProviderModelCatalog } from "../../../src/editor/core/model-catalog.js"
-import { EFFORT_LEVELS } from "../../../src/editor/core/model-catalog.js"
+import { EFFORT_LEVELS, withDefaultEffort } from "../../../src/editor/core/model-catalog.js"
 import { ANTHROPIC_MODEL_CATALOG } from "../../../src/editor/llm-providers/anthropic-model-catalog.js"
 import { listAnthropicLiveModels, fromAgentSdk } from "../../../src/editor/llm-providers/anthropic-live-models.js"
 import { mergeLiveModels, type LiveModel } from "../../../src/editor/llm-providers/live-model-catalog.js"
@@ -109,7 +109,9 @@ export interface ResolvedModelCatalogs {
  * awaited the resolver yet.
  */
 export const STATIC_MODEL_CATALOGS: ResolvedModelCatalogs = {
-  catalogs: [ANTHROPIC_MODEL_CATALOG],
+  catalogs: [
+    withDefaultEffort(ANTHROPIC_MODEL_CATALOG, getDescriptor("anthropic")?.effort.defaultLevel),
+  ],
   source: "static",
 }
 
@@ -159,6 +161,19 @@ export interface ModelCatalogResolver {
   get(): Promise<ResolvedModelCatalogs>
   /** Forget the cached answer (tests, and a credentials change if ever needed). */
   invalidate(): void
+}
+
+/**
+ * A descriptor's own static catalog, stamped with its default effort level.
+ *
+ * The static path is one of the two places a served catalog is assembled;
+ * the live-merge path (`mergeLiveModels`, given `defaultEffort` below) is the
+ * other. Both have to stamp it, or a model reaches the picker with no
+ * starting stop for its effort slider depending only on whether the vendor's
+ * Models API happened to answer.
+ */
+function servedStaticCatalog(descriptor: ProviderDescriptor): ProviderModelCatalog {
+  return withDefaultEffort(descriptor.staticCatalog, descriptor.effort.defaultLevel)
 }
 
 /** The Anthropic-only effort fallback, matched by provider id. */
@@ -310,7 +325,7 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
       descriptor.credentials.hasSubscriptionRuntime === true &&
       !apiKey &&
       isClaudeSubscriptionOptIn(currentEnv)
-    if (!apiKey && !useCli) return { catalog: descriptor.staticCatalog, source: "static" }
+    if (!apiKey && !useCli) return { catalog: servedStaticCatalog(descriptor), source: "static" }
     try {
       const source = liveSourceFor(descriptor)
       const live = useCli
@@ -321,17 +336,18 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
       const merged = mergeLiveModels(descriptor.staticCatalog, live, {
         effortFallback: effortFallbackFor(descriptor),
         defaultAlias: descriptor.defaultAlias,
+        defaultEffort: descriptor.effort.defaultLevel,
       })
       if (!merged) {
         log(`the ${descriptor.id} source listed no models; using the built-in list`)
-        return { catalog: descriptor.staticCatalog, source: "static" }
+        return { catalog: servedStaticCatalog(descriptor), source: "static" }
       }
       return { catalog: merged, source: useCli ? "cli" : "api" }
     } catch (err) {
       log(
         `could not list ${descriptor.id} models: ${(err as Error).message}; using the built-in list`,
       )
-      return { catalog: descriptor.staticCatalog, source: "static" }
+      return { catalog: servedStaticCatalog(descriptor), source: "static" }
     }
   }
 
@@ -355,7 +371,7 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
       )
       const fallback = precedenceId ? getDescriptor(precedenceId) : descriptors[0]
       if (fallback) logUnknownRateCardsOnce(fallback, fallback.staticCatalog)
-      return { catalogs: fallback ? [fallback.staticCatalog] : [], source: "static" }
+      return { catalogs: fallback ? [servedStaticCatalog(fallback)] : [], source: "static" }
     }
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)

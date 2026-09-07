@@ -86,6 +86,9 @@ export const OPENAI_DESCRIPTOR: ProviderDescriptor = {
   },
   effort: {
     levels: [...EFFORT_LEVELS],
+    // OpenAI's own default when the parameter is omitted, so naming it here
+    // states what was already true rather than changing anything.
+    defaultLevel: 'medium',
     toRequest(effort) {
       // Omitted means "let the model decide", which is OpenAI's own default of
       // `medium`. Sending nothing is honest; sending 'medium' would claim the

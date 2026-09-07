@@ -103,6 +103,16 @@ export interface ProviderDescriptor {
    */
   readonly effort: {
     levels: EffortLevel[] | null
+    /**
+     * The level a session runs at before anyone moves the slider. Must be a
+     * member of `levels`, and `null` exactly when `levels` is null.
+     *
+     * It exists because the picker's slider has no "Default" stop any more
+     * (Mo, 2026-09-07): every position is a concrete level, so the starting
+     * one is a concrete level too, and the browser cannot know a vendor's.
+     * It reaches the client as `defaultEffort` on each catalog model.
+     */
+    defaultLevel: EffortLevel | null
     toRequest(effort: EffortLevel | undefined): Record<string, unknown>
   }
   /** Patterns merged into classify-turn-error's generic sets, plus the remediation copy. */

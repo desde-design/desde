@@ -43,7 +43,7 @@
  */
 
 import type { EffortLevel, ModelOption, ProviderModelCatalog } from '../core/model-catalog'
-import { EFFORT_LEVELS } from '../core/model-catalog'
+import { EFFORT_LEVELS, withDefaultEffort } from '../core/model-catalog'
 
 export interface LiveModel {
   id: string
@@ -119,6 +119,13 @@ export interface MergeLiveOptions {
   effortFallback: (id: string) => EffortLevel[] | null
   /** How to recognise a live id as a stand-in for the static default. */
   defaultAlias?: DefaultAliasRule
+  /**
+   * The provider descriptor's `effort.defaultLevel`, stamped onto every
+   * merged model whose ladder can take it. The live-merge path is one of the
+   * two places a served catalog is assembled, and a field set on only one of
+   * them is a defect that has shipped here before.
+   */
+  defaultEffort?: EffortLevel | null
 }
 
 /**
@@ -181,8 +188,11 @@ export function mergeLiveModels(
         // live either.
         (staticDefault && findDefaultAlias(catalog, models, staticDefault, opts.defaultAlias)?.id) ??
         models[0]!.id
-  return {
-    providerId: catalog.providerId,
-    models: models.map((m) => (m.id === defaultId ? { ...m, isDefault: true } : m)),
-  }
+  return withDefaultEffort(
+    {
+      providerId: catalog.providerId,
+      models: models.map((m) => (m.id === defaultId ? { ...m, isDefault: true } : m)),
+    },
+    opts.defaultEffort,
+  )
 }
