@@ -132,6 +132,9 @@ interface RadioCtx {
 }
 const RadioGroupContext = createContext<RadioCtx | null>(null)
 
+/** Values whose select would have dismissed the real Radix menu. */
+const menuDismissals: string[] = []
+
 vi.mock("@/components/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => (
@@ -181,10 +184,12 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
   DropdownMenuRadioItem: ({
     value,
     children,
+    onSelect,
     ...rest
   }: {
     value: string
     children: ReactNode
+    onSelect?: (event: { preventDefault: () => void }) => void
     [key: string]: unknown
   }) => {
     const ctx = useContext(RadioGroupContext)
@@ -192,7 +197,15 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
       <div
         role="menuitemradio"
         aria-checked={ctx?.value === value}
-        onClick={() => ctx?.onValueChange(value)}
+        onClick={() => {
+          // Radix dismisses the menu on select unless the handler prevents
+          // it. The mock models only that one fact, because the provider
+          // switcher's whole bug was the dismissal discarding the choice.
+          let dismissed = true
+          onSelect?.({ preventDefault: () => { dismissed = false } })
+          ctx?.onValueChange(value)
+          if (dismissed) menuDismissals.push(value)
+        }}
         {...rest}
       >
         {children}
@@ -960,5 +973,28 @@ describe("effort is a slider, not a list of rows", () => {
     fireEvent.click(await screen.findByTestId("editor-model-chip"))
     expect(screen.queryByTestId("editor-effort-value")).not.toBeInTheDocument()
     expect(screen.queryByText("Effort")).not.toBeInTheDocument()
+  })
+})
+
+describe("switching provider keeps the menu open", () => {
+  it("does not dismiss the menu, and lists the newly chosen provider's models", async () => {
+    // Reported by Mo, 2026-09-07: picking a provider closed the whole menu
+    // and changed nothing. A Radix radio item dismisses on select, and the
+    // close handler then reset the browsing state, so the choice was
+    // discarded on the way out.
+    menuDismissals.length = 0
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    render(<ModelPickerChip value={null} onChange={() => {}} />)
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    fireEvent.click(screen.getByTestId("editor-provider-option-openai"))
+    expect(menuDismissals).toEqual([])
+    expect(screen.getByTestId("editor-provider-switcher")).toHaveTextContent(
+      "OpenAI",
+    )
+    expect(
+      screen.getByTestId("editor-model-option-openai-gpt-5.2"),
+    ).toBeInTheDocument()
   })
 })

@@ -176,6 +176,9 @@ export function ModelPickerChip({
    * in it is picked, and closing the menu forgets it.
    */
   const [browsing, setBrowsing] = useState<string | null>(null)
+  /** The provider submenu's own open state, so choosing one closes IT while
+   *  the root menu stays open on that provider's models. */
+  const [providerMenuOpen, setProviderMenuOpen] = useState(false)
   // The rail passes an inline arrow, so `onChange`'s identity changes
   // every render. Hold it in a ref so it stays out of the sync effect's
   // deps — otherwise that effect reruns on every render for no reason.
@@ -362,7 +365,10 @@ export function ModelPickerChip({
       onOpenChange={(open) => {
         // Reopening shows the running model's provider again, not wherever
         // the last browse wandered to.
-        if (!open) setBrowsing(null)
+        if (!open) {
+          setBrowsing(null)
+          setProviderMenuOpen(false)
+        }
       }}
     >
       <DropdownMenuTrigger asChild>
@@ -383,7 +389,7 @@ export function ModelPickerChip({
             own submenu at the top, so the list below is one vendor deep. */}
         {multiProvider ? (
           <>
-            <DropdownMenuSub>
+            <DropdownMenuSub open={providerMenuOpen} onOpenChange={setProviderMenuOpen}>
               <DropdownMenuSubTrigger
                 className="text-sm"
                 data-testid="editor-provider-switcher"
@@ -405,6 +411,16 @@ export function ModelPickerChip({
                         value={group.providerId}
                         className="text-sm"
                         data-testid={`editor-provider-option-${group.providerId}`}
+                        // A radio item dismisses the whole menu on select, and
+                        // the close handler below then forgets the provider
+                        // just chosen — so picking one shut the menu and
+                        // changed nothing (Mo, 2026-09-07). Preventing the
+                        // default keeps the root open on the newly listed
+                        // models; the submenu closes on its own, above.
+                        onSelect={(event) => {
+                          event.preventDefault()
+                          setProviderMenuOpen(false)
+                        }}
                       >
                         {providerLabel(group.providerId)}
                       </DropdownMenuRadioItem>
