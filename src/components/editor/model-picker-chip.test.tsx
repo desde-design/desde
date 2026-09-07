@@ -22,7 +22,7 @@
  * portals, focus management and hover timing stay out of scope, and pushing
  * the mock toward being a second Radix would cost more than the gap.
  */
-import { createContext, useContext, useState, type ReactNode } from "react"
+import { createContext, useContext, useState, type KeyboardEvent, type ReactNode } from "react"
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { createRoot } from "react-dom/client"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -169,6 +169,45 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
     <div>{children}</div>
   ),
   DropdownMenuSeparator: () => <hr />,
+  // A plain menu item. Models the two facts the effort row depends on: it
+  // takes keyboard events like any other item (which is the whole reason the
+  // row is an item rather than a div), and Enter or Space selects it, which
+  // dismisses the real menu unless the handler prevents it.
+  //
+  // What it cannot model is the roving focus that makes ArrowDown REACH the
+  // row; that is Radix's, and jsdom would not run it faithfully either. So
+  // these tests prove the row's own key handling, and the reachability half
+  // rests on the row being a `DropdownMenuItem` at all.
+  DropdownMenuItem: ({
+    children,
+    onSelect,
+    onKeyDown,
+    ...rest
+  }: {
+    children: ReactNode
+    onSelect?: (event: { preventDefault: () => void }) => void
+    onKeyDown?: (event: KeyboardEvent) => void
+    [key: string]: unknown
+  }) => (
+    <div
+      role="menuitem"
+      tabIndex={-1}
+      {...rest}
+      onKeyDown={(event) => {
+        onKeyDown?.(event)
+        if (event.key !== "Enter" && event.key !== " ") return
+        let dismissed = true
+        onSelect?.({
+          preventDefault: () => {
+            dismissed = false
+          },
+        })
+        if (dismissed) menuDismissals.push("item")
+      }}
+    >
+      {children}
+    </div>
+  ),
   // The submenu parts the provider switcher uses. This is not a second
   // implementation of Radix, and trying to make it one would be worse than
   // the gap it leaves: no portals, no focus management, no hover timing.
@@ -1121,3 +1160,72 @@ describe("switching provider keeps the menu open", () => {
   })
 })
 
+describe("the effort row is operable from the keyboard", () => {
+  // The row used to be a plain div inside the menu. A menu's arrow keys move
+  // a roving focus between its ITEMS, and Radix cancels Tab inside menu
+  // content outright, so nothing could put focus on the slider at all — it
+  // was a pointer-only control. The row is a menu item now, and owns
+  // left/right itself while leaving up/down to the menu.
+  async function openEffortRow() {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    const onChange = vi.fn()
+    render(
+      <ModelPickerChip
+        value={{ provider: "anthropic", model: "claude-opus-4-8", effort: "high" }}
+        onChange={onChange}
+      />,
+    )
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    return { row: screen.getByTestId("editor-effort-row"), onChange }
+  }
+
+  it("moves one stop along the ladder per left/right press", async () => {
+    const { row, onChange } = await openEffortRow()
+    fireEvent.keyDown(row, { key: "ArrowRight" })
+    expect(onChange).toHaveBeenLastCalledWith({
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      effort: "xhigh",
+    })
+    fireEvent.keyDown(row, { key: "ArrowLeft" })
+    expect(onChange).toHaveBeenLastCalledWith({
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      effort: "medium",
+    })
+  })
+
+  it("stops at the ends of the ladder rather than wrapping", async () => {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    const onChange = vi.fn()
+    render(
+      <ModelPickerChip
+        value={{ provider: "anthropic", model: "claude-opus-4-8", effort: "low" }}
+        onChange={onChange}
+      />,
+    )
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    fireEvent.keyDown(screen.getByTestId("editor-effort-row"), { key: "ArrowLeft" })
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it("leaves up and down to the menu, and does not select on Enter", async () => {
+    // Up/down are how the user gets to this row and away from it again. If
+    // the row consumed them the effort control would be a focus trap. Enter
+    // must not dismiss the menu either: there is nothing here to select.
+    menuDismissals.length = 0
+    const { row, onChange } = await openEffortRow()
+    const down = fireEvent.keyDown(row, { key: "ArrowDown" })
+    const up = fireEvent.keyDown(row, { key: "ArrowUp" })
+    // `fireEvent` returns false when a handler called preventDefault.
+    expect(down).toBe(true)
+    expect(up).toBe(true)
+    expect(onChange).not.toHaveBeenCalled()
+    fireEvent.keyDown(row, { key: "Enter" })
+    expect(menuDismissals).toEqual([])
+  })
+})

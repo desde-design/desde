@@ -46,6 +46,7 @@ import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuPortal,
   DropdownMenuRadioGroup,
@@ -493,38 +494,82 @@ export function ModelPickerChip({
             {/* A slider, not a radio list: effort is one ordered ladder, and
                 as rows it doubled the menu's length for a value most turns
                 never change.
-                
-                Only KEY events are stopped. The menu owns the arrow keys for
-                item navigation and would steal the ones the slider needs.
-                Pointer events must NOT be stopped: swallowing pointerdown
-                here left the menu needing two outside clicks to close, the
-                first being spent restoring the state this handler had
-                interrupted (Mo, 2026-09-07). A plain div is not a menu item,
-                so a click on it does not dismiss the menu anyway. */}
-            <div className="px-2 pt-1 pb-2" onKeyDown={(e) => e.stopPropagation()}>
+
+                The row is a MENU ITEM, which is what makes it reachable at
+                all. A menu's arrow keys move a roving focus between its
+                items, and only items are in that group; Radix also cancels
+                Tab inside menu content outright (`react-menu`'s content
+                `onKeyDown`). So a plain div holding a focusable thumb could
+                be reached by no key at all — pointer only. Being an item puts
+                the row in the same up/down order as the models above it.
+
+                Keys split by axis, which is the convention a menu already
+                sets: left/right belong to the row's VALUE, up/down/home/end
+                stay the menu's navigation. A vertical roving-focus group
+                ignores left/right, so taking them costs the menu nothing.
+
+                `onSelect` is prevented because Enter or Space on a menu item
+                dismisses the menu, and there is nothing here to select. */}
+            <DropdownMenuItem
+              className="flex-col items-stretch gap-0 px-2 pt-1 pb-2"
+              data-testid="editor-effort-row"
+              onSelect={(event) => event.preventDefault()}
+              onKeyDown={(event) => {
+                const delta =
+                  event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0
+                if (delta === 0) return
+                event.preventDefault()
+                const next = Math.min(
+                  effortStops.length - 1,
+                  Math.max(0, effortIndex + delta),
+                )
+                const level = effortStops[next]
+                if (!level || next === effortIndex) return
+                choose({
+                  provider: effective.provider,
+                  model: effective.model,
+                  effort: level,
+                })
+              }}
+            >
               <div className="flex items-baseline justify-between pb-2">
                 <span className="text-xs text-muted-foreground">Effort</span>
-                <span className="text-xs" data-testid="editor-effort-value">
+                {/* Announced on change: with focus on the row rather than on
+                    the thumb, the slider's own value is not what a screen
+                    reader is tracking. */}
+                <span className="text-xs" aria-live="polite" data-testid="editor-effort-value">
                   {effortStops[effortIndex]}
                 </span>
               </div>
-              <Slider
-                aria-label="Effort"
-                min={0}
-                max={effortStops.length - 1}
-                step={1}
-                value={[effortIndex]}
-                onValueChange={([next]) => {
-                  const level = effortStops[next ?? 0]
-                  if (!level) return
-                  choose({
-                    provider: effective.provider,
-                    model: effective.model,
-                    effort: level,
-                  })
-                }}
-              />
-            </div>
+              {/* Only KEY events are stopped, and only those raised INSIDE the
+                  slider — that is a pointer user who has clicked the thumb,
+                  and the thumb's own arrow handling must not also move the
+                  menu's focus. Keys pressed on the row itself never reach
+                  this handler, so the item handler above still gets them.
+
+                  Pointer events must NOT be stopped: swallowing pointerdown
+                  here left the menu needing two outside clicks to close, the
+                  first being spent restoring the state this handler had
+                  interrupted (Mo, 2026-09-07). */}
+              <div onKeyDown={(e) => e.stopPropagation()}>
+                <Slider
+                  aria-label="Effort"
+                  min={0}
+                  max={effortStops.length - 1}
+                  step={1}
+                  value={[effortIndex]}
+                  onValueChange={([next]) => {
+                    const level = effortStops[next ?? 0]
+                    if (!level) return
+                    choose({
+                      provider: effective.provider,
+                      model: effective.model,
+                      effort: level,
+                    })
+                  }}
+                />
+              </div>
+            </DropdownMenuItem>
           </>
         ) : null}
       </DropdownMenuContent>
