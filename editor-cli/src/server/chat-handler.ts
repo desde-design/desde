@@ -1949,8 +1949,10 @@ async function readBody(req: IncomingMessage): Promise<string> {
  * never touched the slider sent no effort at all, and an Anthropic
  * adaptive-thinking model decided per turn how hard to think.
  *
- * A model with no effort ladder (or one whose ladder does not contain the
- * vendor default) has no `defaultEffort` and still sends nothing. This
+ * A model with no effort ladder has no `defaultEffort` and still sends
+ * nothing. A model whose ladder does not contain the vendor default now
+ * carries the middle of its own ladder instead of nothing, decided once in
+ * `withDefaultEffort` so this and the picker read the same value. This
  * resolves effort ONLY: `thinking` is still `resolveAnthropicThinkingConfig`'s
  * answer from the model id, untouched.
  *

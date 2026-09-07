@@ -3,6 +3,7 @@ import {
   defaultModelConfig,
   reconcileSessionModelConfig,
   validateSessionModelConfig,
+  withDefaultEffort,
   type ProviderModelCatalog,
 } from './model-catalog'
 
@@ -192,5 +193,38 @@ describe('reconcileSessionModelConfig', () => {
         CATALOGS,
       ),
     ).toEqual({ provider: 'anthropic', model: 'claude-haiku-4-5' })
+  })
+})
+
+describe('withDefaultEffort', () => {
+  const ladder = (effortLevels: ProviderModelCatalog['models'][number]['effortLevels']) => ({
+    providerId: 'p',
+    models: [{ id: 'm', label: 'M', effortLevels }],
+  })
+
+  it('stamps the declared level when the ladder has it', () => {
+    expect(withDefaultEffort(ladder(['low', 'medium', 'high']), 'medium').models[0]!.defaultEffort).toBe(
+      'medium',
+    )
+  })
+
+  it('stamps the middle of the ladder when the declared level is not on it', () => {
+    // The case that used to leave the field unset. The picker then opened its
+    // slider on the middle of the ladder while the chat handler sent no
+    // effort at all, so the chip named a level the turn did not run. One
+    // value, decided here, is what keeps them equal.
+    expect(withDefaultEffort(ladder(['low', 'high']), 'medium').models[0]!.defaultEffort).toBe('low')
+    expect(
+      withDefaultEffort(ladder(['low', 'high', 'max']), 'medium').models[0]!.defaultEffort,
+    ).toBe('high')
+  })
+
+  it('stamps nothing on a model with no ladder', () => {
+    expect(withDefaultEffort(ladder(null), 'medium').models[0]!.defaultEffort).toBeUndefined()
+    expect(withDefaultEffort(ladder([]), 'medium').models[0]!.defaultEffort).toBeUndefined()
+  })
+
+  it('stamps nothing at all when the provider declares no default level', () => {
+    expect(withDefaultEffort(ladder(['low', 'high']), null).models[0]!.defaultEffort).toBeUndefined()
   })
 })

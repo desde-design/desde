@@ -355,10 +355,15 @@ export function ModelPickerChip({
   // rather than a level, and Claude Code, the reference, has no such
   // position. Every stop is now a real level.
   const effortStops: EffortLevel[] = option.effortLevels ?? []
-  // Where a session with no choice of its own starts. The catalog carries the
-  // vendor's own default (`defaultEffort`, from the provider descriptor);
-  // the middle of the ladder is the floor for a live-listed model whose
-  // ladder does not contain that default.
+  // Where a session with no choice of its own starts. The catalog carries it
+  // as `defaultEffort`, and the chat handler sends that same value, so the
+  // slider's opening position IS the level the next turn runs at.
+  //
+  // The middle-of-the-ladder arm is a floor, not a second opinion: it only
+  // runs for a served catalog that omits the field entirely, and the server
+  // now stamps every model that has a ladder (`withDefaultEffort`). Guessing
+  // here while the server guessed differently was the bug — see that
+  // function's doc comment.
   const defaultEffortIndex = Math.max(
     0,
     option.defaultEffort

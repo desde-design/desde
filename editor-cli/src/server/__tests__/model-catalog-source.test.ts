@@ -315,11 +315,24 @@ describe('every effort-capable served model carries the vendor default effort', 
     const { resolver } = makeResolver({ ANTHROPIC_API_KEY: 'sk-ant-x' })
     const result = await resolver.get()
     expect(result.source).toBe('api')
+    // A live ladder the vendor default is not on. This used to carry no
+    // `defaultEffort`, and then the picker's slider opened on the middle of
+    // the ladder while the turn sent no effort at all — one level shown,
+    // another run. The middle is now decided here, so both sides read it.
     const brandNew = result.catalogs[0]!.models.find((m) => m.id === 'claude-brand-new-7')!
     expect(brandNew.effortLevels).toEqual(['low', 'high'])
-    expect(brandNew.defaultEffort).toBeUndefined()
+    expect(brandNew.defaultEffort).toBe('low')
     const opus5 = result.catalogs[0]!.models.find((m) => m.id === 'claude-opus-5')!
     expect(opus5.defaultEffort).toBe('medium')
+  })
+
+  it('leaves a model with no ladder alone', async () => {
+    const { resolver } = makeResolver({ ANTHROPIC_API_KEY: 'sk-ant-x' })
+    const result = await resolver.get()
+    for (const m of result.catalogs[0]!.models) {
+      if (m.effortLevels !== null) continue
+      expect(m.defaultEffort, m.id).toBeUndefined()
+    }
   })
 })
 
