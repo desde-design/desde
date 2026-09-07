@@ -7,12 +7,20 @@
  * can't mask a failure-path assertion in another.
  *
  * `@/components/ui/dropdown-menu` is swapped for a faithful inline
- * version (content always rendered, radio groups wired through
+ * version (root content always rendered, radio groups wired through
  * context) — Radix DropdownMenu doesn't reliably open under jsdom's
  * fireEvent (needs real pointer-capture semantics), and this repo
  * doesn't have `@testing-library/user-event` installed. Same approach
  * as branch-mode-controls.test.tsx's DropdownMenu mock. The
  * enable/disable + value-carry logic under test is ours, not Radix's.
+ *
+ * The provider SUBMENU is the one part that is not always-rendered. Its
+ * open state is the component's own (`open` / `onOpenChange`), so a mock
+ * that ignored it would have asserted against a submenu that is open by
+ * construction and could not fail. It now renders its content only while
+ * open — which is the whole of what the mock models about submenus. Radix's
+ * portals, focus management and hover timing stay out of scope, and pushing
+ * the mock toward being a second Radix would cost more than the gap.
  */
 import { createContext, useContext, useState, type ReactNode } from "react"
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
@@ -135,6 +143,17 @@ interface RadioCtx {
 }
 const RadioGroupContext = createContext<RadioCtx | null>(null)
 
+/** The provider submenu's controlled open state, as the mock below models it. */
+const SubContext = createContext<{
+  open: boolean
+  onOpenChange?: (open: boolean) => void
+} | null>(null)
+
+/** Open the provider submenu the way a user does: click its trigger. */
+function openProviderSubmenu() {
+  fireEvent.click(screen.getByTestId("editor-provider-switcher"))
+}
+
 /** Values whose select would have dismissed the real Radix menu. */
 const menuDismissals: string[] = []
 
@@ -150,27 +169,54 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
     <div>{children}</div>
   ),
   DropdownMenuSeparator: () => <hr />,
-  // The submenu parts the provider switcher uses. Rendered inline rather
-  // than as a real submenu: this mock exists so the tests can read the
-  // menu's CONTENT without Radix's portals and focus management, and a
-  // submenu that only opens on hover would put the provider list out of
-  // reach of every assertion below.
+  // The submenu parts the provider switcher uses. This is not a second
+  // implementation of Radix, and trying to make it one would be worse than
+  // the gap it leaves: no portals, no focus management, no hover timing.
+  //
+  // It models exactly TWO facts, both of which the component owns and a
+  // regression in either would be silent otherwise. The submenu's open state
+  // is CONTROLLED by the component (`open` / `onOpenChange`), and its content
+  // exists only while open. Everything else about a Radix submenu is out of
+  // scope here and stays untested by this file.
   DropdownMenuPortal: ({ children }: { children: ReactNode }) => <>{children}</>,
-  DropdownMenuSub: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuSub: ({
+    open,
+    onOpenChange,
+    children,
+  }: {
+    open?: boolean
+    onOpenChange?: (open: boolean) => void
+    children: ReactNode
+  }) => (
+    <SubContext.Provider value={{ open: open === true, onOpenChange }}>
+      <div>{children}</div>
+    </SubContext.Provider>
+  ),
   DropdownMenuSubTrigger: ({
     children,
     ...rest
   }: {
     children: ReactNode
     [key: string]: unknown
-  }) => (
-    <div role="menuitem" {...rest}>
-      {children}
-    </div>
-  ),
-  DropdownMenuSubContent: ({ children }: { children: ReactNode }) => (
-    <div>{children}</div>
-  ),
+  }) => {
+    const ctx = useContext(SubContext)
+    return (
+      <div
+        role="menuitem"
+        aria-expanded={ctx?.open ?? false}
+        onClick={() => ctx?.onOpenChange?.(!(ctx?.open ?? false))}
+        {...rest}
+      >
+        {children}
+      </div>
+    )
+  },
+  DropdownMenuSubContent: ({ children }: { children: ReactNode }) => {
+    const ctx = useContext(SubContext)
+    // Uncontrolled (`open` never passed) reads as closed, so dropping the
+    // controlled prop fails loudly rather than leaving the list on screen.
+    return ctx?.open ? <div>{children}</div> : null
+  },
   DropdownMenuRadioGroup: ({
     value,
     onValueChange,
@@ -368,6 +414,7 @@ describe("two providers in one menu", () => {
     const onChange = vi.fn()
     render(<ModelPickerChip value={null} onChange={onChange} />)
     fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    openProviderSubmenu()
     fireEvent.click(screen.getByTestId("editor-provider-option-openai"))
     expect(
       screen.getByTestId("editor-model-option-openai-gpt-5.2"),
@@ -387,6 +434,7 @@ describe("two providers in one menu", () => {
     const onChange = vi.fn()
     render(<ModelPickerChip value={null} onChange={onChange} />)
     fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    openProviderSubmenu()
     fireEvent.click(screen.getByTestId("editor-provider-option-openai"))
     fireEvent.click(screen.getByTestId("editor-model-option-openai-gpt-5.2"))
     expect(onChange).toHaveBeenCalledWith({ provider: "openai", model: "gpt-5.2" })
@@ -1023,6 +1071,7 @@ describe("switching provider keeps the menu open", () => {
     await stubCatalog(TWO_PROVIDER_CATALOG)
     render(<ModelPickerChip value={null} onChange={() => {}} />)
     fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    openProviderSubmenu()
     fireEvent.click(screen.getByTestId("editor-provider-option-openai"))
     expect(menuDismissals).toEqual([])
     expect(screen.getByTestId("editor-provider-switcher")).toHaveTextContent(
@@ -1032,4 +1081,43 @@ describe("switching provider keeps the menu open", () => {
       screen.getByTestId("editor-model-option-openai-gpt-5.2"),
     ).toBeInTheDocument()
   })
+
+  it("keeps the provider submenu closed until its trigger is used", async () => {
+    // The submenu's open state is the component's, not Radix's default. This
+    // asserts the controlled `open` actually reaches it: without the prop the
+    // mock reads as closed, and with the prop stuck open the first assertion
+    // fails instead.
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    render(<ModelPickerChip value={null} onChange={() => {}} />)
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    expect(
+      screen.queryByTestId("editor-provider-option-openai"),
+    ).not.toBeInTheDocument()
+    openProviderSubmenu()
+    expect(
+      screen.getByTestId("editor-provider-option-openai"),
+    ).toBeInTheDocument()
+  })
+
+  it("closes the provider submenu once a provider is chosen", async () => {
+    // The other half of the same fix. Preventing the radio item's default
+    // keeps the ROOT menu open; the submenu still has to close on its own, or
+    // the provider list stays over the models it was opened to change.
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    render(<ModelPickerChip value={null} onChange={() => {}} />)
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    openProviderSubmenu()
+    fireEvent.click(screen.getByTestId("editor-provider-option-openai"))
+    expect(
+      screen.queryByTestId("editor-provider-option-openai"),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByTestId("editor-model-option-openai-gpt-5.2"),
+    ).toBeInTheDocument()
+  })
 })
+
