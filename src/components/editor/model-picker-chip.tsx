@@ -487,14 +487,16 @@ export function ModelPickerChip({
             <DropdownMenuSeparator />
             {/* A slider, not a radio list: effort is one ordered ladder, and
                 as rows it doubled the menu's length for a value most turns
-                never change. Not a menu item — a menu item closes on click
-                and steals the arrow keys the slider needs, so the wrapper
-                stops both. */}
-            <div
-              className="px-2 pt-1 pb-2"
-              onKeyDown={(e) => e.stopPropagation()}
-              onPointerDown={(e) => e.stopPropagation()}
-            >
+                never change.
+                
+                Only KEY events are stopped. The menu owns the arrow keys for
+                item navigation and would steal the ones the slider needs.
+                Pointer events must NOT be stopped: swallowing pointerdown
+                here left the menu needing two outside clicks to close, the
+                first being spent restoring the state this handler had
+                interrupted (Mo, 2026-09-07). A plain div is not a menu item,
+                so a click on it does not dismiss the menu anyway. */}
+            <div className="px-2 pt-1 pb-2" onKeyDown={(e) => e.stopPropagation()}>
               <div className="flex items-baseline justify-between pb-2">
                 <span className="text-xs text-muted-foreground">Effort</span>
                 <span className="text-xs" data-testid="editor-effort-value">
