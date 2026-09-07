@@ -1462,6 +1462,82 @@ describe("handleChatRequest — modelConfig (Task 4)", () => {
     expect(capturedRunOpts.value?.effort).toBe("medium")
   })
 
+  it("reads the default effort from the SELECTED provider, not whichever catalog lists the id first", async () => {
+    // Two providers can serve the SAME model id. An OpenAI-compatible base
+    // URL can point at a gateway that lists a vendor's ids verbatim, which is
+    // the point of a provider seam with shared transport. The lookup scanned
+    // every catalog and took the first entry matching the id alone, so an
+    // OpenAI turn could run at Anthropic's answer for that id — the same
+    // class of bug that already forced the PICKER onto the (provider, model)
+    // pair.
+    //
+    // Both halves are asserted, because both were unscoped: the effort level,
+    // and whether the model thinks adaptively.
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai-test-key")
+    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "1")
+    setModelCatalogLiveSourcesForTests({
+      listViaApi: {
+        // Anthropic's entry for the shared id: a ladder without the vendor
+        // default, so it lands on the middle ('low'), and adaptive thinking.
+        anthropic: async () => [
+          { id: "shared-id-1", label: "Shared", effortLevels: ["low", "high"], adaptiveThinking: true },
+        ],
+        // OpenAI's entry for the same id: no effort information, so it takes
+        // that descriptor's full ladder and its 'medium' default.
+        openai: async () => [{ id: "shared-id-1", label: "Shared" }],
+      },
+      listViaCli: async () => [],
+    })
+    modelCatalogResolver.invalidate()
+    try {
+      const capturedRunOpts: { value?: Record<string, unknown> } = {}
+      const base = makeModelConfigLoaders({ saved: [], capturedRunOpts })
+      const loaders: ChatHandlerLoaders = {
+        ...base,
+        // This turn runs on the neutral lane (OpenAI). Same fake runner, so
+        // the assertion reads the same captured opts.
+        loadRunChatTurnNeutral: async () => {
+          const { runChatTurnSdk } = await base.loadRunChatTurnSdk()
+          return { runChatTurnNeutral: runChatTurnSdk } as unknown as Awaited<
+            ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>
+          >
+        },
+      }
+
+      const { catalogs } = await modelCatalogResolver.get()
+      const anthropicEntry = catalogs
+        .find((c) => c.providerId === "anthropic")
+        ?.models.find((m) => m.id === "shared-id-1")
+      const openaiEntry = catalogs
+        .find((c) => c.providerId === "openai")
+        ?.models.find((m) => m.id === "shared-id-1")
+      // The premise: the two catalogs disagree about this id, and Anthropic's
+      // is the one an id-only scan reaches first.
+      expect(catalogs[0]?.providerId).toBe("anthropic")
+      expect(anthropicEntry?.defaultEffort).toBe("low")
+      expect(anthropicEntry?.adaptiveThinking).toBe(true)
+      expect(openaiEntry?.defaultEffort).toBe("medium")
+      expect(openaiEntry?.adaptiveThinking).toBeUndefined()
+
+      const mock = makeMockReqRes()
+      mock.setBody({
+        userMessage: "hi",
+        modelConfig: { provider: "openai", model: "shared-id-1" },
+      })
+      await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+
+      expect(capturedRunOpts.value?.model).toBe("shared-id-1")
+      expect(capturedRunOpts.value?.effort).toBe("medium")
+      expect(capturedRunOpts.value?.adaptiveThinking).toBeUndefined()
+    } finally {
+      setModelCatalogLiveSourcesForTests({
+        listViaApi: { anthropic: async () => [], openai: async () => [] },
+        listViaCli: async () => [],
+      })
+      modelCatalogResolver.invalidate()
+    }
+  })
+
   it("ignores a persisted model that is no longer in the catalog", async () => {
     const { makeEmptySession } = await import(
       "../../../../src/editor/agent-chat/types.js"

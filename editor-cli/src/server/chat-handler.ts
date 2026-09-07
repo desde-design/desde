@@ -1250,10 +1250,10 @@ export async function handleChatRequest(
             // the picker's slider opens on for this model. The slider has no
             // "Default" stop any more (Mo, 2026-09-07), so the level it shows
             // has to be the level the turn runs at.
-            ...(await effortFor(turnModel, effectiveModelConfig?.effort)),
+            ...(await effortFor(turnProviderId, turnModel, effectiveModelConfig?.effort)),
             // The picker's catalog knows whether this model (or alias) thinks
             // adaptively; the turn cannot always tell from the id alone.
-            ...(await adaptiveThinkingFor(turnModel)),
+            ...(await adaptiveThinkingFor(turnProviderId, turnModel)),
           }
         : {}),
     })
@@ -1935,11 +1935,31 @@ async function readBody(req: IncomingMessage): Promise<string> {
 }
 
 /**
- * `{ adaptiveThinking }` from the served catalog's entry for `model`, or
- * `{}` when the catalog does not say, so the turn falls back to the family
- * rule. Read through the resolver, which is cached, so this costs nothing
- * after the picker's own request.
+ * The served catalog entry for one (provider, model) PAIR, or undefined.
+ *
+ * The pair, never the model id alone. Two providers can serve the same id:
+ * an OpenAI-compatible base URL can be pointed at a gateway that lists a
+ * vendor's ids verbatim, which is the whole premise of a provider seam whose
+ * transport is shared. A scan across catalogs answers with whichever provider
+ * happens to come first, and its answer can be a level the selected model's
+ * own ladder does not contain. The picker was already forced onto the pair
+ * for exactly this reason — see `optionValue` in `model-picker-chip.tsx`.
+ *
+ * `turnProviderId` and `turnModel` are resolved together at the call site
+ * (request config > session config > that provider's default), so the pair is
+ * always the one the turn will actually run.
+ *
+ * No fall back to an unscoped scan when the provider's catalog is not served:
+ * that is the defect, not a safety net. Read through the resolver, which is
+ * cached, so this costs nothing after the picker's own request.
  */
+async function servedOptionFor(providerId: string, model: string) {
+  const { catalogs } = await modelCatalogResolver.get()
+  return catalogs
+    .find((c) => c.providerId === providerId)
+    ?.models.find((m) => m.id === model)
+}
+
 /**
  * The effort this turn runs at.
  *
@@ -1955,30 +1975,33 @@ async function readBody(req: IncomingMessage): Promise<string> {
  * `withDefaultEffort` so this and the picker read the same value. This
  * resolves effort ONLY: `thinking` is still `resolveAnthropicThinkingConfig`'s
  * answer from the model id, untouched.
- *
- * Matched on model id across every served catalog, the same way
- * `adaptiveThinkingFor` below does.
  */
 async function effortFor(
+  providerId: string,
   model: string,
   chosen: EffortLevel | undefined,
 ): Promise<{ effort?: EffortLevel }> {
   if (chosen) return { effort: chosen }
-  const { catalogs } = await modelCatalogResolver.get()
-  for (const catalog of catalogs) {
-    const option = catalog.models.find((m) => m.id === model)
-    if (option?.defaultEffort) return { effort: option.defaultEffort }
-  }
-  return {}
+  const option = await servedOptionFor(providerId, model)
+  return option?.defaultEffort ? { effort: option.defaultEffort } : {}
 }
 
-async function adaptiveThinkingFor(model: string): Promise<{ adaptiveThinking?: boolean }> {
-  const { catalogs } = await modelCatalogResolver.get()
-  for (const catalog of catalogs) {
-    const option = catalog.models.find((m) => m.id === model)
-    if (option && typeof option.adaptiveThinking === "boolean") {
-      return { adaptiveThinking: option.adaptiveThinking }
-    }
-  }
-  return {}
+/**
+ * `{ adaptiveThinking }` from the served catalog's entry for this
+ * (provider, model) pair, or `{}` when the catalog does not say, so the turn
+ * falls back to the family rule.
+ *
+ * Scoped to the provider for the same reason `effortFor` is: the id alone
+ * does not identify a model across vendors, and adaptive-vs-fixed thinking is
+ * a per-vendor answer. Reading another provider's entry could send a fixed
+ * thinking budget to a model that rejects one outright.
+ */
+async function adaptiveThinkingFor(
+  providerId: string,
+  model: string,
+): Promise<{ adaptiveThinking?: boolean }> {
+  const option = await servedOptionFor(providerId, model)
+  return typeof option?.adaptiveThinking === "boolean"
+    ? { adaptiveThinking: option.adaptiveThinking }
+    : {}
 }
