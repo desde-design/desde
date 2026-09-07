@@ -319,9 +319,24 @@ describe("LlmCredentialDialog: one tab per provider", () => {
 
   it("offers a base URL field only for a provider that takes one", async () => {
     render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
-    expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument()
+    // Matched by pattern, not by exact text: this case is about which provider
+    // shows the field at all, so it should not fail when the label's wording
+    // changes. The wording itself is pinned by the case below.
+    expect(screen.queryByLabelText(/Base URL/)).not.toBeInTheDocument()
     fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
-    expect(screen.getByLabelText("Base URL")).toBeInTheDocument()
+    expect(screen.getByLabelText(/Base URL/)).toBeInTheDocument()
+  })
+
+  it("marks the base URL optional on the label, not in the hint", async () => {
+    // "(optional)" decides whether the field is read at all, so it belongs
+    // where a skimmer sees it. The hint used to open with "Optional." and the
+    // label said nothing, which is the arrangement this replaces.
+    render(<LlmCredentialDialog open onOpenChange={() => {}} credentials={credentials()} />)
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "OpenAI" }))
+    // `\s*`, not a literal space: the gap is a margin on the span, so the
+    // label's text content is "Base URL(optional)" with nothing between.
+    expect(screen.getByLabelText(/Base URL\s*\(optional\)/)).toBeInTheDocument()
+    expect(screen.queryByText(/^Optional\./)).not.toBeInTheDocument()
   })
 
   const openaiStoredWithBaseUrl = {

@@ -283,9 +283,22 @@ export function LlmCredentialDialog({
               )}
               {p.baseUrlEnvVar ? (
                 <Field
-                  label="Base URL"
+                  label={
+                    <>
+                      Base URL
+                      {/*
+                        "(optional)" sits on the LABEL, not in the first word of
+                        the hint, for the reason `new-project-page.tsx` gives at
+                        its own optional steps: it decides whether you read the
+                        rest at all, and a skimmer misses a leading "Optional.".
+                      */}
+                      <span className="ml-1.5 font-normal text-muted-foreground">
+                        (optional)
+                      </span>
+                    </>
+                  }
                   htmlFor={`llm-base-url-${p.id}`}
-                  hint={`Optional. Point this at an OpenAI-compatible endpoint, including /v1, or set ${p.baseUrlEnvVar}. Leave it blank for ${p.label}.`}
+                  hint={`Point this at an OpenAI-compatible endpoint, including /v1, or set ${p.baseUrlEnvVar}. Leave it blank for ${p.label}.`}
                 >
                   <Input
                     id={`llm-base-url-${p.id}`}
