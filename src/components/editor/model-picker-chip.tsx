@@ -39,7 +39,7 @@
  * through `useSyncExternalStore`, so every mounted chip sees the cache go
  * back to empty and the fetch effect below refetches it.
  */
-import { Fragment, useEffect, useRef, useState, useSyncExternalStore } from "react"
+import { useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { ChevronDown } from "lucide-react"
 import { editorFetch } from "@/lib/editor-fetch"
 import { Button } from "@/components/ui/button"
@@ -47,11 +47,16 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuLabel,
+  DropdownMenuPortal,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { Slider } from "@/components/ui/slider"
 import { reconcileSessionModelConfig } from "@/editor/core/model-catalog"
 import type { EffortLevel, SessionModelConfig } from "@/editor/core/model-catalog"
 import {
@@ -109,8 +114,6 @@ function providerLabel(providerId: string): string {
  * tests already reset the catalog: `vi.resetModules()` and a fresh dynamic
  * import.
  */
-const NO_EFFORT_SENTINEL = "__default__"
-
 export interface ModelPickerChipProps {
   /** Current session choice; null = runtime default. */
   value: SessionModelConfig | null
@@ -166,6 +169,13 @@ export function ModelPickerChip({
     getCatalogVersion,
   )
   const [catalogFailed, setCatalogFailed] = useState(false)
+  /**
+   * Which provider's models the open menu is listing, or null for the one
+   * the running model belongs to. Browsing is deliberately separate from
+   * choosing: opening the other vendor's list changes nothing until a model
+   * in it is picked, and closing the menu forgets it.
+   */
+  const [browsing, setBrowsing] = useState<string | null>(null)
   // The rail passes an inline arrow, so `onChange`'s identity changes
   // every render. Hold it in a ref so it stays out of the sync effect's
   // deps — otherwise that effect reruns on every render for no reason.
@@ -327,8 +337,34 @@ export function ModelPickerChip({
     onChange(config)
   }
 
+  // Which provider's models the list is showing. Null means "the one the
+  // current model belongs to". Switching it only changes what is LISTED —
+  // the chip keeps running the chosen model until a model is picked, so
+  // browsing the other vendor costs nothing if you change your mind.
+  const browsingProvider = browsing ?? effective.provider
+  const listed =
+    catalog.catalogs.find((c) => c.providerId === browsingProvider) ?? providerCatalog
+  const multiProvider = catalog.catalogs.length > 1
+
+  // The slider's stops. Index 0 is the catalog's own default (no effort sent);
+  // the rest are the ladder this model accepts. Keeping "default" as a stop
+  // rather than a separate control means one control answers one question.
+  const effortStops: (EffortLevel | null)[] = option.effortLevels
+    ? [null, ...option.effortLevels]
+    : []
+  const effortIndex = Math.max(
+    0,
+    effortStops.findIndex((l) => l === (effective.effort ?? null)),
+  )
+
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      onOpenChange={(open) => {
+        // Reopening shows the running model's provider again, not wherever
+        // the last browse wandered to.
+        if (!open) setBrowsing(null)
+      }}
+    >
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
@@ -342,6 +378,46 @@ export function ModelPickerChip({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-56">
+        {/* With two vendors credentialed the flat list ran to 24 rows and
+            filled the screen (Mo, 2026-09-07). The provider moves into its
+            own submenu at the top, so the list below is one vendor deep. */}
+        {multiProvider ? (
+          <>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger
+                className="text-sm"
+                data-testid="editor-provider-switcher"
+              >
+                {/* The vendor's name alone. A "Provider" label beside it
+                    named the row's category rather than its value, which the
+                    value already tells you (Mo, 2026-09-07). */}
+                <span className="truncate">{providerLabel(browsingProvider)}</span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuPortal>
+                <DropdownMenuSubContent>
+                  <DropdownMenuRadioGroup
+                    value={browsingProvider}
+                    onValueChange={setBrowsing}
+                  >
+                    {catalog.catalogs.map((group) => (
+                      <DropdownMenuRadioItem
+                        key={group.providerId}
+                        value={group.providerId}
+                        className="text-sm"
+                        data-testid={`editor-provider-option-${group.providerId}`}
+                      >
+                        {providerLabel(group.providerId)}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuSubContent>
+              </DropdownMenuPortal>
+            </DropdownMenuSub>
+            <DropdownMenuSeparator />
+          </>
+        ) : (
+          <DropdownMenuLabel className="text-xs">Model</DropdownMenuLabel>
+        )}
         <DropdownMenuRadioGroup
           value={optionValue(effective.provider, effective.model)}
           onValueChange={(raw) => {
@@ -364,63 +440,56 @@ export function ModelPickerChip({
             })
           }}
         >
-          {catalog.catalogs.map((group, index) => (
-            <Fragment key={group.providerId}>
-              {index > 0 ? <DropdownMenuSeparator /> : null}
-              {/* One label per provider. With a single provider served this
-                  reads as the plain "Model" header it always did. */}
-              <DropdownMenuLabel className="text-xs">
-                {catalog.catalogs.length > 1 ? providerLabel(group.providerId) : "Model"}
-              </DropdownMenuLabel>
-              {group.models.map((m) => (
-                <DropdownMenuRadioItem
-                  key={optionValue(group.providerId, m.id)}
-                  value={optionValue(group.providerId, m.id)}
-                  className="text-sm"
-                  data-testid={`editor-model-option-${group.providerId}-${m.id}`}
-                >
-                  {/* Name and version, nothing else (Mo, 2026-09-02: "this
-                      menu is unnecessarily complex"). The description stays
-                      on the catalog entry for anything that wants it; the
-                      menu does not. */}
-                  <span className="truncate">{m.label}</span>
-                </DropdownMenuRadioItem>
-              ))}
-            </Fragment>
+          {listed.models.map((m) => (
+            <DropdownMenuRadioItem
+              key={optionValue(listed.providerId, m.id)}
+              value={optionValue(listed.providerId, m.id)}
+              className="text-sm"
+              data-testid={`editor-model-option-${listed.providerId}-${m.id}`}
+            >
+              {/* Name and version, nothing else (Mo, 2026-09-02: "this
+                  menu is unnecessarily complex"). The description stays
+                  on the catalog entry for anything that wants it; the
+                  menu does not. */}
+              <span className="truncate">{m.label}</span>
+            </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
-        {option.effortLevels ? (
+        {effortStops.length > 1 ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-xs">Effort</DropdownMenuLabel>
-            <DropdownMenuRadioGroup
-              value={effective.effort ?? NO_EFFORT_SENTINEL}
-              onValueChange={(effort) => {
-                choose({
-                  provider: effective.provider,
-                  model: effective.model,
-                  ...(effort !== NO_EFFORT_SENTINEL
-                    ? { effort: effort as EffortLevel }
-                    : {}),
-                })
-              }}
+            {/* A slider, not a radio list: effort is one ordered ladder, and
+                as rows it doubled the menu's length for a value most turns
+                never change. Not a menu item — a menu item closes on click
+                and steals the arrow keys the slider needs, so the wrapper
+                stops both. */}
+            <div
+              className="px-2 pt-1 pb-2"
+              onKeyDown={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
             >
-              <DropdownMenuRadioItem
-                value={NO_EFFORT_SENTINEL}
-                className="text-sm"
-              >
-                Default
-              </DropdownMenuRadioItem>
-              {option.effortLevels.map((level) => (
-                <DropdownMenuRadioItem
-                  key={level}
-                  value={level}
-                  className="text-sm"
-                >
-                  {level}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
+              <div className="flex items-baseline justify-between pb-2">
+                <span className="text-xs text-muted-foreground">Effort</span>
+                <span className="text-xs" data-testid="editor-effort-value">
+                  {effortStops[effortIndex] ?? "Default"}
+                </span>
+              </div>
+              <Slider
+                aria-label="Effort"
+                min={0}
+                max={effortStops.length - 1}
+                step={1}
+                value={[effortIndex]}
+                onValueChange={([next]) => {
+                  const level = effortStops[next ?? 0] ?? undefined
+                  choose({
+                    provider: effective.provider,
+                    model: effective.model,
+                    ...(level ? { effort: level } : {}),
+                  })
+                }}
+              />
+            </div>
           </>
         ) : null}
       </DropdownMenuContent>

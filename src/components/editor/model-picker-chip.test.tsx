@@ -144,6 +144,27 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
     <div>{children}</div>
   ),
   DropdownMenuSeparator: () => <hr />,
+  // The submenu parts the provider switcher uses. Rendered inline rather
+  // than as a real submenu: this mock exists so the tests can read the
+  // menu's CONTENT without Radix's portals and focus management, and a
+  // submenu that only opens on hover would put the provider list out of
+  // reach of every assertion below.
+  DropdownMenuPortal: ({ children }: { children: ReactNode }) => <>{children}</>,
+  DropdownMenuSub: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuSubTrigger: ({
+    children,
+    ...rest
+  }: {
+    children: ReactNode
+    [key: string]: unknown
+  }) => (
+    <div role="menuitem" {...rest}>
+      {children}
+    </div>
+  ),
+  DropdownMenuSubContent: ({ children }: { children: ReactNode }) => (
+    <div>{children}</div>
+  ),
   DropdownMenuRadioGroup: ({
     value,
     onValueChange,
@@ -303,20 +324,44 @@ describe("ModelPickerChip", () => {
 })
 
 describe("two providers in one menu", () => {
-  it("labels each provider's group and lists its own models beneath", async () => {
+  it("lists one provider at a time, behind a switcher naming the current one", async () => {
+    // Was: both providers' groups listed together. With two vendors
+    // credentialed that ran to 24 rows and filled the screen (Mo,
+    // 2026-09-07), so the provider moved into its own submenu and the list
+    // below shows only the running model's vendor until it is switched.
     vi.resetModules()
     const { ModelPickerChip } = await import("./model-picker-chip")
     await stubCatalog(TWO_PROVIDER_CATALOG)
     render(<ModelPickerChip value={null} onChange={() => {}} />)
     fireEvent.click(await screen.findByTestId("editor-model-chip"))
-    expect(screen.getByText("Anthropic")).toBeInTheDocument()
-    expect(screen.getByText("OpenAI")).toBeInTheDocument()
+    expect(screen.getByTestId("editor-provider-switcher")).toHaveTextContent(
+      "Anthropic",
+    )
     expect(
       screen.getByTestId("editor-model-option-anthropic-claude-opus-4-8"),
     ).toBeInTheDocument()
     expect(
+      screen.queryByTestId("editor-model-option-openai-gpt-5.2"),
+    ).not.toBeInTheDocument()
+  })
+
+  it("switching provider lists that vendor's models and changes nothing yet", async () => {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    const onChange = vi.fn()
+    render(<ModelPickerChip value={null} onChange={onChange} />)
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    fireEvent.click(screen.getByTestId("editor-provider-option-openai"))
+    expect(
       screen.getByTestId("editor-model-option-openai-gpt-5.2"),
     ).toBeInTheDocument()
+    expect(
+      screen.queryByTestId("editor-model-option-anthropic-claude-opus-4-8"),
+    ).not.toBeInTheDocument()
+    // Browsing is not choosing: the running model is untouched until one of
+    // the listed models is picked.
+    expect(onChange).not.toHaveBeenCalled()
   })
 
   it("reports the provider alongside the model when a pick crosses providers", async () => {
@@ -326,6 +371,7 @@ describe("two providers in one menu", () => {
     const onChange = vi.fn()
     render(<ModelPickerChip value={null} onChange={onChange} />)
     fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    fireEvent.click(screen.getByTestId("editor-provider-option-openai"))
     fireEvent.click(screen.getByTestId("editor-model-option-openai-gpt-5.2"))
     expect(onChange).toHaveBeenCalledWith({ provider: "openai", model: "gpt-5.2" })
   })
@@ -866,5 +912,53 @@ describe("ModelPickerChip — recovers from a failed first fetch once invalidate
     await waitFor(() => {
       expect(screen.getByTestId("editor-model-chip")).toHaveTextContent("Opus 4.8")
     })
+  })
+})
+
+describe("effort is a slider, not a list of rows", () => {
+  it("shows the running effort and moves the model onto the stop the slider lands on", async () => {
+    // Was five radio rows plus a "Default" row, which doubled the menu's
+    // length for a value most turns never change. The stops are the model's
+    // own ladder with the catalog default at index 0.
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    const onChange = vi.fn()
+    render(
+      <ModelPickerChip
+        value={{ provider: "anthropic", model: "claude-opus-4-8", effort: "high" }}
+        onChange={onChange}
+      />,
+    )
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    expect(screen.getByTestId("editor-effort-value")).toHaveTextContent("high")
+    // No radio rows for the levels any more.
+    expect(
+      screen.queryByRole("menuitemradio", { name: /^high$/i }),
+    ).not.toBeInTheDocument()
+  })
+
+  it("reads the catalog default as the first stop when the session has no effort", async () => {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    render(<ModelPickerChip value={null} onChange={() => {}} />)
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    expect(screen.getByTestId("editor-effort-value")).toHaveTextContent("Default")
+  })
+
+  it("shows no effort control for a model with no ladder", async () => {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog(TWO_PROVIDER_CATALOG)
+    render(
+      <ModelPickerChip
+        value={{ provider: "anthropic", model: "claude-haiku-4-5" }}
+        onChange={() => {}}
+      />,
+    )
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    expect(screen.queryByTestId("editor-effort-value")).not.toBeInTheDocument()
+    expect(screen.queryByText("Effort")).not.toBeInTheDocument()
   })
 })
