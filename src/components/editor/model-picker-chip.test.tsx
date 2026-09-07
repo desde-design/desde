@@ -29,6 +29,7 @@ const CATALOG_RESPONSE = {
           id: "claude-opus-4-8",
           label: "Opus 4.8",
           effortLevels: ["low", "medium", "high", "xhigh", "max"],
+          defaultEffort: "medium",
           isDefault: true,
         },
         { id: "claude-haiku-4-5", label: "Haiku 4.5", effortLevels: null },
@@ -60,6 +61,7 @@ const TWO_PROVIDER_CATALOG = {
           id: "claude-opus-4-8",
           label: "Opus 4.8",
           effortLevels: ["low", "medium", "high", "xhigh", "max"],
+          defaultEffort: "medium",
           isDefault: true,
         },
         { id: "claude-haiku-4-5", label: "Haiku 4.5", effortLevels: null },
@@ -72,6 +74,7 @@ const TWO_PROVIDER_CATALOG = {
           id: "gpt-5.2",
           label: "GPT-5.2",
           effortLevels: ["low", "medium", "high"],
+          defaultEffort: "medium",
           isDefault: true,
         },
       ],
@@ -951,13 +954,45 @@ describe("effort is a slider, not a list of rows", () => {
     ).not.toBeInTheDocument()
   })
 
-  it("reads the catalog default as the first stop when the session has no effort", async () => {
+  it("opens on the model's own default level when the session has no effort", async () => {
+    // Was a "Default" stop meaning "send nothing, let the vendor decide".
+    // That word named an implementation detail rather than a level (Mo,
+    // 2026-09-07), so the ladder now starts at the level the catalog names.
     vi.resetModules()
     const { ModelPickerChip } = await import("./model-picker-chip")
     await stubCatalog(TWO_PROVIDER_CATALOG)
     render(<ModelPickerChip value={null} onChange={() => {}} />)
     fireEvent.click(await screen.findByTestId("editor-model-chip"))
-    expect(screen.getByTestId("editor-effort-value")).toHaveTextContent("Default")
+    expect(screen.getByTestId("editor-effort-value")).toHaveTextContent("medium")
+    expect(screen.queryByText("Default")).not.toBeInTheDocument()
+  })
+
+  it("falls back to the middle of the ladder when the catalog names no default", async () => {
+    // A live-listed model whose ladder does not contain the vendor default
+    // gets no `defaultEffort` at all, and the slider still has to start
+    // somewhere real.
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    await stubCatalog({
+      catalogs: [
+        {
+          providerId: "anthropic",
+          models: [
+            {
+              id: "claude-brand-new-7",
+              label: "Brand New 7",
+              effortLevels: ["low", "high", "max"],
+              isDefault: true,
+            },
+          ],
+        },
+      ],
+      default: { provider: "anthropic", model: "claude-brand-new-7" },
+      defaultProviderId: "anthropic",
+    })
+    render(<ModelPickerChip value={null} onChange={() => {}} />)
+    fireEvent.click(await screen.findByTestId("editor-model-chip"))
+    expect(screen.getByTestId("editor-effort-value")).toHaveTextContent("high")
   })
 
   it("shows no effort control for a model with no ladder", async () => {

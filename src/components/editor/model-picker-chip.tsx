@@ -349,16 +349,26 @@ export function ModelPickerChip({
     catalog.catalogs.find((c) => c.providerId === browsingProvider) ?? providerCatalog
   const multiProvider = catalog.catalogs.length > 1
 
-  // The slider's stops. Index 0 is the catalog's own default (no effort sent);
-  // the rest are the ladder this model accepts. Keeping "default" as a stop
-  // rather than a separate control means one control answers one question.
-  const effortStops: (EffortLevel | null)[] = option.effortLevels
-    ? [null, ...option.effortLevels]
-    : []
-  const effortIndex = Math.max(
+  // The slider's stops are the model's own ladder, and nothing else. There
+  // used to be a "Default" stop at index 0 meaning "send no effort, let the
+  // vendor decide". Mo, 2026-09-07: that word names an implementation detail
+  // rather than a level, and Claude Code, the reference, has no such
+  // position. Every stop is now a real level.
+  const effortStops: EffortLevel[] = option.effortLevels ?? []
+  // Where a session with no choice of its own starts. The catalog carries the
+  // vendor's own default (`defaultEffort`, from the provider descriptor);
+  // the middle of the ladder is the floor for a live-listed model whose
+  // ladder does not contain that default.
+  const defaultEffortIndex = Math.max(
     0,
-    effortStops.findIndex((l) => l === (effective.effort ?? null)),
+    option.defaultEffort
+      ? effortStops.indexOf(option.defaultEffort)
+      : Math.floor((effortStops.length - 1) / 2),
   )
+  const chosenEffortIndex = effective.effort
+    ? effortStops.indexOf(effective.effort)
+    : -1
+  const effortIndex = chosenEffortIndex >= 0 ? chosenEffortIndex : defaultEffortIndex
 
   return (
     <DropdownMenu
@@ -471,6 +481,7 @@ export function ModelPickerChip({
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
+        {/* One stop is not a slider, and no ladder is no control at all. */}
         {effortStops.length > 1 ? (
           <>
             <DropdownMenuSeparator />
@@ -487,7 +498,7 @@ export function ModelPickerChip({
               <div className="flex items-baseline justify-between pb-2">
                 <span className="text-xs text-muted-foreground">Effort</span>
                 <span className="text-xs" data-testid="editor-effort-value">
-                  {effortStops[effortIndex] ?? "Default"}
+                  {effortStops[effortIndex]}
                 </span>
               </div>
               <Slider
@@ -497,11 +508,12 @@ export function ModelPickerChip({
                 step={1}
                 value={[effortIndex]}
                 onValueChange={([next]) => {
-                  const level = effortStops[next ?? 0] ?? undefined
+                  const level = effortStops[next ?? 0]
+                  if (!level) return
                   choose({
                     provider: effective.provider,
                     model: effective.model,
-                    ...(level ? { effort: level } : {}),
+                    effort: level,
                   })
                 }}
               />
