@@ -96,6 +96,10 @@ export const MOCK_SELECTION: Selection = {
     { id: "txt-label", label: "Label", value: "Save changes", kind: "prop", propName: "label" },
   ],
   computedStyles: {
+    // The class list above says `inline-flex`, so the computed display
+    // agrees; without it the Align & size section's flex grid never renders
+    // in the gallery, which is where its cells get looked at.
+    display: "inline-flex",
     padding: "8px 16px",
     color: "rgb(255, 255, 255)",
     "background-color": "rgb(99, 102, 241)",
