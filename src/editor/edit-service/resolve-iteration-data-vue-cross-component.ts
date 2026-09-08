@@ -35,6 +35,7 @@ import {
   type SimpleExpressionNode,
 } from '@vue/compiler-dom'
 import type { File } from '@babel/types'
+import { findArrayDeclaration } from './resolve-iteration-data-vue'
 
 export interface CrossComponentResolveInput {
   /** Source of the SFC that contains the v-for. */
@@ -283,82 +284,12 @@ function findPropBindingInTemplate(
  * Same trust whitelist as `resolve-iteration-data-vue.ts`. Duplicated
  * here rather than extracted to keep this file self-contained.
  */
-function findArrayDecl(
-  ast: File,
-  name: string,
-): { line: number; column: number } | null {
-  let result: { line: number; column: number } | null = null
-  function extractTrustedArrayLiteral(
-    init: unknown,
-  ): { line: number; column: number } | null {
-    if (!init || typeof init !== 'object') return null
-    const n = init as { type?: string; loc?: { start: { line: number; column: number } } }
-    if (n.type === 'ArrayExpression' && n.loc) return n.loc.start
-    if (n.type === 'CallExpression') {
-      const call = init as {
-        callee: { type?: string; name?: string }
-        arguments: unknown[]
-      }
-      if (call.callee.type !== 'Identifier') return null
-      const callee = call.callee.name
-      if (callee === 'ref' || callee === 'reactive') {
-        const first = call.arguments[0] as
-          | { type?: string; loc?: { start: { line: number; column: number } } }
-          | undefined
-        if (first?.type === 'ArrayExpression' && first.loc) return first.loc.start
-        return null
-      }
-      if (callee === 'computed') {
-        const fn = call.arguments[0] as { type?: string } | undefined
-        if (!fn) return null
-        if (fn.type !== 'ArrowFunctionExpression' && fn.type !== 'FunctionExpression') {
-          return null
-        }
-        const arrow = fn as {
-          body:
-            | { type: 'ArrayExpression'; loc: { start: { line: number; column: number } } }
-            | { type: 'BlockStatement'; body: unknown[] }
-        }
-        if (arrow.body.type === 'ArrayExpression' && arrow.body.loc) {
-          return arrow.body.loc.start
-        }
-        if (arrow.body.type === 'BlockStatement') {
-          const stmts = arrow.body.body
-          if (stmts.length !== 1) return null
-          const ret = stmts[0] as {
-            type?: string
-            argument?: { type?: string; loc?: { start: { line: number; column: number } } }
-          }
-          if (ret.type !== 'ReturnStatement') return null
-          if (ret.argument?.type === 'ArrayExpression' && ret.argument.loc) {
-            return ret.argument.loc.start
-          }
-          return null
-        }
-        return null
-      }
-    }
-    return null
-  }
-  function visit(node: unknown): void {
-    if (result || !node || typeof node !== 'object') return
-    const n = node as { type?: string }
-    if (n.type === 'VariableDeclarator') {
-      const v = node as { id?: { type?: string; name?: string }; init?: unknown }
-      if (v.id?.type === 'Identifier' && v.id.name === name && v.init) {
-        result = extractTrustedArrayLiteral(v.init)
-        if (result) return
-      }
-    }
-    for (const key of Object.keys(n)) {
-      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue
-      const v = (n as Record<string, unknown>)[key]
-      if (Array.isArray(v)) for (const item of v) visit(item)
-      else if (v && typeof v === 'object') visit(v)
-    }
-  }
-  visit(ast)
-  return result
+/** Page-side array lookup: the same scope-aware finder the same-file
+ *  resolver uses, so a helper's local can no longer shadow the page's
+ *  top-level array (codex round 6). */
+function findArrayDecl(ast: File, name: string): { line: number; column: number } | null {
+  const found = findArrayDeclaration(ast, name)
+  return found ? { line: found.line, column: found.column } : null
 }
 
 export function resolveIterationDataVueCrossComponent(

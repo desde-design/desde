@@ -267,7 +267,7 @@ function getScriptBlock(source: string): ScriptInfo | null {
  * Anything else (ternary, logical-or, conditional, function call result)
  * returns null and the caller falls through to LLM.
  */
-function findArrayDeclaration(
+export function findArrayDeclaration(
   ast: File,
   name: string,
 ): { line: number; column: number; count: number } | null {
@@ -276,10 +276,33 @@ function findArrayDeclaration(
   // locals of an Options API `setup()` (which returns them). A declaration
   // inside any other function is a helper's local, whatever its name (codex
   // round 5: a helper's `const rows = [...]` was picked over the import).
-  function visit(node: unknown, inHelper: boolean): void {
+  // `setup()` only counts on the COMPONENT DEFINITION: the object literal of
+  // `export default { … }` or the first argument of `defineComponent({ … })`.
+  // Any other object with a method called `setup` is somebody's helper
+  // (codex round 6: `const unrelated = { setup() { const rows = … } }`).
+  function visit(node: unknown, inHelper: boolean, inComponentObject: boolean): void {
     if (found || !node || typeof node !== 'object') return
     const n = node as { type?: string; key?: { type?: string; name?: string } }
     let nextInHelper = inHelper
+    let nextInComponentObject = false
+    if (n.type === 'ExportDefaultDeclaration') {
+      const decl = (node as { declaration?: { type?: string } }).declaration
+      if (decl?.type === 'ObjectExpression') {
+        visit(decl, inHelper, true)
+        return
+      }
+    }
+    if (n.type === 'CallExpression') {
+      const call = node as { callee?: { type?: string; name?: string }; arguments?: unknown[] }
+      if (call.callee?.type === 'Identifier' && call.callee.name === 'defineComponent') {
+        const first = call.arguments?.[0] as { type?: string } | undefined
+        if (first?.type === 'ObjectExpression') {
+          visit(first, inHelper, true)
+          return
+        }
+      }
+    }
+    if (n.type === 'ObjectExpression') nextInComponentObject = inComponentObject
     if (
       n.type === 'FunctionDeclaration' ||
       n.type === 'FunctionExpression' ||
@@ -287,14 +310,23 @@ function findArrayDeclaration(
       n.type === 'ObjectMethod' ||
       n.type === 'ClassMethod'
     ) {
-      const isSetup = n.type === 'ObjectMethod' && n.key?.type === 'Identifier' && n.key.name === 'setup'
+      const isSetup =
+        inComponentObject &&
+        n.type === 'ObjectMethod' &&
+        n.key?.type === 'Identifier' &&
+        n.key.name === 'setup'
       nextInHelper = inHelper || !isSetup
     }
-    if (n.type === 'ObjectProperty' && n.key?.type === 'Identifier' && n.key.name === 'setup') {
+    if (
+      inComponentObject &&
+      n.type === 'ObjectProperty' &&
+      n.key?.type === 'Identifier' &&
+      n.key.name === 'setup'
+    ) {
       // `setup: () => { … }` — the arrow below it is the setup body.
       const value = (node as { value?: { type?: string } }).value
       if (value?.type === 'ArrowFunctionExpression' || value?.type === 'FunctionExpression') {
-        visit((value as { body?: unknown }).body, inHelper)
+        visit((value as { body?: unknown }).body, inHelper, false)
         return
       }
     }
@@ -310,11 +342,11 @@ function findArrayDeclaration(
     for (const key of Object.keys(n)) {
       if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue
       const v = (n as Record<string, unknown>)[key]
-      if (Array.isArray(v)) for (const item of v) visit(item, nextInHelper)
-      else if (v && typeof v === 'object') visit(v, nextInHelper)
+      if (Array.isArray(v)) for (const item of v) visit(item, nextInHelper, nextInComponentObject)
+      else if (v && typeof v === 'object') visit(v, nextInHelper, nextInComponentObject)
     }
   }
-  visit(ast, false)
+  visit(ast, false, false)
   return found
 }
 

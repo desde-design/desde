@@ -438,7 +438,9 @@ function isShadowedByEnclosingParam(
     if (
       node.type !== "FunctionDeclaration" &&
       node.type !== "FunctionExpression" &&
-      node.type !== "ArrowFunctionExpression"
+      node.type !== "ArrowFunctionExpression" &&
+      node.type !== "ObjectMethod" &&
+      node.type !== "ClassMethod"
     ) {
       return
     }

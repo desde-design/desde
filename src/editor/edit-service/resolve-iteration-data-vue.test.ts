@@ -289,4 +289,28 @@ import { rows } from "./rows"
     if (result.ok) return
     expect(result.importCandidate?.binding.specifier).toBe('./data')
   })
+
+  it("ignores a helper object's setup() and resolves the top-level array (codex round 6)", () => {
+    const source = `<template>\n  <li v-for="r in rows" :key="r.id">{{ r.name }}</li>\n</template>\n<script setup>\nconst unrelated = {\n  setup() { const rows = [{ id: 'wrong' }]; return { rows } },\n}\nconst rows = [{ id: 'right' }]\n</script>\n`
+    const result = resolveIterationDataVueSameFile({ source, templateLocation: { line: 2, column: 3 } })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.arrayLocation.line).toBe(8)
+  })
+
+  it("still sees the locals of an Options API setup() on the component definition", () => {
+    const source = `<template>\n  <li v-for="r in rows" :key="r.id">{{ r.name }}</li>\n</template>\n<script>\nimport { ref } from 'vue'\nexport default {\n  setup() {\n    const rows = ref([{ id: 1, name: 'a' }])\n    return { rows }\n  },\n}\n</script>\n`
+    const result = resolveIterationDataVueSameFile({ source, templateLocation: { line: 2, column: 3 } })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.arrayLocation.line).toBe(8)
+  })
+
+  it("still sees the locals of defineComponent({ setup() })", () => {
+    const source = `<template>\n  <li v-for="r in rows" :key="r.id">{{ r.name }}</li>\n</template>\n<script>\nimport { defineComponent } from 'vue'\nexport default defineComponent({\n  setup() {\n    const rows = [{ id: 1, name: 'a' }]\n    return { rows }\n  },\n})\n</script>\n`
+    const result = resolveIterationDataVueSameFile({ source, templateLocation: { line: 2, column: 3 } })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.arrayLocation.line).toBe(8)
+  })
 })

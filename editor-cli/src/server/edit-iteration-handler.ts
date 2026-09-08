@@ -327,28 +327,31 @@ export async function handleIterationEdit(
         // component if it imports it; a page that merely uses the same tag
         // name would otherwise have ITS array rewritten (codex round 5). The
         // AI lane applies the same check to its bundle.
-        let pageImportsComponent = false
+        // The name the page renders the component BY is its import's local
+        // name, which is not always the filename (`import CardAlias from
+        // "./Card.vue"` renders `<CardAlias>`; codex round 6).
+        let componentLocalNames: string[] = []
         if (pageSource !== null) {
-          const [{ importsRelativeFile }, { moduleSourceOfFile }] = await Promise.all([
+          const [{ importedLocalNamesForFile }, { moduleSourceOfFile }] = await Promise.all([
             import("../../../src/editor/edit-service/import-binding.js"),
             import("../../../src/editor/edit-service/vue-script-content.js"),
           ])
           const pageRel = path.relative(rootReal, pageReal).split(path.sep).join("/")
           const loopRel = path.relative(rootReal, targetPath).split(path.sep).join("/")
-          pageImportsComponent = importsRelativeFile(
+          componentLocalNames = importedLocalNamesForFile(
             moduleSourceOfFile(pageRel, pageSource),
             pageRel,
             loopRel,
           )
         }
-        if (pageSource !== null && pageImportsComponent) {
+        if (pageSource !== null && componentLocalNames.length === 1) {
           const { resolveIterationDataVueCrossComponent } = await import(
             "../../../src/editor/edit-service/resolve-iteration-data-vue-cross-component.js"
           )
-          // Derive the component name from the SFC filename — `Foo.vue`
-          // → `Foo`. The page template binds to this tag (or its
-          // kebab-case form); the resolver uses both forms.
-          const componentName = path.basename(body.file, ".vue")
+          // The tag the page uses for this component is the import's local
+          // name (usually, but not always, the filename). The resolver
+          // matches both its PascalCase and kebab-case forms.
+          const componentName = componentLocalNames[0]
           const crossResult = resolveIterationDataVueCrossComponent({
             componentSource: source,
             templateLocation: body.templateLocation,

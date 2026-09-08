@@ -211,4 +211,14 @@ describe("resolveRelativeModule", () => {
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.relativePath).toBe("src/data.ts")
   })
+
+  it("refuses an extensionless ./data when Vite would load data.js ahead of data.ts (codex round 6)", async () => {
+    mkdirSync(join(dir, "src"), { recursive: true })
+    writeFileSync(join(dir, "src", "data.js"), "export const rows = []\n", "utf8")
+    writeFileSync(join(dir, "src", "data.ts"), "export const rows = []\n", "utf8")
+    writeFileSync(join(dir, "src", "app.tsx"), "", "utf8")
+    const result = await resolveRelativeModule(join(dir, "src", "app.tsx"), "./data", root)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain(".js file")
+  })
 })

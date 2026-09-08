@@ -226,4 +226,13 @@ describe("resolveIterationDataJsxSameFile — map(callbackFn, thisArg)", () => {
     if (result.ok) return
     expect(result.importCandidate?.binding.specifier).toBe("./data")
   })
+
+  it("treats a class method parameter as shadowing the module array (codex round 6)", () => {
+    const src = 'const rows = [{ id: "module", name: "wrong" }]\nclass List {\n  renderRows(rows: { id: string; name: string }[]) {\n    return rows.map((row) => <div key={row.id}>{row.name}</div>)\n  }\n}\nexport { List }\n'
+    const idx = src.indexOf("<div")
+    const result = resolveIterationDataJsxSameFile({ source: src, templateLocation: { line: 4, column: idx - (src.lastIndexOf("\n", idx) + 1) } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toMatch(/prop or parameter/)
+  })
 })

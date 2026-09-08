@@ -48,6 +48,8 @@ const RESOLVABLE_EXTENSIONS = [".ts", ".tsx", ".jsx"] as const
  * `.ts` to `./Row.jsx` found a `Row.jsx.ts` before the real `Row.tsx`).
  */
 const SUBSTITUTIONS = OUTPUT_EXTENSION_SUBSTITUTIONS
+/** Vite's default `resolve.extensions`, the order an extensionless specifier is tried in. */
+const VITE_EXTENSION_ORDER = [".mjs", ".js", ".mts", ".ts", ".jsx", ".tsx", ".json"] as const
 
 export type ResolveRelativeModuleResult =
   | {
@@ -100,9 +102,13 @@ function candidatePaths(base: string): string[] {
     }
     return out
   }
+  // Extensionless: probe in Vite's default `resolve.extensions` order, not
+  // just the writable ones, so that `./data` beside BOTH `data.js` and
+  // `data.ts` lands on the `.js` Vite loads and refuses, instead of quietly
+  // editing the `.ts` the app never imports (codex round 6).
   const out: string[] = []
-  for (const ext of RESOLVABLE_EXTENSIONS) out.push(base + ext)
-  for (const ext of RESOLVABLE_EXTENSIONS) out.push(path.join(base, "index" + ext))
+  for (const ext of VITE_EXTENSION_ORDER) out.push(base + ext)
+  for (const ext of VITE_EXTENSION_ORDER) out.push(path.join(base, "index" + ext))
   return out
 }
 

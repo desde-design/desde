@@ -139,4 +139,18 @@ const configRows = [{ key: 'right' }]
     })
     expect(result.ok).toBe(false)
   })
+
+  it("does not pick a page helper's local array over the page's top-level one (codex round 6)", () => {
+    const page = `<template>\n  <ConfigCardDisplay :items="rows" />\n</template>\n\n<script setup lang="ts">\nimport ConfigCardDisplay from './ConfigCardDisplay.vue'\nfunction helper() {\n  const rows = [{ key: 'wrong', label: 'W' }]\n  return rows\n}\nconst rows = [{ key: 'right', label: 'R' }]\n</script>\n`
+    const result = resolveIterationDataVueCrossComponent({
+      componentSource: ROW_COMPONENT,
+      templateLocation: locateInnerVForInComponent(ROW_COMPONENT),
+      pageSource: page,
+      pageSourceFile: 'src/views/SomePage.vue',
+      componentName: 'ConfigCardDisplay',
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.arrayLocation.line).toBe(11)
+  })
 })

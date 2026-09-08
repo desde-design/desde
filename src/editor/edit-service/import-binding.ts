@@ -205,35 +205,59 @@ export function importsRelativeFile(
   fromPath: string,
   targetPath: string,
 ): boolean {
+  return importedLocalNamesForFile(moduleSource, fromPath, targetPath).length > 0
+}
+
+/**
+ * The LOCAL names under which this module imports `targetPath` as a value:
+ * `import CardAlias from "./Card.vue"` → `["CardAlias"]`. This is the name
+ * the template renders the component by, which is not always the filename
+ * (codex round 6). Empty when the file is not value-imported.
+ */
+export function importedLocalNamesForFile(
+  moduleSource: string,
+  fromPath: string,
+  targetPath: string,
+): string[] {
   const ast = parseModule(moduleSource)
-  if (!ast) return false
+  if (!ast) return []
   const fromDir = fromPath.includes('/') ? fromPath.slice(0, fromPath.lastIndexOf('/')) : ''
   const target = stripModuleExtension(targetPath)
+  const names: string[] = []
   for (const stmt of ast.program.body as Statement[]) {
     // Only a VALUE import is evidence of rendering. `import type` and
     // re-exports (`export { default as Row } from "./Row"`) name the file
     // without rendering anything from it (codex round 3).
     if (stmt.type !== 'ImportDeclaration') continue
     if (stmt.importKind === 'type') continue
-    if (stmt.specifiers.length > 0 && stmt.specifiers.every((s) => s.type === 'ImportSpecifier' && s.importKind === 'type')) continue
+    const valueSpecifiers = stmt.specifiers.filter(
+      (s) => !(s.type === 'ImportSpecifier' && s.importKind === 'type'),
+    )
+    if (stmt.specifiers.length > 0 && valueSpecifiers.length === 0) continue
     const specifier = stmt.source.value
     if (!isRelativeSpecifier(specifier)) continue
     const normalized = normalizePosix(fromDir ? `${fromDir}/${specifier}` : specifier)
     if (normalized === null) continue
+    let matches = false
     const written = /\.[A-Za-z0-9]+$/.exec(specifier)?.[0]
     if (written) {
       // Written with an extension: it names ONE file, or that file's
       // TypeScript source under output-extension substitution. `./Row.ts` is
       // not `Row.vue` (codex round 4); `./Row.js` IS `Row.tsx` (round 5).
-      if (normalized === targetPath) return true
-      const subs = OUTPUT_EXTENSION_SUBSTITUTIONS.find(([from]) => from === written)
-      const stem = normalized.slice(0, -written.length)
-      if (subs && subs[1].some((ext) => stem + ext === targetPath)) return true
-      continue
+      if (normalized === targetPath) matches = true
+      else {
+        const subs = OUTPUT_EXTENSION_SUBSTITUTIONS.find(([from]) => from === written)
+        const stem = normalized.slice(0, -written.length)
+        if (subs && subs[1].some((ext) => stem + ext === targetPath)) matches = true
+      }
+    } else if (normalized === target || `${normalized}/index` === target) {
+      matches = true
     }
-    if (normalized === target || `${normalized}/index` === target) return true
+    if (!matches) continue
+    if (valueSpecifiers.length === 0) names.push('') // side-effect import: renders nothing by name
+    for (const s of valueSpecifiers) names.push(s.local.name)
   }
-  return false
+  return names.filter((n) => n.length > 0)
 }
 
 function stripModuleExtension(p: string): string {

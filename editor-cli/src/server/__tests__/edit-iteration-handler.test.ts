@@ -387,6 +387,36 @@ const decoy = [{ id: 999 }]
       expect(crossMock).not.toHaveBeenCalled()
     })
 
+    it("hands the cross-component resolver the page's LOCAL import name, not the filename (codex round 6)", async () => {
+      writeFileSync(
+        join(dir, "src", "Aliased.vue"),
+        `<template><FooAlias :items="rows" /><Foo :items="other" /></template>
+<script setup>
+import FooAlias from './Foo.vue'
+import Foo from './Other.vue'
+const rows = [{ id: 1 }]
+const other = [{ id: 9 }]
+</script>`,
+        "utf8",
+      )
+      const { resolveIterationDataVueCrossComponent } = await import(
+        "../../../../src/editor/edit-service/resolve-iteration-data-vue-cross-component.js"
+      )
+      const crossMock = vi.mocked(resolveIterationDataVueCrossComponent)
+      crossMock.mockClear()
+      crossMock.mockReturnValueOnce({
+        ok: true,
+        file: "src/Aliased.vue",
+        arrayLocation: { line: 5, column: 14 },
+        keyProperty: "id",
+        itemVar: "item",
+      })
+      const result = await handleIterationEdit(makeBody({ pageSourceFile: "src/Aliased.vue" }), dir)
+      expect(result.ok).toBe(true)
+      expect(crossMock).toHaveBeenCalledTimes(1)
+      expect(crossMock.mock.calls[0][0]).toMatchObject({ componentName: "FooAlias" })
+    })
+
     it("ignores pageSourceFile that escapes root and falls through to 422", async () => {
       const result = await handleIterationEdit(
         makeBody({ pageSourceFile: "../escape.vue" }),
