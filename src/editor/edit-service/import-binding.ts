@@ -193,12 +193,17 @@ export function importsRelativeFile(
   const fromDir = fromPath.includes('/') ? fromPath.slice(0, fromPath.lastIndexOf('/')) : ''
   const target = stripModuleExtension(targetPath)
   for (const stmt of ast.program.body as Statement[]) {
-    let specifier: string | null = null
-    if (stmt.type === 'ImportDeclaration') specifier = stmt.source.value
-    else if (stmt.type === 'ExportNamedDeclaration' && stmt.source) specifier = stmt.source.value
-    else if (stmt.type === 'ExportAllDeclaration') specifier = stmt.source.value
-    if (!specifier || !isRelativeSpecifier(specifier)) continue
-    const resolved = stripModuleExtension(normalizePosix(fromDir ? `${fromDir}/${specifier}` : specifier))
+    // Only a VALUE import is evidence of rendering. `import type` and
+    // re-exports (`export { default as Row } from "./Row"`) name the file
+    // without rendering anything from it (codex round 3).
+    if (stmt.type !== 'ImportDeclaration') continue
+    if (stmt.importKind === 'type') continue
+    if (stmt.specifiers.length > 0 && stmt.specifiers.every((s) => s.type === 'ImportSpecifier' && s.importKind === 'type')) continue
+    const specifier = stmt.source.value
+    if (!isRelativeSpecifier(specifier)) continue
+    const normalized = normalizePosix(fromDir ? `${fromDir}/${specifier}` : specifier)
+    if (normalized === null) continue
+    const resolved = stripModuleExtension(normalized)
     if (resolved === target || `${resolved}/index` === target) return true
   }
   return false
@@ -208,12 +213,14 @@ function stripModuleExtension(p: string): string {
   return p.replace(/\.(vue|tsx?|jsx?|mts|mjs|cjs)$/, '')
 }
 
-/** `a/b/../c/./d` → `a/c/d`, without touching the filesystem. */
-function normalizePosix(p: string): string {
+/** `a/b/../c/./d` → `a/c/d`, without touching the filesystem. Null when the
+ *  path climbs above its root (`src/../../x`): an escape is never a match. */
+function normalizePosix(p: string): string | null {
   const out: string[] = []
   for (const seg of p.split('/')) {
     if (seg === '' || seg === '.') continue
     if (seg === '..') {
+      if (out.length === 0) return null
       out.pop()
       continue
     }

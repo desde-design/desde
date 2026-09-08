@@ -632,6 +632,50 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
     expect(capturedBundles).toHaveLength(0)
   })
 
+  it("keeps a Vue page that imports the component in a plain <script> and holds its data in <script setup> (codex round 3)", async () => {
+    write("src/Row.vue", '<script setup>\ndefineProps<{ rows: { id: number }[] }>()\n</script>\n<template>\n  <li v-for="r in rows" :key="r.id">{{ r.id }}</li>\n</template>\n')
+    write("src/Page.vue", '<script>\nimport Row from "./Row.vue"\nexport default { components: { Row } }\n</script>\n<script setup>\nconst rows = [{ id: 1 }]\n</script>\n<template><Row :rows="rows" /></template>\n')
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: "src/Row.vue",
+        intent: {
+          kind: "iteration-data",
+          description: "Set the text of row 1",
+          templateLocation: { file: "src/Row.vue", line: 5, column: 3 },
+          iterationContext: { source: "v-for" as const, key: 1, index: 0, siblingCount: 1, expression: null },
+          pageSourceFile: "src/Page.vue",
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      loadersNaming(),
+    )
+    expect(r.status).toBe(200)
+    expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/Row.vue", "src/Page.vue"])
+  })
+
+  it("drops a page whose only reference to the loop file is a type import or a re-export", async () => {
+    write("src/Row.vue", '<script setup>\ndefineProps<{ rows: { id: number }[] }>()\n</script>\n<template>\n  <li v-for="r in rows" :key="r.id">{{ r.id }}</li>\n</template>\n')
+    write("src/Index.vue", '<script setup>\nimport type Row from "./Row.vue"\n</script>\n<template><p /></template>\n')
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: "src/Row.vue",
+        intent: {
+          kind: "iteration-data",
+          description: "Set the text of row 1",
+          templateLocation: { file: "src/Row.vue", line: 5, column: 3 },
+          iterationContext: { source: "v-for" as const, key: 1, index: 0, siblingCount: 1, expression: null },
+          pageSourceFile: "src/Index.vue",
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      loadersNaming(),
+    )
+    expect(r.status).toBe(200)
+    expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/Row.vue"])
+  })
+
   it("passes the lane's refusal kind through to the HTTP result", async () => {
     write("src/List.vue", ITER_SOURCE)
     const unavailableLoaders: LLMFallbackLoaders = {

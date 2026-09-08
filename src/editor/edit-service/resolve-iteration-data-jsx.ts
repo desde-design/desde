@@ -136,11 +136,15 @@ export function resolveIterationDataJsxSameFile(
     // `rows.filter(Boolean).map(...)`: not a shape the deterministic lane
     // edits, but the list is still `rows`, and the AI lane's bundle needs
     // that name to follow the import (codex round 2). Report it.
+    // No hint when that name is a parameter or prop of an enclosing function:
+    // a same-named module import would then be the wrong file (codex round 3).
     const leftmost = leftmostIdentifier(iterateeObject)
+    const hint =
+      leftmost && !isShadowedByEnclosingParam(ast, mapCall, leftmost) ? leftmost : null
     return {
       ok: false,
       reason: "The `.map()` is called on an expression, not a named list, so its data cannot be traced here",
-      ...(leftmost ? { iterateeRoot: leftmost } : {}),
+      ...(hint ? { iterateeRoot: hint } : {}),
     }
   }
 

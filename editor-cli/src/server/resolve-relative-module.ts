@@ -40,9 +40,22 @@ import {
  * bundle; every candidate now has to end in one of these.
  */
 const RESOLVABLE_EXTENSIONS = [".ts", ".tsx", ".jsx"] as const
-/** Extensions a specifier may be WRITTEN with and still point at a resolvable
- *  file (`./data.js` → `data.ts` is the ESM-with-TS convention). */
-const STRIPPABLE_EXTENSIONS = [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts"] as const
+/**
+ * TypeScript's output-extension substitution: a specifier WRITTEN with the
+ * left extension may be satisfied by a file with one of the right ones, in
+ * this order. This is the whole ESM-with-TS convention; nothing else is
+ * tried for an extension-bearing specifier (codex round 3: appending `.ts`
+ * to `./Row.jsx` found a `Row.jsx.ts` before the real `Row.tsx`).
+ */
+const SUBSTITUTIONS: ReadonlyArray<readonly [string, ReadonlyArray<string>]> = [
+  [".js", [".ts", ".tsx"]],
+  [".jsx", [".tsx"]],
+  [".mjs", [".mts"]],
+  [".cjs", [".cts"]],
+  [".ts", [".ts"]],
+  [".tsx", [".tsx"]],
+  [".mts", [".mts"]],
+]
 
 export type ResolveRelativeModuleResult =
   | {
@@ -75,26 +88,28 @@ function hasResolvableExtension(p: string): boolean {
   return RESOLVABLE_EXTENSIONS.some((ext) => p.endsWith(ext))
 }
 
-/** Candidate file paths for a specifier, in bundler order. Every entry ends
- *  in a resolvable extension; a specifier written with any other extension
- *  (`./rows.json`, `./setup.mjs`) is never tried as-is — see
- *  `resolveRelativeModule` for what happens when such a file EXISTS. */
+/**
+ * Candidate file paths for a specifier, in the order a bundler tries them.
+ * Extension-bearing specifier: the file as written, then TypeScript's
+ * substitutions for that extension, nothing else. Extensionless: each
+ * source extension appended, then a directory index. A candidate is
+ * returned even when its extension is not resolvable, so the caller can
+ * tell "the file the app really loads is one we cannot write" apart from
+ * "no such file".
+ */
 function candidatePaths(base: string): string[] {
-  const out: string[] = []
-  if (hasResolvableExtension(base)) out.push(base)
-  for (const ext of RESOLVABLE_EXTENSIONS) out.push(base + ext)
-  const written = STRIPPABLE_EXTENSIONS.find((ext) => base.endsWith(ext))
-  if (written) {
-    // `./rows.js` written against a `rows.ts` on disk. A JSX-flavoured
-    // specifier (`./Row.jsx`) prefers the JSX-flavoured source (`Row.tsx`),
-    // matching the ESM-with-TS convention rather than alphabetical luck.
-    const stem = base.slice(0, -written.length)
-    const order =
-      written === ".jsx" || written === ".tsx"
-        ? [".tsx", ".ts", ".jsx"]
-        : [".ts", ".tsx", ".jsx"]
-    for (const ext of order) out.push(stem + ext)
+  const written = path.extname(base)
+  if (written !== "") {
+    const out = [base]
+    const subs = SUBSTITUTIONS.find(([from]) => from === written)
+    if (subs) {
+      const stem = base.slice(0, -written.length)
+      for (const ext of subs[1]) if (stem + ext !== base) out.push(stem + ext)
+    }
+    return out
   }
+  const out: string[] = []
+  for (const ext of RESOLVABLE_EXTENSIONS) out.push(base + ext)
   for (const ext of RESOLVABLE_EXTENSIONS) out.push(path.join(base, "index" + ext))
   return out
 }
@@ -119,17 +134,12 @@ export async function resolveRelativeModule(
   if (hasNodeModulesSegment(base)) {
     return { ok: false, reason: `"${specifier}" points into node_modules` }
   }
-  // If the specifier names a file that exists AS WRITTEN and that file is
-  // not one this resolver may return, stop here: the bundler will load THAT
-  // file, and picking a same-stem `.ts` beside it would edit data the app
-  // never imports (codex round 2: `./data.js` with both `data.js` and
-  // `data.ts` on disk resolved to the `.ts`).
-  if (!hasResolvableExtension(base) && path.extname(base) !== "" && (await isFile(base))) {
-    return {
-      ok: false,
-      reason: `"${specifier}" is a ${path.extname(base)} file, which the Editor cannot write back`,
-    }
-  }
+  // The FIRST candidate that exists is the file the bundler loads. If that
+  // file's real target is not one we can write back, stop: picking a later
+  // same-stem candidate would edit data the app never imports (codex round
+  // 2: `./data.js` beside `data.ts` resolved to the `.ts`; round 3: the same
+  // for `./data.mjs` beside `data.mts`). The check is on the REAL path, so
+  // an in-root `data.js -> data.ts` symlink alias still resolves.
   for (const candidate of candidatePaths(base)) {
     if (!(await isFile(candidate))) continue
     const real = await resolveRealpathWithinRoot(candidate, root, {
@@ -140,9 +150,10 @@ export async function resolveRelativeModule(
       return { ok: false, reason: `"${specifier}" resolves into node_modules` }
     }
     if (!hasResolvableExtension(real.targetPath)) {
-      // A `data.ts` symlink whose target is `data.json`: the bytes are not
-      // a module the write lane accepts.
-      return { ok: false, reason: `"${specifier}" resolves to a file that is not .ts, .tsx or .jsx` }
+      return {
+        ok: false,
+        reason: `"${specifier}" is a ${path.extname(real.targetPath) || "non-source"} file, which the Editor cannot write back`,
+      }
     }
     let source: string
     try {

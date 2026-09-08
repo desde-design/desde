@@ -148,4 +148,11 @@ describe('importsRelativeFile', () => {
     expect(importsRelativeFile('import { Row } from "row"', 'src/Page.tsx', 'src/Row.tsx')).toBe(false)
     expect(importsRelativeFile('import { Row } from "./Row"', 'src/pages/Page.tsx', 'src/Row.tsx')).toBe(false)
   })
+  it('does not count a type-only import, a re-export, or an import that escapes the root and comes back (codex round 3)', () => {
+    expect(importsRelativeFile('import type { Row } from "./Row"', 'src/Page.tsx', 'src/Row.tsx')).toBe(false)
+    expect(importsRelativeFile('import { type Row } from "./Row"', 'src/Page.tsx', 'src/Row.tsx')).toBe(false)
+    expect(importsRelativeFile('export { default as Row } from "./Row"', 'src/Page.tsx', 'src/Row.tsx')).toBe(false)
+    expect(importsRelativeFile('export * from "./Row"', 'src/Page.tsx', 'src/Row.tsx')).toBe(false)
+    expect(importsRelativeFile('import { Row } from "../../../src/Row"', 'src/pages/Page.tsx', 'src/Row.tsx')).toBe(false)
+  })
 })

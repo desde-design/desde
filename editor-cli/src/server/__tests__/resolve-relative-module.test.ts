@@ -159,7 +159,7 @@ describe("resolveRelativeModule", () => {
     writeFileSync(join(dir, "src", "app.tsx"), "", "utf8")
     const result = await resolveRelativeModule(join(dir, "src", "app.tsx"), "./rows", root)
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toContain("not .ts, .tsx or .jsx")
+    if (!result.ok) expect(result.reason).toContain(".json file")
   })
 
   it("refuses an as-written .js import when that .js file exists, even if a same-stem .ts exists too (codex round 2: it resolved to the sibling)", async () => {
@@ -180,5 +180,35 @@ describe("resolveRelativeModule", () => {
     const result = await resolveRelativeModule(join(dir, "src", "app.tsx"), "./Row.jsx", root)
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.relativePath).toBe("src/Row.tsx")
+  })
+
+  it("refuses ./data.mjs when the real module is data.mts, even with a writable data.ts beside it (codex round 3)", async () => {
+    mkdirSync(join(dir, "src"), { recursive: true })
+    writeFileSync(join(dir, "src", "data.mts"), "export const rows = []\n", "utf8")
+    writeFileSync(join(dir, "src", "data.ts"), "export const rows = []\n", "utf8")
+    writeFileSync(join(dir, "src", "app.tsx"), "", "utf8")
+    const result = await resolveRelativeModule(join(dir, "src", "app.tsx"), "./data.mjs", root)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain(".mts file")
+  })
+
+  it("resolves ./Row.jsx to Row.tsx even when a Row.jsx.ts exists (substitution, not suffixing)", async () => {
+    mkdirSync(join(dir, "src"), { recursive: true })
+    writeFileSync(join(dir, "src", "Row.jsx.ts"), "export const a = 1\n", "utf8")
+    writeFileSync(join(dir, "src", "Row.tsx"), "export const a = 2\n", "utf8")
+    writeFileSync(join(dir, "src", "app.tsx"), "", "utf8")
+    const result = await resolveRelativeModule(join(dir, "src", "app.tsx"), "./Row.jsx", root)
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.relativePath).toBe("src/Row.tsx")
+  })
+
+  it("follows an in-root data.js -> data.ts symlink alias for ./data.js (the real file is writable)", async () => {
+    mkdirSync(join(dir, "src"), { recursive: true })
+    writeFileSync(join(dir, "src", "data.ts"), "export const rows = []\n", "utf8")
+    symlinkSync(join(dir, "src", "data.ts"), join(dir, "src", "data.js"))
+    writeFileSync(join(dir, "src", "app.tsx"), "", "utf8")
+    const result = await resolveRelativeModule(join(dir, "src", "app.tsx"), "./data.js", root)
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.relativePath).toBe("src/data.ts")
   })
 })

@@ -176,4 +176,13 @@ describe("resolveIterationDataJsxSameFile — map(callbackFn, thisArg)", () => {
     expect(result.iterateeRoot).toBe("rows")
     expect(result.importCandidate).toBeUndefined()
   })
+
+  it("gives no list-name hint for a transformed iteratee that is a parameter, even when a same-named import exists (codex round 3)", () => {
+    const src = 'import { rows } from "./unrelated"\nexport function List(rows: { id: number }[]) {\n  return <ul>{rows.filter(Boolean).map((r) => <li key={r.id}>{r.id}</li>)}</ul>\n}\n'
+    const idx = src.indexOf("<li")
+    const result = resolveIterationDataJsxSameFile({ source: src, templateLocation: { line: 3, column: idx - (src.lastIndexOf("\n", idx) + 1) } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.iterateeRoot).toBeUndefined()
+  })
 })

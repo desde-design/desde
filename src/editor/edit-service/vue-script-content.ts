@@ -11,8 +11,12 @@ export function moduleSourceOfFile(path: string, source: string): string {
   if (!path.toLowerCase().endsWith('.vue')) return source
   try {
     const { descriptor } = parseSfc(source)
-    const block = descriptor.scriptSetup ?? descriptor.script
-    return block?.content ?? ''
+    // BOTH blocks: an SFC may register components in a plain `<script>` and
+    // keep its data in `<script setup>` (codex round 3). Imports in either
+    // are imports of this module.
+    return [descriptor.script?.content, descriptor.scriptSetup?.content]
+      .filter((c): c is string => typeof c === 'string' && c.length > 0)
+      .join('\n')
   } catch {
     return ''
   }
