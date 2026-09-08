@@ -26,6 +26,7 @@
 
 import { parse } from "@babel/parser"
 import { findImportBinding, type IterateeImportCandidate } from "./import-binding"
+import type { LocateLoopResult, LoopPosition } from "./locate-loop"
 
 export interface ResolveIterationDataJsxInput {
   /** Full `.tsx`/`.jsx` source. */
@@ -541,4 +542,40 @@ function walk(node: BabelNode | null | undefined, visit: (n: BabelNode) => void)
       walk(v as BabelNode, visit)
     }
   }
+}
+
+/**
+ * Loop check only: is the JSX element at `templateLocation` rendered inside
+ * a `.map()` callback? Shares `findElementAt` / `findEnclosingMapCall` with
+ * the data resolver above, and nothing else: no array lookup, no key.
+ *
+ * Exists because the bridge's stamp-based iteration detector cannot tell "N
+ * usages of one component" from "one usage in a loop" (both give N DOM nodes
+ * with one stamp). Source can.
+ */
+export function locateJsxLoopAt(source: string, templateLocation: LoopPosition): LocateLoopResult {
+  let ast: BabelNode
+  try {
+    ast = parse(source, {
+      sourceType: "module",
+      plugins: ["jsx", "typescript"],
+      errorRecovery: true,
+    }) as unknown as BabelNode
+  } catch (err) {
+    return { found: false, reason: `JSX parse failed: ${(err as Error).message}` }
+  }
+  const el = findElementAt(ast, templateLocation.line, templateLocation.column)
+  if (!el) {
+    return { found: false, reason: `No JSX element at ${templateLocation.line}:${templateLocation.column}` }
+  }
+  const mapCall = findEnclosingMapCall(ast, el)
+  if (!mapCall) {
+    return { found: false, reason: "This element is not rendered by a `.map()` call" }
+  }
+  const callee = mapCall.callee
+  const expression =
+    callee && typeof callee.start === "number" && typeof callee.end === "number"
+      ? source.slice(callee.start, callee.end)
+      : "map"
+  return { found: true, kind: "map", expression }
 }

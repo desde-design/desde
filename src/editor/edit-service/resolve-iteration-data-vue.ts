@@ -22,6 +22,7 @@ import {
 } from '@vue/compiler-dom'
 import type { File } from '@babel/types'
 import { findImportBinding, type IterateeImportCandidate } from './import-binding'
+import type { LocateLoopResult, LoopPosition } from './locate-loop'
 
 export interface ResolveInput {
   source: string
@@ -598,4 +599,38 @@ export function resolveIterationDataVueSameFile(
     iterateeChain: iteratee.chain,
     keyProperty,
   }
+}
+
+/**
+ * Loop check only: is the template element at `templateLocation` (SFC-absolute
+ * line, 1-based column) inside a `v-for`? Reuses `findVForAt`; does not touch
+ * the script block.
+ */
+export function locateVueLoopAt(source: string, templateLocation: LoopPosition): LocateLoopResult {
+  let descriptor
+  try {
+    descriptor = parseSfc(source).descriptor
+  } catch (err) {
+    return { found: false, reason: `SFC parse failed: ${(err as Error).message}` }
+  }
+  if (!descriptor.template) {
+    return { found: false, reason: 'SFC has no <template> block' }
+  }
+  let templateAst
+  try {
+    templateAst = parseTemplate(descriptor.template.content, { comments: false })
+  } catch (err) {
+    return { found: false, reason: `Template parse failed: ${(err as Error).message}` }
+  }
+  const root = templateAst as unknown as ElementNode
+  const match = findVForAt(
+    root,
+    descriptor.template.loc.start.line,
+    templateLocation.line,
+    templateLocation.column,
+  )
+  if (!match) {
+    return { found: false, reason: `No v-for element at ${templateLocation.line}:${templateLocation.column}` }
+  }
+  return { found: true, kind: 'v-for', expression: match.vForExpression }
 }
