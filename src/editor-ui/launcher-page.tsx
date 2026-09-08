@@ -471,7 +471,11 @@ export function LauncherPage({
         // extra 25 CPU points on top of the loader itself (74.6% -> 99.3%
         // with the old Lottie cat; 5.2% -> 6.5% with the WebP that replaced
         // it). Dropped 2026-09-04 (Mo: "No need for blur").
-        <ProjectLoader label={api.busy} className="fixed inset-0 z-50 bg-background/90" />
+        //
+        // No caption. `busy` still gates the overlay, but the message it carries
+        // ("Starting Editor…") is no longer shown under the cat: the animation is
+        // plainly a loading state and the line added nothing (Mo, 2026-09-08).
+        <ProjectLoader className="fixed inset-0 z-50 bg-background/90" />
       ) : null}
 
       <NewProjectPage

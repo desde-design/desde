@@ -533,3 +533,35 @@ describe("LauncherPage — Check for updates", () => {
     expect(await screen.findByText("A notice raised on the launcher")).toBeInTheDocument()
   })
 })
+
+/**
+ * The full-page wait while a project opens shows the cat and nothing else.
+ *
+ * It used to caption the animation with the busy message ("Starting Editor…").
+ * Mo, 2026-09-08: the text isn't necessary, the animation is clearly a loading
+ * state. `busy` still gates the overlay; it just no longer captions it.
+ */
+describe("LauncherPage — opening a project", () => {
+  it("shows the loader with no caption while the open call is pending", async () => {
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith("/api/launcher/projects")) {
+        return Promise.resolve(
+          json(200, {
+            ok: true,
+            projects: [{ path: "/repos/p0", slug: "p0", lastOpenedAt: "2026-08-12T00:00:00Z" }],
+          }),
+        )
+      }
+      // Left pending on purpose: the wait is what is under test.
+      if (url.endsWith("/api/launcher/open")) return new Promise<Response>(() => {})
+      return Promise.resolve(json(404, { ok: false, reason: "unhandled in test" }))
+    })
+    render(<LauncherPage folderPickerSupported={true} />)
+    fireEvent.click(await screen.findByTestId("launcher-project-p0"))
+
+    const loader = await screen.findByTestId("project-loader")
+    expect(loader.querySelector("p")).toBeNull()
+    expect(screen.queryByText(/Starting Editor/)).not.toBeInTheDocument()
+  })
+})
