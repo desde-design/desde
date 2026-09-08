@@ -1,9 +1,9 @@
 /**
- * `~/.desde/settings.json` — the desktop shell's app-scoped store.
+ * `<userData>/settings.json` — the desktop shell's app-scoped store.
  *
- * Each test gets its own tmp "home" dir (passed explicitly, not via
- * `process.env.HOME`) so nothing here can touch the developer's actual
- * `~/.desde/`. Covers: default-on-absent, round-trip, corrupt-file
+ * Each test gets its own tmp directory standing in for Electron's
+ * `userData`, passed explicitly, so nothing here can touch the developer's
+ * actual Application Support folder. Covers: default-on-absent, round-trip, corrupt-file
  * tolerance, missing-dir creation, and the file/dir permission bits the
  * house pattern (`viewer-token-store.ts`) requires.
  */
@@ -37,9 +37,9 @@ describe("desktop settings", () => {
     expect(defaultDesktopSettings().updates.autoDownload).toBe(true)
   })
 
-  it("writes under ~/.desde/settings.json", async () => {
+  it("writes settings.json directly under the given directory", async () => {
     await writeDesktopSettings({ version: 1, updates: { autoDownload: false } }, tmpHome)
-    expect(settingsFilePath(tmpHome)).toBe(path.join(tmpHome, ".desde", "settings.json"))
+    expect(settingsFilePath(tmpHome)).toBe(path.join(tmpHome, "settings.json"))
     const onDisk = JSON.parse(await fs.readFile(settingsFilePath(tmpHome), "utf8")) as unknown
     expect(onDisk).toEqual({ version: 1, updates: { autoDownload: false } })
   })
@@ -49,16 +49,16 @@ describe("desktop settings", () => {
     expect(await readDesktopSettings(tmpHome)).toEqual({ version: 1, updates: { autoDownload: false } })
   })
 
-  it("creates ~/.desde with 0700 and writes the file with 0600", async () => {
-    await writeDesktopSettings({ version: 1, updates: { autoDownload: true } }, tmpHome)
-    const dirStat = await fs.stat(path.join(tmpHome, ".desde"))
-    const fileStat = await fs.stat(settingsFilePath(tmpHome))
+  it("creates a missing directory with 0700 and writes the file with 0600", async () => {
+    const nested = path.join(tmpHome, "Desde")
+    await writeDesktopSettings({ version: 1, updates: { autoDownload: true } }, nested)
+    const dirStat = await fs.stat(nested)
+    const fileStat = await fs.stat(settingsFilePath(nested))
     expect(dirStat.mode & 0o777).toBe(0o700)
     expect(fileStat.mode & 0o777).toBe(0o600)
   })
 
   it("tolerates a corrupt file (degrades to defaults) and a subsequent write repairs it", async () => {
-    await fs.mkdir(path.join(tmpHome, ".desde"), { recursive: true })
     await fs.writeFile(settingsFilePath(tmpHome), "{ not json", "utf8")
     expect(await readDesktopSettings(tmpHome)).toEqual(defaultDesktopSettings())
 
@@ -67,7 +67,6 @@ describe("desktop settings", () => {
   })
 
   it("tolerates a file shaped wrong (missing/mistyped fields)", async () => {
-    await fs.mkdir(path.join(tmpHome, ".desde"), { recursive: true })
     await fs.writeFile(settingsFilePath(tmpHome), JSON.stringify({ version: 1, updates: { autoDownload: "yes" } }), "utf8")
     // A non-boolean autoDownload falls back to the default (true) rather
     // than propagating the wrong type.

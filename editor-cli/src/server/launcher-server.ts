@@ -156,6 +156,29 @@ interface LauncherContext {
    * dev double-effect, a second tab) cannot both copy the fixture.
    */
   seedDemo: () => Promise<void>
+  /**
+   * Why the last seed attempt failed, or null. Reported on the projects
+   * list so a launcher whose demo could not be created says so instead of
+   * showing an empty list with no explanation.
+   */
+  demoSeedError: () => string | null
+}
+
+/**
+ * A seed failure in words the launcher can show. A permission error on macOS
+ * gets the one hint that fixes it, because the raw `EPERM … mkdir` text does
+ * not say where the switch is.
+ */
+function describeSeedFailure(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err)
+  const code = (err as { code?: unknown } | null)?.code
+  if (process.platform === "darwin" && (code === "EPERM" || code === "EACCES")) {
+    return (
+      `${message}. The demo is created in the Documents folder. Allow Desde to access ` +
+      "Documents in System Settings > Privacy & Security > Files and Folders, then try again."
+    )
+  }
+  return message
 }
 
 export async function startLauncher(
@@ -187,15 +210,25 @@ export async function startLauncher(
   }
 
   let seedInFlight: Promise<void> | null = null
+  let seedError: string | null = null
   const seedDemo = (): Promise<void> => {
     if (opts.seedDemo === false) return Promise.resolve()
     if (seedInFlight === null) {
       seedInFlight = seedDemoProject({ fixtureDir: opts.demoFixtureDir }).then(
-        () => undefined,
+        () => {
+          seedError = null
+        },
         (err: unknown) => {
           // Best-effort: a machine that cannot take the demo still gets its
-          // project list, and the empty state offers the other ways in.
-          console.error(`[launcher] could not seed the demo project: ${(err as Error).message}`)
+          // project list. But the failure is REPORTED (on the list) and
+          // RETRIED (the next request seeds again), because the likeliest
+          // cause is one the user can fix without relaunching: on macOS the
+          // demo lives in Documents, and the first write there asks for
+          // permission. A cached failure would have meant that granting it
+          // did nothing until the app was reopened.
+          seedError = describeSeedFailure(err)
+          seedInFlight = null
+          console.error(`[launcher] could not seed the demo project: ${seedError}`)
         },
       )
     }
@@ -208,6 +241,7 @@ export async function startLauncher(
     pickFolder: opts.pickFolder ?? defaultPickFolder,
     uiBundleRoot,
     seedDemo,
+    demoSeedError: () => seedError,
     // Corrected below from what `listen` actually bound (`port: 0` picks its
     // own), before the server can answer anything.
     listenOrigin: listenOriginFor(host, port),
@@ -358,7 +392,12 @@ async function route(
       // after; see `demo/seed.ts`.
       await ctx.seedDemo()
       const registry = await readProjectsRegistry()
-      sendJson(res, 200, { ok: true, projects: registry.projects })
+      const demoSeedError = ctx.demoSeedError()
+      sendJson(res, 200, {
+        ok: true,
+        projects: registry.projects,
+        ...(demoSeedError ? { demoSeedError } : {}),
+      })
       return
     }
 
@@ -429,7 +468,7 @@ async function route(
     if (req.method === "DELETE" && url.pathname === "/api/launcher/demo") {
       await runHandler(res, async () => {
         const result = await removeDemo()
-        sendJson(res, 200, { ok: true, removed: result.removed })
+        sendJson(res, 200, { ok: true, ...result })
       })
       return
     }

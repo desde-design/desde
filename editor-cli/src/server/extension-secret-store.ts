@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { promises as fs } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+import { cliStateDir } from "./state-dir.js"
 
 /**
  * Per-machine storage for the API keys that extensions need.
@@ -27,7 +28,6 @@ import { dirname, join } from "node:path"
  * repeated here.
  */
 
-const CONFIG_DIR_RELATIVE = join(".config", "desde")
 const SECRET_FILE_NAME = "extension-secrets.json"
 const FILE_MODE = 0o600
 const DIR_MODE = 0o700
@@ -40,7 +40,7 @@ interface ExtensionSecretFile {
 }
 
 export function extensionSecretFilePath(home = homedir()): string {
-  return join(home, CONFIG_DIR_RELATIVE, SECRET_FILE_NAME)
+  return join(cliStateDir(home), SECRET_FILE_NAME)
 }
 
 function defaults(): ExtensionSecretFile {

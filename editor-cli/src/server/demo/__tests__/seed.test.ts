@@ -71,7 +71,7 @@ describe("seedDemoProject", () => {
   })
 
   it("skips while another process holds the seed lock, and takes over a stale one", async () => {
-    const lock = join(home, ".desde", "demo-seed.lock")
+    const lock = join(home, ".config", "desde", "demo-seed.lock")
     await mkdir(lock, { recursive: true })
     const skipped = await seedDemoProject({ home, fixtureDir })
     expect(skipped.seeded).toBe(false)
@@ -87,7 +87,7 @@ describe("seedDemoProject", () => {
   it("releases the lock when the copy fails", async () => {
     const missing = join(fixtureDir, "does-not-exist")
     await expect(seedDemoProject({ home, fixtureDir: missing })).rejects.toThrow()
-    await expect(access(join(home, ".desde", "demo-seed.lock"))).rejects.toThrow()
+    await expect(access(join(home, ".config", "desde", "demo-seed.lock"))).rejects.toThrow()
     // The marker was never written, so the next call still seeds.
     expect((await seedDemoProject({ home, fixtureDir })).seeded).toBe(true)
   })

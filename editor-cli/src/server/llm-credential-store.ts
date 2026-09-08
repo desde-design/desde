@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { promises as fs } from "node:fs"
 import { dirname, join } from "node:path"
+import { cliStateDir } from "./state-dir.js"
 import type {
   StoredCredentials,
   StoredProviderCredentials,
@@ -18,10 +19,8 @@ import type {
  * the same UI, so they could not read what it wrote. One secret with two
  * incompatible stores is a bug factory.
  *
- * **Why `~/.config/desde/` and not `~/.desde/`:** both exist today,
- * and the split is by kind. `~/.desde/` holds the project registry,
- * per-session info and the desktop settings file. `~/.config/desde/`
- * holds secrets (`viewer-tokens.json`). This is a secret.
+ * Lives in the CLI's one state directory (`state-dir.ts`), beside the
+ * project registry and the other secret stores.
  *
  * Every read degrades to typed defaults — absent, unreadable, malformed, or
  * shaped wrong. A credential read must never be the reason the CLI fails to
@@ -33,7 +32,6 @@ import type {
  * left in this module.
  */
 
-const CONFIG_DIR_RELATIVE = join(".config", "desde")
 const CREDENTIAL_FILE_NAME = "llm-credentials.json"
 const FILE_MODE = 0o600
 const DIR_MODE = 0o700
@@ -65,7 +63,7 @@ interface LlmCredentialFileV1 {
 }
 
 export function llmCredentialFilePath(home: string): string {
-  return join(home, CONFIG_DIR_RELATIVE, CREDENTIAL_FILE_NAME)
+  return join(cliStateDir(home), CREDENTIAL_FILE_NAME)
 }
 
 /**

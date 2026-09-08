@@ -1,5 +1,5 @@
 /**
- * Per-user project registry at `~/.desde/projects.json`.
+ * Per-user project registry at `~/.config/desde/projects.json`.
  *
  * A machine-local index of "which local checkouts map to which
  * Desde projects" — populated on every editor-cli boot. It
@@ -19,9 +19,9 @@
  */
 
 import { promises as fs } from "node:fs"
-import { homedir } from "node:os"
-import { resolve as resolvePath, dirname } from "node:path"
+import { join } from "node:path"
 import { randomUUID } from "node:crypto"
+import { cliStateDir, ensureCliStateDir } from "./state-dir.js"
 
 const REGISTRY_VERSION = 1
 
@@ -47,7 +47,7 @@ export interface ProjectsRegistry {
 
 /** Absolute path to the registry file. */
 export function projectsRegistryPath(): string {
-  return resolvePath(homedir(), ".desde", "projects.json")
+  return join(cliStateDir(), "projects.json")
 }
 
 function emptyRegistry(): ProjectsRegistry {
@@ -169,8 +169,7 @@ export async function removeProjectRegistryEntry(path: string): Promise<boolean>
 
 async function writeRegistryAtomic(registry: ProjectsRegistry): Promise<void> {
   const path = projectsRegistryPath()
-  const dir = dirname(path)
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 })
+  await ensureCliStateDir()
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
   try {
     await fs.writeFile(tmp, JSON.stringify(registry, null, 2), "utf-8")

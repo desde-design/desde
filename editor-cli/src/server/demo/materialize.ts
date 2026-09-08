@@ -25,8 +25,9 @@ import { execFile } from "node:child_process"
 import { access, cp, mkdir, rm, stat } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { promisify } from "node:util"
+import { ensureLocallyIgnored } from "../../../../src/editor/worktree/ensure-locally-ignored.js"
 import { resolveDemoFixtureDir } from "../../payload-paths.js"
-import { DEMO_NODE_MODULES_ARCHIVE, demoRepoPath, markDemoTried } from "./paths.js"
+import { DEMO_NODE_MODULES_ARCHIVE, demoRepoPath, isManagedDemo, markDemoTried, writeDemoMarker } from "./paths.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -56,6 +57,14 @@ export async function materializeDemo(
 ): Promise<MaterializeDemoResult> {
   const dest = demoRepoPath(opts.home)
   if (await exists(dest)) {
+    // The path sits in Documents under a plain name, so it can be taken by
+    // something the user made. Only a folder carrying the marker is ours to
+    // open (or, later, delete). Anything else is refused, not adopted.
+    if (!(await isManagedDemo(dest))) {
+      throw new Error(
+        `A folder already exists at ${dest} and it is not the Desde demo. Move or rename it, then try again.`,
+      )
+    }
     await markDemoTried(opts.home)
     return { path: dest, created: false }
   }
@@ -93,6 +102,12 @@ export async function materializeDemo(
       "-m",
       "Demo prototype",
     ])
+    // After the commit, so the marker is untracked like the rest of `.desde/`,
+    // and locally ignored from the start: the Editor does this on its own boot,
+    // but the launcher classifies the demo's changes BEFORE any Editor has run,
+    // and an unignored marker would count as a user change.
+    await ensureLocallyIgnored(dest, ".desde/")
+    await writeDemoMarker(dest)
     await markDemoTried(opts.home)
     return { path: dest, created: true }
   } catch (error) {

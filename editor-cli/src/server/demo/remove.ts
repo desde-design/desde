@@ -5,16 +5,21 @@
  * `projects-registry.ts` documents itself as "a CACHE, never a source of
  * truth... re-created on the next boot of that repo", so a list-only removal
  * undoes itself the moment the demo is opened again. And the demo lives in a
- * directory the user never chose and cannot easily find, so a list-only removal
- * strands its contents somewhere they have no way to clean up. For a user's own
- * repo "remove from recents" is right, because the repo still sits where they
- * put it. For the demo it is not.
+ * directory the app chose, not the user, so a list-only removal strands a
+ * folder they did not ask for. For a user's own repo "remove from recents" is
+ * right, because the repo still sits where they put it. For the demo it is
+ * not.
  *
- * THE PATH IS PINNED. This module resolves `~/.desde/demo` itself and exposes
+ * THE PATH IS PINNED. This module resolves the demo path itself and exposes
  * no way to name a different one; the HTTP route reads no body at all. A
  * recursive delete steered by a caller-supplied path is the traversal class
  * this repo has been bitten by before, and taking no parameter removes the
  * question rather than guarding it.
+ *
+ * THE MARKER IS CHECKED. A pinned path is not enough now that the path is a
+ * plain folder name in Documents: a folder the user made there must never be
+ * reported as the demo or deleted as the demo. `isManagedDemo` (paths.ts) is
+ * the ownership test, and both functions here refuse anything it rejects.
  *
  * `triedAt` deliberately survives. See `paths.ts`.
  */
@@ -23,7 +28,7 @@ import { access, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import { promisify } from "node:util"
 import { removeProjectRegistryEntry } from "../projects-registry.js"
-import { demoRepoPath } from "./paths.js"
+import { demoRepoPath, isManagedDemo } from "./paths.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -51,6 +56,7 @@ export async function classifyDemoChanges(
   } catch {
     return ABSENT
   }
+  if (!(await isManagedDemo(path))) return ABSENT
   try {
     const status = await execFileAsync("git", ["-C", path, "status", "--porcelain"])
     const count = await execFileAsync("git", ["-C", path, "rev-list", "--count", "HEAD"])
@@ -68,12 +74,20 @@ export async function classifyDemoChanges(
   }
 }
 
-export async function removeDemo(home: string = homedir()): Promise<{ removed: boolean }> {
+export async function removeDemo(
+  home: string = homedir(),
+): Promise<{ removed: boolean; reason?: string }> {
   const path = demoRepoPath(home)
   try {
     await access(path)
   } catch {
     return { removed: false }
+  }
+  if (!(await isManagedDemo(path))) {
+    return {
+      removed: false,
+      reason: `The folder at ${path} is not the Desde demo, so it was left alone.`,
+    }
   }
   await rm(path, { recursive: true, force: true })
   // Best effort: the registry is a cache, and a stale entry is repaired on the

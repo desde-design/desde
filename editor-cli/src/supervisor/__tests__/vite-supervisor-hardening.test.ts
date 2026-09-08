@@ -10,7 +10,7 @@
  * upgrade that changes glob expansion fails here rather than in the field.
  */
 import { describe, expect, it } from "vitest"
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -98,6 +98,7 @@ describe("hardenServerConfig", () => {
       expect.arrayContaining([
         ".desde",
         "**/.desde/**",
+        "**/.config/desde/**",
         ".env",
         ".env.*",
         "*.{crt,pem}",
@@ -172,6 +173,26 @@ describe("hardenServerConfig — resolved against real Vite", () => {
 
     // …and ordinary prototype source is still served.
     expect(isFileLoadingAllowed(resolved, `${repo}/src/main.ts`)).toBe(true)
+  })
+
+  it("never serves the CLI's own state directory, even when the repo widens fs.allow to $HOME", async () => {
+    // A repo config with `fs.allow: [home]` is kept (widening reach is the
+    // supported escape hatch). That must not make the live session bearer or
+    // the LLM key reachable at `/@fs/<home>/.config/desde/…`.
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "pt-home-")))
+    const repo = join(home, "repo")
+    mkdirSync(repo)
+    writeFileSync(join(repo, "index.html"), "<html></html>")
+    mkdirSync(join(home, ".config", "desde"), { recursive: true })
+    writeFileSync(join(home, ".config", "desde", "editor-session.json"), "{}")
+    writeFileSync(join(home, "shared.ts"), "export {}")
+
+    const { merged } = harden(repo, { server: { fs: { allow: [home] } } })
+    const resolved = await resolveConfig(merged, "serve", "development")
+
+    expect(isFileLoadingAllowed(resolved, `${home}/shared.ts`)).toBe(true)
+    expect(isFileLoadingAllowed(resolved, `${home}/.config/desde/editor-session.json`)).toBe(false)
+    expect(isFileLoadingAllowed(resolved, `${home}/.config/desde/llm-credentials.json`)).toBe(false)
   })
 
   it("denies .desde however its case is spelled, on a case-insensitive filesystem", async () => {

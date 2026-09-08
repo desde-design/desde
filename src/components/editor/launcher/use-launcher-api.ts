@@ -79,6 +79,8 @@ interface ApiResult {
   canceled?: boolean
   supported?: boolean
   projects?: LauncherProject[]
+  /** GET /api/launcher/projects: why the demo could not be created, when it could not. */
+  demoSeedError?: string
   suggestions?: DesignSystemSuggestion[]
   appended?: DesignSystemDeclaration[]
   /** `gh` repo listing (see listGitHubRepos). */
@@ -292,6 +294,7 @@ export function useLauncherApi(): UseLauncherApi {
       if (cancelled) return
       setProjects(res.ok ? (res.projects ?? []) : [])
       if (!res.ok) setError(res.reason ?? "Couldn't load recent projects.")
+      else if (res.demoSeedError) setError(`The demo project couldn't be created. ${res.demoSeedError}`)
     })
     return () => {
       cancelled = true
@@ -587,7 +590,7 @@ export function useLauncherApi(): UseLauncherApi {
     setBusy("Deleting the demo")
     const res = await del("/api/launcher/demo")
     setBusy(null)
-    if (!res.ok) {
+    if (!res.ok || (res.removed === false && res.reason)) {
       setError(res.reason ?? "The demo could not be deleted.")
       return { ok: false }
     }

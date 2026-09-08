@@ -235,7 +235,7 @@ export function resolveIconPreviewDir(): string {
  * `<payload>/demo`, or `<repo>/viewer/fixtures/demo-react` in a checkout.
  *
  * The bundled demo prototype: a standalone Vite + React app the launcher copies
- * to `~/.desde-demo/` on first launch. It is the SAME app the viewer seeds and
+ * to `~/Documents/Desde Demo/` on first launch. It is the SAME app the viewer seeds and
  * demo.desde.design serves, on purpose: the Editor used to carry its own copy
  * under `editor-cli/demo`, and by 2026-09-03 it had drifted into a different
  * prototype from the one every screenshot and the marketing story showed.

@@ -1,5 +1,6 @@
 /**
- * The desktop shell's app-scoped settings store — `~/.desde/settings.json`.
+ * The desktop shell's app-scoped settings store — `<userData>/settings.json`,
+ * which on macOS is `~/Library/Application Support/Desde/settings.json`.
  *
  * Copies the house pattern from `editor-cli/src/server/viewer-token-store.ts`
  * (and `projects-registry.ts`, same shape): atomic temp+rename write, 0600
@@ -12,9 +13,16 @@
  * App-scoped, not repo-scoped: this file is readable with zero repos open
  * (unlike `desde.config.json` / `.desde/config.json`, which
  * live inside a project), because the update-checker and its toggle need
- * somewhere to live before any project is picked. `~/.desde/` already
- * holds the project registry and per-session info — this is a sibling file,
- * not a new directory.
+ * somewhere to live before any project is picked.
+ *
+ * It lives in Electron's `userData` directory, beside the Claude runtime and
+ * the boot log, because it is the DESKTOP APP's setting and nothing else
+ * reads it. The CLI's own per-user state is `~/.config/desde/`
+ * (`editor-cli/src/server/state-dir.ts`); until 2026-09-07 this file sat in
+ * the CLI's directory, which mixed the two layers for no reason. Every
+ * function takes the directory explicitly — main.ts passes
+ * `app.getPath("userData")` — because this module must not import Electron
+ * (its tests run under plain vitest).
  *
  * Phase 4 (`tasks/electron-app.md` §4) is the actual consumer — the updater
  * reads `updates.autoDownload` to decide silent-download vs.
@@ -23,7 +31,6 @@
  */
 
 import { promises as fs } from "node:fs"
-import { homedir } from "node:os"
 import { dirname, resolve as resolvePath } from "node:path"
 import { randomUUID } from "node:crypto"
 
@@ -42,8 +49,9 @@ export function defaultDesktopSettings(): DesktopSettings {
   return { version: SETTINGS_VERSION, updates: { autoDownload: true } }
 }
 
-export function settingsFilePath(home: string = homedir()): string {
-  return resolvePath(home, ".desde", "settings.json")
+/** `dir` is the app's `userData` directory. */
+export function settingsFilePath(dir: string): string {
+  return resolvePath(dir, "settings.json")
 }
 
 /**
@@ -53,10 +61,10 @@ export function settingsFilePath(home: string = homedir()): string {
  * be the reason the app fails to start; the cost of a corrupt file is
  * silently falling back to defaults, not a crash.
  */
-export async function readDesktopSettings(home: string = homedir()): Promise<DesktopSettings> {
+export async function readDesktopSettings(dir: string): Promise<DesktopSettings> {
   let raw: string
   try {
-    raw = await fs.readFile(settingsFilePath(home), "utf8")
+    raw = await fs.readFile(settingsFilePath(dir), "utf8")
   } catch {
     return defaultDesktopSettings()
   }
@@ -89,11 +97,10 @@ export async function readDesktopSettings(home: string = homedir()): Promise<Des
  */
 export async function writeDesktopSettings(
   settings: DesktopSettings,
-  home: string = homedir(),
+  dir: string,
 ): Promise<void> {
-  const path = settingsFilePath(home)
-  const dir = dirname(path)
-  await fs.mkdir(dir, { recursive: true, mode: DIR_MODE })
+  const path = settingsFilePath(dir)
+  await fs.mkdir(dirname(path), { recursive: true, mode: DIR_MODE })
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
   try {
     await fs.writeFile(tmp, `${JSON.stringify(settings, null, 2)}\n`, { mode: FILE_MODE })
@@ -109,11 +116,11 @@ export async function writeDesktopSettings(
   await fs.chmod(path, FILE_MODE).catch(() => {})
 }
 
-export async function getAutoDownload(home: string = homedir()): Promise<boolean> {
-  return (await readDesktopSettings(home)).updates.autoDownload
+export async function getAutoDownload(dir: string): Promise<boolean> {
+  return (await readDesktopSettings(dir)).updates.autoDownload
 }
 
-export async function setAutoDownload(value: boolean, home: string = homedir()): Promise<void> {
-  const current = await readDesktopSettings(home)
-  await writeDesktopSettings({ ...current, updates: { ...current.updates, autoDownload: value } }, home)
+export async function setAutoDownload(value: boolean, dir: string): Promise<void> {
+  const current = await readDesktopSettings(dir)
+  await writeDesktopSettings({ ...current, updates: { ...current.updates, autoDownload: value } }, dir)
 }

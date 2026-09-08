@@ -474,7 +474,7 @@ async function main(): Promise<void> {
 
   // Local `claude` CLI integration hint. The `mcp add` command is a
   // one-time setup; after that, every editor-cli boot is
-  // auto-discovered via ~/.desde/editor-session.json.
+  // auto-discovered via ~/.config/desde/editor-session.json.
   console.log("")
   console.log("▸ Claude CLI integration (optional, one-time setup):")
   console.log("    claude mcp add editor desde-mcp")

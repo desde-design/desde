@@ -65,6 +65,27 @@ describe("classifyDemoChanges", () => {
   })
 })
 
+describe("a folder at the demo path that is not the demo", () => {
+  it("is reported absent rather than as an untouched demo", async () => {
+    await mkdir(demoRepoPath(home), { recursive: true })
+    await writeFile(join(demoRepoPath(home), "mine.txt"), "x", "utf8")
+    expect(await classifyDemoChanges(home)).toEqual({ present: false, dirtyFiles: 0, extraCommits: 0 })
+  })
+
+  it("is not deleted, even as a clean one-commit git repo", async () => {
+    const path = demoRepoPath(home)
+    await mkdir(path, { recursive: true })
+    await writeFile(join(path, "mine.txt"), "x", "utf8")
+    await git(path, ["init", "--quiet"])
+    await git(path, ["add", "-A"])
+    await git(path, ["-c", "user.name=T", "-c", "user.email=t@t.local", "commit", "--quiet", "-m", "theirs"])
+    const result = await removeDemo(home)
+    expect(result.removed).toBe(false)
+    expect(result.reason).toMatch(/not the Desde demo/)
+    await expect(access(join(path, "mine.txt"))).resolves.toBeUndefined()
+  })
+})
+
 describe("removeDemo", () => {
   it("deletes the directory", async () => {
     await materializeDemo({ home, fixtureDir })

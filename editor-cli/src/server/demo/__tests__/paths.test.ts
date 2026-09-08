@@ -13,9 +13,9 @@ afterEach(async () => {
 })
 
 describe("demo paths", () => {
-  it("puts the repo in a SIBLING of .desde, and its state inside", () => {
-    expect(demoRepoPath(home)).toBe(join(home, ".desde-demo"))
-    expect(demoStatePath(home)).toBe(join(home, ".desde", "demo-state.json"))
+  it("puts the repo somewhere visible, and its flag in the CLI state dir", () => {
+    expect(demoRepoPath(home)).toBe(join(home, "Documents", "Desde Demo"))
+    expect(demoStatePath(home)).toBe(join(home, ".config", "desde", "demo-state.json"))
   })
 
   it("reads an empty state when nothing is written yet", async () => {
@@ -28,13 +28,13 @@ describe("demo paths", () => {
   })
 
   it("treats a corrupt state file as empty rather than throwing", async () => {
-    await mkdir(join(home, ".desde"), { recursive: true })
+    await mkdir(join(home, ".config", "desde"), { recursive: true })
     await writeFile(demoStatePath(home), "{not json", "utf8")
     expect(await readDemoState(home)).toEqual({})
   })
 
   it("treats a non-object state file as empty", async () => {
-    await mkdir(join(home, ".desde"), { recursive: true })
+    await mkdir(join(home, ".config", "desde"), { recursive: true })
     await writeFile(demoStatePath(home), '"a string"', "utf8")
     expect(await readDemoState(home)).toEqual({})
   })

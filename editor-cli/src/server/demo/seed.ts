@@ -21,12 +21,13 @@
  * that first request and never waits again.
  */
 
-import { access, mkdir, rm, stat } from "node:fs/promises"
+import { mkdir, rm, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { readProjectsRegistry, upsertProjectRegistryEntry } from "../projects-registry.js"
+import { cliStateDir, ensureCliStateDir } from "../state-dir.js"
 import { materializeDemo, type MaterializeDemoOptions } from "./materialize.js"
-import { demoRepoPath, readDemoState } from "./paths.js"
+import { demoRepoPath, isManagedDemo, readDemoState } from "./paths.js"
 
 /** The registry slug, which is what the project card shows as its name. */
 export const DEMO_PROJECT_SLUG = "demo"
@@ -61,22 +62,13 @@ export interface SeedDemoResult {
 const STALE_LOCK_MS = 10 * 60_000
 
 function seedLockPath(home: string): string {
-  return join(home, ".desde", "demo-seed.lock")
-}
-
-async function exists(path: string): Promise<boolean> {
-  try {
-    await access(path)
-    return true
-  } catch {
-    return false
-  }
+  return join(cliStateDir(home), "demo-seed.lock")
 }
 
 /** True when this process now holds the lock. */
 async function acquireSeedLock(home: string): Promise<boolean> {
   const lock = seedLockPath(home)
-  await mkdir(join(home, ".desde"), { recursive: true })
+  await ensureCliStateDir(home)
   try {
     await mkdir(lock)
     return true
@@ -111,7 +103,7 @@ export async function seedDemoProject(
   const state = await readDemoState(home)
   if (state.triedAt !== undefined) {
     // Not a fresh machine. Repair a stranded copy; otherwise nothing to do.
-    if ((await exists(path)) && (await registerIfMissing(path))) {
+    if ((await isManagedDemo(path)) && (await registerIfMissing(path))) {
       return { seeded: true, path }
     }
     return { seeded: false, path: null }

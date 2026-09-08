@@ -90,7 +90,16 @@ const VITE_DEFAULT_FS_DENY = [".env", ".env.*", "*.{crt,pem}", "**/.git/**"] as 
  * `/Users/…/repo/.desde/chat-sessions/x.json` and only the
  * `**`-anchored spelling covers the files inside.
  */
-const EDITOR_PRIVATE_FS_DENY = [".desde", "**/.desde/**"] as const
+const EDITOR_PRIVATE_FS_DENY = [
+  ".desde",
+  "**/.desde/**",
+  // The CLI's per-user state (`server/state-dir.ts`): the live per-boot
+  // bearer in `editor-session.json`, the LLM key, viewer tokens. Outside the
+  // repo, so `fs.allow`'s default already refuses it; this is for a repo
+  // whose own config widens `fs.allow` to `$HOME` (kept on purpose, see
+  // below), which would otherwise serve `/@fs/$HOME/.config/desde/…`.
+  "**/.config/desde/**",
+] as const
 
 export interface ServerHardeningReport {
   /**
@@ -125,9 +134,9 @@ export interface ServerHardeningReport {
  *    so binding `--host` to a LAN address keeps working.
  *  - `fs.strict` — `strict: false` makes `isFileLoadingAllowed` return true
  *    BEFORE it consults either `fs.allow` or `fs.deny`, which serves
- *    `/.env` and `/@fs$HOME/.desde/editor-session.json` — the latter
+ *    `/.env` and `/@fs$HOME/.config/desde/editor-session.json` — the latter
  *    holding the live per-boot bearer for `:4321`. Pinned to `true`, which
- *    is also what makes the `fs.deny` entry above mean anything.
+ *    is also what makes the `fs.deny` entries above mean anything.
  *
  * Deliberately NOT pinned: `fs.allow`. Widening the allow LIST is the
  * supported escape hatch for a prototype that legitimately imports from a

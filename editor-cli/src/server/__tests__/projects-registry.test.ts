@@ -43,7 +43,7 @@ describe("projects-registry", () => {
   it("writes under ~/.desde/projects.json", async () => {
     await upsertProjectRegistryEntry({ path: "/repo/a" })
     expect(projectsRegistryPath()).toBe(
-      path.join(tmpHome, ".desde", "projects.json"),
+      path.join(tmpHome, ".config", "desde", "projects.json"),
     )
     const onDisk = JSON.parse(
       await fs.readFile(projectsRegistryPath(), "utf-8"),
@@ -80,7 +80,7 @@ describe("projects-registry", () => {
   })
 
   it("tolerates a corrupt registry file (degrades to empty, then repairs)", async () => {
-    await fs.mkdir(path.join(tmpHome, ".desde"), { recursive: true })
+    await fs.mkdir(path.join(tmpHome, ".config", "desde"), { recursive: true })
     await fs.writeFile(projectsRegistryPath(), "{ not json", "utf-8")
     expect(await readProjectsRegistry()).toEqual({ version: 1, projects: [] })
 

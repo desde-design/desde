@@ -1,5 +1,5 @@
 /**
- * Session-info file at `~/.desde/editor-session.json`.
+ * Session-info file at `~/.config/desde/editor-session.json`.
  *
  * Written by editor-cli at boot once the HTTP server is healthy.
  * Read by the `desde-mcp` stdio proxy on every tool
@@ -18,12 +18,12 @@
  * "editor-cli not running" instead of POSTing to a dead port.
  */
 import { mkdirSync, writeFileSync, unlinkSync, chmodSync } from "node:fs"
-import { homedir } from "node:os"
-import { resolve as resolvePath, dirname } from "node:path"
+import { join, dirname } from "node:path"
+import { cliStateDir } from "./state-dir.js"
 
 /** Absolute path to the session-info file. */
 export function sessionInfoPath(): string {
-  return resolvePath(homedir(), ".desde", "editor-session.json")
+  return join(cliStateDir(), "editor-session.json")
 }
 
 export interface SessionInfo {
@@ -44,7 +44,7 @@ export interface SessionInfo {
 }
 
 /**
- * Write the session-info file. Creates `~/.desde/` with 0700 if
+ * Write the session-info file. Creates `~/.config/desde/` with 0700 if
  * absent. Returns nothing — failures are surfaced via thrown errors
  * (the caller logs them as a warning; a missing session file just
  * means the MCP proxy can't auto-discover, which is recoverable by

@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+import { cliStateDir } from "./state-dir.js"
 
 /**
  * Per-machine storage for **viewer** personal access tokens (`dsv_…`).
@@ -31,7 +32,6 @@ import { dirname, join } from "node:path"
  * exactly the signal the caller should act on.
  */
 
-const CONFIG_DIR_RELATIVE = join(".config", "desde")
 const TOKEN_FILE_NAME = "viewer-tokens.json"
 const FILE_MODE = 0o600
 const DIR_MODE = 0o700
@@ -63,7 +63,7 @@ interface ViewerTokenFile {
 }
 
 export function viewerTokenFilePath(home = homedir()): string {
-  return join(home, CONFIG_DIR_RELATIVE, TOKEN_FILE_NAME)
+  return join(cliStateDir(home), TOKEN_FILE_NAME)
 }
 
 /**

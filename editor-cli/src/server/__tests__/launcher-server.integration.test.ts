@@ -1316,6 +1316,46 @@ describe("launcher server — LLM credentials", () => {
  * Once only: a deleted demo stays deleted, and the list is empty again.
  */
 describe("launcher server — demo seeding", () => {
+  it("reports a failed seed on the projects list and retries it on the next request", async () => {
+    // The fixture is missing at first, the way a copy into a folder the OS
+    // has not yet granted access to fails. The list must say WHY it is
+    // empty, and a later request must try again once the cause is gone,
+    // without a relaunch.
+    const fixtureDir = path.join(tmp, "late-fixture")
+    const h = await startLauncher({
+      port: 0,
+      spawnEditor: spawnStub,
+      pickFolder: pickFolderStub,
+      uiBundleRoot: bundleRoot,
+      demoFixtureDir: fixtureDir,
+    })
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const boot = await fetch(`${h.url}/__desde/bootstrap.js`)
+      const m = (await boot.text()).match(/window\.__DESDE_LAUNCHER__=(\{.*\});/)
+      const token = (JSON.parse(m![1]) as { token: string }).token
+      const headers = { authorization: `Bearer ${token}`, origin: h.url }
+
+      const first = await fetch(`${h.url}/api/launcher/projects`, { headers })
+      expect(first.status).toBe(200)
+      const firstBody = (await first.json()) as { projects: unknown[]; demoSeedError?: string }
+      expect(firstBody.projects).toEqual([])
+      expect(firstBody.demoSeedError).toMatch(/late-fixture/)
+
+      await fs.mkdir(path.join(fixtureDir, "src"), { recursive: true })
+      await fs.writeFile(path.join(fixtureDir, "package.json"), '{"name":"desde-demo"}')
+      await fs.writeFile(path.join(fixtureDir, "src", "App.tsx"), "export const App = () => null\n")
+
+      const second = await fetch(`${h.url}/api/launcher/projects`, { headers })
+      const secondBody = (await second.json()) as { projects: { slug?: string }[]; demoSeedError?: string }
+      expect(secondBody.demoSeedError).toBeUndefined()
+      expect(secondBody.projects.map((p) => p.slug)).toEqual(["demo"])
+    } finally {
+      quiet.mockRestore()
+      await h.close()
+    }
+  })
+
   it("seeds the demo into the projects list once, and not after it is deleted", async () => {
     const fixtureDir = path.join(tmp, "demo-fixture")
     await fs.mkdir(path.join(fixtureDir, "src"), { recursive: true })
@@ -1342,7 +1382,7 @@ describe("launcher server — demo seeding", () => {
       ])
       const listA = (await a.json()) as { projects: { path: string; slug?: string }[] }
       const listB = (await b.json()) as { projects: { path: string; slug?: string }[] }
-      const demoPath = path.join(tmpHome, ".desde-demo")
+      const demoPath = path.join(tmpHome, "Documents", "Desde Demo")
       expect(listA.projects.map((p) => [p.path, p.slug])).toEqual([[demoPath, "demo"]])
       expect(listB.projects).toHaveLength(1)
       await expect(fs.access(path.join(demoPath, "src", "App.tsx"))).resolves.toBeUndefined()

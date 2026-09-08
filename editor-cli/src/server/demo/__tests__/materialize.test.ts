@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { promisify } from "node:util"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { materializeDemo } from "../materialize.js"
-import { DEMO_NODE_MODULES_ARCHIVE, demoRepoPath, readDemoState } from "../paths.js"
+import { DEMO_NODE_MODULES_ARCHIVE, demoRepoPath, isManagedDemo, readDemoState } from "../paths.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -57,6 +57,24 @@ describe("materializeDemo", () => {
     const second = await materializeDemo({ home, fixtureDir })
     expect(second.created).toBe(false)
     expect(await readFile(join(second.path, "src", "App.tsx"), "utf8")).toContain("edited by the user")
+  })
+
+  it("refuses to adopt a pre-existing folder that is not the demo, and leaves it alone", async () => {
+    const dest = demoRepoPath(home)
+    await mkdir(dest, { recursive: true })
+    await writeFile(join(dest, "mine.txt"), "the user's own file\n", "utf8")
+    await expect(materializeDemo({ home, fixtureDir })).rejects.toThrow(/not the Desde demo/)
+    expect(await readFile(join(dest, "mine.txt"), "utf8")).toContain("own file")
+    expect((await readDemoState(home)).triedAt).toBeUndefined()
+  })
+
+  it("writes the ownership marker, untracked and locally ignored", async () => {
+    const { path } = await materializeDemo({ home, fixtureDir })
+    expect(await isManagedDemo(path)).toBe(true)
+    const { stdout: tracked } = await execFileAsync("git", ["-C", path, "ls-files", ".desde"])
+    expect(tracked.trim()).toBe("")
+    const { stdout: status } = await execFileAsync("git", ["-C", path, "status", "--porcelain"])
+    expect(status.trim()).toBe("")
   })
 
   it("records triedAt", async () => {

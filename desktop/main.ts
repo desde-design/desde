@@ -557,7 +557,7 @@ function registerIpcHandlers(
       },
     })
   })
-  ipcMain.handle("desktop:settings:get-auto-download", () => getAutoDownload())
+  ipcMain.handle("desktop:settings:get-auto-download", () => getAutoDownload(settingsDir()))
   // Persistence + the live `autoUpdater.autoDownload` flag are updated as
   // ONE ordered step per toggle, serialized in the order the renderer
   // invoked them — see auto-download-mutation-queue.ts's doc comment for
@@ -568,7 +568,7 @@ function registerIpcHandlers(
   // the persisted setting), which is not what "Download updates
   // automatically" reads as when you just clicked it.
   const autoDownloadMutations = createAutoDownloadMutationQueue({
-    persist: setAutoDownload,
+    persist: (value) => setAutoDownload(value, settingsDir()),
     applyLive: (value) => updater.setAutoDownload(value),
   })
   ipcMain.handle("desktop:settings:set-auto-download", (_event, value: boolean) =>
@@ -611,6 +611,16 @@ function fatalBoot(err: unknown): void {
   console.error("[desktop] fatal boot error:", message)
   dialog.showErrorBox(`${PRODUCT_NAME} failed to start`, message)
   app.exit(1)
+}
+
+/**
+ * Desktop settings live in `userData`, beside `boot.log` and the Claude
+ * runtime — see settings.ts's doc comment for why not the CLI's own
+ * directory. A function, not a constant, because `app.getPath` is only
+ * meaningful once the app name is settled, and module load is too early.
+ */
+function settingsDir(): string {
+  return app.getPath("userData")
 }
 
 async function boot(): Promise<void> {
@@ -687,7 +697,7 @@ async function boot(): Promise<void> {
   // `shouldSkipCheck` option it drives in updater.ts) once Phase 5 lands a
   // real publish config and every packaged app's stamp says so.
   const updater = createUpdater({
-    autoDownload: await getAutoDownload(),
+    autoDownload: await getAutoDownload(settingsDir()),
     forceDevUpdateConfig: process.env.DESDE_DESKTOP_FORCE_DEV_UPDATE_CONFIG === "1",
     shouldSkipCheck: () =>
       shouldSkipUpdateChecks({
