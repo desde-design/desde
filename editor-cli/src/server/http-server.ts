@@ -5175,6 +5175,7 @@ async function handleLLMFallbackRequest(
     ok: result.ok,
     reason: result.reason,
     proposal: result.proposal,
+    ...(result.kind !== undefined ? { kind: result.kind } : {}),
   })
 }
 

@@ -11,9 +11,10 @@
  */
 
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest"
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
+import { createHash } from "node:crypto"
 import {
   handleIterationEdit,
   validateIterationBody,
@@ -52,6 +53,13 @@ vi.mock(
   "../../../../src/editor/edit-service/resolve-iteration-data-vue-cross-component.js",
   () => ({
     resolveIterationDataVueCrossComponent: vi.fn(() => ({ ok: false, reason: "no cross" })),
+  }),
+)
+
+vi.mock(
+  "../../../../src/editor/edit-service/extract-slot-interpolation-key.js",
+  () => ({
+    extractSlotInterpolationKey: vi.fn(() => ({ ok: true, propertyKey: "name" })),
   }),
 )
 
@@ -299,6 +307,60 @@ const rows = [{ id: 1 }, { id: 2 }]
       if (!result.ok) return
       expect(result.proposal.file).toBe("src/Page.vue")
       expect(result.status).toBe(200)
+    })
+
+    it("reads the retyped text from the COMPONENT and rewrites the PAGE (before 2026-09-08 both were the page, and the loop variable was never passed)", async () => {
+      const [{ resolveIterationDataVueCrossComponent }, { extractSlotInterpolationKey }, { applyIterationDataEditStatic }] =
+        await Promise.all([
+          import("../../../../src/editor/edit-service/resolve-iteration-data-vue-cross-component.js"),
+          import("../../../../src/editor/edit-service/extract-slot-interpolation-key.js"),
+          import("../../../../src/editor/edit-service/apply-iteration-data-edit-static.js"),
+        ])
+      vi.mocked(resolveIterationDataVueCrossComponent).mockReturnValueOnce({
+        ok: true,
+        file: "src/Page.vue",
+        arrayLocation: { line: 3, column: 14 },
+        keyProperty: "id",
+        itemVar: "item",
+      })
+      const extractMock = vi.mocked(extractSlotInterpolationKey)
+      const applyMock = vi.mocked(applyIterationDataEditStatic)
+      extractMock.mockClear()
+      applyMock.mockClear()
+
+      const result = await handleIterationEdit(
+        makeBody({
+          pageSourceFile: "src/Page.vue",
+          payload: { operation: "patch-text", value: "Renamed" },
+        }),
+        dir,
+      )
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(result.proposal.file).toBe("src/Page.vue")
+
+      const componentSource = readFileSync(join(dir, "src", "Foo.vue"), "utf8")
+      const pageSource = readFileSync(join(dir, "src", "Page.vue"), "utf8")
+      // The interpolation `{{ item.name }}` sits in the component, at the
+      // component's template location — so the extractor must read Foo.vue.
+      expect(extractMock).toHaveBeenCalledTimes(1)
+      expect(extractMock.mock.calls[0][0]).toMatchObject({
+        source: componentSource,
+        line: 2,
+        column: 3,
+        itemVar: "item",
+      })
+      // The array lives in the page, so the rewriter must edit Page.vue.
+      expect(applyMock).toHaveBeenCalledTimes(1)
+      expect(applyMock.mock.calls[0][0]).toMatchObject({
+        source: pageSource,
+        file: "src/Page.vue",
+        operation: { operation: "patch", updates: { name: "Renamed" } },
+      })
+      // And the base hash guards the file that will be overwritten.
+      expect(result.proposal.baseHash).toBe(
+        createHash("sha256").update(pageSource, "utf8").digest("hex"),
+      )
     })
 
     it("ignores pageSourceFile that escapes root and falls through to 422", async () => {

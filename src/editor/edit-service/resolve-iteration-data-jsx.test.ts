@@ -99,6 +99,37 @@ export const L = () => <ul>{items.map((item) => <li key={item.id}>{item.id}</li>
     const r = resolveIterationDataJsxSameFile({ source: src, templateLocation: { line: 99, column: 0 } })
     expect(r.ok).toBe(false)
   })
+
+  it("returns an importCandidate when the iteratee is bound by a relative import", () => {
+    const src = `import { rows } from "./rows"
+export const L = () => <ul>{rows.map((row) => <li key={row.id}>{row.id}</li>)}</ul>
+`
+    const r = resolveIterationDataJsxSameFile({ source: src, templateLocation: loc(src, "<li key") })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.importCandidate).toEqual({
+      iterateeRoot: "rows",
+      itemVar: "row",
+      keyProperty: "id",
+      binding: { specifier: "./rows", importedName: "rows", via: "import" },
+    })
+  })
+
+  it("does not surface an importCandidate when a param shadows the import (shadow guard runs first)", () => {
+    // Same-named relative import AND a same-named prop — the shadow guard
+    // must refuse before ever consulting `findImportBinding`, so the rows
+    // rendered here (from the prop) are never confused with the imported
+    // module's `rows`.
+    const src = `import { rows } from "./rows"
+export function List({ rows }: { rows: { id: number }[] }) {
+  return <ul>{rows.map((row) => <li key={row.id}>{row.id}</li>)}</ul>
+}
+`
+    const r = resolveIterationDataJsxSameFile({ source: src, templateLocation: loc(src, "<li key") })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.importCandidate).toBeUndefined()
+  })
 })
 
 /**

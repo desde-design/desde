@@ -25,6 +25,7 @@
  */
 
 import { parse } from "@babel/parser"
+import { findImportBinding, type IterateeImportCandidate } from "./import-binding"
 
 export interface ResolveIterationDataJsxInput {
   /** Full `.tsx`/`.jsx` source. */
@@ -47,7 +48,17 @@ export type ResolveIterationDataJsxResult =
       /** Property the element's `key` reads off each entry, or null (positional). */
       keyProperty: string | null
     }
-  | { ok: false; reason: string }
+  | {
+      ok: false
+      reason: string
+      /**
+       * Set when the loop was found and its iteratee is a bare identifier
+       * bound by a relative import rather than a same-file array literal.
+       * The handler follows the import (one hop) before giving up on the
+       * deterministic path. See `import-binding.ts`.
+       */
+      importCandidate?: IterateeImportCandidate
+    }
 
 interface BabelNode {
   type?: string
@@ -105,7 +116,7 @@ export function resolveIterationDataJsxSameFile(
   if (!mapCall) {
     return {
       ok: false,
-      reason: "Element isn't rendered by a `.map()` call: can't resolve iteration data.",
+      reason: "This element is not rendered by a `.map()` call, so there is no list data to edit",
     }
   }
   const callee = mapCall.callee
@@ -117,7 +128,7 @@ export function resolveIterationDataJsxSameFile(
   if (!iterateeRoot) {
     return {
       ok: false,
-      reason: "The `.map()` iteratee isn't a simple identifier chain; defer to the LLM lane.",
+      reason: "The `.map()` is called on an expression, not a named list, so its data cannot be traced here",
     }
   }
 
@@ -129,7 +140,7 @@ export function resolveIterationDataJsxSameFile(
   if (isShadowedByEnclosingParam(ast, mapCall, iterateeRoot)) {
     return {
       ok: false,
-      reason: `\`${iterateeRoot}\` is a function parameter/prop here, not a same-file array literal: defer to the LLM lane.`,
+      reason: `\`${iterateeRoot}\` is a prop or parameter here, so its data is defined by the caller, not in this file`,
     }
   }
 
@@ -147,9 +158,26 @@ export function resolveIterationDataJsxSameFile(
   // Trace the iteratee root to a same-module array-literal binding.
   const arrayNode = findArrayLiteralBinding(ast, iterateeRoot)
   if (!arrayNode || typeof arrayNode.loc?.start?.line !== "number") {
+    // Not a same-file literal. Before deferring to the LLM lane, check whether
+    // the name is simply imported from another module — the handler can follow
+    // one hop deterministically. (The shadowing guard above already ran, so a
+    // module-scope import here is the binding the `.map()` actually reads.)
+    const binding = findImportBinding(source, iterateeRoot)
+    if (binding) {
+      return {
+        ok: false,
+        reason: `\`${iterateeRoot}\` is imported from ${binding.specifier}: the list's data lives in another file`,
+        importCandidate: {
+          iterateeRoot,
+          itemVar: itemVar ?? undefined,
+          keyProperty,
+          binding,
+        },
+      }
+    }
     return {
       ok: false,
-      reason: `Couldn't trace \`${iterateeRoot}\` to an array-literal in this file (it may be a prop, fetched data, or store selector). Defer to the LLM lane.`,
+      reason: `Couldn't trace \`${iterateeRoot}\` to an array literal in this file: it may be a prop, fetched data, or a store value`,
     }
   }
 

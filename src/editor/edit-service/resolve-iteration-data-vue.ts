@@ -21,6 +21,7 @@ import {
   type SimpleExpressionNode,
 } from '@vue/compiler-dom'
 import type { File } from '@babel/types'
+import { findImportBinding, type IterateeImportCandidate } from './import-binding'
 
 export interface ResolveInput {
   source: string
@@ -50,7 +51,17 @@ export type ResolveResult =
        */
       keyProperty: string | null
     }
-  | { ok: false; reason: string }
+  | {
+      ok: false
+      reason: string
+      /**
+       * Set when the loop was found and its iteratee is a bare identifier
+       * bound by a relative import rather than a local array literal. The
+       * handler follows the import (one hop) before giving up on the
+       * deterministic path. See `import-binding.ts`.
+       */
+      importCandidate?: IterateeImportCandidate
+    }
 
 /**
  * Recursively walk the template AST looking for the v-for element at
@@ -381,7 +392,7 @@ export function resolveIterationDataVueSameFile(
       ok: false,
       reason:
         `v-for iteratee "${iteratee.root}.${iteratee.chain.join('.')}" uses property access; ` +
-        `same-file resolver requires a bare identifier: falling through to LLM`,
+        `only a plain list name can be traced here`,
     }
   }
   const keyProperty = extractKeyProperty(match.keyExpression, iteratee.itemVar)
@@ -404,9 +415,25 @@ export function resolveIterationDataVueSameFile(
 
   const arrayPos = findArrayDeclaration(ast, iteratee.root)
   if (!arrayPos) {
+    // Not a local literal. Before declaring this a cross-component case,
+    // check whether the name is simply imported from another module — the
+    // handler can follow one hop deterministically.
+    const binding = findImportBinding(scriptInfo.content, iteratee.root)
+    if (binding) {
+      return {
+        ok: false,
+        reason: `"${iteratee.root}" is imported from ${binding.specifier}: the list's data lives in another file`,
+        importCandidate: {
+          iterateeRoot: iteratee.root,
+          itemVar: iteratee.itemVar,
+          keyProperty,
+          binding,
+        },
+      }
+    }
     return {
       ok: false,
-      reason: `Could not locate array literal for "${iteratee.root}" in same-file script: likely a cross-component case (Phase 4)`,
+      reason: `Could not find an array literal for "${iteratee.root}" in this file: its data may come from a parent component`,
     }
   }
 

@@ -23,15 +23,20 @@ import type { CompletionProvider } from '../llm-providers/types'
 import {
   buildIterationDataPrompt,
   type IterationDataIntent,
+  type IterationDataPromptFile,
 } from './iteration-data-prompt'
 
-export type { IterationDataIntent } from './iteration-data-prompt'
+export type { IterationDataIntent, IterationDataPromptFile } from './iteration-data-prompt'
 
 export interface ApplyIterationDataLlmInput {
-  /** Full source of the file being rewritten. */
-  source: string
-  /** Repo-relative path of that file — the page file for cross-component data. */
-  file: string
+  /**
+   * The bundle the model may rewrite ONE of: the file containing the list
+   * first, then the page (when different), then the import chain the data
+   * was traced through. Assembled by the CLI handler, which owns the
+   * filesystem; this function never reads a file. The response must name
+   * one of these paths, or it is refused.
+   */
+  files: ReadonlyArray<IterationDataPromptFile>
   intent: IterationDataIntent
   projectKnowledge?: ProjectKnowledge
   /** Optional LLM provider injection (tests pass a fake). */
@@ -55,24 +60,41 @@ export interface ApplyIterationDataLlmInput {
 export type ApplyIterationDataLlmResult =
   | {
       ok: true
-      /** New full-file source. */
+      /** Bundle path of the ONE file the model rewrote. */
+      file: string
+      /** New full source of that file. */
       newSource: string
-      /** SHA-256 hex of the original source — the OverwriteEdit.baseHash. */
+      /** SHA-256 hex of that file's original source — the OverwriteEdit.baseHash. */
       originalSourceHash: string
       explanation?: string
     }
-  | { ok: false; reason: string }
+  | {
+      ok: false
+      reason: string
+      /**
+       * `unavailable` when the lane never ran (no provider credentials, or
+       * the call itself failed) — the client shows the deterministic reason
+       * in that case, because a lane that never ran cannot supply one.
+       * `refused` when the model ran and declined or answered badly.
+       */
+      kind: 'unavailable' | 'refused'
+    }
 
 interface IterationResponseShape {
+  file?: string
   newSource: string
   explanation?: string
 }
 
 export const ITERATION_DATA_RESPONSE_SCHEMA = {
   type: 'object' as const,
-  required: ['newSource'] as const,
+  required: ['file', 'newSource'] as const,
   additionalProperties: false,
   properties: {
+    file: {
+      type: 'string' as const,
+      description: 'Bundle path of the one file being rewritten, exactly as labeled.',
+    },
     newSource: {
       type: 'string' as const,
       description: 'Full corrected file source. Must compile.',
@@ -88,14 +110,7 @@ export const ITERATION_DATA_RESPONSE_SCHEMA = {
 export async function applyIterationDataLlm(
   input: ApplyIterationDataLlmInput,
 ): Promise<ApplyIterationDataLlmResult> {
-  const {
-    source,
-    file,
-    intent,
-    projectKnowledge,
-    model,
-    maxTokens = 8000,
-  } = input
+  const { files, intent, projectKnowledge, model, maxTokens = 8000 } = input
 
   // Resolved inside the function, not as a parameter default: `getProvider()`
   // THROWS on missing credentials, and a default-parameter throw escapes the
@@ -107,15 +122,19 @@ export async function applyIterationDataLlm(
     try {
       provider = (input.resolveProvider ?? getProvider)()
     } catch (err) {
-      return { ok: false, reason: (err as Error).message }
+      return { ok: false, reason: (err as Error).message, kind: 'unavailable' }
     }
   }
 
-  if (!source || source.length === 0) {
-    return { ok: false, reason: 'Original source is empty: nothing to edit' }
+  if (files.length === 0) {
+    return { ok: false, reason: 'No source files to edit', kind: 'refused' }
+  }
+  const empty = files.find((f) => !f.source || f.source.length === 0)
+  if (empty) {
+    return { ok: false, reason: `${empty.path} is empty: nothing to edit`, kind: 'refused' }
   }
 
-  const prompt = buildIterationDataPrompt({ file, source, intent, projectKnowledge })
+  const prompt = buildIterationDataPrompt({ files, intent, projectKnowledge })
 
   let result
   try {
@@ -127,39 +146,57 @@ export async function applyIterationDataLlm(
       responseFormat: { kind: 'json_schema', schema: { ...ITERATION_DATA_RESPONSE_SCHEMA } },
     })
   } catch (err) {
-    return { ok: false, reason: `LLM call failed: ${(err as Error).message}` }
+    return { ok: false, reason: `LLM call failed: ${(err as Error).message}`, kind: 'unavailable' }
   }
 
   if (!result.text) {
-    return { ok: false, reason: 'LLM produced no text block' }
+    return { ok: false, reason: 'LLM produced no text block', kind: 'refused' }
   }
   if (result.parsed === undefined) {
     return {
       ok: false,
       reason: `LLM response was not valid JSON: ${result.text.slice(0, 120)}`,
+      kind: 'refused',
     }
   }
   const parsed = result.parsed as IterationResponseShape
   if (typeof parsed.newSource !== 'string' || parsed.newSource.length === 0) {
-    return { ok: false, reason: 'LLM response missing newSource (or it was empty)' }
+    return { ok: false, reason: 'LLM response missing newSource (or it was empty)', kind: 'refused' }
+  }
+  // The model must name the file it rewrote, and it must be one it was shown.
+  // A path outside the bundle is refused outright: this lane's output becomes
+  // a full-file overwrite, and the bundle is the only set of files the
+  // handler vetted against the prototype root.
+  const target = files.find((f) => f.path === parsed.file)
+  if (!target) {
+    return {
+      ok: false,
+      reason:
+        typeof parsed.file === 'string' && parsed.file.length > 0
+          ? `LLM named a file it was not given (${parsed.file}): refusing the rewrite`
+          : 'LLM response did not name the file it rewrote',
+      kind: 'refused',
+    }
   }
   // The prompt's own procedure tells the model to return the source
   // unchanged with an explanation when the data lives in a file it was not
   // given. That is a REFUSAL for this lane, not a proposal: an unchanged
   // overwrite would no-op at save and read as a silent success.
-  if (parsed.newSource === source) {
+  if (parsed.newSource === target.source) {
     return {
       ok: false,
       reason:
         parsed.explanation ??
         'LLM returned the original source unchanged: no edit proposed',
+      kind: 'refused',
     }
   }
 
   return {
     ok: true,
+    file: target.path,
     newSource: parsed.newSource,
-    originalSourceHash: createHash('sha256').update(source, 'utf8').digest('hex'),
+    originalSourceHash: createHash('sha256').update(target.source, 'utf8').digest('hex'),
     explanation: parsed.explanation,
   }
 }

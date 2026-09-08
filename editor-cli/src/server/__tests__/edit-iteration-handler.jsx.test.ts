@@ -6,6 +6,7 @@
  */
 import { describe, expect, it, beforeEach, afterEach } from "vitest"
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
 import {
@@ -304,5 +305,187 @@ export default function List() {
     expect(res.ok).toBe(false)
     expect((res as { status: number }).status).toBe(422)
     expect((res as { reason: string }).reason).toMatch(/renders 2 of 3 entries/)
+  })
+})
+
+/**
+ * Cross-file iteration data — the loop lives in `overview.tsx`, the array
+ * lives in `data.ts`, and they are joined by ONE relative import hop. This
+ * mirrors `viewer/fixtures/demo-react/src/pages/overview.tsx` +
+ * `viewer/fixtures/demo-react/src/data.ts`, where `METRICS` shipped broken
+ * before 2026-09-08: the same-file resolver never looked past the loop file,
+ * so an imported array's data could never be edited this way.
+ *
+ * Two files matter here and must not be confused:
+ *   - the LOOP file (`overview.tsx`) — where `templateLocation` points, and
+ *     what the `patch-text` interpolation extractor reads.
+ *   - the DATA file (`data.ts`) — what the array rewriter edits, and what
+ *     `proposal.file` / `proposal.baseHash` name.
+ */
+describe("edit-iteration-handler — data imported from another module", () => {
+  let dir: string
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "desde-jsx-import-hop-"))
+  })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  const DATA_TS_ARRAY = `export const METRICS = [
+  { label: "Active", value: "1,284" },
+  { label: "Errors", value: "0.42%" },
+]
+`
+
+  const DATA_TS_COMPUTE = `export const METRICS = compute()
+
+function compute() {
+  return [{ label: "Active", value: "1,284" }]
+}
+`
+
+  function overviewSource(specifier: string): string {
+    return `import { METRICS } from "${specifier}"
+
+export default function Overview() {
+  return (
+    <section>
+      {METRICS.map((metric) => (
+        <article key={metric.label}>
+          <p>{metric.value}</p>
+        </article>
+      ))}
+    </section>
+  )
+}
+`
+  }
+
+  function writeOverview(root: string, specifier = "../data"): { file: string; src: string } {
+    const file = "src/pages/overview.tsx"
+    const src = overviewSource(specifier)
+    mkdirSync(dirname(join(root, file)), { recursive: true })
+    writeFileSync(join(root, file), src, "utf8")
+    return { file, src }
+  }
+
+  function writeData(root: string, content: string, relFile = "src/data.ts"): void {
+    mkdirSync(dirname(join(root, relFile)), { recursive: true })
+    writeFileSync(join(root, relFile), content, "utf8")
+  }
+
+  it("patch resolves the array literal in the imported data.ts, not the loop file", async () => {
+    const { file, src } = writeOverview(dir)
+    writeData(dir, DATA_TS_ARRAY)
+    const body: IterationEditRequestBody = {
+      file,
+      templateLocation: babelLoc(src, "<article key"),
+      iterationContext: { key: "Errors", index: 1, siblingCount: 2 },
+      payload: { operation: "patch", updates: { value: "9,999" } },
+    }
+    const result = await handleIterationEdit(body, dir)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.proposal.file).toBe("src/data.ts")
+    expect(result.proposal.newSource).toContain("9,999")
+    expect(result.proposal.newSource).toContain("1,284")
+    // baseHash must be the sha256 of data.ts's ORIGINAL content, not overview.tsx.
+    const expectedHash = createHash("sha256").update(DATA_TS_ARRAY, "utf8").digest("hex")
+    expect(result.proposal.baseHash).toBe(expectedHash)
+  })
+
+  it("patch-text extracts the property from the LOOP file, then rewrites the DATA file", async () => {
+    const { file, src } = writeOverview(dir)
+    writeData(dir, DATA_TS_ARRAY)
+    const body: IterationEditRequestBody = {
+      file,
+      // Points at the `<p>` in overview.tsx that renders `{metric.value}` —
+      // the interpolation extractor must read overview.tsx (the loop file)
+      // at this position, not data.ts (which has no such element at all).
+      templateLocation: babelLoc(src, "<p>{metric.value}"),
+      iterationContext: { key: 1, index: 1, siblingCount: 2 },
+      payload: { operation: "patch-text", value: "0.99%" },
+    }
+    const result = await handleIterationEdit(body, dir)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.proposal.file).toBe("src/data.ts")
+    expect(result.proposal.newSource).toContain("0.99%")
+  })
+
+  it("422s naming the imported file when it doesn't export a plain array literal", async () => {
+    const { file, src } = writeOverview(dir)
+    writeData(dir, DATA_TS_COMPUTE)
+    const body: IterationEditRequestBody = {
+      file,
+      templateLocation: babelLoc(src, "<article key"),
+      iterationContext: { key: "Errors", index: 1, siblingCount: 1 },
+      payload: { operation: "patch", updates: { value: "x" } },
+    }
+    const result = await handleIterationEdit(body, dir)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.status).toBe(422)
+    expect(result.kind).toBe("unresolved")
+    expect(result.reason).toContain("src/data.ts")
+    expect(result.reason).toContain("plain exported array literal")
+  })
+
+  it("422s when the imported module can't be opened at all", async () => {
+    const { file, src } = writeOverview(dir, "../missing")
+    const body: IterationEditRequestBody = {
+      file,
+      templateLocation: babelLoc(src, "<article key"),
+      iterationContext: { key: "Errors", index: 1, siblingCount: 1 },
+      payload: { operation: "patch", updates: { value: "x" } },
+    }
+    const result = await handleIterationEdit(body, dir)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.status).toBe(422)
+    expect(result.reason).toContain("could not be opened")
+  })
+
+  it("422s with the original same-file reason for a bare package import (never produces an importCandidate)", async () => {
+    const { file, src } = writeOverview(dir, "metrics-pkg")
+    const body: IterationEditRequestBody = {
+      file,
+      templateLocation: babelLoc(src, "<article key"),
+      iterationContext: { key: "Errors", index: 1, siblingCount: 1 },
+      payload: { operation: "patch", updates: { value: "x" } },
+    }
+    const result = await handleIterationEdit(body, dir)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.status).toBe(422)
+    expect(result.reason).toContain("Couldn't trace")
+  })
+
+  it("refuses (422, not 200) when the import specifier resolves above the prototype root", async () => {
+    // A real file sits ABOVE the root the request is scoped to. The
+    // containment guard must refuse it even though it exists.
+    const base = mkdtempSync(join(tmpdir(), "desde-jsx-import-hop-outside-"))
+    try {
+      const root = join(base, "root")
+      mkdirSync(root, { recursive: true })
+      writeFileSync(
+        join(base, "outside.ts"),
+        'export const METRICS = [{ label: "X", value: "1" }]\n',
+        "utf8",
+      )
+      const { file, src } = writeOverview(root, "../../../outside")
+      const body: IterationEditRequestBody = {
+        file,
+        templateLocation: babelLoc(src, "<article key"),
+        iterationContext: { key: "Errors", index: 1, siblingCount: 1 },
+        payload: { operation: "patch", updates: { value: "x" } },
+      }
+      const result = await handleIterationEdit(body, root)
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.status).not.toBe(200)
+      expect(result.status).toBe(422)
+      expect(result.reason).toContain("outside")
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 })

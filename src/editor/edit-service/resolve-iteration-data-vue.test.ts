@@ -85,7 +85,7 @@ describe('resolveIterationDataVueSameFile', () => {
     })
     expect(result.ok).toBe(false)
     if (result.ok) return
-    expect(result.reason).toMatch(/Could not locate array literal/i)
+    expect(result.reason).toMatch(/Could not find an array literal/i)
   })
 
   it('returns Unresolved when the template position has no v-for', () => {
@@ -217,5 +217,35 @@ const items = ['a', 'b']
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.keyProperty).toBeNull()
+  })
+
+  it('returns an importCandidate when the iteratee is bound by a relative import', () => {
+    const sfc = `<template>
+  <div>
+    <Row v-for="item in rows" :key="item.id" />
+  </div>
+</template>
+<script setup lang="ts">
+import { rows } from "./rows"
+</script>
+`
+    const idx = sfc.indexOf('<Row')
+    const before = sfc.slice(0, idx)
+    const lines = before.split('\n')
+    const result = resolveIterationDataVueSameFile({
+      source: sfc,
+      templateLocation: {
+        line: lines.length,
+        column: lines[lines.length - 1].length + 1,
+      },
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.importCandidate).toEqual({
+      iterateeRoot: 'rows',
+      itemVar: 'item',
+      keyProperty: 'id',
+      binding: { specifier: './rows', importedName: 'rows', via: 'import' },
+    })
   })
 })

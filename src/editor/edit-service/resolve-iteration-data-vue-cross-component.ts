@@ -66,6 +66,14 @@ export type CrossComponentResolveResult =
        * Mirrors the same-file resolver's contract — see that file.
        */
       keyProperty: string | null
+      /**
+       * The loop variable — `r` in `v-for="r in rows"` — read off the
+       * COMPONENT's v-for. The handler's text-field path needs it to name
+       * the property behind a retyped string; until 2026-09-08 this result
+       * did not carry it, so every cross-component "this row" text edit
+       * 422d with "could not name the loop variable".
+       */
+      itemVar: string
     }
   | { ok: false; reason: string }
 
@@ -469,5 +477,6 @@ export function resolveIterationDataVueCrossComponent(
     file: input.pageSourceFile,
     arrayLocation: { line: sfcLine, column: sfcColumn },
     keyProperty,
+    itemVar: iteratee.itemVar,
   }
 }

@@ -49,26 +49,6 @@ export type IterationProposalResult =
   | { ok: true; proposal: IterationProposal }
   | { ok: false; reason: string }
 
-/**
- * Pick the file to rewrite. Heuristic: if a page source file was
- * resolved and it differs from the template file, the data array is
- * probably defined in the page file (cross-component case — typical
- * for v-for'd row components fed from a page-level computed). Else
- * fall back to the template file (single-file case).
- */
-export function pickIterationTargetFile(args: {
-  templateLocation: SourceLocation
-  pageSourceFile: string | null
-}): string {
-  if (
-    args.pageSourceFile &&
-    args.pageSourceFile !== args.templateLocation.file
-  ) {
-    return args.pageSourceFile
-  }
-  return args.templateLocation.file
-}
-
 export interface RequestIterationProposalArgs {
   /** Which edit triggered this — for telemetry + description. */
   editKind: IterationEditKind
@@ -121,11 +101,16 @@ export async function requestIterationProposal(
     return { ok: false, reason: staticResult.reason }
   }
   // Soft refusal (422 = unresolved or apply-failed) → fall through to LLM.
+  // Keep the deterministic reason: it names the actual obstacle ("the list's
+  // data is imported from ../data, which does not export a plain array"),
+  // and it is what the user sees if the AI lane cannot run at all.
+  const staticReason = staticResult.reason
 
-  const file = pickIterationTargetFile({
-    templateLocation: args.templateLocation,
-    pageSourceFile: args.pageSourceFile,
-  })
+  // The LOOP file goes on the wire. The server assembles the bundle around
+  // it — the page file from `pageSourceFile`, then the import chain — and
+  // the model names which bundled file it rewrote. (This used to send the
+  // page file INSTEAD of the loop file, so the model never saw the loop.)
+  const file = args.templateLocation.file
   const intent: IterationDataIntent = {
     kind: "iteration-data",
     description: args.description,
@@ -148,7 +133,13 @@ export async function requestIterationProposal(
     return { ok: false, reason: `Network error: ${reason}` }
   }
 
-  let body: { ok?: boolean; proposal?: IterationProposal; reason?: string }
+  let body: {
+    ok?: boolean
+    proposal?: IterationProposal
+    reason?: string
+    /** `unavailable` = the model never ran; `refused` = it ran and declined. */
+    kind?: "unavailable" | "refused"
+  }
   try {
     body = await response.json()
   } catch (err) {
@@ -158,7 +149,11 @@ export async function requestIterationProposal(
   }
 
   if (!response.ok || !body.ok || !body.proposal) {
-    const reason = body.reason ?? `HTTP ${response.status}`
+    const reason = composeRefusalReason({
+      staticReason,
+      llmReason: body.reason ?? `HTTP ${response.status}`,
+      llmKind: body.kind,
+    })
     logTelemetry({ ...args, source: "llm", outcome: "refused", reason })
     return { ok: false, reason }
   }
@@ -170,9 +165,32 @@ export async function requestIterationProposal(
       newSource: body.proposal.newSource,
       explanation: body.proposal.explanation,
       baseHash: body.proposal.baseHash,
-      file,
+      // The file the model chose out of the bundle. Falls back to the loop
+      // file only for a server that predates the bundle.
+      file: body.proposal.file ?? file,
     },
   }
+}
+
+/**
+ * The most specific reason wins, and a lane that never ran cannot supply it.
+ *
+ *   - The AI lane RAN and refused → its reason (it read the files).
+ *   - The AI lane could not run (no API key, transport failure) → the
+ *     deterministic resolver's reason, plus one sentence saying why the AI
+ *     fallback did not get a turn. Before 2026-09-08 the user saw only the
+ *     second lane's generic refusal and the real cause was thrown away.
+ */
+export function composeRefusalReason(args: {
+  staticReason: string
+  llmReason: string
+  llmKind: "unavailable" | "refused" | undefined
+}): string {
+  if (args.llmKind === "unavailable") {
+    const base = args.staticReason.replace(/[.\s]+$/, "")
+    return `${base}. The AI fallback could not run: ${args.llmReason}`
+  }
+  return args.llmReason
 }
 
 /**

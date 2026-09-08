@@ -59,8 +59,7 @@ const REPAIR_INPUT: ApplyRepairEditInput = {
 }
 
 const ITERATION_INPUT: ApplyIterationDataLlmInput = {
-  source: SOURCE,
-  file: 'src/App.vue',
+  files: [{ path: 'src/App.vue', source: SOURCE }],
   intent: {
     kind: 'iteration-data',
     description: 'Remove the second row',
@@ -97,5 +96,6 @@ describe('an LLM edit lane with no credentials configured', () => {
 
     expect(result.ok).toBe(false)
     expect(result.ok === false && result.reason).toMatch(/ANTHROPIC_API_KEY/)
+    expect(result.ok === false && result.kind).toBe('unavailable')
   })
 })

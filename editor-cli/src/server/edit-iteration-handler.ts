@@ -34,7 +34,9 @@ import {
   resolveRealpathWithinRoot,
   isWithinRoot,
 } from "./resolve-editable-path"
+import { resolveRelativeModule } from "./resolve-relative-module.js"
 import { readRawBody, BodyTooLargeError, EDIT_BODY_MAX_BYTES } from "./http-body.js"
+import type { IterateeImportCandidate } from "../../../src/editor/edit-service/import-binding"
 
 // ---------------------------------------------------------------------------
 // Request body type + validator
@@ -175,8 +177,19 @@ export async function handleIterationEdit(
   // static applicator consumes (it already handles .tsx whole-source rewriting).
   const isJsxIteration =
     targetPath.endsWith(".tsx") || targetPath.endsWith(".jsx")
-  let resolvedSource = source
-  let resolvedFile = body.file
+  // Two files from here on, and they must not be conflated:
+  //   - `source` is the LOOP file — the file the click landed in, where
+  //     `templateLocation` points. The text-field interpolation extractor
+  //     reads THIS file at that position.
+  //   - `dataSource` / `dataFile` is where the array literal lives. Same file
+  //     in the plain case; the imported module when the iteratee is imported;
+  //     the parent page in the Vue cross-component case. The array rewriter
+  //     edits THIS file, and the proposal names it.
+  // Before 2026-09-08 one `resolvedSource` served both roles, so a retyped
+  // text in a child component whose data lives in the page was extracted
+  // from the PAGE at the COMPONENT's coordinates.
+  let dataSource = source
+  let dataFile = body.file
   let resolution: {
     ok: boolean
     file?: string | null
@@ -190,6 +203,8 @@ export async function handleIterationEdit(
     iterateeChain?: unknown[]
     keyProperty?: string | null
     reason?: string
+    /** Same-file miss, but the name is imported: follow the import below. */
+    importCandidate?: IterateeImportCandidate
   }
   if (isJsxIteration) {
     const { resolveIterationDataJsxSameFile } = await import(
@@ -210,7 +225,7 @@ export async function handleIterationEdit(
           iterateeChain: [],
           keyProperty: jsx.keyProperty,
         }
-      : { ok: false, reason: jsx.reason }
+      : { ok: false, reason: jsx.reason, importCandidate: jsx.importCandidate }
   } else {
     const { resolveIterationDataVueSameFile } = await import(
       "../../../src/editor/edit-service/resolve-iteration-data-vue.js"
@@ -219,6 +234,53 @@ export async function handleIterationEdit(
       source,
       templateLocation: body.templateLocation,
     })
+  }
+
+  // Imported data (both frameworks): the loop's array is `import { X } from
+  // "./data"`. The resolver named the specifier; this is the one filesystem
+  // hop, with the same containment guards as the loop file. One hop, named
+  // export, `export const X = [ … ]` — anything else stays a 422 and the AI
+  // lane gets the bundle. This is the case that shipped broken in the React
+  // demo (`METRICS` in `data.ts`, 2026-09-08).
+  if (!resolution.ok && resolution.importCandidate) {
+    const candidate = resolution.importCandidate
+    const { findExportedArrayLiteral } = await import(
+      "../../../src/editor/edit-service/import-binding.js"
+    )
+    const mod = await resolveRelativeModule(
+      targetPath,
+      candidate.binding.specifier,
+      rootResolution,
+    )
+    if (!mod.ok) {
+      resolution = {
+        ok: false,
+        reason: `${resolution.reason}, but that file could not be opened: ${mod.reason}`,
+      }
+    } else {
+      const exported = findExportedArrayLiteral(mod.source, candidate.binding.importedName)
+      if (exported) {
+        resolution = {
+          ok: true,
+          file: mod.relativePath,
+          arrayLocation: exported.arrayLocation,
+          iterateeRoot: candidate.iterateeRoot,
+          itemVar: candidate.itemVar,
+          entryCount: exported.entryCount,
+          iterateeChain: [],
+          keyProperty: candidate.keyProperty,
+        }
+        dataSource = mod.source
+        dataFile = mod.relativePath
+      } else {
+        resolution = {
+          ok: false,
+          reason:
+            `${resolution.reason} (${mod.relativePath}), but that file does not define ` +
+            `"${candidate.binding.importedName}" as a plain exported array literal`,
+        }
+      }
+    }
   }
 
   // Phase 4 (Vue only): if same-file resolution missed AND we have a page
@@ -268,9 +330,10 @@ export async function handleIterationEdit(
               iterateeRoot: "",
               iterateeChain: [],
               keyProperty: crossResult.keyProperty,
+              itemVar: crossResult.itemVar,
             }
-            resolvedSource = pageSource
-            resolvedFile = body.pageSourceFile
+            dataSource = pageSource
+            dataFile = body.pageSourceFile
           }
         }
       }
@@ -323,7 +386,7 @@ export async function handleIterationEdit(
             "../../../src/editor/edit-service/extract-jsx-interpolation-key.js"
           )
         ).extractJsxInterpolationKey({
-          source: resolvedSource,
+          source,
           line: body.templateLocation.line,
           column: body.templateLocation.column,
           itemVar,
@@ -333,7 +396,7 @@ export async function handleIterationEdit(
             "../../../src/editor/edit-service/extract-slot-interpolation-key.js"
           )
         ).extractSlotInterpolationKey({
-          source: resolvedSource,
+          source,
           line: body.templateLocation.line,
           column: body.templateLocation.column,
           itemVar,
@@ -416,8 +479,8 @@ export async function handleIterationEdit(
       } as const)
 
   const applyResult = applyIterationDataEditStatic({
-    source: resolvedSource,
-    file: resolvedFile,
+    source: dataSource,
+    file: dataFile,
     arrayLocation,
     matchers: [matcher],
     operation: operation as unknown as Parameters<
@@ -437,7 +500,7 @@ export async function handleIterationEdit(
   // the client's buffer code is uniform. The baseHash protects against
   // disk-changed-between-propose-and-save races (Phase E guard).
   const baseHash = createHash("sha256")
-    .update(resolvedSource, "utf8")
+    .update(dataSource, "utf8")
     .digest("hex")
   return {
     ok: true,
@@ -446,7 +509,7 @@ export async function handleIterationEdit(
       newSource: applyResult.source,
       explanation: `Iteration ${body.payload.operation}: row ${JSON.stringify(body.iterationContext.key)} via static resolver`,
       baseHash,
-      file: resolvedFile,
+      file: dataFile,
     },
     proposalId: randomUUID(),
   }
