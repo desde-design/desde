@@ -179,6 +179,17 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
     }
   }
 
+  /** Babel 1-based line / 0-based column of `marker`'s first character. */
+  function jsxLoc(src: string, marker: string): { line: number; column: number } {
+    const idx = src.indexOf(marker)
+    const before = src.slice(0, idx)
+    return { line: before.split("\n").length, column: idx - (before.lastIndexOf("\n") + 1) }
+  }
+
+  const OVERVIEW_TSX =
+    'import { METRICS } from "../data"\nexport default function Overview() {\n  return <ul>{METRICS.map((m) => <li key={m.id}>{m.name}</li>)}</ul>\n}\n'
+  const OVERVIEW_LI = jsxLoc(OVERVIEW_TSX, "<li")
+
   function iterationBody(
     overrides: Partial<LLMFallbackRequestBody> = {},
   ): LLMFallbackRequestBody {
@@ -205,10 +216,7 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
     // one Vue-only prompt. The prompt is now framework-agnostic and the
     // handler assembles a bundle instead of gating on extension, so a React
     // loop file is accepted like Vue is.
-    write(
-      "src/pages/overview.tsx",
-      'import { METRICS } from "../data"\nexport default function Overview() {\n  return <ul>{METRICS.map((m) => <li key={m.id}>{m.name}</li>)}</ul>\n}\n',
-    )
+    write("src/pages/overview.tsx", OVERVIEW_TSX)
     write("src/data.ts", 'export const METRICS = [{ id: 1, name: "a" }]\n')
 
     const r = await handleLLMFallback(
@@ -217,7 +225,7 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
         intent: {
           kind: "iteration-data",
           description: "Set the name of item 1",
-          templateLocation: { file: "src/pages/overview.tsx", line: 3, column: 20 },
+          templateLocation: { file: "src/pages/overview.tsx", ...OVERVIEW_LI },
           iterationContext: { source: "map" as const, key: 1, index: 0, siblingCount: 1, expression: "METRICS" },
           pageSourceFile: null,
           payload: { operation: "patch-text", value: "A2" },
@@ -237,11 +245,79 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
     expect(r.proposal?.file).toBe("src/data.ts")
   })
 
-  it("follows a re-export chain to the file with the array literal", async () => {
-    write(
-      "src/pages/overview.tsx",
-      'import { METRICS } from "../data"\nexport default function Overview() {\n  return <ul>{METRICS.map((m) => <li key={m.id}>{m.name}</li>)}</ul>\n}\n',
+  it("builds the chain from the loop in the file, not from the client's `expression` (codex round 1: a spoofed expression bundled an unrelated import)", async () => {
+    const overview =
+      'import { METRICS } from "../data"\nimport { href } from "../router"\nexport default function Overview() {\n  return <ul>{METRICS.map((m) => <li key={m.id}>{href(m.name)}</li>)}</ul>\n}\n'
+    write("src/pages/overview.tsx", overview)
+    write("src/data.ts", 'export const METRICS = [{ id: 1, name: "a" }]\n')
+    write("src/router.tsx", "export const href = (s: string) => s\n")
+
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: "src/pages/overview.tsx",
+        intent: {
+          kind: "iteration-data",
+          description: "Set the name of item 1",
+          templateLocation: { file: "src/pages/overview.tsx", ...jsxLoc(overview, "<li") },
+          // Points at ANOTHER import in the file. Must not admit router.tsx.
+          iterationContext: { source: "map" as const, key: 1, index: 0, siblingCount: 1, expression: "href" },
+          pageSourceFile: null,
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      loadersNaming("src/data.ts"),
     )
+    expect(r.status).toBe(200)
+    expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/pages/overview.tsx", "src/data.ts"])
+  })
+
+  it("builds the chain when the client sends `expression: null`, which the bridge always does for native-element loops", async () => {
+    write("src/pages/overview.tsx", OVERVIEW_TSX)
+    write("src/data.ts", 'export const METRICS = [{ id: 1, name: "a" }]\n')
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: "src/pages/overview.tsx",
+        intent: {
+          kind: "iteration-data",
+          description: "Set the name of item 1",
+          templateLocation: { file: "src/pages/overview.tsx", ...OVERVIEW_LI },
+          iterationContext: { source: "map" as const, key: 1, index: 0, siblingCount: 1, expression: null },
+          pageSourceFile: null,
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      loadersNaming("src/data.ts"),
+    )
+    expect(r.status).toBe(200)
+    expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/pages/overview.tsx", "src/data.ts"])
+  })
+
+  it("drops a page source file under node_modules (codex round 1: a dependency's .vue could be bundled and rewritten)", async () => {
+    write("src/Row.vue", '<script setup>\ndefineProps<{ rows: { id: number }[] }>()\n</script>\n<template>\n  <li v-for="r in rows" :key="r.id">{{ r.id }}</li>\n</template>\n')
+    write("node_modules/acme/Page.vue", "<template><Row :rows=\"[]\" /></template>\n")
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: "src/Row.vue",
+        intent: {
+          kind: "iteration-data",
+          description: "Set the text of row 1",
+          templateLocation: { file: "src/Row.vue", line: 5, column: 3 },
+          iterationContext: { source: "v-for" as const, key: 1, index: 0, siblingCount: 1, expression: null },
+          pageSourceFile: "node_modules/acme/Page.vue",
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      loadersNaming(),
+    )
+    expect(r.status).toBe(200)
+    expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/Row.vue"])
+  })
+
+  it("follows a re-export chain to the file with the array literal", async () => {
+    write("src/pages/overview.tsx", OVERVIEW_TSX)
     write("src/data.ts", 'export { METRICS } from "./metrics"\n')
     write("src/metrics.ts", 'export const METRICS = [{ id: 1, name: "a" }]\n')
 
@@ -251,7 +327,7 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
         intent: {
           kind: "iteration-data",
           description: "Set the name of item 1",
-          templateLocation: { file: "src/pages/overview.tsx", line: 3, column: 20 },
+          templateLocation: { file: "src/pages/overview.tsx", ...OVERVIEW_LI },
           iterationContext: { source: "map" as const, key: 1, index: 0, siblingCount: 1, expression: "METRICS" },
           pageSourceFile: null,
           payload: { operation: "patch-text", value: "A2" },
@@ -282,7 +358,7 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
         intent: {
           kind: "iteration-data",
           description: "Set the name of item 1",
-          templateLocation: { file: "src/pages/overview.tsx", line: 3, column: 20 },
+          templateLocation: { file: "src/pages/overview.tsx", ...OVERVIEW_LI },
           iterationContext: { source: "map" as const, key: 1, index: 0, siblingCount: 1, expression: "METRICS" },
           pageSourceFile: null,
           payload: { operation: "patch-text", value: "A2" },

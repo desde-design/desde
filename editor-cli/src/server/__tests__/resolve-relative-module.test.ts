@@ -116,7 +116,7 @@ describe("resolveRelativeModule", () => {
     const result = await resolveRelativeModule(join(dir, "src", "app.ts"), "./missing", root)
     expect(result.ok).toBe(false)
     if (result.ok) return
-    expect(result.reason).toContain("No file found")
+    expect(result.reason).toContain("file found for")
   })
 
   it("refuses a symlink inside root that points outside root", async () => {
@@ -132,5 +132,33 @@ describe("resolveRelativeModule", () => {
     } finally {
       rmSync(other, { recursive: true, force: true })
     }
+  })
+
+  it("never resolves a specifier written with a non-source extension, even when the file exists (codex round 1: package.json entered the model's bundle)", async () => {
+    mkdirSync(join(dir, "src", "hooks"), { recursive: true })
+    writeFileSync(join(dir, "package.json"), '{"name":"x"}\n', "utf8")
+    writeFileSync(join(dir, "src", "hooks", "use.ts"), "", "utf8")
+    const result = await resolveRelativeModule(join(dir, "src", "hooks", "use.ts"), "../../package.json", root)
+    expect(result.ok).toBe(false)
+  })
+
+  it("does not resolve to a .mjs or .js file: the overwrite lane cannot write those back", async () => {
+    mkdirSync(join(dir, "src"), { recursive: true })
+    writeFileSync(join(dir, "src", "setup.mjs"), "export const rows = []\n", "utf8")
+    writeFileSync(join(dir, "src", "data.js"), "export const rows = []\n", "utf8")
+    writeFileSync(join(dir, "src", "app.tsx"), "", "utf8")
+    expect((await resolveRelativeModule(join(dir, "src", "app.tsx"), "./setup.mjs", root)).ok).toBe(false)
+    expect((await resolveRelativeModule(join(dir, "src", "app.tsx"), "./data", root)).ok).toBe(false)
+    expect((await resolveRelativeModule(join(dir, "src", "app.tsx"), "./data.js", root)).ok).toBe(false)
+  })
+
+  it("refuses a .ts symlink whose real target is not a source file", async () => {
+    mkdirSync(join(dir, "src"), { recursive: true })
+    writeFileSync(join(dir, "src", "rows.json"), "[]\n", "utf8")
+    symlinkSync(join(dir, "src", "rows.json"), join(dir, "src", "rows.ts"))
+    writeFileSync(join(dir, "src", "app.tsx"), "", "utf8")
+    const result = await resolveRelativeModule(join(dir, "src", "app.tsx"), "./rows", root)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain("not .ts, .tsx or .jsx")
   })
 })

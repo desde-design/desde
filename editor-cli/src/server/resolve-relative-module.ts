@@ -12,10 +12,11 @@
  *   - Only relative specifiers. A bare specifier is a dependency and is
  *     never followed (the caller filters these before calling, but this
  *     refuses too so a stray call cannot walk into `node_modules`).
- *   - Tries the specifier as written, then with each source extension, then
- *     as a directory index. `.js`/`.jsx` specifiers that point at `.ts`/`.tsx`
- *     files (the ESM-with-TS convention) are handled by stripping the
- *     extension before retrying.
+ *   - Tries the specifier as written (only if it already ends in a resolvable
+ *     extension), then with each resolvable extension, then as a directory
+ *     index. `.js`/`.jsx` specifiers that point at `.ts`/`.tsx` files (the
+ *     ESM-with-TS convention) are handled by stripping the extension before
+ *     retrying. See `RESOLVABLE_EXTENSIONS` for why `.js` itself is out.
  *   - The lexical candidate AND the realpath must both sit inside the root.
  *     A path with a `node_modules` segment is refused even inside the root.
  */
@@ -28,7 +29,20 @@ import {
   type ResolvedRoot,
 } from "./resolve-editable-path"
 
-const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"] as const
+/**
+ * The only files this resolver will hand back. It is the intersection of
+ * "where a data module lives" and "what the overwrite lane will write back"
+ * (`edit-extension-gate.ts` admits `.vue`, `.ts`, `.tsx`, `.jsx`; a data
+ * module is never `.vue`). `.js` / `.mjs` / `.cjs` / `.mts` are NOT here on
+ * purpose: `vite.config.js` is a `.js` file, and a proposal naming a file the
+ * write lane refuses is a success that fails on Save. Codex round 1 also
+ * showed the as-written candidate admitting `package.json` into the model's
+ * bundle; every candidate now has to end in one of these.
+ */
+const RESOLVABLE_EXTENSIONS = [".ts", ".tsx", ".jsx"] as const
+/** Extensions a specifier may be WRITTEN with and still point at a resolvable
+ *  file (`./data.js` → `data.ts` is the ESM-with-TS convention). */
+const STRIPPABLE_EXTENSIONS = [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts"] as const
 
 export type ResolveRelativeModuleResult =
   | {
@@ -57,17 +71,24 @@ async function isFile(p: string): Promise<boolean> {
   }
 }
 
-/** Candidate file paths for a specifier, in bundler order. */
+function hasResolvableExtension(p: string): boolean {
+  return RESOLVABLE_EXTENSIONS.some((ext) => p.endsWith(ext))
+}
+
+/** Candidate file paths for a specifier, in bundler order. Every entry ends
+ *  in a resolvable extension; a specifier written with any other extension
+ *  (`./rows.json`, `./setup.mjs`) is never tried as-is. */
 function candidatePaths(base: string): string[] {
-  const out: string[] = [base]
-  for (const ext of SOURCE_EXTENSIONS) out.push(base + ext)
-  const known = SOURCE_EXTENSIONS.find((ext) => base.endsWith(ext))
-  if (known) {
+  const out: string[] = []
+  if (hasResolvableExtension(base)) out.push(base)
+  for (const ext of RESOLVABLE_EXTENSIONS) out.push(base + ext)
+  const written = STRIPPABLE_EXTENSIONS.find((ext) => base.endsWith(ext))
+  if (written) {
     // `./rows.js` written against a `rows.ts` on disk.
-    const stem = base.slice(0, -known.length)
-    for (const ext of SOURCE_EXTENSIONS) out.push(stem + ext)
+    const stem = base.slice(0, -written.length)
+    for (const ext of RESOLVABLE_EXTENSIONS) out.push(stem + ext)
   }
-  for (const ext of SOURCE_EXTENSIONS) out.push(path.join(base, "index" + ext))
+  for (const ext of RESOLVABLE_EXTENSIONS) out.push(path.join(base, "index" + ext))
   return out
 }
 
@@ -100,6 +121,11 @@ export async function resolveRelativeModule(
     if (hasNodeModulesSegment(real.targetPath)) {
       return { ok: false, reason: `"${specifier}" resolves into node_modules` }
     }
+    if (!hasResolvableExtension(real.targetPath)) {
+      // A `data.ts` symlink whose target is `data.json`: the bytes are not
+      // a module the write lane accepts.
+      return { ok: false, reason: `"${specifier}" resolves to a file that is not .ts, .tsx or .jsx` }
+    }
     let source: string
     try {
       source = await fs.readFile(real.targetPath, "utf8")
@@ -113,5 +139,8 @@ export async function resolveRelativeModule(
       source,
     }
   }
-  return { ok: false, reason: `No file found for "${specifier}" next to ${path.basename(fromFile)}` }
+  return {
+    ok: false,
+    reason: `No .ts, .tsx or .jsx file found for "${specifier}" next to ${path.basename(fromFile)}`,
+  }
 }

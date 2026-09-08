@@ -190,8 +190,14 @@ async function readBundleFile(
 ): Promise<IterationDataPromptFile | null> {
   const candidate = resolveCandidateWithinRoot(relativePath, root)
   if (!candidate.ok || !isRepairableSource(candidate.candidate)) return null
+  if (hasNodeModulesSegment(candidate.candidate)) return null
   const real = await resolveRealpathWithinRoot(candidate.candidate, root)
   if (!real.ok || !isRepairableSource(real.targetPath)) return null
+  // A dependency is never a page, and never a legal rewrite target. The
+  // import chain refuses node_modules in `resolveRelativeModule`; the page
+  // hint has to refuse it here or a hand-built request could bundle a
+  // package's `.vue` and have the model rewrite it (codex round 1).
+  if (hasNodeModulesSegment(real.targetPath)) return null
   try {
     return {
       path: path.relative(root.rootReal, real.targetPath).split(path.sep).join("/"),
@@ -202,12 +208,38 @@ async function readBundleFile(
   }
 }
 
-/** `collection.items[0]` → `collection`; null when the expression has no
- *  leading identifier (a literal, a call, unknown). */
-function rootIdentifierOf(expression: string | null | undefined): string | null {
-  if (!expression) return null
-  const m = /^\s*([A-Za-z_$][\w$]*)/.exec(expression)
-  return m ? m[1] : null
+function hasNodeModulesSegment(p: string): boolean {
+  return p.split(path.sep).includes("node_modules")
+}
+
+/**
+ * The name of the list the loop iterates, read from the LOOP FILE at the
+ * template location by the same resolver the deterministic lane uses. This
+ * is deliberately not `intent.iterationContext.expression`: the bridge sends
+ * that as null for every native-element loop (`tracer-attribution.ts`), so a
+ * chain keyed on it would never be built in real use, and a hand-built
+ * request could set it to any other import in the file and have that file
+ * bundled as a rewrite target (codex round 1, both). Null when the loop
+ * itself cannot be found: the bundle is then just the loop file (and page).
+ */
+async function iterateeRootOfLoop(
+  relativePath: string,
+  source: string,
+  templateLocation: { line: number; column: number },
+): Promise<string | null> {
+  const isJsx = relativePath.endsWith(".tsx") || relativePath.endsWith(".jsx")
+  if (isJsx) {
+    const { resolveIterationDataJsxSameFile } = await import(
+      "../../../src/editor/edit-service/resolve-iteration-data-jsx.js"
+    )
+    const r = resolveIterationDataJsxSameFile({ source, templateLocation })
+    return r.iterateeRoot ?? null
+  }
+  const { resolveIterationDataVueSameFile } = await import(
+    "../../../src/editor/edit-service/resolve-iteration-data-vue.js"
+  )
+  const r = resolveIterationDataVueSameFile({ source, templateLocation })
+  return r.iterateeRoot ?? null
 }
 
 export async function handleLLMFallback(
@@ -323,7 +355,11 @@ export async function handleLLMFallback(
       addFile(await readBundleFile(intent.pageSourceFile, rootResolution))
     }
 
-    const iterateeRoot = rootIdentifierOf(intent.iterationContext.expression)
+    const iterateeRoot = await iterateeRootOfLoop(
+      resolvedRelPath,
+      source,
+      intent.templateLocation,
+    )
     if (iterateeRoot) {
       const [{ collectImportChain }, { moduleSourceOfFile }] = await Promise.all([
         import("../../../src/editor/edit-service/import-binding.js"),

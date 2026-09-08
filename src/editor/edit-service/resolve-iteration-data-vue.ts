@@ -61,6 +61,12 @@ export type ResolveResult =
        * deterministic path. See `import-binding.ts`.
        */
       importCandidate?: IterateeImportCandidate
+      /**
+       * The list's name, when the loop was found but its data was not. The
+       * AI lane builds its file bundle from THIS, never from the client's
+       * `iterationContext.expression`. See the JSX sibling.
+       */
+      iterateeRoot?: string
     }
 
 /**
@@ -393,6 +399,7 @@ export function resolveIterationDataVueSameFile(
       reason:
         `v-for iteratee "${iteratee.root}.${iteratee.chain.join('.')}" uses property access; ` +
         `only a plain list name can be traced here`,
+      iterateeRoot: iteratee.root,
     }
   }
   const keyProperty = extractKeyProperty(match.keyExpression, iteratee.itemVar)
@@ -400,7 +407,11 @@ export function resolveIterationDataVueSameFile(
   // 2. Parse the script block + find the iteratee root's declaration.
   const scriptInfo = getScriptBlock(input.source)
   if (!scriptInfo) {
-    return { ok: false, reason: 'SFC has no <script> block: iteratee is not local' }
+    return {
+      ok: false,
+      reason: 'SFC has no <script> block: iteratee is not local',
+      iterateeRoot: iteratee.root,
+    }
   }
   let ast: File
   try {
@@ -410,7 +421,11 @@ export function resolveIterationDataVueSameFile(
       allowReturnOutsideFunction: true,
     }) as unknown as File
   } catch (err) {
-    return { ok: false, reason: `Script parse failed: ${(err as Error).message}` }
+    return {
+      ok: false,
+      reason: `Script parse failed: ${(err as Error).message}`,
+      iterateeRoot: iteratee.root,
+    }
   }
 
   const arrayPos = findArrayDeclaration(ast, iteratee.root)
@@ -423,6 +438,7 @@ export function resolveIterationDataVueSameFile(
       return {
         ok: false,
         reason: `"${iteratee.root}" is imported from ${binding.specifier}: the list's data lives in another file`,
+        iterateeRoot: iteratee.root,
         importCandidate: {
           iterateeRoot: iteratee.root,
           itemVar: iteratee.itemVar,
@@ -434,6 +450,7 @@ export function resolveIterationDataVueSameFile(
     return {
       ok: false,
       reason: `Could not find an array literal for "${iteratee.root}" in this file: its data may come from a parent component`,
+      iterateeRoot: iteratee.root,
     }
   }
 

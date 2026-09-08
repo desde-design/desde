@@ -8,8 +8,13 @@
  * server), its own reason is the whole story.
  */
 
-import { describe, expect, it } from 'vitest'
-import { composeRefusalReason } from './iteration-fallback'
+import { describe, expect, it, vi } from 'vitest'
+import { composeRefusalReason, requestIterationProposal } from './iteration-fallback'
+
+const editorFetchMock = vi.fn()
+vi.mock('@/lib/editor-fetch', () => ({
+  editorFetch: (...args: unknown[]) => editorFetchMock(...args),
+}))
 
 describe('composeRefusalReason', () => {
   it('appends the LLM reason to the static reason when the AI lane never ran', () => {
@@ -51,5 +56,30 @@ describe('composeRefusalReason', () => {
       llmKind: undefined,
     })
     expect(reason).toBe('HTTP 500')
+  })
+})
+
+describe('requestIterationProposal', () => {
+  it('keeps the deterministic reason when the AI lane request itself fails (codex round 1: "Network error" alone)', async () => {
+    editorFetchMock.mockReset()
+    editorFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/editor/edit-iteration') {
+        return { status: 422, ok: false, json: async () => ({ reason: 'METRICS is imported from ../data but is not a plain array' }) }
+      }
+      throw new Error('socket closed')
+    })
+    const result = await requestIterationProposal({
+      editKind: 'dom-text',
+      templateLocation: { file: 'src/pages/overview.tsx', line: 3, column: 20 },
+      iterationContext: { source: 'map', key: 1, index: 0, siblingCount: 1, expression: null },
+      pageSourceFile: null,
+      payload: { operation: 'patch-text', value: 'x' },
+      description: 'Set the text of row 1',
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe(
+      'METRICS is imported from ../data but is not a plain array. The AI fallback could not run: Network error: socket closed',
+    )
   })
 })

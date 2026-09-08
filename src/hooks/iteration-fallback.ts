@@ -128,9 +128,14 @@ export async function requestIterationProposal(
       body: JSON.stringify({ file, intent }),
     })
   } catch (err) {
-    const reason = (err as Error).message
+    // The AI lane never ran, so the deterministic reason still leads.
+    const reason = composeRefusalReason({
+      staticReason,
+      llmReason: `Network error: ${(err as Error).message}`,
+      llmKind: "unavailable",
+    })
     logTelemetry({ ...args, source: "llm", outcome: "network-error", reason })
-    return { ok: false, reason: `Network error: ${reason}` }
+    return { ok: false, reason }
   }
 
   let body: {

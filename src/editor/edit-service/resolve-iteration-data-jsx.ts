@@ -58,6 +58,13 @@ export type ResolveIterationDataJsxResult =
        * deterministic path. See `import-binding.ts`.
        */
       importCandidate?: IterateeImportCandidate
+      /**
+       * The list's name, when the loop was found but its data was not. The
+       * AI lane builds its file bundle from THIS, never from the client's
+       * `iterationContext.expression` (which the bridge sends as null, and
+       * which a hand-built request could point at any other import).
+       */
+      iterateeRoot?: string
     }
 
 interface BabelNode {
@@ -141,6 +148,7 @@ export function resolveIterationDataJsxSameFile(
     return {
       ok: false,
       reason: `\`${iterateeRoot}\` is a prop or parameter here, so its data is defined by the caller, not in this file`,
+      iterateeRoot,
     }
   }
 
@@ -167,6 +175,7 @@ export function resolveIterationDataJsxSameFile(
       return {
         ok: false,
         reason: `\`${iterateeRoot}\` is imported from ${binding.specifier}: the list's data lives in another file`,
+        iterateeRoot,
         importCandidate: {
           iterateeRoot,
           itemVar: itemVar ?? undefined,
@@ -178,6 +187,7 @@ export function resolveIterationDataJsxSameFile(
     return {
       ok: false,
       reason: `Couldn't trace \`${iterateeRoot}\` to an array literal in this file: it may be a prop, fetched data, or a store value`,
+      iterateeRoot,
     }
   }
 
