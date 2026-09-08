@@ -169,6 +169,19 @@ describe("SegmentedToggle — stacked", () => {
     for (const cls of classes) expect(cls).not.toMatch(/!(\s|$)/)
   })
 
+  it("captions at the 8px step, touching the icon", () => {
+    // `text-3xs` exists for this caption and nothing else; see the ramp in
+    // globals.css. The gate is the list's size, so it is asserted on the
+    // trigger's class list rather than on a computed style jsdom cannot give.
+    render(
+      <SegmentedToggle value="navigate" options={TOOLS} onChange={() => {}} ariaLabel="Tool" variant="plain" stacked />,
+    )
+    const cls = screen.getAllByRole("tab")[0].className
+    expect(cls).toContain("group-data-[size=stacked]/tabs-list:text-3xs")
+    expect(cls).toContain("group-data-[size=stacked]/tabs-list:gap-0 ")
+    expect(cls).not.toContain("group-data-[size=stacked]/tabs-list:text-2xs")
+  })
+
   it("stays on the default size when not stacked", () => {
     render(<SegmentedToggle value="editor" options={VIEW_OPTIONS} onChange={() => {}} ariaLabel="View" />)
     expect(screen.getByRole("tablist").getAttribute("data-size")).toBe("default")

@@ -200,7 +200,11 @@ export function EditorToolbar({
       // with a three-quarter lift, straddling a border the nav no longer
       // has; two earlier attempts today put it 50px down, first as margin
       // on top of that anchor, then as the offset itself, both too low.
-      className="absolute left-1/2 top-2.5 z-[60] flex -translate-x-1/2 items-center gap-1 rounded-md border bg-card p-1 shadow-xs"
+      //
+      // `p-0.5`, down from `p-1` (Mo, 2026-09-08: "smaller padding for the
+      // toolbar container"), in the same pass that tightened the picker's
+      // own padding and dropped its labels to 8px.
+      className="absolute left-1/2 top-2.5 z-[60] flex -translate-x-1/2 items-center gap-1 rounded-md border bg-card p-0.5 shadow-xs"
       data-testid="editor-toolbar"
     >
       {/* The tool picker. Navigate = clicks drive the prototype. Select =
@@ -242,7 +246,7 @@ export function EditorToolbar({
         // `self-stretch`, no fixed height (Mo, 2026-09-08: "full height of
         // the button area"). The pill centres its items, so the rule
         // stretches to the pill's content box, which the two-line picker
-        // sets; the pill's own `p-1` is its inset from the border. It
+        // sets; the pill's own padding is its inset from the border. It
         // carried `h-5` from when the picker was one line tall, and stayed
         // 20px when the picker grew to two on 2026-09-06.
         <div className="mx-1.5 w-px shrink-0 self-stretch bg-foreground/15" />

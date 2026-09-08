@@ -69,9 +69,11 @@ const tabsListVariants = cva(
         sm: "rounded-md p-[3px] group-data-horizontal/tabs:h-6.5",
         /**
          * `stacked` puts each trigger's icon ABOVE its label, with the label
-         * at the type scale's floor (`text-2xs`). For a strip whose labels
-         * read as wide side-by-side text in chrome this thin: the editor
-         * toolbar's tool picker (Mo, 2026-09-06).
+         * at `text-3xs`: 8px, the caption step that exists for exactly this
+         * (Mo, 2026-09-08, after a day at `2xs`: "I wanted the 8px for the
+         * button text ... no gap, smaller padding around the buttons"). For
+         * a strip whose labels read as wide side-by-side text in chrome this
+         * thin: the editor toolbar's tool picker (Mo, 2026-09-06).
          *
          * No fixed height, and `items-stretch` rather than `items-center`:
          * the strip is two lines tall and sizes to its triggers, which is
@@ -85,7 +87,7 @@ const tabsListVariants = cva(
          * 2026-09-08, forcing its way past the default size's classes with
          * a trailing `!`. Being a size, exactly one set applies.
          */
-        stacked: "rounded-md p-1 gap-0.5 items-stretch",
+        stacked: "rounded-md p-0.5 gap-0.5 items-stretch",
       },
     },
     defaultVariants: {
@@ -129,10 +131,10 @@ function TabsTrigger({
         // `sm` is text-sm with size-3 icons. The pill's own height comes
         // from the list; see that size variant's doc comment.
         "group-data-[size=sm]/tabs-list:h-[calc(100%-1px)] group-data-[size=sm]/tabs-list:gap-1 group-data-[size=sm]/tabs-list:rounded-sm group-data-[size=sm]/tabs-list:px-2 group-data-[size=sm]/tabs-list:text-sm group-data-[size=sm]/tabs-list:[&_svg:not([class*='size-'])]:size-3",
-        // `stacked` is icon over label at the type scale's floor, with no
-        // `leading-*`: `text-2xs` carries its own line-height. See the list
-        // size's doc comment for why it has no height.
-        "group-data-[size=stacked]/tabs-list:flex-col group-data-[size=stacked]/tabs-list:gap-0.5 group-data-[size=stacked]/tabs-list:rounded-md group-data-[size=stacked]/tabs-list:px-1.5 group-data-[size=stacked]/tabs-list:py-1.5 group-data-[size=stacked]/tabs-list:text-2xs group-data-[size=stacked]/tabs-list:[&_svg:not([class*='size-'])]:size-3",
+        // `stacked` is icon over an 8px caption, touching (`gap-0`), in a
+        // 4px inset. No `leading-*`: `text-3xs` carries its own line-height.
+        // See the list size's doc comment for why it has no height.
+        "group-data-[size=stacked]/tabs-list:flex-col group-data-[size=stacked]/tabs-list:gap-0 group-data-[size=stacked]/tabs-list:rounded-md group-data-[size=stacked]/tabs-list:px-1 group-data-[size=stacked]/tabs-list:py-1 group-data-[size=stacked]/tabs-list:text-3xs group-data-[size=stacked]/tabs-list:[&_svg:not([class*='size-'])]:size-3",
         "group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:data-active:bg-transparent dark:group-data-[variant=line]/tabs-list:data-active:border-transparent dark:group-data-[variant=line]/tabs-list:data-active:bg-transparent",
         "data-active:bg-background data-active:text-foreground dark:data-active:border-input dark:data-active:bg-input/30 dark:data-active:text-foreground",
         "after:absolute after:bg-foreground after:opacity-0 after:transition-opacity group-data-horizontal/tabs:after:inset-x-0 group-data-horizontal/tabs:after:bottom-[-5px] group-data-horizontal/tabs:after:h-0.5 group-data-vertical/tabs:after:inset-y-0 group-data-vertical/tabs:after:-right-1 group-data-vertical/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-active:after:opacity-100",
