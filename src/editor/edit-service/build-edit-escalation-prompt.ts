@@ -199,3 +199,92 @@ export function buildPropEditEscalationPrompt(edit: EscalationPropEdit): string 
     "The current value is bound to a variable, prop, or computed expression — please trace the binding (possibly across files) and edit the source so the rendered value matches. Preserve the value's type (the requested change above tells you if it's a string, number, or boolean). Ask me if the intent is ambiguous.",
   ].join("\n")
 }
+
+/**
+ * First line of every message the Editor writes on the user's behalf when a
+ * direct edit is handed to chat. The system prompt's hand-off block keys on
+ * it, so the agent knows the message was composed by the tool from a click,
+ * not typed. Keep the two in sync.
+ */
+export const EDIT_HANDOFF_MARKER = "Hand-off from a direct edit."
+
+export interface StructuralEditHandoff {
+  /** "Delete", "Move", "Swap", "Detach", "Insert", "Unwrap", "Flatten conditional". */
+  kindLabel: string
+  componentName?: string | null
+  tagName?: string | null
+  selector: string
+  location: { file: string; line: number; column: number }
+  /** Delete only. `definition` means the position is in the element's own component file. */
+  scope?: "definition" | "callsite" | null
+  /** The deterministic applicator's refusal, verbatim. */
+  reason: string
+}
+
+function elementLabel(h: { componentName?: string | null; tagName?: string | null }): string {
+  if (h.componentName) return `<${h.componentName}>`
+  if (h.tagName) return `<${h.tagName}>`
+  return "the element"
+}
+
+function locationLabel(l: { file: string; line: number; column: number }): string {
+  return `${l.file}:${l.line}:${l.column}`
+}
+
+/**
+ * A structural edit (delete, move, swap, ...) that the deterministic lane
+ * refused. Used to become a one-file LLM rewrite nobody could see; now it is
+ * a chat turn the user watches, in a session of its own.
+ */
+export function buildStructuralEditHandoffPrompt(h: StructuralEditHandoff): string {
+  const scopeLine =
+    h.scope === "definition"
+      ? " (scope: definition, the component's own file)"
+      : h.scope === "callsite"
+        ? " (scope: this usage only)"
+        : ""
+  return [
+    EDIT_HANDOFF_MARKER,
+    "",
+    `I tried to ${h.kindLabel.toLowerCase()} an element by direct manipulation and the deterministic edit refused.`,
+    "",
+    `- What I did: ${h.kindLabel} ${elementLabel(h)} (selector: ${h.selector})`,
+    `- Source position: ${locationLabel(h.location)}${scopeLine}`,
+    `- Why it refused: ${h.reason}`,
+    "",
+    "Before changing anything, read the file at that position and work out what the element is in source. If it is the root of a component, deleting or moving it there would change the component itself; find where the component is used instead and ask me which usages to change. If more than one reasonable edit fits what I did, ask me before editing. Keep the change minimal and tell me which files you changed.",
+  ].join("\n")
+}
+
+export interface AmbiguousIterationHandoff {
+  /** Lower-case verb phrase: "delete the element", "set the prop `size` to \"lg\"". */
+  requested: string
+  componentName?: string | null
+  tagName?: string | null
+  selector: string
+  location: { file: string; line: number; column: number }
+  /** 0-based position among the look-alikes the bridge counted. */
+  index: number
+  siblingCount: number
+  /** The server's reason for finding no loop at the position. */
+  noLoopReason: string
+}
+
+/**
+ * The bridge saw N elements sharing one source line and called it a loop;
+ * source has no loop there. Usually one component used N times. The agent
+ * can read the usages and ask; the "this item or all items" dialog cannot.
+ */
+export function buildAmbiguousIterationHandoffPrompt(h: AmbiguousIterationHandoff): string {
+  return [
+    EDIT_HANDOFF_MARKER,
+    "",
+    `I tried to ${h.requested} by direct manipulation. The page shows ${h.siblingCount} elements that come from the same source line, so the Editor could not tell whether I meant this one or all of them, and there is no loop at that line in source.`,
+    "",
+    `- What I did: ${h.requested} on ${elementLabel(h)} (selector: ${h.selector}), item ${h.index + 1} of ${h.siblingCount}`,
+    `- Source position: ${locationLabel(h.location)}`,
+    `- Loop check: ${h.noLoopReason}`,
+    "",
+    "Work out from source why several elements share that line (usually one component used several times). Then ask me whether to change this one instance, all of them, or a subset, naming where each is used. Do not edit until I answer. Keep the change minimal and tell me which files you changed.",
+  ].join("\n")
+}

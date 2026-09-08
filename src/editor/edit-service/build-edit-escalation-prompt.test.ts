@@ -4,6 +4,9 @@ import {
   buildPropEditEscalationPrompt,
   buildCommentFixPrompt,
   decodeCommentMentions,
+  EDIT_HANDOFF_MARKER,
+  buildAmbiguousIterationHandoffPrompt,
+  buildStructuralEditHandoffPrompt,
   type EscalationMutation,
 } from "./build-edit-escalation-prompt"
 
@@ -183,5 +186,58 @@ describe("buildCommentFixPrompt", () => {
     expect(prompt).toContain("Start from src/pages/Home.vue:42")
     // The screenshot hint is replaced by the stronger source anchor.
     expect(prompt).not.toContain("capture_screenshot")
+  })
+})
+
+describe("buildStructuralEditHandoffPrompt", () => {
+  it("opens with the marker and carries what, where, and why", () => {
+    const p = buildStructuralEditHandoffPrompt({
+      kindLabel: "Delete",
+      tagName: "div",
+      selector: "body > main > div",
+      location: { file: "src/components/ui/card.tsx", line: 60, column: 4 },
+      scope: "definition",
+      reason: "Refusing to delete a root or expression-embedded JSX element",
+    })
+    expect(p.startsWith(`${EDIT_HANDOFF_MARKER}\n`)).toBe(true)
+    expect(p).toContain("Delete <div>")
+    expect(p).toContain("src/components/ui/card.tsx:60:4")
+    expect(p).toContain("the component's own file")
+    expect(p).toContain("Refusing to delete a root")
+    expect(p).toContain("ask me")
+    expect(p).not.toMatch(/—/) // no em dashes in copy
+  })
+
+  it("names the component when it has one and omits the scope line when there is none", () => {
+    const p = buildStructuralEditHandoffPrompt({
+      kindLabel: "Move",
+      componentName: "KButton",
+      selector: "a.button",
+      location: { file: "src/App.vue", line: 5, column: 3 },
+      reason: "cycle detected",
+    })
+    expect(p).toContain("Move <KButton>")
+    expect(p).not.toContain("scope:")
+  })
+})
+
+describe("buildAmbiguousIterationHandoffPrompt", () => {
+  it("explains the look-alikes, the missing loop, and asks for a decision before any edit", () => {
+    const p = buildAmbiguousIterationHandoffPrompt({
+      requested: "delete the element",
+      tagName: "div",
+      selector: "body > main > div",
+      location: { file: "src/components/ui/card.tsx", line: 60, column: 4 },
+      index: 0,
+      siblingCount: 4,
+      noLoopReason: "This element is not rendered by a `.map()` call",
+    })
+    expect(p.startsWith(`${EDIT_HANDOFF_MARKER}\n`)).toBe(true)
+    expect(p).toContain("4 elements")
+    expect(p).toContain("item 1 of 4")
+    expect(p).toContain("src/components/ui/card.tsx:60:4")
+    expect(p).toContain("not rendered by a `.map()` call")
+    expect(p).toContain("Do not edit until I answer")
+    expect(p).not.toMatch(/—/)
   })
 })

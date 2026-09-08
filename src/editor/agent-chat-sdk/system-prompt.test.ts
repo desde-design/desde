@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import type { ProjectKnowledge } from '../core/project-knowledge'
+import { EDIT_HANDOFF_MARKER } from '../edit-service/build-edit-escalation-prompt'
 import {
   buildSdkSystemPrompt,
   CONTEXT_ENVELOPE_BLOCK,
@@ -338,5 +339,14 @@ describe('VERIFY_EDITS_BLOCK no longer promises worktree commits', () => {
   it('says backups, not worktree commits', () => {
     expect(VERIFY_EDITS_BLOCK).not.toMatch(/worktree commit/i)
     expect(VERIFY_EDITS_BLOCK).toMatch(/backup/i)
+  })
+})
+
+describe('EDIT_HANDOFF_BLOCK', () => {
+  it('is part of the always-on append prompt and names the marker line', () => {
+    const prompt = buildSdkSystemPrompt()
+    expect(prompt).toContain('# Hand-offs from direct edits')
+    expect(prompt).toContain(EDIT_HANDOFF_MARKER)
+    expect(prompt).toContain('mcp__editor__ask_user_question')
   })
 })

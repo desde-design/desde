@@ -27,6 +27,7 @@
  */
 
 import type { ProjectKnowledge } from '../core/project-knowledge'
+import { EDIT_HANDOFF_MARKER } from '../edit-service/build-edit-escalation-prompt'
 import {
   PROJECT_KNOWLEDGE_GUIDANCE,
   renderProjectKnowledgeBlock,
@@ -185,6 +186,23 @@ export const WORKING_STYLE_BLOCK = `# Working style for design tooling
 7. If you're uncertain, say so rather than confabulating component names or props that may not exist.
 8. Match the prototype's framework. Call \`mcp__editor__get_page_info\` if unsure — it reports the framework (\`vue\` / \`react\`). On a React/JSX prototype, edit \`.tsx\`/\`.jsx\` source directly with Edit/Write: the deterministic component tools (\`propose_prop_edit\`, \`insert_component\`, \`insert_element\`, \`scaffold_route\`) are implemented for Vue SFCs and will refuse on JSX — that's expected, fall back to Edit/Write rather than retrying them. Read/selection/navigation/verification/screenshot tools work the same across both frameworks.`
 
+/**
+ * How to treat a turn the Editor composed from a click. Keyed on the marker
+ * line the prompt builders emit (`EDIT_HANDOFF_MARKER`). Written for the
+ * 2026-09-08 incident: a definition-scope delete of a component's root was
+ * refused deterministically and a one-file LLM rewrite then removed the wrong
+ * function. The agent has the whole repo and can ask; the rewrite had neither.
+ */
+export const EDIT_HANDOFF_BLOCK = `# Hand-offs from direct edits
+
+A user message whose first line is "${EDIT_HANDOFF_MARKER}" was written by the Editor, not typed by the user. The user clicked something in the prototype (a delete, a move, a prop or text change), and the deterministic edit either refused or could not tell what they meant. The message carries the selector, the source position, and either the refusal or the ambiguity.
+
+Rules for these turns:
+1. Verify the premise in source before editing. Read the file at the given position. The Editor's classification is a hint; the code is the truth.
+2. If the position is the root element of a component, do not delete or empty that component to satisfy the edit. Find the component's usages (search the repo for \`<ComponentName\`) and ask which ones to change with mcp__editor__ask_user_question, unless there is exactly one usage.
+3. If more than one reasonable edit fits what the user did, ask before editing. One short question with concrete options beats a guess.
+4. Make the smallest edit that does what the user did, verify it as usual, and say which files changed.`
+
 /** The bounded verify-then-correct loop. Same discipline on both lanes. */
 export const VERIFY_EDITS_BLOCK = `# Verify your edits (close the loop)
 
@@ -227,6 +245,7 @@ export const EDITOR_APPEND_PROMPT = [
   CONTEXT_ENVELOPE_BLOCK,
   SDK_STEERING_BLOCK,
   WORKING_STYLE_BLOCK,
+  EDIT_HANDOFF_BLOCK,
   VERIFY_EDITS_BLOCK,
 ].join('\n\n')
 
