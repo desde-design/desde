@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest"
 
 import {
   AUTH_REAUTH_MESSAGE,
+  AUTH_REAUTH_SUBSCRIPTION_MESSAGE,
+  resolveReauthMessage,
   classifyTurnError,
   extractRetryAfterFromError,
   isAuthError,
@@ -271,11 +273,65 @@ describe('classifyTurnError — provider error patterns', () => {
     expect(result.retryAfterSeconds).toBe(12)
   })
 
-  it('still uses the Anthropic copy for the Anthropic descriptor', () => {
-    const result = classifyTurnError('Failed to authenticate. API Error: 401', {
-      errorPatterns: ANTHROPIC_DESCRIPTOR.errorPatterns,
+  describe('Anthropic copy follows how the turn was credentialed', () => {
+    // The `claude` binary answers a 401 with the same string whether it was
+    // handed a dead API key or a signed-out subscription login. Only the
+    // environment can tell those apart, and the two remediations are
+    // different people's jobs: the key is replaced from the settings gear,
+    // the login is repaired in a terminal. A message that named both sent
+    // a dev-mode user to the settings gear for a key they never had.
+    const raw = 'Failed to authenticate: OAuth session expired and could not be refreshed'
+
+    it('sends a key-mode turn to the settings gear, not to /login', () => {
+      const result = classifyTurnError(raw, {
+        errorPatterns: ANTHROPIC_DESCRIPTOR.errorPatterns,
+        env: { ANTHROPIC_API_KEY: 'sk-ant-live' },
+      })
+      expect(result.message).toBe(AUTH_REAUTH_MESSAGE)
+      expect(result.message).not.toContain('/login')
     })
-    expect(result.message).toBe(AUTH_REAUTH_MESSAGE)
+
+    it('sends a subscription-mode turn to `claude` then /login', () => {
+      // Dev mode reaches here as exactly this environment: the opt-in flag
+      // set and the key variable deleted (`applyLlmCredentialsToEnv`).
+      const result = classifyTurnError(raw, {
+        errorPatterns: ANTHROPIC_DESCRIPTOR.errorPatterns,
+        env: { EDITOR_USE_CLAUDE_SUBSCRIPTION: '1' },
+      })
+      expect(result.message).toBe(AUTH_REAUTH_SUBSCRIPTION_MESSAGE)
+      expect(result.message).toContain('/login')
+      expect(result.message).not.toContain('settings gear')
+    })
+
+    it('treats an exported key as key mode even when the opt-in flag is also set', () => {
+      // The spawned `claude` reads `ANTHROPIC_API_KEY` on its own, so with
+      // both present the key is what the vendor rejected.
+      const result = classifyTurnError(raw, {
+        errorPatterns: ANTHROPIC_DESCRIPTOR.errorPatterns,
+        env: { EDITOR_USE_CLAUDE_SUBSCRIPTION: '1', ANTHROPIC_API_KEY: 'sk-ant-live' },
+      })
+      expect(result.message).toBe(AUTH_REAUTH_MESSAGE)
+    })
+
+    it('falls back to key mode with neither, which the credential gate makes unreachable', () => {
+      const result = classifyTurnError(raw, {
+        errorPatterns: ANTHROPIC_DESCRIPTOR.errorPatterns,
+        env: {},
+      })
+      expect(result.message).toBe(AUTH_REAUTH_MESSAGE)
+    })
+  })
+
+  it('resolveReauthMessage answers a plain string and a function alike', () => {
+    expect(resolveReauthMessage(OPENAI_DESCRIPTOR.errorPatterns, {})).toBe(
+      OPENAI_DESCRIPTOR.errorPatterns!.reauthMessage,
+    )
+    expect(
+      resolveReauthMessage(ANTHROPIC_DESCRIPTOR.errorPatterns, {
+        EDITOR_USE_CLAUDE_SUBSCRIPTION: 'true',
+      }),
+    ).toBe(AUTH_REAUTH_SUBSCRIPTION_MESSAGE)
+    expect(resolveReauthMessage(undefined, {})).toBe(AUTH_REAUTH_MESSAGE)
   })
 
   it('keeps its old behaviour when no patterns are supplied', () => {

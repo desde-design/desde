@@ -123,5 +123,12 @@ export interface ProviderDescriptor {
 export interface ProviderErrorPatterns {
   auth?: RegExp[]
   rateLimited?: RegExp[]
-  reauthMessage: string
+  /**
+   * The copy shown in place of a raw auth failure. A string when the vendor
+   * has one credential kind; a function of the environment when the same 401
+   * can mean different things (Anthropic: a rejected API key, or a signed-out
+   * `claude` subscription login). Read through `resolveReauthMessage` in
+   * `../agent-chat/classify-turn-error`, never directly.
+   */
+  reauthMessage: string | ((env: NodeJS.ProcessEnv) => string)
 }

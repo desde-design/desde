@@ -36,6 +36,7 @@
  * change could break detection — but the worst case is degrading to
  * generic "failed", which is what we have today.
  */
+import { isClaudeSubscriptionOptIn } from '../llm-providers/claude-subscription'
 import type { ProviderErrorPatterns } from '../llm-providers/provider-descriptor'
 
 /**
@@ -109,21 +110,72 @@ const AUTH_ERROR_PATTERNS = [
 ]
 
 /**
- * Actionable message shown in place of the raw 401 string. Tells the user
- * exactly how to recover.
+ * Actionable message shown in place of the raw 401 string when the turn ran
+ * on an API key. Tells the user exactly how to recover.
  *
- * The settings gear is named FIRST because it is the only recovery path a
- * desktop user has: an app launched from Finder inherits launchd's
- * environment, not a shell's, so `export ANTHROPIC_API_KEY=…` in a dotfile
- * never reaches it. The `claude` CLI instruction is kept for the subscription
- * path and for terminal users. See
+ * The settings gear is the recovery path, and the only one a desktop user
+ * has: an app launched from Finder inherits launchd's environment, not a
+ * shell's, so `export ANTHROPIC_API_KEY=…` in a dotfile never reaches it. See
  * `docs/superpowers/specs/2026-08-13-editor-llm-credentials-design.md` §8.
+ *
+ * This copy USED to name both remedies ("replace the key from the settings
+ * gear, or run `claude` then `/login`"), because the `claude` binary answers a
+ * 401 with the same string on both paths. The environment can tell them
+ * apart, so now `claudeReauthMessage` does, and each message names one job.
+ * The hybrid sent a dev-mode user (Mo, 2026-09-08, whose CLI login had been
+ * wiped) to the settings gear for a key that mode deletes on purpose.
  */
 export const AUTH_REAUTH_MESSAGE =
-  'Authentication failed (401). The credentials Editor is using look expired ' +
-  'or invalid. Add or replace your Anthropic API key from the settings gear, ' +
-  'or run `claude` then `/login` to re-authenticate the CLI. Then start a new ' +
+  'Authentication failed (401). Anthropic rejected the API key Editor is using. ' +
+  'It may have expired or been revoked. Replace it from the settings gear, then ' +
+  'start a new chat turn.'
+
+/**
+ * The same 401, when the turn ran on the Claude subscription the `claude`
+ * binary is signed in with (`EDITOR_USE_CLAUDE_SUBSCRIPTION`, which desktop
+ * dev mode sets). The login is repaired in a terminal, never from the settings
+ * gear: the desktop's downloaded runtime and the user's own `claude` share one
+ * keychain entry, so `/login` in either fixes both.
+ */
+export const AUTH_REAUTH_SUBSCRIPTION_MESSAGE =
+  'Authentication failed (401). Chat is running on the Claude subscription signed ' +
+  'in on this machine, and that sign-in has expired or been signed out. In a ' +
+  'terminal, run `claude`, then type `/login` and sign in again. Then start a new ' +
   'chat turn.'
+
+/**
+ * Which of the two Anthropic messages fits this environment.
+ *
+ * Key mode wins whenever `ANTHROPIC_API_KEY` is present, opt-in flag or not:
+ * the spawned `claude` reads that variable on its own and uses it, so with
+ * both present the key is what the vendor rejected. Subscription mode is the
+ * opt-in flag with no key, which is exactly the environment
+ * `applyLlmCredentialsToEnv` produces for dev mode. Neither is the credential
+ * gate's refusal, which never reaches a 401; it falls back to key mode.
+ *
+ * Takes `env` as an argument so it is a pure function of its input, like the
+ * rest of this module; the call sites pass `process.env`.
+ */
+export function claudeReauthMessage(env: NodeJS.ProcessEnv): string {
+  if (env.ANTHROPIC_API_KEY?.trim()) return AUTH_REAUTH_MESSAGE
+  if (isClaudeSubscriptionOptIn(env)) return AUTH_REAUTH_SUBSCRIPTION_MESSAGE
+  return AUTH_REAUTH_MESSAGE
+}
+
+/**
+ * A descriptor's remediation copy, resolved. `reauthMessage` is a string for a
+ * vendor with one credential kind and a function of the environment for one
+ * with two (Anthropic). Every consumer reads through here so the choice is
+ * made in one place: the classifier, the SDK lane and the neutral lane.
+ */
+export function resolveReauthMessage(
+  patterns: ProviderErrorPatterns | undefined,
+  env: NodeJS.ProcessEnv,
+): string {
+  const copy = patterns?.reauthMessage
+  if (copy === undefined) return AUTH_REAUTH_MESSAGE
+  return typeof copy === 'function' ? copy(env) : copy
+}
 
 const RETRY_AFTER_PATTERNS = [
   /retry[\s-]?after[\s:]+(\d+)/i,
@@ -270,6 +322,12 @@ export interface ClassifyTurnErrorOpts {
    * multi-provider call site wants and gets unchanged.
    */
   errorPatterns?: ProviderErrorPatterns
+  /**
+   * The environment the failed turn ran in, for a descriptor whose
+   * remediation copy depends on it. Defaults to `process.env`, which is what
+   * every route-level call site means; tests pass their own.
+   */
+  env?: NodeJS.ProcessEnv
 }
 
 /**
@@ -297,7 +355,10 @@ export function classifyTurnError(
   // "recoverable, try again shortly" and the user would wait forever.
   const isAuth = authPatterns.some((p) => p.test(raw))
   if (isAuth) {
-    return { kind: 'other', message: opts.errorPatterns?.reauthMessage ?? AUTH_REAUTH_MESSAGE }
+    return {
+      kind: 'other',
+      message: resolveReauthMessage(opts.errorPatterns, opts.env ?? process.env),
+    }
   }
   const isRateLimited = ratePatterns.some((p) => p.test(raw))
   if (!isRateLimited) return { kind: 'other', message }

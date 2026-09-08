@@ -26,7 +26,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk'
 
 import type { EditProposalPayload } from '../agent-tools/types'
 import {
-  AUTH_REAUTH_MESSAGE,
+  claudeReauthMessage,
   extractRetryAfterFromError,
   isAuthError,
 } from '../agent-chat/classify-turn-error'
@@ -866,9 +866,11 @@ async function runChatTurnSdkInner(
         if (resultPayload.subtype !== 'success') {
           stopReason = 'error'
           // Same auth-failure mapping as the catch arm: a non-success
-          // result can carry the raw 401 string in errorReason.
+          // result can carry the raw 401 string in errorReason. This lane is
+          // the `claude` binary by definition, so the copy is chosen from
+          // the environment that binary was spawned with.
           errorMessage = isAuthError(resultPayload.errorReason)
-            ? AUTH_REAUTH_MESSAGE
+            ? claudeReauthMessage(process.env)
             : resultPayload.errorReason
         }
         // We own termination: a held-open generator never self-closes, because
@@ -917,10 +919,10 @@ async function runChatTurnSdkInner(
       const rawMessage = (err as Error).message
       // Auth failures (expired/invalid local `claude` CLI credentials)
       // surface as a raw "Failed to authenticate. API Error: 401 …"
-      // string — accurate but non-actionable. Swap in the re-login hint
-      // so the chat UI tells the user how to recover.
+      // string — accurate but non-actionable. Swap in the remediation
+      // that fits how this turn was credentialed (key vs subscription).
       errorMessage = isAuthError(rawMessage)
-        ? AUTH_REAUTH_MESSAGE
+        ? claudeReauthMessage(process.env)
         : `SDK query failed: ${rawMessage}${retryHint}`
     }
     stopReason = 'error'

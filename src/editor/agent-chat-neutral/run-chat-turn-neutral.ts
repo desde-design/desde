@@ -39,10 +39,10 @@ import { z } from 'zod'
 
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
 import {
-  AUTH_REAUTH_MESSAGE,
   extractRetryAfterFromError,
   isAuthError,
   redactSecrets,
+  resolveReauthMessage,
 } from '../agent-chat/classify-turn-error'
 import type {
   RunChatTurnOpts,
@@ -776,7 +776,7 @@ async function runInner(
       // `isAuthError` is still asked about the RAW string, so masking can
       // never make a pattern miss.
       errorMessage = isAuthError(raw, { errorPatterns: descriptor.errorPatterns })
-        ? (descriptor.errorPatterns?.reauthMessage ?? AUTH_REAUTH_MESSAGE)
+        ? resolveReauthMessage(descriptor.errorPatterns, process.env)
         : redactSecrets(`${raw}${hint}`)
     }
   } finally {

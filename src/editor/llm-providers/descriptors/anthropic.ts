@@ -14,7 +14,7 @@ import { ANTHROPIC_MODEL_CATALOG } from '../anthropic-model-catalog'
 import { AnthropicProvider, ANTHROPIC_DEFAULT_MODEL } from '../anthropic-provider'
 import { listAnthropicLiveModels } from '../anthropic-live-models'
 import type { ProviderDescriptor } from '../provider-descriptor'
-import { AUTH_REAUTH_MESSAGE } from '../../agent-chat/classify-turn-error'
+import { claudeReauthMessage } from '../../agent-chat/classify-turn-error'
 
 const VALIDATE_URL = 'https://api.anthropic.com/v1/models?limit=1'
 const ANTHROPIC_VERSION = '2023-06-01'
@@ -100,6 +100,9 @@ export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
   },
   errorPatterns: {
     auth: [/invalid authentication credentials/i, /\bauthentication_error\b/i, /failed to authenticate/i],
-    reauthMessage: AUTH_REAUTH_MESSAGE,
+    // A function, not a string: the `claude` binary answers a rejected key
+    // and a signed-out subscription login with the same 401, and the two are
+    // repaired in different places. See `claudeReauthMessage`.
+    reauthMessage: claudeReauthMessage,
   },
 }
