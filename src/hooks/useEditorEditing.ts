@@ -59,7 +59,7 @@ import {
   logIterationScopeChoice,
   requestIterationProposal,
 } from "./iteration-fallback"
-import { applyEditWithLLMFallback } from "./apply-edit-with-llm-fallback"
+import { applyEditWithChatHandoff } from "./apply-edit-with-chat-handoff"
 import {
   buildEditEscalationPrompt,
   buildPropEditEscalationPrompt,
@@ -827,11 +827,11 @@ export function useEditorEditing({
       }
       // The edit lands in the working tree immediately; Vite HMR shows the
       // truthful preview. Errors surface via saveStatus. On deterministic
-      // refusal we auto-fire the LLM repair lane (same endpoint the manual
-      // retry hits) so cycle / coordinate-drift refusals don't dead-end the
-      // user.
-      void applyEditWithLLMFallback(edit, adapter).then(({ result, fallback }) => {
-        const outcome = describeEditOutcome("Move", result, fallback)
+      // refusal we hand the edit off to chat (a new session, with the
+      // selector and the refusal text) so cycle / coordinate-drift refusals
+      // don't dead-end the user.
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
+        const outcome = describeEditOutcome("Move", result, handoff)
         if (outcome.message) setSaveStatus(outcome.message)
       })
     },
@@ -887,8 +887,8 @@ export function useEditorEditing({
     }
     // Drag-move dispatches immediately, like every other edit (branch mode
     // is the only editor edit substrate).
-    void applyEditWithLLMFallback(edit, adapter).then(({ result, fallback }) => {
-      const outcome = describeEditOutcome("Move", result, fallback)
+    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
+      const outcome = describeEditOutcome("Move", result, handoff)
       if (outcome.message) setSaveStatus(outcome.message)
     })
   }, [])
@@ -1108,8 +1108,8 @@ export function useEditorEditing({
         removeFromImport: false,
       }
       // Immediate dispatch (see Move handler).
-      void applyEditWithLLMFallback(edit, adapter).then(({ result, fallback }) => {
-        const outcome = describeEditOutcome("Swap", result, fallback)
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
+        const outcome = describeEditOutcome("Swap", result, handoff)
         if (outcome.message) setSaveStatus(outcome.message)
       })
     },
@@ -1124,7 +1124,7 @@ export function useEditorEditing({
   // import is unsafe without a cross-file usage walk.
   //
   // Branch mode (matches handleLayerMove / handleLayerInsert): immediate
-  // dispatch via `applyEditWithLLMFallback`. Edit lands in the working
+  // dispatch via `applyEditWithChatHandoff`. Edit lands in the working
   // tree instantly (uncommitted); Vite HMR re-renders the iframe with the
   // new icon. No buffer, no DOM-overlay lie. Commit stages the working
   // tree separately.
@@ -1186,8 +1186,8 @@ export function useEditorEditing({
       // and selection updates to the swapped-in icon, so a subsequent pick
       // sees the right fromComponentName naturally — no buffering or replace
       // logic needed.
-      void applyEditWithLLMFallback(edit, adapter).then(({ result, fallback }) => {
-        const outcome = describeEditOutcome("Icon swap", result, fallback)
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
+        const outcome = describeEditOutcome("Icon swap", result, handoff)
         if (outcome.message) setSaveStatus(outcome.message)
       })
     },
@@ -1214,8 +1214,8 @@ export function useEditorEditing({
       componentFile: selection.componentFile,
     }
     // Immediate dispatch (see Move handler).
-    void applyEditWithLLMFallback(edit, adapter).then(({ result, fallback }) => {
-      const outcome = describeEditOutcome("Detach", result, fallback)
+    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
+      const outcome = describeEditOutcome("Detach", result, handoff)
       if (outcome.message) setSaveStatus(outcome.message)
     })
   }, [])
@@ -1244,8 +1244,8 @@ export function useEditorEditing({
         snippet,
       }
       // Immediate dispatch (see Move handler).
-      void applyEditWithLLMFallback(edit, adapter).then(({ result, fallback }) => {
-        const outcome = describeEditOutcome("Insert", result, fallback)
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
+        const outcome = describeEditOutcome("Insert", result, handoff)
         if (outcome.message) setSaveStatus(outcome.message)
       })
     },
@@ -1301,13 +1301,12 @@ export function useEditorEditing({
         contentKind: pending.contentKind,
       }
       // Immediate dispatch (see Move handler).
-      void applyEditWithLLMFallback(edit, adapter).then(({ result, fallback }) => {
-        const outcome = describeEditOutcome("Insert", result, fallback)
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
+        const outcome = describeEditOutcome("Insert", result, handoff)
         // Deviation from the common outcome shape (see edit-outcome.ts):
-        // insert-at-point only surfaces FAILURES, never an "applied via AI
-        // repair" success message — preserved from the pre-extraction
-        // behavior, not normalized away.
-        if (outcome.kind === "failed") setSaveStatus(outcome.message)
+        // insert-at-point never surfaced a success message even before this
+        // change, but a hand-off to chat still needs to be announced.
+        if (outcome.kind !== "success") setSaveStatus(outcome.message)
       })
     },
     [],
@@ -1340,8 +1339,8 @@ export function useEditorEditing({
       // editing in place — `:last-child` and other structural CSS recompute
       // against the real new DOM (the source changed and Vite HMR'd), not
       // against a `display:none` overlay that lies about the tree.
-      void applyEditWithLLMFallback(edit, adapter).then(({ result, fallback }) => {
-        const outcome = describeEditOutcome("Delete", result, fallback)
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
+        const outcome = describeEditOutcome("Delete", result, handoff)
         if (outcome.message) setSaveStatus(outcome.message)
       })
     },
@@ -1429,8 +1428,8 @@ export function useEditorEditing({
       },
     }
     // Immediate dispatch (see Move handler).
-    void applyEditWithLLMFallback(edit, adapter).then(({ result, fallback }) => {
-      const outcome = describeEditOutcome("Unwrap", result, fallback)
+    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
+      const outcome = describeEditOutcome("Unwrap", result, handoff)
       if (outcome.message) setSaveStatus(outcome.message)
     })
   }, [])
@@ -1459,8 +1458,8 @@ export function useEditorEditing({
         branchToKeep,
       }
       // Immediate dispatch (see Move handler).
-      void applyEditWithLLMFallback(edit, adapter).then(({ result, fallback }) => {
-        const outcome = describeEditOutcome("Flatten", result, fallback)
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
+        const outcome = describeEditOutcome("Flatten", result, handoff)
         if (outcome.message) setSaveStatus(outcome.message)
       })
     },
@@ -1488,8 +1487,8 @@ export function useEditorEditing({
       componentFile: node.componentFile,
     }
     // Immediate dispatch (see Move handler).
-    void applyEditWithLLMFallback(edit, adapter).then(({ result, fallback }) => {
-      const outcome = describeEditOutcome("Detach", result, fallback)
+    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
+      const outcome = describeEditOutcome("Detach", result, handoff)
       if (outcome.message) setSaveStatus(outcome.message)
     })
   }, [])
