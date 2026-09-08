@@ -18,6 +18,7 @@ import { readBridgeBundle } from "./serve/html-inject"
 import { assertNoTestHostRelaxation } from "./serve/host-allowlist"
 import { createLoopbackListenerApp } from "./serve/loopback-listener-app"
 import { createLoopbackListenerRegistry } from "./serve/loopback-listeners"
+import { bootBannerLines } from "./boot-banner"
 import { originModeBannerLines } from "./serve/origin-mode-banner"
 import { assertOriginConfig, assertPrototypeOriginConfig } from "./serve/prototype-origin-resolve"
 import { SqliteStorage } from "./storage/sqlite-storage"
@@ -239,44 +240,27 @@ async function main(): Promise<void> {
   })
 
   const server = app.listen(config.port, () => {
-    console.log(
-      `[viewer] profile=${config.profile} bridge=${bridgeVersion} → ${config.publicUrl}`,
-    )
-    // Which origin mode a prototype gets served from, decided from config
-    // alone (no request has happened yet). See `origin-mode-banner.ts` for
-    // the exact wording of each mode and why it's a separate, unit-tested
-    // function rather than inline console calls here. Fallback is a warning
-    // (something is degraded); the other two modes are informational.
-    const originBanner = originModeBannerLines(config)
-    for (const line of originBanner.lines) {
-      if (originBanner.mode === "fallback") console.warn(line)
-      else console.log(line)
-    }
-    console.log(`[viewer] ${emailStatusLine(email)}`)
-    if (!config.adminToken) {
-      // NOT "write endpoints are disabled" — that stopped being true in
-      // Phase 3b-2. `requireWrite` (api/api-router.ts) accepts EITHER the
-      // admin bearer OR a `write`-scoped personal access token, so with no
-      // admin token configured a signed-in user can still mint a PAT at
-      // /settings and use it to create/patch projects and upload
-      // deployments. What's actually unavailable is the admin bearer
-      // itself: the unscoped, non-revocable escape hatch that reaches
-      // every project regardless of membership.
-      console.warn(
-        "[viewer] VIEWER_ADMIN_TOKEN is unset. The admin bearer is unavailable; " +
-          "write endpoints still accept write-scoped personal access tokens (see /settings)",
-      )
-    }
     const signInUrl = localOperatorToken
       ? `${config.publicUrl}/api/v1/auth/local?token=${localOperatorToken}`
       : null
-    if (signInUrl) {
-      console.log("")
-      console.log("[viewer] No GitHub sign-in configured. Open this URL to sign in:")
-      console.log(`[viewer]   ${signInUrl}`)
-      console.log("[viewer] This token is regenerated on every restart. Your session survives restarts.")
-      console.log("")
-    }
+    // Which origin mode a prototype gets served from, decided from config
+    // alone (no request has happened yet). See `origin-mode-banner.ts` for
+    // the exact wording of each mode.
+    //
+    // Every line goes out on stdout, warnings included. `boot-banner.ts`
+    // explains why: stdout and stderr are separate pipes, so splitting the
+    // banner across them let the reader reorder it, and under Docker that
+    // pushed the sign-in URL above four warnings instead of below them.
+    const banner = bootBannerLines({
+      profile: config.profile,
+      bridgeVersion,
+      publicUrl: config.publicUrl,
+      originLines: originModeBannerLines(config).lines,
+      emailStatus: emailStatusLine(email),
+      adminTokenSet: Boolean(config.adminToken),
+      signInUrl,
+    })
+    for (const line of banner) console.log(line)
 
     // Open a tab, the way the Editor CLI already does on boot. The URL is
     // still printed above either way: this is a convenience, and every
