@@ -194,12 +194,15 @@ function isObjectLikePropsType(type: ts.Type): boolean {
 
 /**
  * Recover the props type from a React component, or null if the export
- * isn't a component. Gated on a PascalCase name. Function components (incl.
+ * isn't a component. Exported because it IS the "is this export a component"
+ * test, and `count-components.ts` (the onboarding suggester's React arm)
+ * must agree with the extractor about that rather than carry a second
+ * predicate that drifts. Gated on a PascalCase name. Function components (incl.
  * `forwardRef`/`memo`, any return type): the first call-signature parameter,
  * required to be object-like so non-component callables are rejected. Class
  * components: the construct signature's instance `props`.
  */
-function getReactPropsType(
+export function getReactPropsType(
   checker: ts.TypeChecker,
   type: ts.Type,
   fallback: ts.Node,

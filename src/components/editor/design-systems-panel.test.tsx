@@ -667,7 +667,7 @@ describe("DesignSystemsPanel add mode", () => {
           version: "1.4.0",
           componentCount: 4,
           framework: "vue3",
-          importFrequency: 2,
+          importFrequency: 2, confidence: 'certain'
         },
       ],
     })

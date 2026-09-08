@@ -237,7 +237,7 @@ export function AddDesignSystem({
           <p className="px-1 py-2 text-sm text-muted-foreground">Scanning…</p>
         ) : suggestions.length === 0 ? (
           <p className="px-1 py-2 text-sm text-muted-foreground">
-            No unregistered design-system libraries detected in this prototype.
+            Nothing found that is not already registered. Components written in this repo are picked up on their own.
           </p>
         ) : (
           <ScrollArea className="min-h-0 flex-1">

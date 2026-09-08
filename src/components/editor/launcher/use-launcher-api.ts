@@ -58,11 +58,18 @@ export interface LauncherProject {
   lastOpenedAt: string
 }
 
-/** Shape `suggestDesignSystems` (editor/onboarding/suggest.ts) returns, trimmed to what `<AddDesignSystem>` needs. */
+/**
+ * Shape `suggestDesignSystems` (editor/onboarding/suggest.ts) returns, trimmed
+ * to what the New Project step needs. `confidence` decides what the step does
+ * with a row: `certain` is seeded into the list, `likely` is offered beside
+ * it. Absent (an older server) reads as `certain`, which is what every
+ * suggestion was before the React arm existed.
+ */
 export interface DesignSystemSuggestion {
   package: string
   componentCount: number
   framework: string
+  confidence?: "certain" | "likely"
 }
 
 export interface DeclareSkip {

@@ -19,6 +19,17 @@
  * A detected row is still removable. Being found is not consent, and the
  * scan is a heuristic over `node_modules`; the user has to be able to say no.
  *
+ * ## Found rows are offered, not seeded
+ *
+ * A second kind of detection arrived with the React arm of the scan
+ * (2026-09-08). `*.vue.d.ts` is a certain marker, so a Vue library found in
+ * `node_modules` goes straight into the list above. The React marker is only
+ * likely: on a real dashboard it returns a dozen packages the prototype
+ * renders from, and no scan can say which of them the user calls a design
+ * system. Those arrive as `found` rows under the list, each with its own Add,
+ * and nothing is declared until someone clicks. Seeding them would have
+ * registered every small UI package on the next boot.
+ *
  * ## Purely presentational
  *
  * The caller owns the entries and the mutations, same contract as
@@ -52,34 +63,47 @@ export interface DesignSystemListEntry {
   declaration: DesignSystemDeclaration
 }
 
+/** A library the scan found but is not sure about. Added with a click, never seeded. */
+export interface DesignSystemFoundEntry {
+  /** The package name, which is also what Add declares. */
+  id: string
+  label: string
+  /** What the scan knows about it, e.g. "54 components". */
+  caption: string
+}
+
 export interface DesignSystemListProps {
   entries: readonly DesignSystemListEntry[]
+  found?: readonly DesignSystemFoundEntry[]
   loading?: boolean
   busy?: boolean
   onAdd: () => void
   onEdit: (entry: DesignSystemListEntry) => void
   onRemove: (id: string) => void
+  onAddFound?: (id: string) => void
 }
 
 export function DesignSystemList({
   entries,
+  found = [],
   loading = false,
   busy = false,
   onAdd,
   onEdit,
   onRemove,
+  onAddFound,
 }: DesignSystemListProps) {
   return (
     <div className="flex flex-col gap-2" data-testid="design-system-list">
       {loading && entries.length === 0 ? (
         <p className="text-base text-muted-foreground" data-testid="design-system-list-loading">
-          Looking for design systems already installed here
+          Looking for libraries this prototype uses
         </p>
       ) : entries.length === 0 ? (
         <EmptyState
           size="sm"
-          title="No design systems"
-          description="Add one so the agent builds with its components instead of inventing its own."
+          title="Nothing found to add"
+          description="Components written in this repo are picked up on their own. Add a library if this prototype uses one from npm or a Git repository."
         />
       ) : (
         <ul className="flex flex-col divide-y rounded-md border">
@@ -138,6 +162,38 @@ export function DesignSystemList({
           ))}
         </ul>
       )}
+
+      {found.length > 0 ? (
+        <div className="flex flex-col gap-1.5" data-testid="design-system-found">
+          <p className="text-sm text-muted-foreground">
+            Also found in this prototype. Add the ones that are its design system.
+          </p>
+          <ul className="flex flex-col divide-y rounded-md border">
+            {found.map((entry) => (
+              <li
+                key={entry.id}
+                className="flex items-center gap-2 px-3 py-2"
+                data-testid={`design-system-found-${entry.id}`}
+              >
+                <span className="flex min-w-0 flex-1 items-baseline gap-2">
+                  <span className="truncate text-base">{entry.label}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">{entry.caption}</span>
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  disabled={busy}
+                  onClick={() => onAddFound?.(entry.id)}
+                  data-testid={`design-system-found-add-${entry.id}`}
+                >
+                  Add
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {/*
         Under the list, which is where the brief puts it and where it belongs:

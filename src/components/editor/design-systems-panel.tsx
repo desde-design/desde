@@ -296,7 +296,7 @@ export function DesignSystemsPanel({
             <p className="text-sm text-muted-foreground">Loading…</p>
           ) : ds.systems.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No design systems registered yet.
+              No design systems registered yet. Components written in this repo are picked up on their own; add a library this prototype uses from npm or a Git repository.
             </p>
           ) : (
             <ul className="space-y-1">

@@ -138,8 +138,12 @@ function baseProps(ctx: SurfaceRenderContext): Omit<
     onSuggestDesignSystems: async (path) => {
       ctx.log("onSuggestDesignSystems", path)
       return [
-        { package: "@acme/design-system", componentCount: 42, framework: "vue3" },
-        { package: "@ag-grid-community/core", componentCount: 8, framework: "vue3" },
+        { package: "@acme/design-system", componentCount: 42, framework: "vue3", confidence: "certain" },
+        { package: "@ag-grid-community/core", componentCount: 8, framework: "vue3", confidence: "certain" },
+        // The React arm is only `likely` about what it finds, so these are
+        // offered under the list with their own Add rather than seeded.
+        { package: "recharts", componentCount: 54, framework: "react", confidence: "likely" },
+        { package: "react-day-picker", componentCount: 26, framework: "react", confidence: "likely" },
       ]
     },
     onDeclareDesignSystems: async (path, declarations) => {

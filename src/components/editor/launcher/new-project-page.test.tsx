@@ -865,3 +865,72 @@ describe("NewProjectPage — GitHub repositories", () => {
     await waitFor(() => expect(onListGitHubRepos).toHaveBeenCalledTimes(1))
   })
 })
+
+/**
+ * The React arm of the scan (2026-09-08) is only `likely` about what it finds,
+ * so its rows are OFFERED under the list rather than seeded into it. Nothing
+ * is declared for one until the user clicks its Add.
+ */
+describe("NewProjectPage: libraries the scan is only likely about", () => {
+  const likely = { package: "recharts", componentCount: 54, framework: "react", confidence: "likely" as const }
+  const certain = { package: "@acme/ui", componentCount: 5, framework: "vue3", confidence: "certain" as const }
+
+  it("offers a likely row instead of seeding it, and declares nothing for it on finish", async () => {
+    const props = baseProps()
+    props.onSuggestDesignSystems.mockResolvedValue([likely, certain])
+    render(<NewProjectPage {...props} />)
+
+    await pickLocalFolder()
+    await passNameStep()
+    await screen.findByTestId("new-project-design-systems-step")
+
+    // The certain one is in the list; the likely one is under it, with its own Add.
+    await screen.findByTestId("design-system-row-@acme/ui")
+    expect(screen.queryByTestId("design-system-row-recharts")).not.toBeInTheDocument()
+    const offered = await screen.findByTestId("design-system-found-recharts")
+    expect(offered).toHaveTextContent("recharts")
+    expect(offered).toHaveTextContent("54 components")
+
+    finishFromDesignSystems()
+
+    await waitFor(() =>
+      expect(props.onDeclareDesignSystems).toHaveBeenCalledWith("/picked/repo", [
+        { source: { kind: "installed", package: "@acme/ui" } },
+      ]),
+    )
+  })
+
+  it("adding a found row moves it into the list as a detected entry, and it is declared on finish", async () => {
+    const props = baseProps()
+    props.onSuggestDesignSystems.mockResolvedValue([likely])
+    render(<NewProjectPage {...props} />)
+
+    await pickLocalFolder()
+    await passNameStep()
+    await screen.findByTestId("new-project-design-systems-step")
+    fireEvent.click(await screen.findByTestId("design-system-found-add-recharts"))
+
+    const row = await screen.findByTestId("design-system-row-recharts")
+    expect(row).toHaveTextContent("Detected")
+    expect(screen.queryByTestId("design-system-found-recharts")).not.toBeInTheDocument()
+
+    finishFromDesignSystems()
+
+    await waitFor(() =>
+      expect(props.onDeclareDesignSystems).toHaveBeenCalledWith("/picked/repo", [
+        { source: { kind: "installed", package: "recharts" } },
+      ]),
+    )
+  })
+
+  it("a suggestion with no confidence (an older server) is still seeded", async () => {
+    const props = baseProps()
+    props.onSuggestDesignSystems.mockResolvedValue([{ package: "@acme/ui", componentCount: 5, framework: "vue3" }])
+    render(<NewProjectPage {...props} />)
+
+    await pickLocalFolder()
+    await passNameStep()
+    await screen.findByTestId("design-system-row-@acme/ui")
+    expect(screen.queryByTestId("design-system-found")).not.toBeInTheDocument()
+  })
+})
