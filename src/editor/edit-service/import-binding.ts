@@ -39,6 +39,23 @@ export interface ImportBinding {
   via: 'import' | 're-export'
 }
 
+/**
+ * TypeScript's output-extension substitution: a specifier WRITTEN with the
+ * left extension may be satisfied by a file with one of the right ones, in
+ * this order. Shared by the module resolver (which file does `./data.js`
+ * load?) and the page check (does `import Row from "./Row.js"` name
+ * `Row.tsx`?) so the two cannot disagree.
+ */
+export const OUTPUT_EXTENSION_SUBSTITUTIONS: ReadonlyArray<readonly [string, ReadonlyArray<string>]> = [
+  ['.js', ['.ts', '.tsx']],
+  ['.jsx', ['.tsx']],
+  ['.mjs', ['.mts']],
+  ['.cjs', ['.cts']],
+  ['.ts', ['.ts']],
+  ['.tsx', ['.tsx']],
+  ['.mts', ['.mts']],
+]
+
 /** Only relative specifiers are followed. A bare specifier (`react`,
  *  `@scope/pkg`) is a dependency, and dependencies are never edited. */
 export function isRelativeSpecifier(specifier: string): boolean {
@@ -203,10 +220,15 @@ export function importsRelativeFile(
     if (!isRelativeSpecifier(specifier)) continue
     const normalized = normalizePosix(fromDir ? `${fromDir}/${specifier}` : specifier)
     if (normalized === null) continue
-    if (/\.[A-Za-z0-9]+$/.test(specifier)) {
-      // Written with an extension: it names ONE file. `./Row.ts` is not
-      // `Row.vue` even though the stems agree (codex round 4).
+    const written = /\.[A-Za-z0-9]+$/.exec(specifier)?.[0]
+    if (written) {
+      // Written with an extension: it names ONE file, or that file's
+      // TypeScript source under output-extension substitution. `./Row.ts` is
+      // not `Row.vue` (codex round 4); `./Row.js` IS `Row.tsx` (round 5).
       if (normalized === targetPath) return true
+      const subs = OUTPUT_EXTENSION_SUBSTITUTIONS.find(([from]) => from === written)
+      const stem = normalized.slice(0, -written.length)
+      if (subs && subs[1].some((ext) => stem + ext === targetPath)) return true
       continue
     }
     if (normalized === target || `${normalized}/index` === target) return true

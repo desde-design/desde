@@ -141,15 +141,14 @@ function findVForAt(
   return null
 }
 
-/** Every name a v-for expression binds: `(item, i) in rows` → `["item", "i"]`. */
+/** Every name a v-for expression binds: `(item, i) in rows` → `["item", "i"]`,
+ *  `{ rows } in groups` → `["rows"]`. Destructuring is read as "every
+ *  identifier in the alias part", which over-includes the KEY of
+ *  `{ rows: r }` — over-inclusion only ever costs a refusal (codex round 5). */
 function vForAliases(expr: string): string[] {
-  const m = expr.match(/^\s*(?:\(([^)]*)\)|([A-Za-z_$][A-Za-z0-9_$]*))\s+(?:in|of)\s+/)
+  const m = expr.match(/^\s*(.+?)\s+(?:in|of)\s+/)
   if (!m) return []
-  const list = m[1] ?? m[2] ?? ''
-  return list
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s))
+  return Array.from(m[1].matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g), (x) => x[0])
 }
 
 /**
@@ -273,10 +272,33 @@ function findArrayDeclaration(
   name: string,
 ): { line: number; column: number; count: number } | null {
   let found: { line: number; column: number; count: number } | null = null
-  function visit(node: unknown): void {
+  // What the template can see: top-level `<script setup>` bindings, and the
+  // locals of an Options API `setup()` (which returns them). A declaration
+  // inside any other function is a helper's local, whatever its name (codex
+  // round 5: a helper's `const rows = [...]` was picked over the import).
+  function visit(node: unknown, inHelper: boolean): void {
     if (found || !node || typeof node !== 'object') return
-    const n = node as { type?: string }
-    if (n.type === 'VariableDeclarator') {
+    const n = node as { type?: string; key?: { type?: string; name?: string } }
+    let nextInHelper = inHelper
+    if (
+      n.type === 'FunctionDeclaration' ||
+      n.type === 'FunctionExpression' ||
+      n.type === 'ArrowFunctionExpression' ||
+      n.type === 'ObjectMethod' ||
+      n.type === 'ClassMethod'
+    ) {
+      const isSetup = n.type === 'ObjectMethod' && n.key?.type === 'Identifier' && n.key.name === 'setup'
+      nextInHelper = inHelper || !isSetup
+    }
+    if (n.type === 'ObjectProperty' && n.key?.type === 'Identifier' && n.key.name === 'setup') {
+      // `setup: () => { … }` — the arrow below it is the setup body.
+      const value = (node as { value?: { type?: string } }).value
+      if (value?.type === 'ArrowFunctionExpression' || value?.type === 'FunctionExpression') {
+        visit((value as { body?: unknown }).body, inHelper)
+        return
+      }
+    }
+    if (n.type === 'VariableDeclarator' && !inHelper) {
       const v = node as Record<string, unknown>
       const id = v.id as { type?: string; name?: string } | undefined
       const init = v.init
@@ -288,11 +310,11 @@ function findArrayDeclaration(
     for (const key of Object.keys(n)) {
       if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue
       const v = (n as Record<string, unknown>)[key]
-      if (Array.isArray(v)) for (const item of v) visit(item)
-      else if (v && typeof v === 'object') visit(v)
+      if (Array.isArray(v)) for (const item of v) visit(item, nextInHelper)
+      else if (v && typeof v === 'object') visit(v, nextInHelper)
     }
   }
-  visit(ast)
+  visit(ast, false)
   return found
 }
 
@@ -427,10 +449,11 @@ export function resolveIterationDataVueSameFile(
     // lane edits, but the list is still `rows`, and the AI lane's bundle
     // needs that name to follow the import (codex round 2). Report it.
     const leading = leadingIterateeIdentifier(match.vForExpression)
+    const hint = leading && !match.enclosingAliases.includes(leading) ? leading : null
     return {
       ok: false,
       reason: `Could not parse v-for iteratee expression: "${match.vForExpression}"`,
-      ...(leading ? { iterateeRoot: leading } : {}),
+      ...(hint ? { iterateeRoot: hint } : {}),
     }
   }
   // Codex P1 #2: refuse member-access iteratees (e.g. `group.items`).

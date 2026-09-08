@@ -282,6 +282,7 @@ describe("handleIterationEdit", () => {
         join(dir, "src", "Page.vue"),
         `<template><Foo :items="rows" /></template>
 <script setup>
+import Foo from './Foo.vue'
 const rows = [{ id: 1 }, { id: 2 }]
 </script>`,
         "utf8",
@@ -361,6 +362,29 @@ const rows = [{ id: 1 }, { id: 2 }]
       expect(result.proposal.baseHash).toBe(
         createHash("sha256").update(pageSource, "utf8").digest("hex"),
       )
+    })
+
+    it("does not consult a page that does not import the component, even if it uses the same tag (codex round 5)", async () => {
+      writeFileSync(
+        join(dir, "src", "Unrelated.vue"),
+        `<template><Foo :items="decoy" /></template>
+<script setup>
+const decoy = [{ id: 999 }]
+</script>`,
+        "utf8",
+      )
+      const { resolveIterationDataVueCrossComponent } = await import(
+        "../../../../src/editor/edit-service/resolve-iteration-data-vue-cross-component.js"
+      )
+      const crossMock = vi.mocked(resolveIterationDataVueCrossComponent)
+      crossMock.mockClear()
+      const result = await handleIterationEdit(
+        makeBody({ pageSourceFile: "src/Unrelated.vue" }),
+        dir,
+      )
+      expect(result.ok).toBe(false)
+      expect(result.ok === false && result.status).toBe(422)
+      expect(crossMock).not.toHaveBeenCalled()
     })
 
     it("ignores pageSourceFile that escapes root and falls through to 422", async () => {

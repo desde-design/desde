@@ -265,4 +265,28 @@ import { rows } from "./rows"
     expect(result.importCandidate).toBeUndefined()
     expect(result.reason).toMatch(/outer v-for/)
   })
+
+  it("treats a destructured outer v-for alias as a loop variable, not the module import (codex round 5)", () => {
+    const source = `<template>\n  <div v-for="{ rows } in groups" :key="rows.length">\n    <li v-for="item in rows" :key="item.id">{{ item.name }}</li>\n  </div>\n</template>\n<script setup>\nimport { rows } from './unrelated'\nconst groups = [{ rows: [] }]\n</script>\n`
+    const result = resolveIterationDataVueSameFile({ source, templateLocation: { line: 3, column: 5 } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.importCandidate).toBeUndefined()
+  })
+
+  it("gives no list-name hint for a transformed iteratee that is an outer v-for alias (codex round 5)", () => {
+    const source = `<template>\n  <div v-for="rows in groups" :key="rows.length">\n    <li v-for="item in rows.filter(Boolean)" :key="item.id">{{ item.name }}</li>\n  </div>\n</template>\n<script setup>\nimport { rows } from './unrelated'\nconst groups = [[]]\n</script>\n`
+    const result = resolveIterationDataVueSameFile({ source, templateLocation: { line: 3, column: 5 } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.iterateeRoot).toBeUndefined()
+  })
+
+  it("does not pick a helper function's local array over the imported list (codex round 5)", () => {
+    const source = `<template>\n  <li v-for="r in rows" :key="r.id">{{ r.name }}</li>\n</template>\n<script setup>\nimport { rows } from './data'\nfunction unrelated() {\n  const rows = [{ id: 'wrong' }]\n  return rows\n}\n</script>\n`
+    const result = resolveIterationDataVueSameFile({ source, templateLocation: { line: 2, column: 3 } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.importCandidate?.binding.specifier).toBe('./data')
+  })
 })

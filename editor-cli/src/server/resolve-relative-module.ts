@@ -28,6 +28,7 @@ import {
   resolveRealpathWithinRoot,
   type ResolvedRoot,
 } from "./resolve-editable-path"
+import { OUTPUT_EXTENSION_SUBSTITUTIONS } from "../../../src/editor/edit-service/import-binding.js"
 
 /**
  * The only files this resolver will hand back. It is the intersection of
@@ -41,21 +42,12 @@ import {
  */
 const RESOLVABLE_EXTENSIONS = [".ts", ".tsx", ".jsx"] as const
 /**
- * TypeScript's output-extension substitution: a specifier WRITTEN with the
- * left extension may be satisfied by a file with one of the right ones, in
- * this order. This is the whole ESM-with-TS convention; nothing else is
- * tried for an extension-bearing specifier (codex round 3: appending `.ts`
- * to `./Row.jsx` found a `Row.jsx.ts` before the real `Row.tsx`).
+ * TypeScript's output-extension substitution, shared with the page check in
+ * `import-binding.ts`. This is the whole ESM-with-TS convention; nothing
+ * else is tried for an extension-bearing specifier (codex round 3: appending
+ * `.ts` to `./Row.jsx` found a `Row.jsx.ts` before the real `Row.tsx`).
  */
-const SUBSTITUTIONS: ReadonlyArray<readonly [string, ReadonlyArray<string>]> = [
-  [".js", [".ts", ".tsx"]],
-  [".jsx", [".tsx"]],
-  [".mjs", [".mts"]],
-  [".cjs", [".cts"]],
-  [".ts", [".ts"]],
-  [".tsx", [".tsx"]],
-  [".mts", [".mts"]],
-]
+const SUBSTITUTIONS = OUTPUT_EXTENSION_SUBSTITUTIONS
 
 export type ResolveRelativeModuleResult =
   | {

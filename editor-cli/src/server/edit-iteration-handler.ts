@@ -323,7 +323,25 @@ export async function handleIterationEdit(
         } catch {
           pageSource = null
         }
+        // The page hint is client-supplied. It is only the caller of this
+        // component if it imports it; a page that merely uses the same tag
+        // name would otherwise have ITS array rewritten (codex round 5). The
+        // AI lane applies the same check to its bundle.
+        let pageImportsComponent = false
         if (pageSource !== null) {
+          const [{ importsRelativeFile }, { moduleSourceOfFile }] = await Promise.all([
+            import("../../../src/editor/edit-service/import-binding.js"),
+            import("../../../src/editor/edit-service/vue-script-content.js"),
+          ])
+          const pageRel = path.relative(rootReal, pageReal).split(path.sep).join("/")
+          const loopRel = path.relative(rootReal, targetPath).split(path.sep).join("/")
+          pageImportsComponent = importsRelativeFile(
+            moduleSourceOfFile(pageRel, pageSource),
+            pageRel,
+            loopRel,
+          )
+        }
+        if (pageSource !== null && pageImportsComponent) {
           const { resolveIterationDataVueCrossComponent } = await import(
             "../../../src/editor/edit-service/resolve-iteration-data-vue-cross-component.js"
           )

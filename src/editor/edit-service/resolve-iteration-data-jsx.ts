@@ -142,7 +142,7 @@ export function resolveIterationDataJsxSameFile(
     const hint =
       leftmost &&
       !isShadowedByEnclosingParam(ast, mapCall, leftmost) &&
-      !hasLocalDeclaration(ast, leftmost)
+      !hasLocalDeclaration(ast, leftmost, mapCall)
         ? leftmost
         : null
     return {
@@ -177,7 +177,7 @@ export function resolveIterationDataJsxSameFile(
   const keyProperty = extractKeyProperty(el, itemVar)
 
   // Trace the iteratee root to a same-module array-literal binding.
-  const arrayNode = findArrayLiteralBinding(ast, iterateeRoot)
+  const arrayNode = findArrayLiteralBinding(ast, iterateeRoot, mapCall)
   if (!arrayNode || typeof arrayNode.loc?.start?.line !== "number") {
     // Not a same-file literal. Before deferring to the LLM lane, check whether
     // the name is simply imported from another module — the handler can follow
@@ -186,7 +186,7 @@ export function resolveIterationDataJsxSameFile(
     // A local declaration of the same name (`const rows = supplied`) is the
     // binding the loop reads, whatever a module-level import says. Refuse
     // rather than follow the import into the wrong file (codex round 4).
-    if (hasLocalDeclaration(ast, iterateeRoot)) {
+    if (hasLocalDeclaration(ast, iterateeRoot, mapCall)) {
       return {
         ok: false,
         reason: `\`${iterateeRoot}\` is declared in this file, but not as a plain array literal`,
@@ -344,10 +344,14 @@ function extractKeyProperty(el: BabelNode, itemVar: string | null): string | nul
 /** Find a same-module `const X = [ … ]` or `const [X] = useState([ … ])` whose
  *  initializer is an array literal. Returns the single ArrayExpression node, or
  *  null when there are zero OR MULTIPLE matches (ambiguous → don't guess). */
-function findArrayLiteralBinding(ast: BabelNode, name: string): BabelNode | null {
+function findArrayLiteralBinding(ast: BabelNode, name: string, mapCall: BabelNode): BabelNode | null {
   const matches: BabelNode[] = []
   walk(ast, (node) => {
     if (node.type !== "VariableDeclarator") return
+    // A declaration the loop cannot see (a helper function's local) is not a
+    // candidate, whatever its name (codex round 5: a helper's
+    // `const rows = [{ id: "wrong" }]` was picked over the imported `rows`).
+    if (!isVisibleFrom(ast, node, mapCall)) return
     const id = node.id
     const init = node.init
     if (!init) return
@@ -377,14 +381,36 @@ function findArrayLiteralBinding(ast: BabelNode, name: string): BabelNode | null
   return matches.length === 1 ? matches[0] : null
 }
 
-/** Whether `name` is declared anywhere in the file by a variable, function or
- *  class declaration (imports excluded). Coarser than lexical scoping on
- *  purpose: a declaration ANYWHERE is enough to make "follow the import"
- *  unsafe, and refusing is the cheap side of that error. */
-function hasLocalDeclaration(ast: BabelNode, name: string): boolean {
+/** Is a declaration at `decl` in scope at `mapCall`? True at module scope,
+ *  and inside a function only when that function also encloses the call.
+ *  Block scoping is ignored on purpose (a `const` in a sibling `if` block
+ *  still counts): the cost of that coarseness is a refusal, never a wrong
+ *  file. */
+function isVisibleFrom(ast: BabelNode, decl: BabelNode, mapCall: BabelNode): boolean {
+  let innermost: BabelNode | null = null
+  walk(ast, (node) => {
+    if (
+      node.type !== "FunctionDeclaration" &&
+      node.type !== "FunctionExpression" &&
+      node.type !== "ArrowFunctionExpression" &&
+      node.type !== "ObjectMethod" &&
+      node.type !== "ClassMethod"
+    ) {
+      return
+    }
+    if (node === decl || !within(decl, node)) return
+    if (!innermost || within(node, innermost)) innermost = node
+  })
+  return innermost === null || within(mapCall, innermost)
+}
+
+/** Whether `name` is declared, in a scope the loop can see, by a variable,
+ *  function or class declaration (imports excluded). */
+function hasLocalDeclaration(ast: BabelNode, name: string, mapCall: BabelNode): boolean {
   let found = false
   walk(ast, (node) => {
     if (found) return
+    if (!isVisibleFrom(ast, node, mapCall)) return
     if (node.type === "VariableDeclarator" && patternBindsName(node.id, name)) found = true
     else if (
       (node.type === "FunctionDeclaration" || node.type === "ClassDeclaration") &&

@@ -85,10 +85,23 @@ export function List({ items }: { items: { id: number }[] }) {
     expect(r.ok).toBe(false)
   })
 
-  it("refuses when the iteratee has multiple same-name array bindings (ambiguous)", () => {
+  it("ignores a same-name array inside a helper the loop cannot see, and resolves the module-level one (codex round 5)", () => {
     const src = `const items = [{ id: 1 }]
 function inner() { const items = [{ id: 2 }]; return items }
 export const L = () => <ul>{items.map((item) => <li key={item.id}>{item.id}</li>)}</ul>
+`
+    const r = resolveIterationDataJsxSameFile({ source: src, templateLocation: loc(src, "<li key") })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.arrayLocation.line).toBe(1)
+  })
+
+  it("refuses when two same-name array bindings are both in scope at the loop (ambiguous)", () => {
+    const src = `const items = [{ id: 1 }]
+export const L = () => {
+  if (Math.random() > 2) { const items = [{ id: 2 }]; console.log(items) }
+  return <ul>{items.map((item) => <li key={item.id}>{item.id}</li>)}</ul>
+}
 `
     const r = resolveIterationDataJsxSameFile({ source: src, templateLocation: loc(src, "<li key") })
     expect(r.ok).toBe(false)
@@ -194,5 +207,23 @@ describe("resolveIterationDataJsxSameFile — map(callbackFn, thisArg)", () => {
     if (result.ok) return
     expect(result.importCandidate).toBeUndefined()
     expect(result.reason).toMatch(/declared in this file/)
+  })
+
+  it("follows the import when the only same-name declaration is a helper's local (codex round 5)", () => {
+    const src = 'import { rows } from "./data"\nfunction unrelated() {\n  const rows = makeRows()\n  return rows\n}\nexport const List = () => <ul>{rows.map((r) => <li key={r.id}>{r.id}</li>)}</ul>\n'
+    const idx = src.indexOf("<li")
+    const result = resolveIterationDataJsxSameFile({ source: src, templateLocation: { line: 6, column: idx - (src.lastIndexOf("\n", idx) + 1) } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.importCandidate?.binding.specifier).toBe("./data")
+  })
+
+  it("never picks a helper's wrong array over the imported one the loop reads (codex round 5)", () => {
+    const src = 'import { rows } from "./data"\nfunction unrelated() {\n  const rows = [{ id: "wrong" }]\n  return rows\n}\nexport const List = () => <ul>{rows.map((r) => <li key={r.id}>{r.id}</li>)}</ul>\n'
+    const idx = src.indexOf("<li")
+    const result = resolveIterationDataJsxSameFile({ source: src, templateLocation: { line: 6, column: idx - (src.lastIndexOf("\n", idx) + 1) } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.importCandidate?.binding.specifier).toBe("./data")
   })
 })

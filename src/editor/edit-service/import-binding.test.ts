@@ -160,4 +160,9 @@ describe('importsRelativeFile', () => {
     expect(importsRelativeFile('import Row from "./Row.vue"', 'src/Page.vue', 'src/Row.vue')).toBe(true)
     expect(importsRelativeFile('import Row from "./Row.vue"', 'src/Page.vue', 'src/Row/index.vue')).toBe(false)
   })
+  it("accepts TypeScript's output-extension substitution: ./Row.js and ./Row.jsx name Row.tsx (codex round 5)", () => {
+    expect(importsRelativeFile('import Row from "./Row.js"', 'src/Page.tsx', 'src/Row.tsx')).toBe(true)
+    expect(importsRelativeFile('import Row from "./Row.jsx"', 'src/Page.tsx', 'src/Row.tsx')).toBe(true)
+    expect(importsRelativeFile('import Row from "./Row.mjs"', 'src/Page.tsx', 'src/Row.tsx')).toBe(false)
+  })
 })
