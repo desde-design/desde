@@ -183,6 +183,16 @@ function parseVForIteratee(
   return { itemVar, root, chain }
 }
 
+/** The identifier a v-for's iteratee EXPRESSION starts with, for any
+ *  expression shape: `r in rows.filter(Boolean)` → `rows`. A hint for the AI
+ *  bundle only; `parseVForIteratee` decides what the deterministic lane edits. */
+function leadingIterateeIdentifier(expr: string): string | null {
+  const m = expr.match(
+    /^\s*(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s+(?:in|of)\s+([A-Za-z_$][A-Za-z0-9_$]*)/,
+  )
+  return m ? m[1] : null
+}
+
 interface ScriptInfo {
   content: string
   startLine: number
@@ -383,9 +393,14 @@ export function resolveIterationDataVueSameFile(
 
   const iteratee = parseVForIteratee(match.vForExpression)
   if (!iteratee) {
+    // `v-for="r in rows.filter(Boolean)"`: not a shape the deterministic
+    // lane edits, but the list is still `rows`, and the AI lane's bundle
+    // needs that name to follow the import (codex round 2). Report it.
+    const leading = leadingIterateeIdentifier(match.vForExpression)
     return {
       ok: false,
       reason: `Could not parse v-for iteratee expression: "${match.vForExpression}"`,
+      ...(leading ? { iterateeRoot: leading } : {}),
     }
   }
   // Codex P1 #2: refuse member-access iteratees (e.g. `group.items`).

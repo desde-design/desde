@@ -161,4 +161,24 @@ describe("resolveRelativeModule", () => {
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toContain("not .ts, .tsx or .jsx")
   })
+
+  it("refuses an as-written .js import when that .js file exists, even if a same-stem .ts exists too (codex round 2: it resolved to the sibling)", async () => {
+    mkdirSync(join(dir, "src"), { recursive: true })
+    writeFileSync(join(dir, "src", "data.js"), "export const rows = []\n", "utf8")
+    writeFileSync(join(dir, "src", "data.ts"), "export const rows = []\n", "utf8")
+    writeFileSync(join(dir, "src", "app.tsx"), "", "utf8")
+    const result = await resolveRelativeModule(join(dir, "src", "app.tsx"), "./data.js", root)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain(".js file")
+  })
+
+  it("prefers .tsx over .ts for a .jsx-written specifier", async () => {
+    mkdirSync(join(dir, "src"), { recursive: true })
+    writeFileSync(join(dir, "src", "Row.ts"), "export const a = 1\n", "utf8")
+    writeFileSync(join(dir, "src", "Row.tsx"), "export const a = 2\n", "utf8")
+    writeFileSync(join(dir, "src", "app.tsx"), "", "utf8")
+    const result = await resolveRelativeModule(join(dir, "src", "app.tsx"), "./Row.jsx", root)
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.relativePath).toBe("src/Row.tsx")
+  })
 })

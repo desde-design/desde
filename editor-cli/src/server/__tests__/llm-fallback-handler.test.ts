@@ -407,7 +407,7 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
       "src/Row.vue",
       "<script setup>\nconst rows = [{ key: 'a' }]\n</script>\n<template>\n  <li v-for=\"r in rows\" :key=\"r.key\">{{ r.key }}</li>\n</template>\n",
     )
-    write("src/Page.vue", "<template>\n  <Row />\n</template>\n")
+    write("src/Page.vue", '<script setup>\nimport Row from "./Row.vue"\n</script>\n<template>\n  <Row />\n</template>\n')
 
     const r = await handleLLMFallback(
       iterationBody({
@@ -514,11 +514,11 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
   })
 
   it("adds a file that is both the page source and the import-chain target only once", async () => {
-    write(
-      "src/comp/Row.tsx",
-      'import { ITEMS } from "../shared"\nexport default function Row() {\n  return <ul>{ITEMS.map((i) => <li key={i.id}>{i.name}</li>)}</ul>\n}\n',
-    )
-    write("src/shared.tsx", 'export const ITEMS = [{ id: 1, name: "a" }]\n')
+    const rowTsx =
+      'import { ITEMS } from "../shared"\nexport default function Row() {\n  return <ul>{ITEMS.map((i) => <li key={i.id}>{i.name}</li>)}</ul>\n}\n'
+    write("src/comp/Row.tsx", rowTsx)
+    // The page renders Row AND holds the data Row imports back from it.
+    write("src/shared.tsx", 'import Row from "./comp/Row"\nexport const ITEMS = [{ id: 1, name: "a" }]\nexport const Page = () => <Row />\n')
 
     const r = await handleLLMFallback(
       iterationBody({
@@ -526,7 +526,7 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
         intent: {
           kind: "iteration-data",
           description: "Set the name of item 1",
-          templateLocation: { file: "src/comp/Row.tsx", line: 3, column: 20 },
+          templateLocation: { file: "src/comp/Row.tsx", ...jsxLoc(rowTsx, "<li") },
           iterationContext: { source: "map" as const, key: 1, index: 0, siblingCount: 1, expression: "ITEMS" },
           pageSourceFile: "src/shared.tsx",
           payload: { operation: "patch-text", value: "A2" },
@@ -539,6 +539,97 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
     expect(r.status).toBe(200)
     expect(capturedBundles).toHaveLength(1)
     expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/comp/Row.tsx", "src/shared.tsx"])
+  })
+
+  it("drops a page hint that does not import the loop file (codex round 2: any in-root file could be claimed as the page)", async () => {
+    write("src/Row.vue", '<script setup>\ndefineProps<{ rows: { id: number }[] }>()\n</script>\n<template>\n  <li v-for="r in rows" :key="r.id">{{ r.id }}</li>\n</template>\n')
+    write("src/Unrelated.vue", '<script setup>\nconst rows = [{ id: 9 }]\n</script>\n<template><p>{{ rows.length }}</p></template>\n')
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: "src/Row.vue",
+        intent: {
+          kind: "iteration-data",
+          description: "Set the text of row 1",
+          templateLocation: { file: "src/Row.vue", line: 5, column: 3 },
+          iterationContext: { source: "v-for" as const, key: 1, index: 0, siblingCount: 1, expression: null },
+          pageSourceFile: "src/Unrelated.vue",
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      loadersNaming(),
+    )
+    expect(r.status).toBe(200)
+    expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/Row.vue"])
+  })
+
+  it("keeps a JSX page that imports the loop component without an extension", async () => {
+    const row = 'export function Row({ rows }: { rows: { id: number }[] }) {\n  return <ul>{rows.map((r) => <li key={r.id}>{r.id}</li>)}</ul>\n}\n'
+    write("src/components/Row.tsx", row)
+    write("src/pages/Home.tsx", 'import { Row } from "../components/Row"\nconst rows = [{ id: 1 }]\nexport default () => <Row rows={rows} />\n')
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: "src/components/Row.tsx",
+        intent: {
+          kind: "iteration-data",
+          description: "Set the text of row 1",
+          templateLocation: { file: "src/components/Row.tsx", ...jsxLoc(row, "<li") },
+          iterationContext: { source: "map" as const, key: 1, index: 0, siblingCount: 1, expression: null },
+          pageSourceFile: "src/pages/Home.tsx",
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      loadersNaming(),
+    )
+    expect(r.status).toBe(200)
+    expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/components/Row.tsx", "src/pages/Home.tsx"])
+  })
+
+  it("follows the import of a transformed list (`rows.filter(...).map`) into the bundle", async () => {
+    const src = 'import { rows } from "./data"\nexport default function L() {\n  return <ul>{rows.filter(Boolean).map((r) => <li key={r.id}>{r.name}</li>)}</ul>\n}\n'
+    write("src/L.tsx", src)
+    write("src/data.ts", 'export const rows = [{ id: 1, name: "a" }]\n')
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: "src/L.tsx",
+        intent: {
+          kind: "iteration-data",
+          description: "Set the name of row 1",
+          templateLocation: { file: "src/L.tsx", ...jsxLoc(src, "<li") },
+          iterationContext: { source: "map" as const, key: 1, index: 0, siblingCount: 1, expression: null },
+          pageSourceFile: null,
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      loadersNaming("src/data.ts"),
+    )
+    expect(r.status).toBe(200)
+    expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/L.tsx", "src/data.ts"])
+  })
+
+  it("refuses a loop file inside node_modules before any model call (codex round 2)", async () => {
+    write("node_modules/acme/List.tsx", 'const rows = [{ id: 1 }]\nexport const L = () => <ul>{rows.map((r) => <li key={r.id}>{r.id}</li>)}</ul>\n')
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: "node_modules/acme/List.tsx",
+        intent: {
+          kind: "iteration-data",
+          description: "Set the text of row 1",
+          templateLocation: { file: "node_modules/acme/List.tsx", line: 2, column: 40 },
+          iterationContext: { source: "map" as const, key: 1, index: 0, siblingCount: 1, expression: null },
+          pageSourceFile: null,
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      loadersNaming(),
+    )
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(400)
+    expect(r.reason).toMatch(/installed library/)
+    expect(capturedBundles).toHaveLength(0)
   })
 
   it("passes the lane's refusal kind through to the HTTP result", async () => {

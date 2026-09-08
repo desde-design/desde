@@ -133,9 +133,14 @@ export function resolveIterationDataJsxSameFile(
   }
   const iterateeRoot = rootIdentifier(iterateeObject)
   if (!iterateeRoot) {
+    // `rows.filter(Boolean).map(...)`: not a shape the deterministic lane
+    // edits, but the list is still `rows`, and the AI lane's bundle needs
+    // that name to follow the import (codex round 2). Report it.
+    const leftmost = leftmostIdentifier(iterateeObject)
     return {
       ok: false,
       reason: "The `.map()` is called on an expression, not a named list, so its data cannot be traced here",
+      ...(leftmost ? { iterateeRoot: leftmost } : {}),
     }
   }
 
@@ -240,6 +245,35 @@ function findEnclosingMapCall(ast: BabelNode, el: BabelNode): BabelNode | null {
 
 function isMapProperty(prop: BabelNode | undefined): boolean {
   return !!prop && prop.type === "Identifier" && (prop as { name?: string }).name === "map"
+}
+
+/** Leftmost identifier of ANY expression chain, calls included:
+ *  `rows.filter(Boolean).slice(0, 3)` → `rows`; `useStore().rows` → `useStore`.
+ *  Only a hint for the AI bundle — never used to pick an edit target. */
+function leftmostIdentifier(node: BabelNode | undefined): string | null {
+  let cur: BabelNode | undefined = node
+  while (cur) {
+    switch (cur.type) {
+      case "Identifier":
+        return (cur as { name?: string }).name ?? null
+      case "MemberExpression":
+      case "OptionalMemberExpression":
+        cur = cur.object
+        continue
+      case "CallExpression":
+      case "OptionalCallExpression":
+        cur = cur.callee
+        continue
+      case "TSNonNullExpression":
+      case "TSAsExpression":
+      case "ParenthesizedExpression":
+        cur = (cur as { expression?: BabelNode }).expression
+        continue
+      default:
+        return null
+    }
+  }
+  return null
 }
 
 /** Root identifier of a member chain: `data.rows` → `data`; `items` → `items`. */

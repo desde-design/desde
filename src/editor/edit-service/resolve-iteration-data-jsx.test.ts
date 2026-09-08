@@ -166,4 +166,14 @@ describe("resolveIterationDataJsxSameFile — map(callbackFn, thisArg)", () => {
     // The same argument mix-up also decided `keyProperty`.
     expect(result.ok === true && result.keyProperty).toBe("id")
   })
+
+  it("reports the list's name for a transformed iteratee it will not edit (`rows.filter(...).map`)", () => {
+    const src = 'import { rows } from "./data"\nexport const L = () => <ul>{rows.filter(Boolean).map((r) => <li key={r.id}>{r.name}</li>)}</ul>\n'
+    const idx = src.indexOf("<li")
+    const result = resolveIterationDataJsxSameFile({ source: src, templateLocation: { line: 2, column: idx - (src.lastIndexOf("\n", idx) + 1) } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.iterateeRoot).toBe("rows")
+    expect(result.importCandidate).toBeUndefined()
+  })
 })

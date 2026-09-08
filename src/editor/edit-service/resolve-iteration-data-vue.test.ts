@@ -248,4 +248,12 @@ import { rows } from "./rows"
       binding: { specifier: './rows', importedName: 'rows', via: 'import' },
     })
   })
+
+  it("reports the list's name for a transformed iteratee it will not edit (`r in rows.filter(...)`)", () => {
+    const source = `<template>\n  <li v-for="r in rows.filter(Boolean)" :key="r.id">{{ r.name }}</li>\n</template>\n<script setup>\nimport { rows } from './data'\n</script>\n`
+    const result = resolveIterationDataVueSameFile({ source, templateLocation: { line: 2, column: 3 } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.iterateeRoot).toBe('rows')
+  })
 })

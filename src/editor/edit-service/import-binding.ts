@@ -175,6 +175,53 @@ export function findExportedArrayLiteral(
   return matches.length === 1 ? matches[0] : null
 }
 
+/**
+ * Does this module import `targetPath` through a relative specifier? Used to
+ * decide whether a client-supplied "page" file is actually related to the
+ * loop file before it becomes a legal rewrite target in the AI bundle
+ * (codex round 2: any in-root file could be claimed as the page). Compares
+ * with extensions stripped on both sides and treats `dir` as `dir/index`.
+ * `fromPath` and `targetPath` are repo-relative, POSIX separators.
+ */
+export function importsRelativeFile(
+  moduleSource: string,
+  fromPath: string,
+  targetPath: string,
+): boolean {
+  const ast = parseModule(moduleSource)
+  if (!ast) return false
+  const fromDir = fromPath.includes('/') ? fromPath.slice(0, fromPath.lastIndexOf('/')) : ''
+  const target = stripModuleExtension(targetPath)
+  for (const stmt of ast.program.body as Statement[]) {
+    let specifier: string | null = null
+    if (stmt.type === 'ImportDeclaration') specifier = stmt.source.value
+    else if (stmt.type === 'ExportNamedDeclaration' && stmt.source) specifier = stmt.source.value
+    else if (stmt.type === 'ExportAllDeclaration') specifier = stmt.source.value
+    if (!specifier || !isRelativeSpecifier(specifier)) continue
+    const resolved = stripModuleExtension(normalizePosix(fromDir ? `${fromDir}/${specifier}` : specifier))
+    if (resolved === target || `${resolved}/index` === target) return true
+  }
+  return false
+}
+
+function stripModuleExtension(p: string): string {
+  return p.replace(/\.(vue|tsx?|jsx?|mts|mjs|cjs)$/, '')
+}
+
+/** `a/b/../c/./d` → `a/c/d`, without touching the filesystem. */
+function normalizePosix(p: string): string {
+  const out: string[] = []
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') {
+      out.pop()
+      continue
+    }
+    out.push(seg)
+  }
+  return out.join('/')
+}
+
 /** One file on an import chain, as the AI lane's bundle wants it. */
 export interface ImportChainFile {
   /** Repo-relative path. */

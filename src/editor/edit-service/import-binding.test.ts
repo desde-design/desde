@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { findExportedArrayLiteral, findImportBinding } from './import-binding'
+import { findExportedArrayLiteral, findImportBinding, importsRelativeFile } from './import-binding'
 
 describe('findImportBinding', () => {
   it('finds a plain named import', () => {
@@ -130,5 +130,22 @@ export { X }
 export const X = [2, 3]
 `
     expect(findExportedArrayLiteral(src, 'X')).toBeNull()
+  })
+})
+
+describe('importsRelativeFile', () => {
+  it('matches an extensionless import against the .tsx file it names', () => {
+    expect(importsRelativeFile('import { Row } from "../components/Row"', 'src/pages/Home.tsx', 'src/components/Row.tsx')).toBe(true)
+  })
+  it('matches a .vue import from a script block', () => {
+    expect(importsRelativeFile('import Row from "./Row.vue"', 'src/Page.vue', 'src/Row.vue')).toBe(true)
+  })
+  it('treats a directory import as its index file', () => {
+    expect(importsRelativeFile('import { Row } from "./row"', 'src/Page.tsx', 'src/row/index.tsx')).toBe(true)
+  })
+  it('does not match an unrelated file, a bare specifier, or a same-named file elsewhere', () => {
+    expect(importsRelativeFile('import { x } from "./other"', 'src/Page.tsx', 'src/Row.tsx')).toBe(false)
+    expect(importsRelativeFile('import { Row } from "row"', 'src/Page.tsx', 'src/Row.tsx')).toBe(false)
+    expect(importsRelativeFile('import { Row } from "./Row"', 'src/pages/Page.tsx', 'src/Row.tsx')).toBe(false)
   })
 })

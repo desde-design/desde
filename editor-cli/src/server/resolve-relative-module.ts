@@ -77,16 +77,23 @@ function hasResolvableExtension(p: string): boolean {
 
 /** Candidate file paths for a specifier, in bundler order. Every entry ends
  *  in a resolvable extension; a specifier written with any other extension
- *  (`./rows.json`, `./setup.mjs`) is never tried as-is. */
+ *  (`./rows.json`, `./setup.mjs`) is never tried as-is — see
+ *  `resolveRelativeModule` for what happens when such a file EXISTS. */
 function candidatePaths(base: string): string[] {
   const out: string[] = []
   if (hasResolvableExtension(base)) out.push(base)
   for (const ext of RESOLVABLE_EXTENSIONS) out.push(base + ext)
   const written = STRIPPABLE_EXTENSIONS.find((ext) => base.endsWith(ext))
   if (written) {
-    // `./rows.js` written against a `rows.ts` on disk.
+    // `./rows.js` written against a `rows.ts` on disk. A JSX-flavoured
+    // specifier (`./Row.jsx`) prefers the JSX-flavoured source (`Row.tsx`),
+    // matching the ESM-with-TS convention rather than alphabetical luck.
     const stem = base.slice(0, -written.length)
-    for (const ext of RESOLVABLE_EXTENSIONS) out.push(stem + ext)
+    const order =
+      written === ".jsx" || written === ".tsx"
+        ? [".tsx", ".ts", ".jsx"]
+        : [".ts", ".tsx", ".jsx"]
+    for (const ext of order) out.push(stem + ext)
   }
   for (const ext of RESOLVABLE_EXTENSIONS) out.push(path.join(base, "index" + ext))
   return out
@@ -111,6 +118,17 @@ export async function resolveRelativeModule(
   }
   if (hasNodeModulesSegment(base)) {
     return { ok: false, reason: `"${specifier}" points into node_modules` }
+  }
+  // If the specifier names a file that exists AS WRITTEN and that file is
+  // not one this resolver may return, stop here: the bundler will load THAT
+  // file, and picking a same-stem `.ts` beside it would edit data the app
+  // never imports (codex round 2: `./data.js` with both `data.js` and
+  // `data.ts` on disk resolved to the `.ts`).
+  if (!hasResolvableExtension(base) && path.extname(base) !== "" && (await isFile(base))) {
+    return {
+      ok: false,
+      reason: `"${specifier}" is a ${path.extname(base)} file, which the Editor cannot write back`,
+    }
   }
   for (const candidate of candidatePaths(base)) {
     if (!(await isFile(candidate))) continue

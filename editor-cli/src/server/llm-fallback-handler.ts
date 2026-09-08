@@ -291,6 +291,18 @@ export async function handleLLMFallback(
       reason: "Resolved target is not a .vue, .tsx, or .jsx file",
     }
   }
+  // Both lanes here return a FULL-FILE rewrite of `file`. A dependency is
+  // never a legal target: the write broker would refuse it at save time, but
+  // by then the file has been shown to the model and the user has a
+  // proposal that cannot land (codex round 2). Same wording rule as the edit
+  // handler: the designer reads this, so name the package, not the directory.
+  if (hasNodeModulesSegment(candidate) || hasNodeModulesSegment(targetPath)) {
+    return {
+      status: 400,
+      ok: false,
+      reason: "This file belongs to an installed library, which the Editor does not edit",
+    }
+  }
 
   let source: string
   try {
@@ -352,7 +364,20 @@ export async function handleLLMFallback(
     }
 
     if (intent.pageSourceFile && intent.pageSourceFile !== resolvedRelPath) {
-      addFile(await readBundleFile(intent.pageSourceFile, rootResolution))
+      // The page hint comes from the client (the route's current source
+      // file). It only becomes a legal rewrite target if it actually renders
+      // the loop file — i.e. imports it. Any in-root rewritable file could
+      // otherwise be claimed as "the page" and handed to the model as a file
+      // it may overwrite (codex round 2).
+      const page = await readBundleFile(intent.pageSourceFile, rootResolution)
+      if (page) {
+        const [{ importsRelativeFile }, { moduleSourceOfFile }] = await Promise.all([
+          import("../../../src/editor/edit-service/import-binding.js"),
+          import("../../../src/editor/edit-service/vue-script-content.js"),
+        ])
+        const pageModule = moduleSourceOfFile(page.path, page.source)
+        if (importsRelativeFile(pageModule, page.path, resolvedRelPath)) addFile(page)
+      }
     }
 
     const iterateeRoot = await iterateeRootOfLoop(
