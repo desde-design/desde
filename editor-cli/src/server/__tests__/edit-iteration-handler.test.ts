@@ -367,8 +367,9 @@ const rows = [{ id: 1 }, { id: 2 }]
     it("does not consult a page that does not import the component, even if it uses the same tag (codex round 5)", async () => {
       writeFileSync(
         join(dir, "src", "Unrelated.vue"),
-        `<template><Foo :items="decoy" /></template>
+        `<template><Foo :items="decoy" /><Other /></template>
 <script setup>
+import Other from './Other.vue'
 const decoy = [{ id: 999 }]
 </script>`,
         "utf8",
@@ -415,6 +416,81 @@ const other = [{ id: 9 }]
       expect(result.ok).toBe(true)
       expect(crossMock).toHaveBeenCalledTimes(1)
       expect(crossMock.mock.calls[0][0]).toMatchObject({ componentName: "FooAlias" })
+    })
+
+    it("accepts a page that imports the component through a path alias, with the alias import's local name", async () => {
+      mkdirSync(join(dir, "src", "views"), { recursive: true })
+      writeFileSync(
+        join(dir, "src", "views", "Page.vue"),
+        `<template><FooCard :items="rows" /></template>
+<script setup>
+import FooCard from '@/Foo.vue'
+const rows = [{ id: 1 }]
+</script>`,
+        "utf8",
+      )
+      const { resolveIterationDataVueCrossComponent } = await import(
+        "../../../../src/editor/edit-service/resolve-iteration-data-vue-cross-component.js"
+      )
+      const crossMock = vi.mocked(resolveIterationDataVueCrossComponent)
+      crossMock.mockClear()
+      crossMock.mockReturnValueOnce({
+        ok: true,
+        file: "src/views/Page.vue",
+        arrayLocation: { line: 4, column: 14 },
+        keyProperty: "id",
+        itemVar: "item",
+      })
+      const result = await handleIterationEdit(makeBody({ pageSourceFile: "src/views/Page.vue" }), dir)
+      expect(result.ok).toBe(true)
+      expect(crossMock.mock.calls[0][0]).toMatchObject({ componentName: "FooCard" })
+    })
+
+    it("falls back to the filename tag for a page with no local imports at all (auto-imports)", async () => {
+      writeFileSync(
+        join(dir, "src", "Auto.vue"),
+        `<template><Foo :items="rows" /></template>
+<script setup>
+const rows = [{ id: 1 }]
+</script>`,
+        "utf8",
+      )
+      const { resolveIterationDataVueCrossComponent } = await import(
+        "../../../../src/editor/edit-service/resolve-iteration-data-vue-cross-component.js"
+      )
+      const crossMock = vi.mocked(resolveIterationDataVueCrossComponent)
+      crossMock.mockClear()
+      crossMock.mockReturnValueOnce({
+        ok: true,
+        file: "src/Auto.vue",
+        arrayLocation: { line: 3, column: 14 },
+        keyProperty: "id",
+        itemVar: "item",
+      })
+      const result = await handleIterationEdit(makeBody({ pageSourceFile: "src/Auto.vue" }), dir)
+      expect(result.ok).toBe(true)
+      expect(crossMock.mock.calls[0][0]).toMatchObject({ componentName: "Foo" })
+    })
+
+    it("applies the render-count guard on the cross-component path too (Fable review: entryCount was dropped)", async () => {
+      const { resolveIterationDataVueCrossComponent } = await import(
+        "../../../../src/editor/edit-service/resolve-iteration-data-vue-cross-component.js"
+      )
+      vi.mocked(resolveIterationDataVueCrossComponent).mockReturnValueOnce({
+        ok: true,
+        file: "src/Page.vue",
+        arrayLocation: { line: 4, column: 14 },
+        keyProperty: null,
+        entryCount: 3,
+        itemVar: "item",
+      })
+      // Positional key (key === index) with 2 rendered of 3 source entries.
+      const result = await handleIterationEdit(
+        makeBody({ pageSourceFile: "src/Page.vue", iterationContext: { key: 0, index: 0, siblingCount: 2 } }),
+        dir,
+      )
+      expect(result.ok).toBe(false)
+      expect(result.ok === false && result.reason).toMatch(/renders 2 of 3 entries/)
     })
 
     it("ignores pageSourceFile that escapes root and falls through to 422", async () => {

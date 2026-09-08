@@ -332,17 +332,21 @@ export async function handleIterationEdit(
         // "./Card.vue"` renders `<CardAlias>`; codex round 6).
         let componentLocalNames: string[] = []
         if (pageSource !== null) {
-          const [{ importedLocalNamesForFile }, { moduleSourceOfFile }] = await Promise.all([
-            import("../../../src/editor/edit-service/import-binding.js"),
-            import("../../../src/editor/edit-service/vue-script-content.js"),
-          ])
+          const [{ importedLocalNamesForFile, hasAnyLocalImport }, { moduleSourceOfFile }] =
+            await Promise.all([
+              import("../../../src/editor/edit-service/import-binding.js"),
+              import("../../../src/editor/edit-service/vue-script-content.js"),
+            ])
           const pageRel = path.relative(rootReal, pageReal).split(path.sep).join("/")
           const loopRel = path.relative(rootReal, targetPath).split(path.sep).join("/")
-          componentLocalNames = importedLocalNamesForFile(
-            moduleSourceOfFile(pageRel, pageSource),
-            pageRel,
-            loopRel,
-          )
+          const pageModule = moduleSourceOfFile(pageRel, pageSource)
+          componentLocalNames = importedLocalNamesForFile(pageModule, pageRel, loopRel)
+          // A page that imports NO local component at all is on auto-imports
+          // (Nuxt, unplugin-vue-components): there is no import to check, so
+          // the tag is the filename, as it was before this series.
+          if (componentLocalNames.length === 0 && !hasAnyLocalImport(pageModule)) {
+            componentLocalNames = [path.basename(body.file, ".vue")]
+          }
         }
         if (pageSource !== null && componentLocalNames.length === 1) {
           const { resolveIterationDataVueCrossComponent } = await import(
@@ -367,6 +371,7 @@ export async function handleIterationEdit(
               iterateeRoot: "",
               iterateeChain: [],
               keyProperty: crossResult.keyProperty,
+              entryCount: crossResult.entryCount,
               itemVar: crossResult.itemVar,
             }
             dataSource = pageSource

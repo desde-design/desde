@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { findExportedArrayLiteral, findImportBinding, importsRelativeFile } from './import-binding'
+import { findExportedArrayLiteral, findImportBinding, hasAnyLocalImport, importsRelativeFile } from './import-binding'
 
 describe('findImportBinding', () => {
   it('finds a plain named import', () => {
@@ -164,5 +164,20 @@ describe('importsRelativeFile', () => {
     expect(importsRelativeFile('import Row from "./Row.js"', 'src/Page.tsx', 'src/Row.tsx')).toBe(true)
     expect(importsRelativeFile('import Row from "./Row.jsx"', 'src/Page.tsx', 'src/Row.tsx')).toBe(true)
     expect(importsRelativeFile('import Row from "./Row.mjs"', 'src/Page.tsx', 'src/Row.tsx')).toBe(false)
+  })
+  it('matches a path-alias import by its sub-path, but never a bare package or a lone filename (Fable review)', () => {
+    expect(importsRelativeFile('import Card from "@/components/Card.vue"', 'src/views/Page.vue', 'src/components/Card.vue')).toBe(true)
+    expect(importsRelativeFile('import Card from "~/components/Card"', 'src/views/Page.vue', 'src/components/Card.vue')).toBe(true)
+    expect(importsRelativeFile('import Card from "@/Card.vue"', 'src/views/Page.vue', 'src/other/Card.vue')).toBe(false)
+    expect(importsRelativeFile('import Card from "@/Card.vue"', 'src/views/Page.vue', 'src/Card.vue')).toBe(true)
+    expect(importsRelativeFile('import Card from "@scope/pkg/components/Card.vue"', 'src/views/Page.vue', 'src/components/Card.vue')).toBe(false)
+    expect(importsRelativeFile('import Card from "@/components/Card.vue"', 'src/views/Page.vue', 'src/widgets/Card.vue')).toBe(false)
+  })
+
+  it('hasAnyLocalImport tells an explicit-import page from an auto-import one', () => {
+    expect(hasAnyLocalImport('import Card from "./Card.vue"')).toBe(true)
+    expect(hasAnyLocalImport('import Card from "@/components/Card.vue"')).toBe(true)
+    expect(hasAnyLocalImport('import { ref } from "vue"\nconst rows = []')).toBe(false)
+    expect(hasAnyLocalImport('import type Card from "./Card.vue"')).toBe(false)
   })
 })

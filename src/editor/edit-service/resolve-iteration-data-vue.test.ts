@@ -313,4 +313,13 @@ import { rows } from "./rows"
     if (!result.ok) return
     expect(result.arrayLocation.line).toBe(8)
   })
+
+  it("treats a v-slot destructured name as a loop alias, not the imported list (Fable review)", () => {
+    const source = `<template>\n  <SortedList :items="rows" v-slot="{ rows }">\n    <li v-for="r in rows" :key="r.id">{{ r.name }}</li>\n  </SortedList>\n</template>\n<script setup>\nimport { rows } from './data'\n</script>\n`
+    const result = resolveIterationDataVueSameFile({ source, templateLocation: { line: 3, column: 5 } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.importCandidate).toBeUndefined()
+    expect(result.reason).toMatch(/outer v-for/)
+  })
 })

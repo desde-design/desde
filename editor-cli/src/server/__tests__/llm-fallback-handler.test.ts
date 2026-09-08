@@ -543,7 +543,7 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
 
   it("drops a page hint that does not import the loop file (codex round 2: any in-root file could be claimed as the page)", async () => {
     write("src/Row.vue", '<script setup>\ndefineProps<{ rows: { id: number }[] }>()\n</script>\n<template>\n  <li v-for="r in rows" :key="r.id">{{ r.id }}</li>\n</template>\n')
-    write("src/Unrelated.vue", '<script setup>\nconst rows = [{ id: 9 }]\n</script>\n<template><p>{{ rows.length }}</p></template>\n')
+    write("src/Unrelated.vue", '<script setup>\nimport Other from "./Other.vue"\nconst rows = [{ id: 9 }]\n</script>\n<template><Other /><p>{{ rows.length }}</p></template>\n')
     const r = await handleLLMFallback(
       iterationBody({
         file: "src/Row.vue",
@@ -656,7 +656,7 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
 
   it("drops a page whose only reference to the loop file is a type import or a re-export", async () => {
     write("src/Row.vue", '<script setup>\ndefineProps<{ rows: { id: number }[] }>()\n</script>\n<template>\n  <li v-for="r in rows" :key="r.id">{{ r.id }}</li>\n</template>\n')
-    write("src/Index.vue", '<script setup>\nimport type Row from "./Row.vue"\n</script>\n<template><p /></template>\n')
+    write("src/Index.vue", '<script setup>\nimport type Row from "./Row.vue"\nimport Other from "./Other.vue"\n</script>\n<template><Other /></template>\n')
     const r = await handleLLMFallback(
       iterationBody({
         file: "src/Row.vue",
@@ -674,6 +674,50 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
     )
     expect(r.status).toBe(200)
     expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/Row.vue"])
+  })
+
+  it("keeps a page that imports the loop component through a path alias (Fable review: 320 alias imports in the dogfood substrate)", async () => {
+    write("src/components/Card.vue", '<script setup>\ndefineProps<{ items: { id: number }[] }>()\n</script>\n<template>\n  <li v-for="i in items" :key="i.id">{{ i.id }}</li>\n</template>\n')
+    write("src/views/Page.vue", '<script setup>\nimport Card from "@/components/Card.vue"\nconst rows = [{ id: 1 }]\n</script>\n<template><Card :items="rows" /></template>\n')
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: "src/components/Card.vue",
+        intent: {
+          kind: "iteration-data",
+          description: "Set the text of row 1",
+          templateLocation: { file: "src/components/Card.vue", line: 5, column: 3 },
+          iterationContext: { source: "v-for" as const, key: 1, index: 0, siblingCount: 1, expression: null },
+          pageSourceFile: "src/views/Page.vue",
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      loadersNaming(),
+    )
+    expect(r.status).toBe(200)
+    expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/components/Card.vue", "src/views/Page.vue"])
+  })
+
+  it("keeps a page that imports nothing locally (auto-imports), since there is no import to check", async () => {
+    write("src/components/Card.vue", '<script setup>\ndefineProps<{ items: { id: number }[] }>()\n</script>\n<template>\n  <li v-for="i in items" :key="i.id">{{ i.id }}</li>\n</template>\n')
+    write("src/pages/index.vue", '<script setup>\nconst rows = [{ id: 1 }]\n</script>\n<template><Card :items="rows" /></template>\n')
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: "src/components/Card.vue",
+        intent: {
+          kind: "iteration-data",
+          description: "Set the text of row 1",
+          templateLocation: { file: "src/components/Card.vue", line: 5, column: 3 },
+          iterationContext: { source: "v-for" as const, key: 1, index: 0, siblingCount: 1, expression: null },
+          pageSourceFile: "src/pages/index.vue",
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      loadersNaming(),
+    )
+    expect(r.status).toBe(200)
+    expect(capturedBundles[0].map((f) => f.path)).toEqual(["src/components/Card.vue", "src/pages/index.vue"])
   })
 
   it("passes the lane's refusal kind through to the HTTP result", async () => {

@@ -235,11 +235,37 @@ export function importedLocalNamesForFile(
     )
     if (stmt.specifiers.length > 0 && valueSpecifiers.length === 0) continue
     const specifier = stmt.source.value
-    if (!isRelativeSpecifier(specifier)) continue
-    const normalized = normalizePosix(fromDir ? `${fromDir}/${specifier}` : specifier)
-    if (normalized === null) continue
     let matches = false
     const written = /\.[A-Za-z0-9]+$/.exec(specifier)?.[0]
+    if (!isRelativeSpecifier(specifier)) {
+      // `@/components/Card.vue`, `~/components/Card`: a path alias. We do
+      // not read tsconfig `paths` or Vite `resolve.alias`, so the alias root
+      // is unknown; what we DO know is the path under it, and the loop file
+      // either ends with that path or it does not. A lone filename
+      // (`@/Card.vue`) is accepted only for a file one directory deep
+      // (`src/Card.vue`), the shape `@` → `src` produces; it must not match
+      // every `Card.vue` in the tree. Bare package imports never have an
+      // alias-shaped first segment and fall through to "no match".
+      const suffix = aliasSubPath(specifier)
+      const oneDeep = targetPath.split('/').length === 2
+      if (suffix && (suffix.includes('/') || oneDeep)) {
+        const suffixNoExt = stripModuleExtension(suffix)
+        if (
+          targetPath === suffix ||
+          targetPath.endsWith(`/${suffix}`) ||
+          target === suffixNoExt ||
+          target.endsWith(`/${suffixNoExt}`)
+        ) {
+          matches = true
+        }
+      }
+      if (!matches) continue
+      if (valueSpecifiers.length === 0) continue
+      for (const s of valueSpecifiers) names.push(s.local.name)
+      continue
+    }
+    const normalized = normalizePosix(fromDir ? `${fromDir}/${specifier}` : specifier)
+    if (normalized === null) continue
     if (written) {
       // Written with an extension: it names ONE file, or that file's
       // TypeScript source under output-extension substitution. `./Row.ts` is
@@ -262,6 +288,34 @@ export function importedLocalNamesForFile(
 
 function stripModuleExtension(p: string): string {
   return p.replace(/\.(vue|tsx?|jsx?|mts|mjs|cjs)$/, '')
+}
+
+/** The path under a path alias: `@/components/Card.vue` → `components/Card.vue`,
+ *  `~/x/y` → `x/y`, `#app/x` → `x`. Null for a relative specifier or a bare
+ *  package name (`react`, `@scope/pkg/x` — a scope is not an alias, and
+ *  matching a dependency's path against the prototype would be wrong). */
+function aliasSubPath(specifier: string): string | null {
+  const m = /^([@~#$])\/(.+)$/.exec(specifier)
+  if (m) return m[2]
+  const tilde = /^~(?:[A-Za-z0-9_-]*)\/(.+)$/.exec(specifier)
+  return tilde ? tilde[1] : null
+}
+
+/**
+ * Does this module import ANY local component or module (relative or
+ * alias specifier)? A page with none is on auto-imports (Nuxt, unplugin), where
+ * "the page imports the component" cannot be checked because nothing is
+ * imported by name; callers fall back to the tag name in that case.
+ */
+export function hasAnyLocalImport(moduleSource: string): boolean {
+  const ast = parseModule(moduleSource)
+  if (!ast) return false
+  return (ast.program.body as Statement[]).some(
+    (stmt) =>
+      stmt.type === 'ImportDeclaration' &&
+      stmt.importKind !== 'type' &&
+      (isRelativeSpecifier(stmt.source.value) || aliasSubPath(stmt.source.value) !== null),
+  )
 }
 
 /** `a/b/../c/./d` → `a/c/d`, without touching the filesystem. Null when the

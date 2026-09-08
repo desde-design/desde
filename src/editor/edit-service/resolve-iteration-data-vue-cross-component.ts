@@ -67,6 +67,8 @@ export type CrossComponentResolveResult =
        * Mirrors the same-file resolver's contract — see that file.
        */
       keyProperty: string | null
+      /** Entry count of the page's array literal, for the render-count guard. */
+      entryCount?: number
       /**
        * The loop variable — `r` in `v-for="r in rows"` — read off the
        * COMPONENT's v-for. The handler's text-field path needs it to name
@@ -287,9 +289,11 @@ function findPropBindingInTemplate(
 /** Page-side array lookup: the same scope-aware finder the same-file
  *  resolver uses, so a helper's local can no longer shadow the page's
  *  top-level array (codex round 6). */
-function findArrayDecl(ast: File, name: string): { line: number; column: number } | null {
-  const found = findArrayDeclaration(ast, name)
-  return found ? { line: found.line, column: found.column } : null
+function findArrayDecl(
+  ast: File,
+  name: string,
+): { line: number; column: number; count: number } | null {
+  return findArrayDeclaration(ast, name)
 }
 
 export function resolveIterationDataVueCrossComponent(
@@ -408,6 +412,7 @@ export function resolveIterationDataVueCrossComponent(
     file: input.pageSourceFile,
     arrayLocation: { line: sfcLine, column: sfcColumn },
     keyProperty,
+    entryCount: arrayPos.count,
     itemVar: iteratee.itemVar,
   }
 }

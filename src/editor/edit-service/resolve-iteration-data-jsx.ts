@@ -160,8 +160,9 @@ export function resolveIterationDataJsxSameFile(
   if (isShadowedByEnclosingParam(ast, mapCall, iterateeRoot)) {
     return {
       ok: false,
+      // No `iterateeRoot` hint: the data comes from the caller, so a
+      // same-named import in THIS file is not it (Fable review).
       reason: `\`${iterateeRoot}\` is a prop or parameter here, so its data is defined by the caller, not in this file`,
-      iterateeRoot,
     }
   }
 
@@ -177,7 +178,14 @@ export function resolveIterationDataJsxSameFile(
   const keyProperty = extractKeyProperty(el, itemVar)
 
   // Trace the iteratee root to a same-module array-literal binding.
-  const arrayNode = findArrayLiteralBinding(ast, iterateeRoot, mapCall)
+  const binding = findArrayLiteralBinding(ast, iterateeRoot, mapCall)
+  if (binding.kind === "ambiguous") {
+    return {
+      ok: false,
+      reason: `\`${iterateeRoot}\` is declared more than once in this file, so the list cannot be told apart`,
+    }
+  }
+  const arrayNode = binding.kind === "one" ? binding.node : null
   if (!arrayNode || typeof arrayNode.loc?.start?.line !== "number") {
     // Not a same-file literal. Before deferring to the LLM lane, check whether
     // the name is simply imported from another module — the handler can follow
@@ -344,7 +352,11 @@ function extractKeyProperty(el: BabelNode, itemVar: string | null): string | nul
 /** Find a same-module `const X = [ … ]` or `const [X] = useState([ … ])` whose
  *  initializer is an array literal. Returns the single ArrayExpression node, or
  *  null when there are zero OR MULTIPLE matches (ambiguous → don't guess). */
-function findArrayLiteralBinding(ast: BabelNode, name: string, mapCall: BabelNode): BabelNode | null {
+function findArrayLiteralBinding(
+  ast: BabelNode,
+  name: string,
+  mapCall: BabelNode,
+): { kind: "one"; node: BabelNode } | { kind: "none" } | { kind: "ambiguous" } {
   const matches: BabelNode[] = []
   walk(ast, (node) => {
     if (node.type !== "VariableDeclarator") return
@@ -378,7 +390,8 @@ function findArrayLiteralBinding(ast: BabelNode, name: string, mapCall: BabelNod
       matches.push(init.arguments[0])
     }
   })
-  return matches.length === 1 ? matches[0] : null
+  if (matches.length === 1) return { kind: "one", node: matches[0] }
+  return matches.length === 0 ? { kind: "none" } : { kind: "ambiguous" }
 }
 
 /** Is a declaration at `decl` in scope at `mapCall`? True at module scope,

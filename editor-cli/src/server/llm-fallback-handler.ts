@@ -371,12 +371,20 @@ export async function handleLLMFallback(
       // it may overwrite (codex round 2).
       const page = await readBundleFile(intent.pageSourceFile, rootResolution)
       if (page) {
-        const [{ importsRelativeFile }, { moduleSourceOfFile }] = await Promise.all([
-          import("../../../src/editor/edit-service/import-binding.js"),
-          import("../../../src/editor/edit-service/vue-script-content.js"),
-        ])
+        const [{ importsRelativeFile, hasAnyLocalImport }, { moduleSourceOfFile }] =
+          await Promise.all([
+            import("../../../src/editor/edit-service/import-binding.js"),
+            import("../../../src/editor/edit-service/vue-script-content.js"),
+          ])
         const pageModule = moduleSourceOfFile(page.path, page.source)
-        if (importsRelativeFile(pageModule, page.path, resolvedRelPath)) addFile(page)
+        // Imports the loop file (relative or alias), or imports nothing local
+        // at all (auto-imports, where the check has nothing to read).
+        if (
+          importsRelativeFile(pageModule, page.path, resolvedRelPath) ||
+          !hasAnyLocalImport(pageModule)
+        ) {
+          addFile(page)
+        }
       }
     }
 

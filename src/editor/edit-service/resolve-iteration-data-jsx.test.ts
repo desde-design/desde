@@ -235,4 +235,22 @@ describe("resolveIterationDataJsxSameFile — map(callbackFn, thisArg)", () => {
     if (result.ok) return
     expect(result.reason).toMatch(/prop or parameter/)
   })
+
+  it("gives no list-name hint when the iteratee is a prop, even with a same-named import (Fable review)", () => {
+    const src = 'import { rows } from "./data"\nexport function List({ rows }: { rows: { id: number }[] }) {\n  return <ul>{rows.map((r) => <li key={r.id}>{r.id}</li>)}</ul>\n}\n'
+    const idx = src.indexOf("<li")
+    const result = resolveIterationDataJsxSameFile({ source: src, templateLocation: { line: 3, column: idx - (src.lastIndexOf("\n", idx) + 1) } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.iterateeRoot).toBeUndefined()
+    expect(result.importCandidate).toBeUndefined()
+  })
+
+  it("says so when the list is declared twice in scope, instead of 'not a plain array literal'", () => {
+    const src = 'const items = [{ id: 1 }]\nexport const L = () => {\n  if (Math.random() > 2) { const items = [{ id: 2 }]; console.log(items) }\n  return <ul>{items.map((item) => <li key={item.id}>{item.id}</li>)}</ul>\n}\n'
+    const r = resolveIterationDataJsxSameFile({ source: src, templateLocation: loc(src, "<li key") })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/declared more than once/)
+  })
 })

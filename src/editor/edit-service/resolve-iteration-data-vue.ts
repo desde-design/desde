@@ -131,6 +131,16 @@ function findVForAt(
     )
     const ownContent = (ownVFor?.exp as SimpleExpressionNode | undefined)?.content
     const ownAliases = ownContent ? vForAliases(ownContent) : []
+    // `v-slot="{ rows }"` / `#default="{ rows }"` binds names for the
+    // children just like an outer v-for does (Fable review: a slot named
+    // like an imported list rewrote the wrong row of the imported file).
+    for (const p of node.props ?? []) {
+      if (p.type !== NodeTypes.DIRECTIVE || (p as DirectiveNode).name !== 'slot') continue
+      const content = ((p as DirectiveNode).exp as SimpleExpressionNode | undefined)?.content
+      if (content) {
+        ownAliases.push(...Array.from(content.matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g), (x) => x[0]))
+      }
+    }
     const childAliases = ownAliases.length > 0 ? [...aliases, ...ownAliases] : aliases
     for (const child of node.children ?? []) {
       if (child.type === NodeTypes.ELEMENT) {
