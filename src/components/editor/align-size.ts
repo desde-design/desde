@@ -180,10 +180,98 @@ export function setWidth(
 export { applyClassMutation }
 
 /**
+ * Which screen axis each CSS property controls.
+ *
+ * `justify-content` runs along the MAIN axis and `align-items` along the
+ * CROSS axis. Which of those is horizontal is `flex-direction`'s business: a
+ * row puts main across and cross down, a column swaps them. The `-reverse`
+ * directions keep the axis and mirror it, and `flex-wrap: wrap-reverse`
+ * mirrors the cross axis the same way.
+ *
+ * The 3×3 grid draws SCREEN positions, so it has to translate. Until
+ * 2026-09-08 it did not: it assumed a row, so on a `flex-col` container the
+ * top-right cell wrote `justify-end items-start`, which lays the children out
+ * BOTTOM-LEFT. The highlight read the same assumption back, so the control
+ * was self-consistent and wrong, which is why it survived.
+ */
+export interface FlexAxes {
+  /** True when `justify-content` runs vertically (a column container). */
+  column: boolean
+  /** True when the main axis runs right-to-left or bottom-to-top. */
+  mainReversed: boolean
+  /** True when the cross axis is mirrored (`flex-wrap: wrap-reverse`). */
+  crossReversed: boolean
+}
+
+/** Read the axes off the bridge's computed styles. Absent or unknown = row. */
+export function parseFlexAxes(
+  computedStyles: Record<string, string> | undefined,
+): FlexAxes {
+  const dir = computedStyles?.["flex-direction"]?.trim() ?? "row"
+  const column = dir === "column" || dir === "column-reverse"
+  const mainReversed = dir === "row-reverse" || dir === "column-reverse"
+  const crossReversed = computedStyles?.["flex-wrap"]?.trim() === "wrap-reverse"
+  return { column, mainReversed, crossReversed }
+}
+
+/** start <-> end; center is its own mirror. */
+function mirror<T extends "start" | "center" | "end">(v: T): T {
+  return (v === "start" ? "end" : v === "end" ? "start" : "center") as T
+}
+
+/**
+ * A grid cell (a screen position) to the two CSS values that produce it.
+ *
+ * `col` is the screen column, left to right. `row` is the screen row, top to
+ * bottom. The horizontal one drives the main axis in a row container and the
+ * cross axis in a column container.
+ */
+export function cellToAxes(
+  col: JustifyValue,
+  row: AlignValue,
+  axes: FlexAxes,
+): { justify: JustifyValue; align: AlignValue } {
+  const horizontal = col
+  const vertical = row
+  const main = axes.column ? vertical : horizontal
+  const cross = axes.column ? horizontal : vertical
+  return {
+    justify: axes.mainReversed ? mirror(main) : main,
+    align: axes.crossReversed ? mirror(cross) : cross,
+  }
+}
+
+/**
+ * The inverse: which cell a stored pair lights. `null` for either value (an
+ * unset or unrepresentable axis) lights nothing.
+ */
+export function axesToCell(
+  justify: JustifyValue | null,
+  align: AlignValue | null,
+  axes: FlexAxes,
+): { col: JustifyValue; row: AlignValue } | null {
+  if (justify === null || align === null) return null
+  const main = axes.mainReversed ? mirror(justify) : justify
+  const cross = axes.crossReversed ? mirror(align) : align
+  return axes.column
+    ? { col: cross, row: main }
+    : { col: main, row: cross }
+}
+
+/**
  * Whether the element is a flex/grid CONTAINER — i.e. whether the
  * justify/align (3×3 box) control applies. Reads the live computed `display`
  * (the bridge collects it in the style allowlist). Inline/block/text elements
  * return false and the section shows only text-align + width.
+ *
+ * KNOWN GAP, grid containers. This returns true for `grid`/`inline-grid`, but
+ * the two properties mean something different there: `justify-content` places
+ * the TRACKS inside the container while `align-items` places each item inside
+ * its own row. So the grid's cells are only loosely right for a CSS grid, and
+ * `parseFlexAxes` reports `row` for one because `flex-direction` does not
+ * apply. That is the behaviour this control has always had; the 2026-09-08
+ * direction fix deliberately did not change it, because the honest options
+ * are a different control or no control, and neither is a one-line call.
  */
 export function isFlexLikeContainer(
   computedStyles: Record<string, string> | undefined,

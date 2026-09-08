@@ -98,8 +98,11 @@ export const MOCK_SELECTION: Selection = {
   computedStyles: {
     // The class list above says `inline-flex`, so the computed display
     // agrees; without it the Align & size section's flex grid never renders
-    // in the gallery, which is where its cells get looked at.
+    // in the gallery, which is where its cells get looked at. The direction
+    // rides along because the real bridge always sends it (it is not in the
+    // default-value filter) and the grid's axes depend on it.
     display: "inline-flex",
+    "flex-direction": "row",
     padding: "8px 16px",
     color: "rgb(255, 255, 255)",
     "background-color": "rgb(99, 102, 241)",

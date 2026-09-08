@@ -5,7 +5,10 @@ import { cn } from "@/lib/utils"
 import { SectionHeader, fieldLabelClass, fieldRowClass } from "./section-header"
 import {
   applyClassMutation,
+  axesToCell,
+  cellToAxes,
   isFlexLikeContainer,
+  parseFlexAxes,
   parseAlignItems,
   parseJustify,
   parseWidth,
@@ -47,16 +50,21 @@ const ALIGN_ORDER: AlignValue[] = ["start", "center", "end"]
 
 /**
  * What a cell does, in words: "Align top right", not
- * `justify-end · items-start` (Mo, 2026-09-08). Columns are `justify-*`
- * (left / center / right), rows are `items-*` (top / middle / bottom), read
- * for a row-direction container, which is the layout the grid itself draws.
+ * `justify-end · items-start` (Mo, 2026-09-08).
+ *
+ * The arguments are SCREEN positions, not CSS values: `col` is the screen
+ * column left to right and `row` is the screen row top to bottom. Which CSS
+ * property each one writes depends on `flex-direction` (see `cellToAxes`),
+ * but the name never changes with it, because the name describes where the
+ * children end up and that is the whole point of the grid.
+ *
  * The two centres collapse to "Align center" rather than "middle center".
  */
-export function describeCell(jv: JustifyValue, av: AlignValue): string {
-  const row = { start: "top", center: "middle", end: "bottom" }[av]
-  const col = { start: "left", center: "center", end: "right" }[jv]
-  if (av === "center" && jv === "center") return "Align center"
-  return `Align ${row} ${col}`
+export function describeCell(col: JustifyValue, row: AlignValue): string {
+  const vertical = { start: "top", center: "middle", end: "bottom" }[row]
+  const horizontal = { start: "left", center: "center", end: "right" }[col]
+  if (row === "center" && col === "center") return "Align center"
+  return `Align ${vertical} ${horizontal}`
 }
 
 export function AlignSizeSection({
@@ -71,19 +79,28 @@ export function AlignSizeSection({
     () => isFlexLikeContainer(computedStyles),
     [computedStyles],
   )
+  // Which screen axis each CSS property drives. A column container swaps
+  // them; the `-reverse` directions mirror one. See `parseFlexAxes`.
+  const axes = useMemo(() => parseFlexAxes(computedStyles), [computedStyles])
 
-  // Which column is lit. An UNSET justify is the CSS default, `flex-start`,
-  // so `flex items-center` with no justify class lays children out at the
-  // middle left and that is the cell to light; before 2026-09-08 it lit
-  // nothing until both classes were present. A justify the grid cannot
-  // show (`justify-between`) is `unrepresentable`, and lights nothing. No
-  // such default for the rows: an unset `items-*` is `stretch`, which is
+  // An UNSET justify is the CSS default, `flex-start`, so `flex
+  // items-center` with no justify class lays children out at the middle left
+  // and that is the cell to light; before 2026-09-08 it lit nothing until
+  // both classes were present. A justify the grid cannot show
+  // (`justify-between`) is `unrepresentable`, and lights nothing. No such
+  // default for the cross axis: an unset `items-*` is `stretch`, which is
   // not a cell.
-  const litJustify: JustifyValue | null =
+  const justifyValue: JustifyValue | null =
     justify.value ?? (justify.unrepresentable ? null : "start")
 
-  // Pick a grid cell: set BOTH axes in one commit (justify then items).
-  function pickCell(jv: JustifyValue, av: AlignValue): void {
+  // The lit cell, as a SCREEN position. Translating here rather than at each
+  // cell keeps one direction-aware step in the render.
+  const lit = axesToCell(justifyValue, align.value, axes)
+
+  // Pick a grid cell: set BOTH axes in one commit (justify then items). The
+  // cell is a screen position, so it goes through `cellToAxes` first.
+  function pickCell(col: JustifyValue, row: AlignValue): void {
+    const { justify: jv, align: av } = cellToAxes(col, row, axes)
     let next = applyClassMutation(classes, setJustify(justify, jv))
     next = applyClassMutation(next, setAlignItems(parseAlignItems(next), av))
     onClassesChange(next)
@@ -123,7 +140,10 @@ export function AlignSizeSection({
             >
               {ALIGN_ORDER.map((av) =>
                 JUSTIFY_ORDER.map((jv) => {
-                  const active = litJustify === jv && align.value === av
+                  // `jv` is the screen COLUMN and `av` the screen ROW here,
+                  // not the CSS values they are named for. The names are the
+                  // grid's own axes, kept so the testids stay stable.
+                  const active = lit !== null && lit.col === jv && lit.row === av
                   const name = describeCell(jv, av)
                   return (
                     <Tooltip key={`${jv}-${av}`}>

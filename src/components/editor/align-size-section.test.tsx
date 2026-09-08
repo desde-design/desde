@@ -138,3 +138,63 @@ describe("AlignSizeSection — the grid's cells", () => {
     for (const cell of cells()) expect(cell).toHaveAttribute("aria-pressed", "false")
   })
 })
+
+/**
+ * The grid draws screen positions; `flex-direction` decides which CSS
+ * property each screen axis is. See the tables in `align-size.test.ts` for
+ * the mapping itself. These four cases are the section actually using it:
+ * what a click writes, and which cell a stored value lights.
+ */
+describe("AlignSizeSection — the grid follows flex-direction", () => {
+  function renderFor(direction: string, classes: string[], onClassesChange = vi.fn()) {
+    render(
+      <AlignSizeSection
+        classes={classes}
+        computedStyles={{ display: "flex", "flex-direction": direction }}
+        onClassesChange={onClassesChange}
+      />,
+    )
+    return onClassesChange
+  }
+
+  it("writes the swapped axes in a column container", () => {
+    const onClassesChange = renderFor("column", ["flex", "flex-col"])
+    // Top-right on screen. In a column that is items-end (right) plus
+    // justify-start (top), not the row reading of justify-end items-start.
+    fireEvent.click(screen.getByTestId("align-cell-end-start"))
+    const next = onClassesChange.mock.calls[0][0] as string[]
+    expect(next).toContain("items-end")
+    expect(next).toContain("justify-start")
+  })
+
+  it("still writes the row axes in a row container", () => {
+    const onClassesChange = renderFor("row", ["flex"])
+    fireEvent.click(screen.getByTestId("align-cell-end-start"))
+    const next = onClassesChange.mock.calls[0][0] as string[]
+    expect(next).toContain("justify-end")
+    expect(next).toContain("items-start")
+  })
+
+  it("mirrors the main axis in a reversed row", () => {
+    const onClassesChange = renderFor("row-reverse", ["flex", "flex-row-reverse"])
+    // Leftmost cell: row-reverse runs right to left, so the left edge is
+    // the END of the main axis.
+    fireEvent.click(screen.getByTestId("align-cell-start-center"))
+    const next = onClassesChange.mock.calls[0][0] as string[]
+    expect(next).toContain("justify-end")
+    expect(next).toContain("items-center")
+  })
+
+  it("lights the cell the stored classes actually lay out", () => {
+    // `flex-col justify-end items-start` puts the children BOTTOM-LEFT.
+    renderFor("column", ["flex", "flex-col", "justify-end", "items-start"])
+    expect(screen.getByTestId("align-cell-start-end")).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByTestId("align-cell-end-start")).toHaveAttribute("aria-pressed", "false")
+  })
+
+  it("names the cell by where the children land, in a column too", () => {
+    renderFor("column", ["flex", "flex-col"])
+    // The name is a screen position, so it does not move with direction.
+    expect(screen.getByTestId("align-cell-end-start")).toHaveAttribute("aria-label", "Align top right")
+  })
+})

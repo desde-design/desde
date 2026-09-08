@@ -7,7 +7,10 @@
 import { describe, expect, it } from "vitest"
 import {
   applyClassMutation,
+  cellToAxes,
+  axesToCell,
   isFlexLikeContainer,
+  parseFlexAxes,
   parseAlignItems,
   parseJustify,
   parseTextAlign,
@@ -124,5 +127,195 @@ describe("isFlexLikeContainer", () => {
     expect(isFlexLikeContainer({ display: "block" })).toBe(false)
     expect(isFlexLikeContainer({})).toBe(false)
     expect(isFlexLikeContainer(undefined)).toBe(false)
+  })
+})
+
+/**
+ * The 3×3 grid draws SCREEN positions, but it writes CSS properties whose
+ * meaning depends on `flex-direction`. In a row, `justify-content` runs left
+ * to right and `align-items` runs top to bottom. In a column those swap, and
+ * the `-reverse` variants mirror their axis on top of that.
+ *
+ * The grid ignored direction until 2026-09-08, so on a `flex-col` container
+ * clicking the top-right cell wrote `justify-end items-start`, which puts the
+ * children BOTTOM-LEFT. Every cell but the exact centre landed wrong, and the
+ * highlight read the same swap back, so nothing looked broken from inside the
+ * grid. These are the tables that fix it, kept pure and here rather than in
+ * the section so all sixteen direction/cell combinations are cheap to state.
+ */
+describe("parseFlexAxes", () => {
+  it("defaults to row when the direction is absent or unknown", () => {
+    expect(parseFlexAxes(undefined)).toEqual({ column: false, mainReversed: false, crossReversed: false })
+    expect(parseFlexAxes({})).toEqual({ column: false, mainReversed: false, crossReversed: false })
+    expect(parseFlexAxes({ "flex-direction": "sideways" })).toEqual({ column: false, mainReversed: false, crossReversed: false })
+  })
+
+  it("reads the four directions", () => {
+    expect(parseFlexAxes({ "flex-direction": "row" }).column).toBe(false)
+    expect(parseFlexAxes({ "flex-direction": "column" }).column).toBe(true)
+    expect(parseFlexAxes({ "flex-direction": "row-reverse" })).toEqual({ column: false, mainReversed: true, crossReversed: false })
+    expect(parseFlexAxes({ "flex-direction": "column-reverse" })).toEqual({ column: true, mainReversed: true, crossReversed: false })
+  })
+
+  it("reads wrap-reverse as the cross axis flipping", () => {
+    expect(parseFlexAxes({ "flex-direction": "row", "flex-wrap": "wrap-reverse" }).crossReversed).toBe(true)
+    expect(parseFlexAxes({ "flex-direction": "row", "flex-wrap": "wrap" }).crossReversed).toBe(false)
+  })
+})
+
+describe("cellToAxes / axesToCell", () => {
+  const ROW = { column: false, mainReversed: false, crossReversed: false }
+  const COL = { column: true, mainReversed: false, crossReversed: false }
+  const ROW_REV = { column: false, mainReversed: true, crossReversed: false }
+  const COL_REV = { column: true, mainReversed: true, crossReversed: false }
+
+  it("in a row, columns are justify and rows are items", () => {
+    expect(cellToAxes("end", "start", ROW)).toEqual({ justify: "end", align: "start" })
+    expect(cellToAxes("start", "end", ROW)).toEqual({ justify: "start", align: "end" })
+  })
+
+  it("in a column, the two axes swap", () => {
+    // Top-right on screen: children at the END of the cross axis (right) and
+    // the START of the main axis (top).
+    expect(cellToAxes("end", "start", COL)).toEqual({ justify: "start", align: "end" })
+    expect(cellToAxes("start", "end", COL)).toEqual({ justify: "end", align: "start" })
+  })
+
+  it("mirrors the main axis when the direction is reversed", () => {
+    // row-reverse runs right to left, so the LEFT column is justify-end.
+    expect(cellToAxes("start", "start", ROW_REV)).toEqual({ justify: "end", align: "start" })
+    // column-reverse runs bottom to top, so the TOP row is justify-end. Only
+    // the MAIN axis mirrors: the cross axis is still left-to-right, so the
+    // left column stays items-start.
+    expect(cellToAxes("start", "start", COL_REV)).toEqual({ justify: "end", align: "start" })
+  })
+
+  it("round-trips every cell in every direction", () => {
+    const values = ["start", "center", "end"] as const
+    for (const axes of [ROW, COL, ROW_REV, COL_REV]) {
+      for (const col of values) {
+        for (const row of values) {
+          const css = cellToAxes(col, row, axes)
+          expect(axesToCell(css.justify, css.align, axes)).toEqual({ col, row })
+        }
+      }
+    }
+  })
+
+  it("reads a stored value back to the cell it lays out", () => {
+    // The bug, stated as a value: `flex-col justify-end items-start` puts the
+    // children bottom-left, so that is the cell that lights.
+    expect(axesToCell("end", "start", COL)).toEqual({ col: "start", row: "end" })
+    expect(axesToCell("end", "start", ROW)).toEqual({ col: "end", row: "start" })
+  })
+
+  it("lights nothing when either axis is unset in a way the grid cannot show", () => {
+    expect(axesToCell(null, "start", ROW)).toBeNull()
+    expect(axesToCell("start", null, ROW)).toBeNull()
+  })
+})
+
+/**
+ * The mapping tables, checked against what a browser ACTUALLY does.
+ *
+ * `cellToAxes` is a claim about CSS: that in a column container
+ * `justify-content` runs vertically, that `-reverse` mirrors one axis, and so
+ * on. A hand-written table can be self-consistent and still wrong about the
+ * spec, which is exactly the failure it was written to fix, so asserting it
+ * against itself proves nothing.
+ *
+ * `MEASURED` below is Chromium's answer, not ours. Each row is one
+ * (direction, justify-content, align-items) triple, and the value is which
+ * third of the container the child's centre landed in, as `column,row` on
+ * SCREEN. Regenerate by laying a 20px child in a 200px flex box for all 36
+ * combinations and reading `getBoundingClientRect`; the script that produced
+ * it is in the 2026-09-08 session notes. Rows measured once, in Chromium,
+ * with a left-to-right writing mode, which is the only mode the grid claims
+ * to handle.
+ */
+const MEASURED: Record<string, string> = {
+  "row|start|start": "start,start",
+  "row|start|center": "start,center",
+  "row|start|end": "start,end",
+  "row|center|start": "center,start",
+  "row|center|center": "center,center",
+  "row|center|end": "center,end",
+  "row|end|start": "end,start",
+  "row|end|center": "end,center",
+  "row|end|end": "end,end",
+  "column|start|start": "start,start",
+  "column|start|center": "center,start",
+  "column|start|end": "end,start",
+  "column|center|start": "start,center",
+  "column|center|center": "center,center",
+  "column|center|end": "end,center",
+  "column|end|start": "start,end",
+  "column|end|center": "center,end",
+  "column|end|end": "end,end",
+  "row-reverse|start|start": "end,start",
+  "row-reverse|start|center": "end,center",
+  "row-reverse|start|end": "end,end",
+  "row-reverse|center|start": "center,start",
+  "row-reverse|center|center": "center,center",
+  "row-reverse|center|end": "center,end",
+  "row-reverse|end|start": "start,start",
+  "row-reverse|end|center": "start,center",
+  "row-reverse|end|end": "start,end",
+  "column-reverse|start|start": "start,end",
+  "column-reverse|start|center": "center,end",
+  "column-reverse|start|end": "end,end",
+  "column-reverse|center|start": "start,center",
+  "column-reverse|center|center": "center,center",
+  "column-reverse|center|end": "end,center",
+  "column-reverse|end|start": "start,start",
+  "column-reverse|end|center": "center,start",
+  "column-reverse|end|end": "end,start"
+}
+
+describe("cellToAxes agrees with the browser", () => {
+  const values = ["start", "center", "end"] as const
+
+  it("writes classes that land the children in the cell the user clicked", () => {
+    const mismatches: string[] = []
+    for (const dir of ["row", "column", "row-reverse", "column-reverse"]) {
+      const axes = parseFlexAxes({ "flex-direction": dir })
+      for (const col of values) {
+        for (const row of values) {
+          const { justify, align } = cellToAxes(col, row, axes)
+          const landed = MEASURED[`${dir}|${justify}|${align}`]
+          if (landed !== `${col},${row}`) {
+            mismatches.push(`${dir}: cell ${col},${row} wrote justify-${justify} items-${align}, browser laid it out at ${landed}`)
+          }
+        }
+      }
+    }
+    expect(mismatches).toEqual([])
+  })
+
+  it("lights the cell the children are actually in", () => {
+    const mismatches: string[] = []
+    for (const dir of ["row", "column", "row-reverse", "column-reverse"]) {
+      const axes = parseFlexAxes({ "flex-direction": dir })
+      for (const justify of values) {
+        for (const align of values) {
+          const landed = MEASURED[`${dir}|${justify}|${align}`]
+          const lit = axesToCell(justify, align, axes)
+          if (!lit || `${lit.col},${lit.row}` !== landed) {
+            mismatches.push(`${dir}: justify-${justify} items-${align} lays out at ${landed}, grid lit ${lit ? `${lit.col},${lit.row}` : "nothing"}`)
+          }
+        }
+      }
+    }
+    expect(mismatches).toEqual([])
+  })
+
+  it("would have caught the pre-2026-09-08 bug", () => {
+    // The old code used the cell's column as justify and its row as items,
+    // whatever the direction. In a column container that lays the children
+    // out in the opposite corner along one diagonal.
+    const column = parseFlexAxes({ "flex-direction": "column" })
+    const oldWrite = { justify: "end" as const, align: "start" as const } // top-right, read as a row
+    expect(MEASURED[`column|${oldWrite.justify}|${oldWrite.align}`]).toBe("start,end") // bottom-left
+    expect(cellToAxes("end", "start", column)).not.toEqual(oldWrite)
   })
 })
