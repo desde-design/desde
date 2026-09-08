@@ -1668,10 +1668,15 @@ export async function startCore(opts: CoreOptions): Promise<CoreHandle> {
   // root (not `repoRoot`) so a monorepo subdir prototype's registry
   // entry points at the checkout the user actually opened.
   try {
+    // The name and slug come from the identity block first: on a schema-v2
+    // repo the top-level `projectSlug` is absent, and reading only that used
+    // to leave the entry with no slug at all, so the launcher card fell back
+    // to the folder name.
     await upsertProjectRegistryEntry({
       path: canonicalRoot,
       projectId: projectAssociation.projectId ?? undefined,
-      slug: projectAssociation.projectSlug ?? undefined,
+      name: projectAssociation.identity?.name,
+      slug: projectAssociation.identity?.slug ?? projectAssociation.projectSlug ?? undefined,
       lastPort: shellPort,
       lastUrl: httpHandle.url,
     })

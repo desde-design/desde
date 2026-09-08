@@ -71,6 +71,35 @@ import { useClaudeRuntimeStatus } from "@/hooks/useClaudeRuntimeStatus"
  * case this cannot help: a single trailing segment longer than the budget,
  * which is returned whole because a too-long name beats an empty line.
  */
+/**
+ * What a project card calls the project. The name the user gave it, from the
+ * repo's identity block, or the folder name until it has one. NEVER the slug:
+ * the slug is a routing preference (`onboarding-test`), and showing it as the
+ * title was the bug this replaced.
+ */
+function projectLabel(project: Pick<LauncherProject, "name" | "path">): string {
+  return project.name ?? folderName(project.path)
+}
+
+/**
+ * The last path segment, on either separator: the registry stores the
+ * platform's own absolute paths, and a Windows path split on `/` alone is
+ * one segment, so the fallback title would be the whole `C:\…` path.
+ */
+function folderName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path
+}
+
+/**
+ * The card's test-id key. The slug, or the folder name until it has one:
+ * both are selector-safe, where a display name ("Demo prototype") is not.
+ * `tasks/scripts/docs-media-shots.mts` selects `launcher-project-demo` by
+ * CSS, so this stays the slug even though the title no longer is.
+ */
+function projectKey(project: Pick<LauncherProject, "slug" | "path">): string {
+  return project.slug ?? folderName(project.path)
+}
+
 export function trimPathToTail(path: string, maxChars = 60): string {
   if (path.length <= maxChars) return path
   const segments = path.split("/").filter(Boolean)
@@ -174,7 +203,7 @@ export function LauncherPage({
     const q = query.trim().toLowerCase()
     if (!q) return projects
     return projects.filter((p) => {
-      const label = p.slug ?? p.path.split("/").pop() ?? p.path
+      const label = projectLabel(p)
       return (
         label.toLowerCase().includes(q) || p.path.toLowerCase().includes(q)
       )
@@ -409,7 +438,7 @@ export function LauncherPage({
               ) : pendingDelete ? (
                 <>
                   <strong className="font-medium text-foreground">
-                    {pendingDelete.slug ?? pendingDelete.path.split("/").pop()}
+                    {projectLabel(pendingDelete)}
                   </strong>{" "}
                   will be removed from this list. The folder and everything in it stays on disk, and
                   opening it again brings the project back.
@@ -458,6 +487,7 @@ export function LauncherPage({
           key={settingsPath}
           path={settingsPath}
           onClose={() => navigate({ view: "projects" })}
+          onRenamed={() => void api.refreshProjects()}
           onInspectReadRoot={api.inspectReadRoot}
           onPickReadRoot={folderPickerSupported ? api.pickReadRoot : undefined}
         />
@@ -547,7 +577,8 @@ function LauncherProjectCard({
   onSettings: () => void
   onDelete: () => void
 }) {
-  const name = project.slug ?? project.path.split("/").pop() ?? project.path
+  const name = projectLabel(project)
+  const key = projectKey(project)
   return (
     // `group` is what the row's actions reveal off — see `HOVER_REVEAL`.
     <div className={cn("group flex flex-col gap-1 rounded-2xl p-1.5", tint)}>
@@ -555,7 +586,7 @@ function LauncherProjectCard({
         variant="outline"
         disabled={disabled}
         onClick={onOpen}
-        data-testid={`launcher-project-${name}`}
+        data-testid={`launcher-project-${key}`}
         // min-h-24, down from 36: the card holds two lines (name + path), and
         // 144px left a third of it empty.
         // shadow-xs, not sm: one layer at 5% instead of two at 10%. The card
@@ -645,7 +676,7 @@ function LauncherProjectCard({
               size="icon-xs"
               disabled={disabled}
               aria-label={`Actions for ${name}`}
-              data-testid={`project-menu-${name}`}
+              data-testid={`project-menu-${key}`}
               className={cn(
                 "-mr-1.5 flex-none text-foreground/85 hover:bg-foreground/10",
                 HOVER_REVEAL,

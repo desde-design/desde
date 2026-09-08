@@ -54,6 +54,9 @@ import { navigateTopLevel } from "@/lib/top-level-navigate"
 export interface LauncherProject {
   /** Canonical repo root (absolute path) — the registry key. */
   path: string
+  /** Display name from the repo's identity block. Absent until the project is named. */
+  name?: string
+  /** Routing preference, never shown as a label. */
   slug?: string
   lastOpenedAt: string
 }
@@ -193,6 +196,12 @@ export interface UseLauncherApi {
   demo: LauncherDemoState | null
   /** Re-read the demo's change summary, so a confirmation cannot go stale. */
   refreshDemo: () => Promise<void>
+  /**
+   * Re-read the recents list after something other than an open changed it
+   * (a rename from the settings page). Opens navigate away, so they never
+   * need this.
+   */
+  refreshProjects: () => Promise<void>
   /** Delete the demo for real: the directory and its recents entry. */
   deleteDemo: () => Promise<{ ok: boolean }>
   clearError: () => void
@@ -592,6 +601,11 @@ export function useLauncherApi(): UseLauncherApi {
     })
   }, [])
 
+  const refreshProjects = useCallback(async () => {
+    const res = await get("/api/launcher/projects")
+    if (res.ok) setProjects(res.projects ?? [])
+  }, [])
+
   const deleteDemo = useCallback(async (): Promise<{ ok: boolean }> => {
     setError(null)
     setBusy("Deleting the demo")
@@ -618,6 +632,7 @@ export function useLauncherApi(): UseLauncherApi {
     openBlock,
     demo,
     refreshDemo,
+    refreshProjects,
     deleteDemo,
     clearError: useCallback(() => {
       setError(null)

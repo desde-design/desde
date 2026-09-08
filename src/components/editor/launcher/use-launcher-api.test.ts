@@ -464,3 +464,24 @@ describe("useLauncherApi — suggestDesignSystems / declareDesignSystems", () =>
     expect(result.current.error).toBe("bad declaration")
   })
 })
+
+describe("useLauncherApi — refreshProjects", () => {
+  it("re-reads the recents list in place, so a rename shows on the card without a reload", async () => {
+    const result = await ready()
+    expect(result.current.projects).toEqual([])
+    fetchMock.mockImplementation((input) =>
+      String(input).endsWith("/api/launcher/projects")
+        ? Promise.resolve(
+            json(200, {
+              ok: true,
+              projects: [{ path: "/repos/a", name: "Renamed", slug: "a", lastOpenedAt: "2026-08-12T00:00:00Z" }],
+            }),
+          )
+        : Promise.resolve(json(404, { ok: false, reason: "unhandled in test" })),
+    )
+    await act(async () => {
+      await result.current.refreshProjects()
+    })
+    expect(result.current.projects?.map((p) => p.name)).toEqual(["Renamed"])
+  })
+})

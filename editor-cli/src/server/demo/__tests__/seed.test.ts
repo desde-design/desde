@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile, access, utimes } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { seedDemoProject, DEMO_PROJECT_SLUG } from "../seed.js"
+import { seedDemoProject, DEMO_PROJECT_NAME, DEMO_PROJECT_SLUG } from "../seed.js"
 import { demoRepoPath, markDemoTried, readDemoState } from "../paths.js"
 import { readProjectsRegistry, removeProjectRegistryEntry } from "../../projects-registry.js"
 import { removeDemo } from "../remove.js"
@@ -37,8 +37,8 @@ describe("seedDemoProject", () => {
     await expect(access(join(demoRepoPath(home), "src", "App.tsx"))).resolves.toBeUndefined()
 
     const registry = await readProjectsRegistry()
-    expect(registry.projects.map((p) => [p.path, p.slug])).toEqual([
-      [demoRepoPath(home), DEMO_PROJECT_SLUG],
+    expect(registry.projects.map((p) => [p.path, p.slug, p.name])).toEqual([
+      [demoRepoPath(home), DEMO_PROJECT_SLUG, DEMO_PROJECT_NAME],
     ])
     expect((await readDemoState(home)).triedAt).toBeTypeOf("string")
   })

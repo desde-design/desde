@@ -923,6 +923,225 @@ describe("launcher server", () => {
     })
   })
 
+  /**
+   * The project's NAME comes from the repo's own identity block
+   * (`.desde/config.json` → `project.name`), never from the recents cache.
+   * The settings route used to answer with the registry slug, and the
+   * rename route used to call the idempotent identity minter, so renaming
+   * an existing project silently did nothing.
+   */
+  describe("project name", () => {
+    async function writeIdentity(dir: string, name: string, slug: string): Promise<string> {
+      await fs.mkdir(path.join(dir, ".desde"), { recursive: true })
+      await fs.writeFile(
+        path.join(dir, ".desde", "config.json"),
+        `${JSON.stringify({ version: 2, project: { id: "proj-1", name, slug } }, null, 2)}\n`,
+      )
+      return path.join(dir, ".desde", "config.json")
+    }
+
+    it("project-settings reports the identity's name, not the registry slug or the folder", async () => {
+      const target = path.join(tmp, "next-shadcn-admin-dashboard")
+      await fs.mkdir(target)
+      await writeIdentity(target, "Onboarding test", "onboarding-test")
+      const token = await tokenFromBootstrap()
+      const res = await fetch(handle.url + "/api/launcher/project-settings", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: target }),
+      })
+      const json = await res.json()
+      expect(json.ok).toBe(true)
+      expect(json.name).toBe("Onboarding test")
+    })
+
+    it("project-settings falls back to the folder name when the repo has no identity", async () => {
+      const target = path.join(tmp, "plain-folder")
+      await fs.mkdir(target)
+      const token = await tokenFromBootstrap()
+      const res = await fetch(handle.url + "/api/launcher/project-settings", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: target }),
+      })
+      expect((await res.json()).name).toBe("plain-folder")
+    })
+
+    it("project-name renames an existing identity, keeps its slug, and updates the recents entry", async () => {
+      const target = path.join(tmp, "renamed-repo")
+      await fs.mkdir(target)
+      const configPath = await writeIdentity(target, "Old name", "old-name")
+      const { upsertProjectRegistryEntry, readProjectsRegistry } = await import("../projects-registry.js")
+      const openedAt = "2026-08-01T00:00:00.000Z"
+      await upsertProjectRegistryEntry({ path: target, name: "Old name", slug: "old-name", lastOpenedAt: openedAt })
+      // A project opened more recently sits above it; a rename must not
+      // jump the renamed card over it.
+      await upsertProjectRegistryEntry({ path: path.join(tmp, "newer"), name: "Newer" })
+
+      const token = await tokenFromBootstrap()
+      const res = await fetch(handle.url + "/api/launcher/project-name", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: target, name: "New name", rename: true }),
+      })
+      const json = await res.json()
+      expect(json.ok).toBe(true)
+      expect(json.identity).toEqual({ id: "proj-1", name: "New name", slug: "old-name" })
+
+      const config = JSON.parse(await fs.readFile(configPath, "utf-8"))
+      expect(config.project).toEqual({ id: "proj-1", name: "New name", slug: "old-name" })
+
+      const projects = (await readProjectsRegistry()).projects
+      expect(projects.map((p) => p.name)).toEqual(["Newer", "New name"])
+      expect(projects[1]).toMatchObject({ path: target, slug: "old-name", lastOpenedAt: openedAt })
+    })
+
+    it("project-name still succeeds when the recents cache cannot be written", async () => {
+      // The config is the truth and has already changed by then; a cache
+      // write failure must not report the rename as failed. The failure is
+      // injected at the registry's own atomic rename, scoped to its file:
+      // the state dir re-chmods itself to 0o700 on every write, so a
+      // permissions trick cannot make it fail, and the config's rename runs
+      // first through the same `fs.rename`.
+      const target = path.join(tmp, "cache-locked")
+      await fs.mkdir(target)
+      const configPath = await writeIdentity(target, "Old", "old")
+      const { upsertProjectRegistryEntry, readProjectsRegistry } = await import("../projects-registry.js")
+      await upsertProjectRegistryEntry({ path: target, name: "Old", slug: "old" })
+      const realRename = fs.rename
+      const rename = vi.spyOn(fs, "rename").mockImplementation((from, to) =>
+        String(to).endsWith("projects.json")
+          ? Promise.reject(new Error("EACCES: simulated"))
+          : realRename(from, to),
+      )
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        const token = await tokenFromBootstrap()
+        const res = await fetch(handle.url + "/api/launcher/project-name", {
+          method: "POST",
+          headers: authedHeaders(token),
+          body: JSON.stringify({ path: target, name: "New", rename: true }),
+        })
+        expect(res.status).toBe(200)
+        expect((await res.json()).identity.name).toBe("New")
+        expect(JSON.parse(await fs.readFile(configPath, "utf-8")).project.name).toBe("New")
+        expect(errors).toHaveBeenCalledWith(expect.stringContaining("recents list could not be updated"))
+      } finally {
+        rename.mockRestore()
+        errors.mockRestore()
+      }
+      // The cache really was left behind; the next boot of that repo rewrites it.
+      expect((await readProjectsRegistry()).projects[0]?.name).toBe("Old")
+    })
+
+    it("the list reconciles every name with the repo's identity, and persists what it finds", async () => {
+      // The identity block changes outside this process: an entry written
+      // before the registry carried a name, a pull that renames the
+      // project, a checkout that removes the block. A folder that is gone
+      // is left alone.
+      const named = path.join(tmp, "named-later")
+      await fs.mkdir(named)
+      await writeIdentity(named, "Named later", "named-later")
+      const gone = path.join(tmp, "moved-away")
+      const { upsertProjectRegistryEntry, readProjectsRegistry } = await import("../projects-registry.js")
+      await upsertProjectRegistryEntry({ path: named, slug: "stale-slug" })
+      await upsertProjectRegistryEntry({ path: gone, name: "Moved away", slug: "gone" })
+
+      const token = await tokenFromBootstrap()
+      const list = async () =>
+        (await (
+          await fetch(handle.url + "/api/launcher/projects", { headers: authedHeaders(token) })
+        ).json()) as { projects: Array<{ path: string; name?: string }> }
+      const nameOf = async (p: string) => (await list()).projects.find((e) => e.path === p)?.name
+
+      // Filled in, and persisted.
+      expect(await nameOf(named)).toBe("Named later")
+      expect((await readProjectsRegistry()).projects.find((p) => p.path === named)?.name).toBe(
+        "Named later",
+      )
+      // A pull renamed it.
+      await writeIdentity(named, "Pulled name", "named-later")
+      expect(await nameOf(named)).toBe("Pulled name")
+      // A checkout removed the block: back to the folder name.
+      await fs.rm(path.join(named, ".desde"), { recursive: true })
+      expect(await nameOf(named)).toBeUndefined()
+      expect((await readProjectsRegistry()).projects.find((p) => p.path === named)?.name).toBeUndefined()
+      // The folder that is gone keeps what it had.
+      expect(await nameOf(gone)).toBe("Moved away")
+    })
+
+    it("project-name WITHOUT rename intent hands an existing identity back untouched", async () => {
+      // The create flow on a clone that already carries a committed
+      // identity: the wizard prefills the folder name, and that must not
+      // overwrite a teammate's name.
+      const target = path.join(tmp, "cloned-with-identity")
+      await fs.mkdir(target)
+      const configPath = await writeIdentity(target, "Team name", "team-name")
+      const token = await tokenFromBootstrap()
+      const res = await fetch(handle.url + "/api/launcher/project-name", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: target, name: "cloned-with-identity" }),
+      })
+      const json = await res.json()
+      expect(json.ok).toBe(true)
+      expect(json.identity).toEqual({ id: "proj-1", name: "Team name", slug: "team-name" })
+      expect(JSON.parse(await fs.readFile(configPath, "utf-8")).project.name).toBe("Team name")
+    })
+
+    it("project-name with rename intent refuses a malformed identity instead of minting over it", async () => {
+      const target = path.join(tmp, "malformed-identity")
+      await fs.mkdir(path.join(target, ".desde"), { recursive: true })
+      const configPath = path.join(target, ".desde", "config.json")
+      const before = `${JSON.stringify({ version: 2, project: { name: "No id" } }, null, 2)}\n`
+      await fs.writeFile(configPath, before)
+      const token = await tokenFromBootstrap()
+      const res = await fetch(handle.url + "/api/launcher/project-name", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: target, name: "Renamed", rename: true }),
+      })
+      expect(res.status).toBe(400)
+      expect((await res.json()).reason).toMatch(/malformed/)
+      expect(await fs.readFile(configPath, "utf-8")).toBe(before)
+    })
+
+    it("project-name with rename intent on a never-named repo mints its first identity", async () => {
+      // The Settings page reached from a card for a folder opened directly.
+      const target = path.join(tmp, "never-named")
+      await fs.mkdir(target)
+      const token = await tokenFromBootstrap()
+      const res = await fetch(handle.url + "/api/launcher/project-name", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: target, name: "First name", rename: true }),
+      })
+      const json = await res.json()
+      expect(json.ok).toBe(true)
+      expect(json.identity.name).toBe("First name")
+      const config = JSON.parse(await fs.readFile(path.join(target, ".desde", "config.json"), "utf-8"))
+      expect(config.project).toMatchObject({ id: json.identity.id, name: "First name" })
+    })
+
+    it("project-name on a repo with no identity mints one without adding a recents entry", async () => {
+      // The create flow names the project BEFORE opening it; the card should
+      // appear when the editor boots, not when the name is typed.
+      const target = path.join(tmp, "fresh-repo")
+      await fs.mkdir(target)
+      const token = await tokenFromBootstrap()
+      const res = await fetch(handle.url + "/api/launcher/project-name", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: target, name: "Fresh" }),
+      })
+      const json = await res.json()
+      expect(json.ok).toBe(true)
+      expect(json.identity.name).toBe("Fresh")
+      const { readProjectsRegistry } = await import("../projects-registry.js")
+      expect((await readProjectsRegistry()).projects).toHaveLength(0)
+    })
+  })
+
   describe("design-systems/declare", () => {
     it("rejects an unauthenticated request", async () => {
       const res = await fetch(handle.url + "/api/launcher/design-systems/declare", {

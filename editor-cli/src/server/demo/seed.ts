@@ -29,7 +29,12 @@ import { cliStateDir, ensureCliStateDir } from "../state-dir.js"
 import { materializeDemo, type MaterializeDemoOptions } from "./materialize.js"
 import { demoRepoPath, isManagedDemo, readDemoState } from "./paths.js"
 
-/** The registry slug, which is what the project card shows as its name. */
+/**
+ * The demo's registry name and slug. They match the identity block in the
+ * fixture's `.desde/config.json`; the NAME is what the project card shows as
+ * its title, the slug is only its routing preference.
+ */
+export const DEMO_PROJECT_NAME = "Demo prototype"
 export const DEMO_PROJECT_SLUG = "demo"
 
 export interface SeedDemoResult {
@@ -91,7 +96,7 @@ async function registerIfMissing(path: string): Promise<boolean> {
   // The registry reads HOME itself (`projectsRegistryPath`), the same way the
   // editor's own boot registers a project. A seeded demo is a registry entry
   // like any other, so the demo's delete works on it unchanged.
-  await upsertProjectRegistryEntry({ path, slug: DEMO_PROJECT_SLUG })
+  await upsertProjectRegistryEntry({ path, name: DEMO_PROJECT_NAME, slug: DEMO_PROJECT_SLUG })
   return true
 }
 
