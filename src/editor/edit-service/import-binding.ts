@@ -203,8 +203,13 @@ export function importsRelativeFile(
     if (!isRelativeSpecifier(specifier)) continue
     const normalized = normalizePosix(fromDir ? `${fromDir}/${specifier}` : specifier)
     if (normalized === null) continue
-    const resolved = stripModuleExtension(normalized)
-    if (resolved === target || `${resolved}/index` === target) return true
+    if (/\.[A-Za-z0-9]+$/.test(specifier)) {
+      // Written with an extension: it names ONE file. `./Row.ts` is not
+      // `Row.vue` even though the stems agree (codex round 4).
+      if (normalized === targetPath) return true
+      continue
+    }
+    if (normalized === target || `${normalized}/index` === target) return true
   }
   return false
 }

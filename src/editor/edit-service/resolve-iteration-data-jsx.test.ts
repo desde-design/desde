@@ -185,4 +185,14 @@ describe("resolveIterationDataJsxSameFile — map(callbackFn, thisArg)", () => {
     if (result.ok) return
     expect(result.iterateeRoot).toBeUndefined()
   })
+
+  it("does not follow a module import when a local declaration of the same name exists (codex round 4)", () => {
+    const src = 'import { rows } from "./imported"\nexport function List({ supplied }: { supplied: { id: number }[] }) {\n  const rows = supplied\n  return <ul>{rows.map((r) => <li key={r.id}>{r.id}</li>)}</ul>\n}\n'
+    const idx = src.indexOf("<li")
+    const result = resolveIterationDataJsxSameFile({ source: src, templateLocation: { line: 4, column: idx - (src.lastIndexOf("\n", idx) + 1) } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.importCandidate).toBeUndefined()
+    expect(result.reason).toMatch(/declared in this file/)
+  })
 })

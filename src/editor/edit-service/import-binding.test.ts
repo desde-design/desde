@@ -155,4 +155,9 @@ describe('importsRelativeFile', () => {
     expect(importsRelativeFile('export * from "./Row"', 'src/Page.tsx', 'src/Row.tsx')).toBe(false)
     expect(importsRelativeFile('import { Row } from "../../../src/Row"', 'src/pages/Page.tsx', 'src/Row.tsx')).toBe(false)
   })
+  it('matches an extension-bearing specifier only against that exact file (codex round 4: ./Row.ts is not Row.vue)', () => {
+    expect(importsRelativeFile('import helper from "./Row.ts"', 'src/Page.vue', 'src/Row.vue')).toBe(false)
+    expect(importsRelativeFile('import Row from "./Row.vue"', 'src/Page.vue', 'src/Row.vue')).toBe(true)
+    expect(importsRelativeFile('import Row from "./Row.vue"', 'src/Page.vue', 'src/Row/index.vue')).toBe(false)
+  })
 })

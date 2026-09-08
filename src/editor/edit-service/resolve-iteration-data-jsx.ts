@@ -140,7 +140,11 @@ export function resolveIterationDataJsxSameFile(
     // a same-named module import would then be the wrong file (codex round 3).
     const leftmost = leftmostIdentifier(iterateeObject)
     const hint =
-      leftmost && !isShadowedByEnclosingParam(ast, mapCall, leftmost) ? leftmost : null
+      leftmost &&
+      !isShadowedByEnclosingParam(ast, mapCall, leftmost) &&
+      !hasLocalDeclaration(ast, leftmost)
+        ? leftmost
+        : null
     return {
       ok: false,
       reason: "The `.map()` is called on an expression, not a named list, so its data cannot be traced here",
@@ -179,6 +183,15 @@ export function resolveIterationDataJsxSameFile(
     // the name is simply imported from another module — the handler can follow
     // one hop deterministically. (The shadowing guard above already ran, so a
     // module-scope import here is the binding the `.map()` actually reads.)
+    // A local declaration of the same name (`const rows = supplied`) is the
+    // binding the loop reads, whatever a module-level import says. Refuse
+    // rather than follow the import into the wrong file (codex round 4).
+    if (hasLocalDeclaration(ast, iterateeRoot)) {
+      return {
+        ok: false,
+        reason: `\`${iterateeRoot}\` is declared in this file, but not as a plain array literal`,
+      }
+    }
     const binding = findImportBinding(source, iterateeRoot)
     if (binding) {
       return {
@@ -362,6 +375,26 @@ function findArrayLiteralBinding(ast: BabelNode, name: string): BabelNode | null
     }
   })
   return matches.length === 1 ? matches[0] : null
+}
+
+/** Whether `name` is declared anywhere in the file by a variable, function or
+ *  class declaration (imports excluded). Coarser than lexical scoping on
+ *  purpose: a declaration ANYWHERE is enough to make "follow the import"
+ *  unsafe, and refusing is the cheap side of that error. */
+function hasLocalDeclaration(ast: BabelNode, name: string): boolean {
+  let found = false
+  walk(ast, (node) => {
+    if (found) return
+    if (node.type === "VariableDeclarator" && patternBindsName(node.id, name)) found = true
+    else if (
+      (node.type === "FunctionDeclaration" || node.type === "ClassDeclaration") &&
+      node.id?.type === "Identifier" &&
+      (node.id as { name?: string }).name === name
+    ) {
+      found = true
+    }
+  })
+  return found
 }
 
 /** Whether `name` is bound as a parameter of any function whose body encloses

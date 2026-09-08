@@ -246,7 +246,14 @@ async function tryStaticEndpoint(
     return { kind: "unresolved", reason: body.reason ?? "unresolved" }
   }
   if (!response.ok) {
-    return { kind: "hard-error", reason: `HTTP ${response.status}` }
+    // 400/404/5xx: the server's own reason ("This file belongs to an installed
+    // library…", "Could not read file…") is the one the user can act on;
+    // "HTTP 404" is not (codex round 4).
+    let failure: { reason?: string } = {}
+    try {
+      failure = await response.json()
+    } catch { /* ignore */ }
+    return { kind: "hard-error", reason: failure.reason ?? `HTTP ${response.status}` }
   }
   let body: {
     ok?: boolean

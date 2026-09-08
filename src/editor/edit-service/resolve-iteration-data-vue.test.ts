@@ -256,4 +256,13 @@ import { rows } from "./rows"
     if (result.ok) return
     expect(result.iterateeRoot).toBe('rows')
   })
+
+  it("does not follow a module import when the iteratee is an outer v-for's loop variable (codex round 4)", () => {
+    const source = `<template>\n  <div v-for="rows in groups" :key="rows.id">\n    <li v-for="item in rows" :key="item.id">{{ item.name }}</li>\n  </div>\n</template>\n<script setup>\nimport { rows } from './data'\nconst groups = [{ id: 1, name: 'g' }]\n</script>\n`
+    const result = resolveIterationDataVueSameFile({ source, templateLocation: { line: 3, column: 5 } })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.importCandidate).toBeUndefined()
+    expect(result.reason).toMatch(/outer v-for/)
+  })
 })

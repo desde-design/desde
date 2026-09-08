@@ -60,6 +60,27 @@ describe('composeRefusalReason', () => {
 })
 
 describe('requestIterationProposal', () => {
+  it("surfaces the server's own reason on a non-422 static failure instead of 'HTTP 404' (codex round 4)", async () => {
+    editorFetchMock.mockReset()
+    editorFetchMock.mockImplementation(async () => ({
+      status: 404,
+      ok: false,
+      json: async () => ({ ok: false, reason: 'Could not read file: ENOENT' }),
+    }))
+    const result = await requestIterationProposal({
+      editKind: 'dom-text',
+      templateLocation: { file: 'src/pages/overview.tsx', line: 3, column: 20 },
+      iterationContext: { source: 'map', key: 1, index: 0, siblingCount: 1, expression: null },
+      pageSourceFile: null,
+      payload: { operation: 'patch-text', value: 'x' },
+      description: 'Set the text of row 1',
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('Could not read file: ENOENT')
+    expect(editorFetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps the deterministic reason when the AI lane request itself fails (codex round 1: "Network error" alone)', async () => {
     editorFetchMock.mockReset()
     editorFetchMock.mockImplementation(async (path: string) => {

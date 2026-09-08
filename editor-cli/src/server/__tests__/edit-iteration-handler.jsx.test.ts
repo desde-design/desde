@@ -488,4 +488,23 @@ export default function Overview() {
       rmSync(base, { recursive: true, force: true })
     }
   })
+
+  it("refuses a loop file under node_modules before reading it (codex round 4)", async () => {
+    mkdirSync(join(dir, "node_modules", "pkg"), { recursive: true })
+    writeFileSync(join(dir, "node_modules", "pkg", "List.tsx"), APP_TSX, "utf8")
+    const tl = babelLoc(APP_TSX, "<li key")
+    const result = await handleIterationEdit(
+      {
+        file: "node_modules/pkg/List.tsx",
+        templateLocation: tl,
+        iterationContext: { key: 1, index: 0, siblingCount: 2 },
+        payload: { operation: "remove" },
+      },
+      dir,
+    )
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.status).toBe(400)
+    expect(result.reason).toMatch(/installed library/)
+  })
 })

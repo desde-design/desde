@@ -80,10 +80,18 @@ function findVForAt(
   templateStartLine: number,
   targetLine: number,
   targetColumn: number,
-): { element: ElementNode; vForExpression: string; keyExpression: string | null } | null {
-  const stack: ElementNode[] = [templateAst]
+): {
+  element: ElementNode
+  vForExpression: string
+  keyExpression: string | null
+  /** Loop variables of every ENCLOSING v-for, outermost first. */
+  enclosingAliases: string[]
+} | null {
+  const stack: Array<{ node: ElementNode; aliases: string[] }> = [
+    { node: templateAst, aliases: [] },
+  ]
   while (stack.length > 0) {
-    const node = stack.pop()!
+    const { node, aliases } = stack.pop()!
     const loc = node.loc?.start
     if (loc) {
       const sfcLine = loc.line + templateStartLine - 1
@@ -109,17 +117,39 @@ function findVForAt(
             element: node,
             vForExpression: (vFor.exp as SimpleExpressionNode).content,
             keyExpression: keyExp?.content ?? null,
+            enclosingAliases: aliases,
           }
         }
       }
     }
+    // Names introduced by a v-for on THIS element are in scope for its
+    // children. Collected so the resolver can tell `item in rows` under
+    // `rows in groups` apart from a module-level `rows` (codex round 4).
+    const ownVFor = node.props?.find(
+      (p): p is DirectiveNode =>
+        p.type === NodeTypes.DIRECTIVE && (p as DirectiveNode).name === 'for',
+    )
+    const ownContent = (ownVFor?.exp as SimpleExpressionNode | undefined)?.content
+    const ownAliases = ownContent ? vForAliases(ownContent) : []
+    const childAliases = ownAliases.length > 0 ? [...aliases, ...ownAliases] : aliases
     for (const child of node.children ?? []) {
       if (child.type === NodeTypes.ELEMENT) {
-        stack.push(child as ElementNode)
+        stack.push({ node: child as ElementNode, aliases: childAliases })
       }
     }
   }
   return null
+}
+
+/** Every name a v-for expression binds: `(item, i) in rows` → `["item", "i"]`. */
+function vForAliases(expr: string): string[] {
+  const m = expr.match(/^\s*(?:\(([^)]*)\)|([A-Za-z_$][A-Za-z0-9_$]*))\s+(?:in|of)\s+/)
+  if (!m) return []
+  const list = m[1] ?? m[2] ?? ''
+  return list
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s))
 }
 
 /**
@@ -418,6 +448,15 @@ export function resolveIterationDataVueSameFile(
     }
   }
   const keyProperty = extractKeyProperty(match.keyExpression, iteratee.itemVar)
+
+  // The iteratee is a loop variable of an enclosing v-for, not a script
+  // binding: nothing in the script (or any import) is the array it reads.
+  if (match.enclosingAliases.includes(iteratee.root)) {
+    return {
+      ok: false,
+      reason: `"${iteratee.root}" is the loop variable of an outer v-for, so its data is one entry of that outer list`,
+    }
+  }
 
   // 2. Parse the script block + find the iteratee root's declaration.
   const scriptInfo = getScriptBlock(input.source)

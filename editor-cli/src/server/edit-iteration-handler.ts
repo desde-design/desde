@@ -77,6 +77,10 @@ export interface IterationEditRequestBody {
     | { operation: "patch-text"; value: string }
 }
 
+function hasNodeModulesSegment(p: string): boolean {
+  return p.split(path.sep).includes("node_modules")
+}
+
 export function validateIterationBody(body: unknown): string | null {
   if (!body || typeof body !== "object") return "Body must be an object"
   const b = body as Record<string, unknown>
@@ -160,6 +164,16 @@ export async function handleIterationEdit(
   const realpathResolution = await resolveRealpathWithinRoot(candidate, rootResolution)
   if (!realpathResolution.ok) return realpathResolution
   const { targetPath } = realpathResolution
+  // A dependency is never an edit target on this route either: the proposal
+  // would be a full-file overwrite of library source that the next install
+  // erases (codex round 4; the AI lane got the same guard in round 2).
+  if (hasNodeModulesSegment(candidate) || hasNodeModulesSegment(targetPath)) {
+    return {
+      ok: false,
+      status: 400,
+      reason: "This file belongs to an installed library, which the Editor does not edit",
+    }
+  }
 
   let source: string
   try {
@@ -299,7 +313,9 @@ export async function handleIterationEdit(
       if (
         pageReal &&
         isWithinRoot(pageReal, rootReal, rootWithSep) &&
-        pageReal.endsWith(".vue")
+        pageReal.endsWith(".vue") &&
+        !hasNodeModulesSegment(pageCandidate) &&
+        !hasNodeModulesSegment(pageReal)
       ) {
         let pageSource: string | null = null
         try {
