@@ -10,7 +10,6 @@ import type {
   InsertAtPointRequest,
   ResizeRequest,
   IconManifest,
-  IterationContext,
   Mutation,
   PendingMutation,
   PropEdit,
@@ -110,6 +109,10 @@ import {
   readStoredLayersDensity,
   writeStoredLayersDensity,
 } from "./layers-density-storage"
+import {
+  iterationTemplateLocation,
+  type PendingIterationEdit,
+} from "./pending-iteration-edit"
 
 /**
  * Shared empty listing for "this refresh found no `.vue` files". A module
@@ -177,48 +180,6 @@ export type ConnectionStatus =
   | { kind: "connecting" }
   | { kind: "ready" }
   | { kind: "error"; message: string }
-
-/**
- * Pending iteration edit — held while the IterationScopeDialog asks the
- * user to pick between mutating the data array entry vs. the template.
- * Each variant carries the data the legacy-path handler would need so
- * "all-rows" can re-enter without re-collecting inputs. New iteration-
- * aware edit kinds add a variant here.
- */
-type PendingIterationEdit =
-  | {
-      editKind: "delete"
-      selection: Selection
-      node: OutlineNode
-      iterationContext: IterationContext
-    }
-  | {
-      editKind: "prop"
-      selection: Selection
-      propName: string
-      value: PropControlValue
-      iterationContext: IterationContext
-    }
-  | {
-      editKind: "move"
-      payload: LayersMovePayload
-      iterationContext: IterationContext
-    }
-  | {
-      editKind: "dom-text"
-      selection: Selection
-      field: EditableTextField
-      value: string
-      iterationContext: IterationContext
-      /**
-       * Set ONLY when the edit reached us as a bridge pending disambiguation —
-       * i.e. the designer typed in the page rather than in the inspector. The
-       * bridge is holding a draft mutation and a live DOM preview, so every
-       * exit from the dialog must resolve or cancel it; leaving it hanging
-       * blocks Save behind `handleSaveAll`'s gate.
-       */
-      bridgePendingId?: string
-    }
 
 interface UseEditorEditingOptions {
   iframeRef: RefObject<HTMLIFrameElement | null>
@@ -2099,15 +2060,7 @@ export function useEditorEditing({
       // "this-row" → deterministic iteration-data edit, LLM fallback behind it.
       // Build the payload that the prompt builder expects (one shape per
       // operation).
-      const templateLocation = pending.iterationContext
-        ? pending.editKind === "delete"
-          ? pending.node.editTarget
-          : pending.editKind === "prop"
-          ? pending.selection.editTarget
-          : pending.editKind === "dom-text"
-          ? pending.selection.editTarget
-          : pending.payload.source.editTarget
-        : undefined
+      const templateLocation = iterationTemplateLocation(pending)
       if (!templateLocation) {
         setSaveStatus(
           "Iteration edit refused: no source location on the selection.",
