@@ -19,16 +19,13 @@
  * A detected row is still removable. Being found is not consent, and the
  * scan is a heuristic over `node_modules`; the user has to be able to say no.
  *
- * ## Found rows are offered, not seeded
- *
- * A second kind of detection arrived with the React arm of the scan
- * (2026-09-08). `*.vue.d.ts` is a certain marker, so a Vue library found in
- * `node_modules` goes straight into the list above. The React marker is only
- * likely: on a real dashboard it returns a dozen packages the prototype
- * renders from, and no scan can say which of them the user calls a design
- * system. Those arrive as `found` rows under the list, each with its own Add,
- * and nothing is declared until someone clicks. Seeding them would have
- * registered every small UI package on the next boot.
+ * The React arm of the scan (2026-09-08) is only "likely" about what it
+ * finds: on a real dashboard it returns a dozen packages the prototype renders
+ * from. For one afternoon those were OFFERED under the list with their own Add
+ * instead of seeded. Mo reversed that the same day: one rule, found means
+ * added, remove what is not a design system. The cost of a wrong seed is a
+ * removable row and a few seconds of manifest extraction on the next boot; the
+ * cost of offering was a screen of Add buttons under an empty list.
  *
  * ## Purely presentational
  *
@@ -63,35 +60,22 @@ export interface DesignSystemListEntry {
   declaration: DesignSystemDeclaration
 }
 
-/** A library the scan found but is not sure about. Added with a click, never seeded. */
-export interface DesignSystemFoundEntry {
-  /** The package name, which is also what Add declares. */
-  id: string
-  label: string
-  /** What the scan knows about it, e.g. "54 components". */
-  caption: string
-}
-
 export interface DesignSystemListProps {
   entries: readonly DesignSystemListEntry[]
-  found?: readonly DesignSystemFoundEntry[]
   loading?: boolean
   busy?: boolean
   onAdd: () => void
   onEdit: (entry: DesignSystemListEntry) => void
   onRemove: (id: string) => void
-  onAddFound?: (id: string) => void
 }
 
 export function DesignSystemList({
   entries,
-  found = [],
   loading = false,
   busy = false,
   onAdd,
   onEdit,
   onRemove,
-  onAddFound,
 }: DesignSystemListProps) {
   return (
     <div className="flex flex-col gap-2" data-testid="design-system-list">
@@ -163,45 +147,14 @@ export function DesignSystemList({
         </ul>
       )}
 
-      {found.length > 0 ? (
-        <div className="flex flex-col gap-1.5" data-testid="design-system-found">
-          <p className="text-sm text-muted-foreground">
-            Also found in this prototype. Add the ones that are its design system.
-          </p>
-          <ul className="flex flex-col divide-y rounded-md border">
-            {found.map((entry) => (
-              <li
-                key={entry.id}
-                className="flex items-center gap-2 px-3 py-2"
-                data-testid={`design-system-found-${entry.id}`}
-              >
-                <span className="flex min-w-0 flex-1 items-baseline gap-2">
-                  <span className="truncate text-base">{entry.label}</span>
-                  <span className="shrink-0 text-xs text-muted-foreground">{entry.caption}</span>
-                </span>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="xs"
-                  disabled={busy}
-                  onClick={() => onAddFound?.(entry.id)}
-                  data-testid={`design-system-found-add-${entry.id}`}
-                >
-                  Add
-                </Button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-
       {/*
         Under the list, which is where the brief puts it and where it belongs:
-        the button acts on the list, so it follows it. `outline`, not the
-        primary — the step's primary action is in the page footer, and two
-        filled buttons on one screen would compete over which one continues.
+        the button acts on the list, so it follows it. Centred (Mo,
+        2026-09-08). `outline`, not the primary: the step's primary action is
+        in the page footer, and two filled buttons on one screen would compete
+        over which one continues.
       */}
-      <div>
+      <div className="flex justify-center">
         <Button
           type="button"
           variant="outline"

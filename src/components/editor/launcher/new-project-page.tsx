@@ -18,7 +18,6 @@ import {
 import { AddDesignSystemDialog } from "@/components/editor/design-systems/add-design-system-dialog"
 import {
   DesignSystemList,
-  type DesignSystemFoundEntry,
   type DesignSystemListEntry,
 } from "@/components/editor/design-systems/design-system-list"
 import { OpenBlockNotice } from "./open-block-notice"
@@ -260,12 +259,6 @@ export function NewProjectPage({
   /** Non-null while the add dialog is editing an existing row. */
   const [editingDeclaration, setEditingDeclaration] = useState<DesignSystemDeclaration | null>(null)
   const [suggestLoading, setSuggestLoading] = useState(false)
-  /**
-   * Libraries the scan found but is only `likely` about (the React arm). They
-   * sit under the list with their own Add and are declared only on a click;
-   * see `DesignSystemList`'s header for why they are not seeded.
-   */
-  const [found, setFound] = useState<DesignSystemSuggestion[]>([])
   const [declaring, setDeclaring] = useState(false)
   // GitHub browsing. `null` = not asked yet; the load is lazy because it
   // shells out to `gh` and most opens never reach the clone step.
@@ -306,7 +299,6 @@ export function NewProjectPage({
     setChosenPath(null)
     setProjectName("")
     setPending([])
-    setFound([])
     setSuggestLoading(false)
     setDeclaring(false)
     // Cleared, not kept: the user may have run `gh auth login` since, and one
@@ -353,7 +345,6 @@ export function NewProjectPage({
   const enterNameStep = (path: string) => {
     setChosenPath(path)
     setPending([])
-    setFound([])
     setProjectName(path.split("/").filter(Boolean).pop() ?? "")
     setStep("name")
   }
@@ -392,19 +383,18 @@ export function NewProjectPage({
       // scan was still running must not lose it. Deduped on the same identity
       // the list keys on, so a package that is BOTH detected and typed appears
       // once.
-      // Only a `certain` detection is seeded. An older server sends no
-      // confidence at all, and everything it finds is the certain kind.
-      const certain = result.filter((s) => s.confidence !== "likely")
+      // Every detection is seeded, the React scan's "likely" ones included
+      // (Mo, 2026-09-08: found means added; remove what is not a design
+      // system). The confidence field still arrives and is ignored here.
       setPending((prev) => {
         const seen = new Set(prev.map((d) => pendingIdentity(d.source)))
-        const seeded = certain
+        const seeded = result
           .map((s): DesignSystemDeclaration => ({
             source: { kind: "installed", package: s.package },
           }))
           .filter((d) => !seen.has(pendingIdentity(d.source)))
         return seeded.length === 0 ? prev : [...prev, ...seeded]
       })
-      setFound(result.filter((s) => s.confidence === "likely"))
     })
     return () => {
       cancelled = true
@@ -497,12 +487,6 @@ export function NewProjectPage({
     setPending((prev) => prev.filter((p) => pendingIdentity(p.source) !== id))
   }
 
-  /** A found row, accepted: it becomes a detected entry and leaves the offer. */
-  const addFound = (pkg: string) => {
-    addPending({ source: { kind: "installed", package: pkg } })
-    setFound((prev) => prev.filter((s) => s.package !== pkg))
-  }
-
   /** Persist the name, then open. A failed name write blocks the open — the
    *  project would otherwise boot without the identity the user just chose. */
   const persistNameThenOpen = async (path: string): Promise<void> => {
@@ -587,16 +571,6 @@ export function NewProjectPage({
     detected: declaration.source.kind === "installed",
     declaration,
   }))
-
-  const pendingIds = new Set(designSystemEntries.map((e) => e.id))
-  const foundEntries: DesignSystemFoundEntry[] = found
-    // Typed in by hand while the scan ran: already in the list, so not offered.
-    .filter((s) => !pendingIds.has(s.package))
-    .map((s) => ({
-      id: s.package,
-      label: s.package,
-      caption: `${s.componentCount} ${s.componentCount === 1 ? "component" : "components"}`,
-    }))
 
   const stepBusy = busy || declaring || checking
 
@@ -996,7 +970,6 @@ export function NewProjectPage({
             */}
             <DesignSystemList
               entries={designSystemEntries}
-              found={foundEntries}
               loading={suggestLoading}
               busy={stepBusy}
               onAdd={() => {
@@ -1008,7 +981,6 @@ export function NewProjectPage({
                 setAddDialogOpen(true)
               }}
               onRemove={removePending}
-              onAddFound={addFound}
             />
           </div>
         )}
