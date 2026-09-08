@@ -63,6 +63,7 @@ import { applyEditWithLLMFallback } from "./apply-edit-with-llm-fallback"
 import {
   buildEditEscalationPrompt,
   buildPropEditEscalationPrompt,
+  buildAmbiguousIterationHandoffPrompt,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
   coalesceCapturedMutation,
@@ -111,8 +112,10 @@ import {
 } from "./layers-density-storage"
 import {
   iterationTemplateLocation,
+  describeAmbiguousIteration,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
+import { verifyIterationLoop } from "./iteration-verify"
 
 /**
  * Shared empty listing for "this refresh found no `.vue` files". A module
@@ -200,12 +203,10 @@ interface UseEditorEditingOptions {
    */
   manifestSource?: ComponentManifestSource
   /**
-   * Hand a direct-manipulation edit to the chat agent when the server
-   * stops at the deterministic boundary in `'chat'` fallback mode
-   * (`needsChat`). The hook builds a seed prompt from the failed
-   * mutations and calls this; the surface wires it to `chat.submit` and
-   * reveals the chat rail. Omitted in legacy/`'patch'` mode (the
-   * in-modal LLM lane handles the fallback instead).
+   * Hand a direct-manipulation edit to the chat agent in a NEW chat
+   * session. Used for `needsChat` refusals, for structural edits the
+   * deterministic lane refused, and for iteration prompts whose loop
+   * could not be found in source.
    *
    * Returns whether the handoff was ACCEPTED: `true` when a chat turn was
    * dispatched, `false` when it no-ops (no chat transport available). The
@@ -2189,51 +2190,82 @@ export function useEditorEditing({
     [iterationScopePrompt, dispatchIterationEdit],
   )
 
-  const cancelIterationScope = useCallback(() => {
-    // A prompt that arrived from the BRIDGE (in-page typing) means the bridge
-    // is still holding a draft mutation keyed by `bridgePendingId`. Dismissing
-    // the dialog — Cancel, Escape, or the close button — used to drop only the
-    // React state, orphaning that draft in the bridge's pending map with no
-    // path to ever resolve it. Release it here so dismissal means the same
-    // thing on both sides. Harmless for prompts that never came from the
-    // bridge: `resolveDisambiguation` no-ops on an unknown id.
-    setIterationScopePrompt((current) => {
-      if (current?.editKind === "dom-text" && current.bridgePendingId) {
-        adapterRef.current?.resolveMutationDisambiguation(
-          current.bridgePendingId,
-          "cancel",
-        )
-      }
-      return null
-    })
+  // A prompt that arrived from the BRIDGE (in-page typing) means the bridge
+  // is still holding a draft mutation keyed by `bridgePendingId`. Every exit
+  // from the pending state (cancel, hand-off to chat, refusal) must release
+  // it, or the orphaned draft blocks Save behind `handleSaveAll`'s gate.
+  // Harmless for prompts that never came from the bridge:
+  // `resolveDisambiguation` no-ops on an unknown id.
+  const releaseBridgeDraft = useCallback((pending: PendingIterationEdit | null) => {
+    if (pending?.editKind === "dom-text" && pending.bridgePendingId) {
+      adapterRef.current?.resolveMutationDisambiguation(pending.bridgePendingId, "cancel")
+    }
   }, [])
 
+  const cancelIterationScope = useCallback(() => {
+    setIterationScopePrompt((current) => {
+      releaseBridgeDraft(current)
+      return null
+    })
+  }, [releaseBridgeDraft])
+
   /**
-   * Funnel a pending iteration edit through the remembered-or-prompt
-   * gate. Returns `true` when the dispatcher intercepted (and the
-   * caller should NOT run the legacy path); `false` when there's no
-   * iteration context and the caller should proceed normally.
+   * Funnel a pending iteration edit through: verify the loop in source,
+   * then remembered-scope, then the dialog. Returns `true` synchronously
+   * (the caller must not run the legacy path); the decision lands
+   * asynchronously.
    *
-   * Used by handleLayerDelete / handlePropEdit / handleLayerMove as the
-   * first line of their handler. Keeps the gate logic in one place.
+   * The verify step exists because the bridge's classification comes from
+   * DOM stamps, and N usages of one component look exactly like N loop rows.
+   * The 2026-09-08 incident: four hand-written cards, "all items" chosen,
+   * the component's root deleted by an AI rewrite of the wrong function.
+   * When source has no loop at the position, the question "this item or all
+   * items" has no right answer, so the edit goes to chat with the evidence
+   * and the agent asks a better one.
    */
   const interceptIterationEdit = useCallback(
     (pending: PendingIterationEdit): boolean => {
-      const remembered = iterationScopeMemoryRef.current[pending.editKind]
-      if (remembered) {
-        logIterationScopeChoice({
-          editKind: pending.editKind,
-          scope: remembered,
-          iterationContext: pending.iterationContext,
-          remembered: true,
-        })
-        void dispatchIterationEdit(pending, remembered)
+      const location = iterationTemplateLocation(pending)
+      if (!location) {
+        releaseBridgeDraft(pending)
+        setSaveStatus("This edit has no source location, so it cannot be applied.")
         return true
       }
-      setIterationScopePrompt(pending)
+      void verifyIterationLoop({ file: location.file, line: location.line, column: location.column }).then(
+        (outcome) => {
+          if (outcome.kind === "error") {
+            releaseBridgeDraft(pending)
+            setSaveStatus(`Could not check the source for a loop: ${outcome.reason}`)
+            return
+          }
+          if (outcome.kind === "no-loop") {
+            releaseBridgeDraft(pending)
+            const handOff = escalateToChatRef.current
+            const prompt = buildAmbiguousIterationHandoffPrompt(
+              describeAmbiguousIteration(pending, location, outcome.reason),
+            )
+            if (!handOff || !handOff(prompt)) {
+              setSaveStatus("This edit needs a decision, and chat is not available.")
+            }
+            return
+          }
+          const remembered = iterationScopeMemoryRef.current[pending.editKind]
+          if (remembered) {
+            logIterationScopeChoice({
+              editKind: pending.editKind,
+              scope: remembered,
+              iterationContext: pending.iterationContext,
+              remembered: true,
+            })
+            void dispatchIterationEdit(pending, remembered)
+            return
+          }
+          setIterationScopePrompt(pending)
+        },
+      )
       return true
     },
-    [dispatchIterationEdit],
+    [dispatchIterationEdit, releaseBridgeDraft],
   )
 
   // Keep the early-handler ref pointed at the latest interceptor. The

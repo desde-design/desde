@@ -215,17 +215,20 @@ export function EditorSurface({
   // change is user-initiated (clicking the tab, or a Commit/Push count
   // badge that routes to Activity).
   const [activeTab, setActiveTab] = useState<RightRailTab>("edit")
+  // Every hand-off from a direct edit lands in a NEW chat session, like the
+  // right-click "start a chat about this element" path below: the hand-off
+  // is a fresh question about one click, and a session of its own keeps the
+  // prompt and the agent's answer visible in the tab strip. `chatSubmitRef`
+  // is pointed at a submit that mints the session (see `submitChatInNewSession`).
   const handleEditEscalation = useCallback(
     (prompt: string): boolean => {
       const submit = chatSubmitRef.current
       if (!submit) return false
       setView("editor")
-      // Reveal the chat rail — the escape hatch can be fired from the
-      // Activity tab, where the chat panel is hidden.
       setActiveTab("chat")
       void submit(prompt)
       toast.message("Sent this edit to chat", {
-        description: "The assistant will read the file and apply it.",
+        description: "The assistant will check the source and ask if it needs a decision.",
       })
       return true
     },
@@ -820,10 +823,29 @@ export function EditorSurface({
     ],
   )
 
+  // Hand-offs always start a fresh session. With detached sessions OFF,
+  // `newSession()` is a no-op and a submit into the single bucket would abort
+  // a running chat; refuse in that case, exactly as the right-click path does.
+  const submitChatInNewSession = useCallback(
+    async (prompt: string): Promise<void> => {
+      if (chatSessions.currentSessionId === null && chat.submitting) {
+        toast.error("A chat is already running. Wait for it to finish before starting a new one.")
+        return
+      }
+      chatSessions.newSession()
+      await chat.submit(prompt)
+    },
+    // Same rationale as submitChatAutoFork: the four members are the reactive
+    // inputs; depending on the whole `chat` object would rebuild this on
+    // every streamed token.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chat.submit, chat.submitting, chatSessions.currentSessionId, chatSessions.newSession],
+  )
+
   // Keep the escalate-to-chat bridge pointed at the live submit fn so a
   // direct-manipulation edit that needs interpretation lands as a chat
-  // turn (see handleEditEscalation above).
-  chatSubmitRef.current = submitChatAutoFork
+  // turn (see handleEditEscalation above), always in a new session.
+  chatSubmitRef.current = submitChatInNewSession
 
   // Right-click context-menu → "start a chat about this element". Always
   // opens a FRESH session (the entry point's intent is "begin a new chat
