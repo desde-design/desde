@@ -116,6 +116,7 @@ import {
   type GroundingLoaders,
 } from "./grounding-context.js"
 import { handleEditIterationRequest } from "./edit-iteration-handler.js"
+import { handleIterationVerifyRequest } from "./iteration-verify-handler.js"
 import { readPrototypeFile } from "./file-read-handler.js"
 import type {
   DriftLog,
@@ -2401,6 +2402,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-required",
     handler: (req, res, ctx) =>
       handleEditIterationRequest(req, res, ctx.repoRoot, sendJson),
+  },
+  // Iteration verify endpoint — does the clicked position sit inside a loop?
+  // The client calls this before offering "this item or all items".
+  {
+    method: "POST",
+    path: "/api/editor/iteration/verify",
+    authPolicy: "bearer-origin-required",
+    handler: (req, res, ctx) =>
+      handleIterationVerifyRequest(req, res, ctx.repoRoot, sendJson),
   },
   {
     method: "GET",
