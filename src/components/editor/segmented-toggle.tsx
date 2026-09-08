@@ -81,12 +81,11 @@ interface SegmentedToggleProps<TValue extends string> {
    * side-by-side text in a toolbar this thin (Mo, 2026-09-06, the toolbar's
    * tool picker: Navigate / Select / Comment).
    *
-   * Overrides use Tailwind's trailing `!` rather than relying on class
-   * order: the base trigger's size classes are gated behind a
-   * `group-data-[size=default]/tabs-list:` modifier, which compiles through
-   * `:where()` to the same zero specificity as a plain utility (see the
-   * height comment in `ui/tabs.tsx`), so an unmarked override class is not
-   * guaranteed to win.
+   * This is the Tabs primitive's `stacked` SIZE; the wrapper only names it.
+   * It used to be a run of `h-auto! flex-col! … text-2xs!` overrides on the
+   * trigger, each with a trailing `!` to beat the default size's classes.
+   * A size the list declares means exactly one set of classes applies and
+   * nothing has to win a fight (2026-09-08).
    */
   stacked?: boolean
 }
@@ -113,14 +112,15 @@ export function SegmentedToggle<TValue extends string>({
       <TabsList
         aria-label={ariaLabel}
         data-testid="segmented-toggle"
+        size={stacked ? "stacked" : "default"}
         // The track, the padding and the rounding all belong to the
         // container look; `plain` drops the three together, or a track-less
-        // strip keeps a 3px inset nothing sits in.
+        // strip keeps a 3px inset nothing sits in. A stacked strip keeps its
+        // vertical padding: it is the breathing room between the toolbar's
+        // own inset and the two-line triggers, not a track inset.
         className={cn(
-          plain && "gap-0.5 bg-transparent p-0",
-          // The fixed track height assumes one line of content; a stacked
-          // trigger is two, so let the list size to its tallest child instead.
-          stacked && "h-auto! items-stretch py-1!"
+          plain && "gap-0.5 bg-transparent",
+          plain && (stacked ? "px-0" : "p-0"),
         )}
       >
         {options.map((opt) => (
@@ -156,9 +156,6 @@ export function SegmentedToggle<TValue extends string>({
                 // under the cursor — a picked tool looking momentarily unpicked
                 // (Mo, 2026-08-18).
                 "data-active:bg-primary/10 data-active:font-medium data-active:text-primary data-active:hover:text-primary",
-              // Icon on top, label under, at the type scale's floor. No
-              // `leading-*`: `text-2xs` carries its own line-height.
-              stacked && "h-auto! flex-col! gap-0.5! px-1.5! py-1.5! text-2xs!"
             )}
           >
             {opt.icon}

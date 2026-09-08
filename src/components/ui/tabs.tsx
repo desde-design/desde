@@ -67,6 +67,25 @@ const tabsListVariants = cva(
       size: {
         default: "rounded-lg p-[3px] group-data-horizontal/tabs:h-8",
         sm: "rounded-md p-[3px] group-data-horizontal/tabs:h-6.5",
+        /**
+         * `stacked` puts each trigger's icon ABOVE its label, with the label
+         * at the type scale's floor (`text-2xs`). For a strip whose labels
+         * read as wide side-by-side text in chrome this thin: the editor
+         * toolbar's tool picker (Mo, 2026-09-06).
+         *
+         * No fixed height, and `items-stretch` rather than `items-center`:
+         * the strip is two lines tall and sizes to its triggers, which is
+         * the opposite of the other two sizes, where the list's height
+         * decides the pill's. That is also why the trigger's
+         * `h-[calc(100%-1px)]` lives in the default/sm gates below and not
+         * in the base: on this size there is no list height to be a
+         * fraction of.
+         *
+         * It was `h-auto! flex-col! … text-2xs!` on the trigger until
+         * 2026-09-08, forcing its way past the default size's classes with
+         * a trailing `!`. Being a size, exactly one set applies.
+         */
+        stacked: "rounded-md p-1 gap-0.5 items-stretch",
       },
     },
     defaultVariants: {
@@ -102,14 +121,18 @@ function TabsTrigger({
     <TabsPrimitive.Trigger
       data-slot="tabs-trigger"
       className={cn(
-        "relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center border border-transparent font-normal whitespace-nowrap text-foreground/60 transition-all group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start group-data-vertical/tabs:py-[calc(--spacing(1.25))] hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 has-data-[icon=inline-end]:pr-1 has-data-[icon=inline-start]:pl-1 dark:text-muted-foreground dark:hover:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0",
+        "relative inline-flex flex-1 items-center justify-center border border-transparent font-normal whitespace-nowrap text-foreground/60 transition-all group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start group-data-vertical/tabs:py-[calc(--spacing(1.25))] hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 has-data-[icon=inline-end]:pr-1 has-data-[icon=inline-start]:pl-1 dark:text-muted-foreground dark:hover:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0",
         // Everything the strip's size decides. These read off the list's
         // `data-size`, so exactly one set ever applies and the two never
         // compete on specificity or on source order.
-        "group-data-[size=default]/tabs-list:gap-1.5 group-data-[size=default]/tabs-list:rounded-md group-data-[size=default]/tabs-list:px-1.5 group-data-[size=default]/tabs-list:py-0.5 group-data-[size=default]/tabs-list:text-sm group-data-[size=default]/tabs-list:[&_svg:not([class*='size-'])]:size-3.5",
+        "group-data-[size=default]/tabs-list:h-[calc(100%-1px)] group-data-[size=default]/tabs-list:gap-1.5 group-data-[size=default]/tabs-list:rounded-md group-data-[size=default]/tabs-list:px-1.5 group-data-[size=default]/tabs-list:py-0.5 group-data-[size=default]/tabs-list:text-sm group-data-[size=default]/tabs-list:[&_svg:not([class*='size-'])]:size-3.5",
         // `sm` is text-sm with size-3 icons. The pill's own height comes
         // from the list; see that size variant's doc comment.
-        "group-data-[size=sm]/tabs-list:gap-1 group-data-[size=sm]/tabs-list:rounded-sm group-data-[size=sm]/tabs-list:px-2 group-data-[size=sm]/tabs-list:text-sm group-data-[size=sm]/tabs-list:[&_svg:not([class*='size-'])]:size-3",
+        "group-data-[size=sm]/tabs-list:h-[calc(100%-1px)] group-data-[size=sm]/tabs-list:gap-1 group-data-[size=sm]/tabs-list:rounded-sm group-data-[size=sm]/tabs-list:px-2 group-data-[size=sm]/tabs-list:text-sm group-data-[size=sm]/tabs-list:[&_svg:not([class*='size-'])]:size-3",
+        // `stacked` is icon over label at the type scale's floor, with no
+        // `leading-*`: `text-2xs` carries its own line-height. See the list
+        // size's doc comment for why it has no height.
+        "group-data-[size=stacked]/tabs-list:flex-col group-data-[size=stacked]/tabs-list:gap-0.5 group-data-[size=stacked]/tabs-list:rounded-md group-data-[size=stacked]/tabs-list:px-1.5 group-data-[size=stacked]/tabs-list:py-1.5 group-data-[size=stacked]/tabs-list:text-2xs group-data-[size=stacked]/tabs-list:[&_svg:not([class*='size-'])]:size-3",
         "group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:data-active:bg-transparent dark:group-data-[variant=line]/tabs-list:data-active:border-transparent dark:group-data-[variant=line]/tabs-list:data-active:bg-transparent",
         "data-active:bg-background data-active:text-foreground dark:data-active:border-input dark:data-active:bg-input/30 dark:data-active:text-foreground",
         "after:absolute after:bg-foreground after:opacity-0 after:transition-opacity group-data-horizontal/tabs:after:inset-x-0 group-data-horizontal/tabs:after:bottom-[-5px] group-data-horizontal/tabs:after:h-0.5 group-data-vertical/tabs:after:inset-y-0 group-data-vertical/tabs:after:-right-1 group-data-vertical/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-active:after:opacity-100",

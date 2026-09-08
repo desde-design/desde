@@ -398,3 +398,27 @@ describe("EditorToolbar — hide chrome", () => {
     expect(onHideChrome).toHaveBeenCalledTimes(1)
   })
 })
+
+describe("EditorToolbar — the rule after the picker", () => {
+  /**
+   * The rule is as tall as the picker beside it (Mo, 2026-09-08: "full
+   * height of the button area"). It stretches to the pill's content box, so
+   * the pill's own padding is its inset from the border. It carried a fixed
+   * `h-5` from when the picker was one line tall, and stayed at 20px when
+   * the picker grew to two.
+   */
+  it("stretches to the picker's height instead of carrying a fixed one", () => {
+    renderToolbar()
+    const list = screen.getByRole("tablist", { name: "Prototype tool" })
+    // The Tabs root wraps the list; the rule is the root's next sibling.
+    const rule = list.parentElement!.nextElementSibling as HTMLElement
+    expect(rule.className).toContain("w-px")
+    expect(rule.className).toContain("self-stretch")
+    expect(rule.className).not.toMatch(/\bh-\d/)
+  })
+
+  it("is not rendered without the picker it follows", () => {
+    renderToolbar({ showIframe: false })
+    expect(screen.getByTestId("editor-toolbar").querySelector(".w-px")).toBeNull()
+  })
+})

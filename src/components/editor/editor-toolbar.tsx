@@ -236,11 +236,16 @@ export function EditorToolbar({
         left is a stray mark.
       */}
       {showIframe ? (
-        // `h-5` and `bg-border/80` → `bg-foreground/15` (Mo, 2026-08-18).
-        // `bg-border` on the pill's own near-white ground was close to
-        // invisible, and at `h-4` it was shorter than the 24px controls it
-        // separates, so it read as a speck rather than a division.
-        <div className="mx-1.5 h-5 w-px shrink-0 bg-foreground/15" />
+        // `bg-border/80` → `bg-foreground/15` (Mo, 2026-08-18): `bg-border`
+        // on the pill's own near-white ground was close to invisible.
+        //
+        // `self-stretch`, no fixed height (Mo, 2026-09-08: "full height of
+        // the button area"). The pill centres its items, so the rule
+        // stretches to the pill's content box, which the two-line picker
+        // sets; the pill's own `p-1` is its inset from the border. It
+        // carried `h-5` from when the picker was one line tall, and stayed
+        // 20px when the picker grew to two on 2026-09-06.
+        <div className="mx-1.5 w-px shrink-0 self-stretch bg-foreground/15" />
       ) : null}
       {/* Undo/Redo — not gated on `showIframe`: they act on source edits,
           which are just as real in the file-editor view. */}

@@ -136,3 +136,41 @@ describe("SegmentedToggle", () => {
     expect(onChange).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * `stacked` is a SIZE the list declares, not a pile of forced overrides.
+ *
+ * Until 2026-09-08 the stacked look was `h-auto! flex-col! … text-2xs!` on
+ * every trigger, fighting the primitive's own size classes with Tailwind's
+ * trailing `!`. The Tabs primitive now carries a `stacked` size beside
+ * `default` and `sm`, so exactly one size's classes ever apply and nothing
+ * needs to win a specificity fight. The wrapper's whole job here is to say
+ * which size the list is.
+ */
+describe("SegmentedToggle — stacked", () => {
+  const TOOLS = [
+    { value: "navigate" as const, label: "Navigate", icon: <svg aria-hidden="true" /> },
+    { value: "select" as const, label: "Select", icon: <svg aria-hidden="true" /> },
+  ]
+
+  it("declares the stacked size on the list", () => {
+    render(
+      <SegmentedToggle value="navigate" options={TOOLS} onChange={() => {}} ariaLabel="Tool" variant="plain" stacked />,
+    )
+    expect(screen.getByRole("tablist").getAttribute("data-size")).toBe("stacked")
+  })
+
+  it("forces nothing: no `!` override on the list or its triggers", () => {
+    render(
+      <SegmentedToggle value="navigate" options={TOOLS} onChange={() => {}} ariaLabel="Tool" variant="plain" stacked />,
+    )
+    const list = screen.getByRole("tablist")
+    const classes = [list, ...screen.getAllByRole("tab")].map((el) => el.className)
+    for (const cls of classes) expect(cls).not.toMatch(/!(\s|$)/)
+  })
+
+  it("stays on the default size when not stacked", () => {
+    render(<SegmentedToggle value="editor" options={VIEW_OPTIONS} onChange={() => {}} ariaLabel="View" />)
+    expect(screen.getByRole("tablist").getAttribute("data-size")).toBe("default")
+  })
+})
