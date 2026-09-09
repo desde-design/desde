@@ -797,7 +797,6 @@ describe("useEditorChat.steer", () => {
       await act(async () => {
         turn.push(SESSION_EVENT)
         turn.push(ACCEPTED_EVENT)
-      turn.push(ACCEPTED_EVENT)
         turn.push({ kind: "turn_start", turnId: "t1" })
         await vi.advanceTimersByTimeAsync(0)
       })
@@ -856,7 +855,6 @@ describe("useEditorChat.steer", () => {
       await act(async () => {
         turn.push(SESSION_EVENT)
         turn.push(ACCEPTED_EVENT)
-      turn.push(ACCEPTED_EVENT)
         turn.push({ kind: "turn_start", turnId: "t1" })
         await vi.advanceTimersByTimeAsync(0)
       })
@@ -916,7 +914,6 @@ describe("useEditorChat.steer", () => {
       await act(async () => {
         turn.push(SESSION_EVENT)
         turn.push(ACCEPTED_EVENT)
-      turn.push(ACCEPTED_EVENT)
         turn.push({ kind: "turn_start", turnId: "t1" })
         await vi.advanceTimersByTimeAsync(0)
       })

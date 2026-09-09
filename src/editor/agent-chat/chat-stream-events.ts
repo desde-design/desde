@@ -425,11 +425,19 @@ export type ChatStreamEvent =
  * Hand-maintained, and `event-kind-coverage.test.ts` is what stops it going
  * stale: a kind added to the union above but not to this list is a kind the
  * coverage test cannot account for, and it fails.
+ *
+ * That "and it fails" claim is now actually true at the type level, not just
+ * at the vitest level (vitest strips types and never runs `tsc`, so a purely
+ * runtime check here could not have caught a missing kind). `_AssertNever`
+ * below fails `npm run typecheck` if any `ChatStreamEvent['kind']` is absent
+ * from this list — `Exclude` would then produce the missing kind name(s)
+ * instead of `never`, and `_AssertNever` only accepts `never`.
  */
-export const CHAT_STREAM_EVENT_KINDS: readonly ChatStreamEvent['kind'][] = [
+export const CHAT_STREAM_EVENT_KINDS = [
   'session',
   'capability_gap',
   'queued',
+  'accepted',
   'steered',
   'resubmit_required',
   'turn_start',
@@ -445,7 +453,10 @@ export const CHAT_STREAM_EVENT_KINDS: readonly ChatStreamEvent['kind'][] = [
   'rate_limit_warning',
   'api_retry',
   'error',
-]
+] as const satisfies readonly ChatStreamEvent['kind'][]
+
+type _AssertNever<T extends never> = T
+type _AllKindsListed = _AssertNever<Exclude<ChatStreamEvent['kind'], (typeof CHAT_STREAM_EVENT_KINDS)[number]>>
 
 /**
  * Kinds the CHAT HANDLER emits, not a runtime
@@ -453,7 +464,7 @@ export const CHAT_STREAM_EVENT_KINDS: readonly ChatStreamEvent['kind'][] = [
  * comparison because both lanes reach the same handler, so neither runtime
  * can be missing them: there is no per-lane code here to drift.
  *
- * Grepping `chat-handler.ts` for each of these four is what keeps this list
+ * Grepping `chat-handler.ts` for each of these five is what keeps this list
  * honest. A kind that is not actually emitted there does not belong in it,
  * even if it is also exempt from the script-driven check for its own reason
  * — see `SCRIPT_EXEMPT_EVENT_KINDS` for those.
@@ -462,6 +473,7 @@ export const HANDLER_OWNED_EVENT_KINDS: readonly ChatStreamEvent['kind'][] = [
   'session',
   'capability_gap',
   'queued',
+  'accepted',
   'bridge_request',
 ]
 
