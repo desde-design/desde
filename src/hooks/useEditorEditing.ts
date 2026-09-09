@@ -4026,6 +4026,26 @@ export function useEditorEditing({
         current,
         sessionSignal ? { signal: sessionSignal } : undefined,
       )
+      // Disk truth, not session state, so it is recorded whoever is looking at
+      // the files. Same order and the same reason as the text and class lanes.
+      // Skipping it would leave the external-edit guard comparing against a
+      // hash this very write invalidated.
+      if (result.kind === "applied" && result.newHashes) {
+        fileHashesRef.current = {
+          ...fileHashesRef.current,
+          ...result.newHashes,
+        }
+      }
+      // THE PAGE THIS ANSWER IS ABOUT IS GONE. Do nothing with it, and that
+      // means nothing at all: no buffer filter, no timer replaced, no status.
+      // The request can be out for ~90 seconds (the server runs its AI
+      // mini-turn inside the POST), and a document replaced inside that window
+      // took this dispatch's entry with it. A SUCCESS is the case that used to
+      // slip through here: the reconcile below would clear the live debounce
+      // and re-arm it under this dispatch's dead session, so the replacement
+      // document's edit on the same prop stayed buffered and was never
+      // written. The `finally` leaves the marker alone for the same reason.
+      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
       if (result.kind === "failed") {
         // `'chat'` fallback mode: the deterministic applicator refused
         // (bound-binding / v-model / dynamic-vbind) AND the source-aware
@@ -4034,14 +4054,6 @@ export function useEditorEditing({
         // instead of leaving it stuck in the buffer, and drop the entry.
         // Mirrors the inline text path at ~line 2311.
         if (result.needsChat && escalateToChatRef.current) {
-          // The refusal can arrive up to ~90 seconds after the request left
-          // (the server runs its AI mini-turn inside the POST), and the page
-          // can be replaced inside that. Starting a chat turn now would tell
-          // the agent to make an edit happen on an element of a document that
-          // is gone, and the agent WOULD edit files for it. Say nothing: the
-          // session end has already told the designer their pending edits went
-          // with the page.
-          if (isStaleGeneration(generation, adapterGenerationRef.current)) return
           const editTarget = current.target.editTarget
           const editTargetLocation = editTarget
             ? `${editTarget.file}:${editTarget.line}`
@@ -4067,16 +4079,16 @@ export function useEditorEditing({
             // than leaving a turn on its way to a page nobody is looking at.
             sessionSignal ? { signal: sessionSignal } : undefined,
           )
+          // The session ended while the submission was out. Touch nothing: the
+          // entry this would keep or drop was retired with the page it was
+          // typed on, and the status bar is describing a different page now.
+          if (isStaleGeneration(generation, adapterGenerationRef.current)) return
           const aftermath = afterEscalation(
             accepted,
             `The "${current.propName}" edit`,
           )
           if (aftermath.buffer === "keep") {
-            // Silent if the session ended while the submission was out: the
-            // status bar is describing a different page now.
-            if (!isStaleGeneration(generation, adapterGenerationRef.current)) {
-              setSaveStatus(aftermath.status)
-            }
+            setSaveStatus(aftermath.status)
             return
           }
           setPendingPropEdits((prev) => prev.filter((e) => e.id !== current.id))
@@ -4140,12 +4152,6 @@ export function useEditorEditing({
         // edit; the preview rides until then or until the store times out.)
         resolveOverrideSettled(adapter, current.id, "failed", result.reason)
         return
-      }
-      if (result.kind === "applied" && result.newHashes) {
-        fileHashesRef.current = {
-          ...fileHashesRef.current,
-          ...result.newHashes,
-        }
       }
       if (result.kind === "applied" && result.fallbackUsed) {
         const notes = result.notes
