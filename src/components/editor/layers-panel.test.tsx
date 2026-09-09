@@ -996,4 +996,58 @@ describe("LayersPanel", () => {
       ).not.toBeInTheDocument()
     })
   })
+  /**
+   * Both-ends gating for unreadable loop information.
+   *
+   * `iterationContextMalformed` means the page said this element is repeated
+   * in a way that did not survive the wire boundary, so we cannot tell "insert
+   * into one row" from "insert into the shared template". The dispatch refuses
+   * it (`handleLayerInsert` → `structuralRouteFor`), and the menu must not
+   * offer a control that always fails on click.
+   */
+  describe("insert offering vs unreadable loop information", () => {
+    function oneRow(extra: Partial<OutlineNode>): OutlineNode[] {
+      return [
+        {
+          id: "row",
+          name: "li",
+          type: "element",
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 20,
+          selector: "#row",
+          editTarget: { file: "src/App.vue", line: 4, column: 2 },
+          ...extra,
+        } as OutlineNode,
+      ]
+    }
+
+    function openMenu(roots: OutlineNode[]) {
+      render(
+        <LayersPanel
+          roots={roots}
+          selectedSelector={null}
+          onSelect={() => {}}
+          onRefresh={() => {}}
+          refreshing={false}
+          onInsert={() => {}}
+          onDelete={() => {}}
+        />,
+      )
+      fireEvent.contextMenu(screen.getByTitle("#row"))
+    }
+
+    it("offers Insert child… on an ordinary source-tagged row", async () => {
+      openMenu(oneRow({}))
+      expect(await screen.findByText("Insert child…")).toBeInTheDocument()
+    })
+
+    it("does not offer it when the page's loop information could not be read", async () => {
+      openMenu(oneRow({ iterationContextMalformed: true }))
+      // The menu opened — Delete is still there — and only Insert is gone.
+      expect(await screen.findByText("Delete")).toBeInTheDocument()
+      expect(screen.queryByText("Insert child…")).not.toBeInTheDocument()
+    })
+  })
 })

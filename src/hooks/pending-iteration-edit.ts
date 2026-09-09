@@ -117,12 +117,44 @@ export function endSentence(message: string): string {
  * a 4700-line hook with no test harness, so the decision they share is tested
  * here instead.
  */
+export type IterationRouteTarget = {
+  iterationContext?: IterationContext
+  iterationContextMalformed?: boolean
+}
+
 export function iterationRouteFor(
-  target: { iterationContext?: IterationContext; iterationContextMalformed?: boolean } | null | undefined,
+  target: IterationRouteTarget | null | undefined,
 ): "refuse" | "iteration" | "plain" {
   if (!target) return "plain"
   if (target.iterationContextMalformed) return "refuse"
   return target.iterationContext ? "iteration" : "plain"
+}
+
+/**
+ * The same route for an edit that has a DESTINATION as well as a target: a
+ * Layers move (source + destination parent) or a Layers insert (destination
+ * parent only).
+ *
+ * Two rules, and only two:
+ *
+ * - Malformed loop information on EITHER end refuses. It used to be checked on
+ *   the source only, so a move INTO a destination the page could not describe
+ *   went through, and an insert checked nothing at all. Dropping a row into a
+ *   loop we cannot read writes the shared template, which is every row.
+ * - A destination with a VALID loop context changes nothing. Inserting into a
+ *   `v-for` element adds to the shared template on purpose, and that is
+ *   today's behaviour; the "this item or all items" question belongs to the
+ *   element being edited, not to where it lands.
+ *
+ * So the returned route is the NODE's, and the destination can only veto it.
+ * An insert (no node) is therefore `plain` or `refuse`, never `iteration`.
+ */
+export function structuralRouteFor(args: {
+  node?: IterationRouteTarget | null
+  destParent?: IterationRouteTarget | null
+}): "refuse" | "iteration" | "plain" {
+  if (args.destParent?.iterationContextMalformed) return "refuse"
+  return iterationRouteFor(args.node)
 }
 
 /**

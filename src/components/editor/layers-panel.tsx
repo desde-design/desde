@@ -201,9 +201,16 @@ interface LayersPanelProps {
  * Whether the layers-panel context menu should offer "Insert child…"
  * for this node. Insert needs a editTarget on the parent so the
  * applicator can find the splice point.
+ *
+ * And it needs loop information we could read. `iterationContextMalformed`
+ * means the page described this element as repeated in a way that did not
+ * survive the wire boundary, so we cannot tell "insert into one row" from
+ * "insert into the shared template". The dispatch refuses that node, so the
+ * menu must not offer it: a control that always fails on click is worse than
+ * no control. Both ends read the flag; neither trusts the other.
  */
 function canInsertIntoNode(node: OutlineNode): boolean {
-  return !!node.editTarget
+  return !!node.editTarget && !node.iterationContextMalformed
 }
 
 /**

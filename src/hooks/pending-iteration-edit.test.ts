@@ -11,6 +11,7 @@ import {
   iterationRouteFor,
   iterationTemplateLocation,
   sameBridgeDraft,
+  structuralRouteFor,
   thisRowTemplateLocation,
   verifyKeyFor,
   type PendingIterationEdit,
@@ -376,6 +377,56 @@ describe("iterationRouteFor", () => {
     // Belt and braces: the boundary clears one when it sets the other, but the
     // refusal must not depend on that ordering holding.
     expect(iterationRouteFor({ iterationContext, iterationContextMalformed: true })).toBe("refuse")
+  })
+})
+
+describe("structuralRouteFor", () => {
+  it("refuses when the DESTINATION carries unreadable loop information", () => {
+    // The gap: a move validated its source and never looked at where the row
+    // was going, and an insert looked at neither. Dropping into a loop we
+    // cannot read writes the shared template, which is every row.
+    expect(
+      structuralRouteFor({ node: {}, destParent: { iterationContextMalformed: true } }),
+    ).toBe("refuse")
+    expect(
+      structuralRouteFor({ destParent: { iterationContextMalformed: true } }),
+    ).toBe("refuse")
+  })
+
+  it("refuses when the node carries it, exactly as the single-target route does", () => {
+    expect(
+      structuralRouteFor({ node: { iterationContextMalformed: true }, destParent: {} }),
+    ).toBe("refuse")
+  })
+
+  it("refuses when BOTH ends carry it", () => {
+    expect(
+      structuralRouteFor({
+        node: { iterationContextMalformed: true },
+        destParent: { iterationContextMalformed: true },
+      }),
+    ).toBe("refuse")
+  })
+
+  it("leaves a VALID destination context alone: no refusal, no new question", () => {
+    // Today's behaviour, deliberately kept. Inserting into a `v-for` element
+    // adds to the shared template on purpose, and the "this item or all items"
+    // question belongs to the element being edited, not to where it lands.
+    expect(structuralRouteFor({ node: {}, destParent: { iterationContext } })).toBe("plain")
+    expect(structuralRouteFor({ destParent: { iterationContext } })).toBe("plain")
+  })
+
+  it("returns the NODE's route when nothing is malformed", () => {
+    expect(structuralRouteFor({ node: { iterationContext }, destParent: {} })).toBe(
+      "iteration",
+    )
+    expect(structuralRouteFor({ node: {}, destParent: {} })).toBe("plain")
+    expect(structuralRouteFor({})).toBe("plain")
+  })
+
+  it("never says `iteration` for a destination-only edit", () => {
+    // An insert has no edited element to ask the question about.
+    expect(structuralRouteFor({ destParent: { iterationContext } })).not.toBe("iteration")
   })
 })
 

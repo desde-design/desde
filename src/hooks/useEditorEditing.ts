@@ -119,6 +119,7 @@ import {
   iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
+  structuralRouteFor,
   thisRowTemplateLocation,
   verifyKeyFor,
   type PendingIterationEdit,
@@ -839,10 +840,12 @@ export function useEditorEditing({
         return
       }
       if (!skipIterationCheck) {
-        const route = iterationRouteFor(source)
-        // See `iterationRouteFor`: a context the page sent and we could not
-        // read is refused, never treated as "not a loop". Moving a loop row as
-        // if it were an ordinary element rewrites the shared template.
+        // The DESTINATION is checked too. See `structuralRouteFor`: a context
+        // the page sent and we could not read is refused, never treated as
+        // "not a loop", at either end. Moving a loop row as if it were an
+        // ordinary element rewrites the shared template, and so does dropping
+        // a row into a loop we cannot read.
+        const route = structuralRouteFor({ node: source, destParent })
         if (route === "refuse") {
           setSaveStatus(MALFORMED_ITERATION_STATUS)
           return
@@ -1285,6 +1288,16 @@ export function useEditorEditing({
     (parentNode: OutlineNode, snippet: string, destIndex = -1) => {
       const adapter = adapterRef.current
       if (!adapter || !parentNode.editTarget) return
+      // Same refusal as every other entry point (see `structuralRouteFor`).
+      // The parent is a DESTINATION, so a valid loop context on it changes
+      // nothing — inserting into a `v-for` adds to the shared template on
+      // purpose. Only loop information we could not read refuses, because
+      // then we cannot tell that case from this one. The Layers menu does not
+      // offer the control in that state either; this is the dispatch half.
+      if (structuralRouteFor({ destParent: parentNode }) === "refuse") {
+        setSaveStatus(MALFORMED_ITERATION_STATUS)
+        return
+      }
       const id = makeEditId()
       const edit: StructuralEdit = {
         kind: "insert",
