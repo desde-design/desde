@@ -62,10 +62,6 @@ const HANDOFF_LABELS: Record<string, string> = {
  */
 const SNIPPET_LIMIT = 2000
 
-function locationText(l: { file: string; line: number; column: number }): string {
-  return `${l.file}:${l.line}:${l.column}`
-}
-
 /**
  * Refusals that are POLICY, not capability. The agent cannot fix these by
  * reading more source: a dormant lane is off by configuration, and library

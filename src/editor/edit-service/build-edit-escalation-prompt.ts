@@ -281,7 +281,6 @@ export function describeMoveDestination(
 function sanitizeField(value: string, limit = FIELD_LIMIT): string {
   // The class is the C0 and C1 control ranges plus the two Unicode line
   // separators, which JavaScript treats as line terminators.
-  // eslint-disable-next-line no-control-regex
   const flat = value.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ").trim()
   if (flat.length <= limit) return flat
   return `${flat.slice(0, limit)}... (truncated at ${limit} characters)`
