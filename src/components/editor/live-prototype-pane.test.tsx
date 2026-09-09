@@ -992,6 +992,87 @@ describe("class-edit lane — release-then-verify sequencing", () => {
     )
     expect(editPosts).toHaveLength(0)
   })
+
+  it("does not let a write from the departed page unlock the element the live page is writing", async () => {
+    // The in-flight marker set is keyed by mutation identity and shared across
+    // sessions, and it is the ONLY thing stopping two writes for one element
+    // from running at once (the older answer overwriting the newer value). A
+    // dispatch that outlives its session used to delete that key unconditionally
+    // in its `finally`, and by then the key belonged to a dispatch the live page
+    // had started for the same element.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const answer: Array<(response: Response) => void> = []
+    const fetchMock = vi.fn(
+      async (_url: RequestInfo | URL) =>
+        new Promise<Response>((resolve) => {
+          answer.push(resolve)
+        }),
+    )
+    vi.stubGlobal("fetch", fetchMock)
+    const applied = () =>
+      new Response(JSON.stringify({ ok: true, newHashes: {} }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    render(<Harness />)
+    await act(async () => {
+      emitFromBridge({
+        type: "BRIDGE_READY",
+        payload: { version: "2026-09-09a", documentId: "doc-a" },
+      })
+    })
+    await waitFor(() => {
+      expect(activeMockSetup!.postMessages.length).toBeGreaterThan(0)
+    })
+
+    // First write, left in flight.
+    await act(async () => {
+      emitFromBridge({ type: "MUTATION_CAPTURED", payload: CLASS_MUTATION })
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(answer).toHaveLength(1)
+
+    // The page is replaced while that write is still out.
+    const iframe = screen.getByTitle("Prototype") as HTMLIFrameElement
+    await act(async () => {
+      iframe.dispatchEvent(new Event("load"))
+    })
+    await act(async () => {
+      emitFromBridge({
+        type: "BRIDGE_READY",
+        payload: { version: "2026-09-09a", documentId: "doc-b" },
+      })
+    })
+
+    // The designer edits the same element on the new page: a second write,
+    // which now owns the marker.
+    await act(async () => {
+      emitFromBridge({ type: "MUTATION_CAPTURED", payload: CLASS_MUTATION })
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(answer).toHaveLength(2)
+
+    // Now the departed page's write answers.
+    await act(async () => {
+      answer[0](applied())
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    // A further edit on that element must still find it locked by the write
+    // that is genuinely out. Before the fix the answer above had unlocked it,
+    // and this started a third write alongside the second.
+    await act(async () => {
+      emitFromBridge({ type: "MUTATION_CAPTURED", payload: CLASS_MUTATION })
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(answer).toHaveLength(2)
+  })
 })
 
 // ──────────── The document boundary is the handshake, not the load ────────────

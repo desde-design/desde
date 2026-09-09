@@ -3008,11 +3008,14 @@ export function useEditorEditing({
       if (pendingDisambiguationsRef.current.length > 0) setPendingDisambiguations([])
       bridgeDraftsByPendingIdRef.current.clear()
       latestPendingByDraftRef.current.clear()
-      // The prop lane's markers are per identity and shared across sessions, so
-      // they die with the session that set them. Its `finally` refuses to
-      // delete a marker once the generation has moved (it would be deleting the
-      // NEXT session's), which is only safe because this clears them.
+      // The lanes' in-flight markers are per identity and shared across
+      // sessions, so they die with the session that set them. Each lane's
+      // `finally` refuses to delete a marker once the generation has moved (it
+      // would be deleting the NEXT session's), which is only safe because this
+      // clears them. Both sets: the prop lane's, and the one the text and class
+      // lanes share.
       branchPropInFlight.current.clear()
+      branchTextInFlight.current.clear()
       // Every debounced write this session had armed, cancelled. A debounce
       // callback is a plain `setTimeout` and knows nothing about sessions: left
       // running, it fires after the new document has attached, reads the LIVE
@@ -3684,6 +3687,23 @@ export function useEditorEditing({
       inFlightOverrideIdsRef.current.add(normalized.id)
       try {
         const result = await adapter.applyEdit(edit)
+        // Disk truth, not session state: the files are what they are whoever
+        // is looking at them, so this is recorded before the session check
+        // below. Skipping it would leave the external-edit guard comparing
+        // against a hash this very write invalidated.
+        if (result.kind === "applied" && result.newHashes) {
+          fileHashesRef.current = {
+            ...fileHashesRef.current,
+            ...result.newHashes,
+          }
+        }
+        // The page this answer is about is gone. Do NOTHING with it. The
+        // override id, the verification and the status all name a document
+        // that has been replaced, and the bridge restarts its mutation ids on
+        // the new one, so resolving "this" override would retire an override
+        // the designer can still see. The `finally` below leaves the marker
+        // alone for the same reason; `endBridgeSession` has already cleared it.
+        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
         if (result.kind === "failed") {
           // `'chat'` mode: the deterministic lane couldn't apply this edit.
           // Don't interrupt the user mid-type — QUEUE it. Keep the mutation
@@ -3707,12 +3727,6 @@ export function useEditorEditing({
           // queued for the AI lane and the preview legitimately stays.)
           resolveOverrideSettled(adapter, normalized.id, "failed", result.reason)
           return
-        }
-        if (result.kind === "applied" && result.newHashes) {
-          fileHashesRef.current = {
-            ...fileHashesRef.current,
-            ...result.newHashes,
-          }
         }
         // Tier-2 verification: the source write landed in the worktree and HMR
         // will re-render. Confirm the edited text actually shows up in the live
@@ -3831,7 +3845,15 @@ export function useEditorEditing({
         resolveOverrideSettled(adapter, normalized.id, "failed", (err as Error).message)
       } finally {
         inFlightOverrideIdsRef.current.delete(normalized.id)
-        branchTextInFlight.current.delete(identityKey)
+        // Only while this dispatch still owns the marker, exactly as the prop
+        // lane does. Once the session has ended, `endBridgeSession` emptied the
+        // set and any key in it was put there by a dispatch that started
+        // afterwards; deleting it would let a second write for that identity
+        // run alongside the first, which is the out-of-order overwrite the set
+        // exists to prevent.
+        if (mayClearInFlightMarker(generation, adapterGenerationRef.current)) {
+          branchTextInFlight.current.delete(identityKey)
+        }
       }
     },
     [scheduleSelectionStampRefresh],
@@ -4425,7 +4447,12 @@ export function useEditorEditing({
       )
       if (!current) return
       const dispatchedAfter = current.after
+      // This lane has an await BEFORE it takes its marker: resolving where a
+      // style rule may be written can ask the document (`GET_STYLESHEET_TARGETS`).
+      // A page replaced in that window makes both the answer and the override id
+      // below name a document that is gone.
       const destination = await resolveStyleDestination()
+      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
       if (!destination.ok) {
         setSaveStatus(`Inline style edit failed: ${destination.reason}`)
         resolveOverrideSettled(adapter, current.id, "failed", destination.reason)
@@ -4447,6 +4474,15 @@ export function useEditorEditing({
       inFlightOverrideIdsRef.current.add(current.id)
       try {
         const result = await adapter.applyEdit(edit)
+        // Disk truth first, then the session check — same order and the same
+        // reasons as the text lane above.
+        if (result.kind === "applied" && result.newHashes) {
+          fileHashesRef.current = {
+            ...fileHashesRef.current,
+            ...result.newHashes,
+          }
+        }
+        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
         if (result.kind === "failed") {
           setSaveStatus(`Inline class edit failed: ${result.reason}`)
           // WS3: the write never landed — revert the preview. Resolve by
@@ -4457,12 +4493,6 @@ export function useEditorEditing({
           // `normalized.id` and the llm-patch `edit.id`.
           resolveOverrideSettled(adapter, current.id, "failed", result.reason)
           return
-        }
-        if (result.kind === "applied" && result.newHashes) {
-          fileHashesRef.current = {
-            ...fileHashesRef.current,
-            ...result.newHashes,
-          }
         }
         // RELEASE-THEN-VERIFY (final-review C1). The write landed — release
         // the preview override NOW, exactly as this lane did before cascade
@@ -4601,7 +4631,11 @@ export function useEditorEditing({
         resolveOverrideSettled(adapter, current.id, "failed", (err as Error).message)
       } finally {
         inFlightOverrideIdsRef.current.delete(current.id)
-        branchTextInFlight.current.delete(identityKey)
+        // Only while this dispatch still owns the marker — the same rule as
+        // the text lane it shares this set with, and the prop lane before it.
+        if (mayClearInFlightMarker(generation, adapterGenerationRef.current)) {
+          branchTextInFlight.current.delete(identityKey)
+        }
       }
     },
     // `buildStyleEdit` is a stable top-level import (see
