@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest"
 import type { EditResult, StructuralEdit } from "@/editor/core"
 import { EDIT_HANDOFF_MARKER } from "@/editor/edit-service/build-edit-escalation-prompt"
-import { applyEditWithChatHandoff, describeStructuralEditForHandoff } from "./apply-edit-with-chat-handoff"
+import {
+  applyEditWithChatHandoff,
+  describeStructuralEditForHandoff,
+  isPolicyRefusal,
+} from "./apply-edit-with-chat-handoff"
 
 const applied: EditResult = { kind: "applied", appliedEditId: "e-1", affectedTargetIds: ["t-1"] }
 const refused: EditResult = { kind: "failed", reason: "Refusing to delete a root or expression-embedded JSX element" }
@@ -92,6 +96,85 @@ describe("describeStructuralEditForHandoff", () => {
       column: 4,
     })
   })
+
+  it("returns null for a definition-scope delete with no authoredAt, rather than passing the callsite off as the component's own file", () => {
+    // `editTarget` is the CALLSITE. Labelling it "scope: definition, the
+    // component's own file" sent the agent to the wrong place. The adapter
+    // refuses this edit anyway ("DeleteEdit requires target.authoredAt").
+    const edit = {
+      kind: "delete",
+      id: "e-1",
+      scope: "definition",
+      target: {
+        targetId: "t",
+        selector: "div",
+        editTarget: { file: "src/app/kpi-cards.tsx", line: 20, column: 12 },
+      },
+    } as StructuralEdit
+    expect(describeStructuralEditForHandoff(edit, "r")).toBeNull()
+  })
+})
+
+describe("isPolicyRefusal", () => {
+  it("is true for the dormant-lane refusal, which names lanes.<id>", () => {
+    const reason =
+      'The "detach" edit lane is dormant: it is Vue-only and has no JSX sibling, ' +
+      "so the product does not offer it. Set lanes.detach " +
+      '({ "lanes": { "detach": true } } in desde.config.json at the prototype ' +
+      "root) to turn it back on. The applicator is intact and unchanged."
+    expect(isPolicyRefusal(reason)).toBe(true)
+  })
+
+  it("is true for the two library refusals", () => {
+    expect(
+      isPolicyRefusal(
+        "Refusing a definition-scoped delete in library source (node_modules/x/y.vue); editor never rewrites node_modules",
+      ),
+    ).toBe(true)
+    expect(
+      isPolicyRefusal("This file belongs to an installed library, which the Editor does not edit"),
+    ).toBe(true)
+  })
+
+  it("is false for a capability refusal, which the agent CAN work on", () => {
+    expect(isPolicyRefusal("Refusing to delete a root or expression-embedded JSX element")).toBe(false)
+    expect(isPolicyRefusal("Stale target: the file changed under the captured position")).toBe(false)
+  })
+})
+
+describe("policy refusals are not handed to chat", () => {
+  const dormant: EditResult = {
+    kind: "failed",
+    reason: 'The "swap" edit lane is dormant. Set lanes.swap to turn it back on.',
+  }
+  const library: EditResult = {
+    kind: "failed",
+    reason: "Refusing a callsite-scoped delete in library source (node_modules/k/a.vue); editor never rewrites node_modules",
+  }
+
+  it("reports a dormant-lane refusal as a plain failure", async () => {
+    const handOff = vi.fn(() => true)
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapterReturning(dormant), handOff)
+    expect(handOff).not.toHaveBeenCalled()
+    expect(r.handoff).toEqual({
+      attempted: false,
+      started: false,
+      originalReason: dormant.kind === "failed" ? dormant.reason : "",
+    })
+  })
+
+  it("reports a library refusal as a plain failure", async () => {
+    const handOff = vi.fn(() => true)
+    await applyEditWithChatHandoff(deleteEdit(), adapterReturning(library), handOff)
+    expect(handOff).not.toHaveBeenCalled()
+  })
+
+  it("still hands off a capability refusal", async () => {
+    const handOff = vi.fn(() => true)
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapterReturning(refused), handOff)
+    expect(handOff).toHaveBeenCalledTimes(1)
+    expect(r.handoff.attempted).toBe(true)
+  })
 })
 
 describe("describeStructuralEditForHandoff details", () => {
@@ -143,17 +226,30 @@ describe("describeStructuralEditForHandoff details", () => {
     expect(d?.detail).toBe('insert <UiCard title="Hello" /> at child index 1')
   })
 
-  it("insert: cuts a long snippet at 200 characters and says 'at the end' for -1", () => {
+  it("insert: carries a 400-character snippet whole, where the old 200 cap cut it", () => {
+    const snippet = `<div>${"x".repeat(400)}</div>`
+    const edit = { kind: "insert", id: "e", target, destIndex: -1, snippet } as StructuralEdit
+    expect(describeStructuralEditForHandoff(edit, "r")?.detail).toBe(`insert ${snippet} at the end`)
+  })
+
+  it("insert: cuts at 2000 characters, says so, and still says 'at the end' for -1", () => {
     const edit = {
       kind: "insert",
       id: "e",
       target,
       destIndex: -1,
-      snippet: `<div>${"x".repeat(400)}</div>`,
+      snippet: `<div>${"x".repeat(4000)}</div>`,
     } as StructuralEdit
     const detail = describeStructuralEditForHandoff(edit, "r")?.detail ?? ""
-    expect(detail.endsWith("... at the end")).toBe(true)
-    expect(detail).toContain(`insert ${"<div>"}${"x".repeat(195)}...`)
+    expect(detail.endsWith("... (truncated) at the end")).toBe(true)
+    expect(detail).toContain(`insert ${"<div>"}${"x".repeat(1995)}... (truncated)`)
+  })
+
+  it("insert: 2000 characters exactly is not truncated; 2001 is", () => {
+    const exact = { kind: "insert", id: "e", target, destIndex: 0, snippet: "y".repeat(2000) } as StructuralEdit
+    expect(describeStructuralEditForHandoff(exact, "r")?.detail).not.toContain("(truncated)")
+    const over = { kind: "insert", id: "e", target, destIndex: 0, snippet: "y".repeat(2001) } as StructuralEdit
+    expect(describeStructuralEditForHandoff(over, "r")?.detail).toContain("(truncated)")
   })
 
   it("insert: quotes a text payload", () => {
@@ -190,8 +286,18 @@ describe("describeStructuralEditForHandoff details", () => {
 
   it("delete, detach and unwrap carry no detail", () => {
     for (const kind of ["delete", "detach", "unwrap"] as const) {
-      const edit = { kind, id: "e", target, componentFile: "src/Card.vue" } as unknown as StructuralEdit
-      expect(describeStructuralEditForHandoff(edit, "r")?.detail).toBeUndefined()
+      // `delete` defaults to definition scope, which needs `authoredAt` to be
+      // describable at all; without it the assertion below would pass on a
+      // null result rather than on a described edit with no detail.
+      const edit = {
+        kind,
+        id: "e",
+        target: { ...target, authoredAt: { file: "src/Card.vue", line: 2, column: 0 } },
+        componentFile: "src/Card.vue",
+      } as unknown as StructuralEdit
+      const described = describeStructuralEditForHandoff(edit, "r")
+      expect(described).not.toBeNull()
+      expect(described?.detail).toBeUndefined()
     }
   })
 })

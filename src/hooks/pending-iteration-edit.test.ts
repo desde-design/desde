@@ -92,6 +92,52 @@ describe("describeAmbiguousIteration", () => {
     }
     expect(describeAmbiguousIteration(pending, { file: "src/App.vue", line: 3, column: 2 }, "x").requested).toBe('change the text to "Hello"')
   })
+
+  it("carries the move destination, which 'move the element' alone loses", () => {
+    const pending: PendingIterationEdit = {
+      editKind: "move",
+      payload: {
+        source: { ...node, selector: "li.row", name: "li", type: "element" },
+        destParent: { ...node, editTarget: { file: "src/App.tsx", line: 14, column: 6 } },
+        destIndex: 2,
+      } as never,
+      iterationContext,
+    }
+    const d = describeAmbiguousIteration(pending, node.editTarget!, "no .map()")
+    expect(d.requested).toBe("move the element")
+    expect(d.detail).toBe("move it to be child index 2 of the element at src/App.tsx:14:6")
+    expect(d.selector).toBe("li.row")
+  })
+
+  it("says append when the move landed at the end, and falls back with no destination position", () => {
+    function move(destParent: Partial<OutlineNode>, destIndex: number): PendingIterationEdit {
+      return {
+        editKind: "move",
+        payload: { source: node, destParent: { ...node, ...destParent }, destIndex } as never,
+        iterationContext,
+      }
+    }
+    expect(
+      describeAmbiguousIteration(
+        move({ editTarget: { file: "src/App.tsx", line: 14, column: 6 } }, -1),
+        node.editTarget!,
+        "x",
+      ).detail,
+    ).toBe("append it to the element at src/App.tsx:14:6")
+    expect(
+      describeAmbiguousIteration(move({ editTarget: undefined }, 0), node.editTarget!, "x").detail,
+    ).toBe("move it within the page")
+  })
+
+  it("gives the other kinds no detail, because the verb already carries the payload", () => {
+    const pending: PendingIterationEdit = {
+      editKind: "delete",
+      selection: { selector: "x" } as never,
+      node,
+      iterationContext,
+    }
+    expect(describeAmbiguousIteration(pending, node.editTarget!, "x").detail).toBeUndefined()
+  })
 })
 
 describe("sameBridgeDraft", () => {

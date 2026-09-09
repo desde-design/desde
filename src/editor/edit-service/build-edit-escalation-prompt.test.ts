@@ -340,8 +340,10 @@ describe("hand-off prompts fence the data copied off the page", () => {
       reason: "r",
     })
     expect(p).toContain(`${"s".repeat(500)}... (truncated at 500 characters)`)
-    expect(p).toContain("... (truncated at 2000 characters)")
-    expect(p).not.toContain("x".repeat(2001))
+    // The detail cap is the snippet cap plus room for the sentence around it,
+    // so a snippet the applicator already cut is not cut a second time.
+    expect(p).toContain("... (truncated at 2400 characters)")
+    expect(p).not.toContain("x".repeat(2401))
   })
 
   it("renders a Details bullet on the ambiguous prompt only when a detail is given", () => {

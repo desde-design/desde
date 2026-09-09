@@ -10,7 +10,10 @@ import type { LayersMovePayload } from "@/components/editor/layers-panel"
 import type { PropControlValue } from "@/components/editor/prop-control"
 import type { EditableTextField, OutlineNode } from "@/types/bridge"
 import type { AmbiguousIterationHandoff } from "@/editor/edit-service/build-edit-escalation-prompt"
-import { buildAmbiguousIterationHandoffPrompt } from "@/editor/edit-service/build-edit-escalation-prompt"
+import {
+  buildAmbiguousIterationHandoffPrompt,
+  describeMoveDestination,
+} from "@/editor/edit-service/build-edit-escalation-prompt"
 import type { IterationVerifyOutcome } from "./iteration-verify"
 
 /**
@@ -107,14 +110,27 @@ function requestedOf(pending: PendingIterationEdit): string {
   }
 }
 
+/**
+ * The half of the request the element cannot express. Only `move` has one:
+ * "move the element" alone leaves the agent unable to reconstruct the drop,
+ * because the destination parent and the child index live on the payload.
+ * The other kinds put everything into `requestedOf`.
+ */
+function detailOf(pending: PendingIterationEdit): string | undefined {
+  if (pending.editKind !== "move") return undefined
+  return describeMoveDestination(pending.payload.destParent.editTarget, pending.payload.destIndex)
+}
+
 /** Everything `buildAmbiguousIterationHandoffPrompt` needs, read off the pending edit. */
 export function describeAmbiguousIteration(
   pending: PendingIterationEdit,
   location: SourceLocation,
   noLoopReason: string,
 ): AmbiguousIterationHandoff {
+  const detail = detailOf(pending)
   return {
     requested: requestedOf(pending),
+    ...(detail ? { detail } : {}),
     ...namesOf(pending),
     selector: selectorOf(pending),
     location: { file: location.file, line: location.line, column: location.column },

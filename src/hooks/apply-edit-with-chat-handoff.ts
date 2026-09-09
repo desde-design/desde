@@ -18,6 +18,7 @@ import type { EditResult, StructuralEdit } from "@/editor/core"
 import type { BridgeFrameworkAdapter } from "@/editor/adapters/bridge"
 import {
   buildStructuralEditHandoffPrompt,
+  describeMoveDestination,
   type StructuralEditHandoff,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
 
@@ -50,11 +51,39 @@ const HANDOFF_LABELS: Record<string, string> = {
   insert: "Insert into",
 }
 
-/** How much of an inserted snippet the prompt carries before it is cut. */
-const SNIPPET_LIMIT = 200
+/**
+ * How much of an inserted snippet the prompt carries before it is cut.
+ *
+ * 2000, not the 200 this started at. The omitted tail exists nowhere else:
+ * the deterministic applicator refused, so nothing was written, and the agent
+ * has only this message to work from. At 200 characters it could not apply
+ * any realistic insert faithfully. 2000 matches the cap the prompt builder
+ * enforces on copied fields.
+ */
+const SNIPPET_LIMIT = 2000
 
 function locationText(l: { file: string; line: number; column: number }): string {
   return `${l.file}:${l.line}:${l.column}`
+}
+
+/**
+ * Refusals that are POLICY, not capability. The agent cannot fix these by
+ * reading more source: a dormant lane is off by configuration, and library
+ * source under `node_modules` is never an edit target. Handing one to an
+ * agent told to make the edit happen invites it to work around the rule.
+ *
+ * Kept deliberately short. Each pattern pins a message that a colocated test
+ * on the producing side already holds stable:
+ *  - `lanes.<id>` from `dormantLaneRefusal` in `editor-cli/src/server/enabled-lanes.ts`
+ *  - "never rewrites node_modules" from `build-edit-request.ts`
+ *  - "installed library" from the iteration and llm-fallback handlers
+ */
+export function isPolicyRefusal(reason: string): boolean {
+  return (
+    /\blanes\.[a-z-]+\b/.test(reason) ||
+    /never rewrites node_modules/i.test(reason) ||
+    /installed library/i.test(reason)
+  )
 }
 
 /**
@@ -64,17 +93,14 @@ function locationText(l: { file: string; line: number; column: number }): string
  */
 function detailForHandoff(edit: StructuralEdit): string | undefined {
   switch (edit.kind) {
-    case "move": {
-      const parent = edit.destination.parentEditTarget
-      if (!parent) return "move it within the page"
-      const at = `the element at ${locationText(parent)}`
-      return edit.destination.index < 0
-        ? `append it to ${at}`
-        : `move it to be child index ${edit.destination.index} of ${at}`
-    }
+    case "move":
+      return describeMoveDestination(edit.destination.parentEditTarget, edit.destination.index)
     case "insert": {
       const snippet = edit.snippet.trim()
-      const shown = snippet.length > SNIPPET_LIMIT ? `${snippet.slice(0, SNIPPET_LIMIT)}...` : snippet
+      const shown =
+        snippet.length > SNIPPET_LIMIT
+          ? `${snippet.slice(0, SNIPPET_LIMIT)}... (truncated)`
+          : snippet
       const content = edit.contentKind === "text" ? `the text ${JSON.stringify(shown)}` : shown
       const where = edit.destIndex < 0 ? "at the end" : `at child index ${edit.destIndex}`
       return `insert ${content} ${where}`
@@ -108,7 +134,12 @@ export function describeStructuralEditForHandoff(
   // a position to hand over, and used to be dropped here.
   if (!target) return null
   const scope = edit.kind === "delete" ? (edit.scope ?? "definition") : null
-  const location = scope === "definition" ? (target.authoredAt ?? target.editTarget) : target.editTarget
+  // No `?? target.editTarget` fallback for definition scope. `editTarget` is
+  // the CALLSITE, so the fallback labelled a callsite position "the
+  // component's own file" and sent the agent to the wrong place. The adapter
+  // refuses that edit anyway ("DeleteEdit requires target.authoredAt"), so a
+  // plain failure status is the honest outcome.
+  const location = scope === "definition" ? target.authoredAt : target.editTarget
   if (!location) return null
   return {
     kindLabel: HANDOFF_LABELS[edit.kind] ?? kindLabel,
@@ -130,6 +161,12 @@ export async function applyEditWithChatHandoff(
   const initial = await adapter.applyEdit(edit)
   if (initial.kind !== "failed") {
     return { result: initial, handoff: { attempted: false, started: false } }
+  }
+  // A policy refusal is not something the agent can read its way out of, and
+  // the hand-off tells the agent to make the edit happen. Report it as a
+  // plain failure instead.
+  if (isPolicyRefusal(initial.reason)) {
+    return { result: initial, handoff: { attempted: false, started: false, originalReason: initial.reason } }
   }
   const described = describeStructuralEditForHandoff(edit, initial.reason)
   if (!described || !handOff) {

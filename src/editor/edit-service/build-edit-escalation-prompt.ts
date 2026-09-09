@@ -246,7 +246,28 @@ export function afterEscalation(accepted: boolean, what: string): EscalationAfte
  * the whole value.
  */
 const FIELD_LIMIT = 500
-const SNIPPET_LIMIT = 2000
+/**
+ * The `detail` bullet is a sentence built around a snippet, and the snippet is
+ * already cut at 2000 characters by `apply-edit-with-chat-handoff.ts`. The cap
+ * here is that plus room for the sentence, so a snippet that already names its
+ * own truncation is not truncated a second time with a second note.
+ */
+const DETAIL_LIMIT = 2400
+
+/**
+ * `file:line:column` of a move's destination parent, plus where in its
+ * children the element landed. Shared by the two hand-off descriptions so a
+ * refused move and an ambiguous move read identically; the destination is the
+ * half of a drop the element alone cannot express.
+ */
+export function describeMoveDestination(
+  parent: { file: string; line: number; column: number } | undefined,
+  index: number,
+): string {
+  if (!parent) return "move it within the page"
+  const at = `the element at ${parent.file}:${parent.line}:${parent.column}`
+  return index < 0 ? `append it to ${at}` : `move it to be child index ${index} of ${at}`
+}
 
 /**
  * Every value below comes from the prototype page (selectors, tag and
@@ -357,7 +378,7 @@ export function buildStructuralEditHandoffPrompt(h: StructuralEditHandoff): stri
     "",
     ...fenceHandoffFacts([
       `- What I did: ${kindLabel} ${elementLabel(h)} (selector: ${sanitizeField(h.selector)})`,
-      ...(h.detail ? [`- Details: ${sanitizeField(h.detail, SNIPPET_LIMIT)}`] : []),
+      ...(h.detail ? [`- Details: ${sanitizeField(h.detail, DETAIL_LIMIT)}`] : []),
       `- Source position: ${locationLabel(h.location)}${scopeLine}`,
       `- Why it refused: ${sanitizeField(h.reason)}`,
     ]),
@@ -406,7 +427,7 @@ export function buildAmbiguousIterationHandoffPrompt(h: AmbiguousIterationHandof
     "",
     ...fenceHandoffFacts([
       `- What I did: ${requested} on ${elementLabel(h)} (selector: ${sanitizeField(h.selector)}), item ${h.index + 1} of ${h.siblingCount}`,
-      ...(h.detail ? [`- Details: ${sanitizeField(h.detail, SNIPPET_LIMIT)}`] : []),
+      ...(h.detail ? [`- Details: ${sanitizeField(h.detail, DETAIL_LIMIT)}`] : []),
       `- Source position: ${locationLabel(h.location)}`,
       `- Loop check: ${sanitizeField(h.noLoopReason)}`,
     ]),
