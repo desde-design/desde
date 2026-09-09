@@ -8,6 +8,7 @@ import {
   isStaleVerify,
   iterationTemplateLocation,
   sameBridgeDraft,
+  thisRowTemplateLocation,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
 
@@ -249,5 +250,44 @@ describe("decideAfterVerify", () => {
         remembered: undefined,
       }),
     ).toEqual({ kind: "prompt" })
+  })
+
+  it("carries the loop's own position on both loop exits, keeping the verified file", () => {
+    // The click stamped a nested element on line 71; the loop is on line 60.
+    // "This item" has to dispatch against the loop, so the position travels
+    // with the decision.
+    const clicked = { file: "src/components/ui/card.tsx", line: 71, column: 12 }
+    const outcome = { kind: "loop" as const, expression: "items.map", location: { line: 60, column: 4 } }
+    expect(
+      decideAfterVerify({ outcome, pending, location: clicked, remembered: undefined }),
+    ).toEqual({
+      kind: "prompt",
+      loopLocation: { file: "src/components/ui/card.tsx", line: 60, column: 4 },
+    })
+    expect(
+      decideAfterVerify({ outcome, pending, location: clicked, remembered: "this-row" }),
+    ).toEqual({
+      kind: "remembered",
+      scope: "this-row",
+      loopLocation: { file: "src/components/ui/card.tsx", line: 60, column: 4 },
+    })
+  })
+})
+
+describe("thisRowTemplateLocation", () => {
+  const pending: PendingIterationEdit = {
+    editKind: "delete",
+    selection: { selector: node.selector } as never,
+    node,
+    iterationContext,
+  }
+
+  it("uses the clicked element's position when no loop position was verified", () => {
+    expect(thisRowTemplateLocation(pending)).toEqual(node.editTarget)
+  })
+
+  it("prefers the verified loop's position over the clicked element's", () => {
+    const loopLocation = { file: "src/components/ui/card.tsx", line: 41, column: 2 }
+    expect(thisRowTemplateLocation({ ...pending, loopLocation })).toEqual(loopLocation)
   })
 })

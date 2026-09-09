@@ -115,6 +115,7 @@ import {
   isStaleVerify,
   iterationTemplateLocation,
   sameBridgeDraft,
+  thisRowTemplateLocation,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
 import { verifyIterationLoop } from "./iteration-verify"
@@ -2092,7 +2093,9 @@ export function useEditorEditing({
       // "this-row" → deterministic iteration-data edit, LLM fallback behind it.
       // Build the payload that the prompt builder expects (one shape per
       // operation).
-      const templateLocation = iterationTemplateLocation(pending)
+      // The VERIFIED loop's position when there is one, not the click's. See
+      // `thisRowTemplateLocation`.
+      const templateLocation = thisRowTemplateLocation(pending)
       if (!templateLocation) {
         setSaveStatus(
           "Iteration edit refused: no source location on the selection.",
@@ -2322,6 +2325,13 @@ export function useEditorEditing({
             }
             return
           }
+          // Carry the verified loop's position onto the pending edit. Both
+          // remaining exits dispatch or open a dialog that dispatches, and
+          // "this item" aims at the loop element, which is not necessarily
+          // the element that was clicked.
+          const verified: PendingIterationEdit = action.loopLocation
+            ? { ...pending, loopLocation: action.loopLocation }
+            : pending
           if (action.kind === "remembered") {
             logIterationScopeChoice({
               editKind: pending.editKind,
@@ -2329,7 +2339,7 @@ export function useEditorEditing({
               iterationContext: pending.iterationContext,
               remembered: true,
             })
-            void dispatchIterationEdit(pending, action.scope)
+            void dispatchIterationEdit(verified, action.scope)
             return
           }
           // Two verifies can be in flight at once (verify is an HTTP round
@@ -2340,10 +2350,10 @@ export function useEditorEditing({
           // in-page typing session rebuilds the pending object, and cancelling
           // its draft would strand the edit that is still open.
           setIterationScopePrompt((previous) => {
-            if (previous && previous !== pending && !sameBridgeDraft(previous, pending)) {
+            if (previous && previous !== verified && !sameBridgeDraft(previous, verified)) {
               releaseBridgeDraft(previous)
             }
-            return pending
+            return verified
           })
         },
       ).catch((err) => {

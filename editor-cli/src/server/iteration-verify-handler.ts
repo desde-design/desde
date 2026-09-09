@@ -34,7 +34,16 @@ export type IterationVerifyResult =
   | {
       ok: true
       status: 200
-      loop: { kind: "map" | "v-for"; expression: string } | null
+      /**
+       * `location` is where the LOOP is, which is not always the position
+       * asked about: the locators walk up from a nested element to the
+       * enclosing loop. The client dispatches "this item" against it.
+       */
+      loop: {
+        kind: "map" | "v-for"
+        expression: string
+        location: { line: number; column: number }
+      } | null
       /** Why no loop was found. Present only when `loop` is null. */
       reason?: string
     }
@@ -113,7 +122,11 @@ export async function handleIterationVerify(
   const resolvedRelPath = path.relative(rootResolution.rootReal, targetPath)
   const located = locateLoopAt({ file: resolvedRelPath, source, templateLocation: body.templateLocation })
   if (located.found) {
-    return { ok: true, status: 200, loop: { kind: located.kind, expression: located.expression } }
+    return {
+      ok: true,
+      status: 200,
+      loop: { kind: located.kind, expression: located.expression, location: located.location },
+    }
   }
   return { ok: true, status: 200, loop: null, reason: located.reason }
 }

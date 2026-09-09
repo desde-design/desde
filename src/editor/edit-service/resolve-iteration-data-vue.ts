@@ -159,9 +159,22 @@ function findVForAt(
  * message quotes the reason verbatim.
  */
 type EnclosingVForResult =
-  | { kind: 'found'; vForExpression: string }
+  | {
+      kind: 'found'
+      vForExpression: string
+      /**
+       * Where the element CARRYING the `v-for` is, SFC-absolute, 1-based
+       * column, same convention as the target position. The clicked element
+       * can be nested inside the row, and the "this item" lane dispatches
+       * against the loop element itself, not the nested one.
+       */
+      location: { line: number; column: number }
+    }
   | { kind: 'no-element' }
   | { kind: 'no-loop' }
+
+/** The nearest ancestor-or-self `v-for`, with the position of the element carrying it. */
+type EnclosingVFor = { expression: string; line: number; column: number }
 
 /**
  * Nearest ANCESTOR-OR-SELF element carrying `v-for`, for the element at the
@@ -185,7 +198,7 @@ function findEnclosingVForAt(
   targetLine: number,
   targetColumn: number,
 ): EnclosingVForResult {
-  const stack: Array<{ node: ElementNode; enclosing: string | null }> = [
+  const stack: Array<{ node: ElementNode; enclosing: EnclosingVFor | null }> = [
     { node: templateAst, enclosing: null },
   ]
   while (stack.length > 0) {
@@ -195,13 +208,24 @@ function findEnclosingVForAt(
         p.type === NodeTypes.DIRECTIVE && (p as DirectiveNode).name === 'for',
     )
     const ownExpression = (ownVFor?.exp as SimpleExpressionNode | undefined)?.content ?? null
-    // Self counts: the clicked element may BE the `v-for` element.
-    const nearest = ownExpression ?? enclosing
     const loc = node.loc?.start
-    if (loc) {
-      const sfcLine = loc.line + templateStartLine - 1
+    const sfcLine = loc ? loc.line + templateStartLine - 1 : null
+    // Self counts: the clicked element may BE the `v-for` element. The
+    // position travels with the expression, so a nested match can report
+    // where the loop actually is rather than where the click landed.
+    const nearest: EnclosingVFor | null =
+      ownExpression !== null && loc && sfcLine !== null
+        ? { expression: ownExpression, line: sfcLine, column: loc.column }
+        : enclosing
+    if (loc && sfcLine !== null) {
       if (sfcLine === targetLine && loc.column === targetColumn) {
-        return nearest ? { kind: 'found', vForExpression: nearest } : { kind: 'no-loop' }
+        return nearest
+          ? {
+              kind: 'found',
+              vForExpression: nearest.expression,
+              location: { line: nearest.line, column: nearest.column },
+            }
+          : { kind: 'no-loop' }
       }
     }
     for (const child of node.children ?? []) {
@@ -697,5 +721,10 @@ export function locateVueLoopAt(source: string, templateLocation: LoopPosition):
   if (match.kind === 'no-loop') {
     return { found: false, reason: 'This element is not inside a `v-for`' }
   }
-  return { found: true, kind: 'v-for', expression: match.vForExpression }
+  return {
+    found: true,
+    kind: 'v-for',
+    expression: match.vForExpression,
+    location: match.location,
+  }
 }

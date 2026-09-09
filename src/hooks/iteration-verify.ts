@@ -6,7 +6,13 @@
 import { editorFetch } from "@/lib/editor-fetch"
 
 export type IterationVerifyOutcome =
-  | { kind: "loop"; expression: string }
+  /**
+   * `location` is where the LOOP is in source, which is not always the
+   * position that was asked about: the server walks up from a nested element
+   * to the enclosing `v-for` / `.map()`. Absent when an older CLI answered
+   * without it, in which case the caller keeps using the clicked position.
+   */
+  | { kind: "loop"; expression: string; location?: { line: number; column: number } }
   | { kind: "no-loop"; reason: string }
   | { kind: "error"; reason: string }
 
@@ -113,7 +119,11 @@ export async function verifyIterationLoop(
     }
     return { kind: "error", reason: (err as Error).message }
   }
-  let body: { ok: boolean; loop?: { expression: string } | null; reason?: string }
+  let body: {
+    ok: boolean
+    loop?: { expression: string; location?: { line: number; column: number } } | null
+    reason?: string
+  }
   try {
     body = (await response.json()) as typeof body
   } catch {
@@ -122,6 +132,19 @@ export async function verifyIterationLoop(
   if (!response.ok || !body.ok) {
     return { kind: "error", reason: body.reason ?? `HTTP ${response.status}` }
   }
-  if (body.loop) return { kind: "loop", expression: body.loop.expression }
+  if (body.loop) {
+    // The position is validated, not trusted: it is dispatched as an edit
+    // coordinate, and a non-integer there reaches a parser as a position that
+    // can never match. A bad one is dropped, which falls back to the clicked
+    // position rather than failing the verify.
+    const loc = body.loop.location
+    const usable =
+      loc && Number.isInteger(loc.line) && Number.isInteger(loc.column) && loc.line >= 1 && loc.column >= 0
+    return {
+      kind: "loop",
+      expression: body.loop.expression,
+      ...(usable ? { location: { line: loc.line, column: loc.column } } : {}),
+    }
+  }
   return { kind: "no-loop", reason: body.reason ?? "No loop at that position" }
 }

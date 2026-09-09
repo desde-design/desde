@@ -21,7 +21,23 @@ export interface LoopPosition {
 }
 
 export type LocateLoopResult =
-  | { found: true; kind: "map" | "v-for"; expression: string }
+  | {
+      found: true
+      kind: "map" | "v-for"
+      expression: string
+      /**
+       * Where the LOOP is, in the same coordinate convention as the input:
+       * the element carrying `v-for` for Vue, the JSX element the `.map()`
+       * callback returns for JSX.
+       *
+       * Not the same as the position asked about. Both locators walk up from
+       * the clicked element to the enclosing loop, so a `<span>` inside an
+       * `<li v-for>` verifies as a loop; without this, "this item" then
+       * dispatched the SPAN's position to the data resolver, which matches
+       * the loop element exactly and answered "No v-for element at ...".
+       */
+      location: LoopPosition
+    }
   | { found: false; reason: string }
 
 export interface LocateLoopInput {

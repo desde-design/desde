@@ -44,7 +44,11 @@ describe("iteration-verify-handler", () => {
   it("answers loop: {...} for an element inside .map()", async () => {
     const file = write("src/List.tsx", LIST_TSX)
     const r = await handleIterationVerify({ file, templateLocation: babelLoc(LIST_TSX, "<li key") }, dir)
-    expect(r).toEqual({ ok: true, status: 200, loop: { kind: "map", expression: "items.map" } })
+    expect(r).toEqual({
+      ok: true,
+      status: 200,
+      loop: { kind: "map", expression: "items.map", location: babelLoc(LIST_TSX, "<li key") },
+    })
   })
 
   it("answers loop: null, with the reason, for a component's own root", async () => {
@@ -66,7 +70,11 @@ describe("iteration-verify-handler", () => {
       { file: "src/Alias.vue", templateLocation: babelLoc(LIST_TSX, "<li key") },
       dir,
     )
-    expect(r).toEqual({ ok: true, status: 200, loop: { kind: "map", expression: "items.map" } })
+    expect(r).toEqual({
+      ok: true,
+      status: 200,
+      loop: { kind: "map", expression: "items.map", location: babelLoc(LIST_TSX, "<li key") },
+    })
   })
 
   it("refuses a path outside the prototype root", async () => {

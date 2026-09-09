@@ -17,6 +17,31 @@ describe("verifyIterationLoop", () => {
     expect(JSON.parse(init.body as string)).toEqual({ file: args.file, templateLocation: { line: 60, column: 4 } })
   })
 
+  it("carries the loop's own position when the server reports one", async () => {
+    // The server walks up from the clicked element, so this is the `<li>`,
+    // not the `<span>` that was asked about.
+    const fetchImpl = vi.fn(async () =>
+      json({ ok: true, loop: { kind: "map", expression: "items.map", location: { line: 51, column: 8 } } }),
+    )
+    expect(await verifyIterationLoop(args, fetchImpl as never)).toEqual({
+      kind: "loop",
+      expression: "items.map",
+      location: { line: 51, column: 8 },
+    })
+  })
+
+  it("drops a position that is not a usable coordinate", async () => {
+    // It is dispatched as an edit coordinate. A non-integer reaches a parser
+    // as a position nothing can match, so the click's position is better.
+    const fetchImpl = vi.fn(async () =>
+      json({ ok: true, loop: { kind: "map", expression: "items.map", location: { line: "51", column: 8 } } }),
+    )
+    expect(await verifyIterationLoop(args, fetchImpl as never)).toEqual({
+      kind: "loop",
+      expression: "items.map",
+    })
+  })
+
   it("reports no-loop with the server's reason", async () => {
     const fetchImpl = vi.fn(async () => json({ ok: true, loop: null, reason: "not a .map()" }))
     expect(await verifyIterationLoop(args, fetchImpl as never)).toEqual({ kind: "no-loop", reason: "not a .map()" })

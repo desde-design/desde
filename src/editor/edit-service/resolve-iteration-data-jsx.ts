@@ -577,5 +577,40 @@ export function locateJsxLoopAt(source: string, templateLocation: LoopPosition):
     callee && typeof callee.start === "number" && typeof callee.end === "number"
       ? source.slice(callee.start, callee.end)
       : "map"
-  return { found: true, kind: "map", expression }
+  // The ROW's position, not the click's. `el` may be nested well inside the
+  // row (a `<span>` inside the `<li>` the callback returns), and the "this
+  // item" lane dispatches against the row. Falls back to the clicked position
+  // when the row cannot be identified, which is the behaviour before this.
+  const rootStart = findLoopRootElement(mapCall, el)?.openingElement?.loc?.start
+  const location =
+    rootStart && typeof rootStart.line === "number" && typeof rootStart.column === "number"
+      ? { line: rootStart.line, column: rootStart.column }
+      : { line: templateLocation.line, column: templateLocation.column }
+  return { found: true, kind: "map", expression, location }
+}
+
+/**
+ * The JSX element the `.map()` callback returns, given an element inside it:
+ * the OUTERMOST `JSXElement` within the call that still contains `el`.
+ *
+ * Reading the callback's body directly would mean enumerating shapes (concise
+ * arrow body, block with a `return`, a conditional, a fragment root). The
+ * outermost-container rule answers all of them with one walk, and when the
+ * root is a fragment it lands on the first real element, which is the only
+ * thing with a position to dispatch against anyway.
+ */
+function findLoopRootElement(mapCall: BabelNode, el: BabelNode): BabelNode | null {
+  let best: BabelNode | null = null
+  let bestSpan = -1
+  walk(mapCall, (node) => {
+    if (node.type !== "JSXElement") return
+    if (!within(el, node)) return
+    if (typeof node.start !== "number" || typeof node.end !== "number") return
+    const span = node.end - node.start
+    if (span > bestSpan) {
+      bestSpan = span
+      best = node
+    }
+  })
+  return best
 }

@@ -90,7 +90,14 @@ export function List() {
 describe("locateLoopAt", () => {
   it("finds the .map() enclosing a JSX element", () => {
     const r = locateLoopAt({ file: "src/List.tsx", source: LIST_TSX, templateLocation: babelLoc(LIST_TSX, "<li key") })
-    expect(r).toEqual({ found: true, kind: "map", expression: "items.map" })
+    expect(r).toEqual({
+      found: true,
+      kind: "map",
+      expression: "items.map",
+      // The clicked element IS the callback's root here, so the reported
+      // loop position is the position asked about.
+      location: babelLoc(LIST_TSX, "<li key"),
+    })
   })
 
   it("reports no loop for a component's own root rendered by repeated usages", () => {
@@ -107,7 +114,12 @@ describe("locateLoopAt", () => {
   it("finds a v-for in a Vue SFC (SFC-absolute, 1-based column)", () => {
     // Line 6 of the SFC, column of `<li`. Vue positions are 1-based.
     const r = locateLoopAt({ file: "src/List.vue", source: LIST_VUE, templateLocation: { line: 6, column: 5 } })
-    expect(r).toEqual({ found: true, kind: "v-for", expression: "r in rows" })
+    expect(r).toEqual({
+      found: true,
+      kind: "v-for",
+      expression: "r in rows",
+      location: { line: 6, column: 5 },
+    })
   })
 
   it("reports no loop for a plain Vue element", () => {
@@ -120,7 +132,15 @@ describe("locateLoopAt", () => {
     // inside a loop row used to answer "no loop", which handed the edit to
     // chat with a false premise and made "all rows" unreachable.
     const r = locateLoopAt({ file: "src/List.vue", source: NESTED_VUE, templateLocation: { line: 7, column: 7 } })
-    expect(r).toEqual({ found: true, kind: "v-for", expression: "r in rows" })
+    expect(r).toEqual({
+      found: true,
+      kind: "v-for",
+      expression: "r in rows",
+      // The `<li v-for>` on line 6, NOT the span on line 7 that was clicked.
+      // "This item" dispatches against this, and the data resolver matches
+      // the loop element exactly.
+      location: { line: 6, column: 5 },
+    })
   })
 
   it("reports no loop for a nested Vue element with no enclosing v-for", () => {
@@ -145,7 +165,40 @@ describe("locateLoopAt", () => {
       source: NESTED_TSX,
       templateLocation: babelLoc(NESTED_TSX, "<span className"),
     })
-    expect(r).toEqual({ found: true, kind: "map", expression: "items.map" })
+    expect(r).toEqual({
+      found: true,
+      kind: "map",
+      expression: "items.map",
+      // The `<li>` the callback returns, not the span that was clicked.
+      location: babelLoc(NESTED_TSX, "<li key"),
+    })
+  })
+
+  it("reports the row's position for an element nested several levels into a JSX row", () => {
+    const DEEP_TSX = `const items = [{ id: 1 }]
+export function List() {
+  return (
+    <ul>
+      {items.map((item) => {
+        return (
+          <li key={item.id}>
+            <div className="wrap"><span className="label">{item.id}</span></div>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+`
+    const r = locateLoopAt({
+      file: "src/List.tsx",
+      source: DEEP_TSX,
+      templateLocation: babelLoc(DEEP_TSX, "<span className"),
+    })
+    // A block body with a `return`, and two levels of nesting. The row is
+    // still the `<li>`.
+    expect(r.found).toBe(true)
+    if (r.found) expect(r.location).toEqual(babelLoc(DEEP_TSX, "<li key"))
   })
 
   it("refuses an unsupported extension", () => {

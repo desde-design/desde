@@ -24,26 +24,39 @@ import type { IterationVerifyOutcome } from "./iteration-verify"
  * "all-rows" can re-enter without re-collecting inputs. New iteration-
  * aware edit kinds add a variant here.
  */
+/**
+ * Where the LOOP is, as the verify step found it. Carried on every variant.
+ *
+ * The click's own position is not the loop's: both locators walk up from the
+ * clicked element to the enclosing `v-for` / `.map()`, so a `<span>` inside an
+ * `<li v-for>` verifies as a loop. Dispatching "this item" against the SPAN's
+ * position then reached the data resolver, which matches the loop element
+ * EXACTLY, and got "No v-for element at ..." back. Absent when the verify
+ * never ran or an older CLI answered without a position; the click's position
+ * is the fallback, which is the behaviour before this field existed.
+ */
+type WithLoopLocation = { loopLocation?: SourceLocation }
+
 export type PendingIterationEdit =
-  | {
+  | ({
       editKind: "delete"
       selection: Selection
       node: OutlineNode
       iterationContext: IterationContext
-    }
-  | {
+    } & WithLoopLocation)
+  | ({
       editKind: "prop"
       selection: Selection
       propName: string
       value: PropControlValue
       iterationContext: IterationContext
-    }
-  | {
+    } & WithLoopLocation)
+  | ({
       editKind: "move"
       payload: LayersMovePayload
       iterationContext: IterationContext
-    }
-  | {
+    } & WithLoopLocation)
+  | ({
       editKind: "dom-text"
       selection: Selection
       field: EditableTextField
@@ -57,7 +70,7 @@ export type PendingIterationEdit =
        * blocks Save behind `handleSaveAll`'s gate.
        */
       bridgePendingId?: string
-    }
+    } & WithLoopLocation)
 
 /**
  * Where the loop would be in source for this pending edit. Same derivation
@@ -74,6 +87,19 @@ export function iterationTemplateLocation(pending: PendingIterationEdit): Source
     case "move":
       return pending.payload.source.editTarget
   }
+}
+
+/**
+ * The position the "this item" lane dispatches against: the verified loop's
+ * own, when the verify found one, and otherwise the clicked element's.
+ *
+ * A one-line decision, but it is the whole of H4 and the failure it fixes is
+ * silent (a refusal from the data resolver, then an LLM fallback with no
+ * iteratee root), so it is a named function with a test rather than an
+ * expression inside a 100-line callback.
+ */
+export function thisRowTemplateLocation(pending: PendingIterationEdit): SourceLocation | undefined {
+  return pending.loopLocation ?? iterationTemplateLocation(pending)
 }
 
 function selectorOf(pending: PendingIterationEdit): string {
@@ -188,8 +214,14 @@ export function isStaleVerify(seq: number, latest: number): boolean {
 export type AfterVerifyAction =
   | { kind: "release-and-status"; message: string }
   | { kind: "hand-off"; prompt: string }
-  | { kind: "remembered"; scope: IterationScope }
-  | { kind: "prompt" }
+  /**
+   * `loopLocation` is where the verify found the loop, when that is not the
+   * clicked position. The caller stores it on the pending edit so the "this
+   * item" dispatch aims at the loop element rather than at whatever was
+   * nested inside the row.
+   */
+  | { kind: "remembered"; scope: IterationScope; loopLocation?: SourceLocation }
+  | { kind: "prompt"; loopLocation?: SourceLocation }
 
 export function decideAfterVerify(args: {
   outcome: IterationVerifyOutcome
@@ -207,6 +239,15 @@ export function decideAfterVerify(args: {
       prompt: buildAmbiguousIterationHandoffPrompt(describeAmbiguousIteration(pending, location, outcome.reason)),
     }
   }
-  if (remembered) return { kind: "remembered", scope: remembered }
-  return { kind: "prompt" }
+  // The loop's own position, when the server reported one that differs from
+  // the click. The file is the file that was verified; only line and column
+  // move.
+  const found = outcome.kind === "loop" ? outcome.location : undefined
+  const loopLocation: SourceLocation | undefined = found
+    ? { ...location, line: found.line, column: found.column }
+    : undefined
+  if (remembered) {
+    return { kind: "remembered", scope: remembered, ...(loopLocation ? { loopLocation } : {}) }
+  }
+  return { kind: "prompt", ...(loopLocation ? { loopLocation } : {}) }
 }
