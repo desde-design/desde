@@ -53,6 +53,19 @@ export const THIS_ITEM_UNAVAILABLE_REASON =
   "Editing a single item's text isn't wired up yet. Use All items, or describe the change in chat."
 
 /**
+ * The dormant "remember this session" checkbox's label, for a given noun.
+ *
+ * Single-sourced across the two scope dialogs, which ask the same question and
+ * had drifted into two spellings of it. Deliberately NOT first person: the
+ * product does not say "me" or "my", and while the flag
+ * (`EDITOR_REMEMBER_SCOPE_CHOICE`) is off nothing renders this, so a function
+ * is what lets the copy rule be tested at all.
+ */
+export function rememberChoiceLabel(noun: string): string {
+  return `Remember this choice for ${noun.toLowerCase()} this session`
+}
+
+/**
  * Display copy keyed by edit kind.
  *
  * Vocabulary rules, decided 2026-08-09 — keep new kinds consistent with them:
@@ -302,7 +315,7 @@ export function IterationScopeDialog({
               onCheckedChange={(checked) => setRemember(checked === true)}
               data-testid="iteration-scope-remember"
             />
-            Remember my choice for {labels.verb.toLowerCase()} this session
+            {rememberChoiceLabel(labels.verb)}
           </label>
         ) : null}
 

@@ -5,7 +5,10 @@
 
 import { fireEvent, render, screen, within } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
-import { IterationScopeDialog } from "./iteration-scope-dialog"
+import {
+  IterationScopeDialog,
+  rememberChoiceLabel,
+} from "./iteration-scope-dialog"
 
 function defaultProps() {
   return {
@@ -227,5 +230,30 @@ describe("IterationScopeDialog", () => {
         unmount()
       }
     })
+  })
+})
+
+describe("rememberChoiceLabel", () => {
+  /**
+   * The checkbox is dormant (`EDITOR_REMEMBER_SCOPE_CHOICE`), so nothing
+   * renders this string and no render test can reach it. It said "Remember my
+   * choice", which the house rule bans, and it stayed that way for a month
+   * precisely because it was unreachable. A function is what makes the copy
+   * rule enforceable while the control is off.
+   */
+  it("asks about THIS choice, never the first person", () => {
+    expect(rememberChoiceLabel("Delete")).toBe(
+      "Remember this choice for delete this session",
+    )
+    expect(rememberChoiceLabel("style edits")).toBe(
+      "Remember this choice for style edits this session",
+    )
+  })
+
+  it("uses no em dash and no first person, for either dialog's noun", () => {
+    for (const noun of ["Delete", "Move", "Edit", "style edits"]) {
+      expect(rememberChoiceLabel(noun)).not.toMatch(/\u2014/)
+      expect(rememberChoiceLabel(noun)).not.toMatch(/\b(me|my)\b/i)
+    }
   })
 })

@@ -27,6 +27,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { EDITOR_REMEMBER_SCOPE_CHOICE } from "@/lib/editor-feature-flags"
+import { rememberChoiceLabel } from "@/components/editor/iteration-scope-dialog"
 import { OptionCard, OptionCardGroup, ValueReadout } from "@/components/blocks"
 import type { StyleOrigin } from "@/types/bridge"
 import { scopeDialogReasons, type StyleScope } from "./style-scope-decision"
@@ -217,7 +218,7 @@ export function StyleScopeDialog({
               onCheckedChange={(checked) => setRemember(checked === true)}
               data-testid="style-scope-remember"
             />
-            Remember my choice for style edits this session
+            {rememberChoiceLabel("style edits")}
           </label>
         ) : null}
 

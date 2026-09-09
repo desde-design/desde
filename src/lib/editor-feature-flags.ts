@@ -365,7 +365,7 @@ export const EDITOR_LANE_DETACH: boolean = cliBootstrap?.lanes?.detach === true
 export const EDITOR_LANE_SWAP: boolean = cliBootstrap?.lanes?.swap === true
 
 /**
- * Whether the scope dialogs offer "Remember my choice for this session".
+ * Whether the scope dialogs offer "Remember this choice for this session".
  *
  * DORMANT by product decision 2026-08-09: the checkbox was judged not useful —
  * a scope choice is per-edit by nature, and a sticky answer is exactly the kind
