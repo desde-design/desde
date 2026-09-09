@@ -940,3 +940,109 @@ describe("class-edit lane — release-then-verify sequencing", () => {
     expect(verifications[0].editId).not.toBe(CLASS_MUTATION.id)
   })
 })
+
+// ──────────── The document boundary is the handshake, not the load ────────────
+// A bridge session is one document seen through one adapter attachment, and
+// ending one throws away every edit it was holding. The shell used to end it on
+// the iframe's `load` event, which fires for the page it is ALREADY connected to
+// whenever a subresource finishes after the bridge announced itself. See
+// `shouldEndSessionOnHandshake`.
+
+/**
+ * A prompt the shell will hold open: two origin candidates (so nothing
+ * auto-resolves) at callsite scope (so there are two honest choices, and the
+ * one-choice auto-apply route does not take it).
+ */
+const HELD_PROMPT = {
+  pendingId: "dom-pending-1",
+  draft: {
+    id: "m-held-1",
+    kind: "text",
+    sourceLoc: "src/components/Card.vue:12:4",
+    resolutionKind: "direct",
+    scope: "callsite",
+    callsiteLoc: "src/pages/Home.vue:8:2",
+    selector: '[data-testid="card-title"]',
+    before: "Hello",
+    after: "Hi",
+  },
+  candidates: [
+    { instancePath: "App>List>Item[0]", selector: '[data-i="0"]', origin: true },
+    { instancePath: "App>List>Item[1]", selector: '[data-i="1"]', origin: true },
+  ],
+}
+
+const RESET_STATUS = /page connection was reset/i
+
+describe("bridge session boundary", () => {
+  /** Render, connect as `documentId`, and park one edit in the dialog. */
+  async function connectHoldingAnEdit(documentId: string) {
+    let editing: ReturnType<typeof useEditorEditing> | null = null
+    render(<Harness onEditing={(e) => { editing = e }} />)
+    await act(async () => {
+      emitFromBridge({
+        type: "BRIDGE_READY",
+        payload: { version: "2026-09-09a", documentId },
+      })
+    })
+    await act(async () => {
+      emitFromBridge({
+        type: "MUTATION_AWAITING_DISAMBIGUATION",
+        payload: HELD_PROMPT,
+      })
+    })
+    await waitFor(() => {
+      expect(editing!.disambiguationPrompt).not.toBeNull()
+    })
+    const iframe = screen.getByTitle("Prototype") as HTMLIFrameElement
+    return {
+      iframe,
+      /** Re-read through the closure: `onEditing` runs on every render. */
+      current: () => editing!,
+    }
+  }
+
+  /** The iframe finished loading, and the bridge answers the re-handshake. */
+  async function reloadAndAnswer(iframe: HTMLIFrameElement, documentId: string) {
+    await act(async () => {
+      iframe.dispatchEvent(new Event("load"))
+    })
+    await act(async () => {
+      emitFromBridge({
+        type: "BRIDGE_READY",
+        payload: { version: "2026-09-09a", documentId },
+      })
+    })
+  }
+
+  it("keeps the session when the page the shell is on answers a second handshake", async () => {
+    const { iframe, current } = await connectHoldingAnEdit("doc-a")
+
+    // The same document: its slow subresources finished, so `load` fired on a
+    // page that has been connected (and edited) for some time already.
+    await reloadAndAnswer(iframe, "doc-a")
+
+    expect(current().disambiguationPrompt).not.toBeNull()
+    expect(current().saveStatus ?? "").not.toMatch(RESET_STATUS)
+  })
+
+  it("ends the session when a different page answers the handshake", async () => {
+    const { iframe, current } = await connectHoldingAnEdit("doc-a")
+
+    await reloadAndAnswer(iframe, "doc-b")
+
+    await waitFor(() => {
+      expect(current().disambiguationPrompt).toBeNull()
+    })
+    expect(current().saveStatus ?? "").toMatch(RESET_STATUS)
+  })
+
+  it("ends nothing on the first handshake of an attachment", async () => {
+    // The attach starts the session; the handshake that follows it is the same
+    // document's first, and ending anything there would abort the session the
+    // effect had only just begun.
+    const { current } = await connectHoldingAnEdit("doc-a")
+    expect(current().disambiguationPrompt).not.toBeNull()
+    expect(current().saveStatus ?? "").not.toMatch(RESET_STATUS)
+  })
+})

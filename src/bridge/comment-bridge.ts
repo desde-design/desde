@@ -68,9 +68,32 @@ import { createOverridePreview } from "./override-preview"
   // the viewer's `html-inject`). Keep it a single-use literal;
   // bridge-bundle-version.test.ts fails if that stops holding.
   ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__ =
-    "2026-09-03a-suspense-and-memo-chain"
+    "2026-09-09a-document-id"
   const BRIDGE_VERSION = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__ as string
+
+  // ── DOCUMENT_ID ───────────────────────────────────────────────────────
+  //
+  // Who this document is, for the length of its life. The IIFE runs once per
+  // document, so this value is minted once per document and every BRIDGE_READY
+  // this instance sends carries the same one — the native one on load, the
+  // PING echo, and the NAVIGATE "already on that page" echo.
+  //
+  // The shell needs it to answer one question it otherwise cannot: is this
+  // handshake a NEW page, or the page it is already on answering again? Both
+  // arrive as BRIDGE_READY. Without an id the shell had to guess from the
+  // iframe's `load` event, and a document whose subresources finish AFTER the
+  // bridge is ready fires `load` on a page the shell is already connected to —
+  // which the shell then read as a reload and threw the designer's in-progress
+  // edits away.
+  //
+  // Not a UUID: `crypto.randomUUID` is unavailable on insecure origins, and a
+  // prototype served over plain http on a LAN address is exactly where this
+  // runs. Two random segments plus the load time is far more than enough to
+  // separate one document from the next in one iframe.
+  const DOCUMENT_ID = `doc-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`
 
   // ── postMessage origin discipline ─────────────────────────────────────
   //
@@ -1334,7 +1357,10 @@ import { createOverridePreview } from "./override-preview"
             window.location.href = targetPage
           } else {
             // Already on the right page — tell shell bridge is still ready
-            sendToShell({ type: "BRIDGE_READY", payload: { version: BRIDGE_VERSION } })
+            sendToShell({
+              type: "BRIDGE_READY",
+              payload: { version: BRIDGE_VERSION, documentId: DOCUMENT_ID },
+            })
           }
           break
         }
@@ -1802,7 +1828,10 @@ import { createOverridePreview } from "./override-preview"
           // itself again — without this, React Strict Mode's double-
           // invoke detaches+re-attaches the listener around the
           // moment BRIDGE_READY fires natively, and the shell misses it.
-          sendToShell({ type: "BRIDGE_READY", payload: { version: BRIDGE_VERSION } })
+          sendToShell({
+            type: "BRIDGE_READY",
+            payload: { version: BRIDGE_VERSION, documentId: DOCUMENT_ID },
+          })
           // The page background is one-shot too, and loses the SAME race for
           // the same reason (see docs/bridge-protocol.md, "BRIDGE_READY is
           // one-shot"). MEASURED on the live viewer, 2026-08-28: the rail
@@ -1902,7 +1931,10 @@ import { createOverridePreview } from "./override-preview"
     }
 
     // Notify shell that bridge is ready
-    sendToShell({ type: "BRIDGE_READY", payload: { version: BRIDGE_VERSION } })
+    sendToShell({
+      type: "BRIDGE_READY",
+      payload: { version: BRIDGE_VERSION, documentId: DOCUMENT_ID },
+    })
 
     // Tell the shell what colour this page is painted, so its own chrome can
     // sit on the same ground and the iframe edge stops being a seam.

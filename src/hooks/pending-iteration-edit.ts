@@ -915,6 +915,37 @@ export function mayClearInFlightMarker(captured: number, current: number): boole
 }
 
 /**
+ * Does a completed bridge handshake end the session that was running?
+ *
+ * The document boundary is the HANDSHAKE, not the iframe's `load` event. Those
+ * two are not the same moment, and the difference is a real defect: the bridge
+ * announces itself as soon as its script runs, so a page whose images or fonts
+ * finish afterwards fires `load` on a document the shell is already connected
+ * to and has been editing. Ending the session there discarded a draft the live
+ * bridge was still holding, with nothing left to cancel it.
+ *
+ * So `load` only TRIGGERS a handshake now, and this decides what the handshake
+ * means:
+ *
+ * | `previousToken` | `nextToken` | Decision |
+ * | --- | --- | --- |
+ * | null (first handshake of an attachment) | anything | ends nothing |
+ * | a document | the SAME document | ends nothing: the page answered again |
+ * | a document | a DIFFERENT document | ends the session: a new page is here |
+ *
+ * The token is the bridge's own per-document id when it reports one. A bridge
+ * older than that (2026-09-09a) reports none, and the shell mints a fresh token
+ * per completed handshake instead — which reads every handshake after the first
+ * as a new document, i.e. the older, blunter rule, never a missed boundary.
+ */
+export function shouldEndSessionOnHandshake(
+  previousToken: string | null,
+  nextToken: string,
+): boolean {
+  return previousToken !== null && previousToken !== nextToken
+}
+
+/**
  * Everything a bridge session is holding when it ends, as plain values.
  *
  * The three places a session ends (the adapter effect's cleanup, the iframe's

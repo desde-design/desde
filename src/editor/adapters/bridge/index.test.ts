@@ -188,6 +188,54 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     await expect(initPromise2).resolves.toBeUndefined()
   })
 
+  it("reports the document the bridge says it is running in, and changes it only when the page does", async () => {
+    // The shell reads this right after `init()` resolves to decide whether a
+    // handshake is a NEW page or the page it is already on answering again.
+    // A late `load` (slow image) re-handshakes the same document, and reading
+    // that as a reload used to throw the designer's in-progress edits away.
+    const target: AdapterTarget = { iframe: setup.iframe, origin: "*" }
+    expect(adapter.bridgeDocumentId).toBeNull()
+
+    const first = adapter.init(target)
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: "2026-09-09a", documentId: "doc-a" },
+    })
+    await first
+    expect(adapter.bridgeDocumentId).toBe("doc-a")
+
+    // The same document answering a second PING.
+    const second = adapter.init(target)
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: "2026-09-09a", documentId: "doc-a" },
+    })
+    await second
+    expect(adapter.bridgeDocumentId).toBe("doc-a")
+
+    // A reload: a fresh bridge IIFE, so a fresh id.
+    const third = adapter.init(target)
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: "2026-09-09a", documentId: "doc-b" },
+    })
+    await third
+    expect(adapter.bridgeDocumentId).toBe("doc-b")
+  })
+
+  it("reports no document id for a bridge that does not send one", async () => {
+    const target: AdapterTarget = { iframe: setup.iframe, origin: "*" }
+    const initPromise = adapter.init(target)
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: "2026-05-06a" },
+    })
+    await initPromise
+    // Null, not a stale value: the shell mints its own token in that case, and
+    // a leftover id from an earlier bridge would read as "same document".
+    expect(adapter.bridgeDocumentId).toBeNull()
+  })
+
   it("dispose rejects a pending handshake instead of leaving the awaiter dangling", async () => {
     const target: AdapterTarget = { iframe: setup.iframe, origin: "*" }
     const initPromise = adapter.init(target)

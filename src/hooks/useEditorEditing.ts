@@ -139,6 +139,7 @@ import {
   SAVE_HANDOFF_TIMEOUT_STATUS,
   sessionEndPlan,
   settleHandOff,
+  shouldEndSessionOnHandshake,
   structuralRouteFor,
   thisRowOperationAllowed,
   thisRowTemplateLocation,
@@ -610,6 +611,30 @@ export function useEditorEditing({
    */
   const adapterGenerationRef = useRef(0)
   /**
+   * WHICH DOCUMENT this attachment last handshaked with, or null before the
+   * first handshake of an attachment completes.
+   *
+   * The document in the iframe is what a bridge session is about, and the shell
+   * learns a new one is there from the HANDSHAKE, not from the iframe's `load`
+   * event. The two are different moments: the bridge announces itself when its
+   * script runs, so a page with a slow image fires `load` afterwards — on a
+   * document the shell is already connected to and the designer may already
+   * have edited. Ending the session there threw that edit away and left the
+   * live bridge holding a draft nothing would ever cancel.
+   *
+   * The value is the bridge's own per-document id where the bridge reports one
+   * (2026-09-09a+), and a shell-minted token per handshake otherwise. See
+   * `shouldEndSessionOnHandshake` for the decision it feeds.
+   */
+  const sessionDocumentRef = useRef<string | null>(null)
+  /**
+   * Counter behind the fallback token, for a bridge that reports no document
+   * id. Per hook instance and never reset: a token must not repeat across
+   * attachments, or the first handshake after a re-attach could match the last
+   * one before it and read a new document as the old one.
+   */
+  const handshakeSeqRef = useRef(0)
+  /**
    * Monotonic id for iteration verifies, PER TARGET. Each intercept takes the
    * next one for its own key and records it as that key's latest; only a key's
    * latest answer may open the dialog or hand off. See `isStaleVerify` for what
@@ -669,6 +694,10 @@ export function useEditorEditing({
     // one is now stale, whatever it does next.
     adapterGenerationRef.current += 1
     adapterAbortRef.current = new AbortController()
+    // No document is adopted yet for THIS attachment, so its first handshake
+    // ends nothing. The session that was running before it ended in the
+    // previous cleanup, which is the only other way an attachment begins.
+    sessionDocumentRef.current = null
 
     const adapter = new BridgeFrameworkAdapter()
     let cancelled = false
@@ -773,6 +802,25 @@ export function useEditorEditing({
         .init({ iframe, origin })
         .then(() => {
           if (cancelled) return
+          // THE DOCUMENT BOUNDARY. A handshake that reports a different
+          // document than the one this attachment adopted means the page was
+          // replaced, and everything the previous page's session was holding
+          // ends here — before the new document is adopted, so a continuation
+          // that resumes afterwards sees the session it belongs to as over.
+          //
+          // Nothing is cancelled with the bridge: those drafts died with the
+          // document that issued them, and the instance that would receive the
+          // cancel is a different one that numbers its own drafts from
+          // `dom-pending-1`.
+          const documentToken =
+            adapter.bridgeDocumentId ?? `handshake-${(handshakeSeqRef.current += 1)}`
+          if (shouldEndSessionOnHandshake(sessionDocumentRef.current, documentToken)) {
+            endBridgeSessionRef.current?.({
+              reason: "reconnect",
+              cancelWithBridge: false,
+            })
+          }
+          sessionDocumentRef.current = documentToken
           setStatus({ kind: "ready" })
           if (!adapterReadyAnnounced) {
             adapterReadyAnnounced = true
@@ -802,24 +850,17 @@ export function useEditorEditing({
     }
 
     /**
-     * A DIFFERENT document is in the iframe now.
+     * A document in the iframe has finished loading. It MAY be a new one.
      *
-     * The adapter survives it and re-handshakes, but the bridge does not: it
-     * comes back a fresh instance, numbering its drafts from `dom-pending-1`
-     * again. So the previous document's session ends here, before the
-     * re-attach, and every continuation still awaiting under it goes quiet.
-     * Without this, an older verify or hand-off resolved into the new document
-     * holding ids that now name the designer's current edits.
-     *
-     * Nothing is cancelled with the bridge: the drafts died with the document
-     * that issued them, and the instance that would receive the cancel never
-     * saw them.
-     *
-     * Only the LISTENER does this. The direct `runHandshake()` below is the
-     * first attach, whose session the effect body has just started.
+     * All this does is re-handshake. `load` is a trigger, never the boundary:
+     * it fires for the document the shell is already connected to whenever a
+     * subresource finishes after the bridge announced itself, and ending the
+     * session there discarded the designer's in-progress edits on a page that
+     * was still right in front of them. The handshake carries the document's
+     * id, so the boundary is decided where that id is read, in the `.then`
+     * above.
      */
     const onIframeLoad = () => {
-      endBridgeSessionRef.current?.({ reason: "reconnect", cancelWithBridge: false })
       runHandshake()
     }
 

@@ -650,7 +650,15 @@ export type PreviewFailureKind =
 
 // Bridge → Shell messages
 export type BridgeToShellMessage =
-  | { type: "BRIDGE_READY"; payload?: { version?: string } }
+  // `documentId` names the DOCUMENT this bridge instance runs in. It is minted
+  // once per bridge IIFE, so every BRIDGE_READY from one document carries the
+  // same value (the native one on load, and the PING and NAVIGATE echoes) and a
+  // reload or navigation carries a different one. The shell uses it to tell a
+  // re-handshake of the page it is already on from a genuinely new page: the
+  // first is not a session boundary, the second is. Absent on bridges older
+  // than 2026-09-09a, where the shell falls back to treating every completed
+  // handshake after the first as a new document.
+  | { type: "BRIDGE_READY"; payload?: { version?: string; documentId?: string } }
   // Tier-2 edit verification response (paired with a READ_RENDERED_VALUE
   // requestId). `value` is null when the selector matched nothing.
   | { type: "RENDERED_VALUE_READ"; payload: { value: string | null }; requestId: string }

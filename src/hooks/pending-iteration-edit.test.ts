@@ -32,6 +32,7 @@ import {
   SAVE_HANDOFF_TIMEOUT_STATUS,
   sessionEndPlan,
   settleHandOff,
+  shouldEndSessionOnHandshake,
   structuralRouteFor,
   thisRowOperationAllowed,
   thisRowTemplateLocation,
@@ -1376,5 +1377,35 @@ describe("errorMessage", () => {
       },
     }
     expect(errorMessage(hostile)).toBe("unknown error")
+  })
+})
+
+describe("shouldEndSessionOnHandshake", () => {
+  it("ends nothing on the first handshake of an attachment", () => {
+    // Nothing was adopted yet. The session this handshake connects to is the
+    // one the attach just started, and ending it here would abort the
+    // controller it had only just made.
+    expect(shouldEndSessionOnHandshake(null, "doc-a")).toBe(false)
+  })
+
+  it("ends nothing when the same document answers again", () => {
+    // The defect this closes: the bridge announces itself as soon as its
+    // script runs, so a page with a slow image fires `load` afterwards and the
+    // shell re-handshakes with the page it is already on. Ending the session
+    // there discarded a draft the live bridge was still holding.
+    expect(shouldEndSessionOnHandshake("doc-a", "doc-a")).toBe(false)
+  })
+
+  it("ends the session when a different document is there", () => {
+    expect(shouldEndSessionOnHandshake("doc-a", "doc-b")).toBe(true)
+  })
+
+  it("reads every handshake after the first as new when tokens never repeat", () => {
+    // The fallback shape, for a bridge that reports no document id: the shell
+    // mints a fresh token per completed handshake, so this is the older,
+    // blunter rule. Blunter in the safe direction, a boundary too many rather
+    // than a boundary missed.
+    expect(shouldEndSessionOnHandshake(null, "handshake-1")).toBe(false)
+    expect(shouldEndSessionOnHandshake("handshake-1", "handshake-2")).toBe(true)
   })
 })

@@ -205,6 +205,16 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     timeout: ReturnType<typeof setTimeout>
   } | null = null
   private lastBridgeVersion: string | null = null
+  /**
+   * The document the last accepted BRIDGE_READY came from, or null when the
+   * bridge is older than the id (2026-09-09a) or nothing has handshaked yet.
+   *
+   * One document mints one id and repeats it on every BRIDGE_READY it sends,
+   * so the shell can tell "the page answered again" from "a different page is
+   * here now" — which is what decides whether a bridge session ends. See
+   * `bridgeDocumentId` and `shouldEndSessionOnHandshake`.
+   */
+  private lastBridgeDocumentId: string | null = null
   private readonly mutationCapturedListeners = new Set<MutationCapturedListener>()
   private readonly dragMoveListeners = new Set<(move: DragMoveRequest) => void>()
   private readonly insertAtPointListeners = new Set<(req: InsertAtPointRequest) => void>()
@@ -359,6 +369,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
       this.domEditExitPending = null
     }
     this.lastBridgeVersion = null
+    this.lastBridgeDocumentId = null
     this.mutationCapturedListeners.clear()
     this.dragMoveListeners.clear()
     this.insertAtPointListeners.clear()
@@ -1224,7 +1235,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
 
     switch (message.type) {
       case 'BRIDGE_READY':
-        this.handleBridgeReady(message.payload?.version)
+        this.handleBridgeReady(message.payload?.version, message.payload?.documentId)
         break
       case 'ELEMENT_INSPECTED':
         if (message.requestId) {
@@ -1518,7 +1529,20 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     }
   }
 
-  private handleBridgeReady(version: string | undefined): void {
+  /**
+   * Which document the bridge last said it was running in, or null when it did
+   * not say (a bridge older than 2026-09-09a, or no handshake yet).
+   *
+   * Read by the shell right after `init()` resolves. A handshake that reports
+   * the SAME id as the last one is the page the shell is already connected to
+   * answering again — an iframe `load` whose subresources finished late does
+   * exactly that — and no bridge session ends on it.
+   */
+  get bridgeDocumentId(): string | null {
+    return this.lastBridgeDocumentId
+  }
+
+  private handleBridgeReady(version: string | undefined, documentId?: string): void {
     if (version && this.compareVersions(version, REQUIRED_BRIDGE_VERSION) < 0) {
       if (this.bridgeReadyReject) {
         this.bridgeReadyReject(
@@ -1530,6 +1554,10 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
       return
     }
     this.lastBridgeVersion = version ?? null
+    // Only from an ACCEPTED ready, below the version guard above: a bridge the
+    // shell is refusing to talk to must not be able to move the document id and
+    // so end the live session.
+    this.lastBridgeDocumentId = documentId ?? null
     if (this.bridgeReadyResolve) {
       this.bridgeReadyResolve()
     }
