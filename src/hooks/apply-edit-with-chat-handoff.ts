@@ -41,6 +41,56 @@ const KIND_LABELS: Record<string, string> = {
 }
 
 /**
+ * Labels that read wrong in the prompt under their status name. An insert's
+ * `target` is the destination PARENT, not the new content, so "Insert <Card>"
+ * names the wrong element; "Insert into <Card>" is what happened. Status text
+ * keeps the plain label, which is built at the call site, not here.
+ */
+const HANDOFF_LABELS: Record<string, string> = {
+  insert: "Insert into",
+}
+
+/** How much of an inserted snippet the prompt carries before it is cut. */
+const SNIPPET_LIMIT = 200
+
+function locationText(l: { file: string; line: number; column: number }): string {
+  return `${l.file}:${l.line}:${l.column}`
+}
+
+/**
+ * The payload of the edit, in the user's voice, for the kinds where the
+ * element alone does not say what was asked. `delete`, `detach` and `unwrap`
+ * return undefined: for those the element IS the whole request.
+ */
+function detailForHandoff(edit: StructuralEdit): string | undefined {
+  switch (edit.kind) {
+    case "move": {
+      const parent = edit.destination.parentEditTarget
+      if (!parent) return "move it within the page"
+      const at = `the element at ${locationText(parent)}`
+      return edit.destination.index < 0
+        ? `append it to ${at}`
+        : `move it to be child index ${edit.destination.index} of ${at}`
+    }
+    case "insert": {
+      const snippet = edit.snippet.trim()
+      const shown = snippet.length > SNIPPET_LIMIT ? `${snippet.slice(0, SNIPPET_LIMIT)}...` : snippet
+      const content = edit.contentKind === "text" ? `the text ${JSON.stringify(shown)}` : shown
+      const where = edit.destIndex < 0 ? "at the end" : `at child index ${edit.destIndex}`
+      return `insert ${content} ${where}`
+    }
+    case "swap":
+      return `replace <${edit.fromComponentName}> with <${edit.toComponentName}>`
+    case "flatten-conditional":
+      return edit.branchToKeep === "else"
+        ? "keep the else branch"
+        : `keep branch ${edit.branchToKeep} of the conditional chain`
+    default:
+      return undefined
+  }
+}
+
+/**
  * The hand-off description for a refused structural edit, or null when the
  * kind carries no source position (overwrite, llm-patch, prop, styles, text
  * ranges, tokens: each has its own path and none of them belongs here).
@@ -52,16 +102,18 @@ export function describeStructuralEditForHandoff(
   const kindLabel = KIND_LABELS[edit.kind]
   if (!kindLabel) return null
   const target = edit.target
-  if (!target || !("editTarget" in target) || !target.editTarget) return null
+  // The `!location` check below is the only position guard needed, and it is
+  // broader than the `!target.editTarget` clause it replaces: a
+  // definition-scope delete carrying an `authoredAt` but no `editTarget` has
+  // a position to hand over, and used to be dropped here.
+  if (!target) return null
   const scope = edit.kind === "delete" ? (edit.scope ?? "definition") : null
-  const location =
-    scope === "definition"
-      ? ("authoredAt" in target ? target.authoredAt : undefined) ?? target.editTarget
-      : target.editTarget
+  const location = scope === "definition" ? (target.authoredAt ?? target.editTarget) : target.editTarget
   if (!location) return null
   return {
-    kindLabel,
-    componentName: "componentName" in target ? (target.componentName ?? null) : null,
+    kindLabel: HANDOFF_LABELS[edit.kind] ?? kindLabel,
+    detail: detailForHandoff(edit),
+    componentName: target.componentName ?? null,
     tagName: null,
     selector: target.selector,
     location: { file: location.file, line: location.line, column: location.column },

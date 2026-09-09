@@ -217,6 +217,14 @@ export interface StructuralEditHandoff {
   location: { file: string; line: number; column: number }
   /** Delete only. `definition` means the position is in the element's own component file. */
   scope?: "definition" | "callsite" | null
+  /**
+   * What the user actually asked for, when the kind carries more intent than
+   * "this element": the destination of a move, the snippet of an insert, the
+   * two component names of a swap, the branch a flatten keeps. Without it the
+   * agent sees only the element and has to guess the operation's payload.
+   * Absent for delete, detach and unwrap, where the element is the whole ask.
+   */
+  detail?: string
   /** The deterministic applicator's refusal, verbatim. */
   reason: string
 }
@@ -249,6 +257,7 @@ export function buildStructuralEditHandoffPrompt(h: StructuralEditHandoff): stri
     `I tried to ${h.kindLabel.toLowerCase()} an element by direct manipulation and the deterministic edit refused.`,
     "",
     `- What I did: ${h.kindLabel} ${elementLabel(h)} (selector: ${h.selector})`,
+    ...(h.detail ? [`- Details: ${h.detail}`] : []),
     `- Source position: ${locationLabel(h.location)}${scopeLine}`,
     `- Why it refused: ${h.reason}`,
     "",

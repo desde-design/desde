@@ -219,6 +219,27 @@ describe("buildStructuralEditHandoffPrompt", () => {
     expect(p).toContain("Move <KButton>")
     expect(p).not.toContain("scope:")
   })
+
+  it("renders a Details bullet between what and where, only when a detail is given", () => {
+    const base = {
+      kindLabel: "Move",
+      componentName: "KButton",
+      selector: "a.button",
+      location: { file: "src/App.vue", line: 5, column: 3 },
+      reason: "cycle detected",
+    }
+    const withDetail = buildStructuralEditHandoffPrompt({
+      ...base,
+      detail: "move it to be child index 2 of the element at src/App.vue:14:6",
+    }).split("\n")
+    const whatIndex = withDetail.findIndex((l) => l.startsWith("- What I did:"))
+    expect(withDetail[whatIndex + 1]).toBe(
+      "- Details: move it to be child index 2 of the element at src/App.vue:14:6",
+    )
+    expect(withDetail[whatIndex + 2]?.startsWith("- Source position:")).toBe(true)
+
+    expect(buildStructuralEditHandoffPrompt(base)).not.toContain("- Details:")
+  })
 })
 
 describe("buildAmbiguousIterationHandoffPrompt", () => {
