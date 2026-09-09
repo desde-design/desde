@@ -2259,9 +2259,24 @@ export function useEditorEditing({
             void dispatchIterationEdit(pending, remembered)
             return
           }
-          setIterationScopePrompt(pending)
+          // Two verifies can be in flight at once (verify is an HTTP round
+          // trip). If a second one resolves after a first already opened the
+          // dialog, a plain set would overwrite the first pending and leak
+          // its bridge draft. Release whatever this replaces, mirroring
+          // `cancelIterationScope`.
+          setIterationScopePrompt((previous) => {
+            if (previous && previous !== pending) releaseBridgeDraft(previous)
+            return pending
+          })
         },
-      )
+      ).catch((err) => {
+        // A throw inside the `.then` body above (not an `outcome.kind ===
+        // "error"` result, an actual exception) must still release the
+        // draft and surface a status, or it leaves the bridge blocked with
+        // nothing shown.
+        releaseBridgeDraft(pending)
+        setSaveStatus(`Could not check the source for a loop: ${(err as Error).message}`)
+      })
       return true
     },
     [dispatchIterationEdit, releaseBridgeDraft],

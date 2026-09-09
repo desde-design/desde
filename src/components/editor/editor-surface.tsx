@@ -204,9 +204,14 @@ export function EditorSurface({
   // the chat agent instead of the in-modal LLM lane. `editing` is created
   // before `chat`, so the submit fn is reached through a ref populated once
   // `chat` exists (below).
-  const chatSubmitRef = useRef<((message: string) => Promise<void>) | null>(
-    null,
-  )
+  const chatSubmitRef = useRef<
+    ((message: string) => Promise<boolean>) | null
+  >(null)
+  // Synchronous twin of `chatSubmitRef`: lets `handleEditEscalation` (defined
+  // below, before `chat`/`chatSessions` exist) know WITHOUT awaiting whether
+  // a hand-off will actually be accepted. Populated once `canStartChatSession`
+  // exists (see `submitChatInNewSession`).
+  const canStartChatSessionRef = useRef<(() => boolean) | null>(null)
   // Right-rail active tab. Declared here (ahead of `editing`) so the
   // escalate-to-chat callback below can flip the rail to the Chat
   // tab — the escape hatch is initiated from the Activity tab, so without
@@ -223,7 +228,16 @@ export function EditorSurface({
   const handleEditEscalation = useCallback(
     (prompt: string): boolean => {
       const submit = chatSubmitRef.current
-      if (!submit) return false
+      const canStart = canStartChatSessionRef.current
+      if (!submit || !canStart) return false
+      // `canStartChatSession` (declared with `submitChatInNewSession` below)
+      // gates on the same "a chat is already running" rule and shows its own
+      // toast on refusal. Check it here too, synchronously, so a refused
+      // hand-off returns `false` with no success toast instead of the
+      // contradictory pair a caller used to see before this fix (both the
+      // refusal toast from `canStartChatSession` AND "Sent this edit to
+      // chat" from below).
+      if (!canStart()) return false
       setView("editor")
       setActiveTab("chat")
       void submit(prompt)
@@ -586,10 +600,17 @@ export function EditorSurface({
           planIdsBefore: new Set(before.map((p) => p.id)),
         }
         setGeneratingCanvasFlow(true)
-        await submit(
+        const started = await submit(
           `Build a screenshot flow for this request, then save it with save_screenshot_plan: ${prompt}\n\n` +
             `Walk the flow live: decide which screens matter, navigate/interact to reach each, and add a capture step per screen. Don't add it to a canvas yourself; just save the plan.`,
         )
+        if (!started) {
+          // Refused (a chat is already running with detached sessions off) —
+          // `submitChatInNewSession` already showed the refusal toast, so
+          // just unwind the pending state, same as the catch block below.
+          pendingCanvasFlowRef.current = null
+          setGeneratingCanvasFlow(false)
+        }
       } catch (err) {
         pendingCanvasFlowRef.current = null
         setGeneratingCanvasFlow(false)
@@ -823,28 +844,44 @@ export function EditorSurface({
     ],
   )
 
-  // Hand-offs always start a fresh session. With detached sessions OFF,
-  // `newSession()` is a no-op and a submit into the single bucket would abort
-  // a running chat; refuse in that case, exactly as the right-click path does.
-  const submitChatInNewSession = useCallback(
-    async (prompt: string): Promise<void> => {
+  // Shared refusal guard: with detached sessions OFF, `newSession()` is a
+  // no-op and a submit into the single bucket would abort a running chat, so
+  // refuse in that case, exactly as the right-click path does. Synchronous
+  // and side-effecting (shows the toast) so both `submitChatInNewSession`
+  // and `handleEditEscalation` (via `canStartChatSessionRef`, above) can use
+  // it without awaiting anything.
+  const canStartChatSession = useCallback(
+    (): boolean => {
       if (chatSessions.currentSessionId === null && chat.submitting) {
         toast.error("A chat is already running. Wait for it to finish before starting a new one.")
-        return
+        return false
       }
-      chatSessions.newSession()
-      await chat.submit(prompt)
+      return true
     },
-    // Same rationale as submitChatAutoFork: the four members are the reactive
-    // inputs; depending on the whole `chat` object would rebuild this on
-    // every streamed token.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chat.submit, chat.submitting, chatSessions.currentSessionId, chatSessions.newSession],
+    [chat.submitting, chatSessions.currentSessionId],
   )
 
-  // Keep the escalate-to-chat bridge pointed at the live submit fn so a
+  // Hand-offs always start a fresh session. Returns `false` (no session
+  // minted, nothing submitted) when `canStartChatSession` refuses; `true`
+  // once the turn has been submitted.
+  const submitChatInNewSession = useCallback(
+    async (prompt: string): Promise<boolean> => {
+      if (!canStartChatSession()) return false
+      chatSessions.newSession()
+      await chat.submit(prompt)
+      return true
+    },
+    // Same rationale as submitChatAutoFork: the reactive inputs are listed
+    // directly; depending on the whole `chat` object would rebuild this on
+    // every streamed token.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [canStartChatSession, chat.submit, chatSessions.newSession],
+  )
+
+  // Keep the escalate-to-chat bridges pointed at the live fns so a
   // direct-manipulation edit that needs interpretation lands as a chat
   // turn (see handleEditEscalation above), always in a new session.
+  canStartChatSessionRef.current = canStartChatSession
   chatSubmitRef.current = submitChatInNewSession
 
   // Right-click context-menu → "start a chat about this element". Always
