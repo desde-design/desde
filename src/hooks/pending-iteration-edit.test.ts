@@ -18,6 +18,7 @@ import {
   parkedReason,
   promptCollision,
   PROMPT_BUSY_STATUS,
+  hasUndispatchedWork,
   parkDecision,
   queueDeferredPark,
   sameBridgeDraft,
@@ -316,6 +317,32 @@ describe("queueDeferredPark", () => {
     const first = { kind: "held" as const, held: { pendingId: "p-1" } as never, reason: "a" }
     const second = { kind: "held" as const, held: { pendingId: "p-2" } as never, reason: "b" }
     expect(queueDeferredPark([first], second)).toEqual([first, second])
+  })
+})
+
+describe("hasUndispatchedWork", () => {
+  const none = { aiQueue: 0, parked: 0, deferred: 0 }
+
+  it("says there is nothing to warn about when all three counts are zero", () => {
+    expect(hasUndispatchedWork(none)).toBe(false)
+  })
+
+  it.each([
+    ["mutations queued for the AI lane", { ...none, aiQueue: 1 }],
+    ["edits parked in the deterministic dialog", { ...none, parked: 1 }],
+    ["parks held behind an open scope prompt", { ...none, deferred: 1 }],
+  ])("warns on %s", (_label, counts) => {
+    expect(hasUndispatchedWork(counts)).toBe(true)
+  })
+
+  /**
+   * The deferred count is the one the unload guard did not read. A park behind
+   * an open prompt has opened no dialog of its own yet, so it is the only one
+   * of the three with nothing on screen to remind the designer it exists, and
+   * a reload would take the bridge's held draft with it in silence.
+   */
+  it("counts a deferred park even when nothing else is outstanding", () => {
+    expect(hasUndispatchedWork({ aiQueue: 0, parked: 0, deferred: 2 })).toBe(true)
   })
 })
 

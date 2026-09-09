@@ -119,6 +119,7 @@ import {
   describeRowScopedEdit,
   errorMessage,
   handOffFailureStatus,
+  hasUndispatchedWork,
   isStaleVerify,
   iterationRouteFor,
   parkDecision,
@@ -574,6 +575,30 @@ export function useEditorEditing({
    */
   const verifySeqByKeyRef = useRef<Map<string, number>>(new Map())
 
+  /**
+   * True only once React has begun unmounting this hook.
+   *
+   * The adapter cleanup below cannot tell its two cases apart on its own, and
+   * they want opposite things from the iteration lane's held drafts. `enabled`
+   * flipping off leaves the panels mounted, so a held draft can still be parked
+   * where the designer will see it. Unmounting leaves nothing to park into, so
+   * the drafts have to go back to the bridge instead.
+   *
+   * Declared BEFORE the adapter effect deliberately. React runs a component's
+   * cleanups in the order its effects were defined, so on unmount this one runs
+   * first and the flag is already set when the adapter's cleanup reads it. An
+   * `enabled` flip re-runs only the adapter effect and never this one, so the
+   * flag cannot be true in that case, which is the direction that would cost
+   * the designer their typed text.
+   */
+  const hookUnmountingRef = useRef(false)
+  useEffect(
+    () => () => {
+      hookUnmountingRef.current = true
+    },
+    [],
+  )
+
   // Adapter lifecycle. Attached when `enabled` flips true and an iframe
   // is present; disposed on disable, unmount, or url change. Selection
   // wiring + manifest lookup mirror what `<LivePrototypePane>` does so
@@ -730,6 +755,14 @@ export function useEditorEditing({
       disposedRef.current = true
       verifyAbortRef.current?.abort()
       verifyAbortRef.current = null
+      // Hand the iteration lane's held drafts somewhere before the adapter
+      // goes. An open scope prompt and the parks queued behind it are both
+      // holding bridge drafts, and neither has an owner once this adapter is
+      // disposed: the prompt would dispatch against nothing, and the queue is
+      // drained only by the prompt closing. Ordered BEFORE `dispose()` because
+      // releasing a draft is a message to this adapter. Via a ref because the
+      // callbacks are defined far below this effect; see its declaration.
+      iterationTeardownRef.current?.(hookUnmountingRef.current)
       iframe.removeEventListener("load", runHandshake)
       treeUpdateUnsubRef.current?.()
       treeUpdateUnsubRef.current = null
@@ -1727,6 +1760,16 @@ export function useEditorEditing({
    * prompt closes, by either of its two exits.
    */
   const deferredParksRef = useRef<DeferredPark[]>([])
+  /**
+   * How to wind the scope prompt and the deferred-park queue down, for the
+   * adapter effect's cleanup to call.
+   *
+   * A ref because that effect is defined ABOVE these callbacks in source order,
+   * so it cannot name them in its dependency array without a temporal-dead-zone
+   * error. Same trick, and the same reason, as `interceptIterationEditRef`. The
+   * assignment happens during render, next to the callbacks themselves.
+   */
+  const iterationTeardownRef = useRef<((unmounting: boolean) => void) | null>(null)
   // Per-edit-kind remembered scope. Cleared on hook unmount; not persisted
   // across reloads (v1 — the dialog's "Remember for this session" checkbox).
   const iterationScopeMemoryRef = useRef<
@@ -2336,6 +2379,48 @@ export function useEditorEditing({
   }, [parkDraftForDeterministicFallback, parkHeldBridgeDraft, releaseBridgeDraft])
 
   /**
+   * Give every queued park's draft back to the bridge without parking it.
+   *
+   * The unmount case, and only that. There is no dialog left to park into, so
+   * holding the drafts would leave the bridge blocked on prompts nobody can
+   * ever answer. Nothing is lost that was not already going with the page.
+   */
+  const releaseDeferredParks = useCallback(() => {
+    const queued = deferredParksRef.current
+    if (queued.length === 0) return
+    deferredParksRef.current = []
+    for (const entry of queued) {
+      if (entry.kind === "held") {
+        // No `releaseBridgeDraft` for this variant: it takes an iteration edit,
+        // and a held park never became one. The bridge call is the same.
+        adapterRef.current?.resolveMutationDisambiguation(entry.held.pendingId, "cancel")
+        continue
+      }
+      releaseBridgeDraft(entry.pending)
+    }
+  }, [releaseBridgeDraft])
+
+  /**
+   * Close the scope prompt, by whatever path, and run the parks that were
+   * waiting on it.
+   *
+   * The ONE close. Every exit goes through here so that "the prompt closed" and
+   * "the queue behind it ran" cannot come apart: a park is queued precisely
+   * because a prompt is open, so a close that forgets to flush strands an edit
+   * the bridge is still holding, with no dialog anywhere that mentions it.
+   *
+   * The ref is cleared HERE rather than at the next render. The flush asks
+   * `parkOrDefer`'s decision whether a prompt is open, and React has not
+   * re-rendered yet at this point, so a ref left pointing at the prompt we just
+   * closed would defer the very parks this call exists to release.
+   */
+  const closeIterationPrompt = useCallback(() => {
+    iterationScopePromptRef.current = null
+    setIterationScopePrompt(null)
+    flushDeferredParks()
+  }, [flushDeferredParks])
+
+  /**
    * The terminal step for an iteration edit that will NOT be applied: park the
    * bridge's draft in the deterministic dialog when there is one, and release
    * it only when there is nothing to park.
@@ -2644,23 +2729,54 @@ export function useEditorEditing({
       if (remember) {
         iterationScopeMemoryRef.current[pending.editKind] = scope
       }
-      setIterationScopePrompt(null)
+      // The question is answered, so anything waiting behind it can ask its
+      // own now. Closing and flushing are one call for that reason. It runs
+      // BEFORE the dispatch so that a failure inside the dispatch parks
+      // immediately rather than deferring behind a prompt that is already
+      // closed.
+      closeIterationPrompt()
       void dispatchIterationEdit(pending, scope)
-      // The question is answered, so anything that was waiting behind it can
-      // ask its own now. Both exits flush: a cancel leaves the queue just as
-      // stuck as a confirm would.
-      flushDeferredParks()
     },
-    [iterationScopePrompt, dispatchIterationEdit, flushDeferredParks],
+    [iterationScopePrompt, dispatchIterationEdit, closeIterationPrompt],
   )
 
   const cancelIterationScope = useCallback(() => {
-    setIterationScopePrompt((current) => {
-      releaseBridgeDraft(current)
-      return null
-    })
-    flushDeferredParks()
-  }, [releaseBridgeDraft, flushDeferredParks])
+    // The ref rather than the state updater: `closeIterationPrompt` clears the
+    // ref synchronously, so reading it first is the same value the updater saw,
+    // and releasing a bridge draft from inside a `setState` updater was always
+    // a side effect in a place React may run twice.
+    releaseBridgeDraft(iterationScopePromptRef.current)
+    closeIterationPrompt()
+  }, [releaseBridgeDraft, closeIterationPrompt])
+
+  /**
+   * Wind the iteration lane down because the adapter it edits through is going
+   * away. Called from the adapter effect's cleanup, through a ref.
+   *
+   * Two shapes, and what separates them is whether anything will still be on
+   * screen. Staying mounted (`enabled` flipped off, a re-attach): the open
+   * question cannot be answered against a disposed adapter, so it ends the way
+   * the dialog's own Cancel ends it, and that close flushes the parks behind it
+   * into the deterministic queue, where they stay visible and answerable.
+   * Unmounting: there is no queue left to flush into, so every held draft goes
+   * back to the bridge instead of being left as an orphan.
+   */
+  const teardownIterationPrompts = useCallback(
+    (unmounting: boolean) => {
+      if (!unmounting) {
+        cancelIterationScope()
+        return
+      }
+      releaseBridgeDraft(iterationScopePromptRef.current)
+      iterationScopePromptRef.current = null
+      setIterationScopePrompt(null)
+      releaseDeferredParks()
+    },
+    [cancelIterationScope, releaseBridgeDraft, releaseDeferredParks],
+  )
+  // Assigned during render, like the other always-latest mirrors in this hook,
+  // so the adapter effect's cleanup always calls the current one.
+  iterationTeardownRef.current = teardownIterationPrompts
 
   /**
    * Funnel a pending iteration edit through: verify the loop in source,
@@ -3054,19 +3170,25 @@ export function useEditorEditing({
   // Warn on tab close/reload when there's un-dispatched work that a reload
   // would silently discard: mutations queued for the AI lane
   // (`queuedForAiRef` — only flushed by `handleSaveAll`'s LLM dispatch, not
-  // by any autosave) and unresolved v-for disambiguations
+  // by any autosave), unresolved v-for disambiguations
   // (`pendingDisambiguations` — the designer hasn't picked a target yet, so
-  // nothing has been written). Registers the listener once at mount and
-  // reads the ref/ref-mirrored count at fire-time rather than re-registering
-  // per state change — simpler and race-free since both refs are updated
-  // synchronously during render, before any unload can occur.
+  // nothing has been written), and parks deferred behind an open scope prompt
+  // (`deferredParksRef` — the bridge is holding those drafts and no dialog
+  // mentions them yet, which makes them the easiest of the three to lose).
+  // The rule itself is `hasUndispatchedWork`, a pure function, so it can be
+  // read and tested without a listener. Registers once at mount and reads the
+  // refs at fire-time rather than re-registering per state change — simpler
+  // and race-free since all three are updated synchronously during render or
+  // by the code that changes them, before any unload can occur.
   useEffect(() => {
     if (typeof window === "undefined") return
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      const hasUndispatchedWork =
-        queuedForAiRef.current.size > 0 ||
-        pendingDisambiguationsCountRef.current > 0
-      if (!hasUndispatchedWork) return
+      const undispatched = hasUndispatchedWork({
+        aiQueue: queuedForAiRef.current.size,
+        parked: pendingDisambiguationsCountRef.current,
+        deferred: deferredParksRef.current.length,
+      })
+      if (!undispatched) return
       event.preventDefault()
       event.returnValue = ""
     }

@@ -655,6 +655,28 @@ export function parkDecision(promptOpen: boolean): ParkDecision {
 }
 
 /**
+ * Is there work the designer has not dispatched, that reloading the page would
+ * throw away without saying so?
+ *
+ * Three counts, and the third is the one that was missing: a deferred park is
+ * an edit the bridge is still holding while it waits for a dialog to close. It
+ * is exactly as unsaved as the other two, and it is INVISIBLE, because nothing
+ * has opened a dialog for it yet. A pure function so the unload warning's rule
+ * can be read and tested in one place rather than inferred from a boolean
+ * expression inside a listener.
+ */
+export function hasUndispatchedWork(counts: {
+  /** Mutations queued for the AI lane, which only Save dispatches. */
+  aiQueue: number
+  /** Edits parked in the deterministic disambiguation dialog. */
+  parked: number
+  /** Parks held back behind an open scope prompt. */
+  deferred: number
+}): boolean {
+  return counts.aiQueue > 0 || counts.parked > 0 || counts.deferred > 0
+}
+
+/**
  * The status shown to a newcomer whose park is being held back.
  *
  * It has to say the edit is KEPT, unlike {@link PROMPT_BUSY_STATUS}, which
