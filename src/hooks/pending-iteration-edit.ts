@@ -800,12 +800,13 @@ export function hasUndispatchedWork(counts: {
 }
 
 /**
- * The status shown to a newcomer whose park is being held back.
+ * The status shown to a newcomer whose dialog is waiting behind the open one.
  *
- * It has to say the edit is KEPT, unlike {@link PROMPT_BUSY_STATUS}, which
- * tells the designer to repeat an edit that really is gone. Nothing is lost
- * here: the text is still in the bridge's draft and the question about it
- * opens as soon as the current one is answered.
+ * Either dialog: a park held back, and a scope question raised while the
+ * deterministic dialog is up. It has to say the edit is KEPT, unlike
+ * {@link PROMPT_BUSY_STATUS}, which tells the designer to repeat an edit that
+ * really is gone. Nothing is lost here: the text is still in the bridge's draft
+ * and the question about it opens as soon as the current one is answered.
  */
 export const DEFERRED_PARK_STATUS =
   "This edit is held behind the open question. Answer it and this one is next."

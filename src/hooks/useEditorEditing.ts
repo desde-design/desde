@@ -2579,8 +2579,7 @@ export function useEditorEditing({
       // The designer picked the narrower scope, so the bridge's draft — which
       // is the SHARED-template edit — must never reach the edit route. It is
       // released once this lane has actually WRITTEN the row edit, and parked
-      // in the deterministic dialog if it cannot (see
-      // `parkDraftForDeterministicFallback`).
+      // in the deterministic dialog if it cannot (see `parkOrDefer`).
       //
       // It used to be cancelled here, before the request ran. Cancelling does
       // not restore the typed text: `releaseUnownedPreview` returns early when
