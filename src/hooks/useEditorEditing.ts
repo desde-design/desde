@@ -5897,7 +5897,16 @@ export function useEditorEditing({
             // cannot dismiss, over a save that may never answer.
             const handOff = escalateToChatRef.current
             const prompt = buildEditEscalationPrompt(normalizedMutations)
-            const outcome = await settleHandOff((signal) => handOff(prompt, { signal }))
+            // The session's own signal goes in alongside the deadline's, the
+            // way the iteration lane's hand-offs pass theirs. Without it the
+            // helper aborts only on the timeout: a page changed while this POST
+            // is out would still let the turn be ACCEPTED, and an accepted turn
+            // edits files for the page that left. The stale check below cannot
+            // retract a turn that has already been taken.
+            const outcome = await settleHandOff(
+              (signal) => handOff(prompt, { signal }),
+              sessionSignal ? { signal: sessionSignal } : {},
+            )
             // The hand-off can hold for as long as the project's other turns
             // take, which is easily long enough for the page to be replaced.
             // Both arms below write `mutations`, so neither may run for a

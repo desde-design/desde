@@ -1576,6 +1576,94 @@ describe("bridge session boundary", () => {
     })
   })
 
+  it("cancels the save's chat hand-off when the page is replaced under it", async () => {
+    // Round 16 X1. The save's hand-off had the deadline's signal but not the
+    // session's, so a page changed while the POST was out could still let the
+    // turn be ACCEPTED — and an accepted turn edits files for the page that
+    // left. The stale check afterwards cannot retract a turn already taken.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({ reason: "bound binding", needsChat: true }),
+              { status: 422, headers: { "content-type": "application/json" } },
+            ),
+        ),
+      )
+      // Held open, so the page can change while the submission is in flight.
+      let handOffSignal: AbortSignal | undefined
+      const escalateToChat = vi.fn(
+        (_prompt: string, options?: { signal?: AbortSignal }) => {
+          handOffSignal = options?.signal
+          return new Promise<boolean>(() => {})
+        },
+      )
+      let editing: ReturnType<typeof useEditorEditing> | null = null
+      render(<Harness escalateToChat={escalateToChat} onEditing={(e) => { editing = e }} />)
+      await act(async () => {
+        emitFromBridge({
+          type: "BRIDGE_READY",
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+        })
+      })
+      await act(async () => {
+        emitFromBridge({
+          type: "MUTATION_CAPTURED",
+          payload: {
+            id: "dom-mut-handoff-1",
+            kind: "text",
+            sourceLoc: "src/components/Card.vue:12:4",
+            sourceVersion: "abc123",
+            resolutionKind: "direct",
+            scope: "definition",
+            callsiteLoc: null,
+            callsiteVersion: null,
+            instancePath: "0",
+            selector: "#card-title",
+            before: "Hello",
+            after: "Hi",
+          },
+        })
+      })
+
+      let save: Promise<{ ok: true } | { ok: false; reason: string }> | null = null
+      await act(async () => {
+        save = editing!.handleSaveAll()
+      })
+      await waitFor(() => {
+        expect(escalateToChat).toHaveBeenCalledTimes(1)
+      })
+      expect(handOffSignal?.aborted).toBe(false)
+
+      // The page is replaced while the hand-off is still out.
+      const iframe = screen.getByTitle("Prototype") as HTMLIFrameElement
+      await act(async () => {
+        iframe.dispatchEvent(new Event("load"))
+      })
+      await act(async () => {
+        emitFromBridge({
+          type: "BRIDGE_READY",
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
+        })
+      })
+
+      // The submission is cancelled, not merely stopped being waited for, and
+      // the save stops where it is.
+      expect(handOffSignal?.aborted).toBe(true)
+      let result: { ok: true } | { ok: false; reason: string } | null = null
+      await act(async () => {
+        result = await save!
+      })
+      expect(result).toEqual({ ok: false, reason: SAVE_PAGE_CHANGED_STATUS })
+    } finally {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
+  })
+
   it("stops the save when the page is replaced while its flush is out", async () => {
     // Round 15 W1. The AI-queue flush runs an LLM on the server, so it is out
     // for as long as that takes. Its continuation used to run whatever had
