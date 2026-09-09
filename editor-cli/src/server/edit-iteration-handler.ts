@@ -37,6 +37,7 @@ import {
 import { resolveRelativeModule } from "./resolve-relative-module.js"
 import { readRawBody, BodyTooLargeError, EDIT_BODY_MAX_BYTES } from "./http-body.js"
 import type { IterateeImportCandidate } from "../../../src/editor/edit-service/import-binding"
+import { iterationTextProblem } from "../../../src/editor/edit-service/iteration-text-limits"
 
 // ---------------------------------------------------------------------------
 // Request body type + validator
@@ -47,6 +48,21 @@ export interface IterationEditRequestBody {
   file: string
   /** SFC-absolute (1-based) position of the v-for template element. */
   templateLocation: { line: number; column: number }
+  /**
+   * Position of the element the designer actually clicked, when that is
+   * NESTED inside the loop root rather than being it.
+   *
+   * The two consumers want different positions. The data resolver matches the
+   * loop element exactly, so it gets `templateLocation`. The `patch-text`
+   * interpolation extractor reads the direct children of the position it is
+   * given to name the property behind the text, so it gets this one:
+   * `<li><span>{item.name}</span><span>{item.email}</span></li>` retyped on
+   * the email span patched `name` while both positions were the `<li>`.
+   *
+   * Optional. An older client sends only `templateLocation`, and the extractor
+   * falls back to it, which is the behaviour before this field existed.
+   */
+  fieldLocation?: { line: number; column: number }
   /**
    * Page source file when known. Phase 4 fallback: when same-file
    * resolution fails AND `pageSourceFile` is supplied, try the
@@ -97,6 +113,20 @@ export function validateIterationBody(body: unknown): string | null {
     // Column 0 is valid for JSX (Babel 0-based); Vue's are 1-based.
     return "body.templateLocation must be { line, column } (line 1-based, column >= 0)"
   }
+  // Same rule when present: it is dispatched as a source coordinate, and a
+  // bad one reads a position in a file.
+  const fl = b.fieldLocation as Record<string, unknown> | undefined
+  if (fl !== undefined && fl !== null) {
+    if (
+      typeof fl !== "object" ||
+      typeof fl.line !== "number" ||
+      typeof fl.column !== "number" ||
+      fl.line < 1 ||
+      fl.column < 0
+    ) {
+      return "body.fieldLocation must be { line, column } (line 1-based, column >= 0)"
+    }
+  }
   const ic = b.iterationContext as Record<string, unknown> | undefined
   if (
     !ic ||
@@ -104,6 +134,17 @@ export function validateIterationBody(body: unknown): string | null {
     typeof ic.index !== "number"
   ) {
     return "body.iterationContext required with key + index"
+  }
+  // The two free-text fields ride into an LLM request when this route refuses
+  // and the client falls back. The client checks them at its wire boundary;
+  // this route must not trust a hand-built request either, so the SAME rule is
+  // applied here. See `iteration-text-limits.ts`.
+  const keyProblem = typeof ic.key === "string" ? iterationTextProblem("key", ic.key) : null
+  if (keyProblem) return `body.iterationContext.${keyProblem}`
+  if (ic.expression !== undefined && ic.expression !== null) {
+    if (typeof ic.expression !== "string") return "body.iterationContext.expression must be a string or null"
+    const problem = iterationTextProblem("expression", ic.expression)
+    if (problem) return `body.iterationContext.${problem}`
   }
   const p = b.payload as Record<string, unknown> | undefined
   if (!p || typeof p.operation !== "string") {
@@ -164,6 +205,12 @@ export async function handleIterationEdit(
   const realpathResolution = await resolveRealpathWithinRoot(candidate, rootResolution)
   if (!realpathResolution.ok) return realpathResolution
   const { targetPath } = realpathResolution
+  // The gate above checked the NAME the request asked for. A symlink with a
+  // supported name can point at anything, so the RESOLVED target is checked
+  // too, before the read. Same wording the other routes use for this.
+  if (!isSupportedIterationFile(targetPath)) {
+    return { ok: false, status: 400, reason: "Resolved target is not a .vue, .tsx, or .jsx file" }
+  }
   // A dependency is never an edit target on this route either: the proposal
   // would be a full-file overwrite of library source that the next install
   // erases (codex round 4; the AI lane got the same guard in round 2).
@@ -422,6 +469,10 @@ export async function handleIterationEdit(
         kind: "unresolved",
       }
     }
+    // The FIELD's position, not the loop's. The extractor names the property
+    // behind the text on the element it is pointed at, so a nested field must
+    // be pointed at itself; the loop root answers for the row's first field.
+    const fieldPosition = body.fieldLocation ?? body.templateLocation
     const keyResult = isJsxIteration
       ? (
           await import(
@@ -429,8 +480,8 @@ export async function handleIterationEdit(
           )
         ).extractJsxInterpolationKey({
           source,
-          line: body.templateLocation.line,
-          column: body.templateLocation.column,
+          line: fieldPosition.line,
+          column: fieldPosition.column,
           itemVar,
         })
       : (
@@ -439,8 +490,8 @@ export async function handleIterationEdit(
           )
         ).extractSlotInterpolationKey({
           source,
-          line: body.templateLocation.line,
-          column: body.templateLocation.column,
+          line: fieldPosition.line,
+          column: fieldPosition.column,
           itemVar,
         })
     if (!keyResult.ok) {

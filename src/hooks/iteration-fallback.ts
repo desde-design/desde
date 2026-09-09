@@ -54,6 +54,23 @@ export interface RequestIterationProposalArgs {
   editKind: IterationEditKind
   /** v-for / .map template position. */
   templateLocation: SourceLocation
+  /**
+   * The CLICKED element's own position, when it is not the loop root.
+   *
+   * `templateLocation` is the loop, because the data resolver matches the
+   * element carrying `v-for` / returning from `.map()` exactly. But the
+   * text-field extractor asks a different question: which property of the row
+   * produced the text on THIS element? It looks at the direct children of the
+   * position it is given, so pointing it at the loop root answers for the
+   * first field in the row, whatever the designer actually clicked.
+   *
+   * Measured shape: `<li><span>{item.name}</span><span>{item.email}</span></li>`.
+   * Retyping the email patched `name`.
+   *
+   * Absent when the click IS the loop root, and absent from an older client,
+   * where the server falls back to `templateLocation` as before.
+   */
+  fieldLocation?: SourceLocation
   iterationContext: IterationContext
   /** Page-level source file when known (from the current-page store). */
   pageSourceFile: string | null
@@ -230,6 +247,7 @@ async function tryStaticEndpoint(
       body: JSON.stringify({
         file: args.templateLocation.file,
         templateLocation: args.templateLocation,
+        ...(args.fieldLocation ? { fieldLocation: args.fieldLocation } : {}),
         pageSourceFile: args.pageSourceFile,
         iterationContext: args.iterationContext,
         payload: args.payload,

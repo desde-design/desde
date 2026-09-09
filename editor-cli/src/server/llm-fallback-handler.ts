@@ -12,6 +12,10 @@ import type {
   IterationDataPromptFile,
 } from "../../../src/editor/edit-service/iteration-data-prompt"
 import type { ProjectKnowledgeConfig } from "../../../src/editor/edit-service/load-project-knowledge"
+import {
+  ITERATION_DESCRIPTION_LIMIT,
+  iterationTextProblem,
+} from "../../../src/editor/edit-service/iteration-text-limits"
 import type { CompletionProvider } from "../../../src/editor/llm-providers/types"
 import {
   resolvePrototypeRoot,
@@ -98,6 +102,15 @@ function validate(body: unknown): string | null {
     if (typeof intent.description !== "string" || intent.description.length === 0) {
       return "body.intent.description required"
     }
+    // `description` is built around a key the PAGE supplied and lands in the
+    // prompt this route sends, so it takes the same rule as the two context
+    // fields below, at the sentence cap rather than the identifier cap.
+    const descriptionProblem = iterationTextProblem(
+      "description",
+      intent.description,
+      ITERATION_DESCRIPTION_LIMIT,
+    )
+    if (descriptionProblem) return `body.intent.${descriptionProblem}`
     const tloc = intent.templateLocation as Record<string, unknown> | undefined
     if (
       !tloc ||
@@ -109,6 +122,20 @@ function validate(body: unknown): string | null {
     }
     const iter = intent.iterationContext as Record<string, unknown> | undefined
     if (!iter || typeof iter !== "object") return "body.intent.iterationContext required"
+    // The client checks these at its wire boundary; a hand-built request never
+    // passed through it, and both reach the prompt below. Same rule, applied
+    // again here. See `iteration-text-limits.ts`.
+    if (typeof iter.key === "string") {
+      const problem = iterationTextProblem("key", iter.key)
+      if (problem) return `body.intent.iterationContext.${problem}`
+    }
+    if (iter.expression !== undefined && iter.expression !== null) {
+      if (typeof iter.expression !== "string") {
+        return "body.intent.iterationContext.expression must be a string or null"
+      }
+      const problem = iterationTextProblem("expression", iter.expression)
+      if (problem) return `body.intent.iterationContext.${problem}`
+    }
     const payload = intent.payload as Record<string, unknown> | undefined
     if (!payload || typeof payload.operation !== "string") {
       return "body.intent.payload.operation required"

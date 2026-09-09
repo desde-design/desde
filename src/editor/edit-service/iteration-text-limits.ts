@@ -17,6 +17,13 @@
 /** A `v-for` expression or a row key that is longer than this is not one. */
 export const ITERATION_TEXT_LIMIT = 200
 
+/**
+ * The cap for the iteration intent's `description`, which is a SENTENCE built
+ * around a key rather than an identifier ("Patch row \"x\": set label"). Same
+ * rule otherwise: it reaches the same prompt, so it may not carry lines.
+ */
+export const ITERATION_DESCRIPTION_LIMIT = 500
+
 // eslint-disable-next-line no-control-regex -- matching control characters IS the check
 const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/
 
@@ -26,9 +33,13 @@ const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/
  * The returned sentence is for logs, tests and HTTP 400 bodies. It never
  * reaches a prompt, and it never quotes the value.
  */
-export function iterationTextProblem(label: string, value: string): string | null {
-  if (value.length > ITERATION_TEXT_LIMIT) {
-    return `${label} is longer than ${ITERATION_TEXT_LIMIT} characters`
+export function iterationTextProblem(
+  label: string,
+  value: string,
+  limit: number = ITERATION_TEXT_LIMIT,
+): string | null {
+  if (value.length > limit) {
+    return `${label} is longer than ${limit} characters`
   }
   if (CONTROL_CHARACTERS.test(value)) return `${label} contains control characters`
   return null

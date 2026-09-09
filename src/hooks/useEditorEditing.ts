@@ -2240,6 +2240,9 @@ export function useEditorEditing({
         failThisRow("Iteration edit refused: no source location on the selection.")
         return
       }
+      // Where the CLICK landed, which is the loop root only when the element
+      // the designer touched is itself the loop element.
+      const fieldLocation = iterationTemplateLocation(pending)
       const pageSourceFile = useAppStore.getState().currentSourceFile
       let payload
       let description: string
@@ -2280,6 +2283,13 @@ export function useEditorEditing({
         const result = await requestIterationProposal({
           editKind: pending.editKind,
           templateLocation,
+          // The clicked element's OWN position, when the verify moved
+          // `templateLocation` up to the loop root. The data resolver needs
+          // the loop; the text-field extractor needs the field. Sending only
+          // one made a nested `<span>{item.email}</span>` patch `name`.
+          ...(fieldLocation && fieldLocation !== templateLocation
+            ? { fieldLocation }
+            : {}),
           iterationContext: pending.iterationContext,
           pageSourceFile,
           payload,
