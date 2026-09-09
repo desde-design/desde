@@ -48,6 +48,13 @@ function emitFromBridge(
   window.dispatchEvent(event)
 }
 
+/**
+ * A version the shell accepts. `REQUIRED_BRIDGE_VERSION` is the document-id
+ * bridge (round 16 X3), so every bridge that can handshake at all is well past
+ * the style-provenance threshold.
+ */
+const CURRENT_BRIDGE_VERSION = '2026-09-09c-guard-origin'
+
 /** Boot the adapter through the real handshake so `lastBridgeVersion` is set. */
 async function adapterWithVersion(
   version: string,
@@ -58,7 +65,8 @@ async function adapterWithVersion(
   const initPromise = adapter.init(target)
   emitFromBridge(setup.contentWindow, {
     type: 'BRIDGE_READY',
-    payload: { version },
+    // The id is required of every bridge the shell talks to.
+    payload: { version, documentId: 'doc-a' },
   })
   await initPromise
   return { adapter, setup }
@@ -71,13 +79,17 @@ describe('BridgeFrameworkAdapter.supportsStyleProvenance', () => {
     await adapter?.dispose()
   })
 
-  it('is false on a bridge older than the provenance version', async () => {
-    ;({ adapter } = await adapterWithVersion('2026-05-30a-verify'))
-    expect(adapter.supportsStyleProvenance()).toBe(false)
+  it('is refused at the handshake on a bridge older than the shell requires', async () => {
+    // Round 16 X3. The provenance gate's own threshold is now below
+    // `REQUIRED_BRIDGE_VERSION`, so a bridge that would fail it cannot
+    // handshake in the first place: it never reaches the gate.
+    await expect(adapterWithVersion('2026-05-30a-verify')).rejects.toThrow(
+      /older than required/,
+    )
   })
 
-  it('is true from the provenance version onward', async () => {
-    ;({ adapter } = await adapterWithVersion('2026-06-08a-style-provenance'))
+  it('is true for a bridge the shell accepts', async () => {
+    ;({ adapter } = await adapterWithVersion(CURRENT_BRIDGE_VERSION))
     expect(adapter.supportsStyleProvenance()).toBe(true)
   })
 
@@ -97,13 +109,12 @@ describe('BridgeFrameworkAdapter.getStyleProvenance', () => {
   // A read we could not perform resolves `null`, NOT `{}` — `verifyCascade`
   // turns a missing origin into a `fail`, so an unsubstantiated read must stay
   // distinguishable from "the read worked and found nothing".
-  it('resolves null without sending when the bridge is too old', async () => {
-    let setup: MockIframeSetup
-    ;({ adapter, setup } = await adapterWithVersion('2026-05-30a-verify'))
+  it('resolves null without sending when no bridge has been accepted', async () => {
+    // The version gate's "too old" arm is unreachable through the handshake now
+    // (round 16 X3), so the reachable no-read case is an adapter that has seen
+    // no accepted bridge: it must still answer null rather than send.
+    adapter = new BridgeFrameworkAdapter()
     await expect(adapter.getStyleProvenance('.a', ['color'])).resolves.toBeNull()
-    expect(
-      setup.postMessages.filter((m) => (m as { type: string }).type === 'GET_STYLE_PROVENANCE'),
-    ).toHaveLength(0)
   })
 
   it('resolves null when no iframe target is attached', async () => {
@@ -113,7 +124,7 @@ describe('BridgeFrameworkAdapter.getStyleProvenance', () => {
 
   it('resolves {} without sending when there are no properties to ask about', async () => {
     let setup: MockIframeSetup
-    ;({ adapter, setup } = await adapterWithVersion('2026-06-08a-style-provenance'))
+    ;({ adapter, setup } = await adapterWithVersion(CURRENT_BRIDGE_VERSION))
     await expect(adapter.getStyleProvenance('.a', [])).resolves.toEqual({})
     expect(
       setup.postMessages.filter((m) => (m as { type: string }).type === 'GET_STYLE_PROVENANCE'),
@@ -122,7 +133,7 @@ describe('BridgeFrameworkAdapter.getStyleProvenance', () => {
 
   it('sends GET_STYLE_PROVENANCE and resolves the correlated reply', async () => {
     let setup: MockIframeSetup
-    ;({ adapter, setup } = await adapterWithVersion('2026-06-08a-style-provenance'))
+    ;({ adapter, setup } = await adapterWithVersion(CURRENT_BRIDGE_VERSION))
     const pending = adapter.getStyleProvenance('.ui-card', ['color'])
     const request = setup.postMessages.find(
       (m) => (m as { type: string }).type === 'GET_STYLE_PROVENANCE',
@@ -146,7 +157,7 @@ describe('BridgeFrameworkAdapter.getStyleProvenance', () => {
 
   it('ignores a reply whose requestId it does not own', async () => {
     let setup: MockIframeSetup
-    ;({ adapter, setup } = await adapterWithVersion('2026-06-08a-style-provenance'))
+    ;({ adapter, setup } = await adapterWithVersion(CURRENT_BRIDGE_VERSION))
     const pending = adapter.getStyleProvenance('.ui-card', ['color'])
     const request = setup.postMessages.find(
       (m) => (m as { type: string }).type === 'GET_STYLE_PROVENANCE',
@@ -168,7 +179,7 @@ describe('BridgeFrameworkAdapter.getStyleProvenance', () => {
   it('resolves null on timeout rather than rejecting or faking an empty read', async () => {
     vi.useFakeTimers()
     try {
-      ;({ adapter } = await adapterWithVersion('2026-06-08a-style-provenance'))
+      ;({ adapter } = await adapterWithVersion(CURRENT_BRIDGE_VERSION))
       const pending = adapter.getStyleProvenance('.ui-card', ['color'])
       await vi.advanceTimersByTimeAsync(10_000)
       await expect(pending).resolves.toBeNull()
@@ -182,7 +193,7 @@ describe('BridgeFrameworkAdapter.getStyleProvenance', () => {
     // the selector just matched nothing. That is a SUCCESSFUL read with an
     // empty result — distinct from the null above.
     let setup: MockIframeSetup
-    ;({ adapter, setup } = await adapterWithVersion('2026-06-08a-style-provenance'))
+    ;({ adapter, setup } = await adapterWithVersion(CURRENT_BRIDGE_VERSION))
     const pending = adapter.getStyleProvenance('div.bg-white', ['background-color'])
     const request = setup.postMessages.find(
       (m) => (m as { type: string }).type === 'GET_STYLE_PROVENANCE',

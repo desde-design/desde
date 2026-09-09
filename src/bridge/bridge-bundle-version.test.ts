@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest"
 import { readFileSync } from "node:fs"
 import * as esbuild from "esbuild"
+import { JSDOM } from "jsdom"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -24,6 +25,58 @@ import { fileURLToPath } from "node:url"
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SOURCE = resolve(HERE, "comment-bridge.ts")
 const BUNDLE = resolve(HERE, "../../dist/bridge-bundle.js")
+
+const SHELL_ORIGIN = "https://shell.example"
+const PROTO_ORIGIN = "https://proto.example"
+
+/**
+ * Evaluate the BUILT bundle twice in ONE jsdom document, as a page that loads
+ * it twice really does, and report what each evaluation managed to say.
+ *
+ * `configured` is one entry per evaluation: `true` gives that copy's script tag
+ * the `data-shell-origin` attribute a serve layer injects, `false` is the copy a
+ * prototype bundles itself, which has no attribute and therefore fails closed.
+ *
+ * A copy that never learns the shell origin posts NOTHING (the fail-closed rule
+ * from 2026-08-10), so the announcements below come only from configured copies.
+ */
+function bootTwice(
+  bundle: string,
+  configured: readonly [boolean, boolean],
+): { readyIds: string[]; warnings: string[] } {
+  const dom = new JSDOM(`<!doctype html><html><body><div id="app">hi</div></body></html>`, {
+    url: `${PROTO_ORIGIN}/`,
+    runScripts: "dangerously",
+    pretendToBeVisual: true,
+  })
+  const { window } = dom
+  const readyIds: string[] = []
+  const fakeParent = {
+    postMessage(message: { type?: string; payload?: { documentId?: string } }) {
+      if (message?.type === "BRIDGE_READY" && message.payload?.documentId) {
+        readyIds.push(message.payload.documentId)
+      }
+    },
+    // A real cross-origin parent throws on `.location`, which is the
+    // same-origin test `resolveShellTargetOrigin` performs.
+    get location(): never {
+      throw new Error("cross-origin")
+    },
+  }
+  Object.defineProperty(window, "parent", { value: fakeParent, configurable: true })
+  const warnings: string[] = []
+  window.console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  for (const withOrigin of configured) {
+    const script = window.document.createElement("script")
+    script.setAttribute("data-prototype-flow", "bridge")
+    if (withOrigin) script.setAttribute("data-shell-origin", SHELL_ORIGIN)
+    script.textContent = bundle
+    window.document.body.appendChild(script)
+  }
+  return { readyIds, warnings }
+}
 
 /** The exact recovery both serve layers perform. */
 function extractBridgeVersion(script: string): string {
@@ -96,26 +149,40 @@ describe("bridge bundle version anchor", () => {
     expect(rebuilt).toBe(committed)
   })
 
-  it("returns early only when THIS version is already running in this document", () => {
-    // Round 14 V5, tightened by round 15 W3(a). A page can load this bundle
-    // twice: two `<script src=…>` tags, a bundler that inlines it as well, or a
-    // re-injection after a soft navigation. Each evaluation would mint its own
-    // document id and announce itself, and the shell reads a second id as a NEW
-    // document, ending the session and discarding the designer's pending edits
-    // on a page that never went anywhere.
+  it("returns early only for an earlier copy that is OURS and configured", () => {
+    // Round 14 V5, tightened by round 15 W3(a) and round 16 X4. A page can load
+    // this bundle twice: two `<script src=…>` tags, a bundler that inlines it as
+    // well, or a re-injection after a soft navigation. Each evaluation would
+    // mint its own document id and announce itself, and the shell reads a second
+    // id as a NEW document, ending the session and discarding the designer's
+    // pending edits on a page that never went anywhere.
     //
-    // The version has to MATCH. A prototype carrying its own copy of an older
-    // bridge runs first and writes the global; a truthiness guard would let it
-    // suppress the bridge the shell just injected, and an older bridge reports
-    // no document id, so the shell falls back to guessing the boundary.
+    // Two things have to hold, and X4 is the second one. The version has to
+    // MATCH, so a DIFFERENT bridge the prototype ships cannot suppress the one
+    // the shell injected. And the earlier copy has to have been CONFIGURED with
+    // a shell origin, because the prototype can bundle the same version we
+    // inject: that copy's script tag carries no `data-shell-origin`, so it fails
+    // closed, talks to nobody, and the properly injected tag stepping aside for
+    // it left the page looking alive with no handshake at all.
     //
-    // Checked against the BUILT artifact, because minification is what would
-    // quietly drop a guard whose result nothing reads. The shape asserted:
-    // capture the global, assign ours, read it back, return only on equality.
+    // Driven against the BUILT artifact — minification is what would quietly
+    // drop a guard whose result nothing reads — through the real IIFE in a jsdom
+    // document, because the shape this now has is a decision, not a pattern.
     const bundle = readFileSync(BUNDLE, "utf-8")
-    expect(bundle).toMatch(
-      /(?:let|var|const)?\s*(\w+)\s*=\s*window\.__DESDE_BRIDGE_VERSION__\s*[;,]\s*window\.__DESDE_BRIDGE_VERSION__\s*=\s*"[^"]+"\s*[;,]\s*(?:let|var|const)?\s*(\w+)\s*=\s*window\.__DESDE_BRIDGE_VERSION__\s*[;,]\s*if\s*\(\s*\1\s*===\s*\2\s*\)\s*return/,
-    )
+
+    // Configured first, then a second copy: the second must step aside, so only
+    // ONE document id is ever announced.
+    const stepsAside = bootTwice(bundle, [true, true])
+    expect(stepsAside.readyIds).toHaveLength(1)
+    expect(stepsAside.warnings.join(" ")).not.toMatch(/already running/i)
+
+    // Unconfigured first (the prototype's own bundled copy), injected second:
+    // the injected one must take over and announce itself, or the shell never
+    // hears from this page.
+    const takesOver = bootTwice(bundle, [false, true])
+    expect(takesOver.readyIds).toHaveLength(1)
+    expect(takesOver.warnings.join(" ")).toMatch(/already running/i)
+
     // And nothing weaker survives alongside it: no bare truthiness return on
     // the global, which is the exact shape W3(a) replaced.
     expect(bundle).not.toContain("__DESDE_BRIDGE_VERSION__)return")

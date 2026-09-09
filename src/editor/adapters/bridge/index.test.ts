@@ -13,6 +13,13 @@ import { BridgeFrameworkAdapter } from "./index"
 import type { AdapterTarget, Selection } from "../../core"
 import type { InspectionData } from "@/types/bridge"
 
+/**
+ * A version the shell accepts, with the document id every accepted bridge
+ * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
+ * so a handshake fixture has to carry both.
+ */
+const CURRENT_BRIDGE_VERSION = "2026-09-09c-guard-origin"
+
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
   contentWindow: { postMessage: ReturnType<typeof vi.fn> }
@@ -98,7 +105,7 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     expect(setup.postMessages.find((m) => (m as { type: string }).type === "NAVIGATE")).toBeUndefined()
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initPromise
     const types = setup.postMessages.map(
@@ -131,7 +138,7 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     const initPromise1 = adapter.init(target)
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initPromise1
 
@@ -144,7 +151,7 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     const initPromise2 = adapter.init(target)
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initPromise2
     let types = setup.postMessages.map((m) => (m as { type: string }).type)
@@ -164,7 +171,7 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     const initPromise3 = adapter.init(target)
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initPromise3
     types = setup.postMessages.map((m) => (m as { type: string }).type)
@@ -183,7 +190,7 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     await expect(initPromise1).rejects.toThrow(/superseded/)
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await expect(initPromise2).resolves.toBeUndefined()
   })
@@ -199,7 +206,7 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     const first = adapter.init(target)
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-09-09a", documentId: "doc-a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await first
     expect(adapter.bridgeDocumentId).toBe("doc-a")
@@ -208,7 +215,7 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     const second = adapter.init(target)
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-09-09a", documentId: "doc-a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await second
     expect(adapter.bridgeDocumentId).toBe("doc-a")
@@ -217,23 +224,35 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     const third = adapter.init(target)
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-09-09a", documentId: "doc-b" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
     })
     await third
     expect(adapter.bridgeDocumentId).toBe("doc-b")
   })
 
-  it("reports no document id for a bridge that does not send one", async () => {
+  it("refuses a handshake from a bridge that sends no document id", async () => {
+    // Round 16 X3. The id is what the shell's session boundary is decided by,
+    // and the fallback for a bridge without one could not decide the case it
+    // existed for. There is no installed base of such bridges, so the handshake
+    // is refused rather than guessed at — and the version gate alone would not
+    // catch a ready that carries no version either.
     const target: AdapterTarget = { iframe: setup.iframe, origin: "*" }
     const initPromise = adapter.init(target)
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION },
     })
-    await initPromise
-    // Null, not a stale value: the shell mints its own token in that case, and
-    // a leftover id from an earlier bridge would read as "same document".
+    await expect(initPromise).rejects.toThrow(/no document id/)
+    // And nothing was adopted: a refused bridge must not be able to move the
+    // document the shell thinks it is on.
     expect(adapter.bridgeDocumentId).toBeNull()
+  })
+
+  it("refuses a handshake that reports no version at all", async () => {
+    const target: AdapterTarget = { iframe: setup.iframe, origin: "*" }
+    const initPromise = adapter.init(target)
+    emitFromBridge(setup.contentWindow, { type: "BRIDGE_READY", payload: {} })
+    await expect(initPromise).rejects.toThrow(/no document id/)
   })
 
   it("dispose rejects a pending handshake instead of leaving the awaiter dangling", async () => {
@@ -249,7 +268,7 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     const initPromise = adapter.init(target)
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initPromise
 
@@ -269,7 +288,7 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     const initPromise = adapter.init(target)
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initPromise
 
@@ -313,7 +332,7 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     const initPromise = adapter.init(target)
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initPromise
 
@@ -347,7 +366,7 @@ describe("BridgeFrameworkAdapter — selection ops", () => {
     const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initPromise
     setup.postMessages.length = 0
@@ -367,7 +386,7 @@ describe("BridgeFrameworkAdapter — selection ops", () => {
     const initP = adapter.init({ iframe: setup.iframe, origin: "*" })
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-13a-multi-select" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initP
     setup.postMessages.length = 0
@@ -397,13 +416,23 @@ describe("BridgeFrameworkAdapter — selection ops", () => {
     ).toBe(false)
   })
 
-  it("selectMany rejects when the bridge version is too old (feature gate)", async () => {
-    // Default test bridge version (2026-05-06a) is below the multi-
-    // select gate, so this should throw without sending INSPECT_MANY.
-    await expect(adapter.selectMany(["#btn"])).rejects.toThrow(/does not support multi-select/)
-    expect(
-      setup.postMessages.some((m) => (m as { type: string }).type === "INSPECT_MANY"),
-    ).toBe(false)
+  // There is no "selectMany rejects on a too-old bridge" case any more. Round
+  // 16 X3 raised `REQUIRED_BRIDGE_VERSION` past the multi-select threshold, so
+  // a bridge that would fail that feature gate is refused at the handshake and
+  // never reaches it — the refusal is covered by "init rejects when BRIDGE_READY
+  // reports a version older than required". The gate itself stays: it is the
+  // pattern every later feature gate copies, and it costs one comparison.
+
+  it("selectMany rejects before any bridge is attached", async () => {
+    const fresh = new BridgeFrameworkAdapter()
+    try {
+      await expect(fresh.selectMany(["#btn"])).rejects.toThrow(/not initialized/)
+      expect(
+        setup.postMessages.some((m) => (m as { type: string }).type === "INSPECT_MANY"),
+      ).toBe(false)
+    } finally {
+      await fresh.dispose()
+    }
   })
 
   it("selectBySelector resolves null when bridge responds with ELEMENT_INSPECTION_UNRESOLVED", async () => {
@@ -582,7 +611,7 @@ describe("BridgeFrameworkAdapter — incoming events", () => {
     const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initPromise
   })
@@ -895,7 +924,7 @@ describe("BridgeFrameworkAdapter — applyEdit (V1.3)", () => {
     const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initPromise
     setup.postMessages.length = 0
@@ -1329,7 +1358,7 @@ describe("BridgeFrameworkAdapter — applyEdit carries the caller's abort signal
     const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
     emitFromBridge(setup.contentWindow, {
       type: "BRIDGE_READY",
-      payload: { version: "2026-05-06a" },
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
     })
     await initPromise
     setup.postMessages.length = 0

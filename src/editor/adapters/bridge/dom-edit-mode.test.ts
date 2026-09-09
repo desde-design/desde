@@ -45,14 +45,17 @@ function makeMockIframe(): MockIframeSetup {
 
 function emitBridgeReady(
   setup: MockIframeSetup,
-  version = '2026-05-07a-dom',
+  // A version the shell accepts, with the document id every accepted bridge
+  // reports (round 16 X3).
+  version = '2026-09-09c-guard-origin',
+  documentId = 'doc-a',
 ): void {
   const event = new Event('message') as MessageEvent
   Object.defineProperty(event, 'data', {
     value: {
       source: 'desde-bridge',
       type: 'BRIDGE_READY',
-      payload: { version },
+      payload: { version, documentId },
     },
   })
   Object.defineProperty(event, 'source', { value: setup.contentWindow })

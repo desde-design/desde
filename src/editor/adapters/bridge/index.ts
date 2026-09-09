@@ -55,7 +55,18 @@ import {
   sanitizeOutlineIterationContexts,
 } from './inspection-conversion'
 
-const REQUIRED_BRIDGE_VERSION = '2026-05-06a'
+/**
+ * The oldest bridge the shell will talk to.
+ *
+ * Raised to the version that introduced `documentId` (round 16 X3). The shell's
+ * session boundary is decided by that id and nothing else: the fallback for a
+ * bridge that would not report one — the iframe's `load` event — could not
+ * decide the case it existed for, since every re-handshake the shell can cause
+ * follows a `load`. There is no installed base of older bridges (the repo's own
+ * rule: rename and break freely), so an id-less bridge is refused here rather
+ * than guessed at.
+ */
+const REQUIRED_BRIDGE_VERSION = '2026-09-09a-document-id'
 
 /**
  * Phase 6 feature gate. Bridges below this version don't know about
@@ -1541,8 +1552,8 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
   }
 
   /**
-   * Which document the bridge last said it was running in, or null when it did
-   * not say (a bridge older than 2026-09-09a, or no handshake yet).
+   * Which document the bridge last said it was running in, or null when no
+   * handshake has been accepted yet.
    *
    * Read by the shell right after `init()` resolves. A handshake that reports
    * the SAME id as the last one is the page the shell is already connected to
@@ -1564,11 +1575,26 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
       }
       return
     }
+    // The id is REQUIRED, and the version gate above is not enough on its own:
+    // a bridge that reports no version at all passes it. Without an id the
+    // shell cannot tell the page it is already on from a new one, and the
+    // session boundary is decided by that difference — so this is refused the
+    // same way an old version is, rather than guessed at.
+    if (typeof documentId !== 'string' || documentId.length === 0) {
+      if (this.bridgeReadyReject) {
+        this.bridgeReadyReject(
+          new Error(
+            `BridgeFrameworkAdapter: bridge reported no document id (needs ${REQUIRED_BRIDGE_VERSION} or newer)`,
+          ),
+        )
+      }
+      return
+    }
     this.lastBridgeVersion = version ?? null
-    // Only from an ACCEPTED ready, below the version guard above: a bridge the
-    // shell is refusing to talk to must not be able to move the document id and
-    // so end the live session.
-    this.lastBridgeDocumentId = documentId ?? null
+    // Only from an ACCEPTED ready, below the guards above: a bridge the shell is
+    // refusing to talk to must not be able to move the document id and so end
+    // the live session.
+    this.lastBridgeDocumentId = documentId
     if (this.bridgeReadyResolve) {
       this.bridgeReadyResolve()
     }

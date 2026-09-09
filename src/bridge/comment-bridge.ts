@@ -66,23 +66,33 @@ import { createOverridePreview } from "./override-preview"
   // The version global is the marker, because it is already the first thing
   // written and every serve layer already looks for it.
   //
-  // ONLY OUR OWN VERSION COUNTS. The guard used to return whenever the global
-  // was set at all, whoever set it. A prototype that ships its own copy of an
-  // OLDER bridge — bundled into the app, or served by a stale cache — runs
-  // first, writes the global, and would then suppress the bridge the shell
-  // just injected. That is worse than the duplicate it was defending against:
-  // an older bridge sends no document id, so the shell falls back to guessing
-  // the document boundary and discards valid edits on a re-handshake.
+  // ONLY OUR OWN VERSION COUNTS, AND ONLY A CONFIGURED ONE. The guard used to
+  // return whenever the global was set at all, whoever set it. A prototype that
+  // ships its own copy of the bridge — bundled into the app, or served by a
+  // stale cache — runs first, writes the global, and would then suppress the
+  // bridge the shell just injected. That is worse than the duplicate it was
+  // defending against: the app's own copy has no `data-shell-origin` on its
+  // script tag, so it fails closed, talks to nobody, and the cross-origin
+  // handshake never completes on a page that looks perfectly alive.
   //
-  // So the capture happens here, the comparison happens after the assignment
+  // Matching the version is not enough on its own, because the app can bundle
+  // the SAME version we inject. So the second marker is the shell origin: it is
+  // recorded below whenever this evaluation was configured with one, and the
+  // guard steps aside only for an earlier copy that was BOTH our version and
+  // configured. An unconfigured earlier copy is taken over instead, with one
+  // console warning naming the situation.
+  //
+  // So the captures happen here, the comparison happens after the assignment
   // below (the version literal is written straight into the global and read
   // back, and it has to stay single-use — see the note there), and only an
-  // exact match returns. A DIFFERENT version proceeds and takes the document
-  // over, which is the behaviour that shipped before the guard existed. Two
-  // bridges of different versions both listening is a pre-existing problem and
-  // is not what this guard is about.
+  // exact match on a configured copy returns. A DIFFERENT version proceeds and
+  // takes the document over, which is the behaviour that shipped before the
+  // guard existed. Two bridges of different versions both listening is a
+  // pre-existing problem and is not what this guard is about.
   const previousBridgeVersion = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__
+  const previousBridgeOrigin = (window as unknown as Record<string, unknown>)
+    .__DESDE_BRIDGE_ORIGIN__
 
   // ── BRIDGE_VERSION ────────────────────────────────────────────────────
   //
@@ -99,16 +109,52 @@ import { createOverridePreview } from "./override-preview"
   // the viewer's `html-inject`). Keep it a single-use literal;
   // bridge-bundle-version.test.ts fails if that stops holding.
   ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__ =
-    "2026-09-09b-document-id-guard"
+    "2026-09-09c-guard-origin"
   const BRIDGE_VERSION = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__ as string
 
+  /**
+   * The bundle's own `<script>` element, captured at IIFE body time.
+   * `document.currentScript` is only non-null while the script is executing,
+   * and the shell origin is read from it in two places — the guard right
+   * below, and `getShellOrigin()` on the first inbound message, long after.
+   * Reading it here is the only way to get it.
+   */
+  const OWN_SCRIPT_ELEMENT: Element | null =
+    typeof document !== "undefined" ? document.currentScript : null
+
+  /**
+   * The shell origin this evaluation was configured with, or null.
+   *
+   * Read eagerly, because the double-evaluation guard below needs it before
+   * anything else runs. `getShellOrigin()` reuses it rather than reading the
+   * attribute a second time.
+   */
+  const INJECTED_SHELL_ORIGIN = normalizeOrigin(readShellOriginAttribute())
+  // The marker the guard reads on the NEXT evaluation in this document: this
+  // copy was injected by a serve layer that told it who the shell is, so it can
+  // actually complete a handshake and a later copy may step aside for it.
+  if (INJECTED_SHELL_ORIGIN) {
+    ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_ORIGIN__ =
+      INJECTED_SHELL_ORIGIN
+  }
+
   // The other half of ONE BRIDGE PER DOCUMENT, above. THIS version was already
-  // running here, so this is the same bundle evaluated twice in one document:
-  // leave the running instance alone and return. Re-writing the global first
-  // is a no-op, it is the same string.
+  // running here, so this is the same bundle evaluated twice in one document.
+  // Leave the running instance alone and return — but only if that instance
+  // knows which shell to talk to. Re-writing the global first is a no-op, it is
+  // the same string.
   if (previousBridgeVersion === BRIDGE_VERSION) {
-    return
+    if (typeof previousBridgeOrigin === "string" && previousBridgeOrigin.length > 0) {
+      return
+    }
+    console.warn(
+      "[Desde Bridge] a copy of this bridge version was already running in " +
+        "this document with no shell origin configured (a copy the prototype " +
+        "bundles itself, or an injected tag whose data-shell-origin attribute " +
+        "was missing). That copy fails closed and can never complete the " +
+        "handshake, so this evaluation takes the document over.",
+    )
   }
 
   // ── DOCUMENT_ID ───────────────────────────────────────────────────────
@@ -124,7 +170,8 @@ import { createOverridePreview } from "./override-preview"
   // iframe's `load` event, and a document whose subresources finish AFTER the
   // bridge is ready fires `load` on a page the shell is already connected to —
   // which the shell then read as a reload and threw the designer's in-progress
-  // edits away.
+  // edits away. That guess is gone: the shell now REQUIRES the id and refuses
+  // the handshake of a bridge that sends none, so this value is not optional.
   //
   // Not a UUID: `crypto.randomUUID` is unavailable on insecure origins, and a
   // prototype served over plain http on a LAN address is exactly where this
@@ -177,15 +224,6 @@ import { createOverridePreview } from "./override-preview"
   let configuredShellOrigin: string | null = null
 
   /**
-   * The bundle's own `<script>` element, captured at IIFE body time.
-   * `document.currentScript` is only non-null while the script is executing,
-   * and `getShellOrigin()` runs lazily on the first inbound message — long
-   * after. Reading it here is the only way to get it.
-   */
-  const OWN_SCRIPT_ELEMENT: Element | null =
-    typeof document !== "undefined" ? document.currentScript : null
-
-  /**
    * Normalize a configured origin to the serialized form `event.origin`
    * carries, so `https://shell.example/` and `https://shell.example` compare
    * equal. Anything unparseable — or an opaque origin, which serializes to
@@ -216,7 +254,7 @@ import { createOverridePreview } from "./override-preview"
     if (!shellOriginRead) {
       shellOriginRead = true
       configuredShellOrigin =
-        normalizeOrigin(readShellOriginAttribute()) ??
+        INJECTED_SHELL_ORIGIN ??
         normalizeOrigin((window as unknown as Record<string, unknown>).__DESDE_SHELL_ORIGIN__)
       if (!configuredShellOrigin) {
         console.warn(

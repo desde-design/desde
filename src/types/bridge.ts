@@ -655,10 +655,14 @@ export type BridgeToShellMessage =
   // same value (the native one on load, and the PING and NAVIGATE echoes) and a
   // reload or navigation carries a different one. The shell uses it to tell a
   // re-handshake of the page it is already on from a genuinely new page: the
-  // first is not a session boundary, the second is. Absent on bridges older
-  // than 2026-09-09a, where the shell falls back to the iframe's `load` event:
-  // a handshake with no load since the previous one is the same document.
-  | { type: "BRIDGE_READY"; payload?: { version?: string; documentId?: string } }
+  // first is not a session boundary, the second is.
+  //
+  // REQUIRED. A bridge older than 2026-09-09a sends none, and the shell has no
+  // way to tell those two cases apart without it — the fallback it used to run
+  // (the iframe's `load` event) could not decide the case it existed for, so it
+  // is gone. Such a bridge is refused at the handshake by
+  // `REQUIRED_BRIDGE_VERSION` instead, and there is no installed base of them.
+  | { type: "BRIDGE_READY"; payload: { version?: string; documentId: string } }
   // Tier-2 edit verification response (paired with a READ_RENDERED_VALUE
   // requestId). `value` is null when the selector matched nothing.
   | { type: "RENDERED_VALUE_READ"; payload: { value: string | null }; requestId: string }

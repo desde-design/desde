@@ -76,6 +76,13 @@ interface MockIframeSetup {
 
 const PROTOTYPE_URL = "https://prototype.example.com/dashboard"
 
+/**
+ * A version the shell accepts. `REQUIRED_BRIDGE_VERSION` is the document-id
+ * bridge (round 16 X3), so every handshake fixture carries both a version at or
+ * above it and a `documentId`; a ready without one is refused.
+ */
+const CURRENT_BRIDGE_VERSION = "2026-09-09c-guard-origin"
+
 let activeMockSetup: MockIframeSetup | null = null
 
 beforeEach(() => {
@@ -223,7 +230,7 @@ describe("LivePrototypePane + useEditorEditing", () => {
     // away from the src pathname). So no messages flow until BRIDGE_READY
     // arrives.
     await act(async () => {
-      emitFromBridge({ type: "BRIDGE_READY", payload: { version: "2026-05-06a" } })
+      emitFromBridge({ type: "BRIDGE_READY", payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" } })
     })
 
     // Bridge connected once the handshake messages start flowing.
@@ -251,7 +258,7 @@ describe("LivePrototypePane + useEditorEditing", () => {
     render(<Harness onEditing={(e) => { editing = e }} />)
 
     await act(async () => {
-      emitFromBridge({ type: "BRIDGE_READY", payload: { version: "2026-05-06a" } })
+      emitFromBridge({ type: "BRIDGE_READY", payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" } })
     })
     // Bridge connected once the handshake messages start flowing.
     await waitFor(() => {
@@ -303,7 +310,7 @@ describe("LivePrototypePane + useEditorEditing", () => {
     render(<Harness manifestSource={manifestSource} />)
 
     await act(async () => {
-      emitFromBridge({ type: "BRIDGE_READY", payload: { version: "2026-05-06a" } })
+      emitFromBridge({ type: "BRIDGE_READY", payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" } })
     })
 
     await act(async () => {
@@ -341,7 +348,7 @@ describe("LivePrototypePane + useEditorEditing", () => {
     render(<Harness />)
 
     await act(async () => {
-      emitFromBridge({ type: "BRIDGE_READY", payload: { version: "2026-05-06a" } })
+      emitFromBridge({ type: "BRIDGE_READY", payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" } })
     })
 
     await act(async () => {
@@ -393,7 +400,7 @@ describe("LivePrototypePane + useEditorEditing", () => {
     try {
       render(<Harness manifestSource={throwingSource} />)
       await act(async () => {
-        emitFromBridge({ type: "BRIDGE_READY", payload: { version: "2026-05-06a" } })
+        emitFromBridge({ type: "BRIDGE_READY", payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" } })
       })
       await act(async () => {
         emitFromBridge({
@@ -598,7 +605,7 @@ describe("inspection-time drift detection (2026-07-30 widening)", () => {
     render(<Harness manifestSource={manifestSource} />)
 
     await act(async () => {
-      emitFromBridge({ type: "BRIDGE_READY", payload: { version: "2026-05-06a" } })
+      emitFromBridge({ type: "BRIDGE_READY", payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" } })
     })
     await act(async () => {
       emitFromBridge({
@@ -631,7 +638,7 @@ describe("inspection-time drift detection (2026-07-30 widening)", () => {
     render(<Harness manifestSource={manifestSource} />)
 
     await act(async () => {
-      emitFromBridge({ type: "BRIDGE_READY", payload: { version: "2026-05-06a" } })
+      emitFromBridge({ type: "BRIDGE_READY", payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" } })
     })
     await act(async () => {
       emitFromBridge({
@@ -667,7 +674,7 @@ describe("inspection-time drift detection (2026-07-30 widening)", () => {
     render(<Harness manifestSource={manifestSource} />)
 
     await act(async () => {
-      emitFromBridge({ type: "BRIDGE_READY", payload: { version: "2026-05-06a" } })
+      emitFromBridge({ type: "BRIDGE_READY", payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" } })
     })
     await act(async () => {
       emitFromBridge({
@@ -711,7 +718,7 @@ describe("inspection-time drift detection (2026-07-30 widening)", () => {
       render(<Harness manifestSource={manifestSource} />)
 
       await act(async () => {
-        emitFromBridge({ type: "BRIDGE_READY", payload: { version: "2026-05-06a" } })
+        emitFromBridge({ type: "BRIDGE_READY", payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" } })
       })
       await act(async () => {
         emitFromBridge({
@@ -763,7 +770,7 @@ describe("inspection-time drift detection (2026-07-30 widening)", () => {
     render(<Harness manifestSource={manifestSource} />)
 
     await act(async () => {
-      emitFromBridge({ type: "BRIDGE_READY", payload: { version: "2026-05-06a" } })
+      emitFromBridge({ type: "BRIDGE_READY", payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" } })
     })
 
     // Selection A: UiLabel, clicked selector deliberately mismatched so —
@@ -872,7 +879,7 @@ describe("class-edit lane — release-then-verify sequencing", () => {
     )
     render(<Harness />)
     await act(async () => {
-      emitFromBridge({ type: "BRIDGE_READY", payload: { version: "2026-06-08a-style-provenance" } })
+      emitFromBridge({ type: "BRIDGE_READY", payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" } })
     })
     await waitFor(() => {
       expect(activeMockSetup!.postMessages.length).toBeGreaterThan(0)
@@ -972,7 +979,7 @@ describe("class-edit lane — release-then-verify sequencing", () => {
     await act(async () => {
       emitFromBridge({
         type: "BRIDGE_READY",
-        payload: { version: "2026-09-09a", documentId: "doc-a" },
+        payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
       })
     })
     await waitFor(() => {
@@ -991,7 +998,7 @@ describe("class-edit lane — release-then-verify sequencing", () => {
     await act(async () => {
       emitFromBridge({
         type: "BRIDGE_READY",
-        payload: { version: "2026-09-09a", documentId: "doc-b" },
+        payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
       })
     })
 
@@ -1030,7 +1037,7 @@ describe("class-edit lane — release-then-verify sequencing", () => {
     await act(async () => {
       emitFromBridge({
         type: "BRIDGE_READY",
-        payload: { version: "2026-09-09a", documentId: "doc-a" },
+        payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
       })
     })
     await waitFor(() => {
@@ -1054,7 +1061,7 @@ describe("class-edit lane — release-then-verify sequencing", () => {
     await act(async () => {
       emitFromBridge({
         type: "BRIDGE_READY",
-        payload: { version: "2026-09-09a", documentId: "doc-b" },
+        payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
       })
     })
 
@@ -1140,20 +1147,14 @@ const INSPECTED_BUTTON = {
 }
 
 describe("bridge session boundary", () => {
-  /**
-   * Render, connect as `documentId`, and park one edit in the dialog.
-   *
-   * `null` is the id-less bridge (anything older than 2026-09-09a): the
-   * BRIDGE_READY carries no `documentId` field at all, which is what such a
-   * bridge actually sends.
-   */
-  async function connectHoldingAnEdit(documentId: string | null) {
+  /** Render, connect as `documentId`, and park one edit in the dialog. */
+  async function connectHoldingAnEdit(documentId: string) {
     let editing: ReturnType<typeof useEditorEditing> | null = null
     render(<Harness onEditing={(e) => { editing = e }} />)
     await act(async () => {
       emitFromBridge({
         type: "BRIDGE_READY",
-        payload: { version: "2026-09-09a", ...(documentId ? { documentId } : {}) },
+        payload: { version: CURRENT_BRIDGE_VERSION, documentId },
       })
     })
     await act(async () => {
@@ -1174,17 +1175,14 @@ describe("bridge session boundary", () => {
   }
 
   /** The iframe finished loading, and the bridge answers the re-handshake. */
-  async function reloadAndAnswer(
-    iframe: HTMLIFrameElement,
-    documentId: string | null,
-  ) {
+  async function reloadAndAnswer(iframe: HTMLIFrameElement, documentId: string) {
     await act(async () => {
       iframe.dispatchEvent(new Event("load"))
     })
     await act(async () => {
       emitFromBridge({
         type: "BRIDGE_READY",
-        payload: { version: "2026-09-09a", ...(documentId ? { documentId } : {}) },
+        payload: { version: CURRENT_BRIDGE_VERSION, documentId },
       })
     })
   }
@@ -1242,7 +1240,7 @@ describe("bridge session boundary", () => {
       await act(async () => {
         emitFromBridge({
           type: "BRIDGE_READY",
-          payload: { version: "2026-09-09a", documentId: "doc-a" },
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
         })
       })
       await act(async () => {
@@ -1270,7 +1268,7 @@ describe("bridge session boundary", () => {
       await act(async () => {
         emitFromBridge({
           type: "BRIDGE_READY",
-          payload: { version: "2026-09-09a", documentId: "doc-b" },
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
         })
       })
 
@@ -1313,7 +1311,7 @@ describe("bridge session boundary", () => {
       await act(async () => {
         emitFromBridge({
           type: "BRIDGE_READY",
-          payload: { version: "2026-09-09a", documentId: "doc-a" },
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
         })
       })
       await act(async () => {
@@ -1389,7 +1387,7 @@ describe("bridge session boundary", () => {
       await act(async () => {
         emitFromBridge({
           type: "BRIDGE_READY",
-          payload: { version: "2026-09-09a", documentId: "doc-a" },
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
         })
       })
       await act(async () => {
@@ -1472,7 +1470,7 @@ describe("bridge session boundary", () => {
       await act(async () => {
         emitFromBridge({
           type: "BRIDGE_READY",
-          payload: { version: "2026-09-09a", documentId: "doc-a" },
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
         })
       })
       // One buffered text capture. Its own debounced write never fires: no
@@ -1511,7 +1509,7 @@ describe("bridge session boundary", () => {
       await act(async () => {
         emitFromBridge({
           type: "BRIDGE_READY",
-          payload: { version: "2026-09-09a", documentId: "doc-b" },
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
         })
       })
 
@@ -1542,28 +1540,34 @@ describe("bridge session boundary", () => {
     }
   })
 
-  it("ends nothing on the first handshake of an attachment with an id-less bridge", async () => {
-    // Round 15 W3(b). Same rule, and it has to hold for a bridge that reports
-    // no document id too: the shell now stores `UNIDENTIFIED_DOCUMENT` for
-    // those, and that token must not read as "a previous document" on the very
-    // handshake that wrote it.
-    const { current } = await connectHoldingAnEdit(null)
-    expect(current().disambiguationPrompt).not.toBeNull()
-    expect(current().saveStatus ?? "").not.toMatch(RESET_STATUS)
-  })
-
-  it("ends the session for an id-less bridge when the iframe loaded in between", async () => {
-    // A bridge older than 2026-09-09a cannot say which document it is, so the
-    // iframe's `load` event is the only evidence there is, and the conservative
-    // call stands: a boundary too many rather than a boundary missed. The
-    // session boundary must not quietly disappear for old bridges.
-    const { iframe, current } = await connectHoldingAnEdit(null)
-
-    await reloadAndAnswer(iframe, null)
-
-    await waitFor(() => {
-      expect(current().disambiguationPrompt).toBeNull()
+  it("never connects to a bridge that reports no document id", async () => {
+    // Round 16 X3, replacing round 15's two id-less-bridge cases. The shell no
+    // longer has a fallback rule for a bridge that will not say which document
+    // it is: that rule could not decide the case it existed for, since every
+    // re-handshake the shell can cause follows a `load`. Such a bridge is
+    // refused at the handshake, so nothing attaches and no session begins.
+    let editing: ReturnType<typeof useEditorEditing> | null = null
+    render(<Harness onEditing={(e) => { editing = e }} />)
+    await act(async () => {
+      emitFromBridge({
+        type: "BRIDGE_READY",
+        payload: { version: CURRENT_BRIDGE_VERSION },
+      })
     })
-    expect(current().saveStatus ?? "").toMatch(RESET_STATUS)
+    // The shell reports a failed connection, and the bridge's own messages
+    // reach nothing: no subscription was ever made.
+    await waitFor(() => {
+      expect(editing!.status).toEqual({
+        kind: "error",
+        message: expect.stringMatching(/no document id/i),
+      })
+    })
+    await act(async () => {
+      emitFromBridge({
+        type: "MUTATION_AWAITING_DISAMBIGUATION",
+        payload: HELD_PROMPT,
+      })
+    })
+    expect(editing!.disambiguationPrompt).toBeNull()
   })
 })

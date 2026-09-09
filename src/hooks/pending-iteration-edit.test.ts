@@ -37,7 +37,6 @@ import {
   sessionEndPlan,
   settleHandOff,
   shouldEndSessionOnHandshake,
-  UNIDENTIFIED_DOCUMENT,
   structuralRouteFor,
   thisRowOperationAllowed,
   thisRowTemplateLocation,
@@ -1547,62 +1546,32 @@ describe("errorMessage", () => {
 })
 
 describe("shouldEndSessionOnHandshake", () => {
-  it("ends nothing on the first handshake of an attachment", () => {
+  it("ends nothing on the first handshake of a document", () => {
     // Nothing was adopted yet. The session this handshake connects to is the
     // one the attach just started, and ending it here would abort the
     // controller it had only just made.
-    expect(shouldEndSessionOnHandshake(null, "doc-a", false)).toBe(false)
-    // Even after a load: the attach's own first handshake follows the iframe
-    // loading the page, and there is still no earlier session to end.
-    expect(shouldEndSessionOnHandshake(null, "doc-a", true)).toBe(false)
-    expect(shouldEndSessionOnHandshake(null, null, true)).toBe(false)
+    expect(shouldEndSessionOnHandshake(null, "doc-a")).toBe(false)
   })
 
   it("ends nothing when the same document answers again", () => {
     // The defect this closes: the bridge announces itself as soon as its
     // script runs, so a page with a slow image fires `load` afterwards and the
     // shell re-handshakes with the page it is already on. Ending the session
-    // there discarded a draft the live bridge was still holding.
-    expect(shouldEndSessionOnHandshake("doc-a", "doc-a", false)).toBe(false)
-  })
-
-  it("believes the ids over the load event when the bridge reports one", () => {
-    // A document whose subresources finish after the bridge announced itself
-    // fires `load` on the page the shell is already editing. The id is the
-    // whole point of the 2026-09-09a bridge: it settles that case outright.
-    expect(shouldEndSessionOnHandshake("doc-a", "doc-a", true)).toBe(false)
-    expect(shouldEndSessionOnHandshake("doc-a", "doc-b", false)).toBe(true)
+    // there discarded a draft the live bridge was still holding. It is also the
+    // re-attach case: a teardown keeps the id, so the page that comes back is
+    // recognised rather than treated as a new one.
+    expect(shouldEndSessionOnHandshake("doc-a", "doc-a")).toBe(false)
   })
 
   it("ends the session when a different document is there", () => {
-    expect(shouldEndSessionOnHandshake("doc-a", "doc-b", true)).toBe(true)
+    expect(shouldEndSessionOnHandshake("doc-a", "doc-b")).toBe(true)
   })
 
-  describe("a bridge that reports no document id", () => {
-    // Round 15 W3(b). The shell used to mint a fresh token per completed
-    // handshake for these, which read EVERY re-handshake as a new document and
-    // discarded the designer's valid pending edits. The load event is the only
-    // honest evidence available, and a document cannot be replaced without one.
-    it("ends nothing when no load happened since the last handshake", () => {
-      expect(
-        shouldEndSessionOnHandshake(UNIDENTIFIED_DOCUMENT, null, false),
-      ).toBe(false)
-    })
-
-    it("ends the session when a load happened since the last handshake", () => {
-      expect(
-        shouldEndSessionOnHandshake(UNIDENTIFIED_DOCUMENT, null, true),
-      ).toBe(true)
-    })
-
-    it("ends the session when a bridge that DOES report an id takes over", () => {
-      // Only reachable through a document swap: an id is minted once per
-      // document evaluation, so a page cannot start reporting one in place.
-      // Ending is the conservative call either way.
-      expect(
-        shouldEndSessionOnHandshake(UNIDENTIFIED_DOCUMENT, "doc-a", false),
-      ).toBe(true)
-    })
+  it("ends the session for a handshake that names no document at all", () => {
+    // Round 16 X3 removed the id-less fallback: a bridge that reports no id is
+    // refused at the handshake, so this cannot happen through the wiring. If it
+    // ever does, ending is the conservative direction.
+    expect(shouldEndSessionOnHandshake("doc-a", null)).toBe(true)
   })
 })
 

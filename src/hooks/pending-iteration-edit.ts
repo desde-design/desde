@@ -944,56 +944,32 @@ export function mayClearInFlightMarker(captured: number, current: number): boole
  *
  * | `previousToken` | `nextToken` | Decision |
  * | --- | --- | --- |
- * | null (first handshake of an attachment) | anything | ends nothing |
+ * | null (first handshake of this document) | anything | ends nothing |
  * | a document | the SAME document | ends nothing: the page answered again |
  * | a document | a DIFFERENT document | ends the session: a new page is here |
  *
- * `nextToken` is the bridge's own per-document id. A bridge older than
- * 2026-09-09a reports none and arrives here as `null`, and the shell used to
- * mint a fresh token per handshake for that case — which read EVERY handshake
- * after the first as a new document, so a page that simply answered twice had
- * the designer's pending edits discarded.
+ * Both tokens are the bridge's own per-document id, minted once per bridge
+ * IIFE. Every bridge the shell accepts reports one: a bridge that does not is
+ * refused at the handshake by `REQUIRED_BRIDGE_VERSION`, because the fallback
+ * the shell used to run for those — the iframe's `load` event — could not
+ * decide the one case it existed for. Every re-handshake the shell can cause
+ * follows a `load`, so "a load happened since the last handshake" was true even
+ * for the same page answering twice, which is exactly what it was meant to tell
+ * apart. A `nextToken` of null therefore cannot happen through the wiring; it
+ * ends the session anyway, which is the conservative direction.
  *
- * `loadSinceLast` is the honest answer for a bridge that cannot say who it is:
- * did the iframe fire a `load` event since the previous completed handshake?
- * A document cannot be replaced without one, so no load means the same
- * document, and a load means a new one may be here and the conservative call
- * is to end the session. `previousToken` for such a bridge is
- * {@link UNIDENTIFIED_DOCUMENT}: it is not null, so the shell can still tell
- * "a handshake completed" from "none has yet".
- *
- * | `previousToken` | `nextToken` | `loadSinceLast` | Decision |
- * | --- | --- | --- | --- |
- * | unidentified | null | false | ends nothing: the same page answered again |
- * | unidentified | null | true | ends the session: a page loaded in between |
+ * `previousToken` is null before any handshake has been accepted for this
+ * document, which is the first handshake of a fresh attachment and of every
+ * attachment that follows a document change. It SURVIVES a plain teardown, so a
+ * re-attach over the same page recognises it and re-arms the buffered edits
+ * rather than starting a session that knows nothing about them.
  */
 export function shouldEndSessionOnHandshake(
   previousToken: string | null,
   nextToken: string | null,
-  loadSinceLast: boolean,
 ): boolean {
-  // No handshake has completed in this attachment yet, so there is no session
-  // about a document for this one to end.
-  if (previousToken === null) return false
-  // Both sides name their document: the ids decide, and nothing else can.
-  if (nextToken !== null) return previousToken !== nextToken
-  // A bridge that reports no id. The iframe's `load` event is the only
-  // evidence left that the document underneath changed.
-  return loadSinceLast
+  return previousToken !== null && previousToken !== nextToken
 }
-
-/**
- * The token stored for a completed handshake whose bridge reported no document
- * id (a bridge older than 2026-09-09a).
- *
- * It exists so `previousToken` can distinguish "a handshake completed, and the
- * bridge would not say which document" from "no handshake has completed yet",
- * which is the difference between consulting `loadSinceLast` and ending
- * nothing. It never has to be unique per document, because it is never
- * compared for equality against another document's id: the no-id branch of
- * {@link shouldEndSessionOnHandshake} is decided by the load event instead.
- */
-export const UNIDENTIFIED_DOCUMENT = "unidentified-document"
 
 /**
  * Did a handshake fail because a newer one replaced it?
