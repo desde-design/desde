@@ -4843,12 +4843,27 @@ export function useEditorEditing({
     setPendingDisambiguations([])
     // The modal goes with the rows. Emptying `pendingDisambiguations` closes
     // the dialog, so leaving the owner set would wedge every later question
-    // behind a dialog that is no longer on screen. The waiting drafts die with
-    // the reload this triggers, which is what the designer asked for.
+    // behind a dialog that is no longer on screen.
     modalOwnerRef.current = null
     modalQueueRef.current = []
     iterationScopePromptRef.current = null
     setIterationScopePrompt(null)
+    // Hand every draft still in the maps back, while the adapter that holds
+    // them is still there to hear it. Clearing the queue and the prompt above
+    // drops the REFERENCES only; the drafts themselves live in the maps, and
+    // the reload below makes the bridge re-issue those same ids from
+    // `dom-pending-1`. A verify still in flight would then open a dialog about
+    // a draft the reloaded page does not hold, under an id that names someone
+    // else's edit.
+    releaseHeldBridgeDrafts()
+    // A reload ends the drafts' session as surely as a teardown does, without
+    // detaching the adapter. So the generation moves and the session's requests
+    // are cancelled: every in-flight continuation stops where it is. The
+    // controller is renewed rather than left aborted, because the adapter is
+    // staying and the next edit needs a live one.
+    adapterGenerationRef.current += 1
+    adapterAbortRef.current?.abort()
+    adapterAbortRef.current = new AbortController()
     fileHashesRef.current = {}
     setSaveStatus(null)
     adapterRef.current?.clearPropOverrides()
@@ -4868,7 +4883,7 @@ export function useEditorEditing({
     // backstop flag. The flag only governs the AUTOMATIC post-edit
     // safety net; explicit user actions bypass it.
     requestPrototypeReload(iframeRef.current, "conflict-reload", "force")
-  }, [iframeRef])
+  }, [iframeRef, releaseHeldBridgeDrafts])
 
   /**
    * Merge a chat-proposed edit into the live editing state. Called by
