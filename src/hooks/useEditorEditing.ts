@@ -112,6 +112,7 @@ import {
 } from "./layers-density-storage"
 import {
   decideAfterVerify,
+  isStaleVerify,
   iterationTemplateLocation,
   sameBridgeDraft,
   type PendingIterationEdit,
@@ -515,14 +516,36 @@ export function useEditorEditing({
     }
   }, [])
 
+  /**
+   * True whenever no adapter is attached: the hook is disabled, unmounted, or
+   * between attachments. An in-flight iteration verify that resolves in that
+   * window must NOT open a dialog or start an agent turn; the UI that
+   * authorized the edit is gone. Paired with `verifyAbortRef`, which stops the
+   * request itself rather than only ignoring its answer.
+   */
+  const disposedRef = useRef(true)
+  const verifyAbortRef = useRef<AbortController | null>(null)
+  /**
+   * Monotonic id for iteration verifies. Each intercept takes the next one and
+   * records it as the latest; only the latest answer may open the dialog or
+   * hand off. See `isStaleVerify` for what went wrong without it.
+   */
+  const verifySeqRef = useRef(0)
+
   // Adapter lifecycle. Attached when `enabled` flips true and an iframe
   // is present; disposed on disable, unmount, or url change. Selection
   // wiring + manifest lookup mirror what `<LivePrototypePane>` does so
   // the project-route inline mode behaves identically to /compose.
   useEffect(() => {
+    // React runs the PREVIOUS cleanup before this body, so on any
+    // disable/re-attach the flag is already true here. It is cleared only
+    // once an attachment actually follows, never on an early return.
+    disposedRef.current = true
     if (!enabled) return
     const iframe = iframeRef.current
     if (!iframe) return
+    disposedRef.current = false
+    verifyAbortRef.current = new AbortController()
 
     const adapter = new BridgeFrameworkAdapter()
     let cancelled = false
@@ -660,6 +683,11 @@ export function useEditorEditing({
 
     return () => {
       cancelled = true
+      // Stop any iteration verify still in flight, and mark the window in
+      // which a late answer must do nothing but release its own draft.
+      disposedRef.current = true
+      verifyAbortRef.current?.abort()
+      verifyAbortRef.current = null
       iframe.removeEventListener("load", runHandshake)
       treeUpdateUnsubRef.current?.()
       treeUpdateUnsubRef.current = null
@@ -2231,8 +2259,33 @@ export function useEditorEditing({
         setSaveStatus("This edit has no source location, so it cannot be applied.")
         return true
       }
-      void verifyIterationLoop({ file: location.file, line: location.line, column: location.column }).then(
+      // Claim the latest slot. Responses are not ordered, so this is what
+      // tells a late answer that newer keystrokes have replaced it.
+      const seq = ++verifySeqRef.current
+      const signal = verifyAbortRef.current?.signal
+      // The window between "this verify started" and "this verify answered"
+      // is one in which the surface can go away. Both facts are read at
+      // resolve time, not captured now.
+      const gone = (): boolean => disposedRef.current || signal?.aborted === true
+      void verifyIterationLoop({
+        file: location.file,
+        line: location.line,
+        column: location.column,
+        ...(signal ? { signal } : {}),
+      }).then(
         (outcome) => {
+          if (gone()) {
+            // No status: the panel that would show it is gone too.
+            releaseBridgeDraft(pending)
+            return
+          }
+          if (isStaleVerify(seq, verifySeqRef.current)) {
+            // Release THIS draft only. The newer intercept owns the prompt
+            // and whatever draft is in it.
+            releaseBridgeDraft(pending)
+            setSaveStatus("A newer edit replaced this one.")
+            return
+          }
           const action = decideAfterVerify({
             outcome,
             pending,
@@ -2282,6 +2335,7 @@ export function useEditorEditing({
         // draft and surface a status, or it leaves the bridge blocked with
         // nothing shown.
         releaseBridgeDraft(pending)
+        if (gone()) return
         setSaveStatus(`Could not check the source for a loop: ${(err as Error).message}`)
       })
       return true

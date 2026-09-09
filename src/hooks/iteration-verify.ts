@@ -11,7 +11,17 @@ export type IterationVerifyOutcome =
   | { kind: "error"; reason: string }
 
 export async function verifyIterationLoop(
-  args: { file: string; line: number; column: number },
+  args: {
+    file: string
+    line: number
+    column: number
+    /**
+     * Aborted when the editing hook is disposed or disabled. Without it a
+     * verify outlives the surface that authorized it, and its `no-loop`
+     * answer starts an agent turn after the UI is gone.
+     */
+    signal?: AbortSignal
+  },
   fetchImpl: typeof editorFetch = editorFetch,
 ): Promise<IterationVerifyOutcome> {
   let response: Response
@@ -23,6 +33,7 @@ export async function verifyIterationLoop(
         file: args.file,
         templateLocation: { line: args.line, column: args.column },
       }),
+      ...(args.signal ? { signal: args.signal } : {}),
     })
   } catch (err) {
     return { kind: "error", reason: (err as Error).message }

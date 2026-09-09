@@ -31,4 +31,14 @@ describe("verifyIterationLoop", () => {
     const fetchImpl = vi.fn(async () => { throw new Error("offline") })
     expect(await verifyIterationLoop(args, fetchImpl as never)).toEqual({ kind: "error", reason: "offline" })
   })
+
+  it("forwards the caller's abort signal to fetch, so a disposed surface stops the request", async () => {
+    const controller = new AbortController()
+    const fetchImpl = vi.fn(async () => json({ ok: true, loop: null, reason: "x" }))
+    await verifyIterationLoop({ ...args, signal: controller.signal }, fetchImpl as never)
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    expect(init.signal).toBeDefined()
+    controller.abort()
+    expect((init.signal as AbortSignal).aborted).toBe(true)
+  })
 })

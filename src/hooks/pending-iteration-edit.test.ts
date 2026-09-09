@@ -5,6 +5,7 @@ import { EDIT_HANDOFF_MARKER } from "@/editor/edit-service/build-edit-escalation
 import {
   decideAfterVerify,
   describeAmbiguousIteration,
+  isStaleVerify,
   iterationTemplateLocation,
   sameBridgeDraft,
   type PendingIterationEdit,
@@ -120,6 +121,19 @@ describe("sameBridgeDraft", () => {
       iterationContext,
     }
     expect(sameBridgeDraft(del, domText("p-1"))).toBe(false)
+  })
+})
+
+describe("isStaleVerify", () => {
+  it("is false for the only verify in flight and for the newest one", () => {
+    expect(isStaleVerify(1, 1)).toBe(false)
+    expect(isStaleVerify(7, 7)).toBe(false)
+  })
+
+  it("is true for an older verify answering after a newer one started", () => {
+    // A (seq 1) and B (seq 2) are both in flight; B is the latest. A's answer,
+    // whenever it lands, may not touch the prompt or B's draft.
+    expect(isStaleVerify(1, 2)).toBe(true)
   })
 })
 

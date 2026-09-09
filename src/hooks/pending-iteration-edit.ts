@@ -140,6 +140,25 @@ export function sameBridgeDraft(a: PendingIterationEdit, b: PendingIterationEdit
 }
 
 /**
+ * Is this verify's answer stale, i.e. did a newer intercept start while it was
+ * in flight?
+ *
+ * Verify is an HTTP round trip and nothing orders the responses. Draft P1 goes
+ * out, the user types again, draft P2 goes out. If B answers first the dialog
+ * shows P2, and A's late answer then released P2 (the NEWER keystrokes) and
+ * reopened P1. With two `loop` answers it was worse: the second completion
+ * silently destroyed the first edit. Sequence numbers make "newer exists" a
+ * fact rather than an inference from object identity, which does not hold
+ * (the pending object is rebuilt on every keystroke round trip).
+ *
+ * A stale result may only release ITS OWN draft. It must not touch the prompt
+ * or the draft the newer intercept is holding.
+ */
+export function isStaleVerify(seq: number, latest: number): boolean {
+  return seq !== latest
+}
+
+/**
  * What the client should do once the server has answered "is there a loop at
  * this position?". Pure, so the four exits are testable without mounting the
  * hook: an error surfaces as a status, a missing loop goes to chat, a
