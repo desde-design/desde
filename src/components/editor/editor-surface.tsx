@@ -612,9 +612,12 @@ export function EditorSurface({
             `Walk the flow live: decide which screens matter, navigate/interact to reach each, and add a capture step per screen. Don't add it to a canvas yourself; just save the plan.`,
         )
         if (!started) {
-          // Refused (a chat is already running with detached sessions off) —
-          // `submitChatInNewSession` already showed the refusal toast, so
-          // just unwind the pending state, same as the catch block below.
+          // Two ways to get here, and only one of them has already told the
+          // user. The client guard (a chat is already running) toasts inside
+          // `submitChatInNewSession`; an HTTP or network refusal of the POST
+          // surfaces in the chat panel's own failure banner instead. Either
+          // way nothing is running, so unwind the pending state, same as the
+          // catch block below.
           pendingCanvasFlowRef.current = null
           setGeneratingCanvasFlow(false)
         }
