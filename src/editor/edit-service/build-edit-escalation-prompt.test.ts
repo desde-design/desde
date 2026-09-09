@@ -224,6 +224,40 @@ describe("buildCommentFixPrompt", () => {
     expect(prompt).toContain(body.trim())
   })
 
+  /**
+   * L7. `seed.body` is typed `string`, and the type is a claim the wire never
+   * checked: a comment arrives over `postMessage` / the comment store, so its
+   * body can be anything JSON can hold. `decodeCommentMentions` is string-only,
+   * and a builder that throws takes the hand-off down instead of degrading it.
+   */
+  it("does not throw on a body that is not a string", () => {
+    for (const body of [
+      undefined,
+      null,
+      42,
+      { text: "nested" },
+      ["a", "b"],
+    ] as unknown as string[]) {
+      const prompt = buildCommentFixPrompt({ body, selector: "div", page: "/" })
+      expect(prompt).toContain(EDIT_HANDOFF_MARKER)
+      // Renders as an empty comment rather than as the object's shape.
+      expect(prompt).toContain('- Comment: ""')
+      expect(prompt).not.toContain("nested")
+    }
+  })
+
+  it("does not throw on a sourceLoc that is not a string", () => {
+    const prompt = buildCommentFixPrompt({
+      body: "fix",
+      selector: "div",
+      page: "/",
+      sourceLoc: { file: "src/App.vue" } as unknown as string,
+    })
+    // Treated as unresolved, which is the honest reading: there is no location.
+    expect(prompt).not.toContain("- Source:")
+    expect(prompt).toContain("capture_screenshot")
+  })
+
   it("renders a hostile comment number as a number", () => {
     const prompt = buildCommentFixPrompt({
       body: "fix",

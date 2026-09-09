@@ -25,8 +25,12 @@ export interface EscalationMutation {
 }
 
 /** Strip the trailing `:column` so the prompt reads `file:line`. */
-function formatLocation(sourceLoc: string | null): string | null {
-  if (!sourceLoc) return null
+function formatLocation(sourceLoc: unknown): string | null {
+  // `unknown`, not `string | null`: every caller reads this off a payload that
+  // crossed the wire, where the declared type is a claim nobody checked. A
+  // non-string reached `.split` and threw, which takes the whole hand-off down
+  // rather than degrading it.
+  if (typeof sourceLoc !== "string" || !sourceLoc) return null
   const parts = sourceLoc.split(":")
   if (parts.length >= 3) {
     // file may itself contain ':' on exotic paths — keep all but the last
@@ -148,7 +152,17 @@ export function buildCommentFixPrompt(seed: CommentFixSeed): string {
   // is still flattened, and it still sits inside the envelope, because it is
   // text one person wrote for another and this message goes to an agent with
   // write tools.
-  const body = sanitizeField(decodeCommentMentions(seed.body).trim(), DETAIL_LIMIT)
+  //
+  // `seed.body` is typed `string`, and the type is a claim the wire never
+  // checked: a comment arrives over `postMessage` / the comment store, so its
+  // body can be anything JSON can hold. `decodeCommentMentions` is
+  // string-only and would throw on an object, and a builder that throws
+  // takes down the hand-off instead of degrading it. Same posture
+  // `sanitizeField` and `safeCount` already take for every other field here.
+  const rawBody = typeof seed.body === "string" ? seed.body : ""
+  const body = sanitizeField(decodeCommentMentions(rawBody).trim(), DETAIL_LIMIT)
+  // `number` needs no guard of its own: `safeCount` is already total, and it
+  // renders a hostile value as `0` rather than dropping the reference.
   const ref = seed.number ? ` (comment #${String(safeCount(seed.number))})` : ""
   const where = formatLocation(seed.sourceLoc ?? null)
   const page = sanitizeField(seed.page)
