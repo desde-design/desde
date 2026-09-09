@@ -8,6 +8,13 @@
  * handle it consistently. All fields the bridge captures are passed
  * through; the agent decides what's actually load-bearing.
  *
+ * **Everything it copies comes from the page**, including the visible cell
+ * text, the selectors, the source locations and the iteration numbers. So it
+ * is written like the other hand-offs: the marker line first, every copied
+ * field flattened to one line, the facts inside a per-message random envelope,
+ * and the instruction sentences outside it. It used to interpolate all of it
+ * raw into a message that starts a write-capable turn.
+ *
  * Framework-neutral. Mentions of "v-for" / ".map()" stay out — the
  * agent reads the source file and recognizes idioms from there. The
  * `iterationContext.source` enum (`v-for | map | each | unknown`) is
@@ -16,6 +23,14 @@
  */
 
 import type { TableEdgeContextMenuPayload } from "@/types/bridge"
+import {
+  DETAIL_LIMIT,
+  EDIT_HANDOFF_MARKER,
+  fenceHandoffFacts,
+  HANDOFF_FENCE_NOTE,
+  safeCount,
+  sanitizeField,
+} from "@/editor/edit-service/build-edit-escalation-prompt"
 
 export type TableEdgeAction =
   | "delete"
@@ -41,14 +56,23 @@ function formatLocation(
   loc: { file: string; line: number; column: number } | undefined,
 ): string {
   if (!loc) return "(no source location available)"
-  return `${loc.file}:${loc.line}:${loc.column}`
+  // The two numbers are typed but never checked on the wire, same as
+  // everywhere else a bridge coordinate is rendered.
+  return `${sanitizeField(loc.file)}:${String(safeCount(loc.line))}:${String(safeCount(loc.column))}`
 }
 
-function formatFingerprints(strings: string[], totalCount: number): string {
-  if (strings.length === 0) return "(no visible text in cells)"
-  const list = strings.map((s) => `"${s}"`).join(", ")
-  if (totalCount > strings.length) {
-    return `${list} (showing first ${strings.length} of ${totalCount} cells)`
+/**
+ * The cells' visible text, which is the most page-controlled field here: a
+ * prototype can put anything in a table cell. Each entry is flattened and
+ * capped on its own, then the whole list rides one bullet inside the envelope.
+ */
+function formatFingerprints(strings: readonly string[], totalCount: number): string {
+  const shown = strings.slice(0, 50)
+  if (shown.length === 0) return "(no visible text in cells)"
+  const list = shown.map((s) => `"${sanitizeField(s)}"`).join(", ")
+  const total = safeCount(totalCount)
+  if (total > shown.length) {
+    return `${list} (showing first ${String(shown.length)} of ${String(total)} cells)`
   }
   return list
 }
@@ -58,32 +82,42 @@ export function buildTableEdgeInstruction(
   payload: TableEdgeContextMenuPayload,
 ): string {
   const verb = actionLabel(action, payload.kind)
-  const lines: string[] = []
-  lines.push(`[Table edge action]`)
-  lines.push(`Action: ${verb}`)
-  lines.push(
-    `Targeted band: ${payload.kind} index ${payload.index} of ${payload.totalBands}`,
-  )
-  lines.push(`Container selector: ${payload.containerSelector || "(none)"}`)
-  lines.push(`Container source: ${formatLocation(payload.containerEditTarget)}`)
-  lines.push(`Target selector: ${payload.targetSelector || "(none)"}`)
-  lines.push(`Target source: ${formatLocation(payload.editTarget)}`)
+  const kind = payload.kind === "column" ? "column" : "row"
+  const facts: string[] = [
+    `- Action: ${verb}`,
+    `- Targeted band: ${kind} index ${String(safeCount(payload.index))} of ${String(safeCount(payload.totalBands))}`,
+    `- Container selector: ${sanitizeField(payload.containerSelector) || "(none)"}`,
+    `- Container source: ${formatLocation(payload.containerEditTarget)}`,
+    `- Target selector: ${sanitizeField(payload.targetSelector) || "(none)"}`,
+    `- Target source: ${formatLocation(payload.editTarget)}`,
+  ]
   if (payload.iterationContext) {
     const ic = payload.iterationContext
-    lines.push(
-      `Iteration context: source=${ic.source}, key=${JSON.stringify(ic.key)}, index=${ic.index}, siblingCount=${ic.siblingCount}`,
+    // `key` is a string or a number. `JSON.stringify` of a string keeps its
+    // escapes, so a newline inside it survives as `\n` rather than as a line
+    // break; sanitize anyway, so the rule does not depend on that.
+    const key = typeof ic.key === "string" ? `"${sanitizeField(ic.key)}"` : String(safeCount(ic.key))
+    facts.push(
+      `- Iteration context: source=${sanitizeField(ic.source, 20)}, key=${key}, index=${String(safeCount(ic.index))}, siblingCount=${String(safeCount(ic.siblingCount))}`,
     )
   } else {
-    lines.push(
-      `Iteration context: none (target is not produced by a detected iteration)`,
+    facts.push(
+      "- Iteration context: none (target is not produced by a detected iteration)",
     )
   }
-  lines.push(
-    `Visible cell text: ${formatFingerprints(payload.cellFingerprints, payload.cellCount)}`,
+  facts.push(
+    `- Visible cell text: ${sanitizeField(formatFingerprints(payload.cellFingerprints, payload.cellCount), DETAIL_LIMIT)}`,
   )
-  lines.push("")
-  lines.push(
+  return [
+    EDIT_HANDOFF_MARKER,
+    "",
+    "[Table edge action]",
+    `I picked "${sanitizeField(verb, 60)}" from the ${kind} edge menu in the prototype.`,
+    "",
+    HANDOFF_FENCE_NOTE,
+    "",
+    ...fenceHandoffFacts(facts),
+    "",
     "Read the indicated source file to confirm how this row/column is produced (literal markup, iteration over data, or component-in-loop) before proposing the edit. Edit at the right level: if rows come from iteration, row edits usually belong on the data; columns are typically template-bound.",
-  )
-  return lines.join("\n")
+  ].join("\n")
 }

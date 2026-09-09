@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { RefObject } from "react"
 import type { TableEdgeContextMenuPayload } from "@/types/bridge"
 import { buildTableEdgeInstruction, type TableEdgeAction } from "@/lib/table-edge-instruction"
+import { validateIterationContext } from "@/editor/adapters/bridge/inspection-conversion"
 import { isBridgeMessage, originOf } from "./bridge-message-guard"
 
 export interface TableEdgeMenuState {
@@ -105,15 +106,24 @@ export function useTableEdgeMenu(
       const data = event.data as { type?: string; payload?: unknown }
       if (data.type !== "TABLE_EDGE_CONTEXT_MENU") return
       if (!active) return
-      const payload = data.payload as TableEdgeContextMenuPayload
+      const raw = data.payload as TableEdgeContextMenuPayload
       const iframe = iframeRef.current
       if (!iframe) return
       const rect = iframe.getBoundingClientRect()
+      // Same gate the inspection and layers boundaries apply: an iteration
+      // context that fails the shape check is DROPPED, so the instruction says
+      // "none" rather than carrying page-written numbers and expressions into
+      // a chat turn. Unlike an edit, nothing here routes on the context (it is
+      // a hint for the agent), so dropping it is the whole refusal.
+      const checked = validateIterationContext(raw.iterationContext)
+      const payload: TableEdgeContextMenuPayload = checked.ok
+        ? { ...raw, iterationContext: checked.value }
+        : { ...raw, iterationContext: undefined }
       setMenu({
         payload,
         shellAnchor: {
-          x: rect.left + payload.menuAnchor.x,
-          y: rect.top + payload.menuAnchor.y,
+          x: rect.left + raw.menuAnchor.x,
+          y: rect.top + raw.menuAnchor.y,
         },
       })
     }
