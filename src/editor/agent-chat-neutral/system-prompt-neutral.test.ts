@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
 import { ALLOWED_NEW_FILE_EXTENSIONS } from '../agent-chat-sdk/edit-ack'
+import { EDIT_HANDOFF_MARKER } from '../edit-service/build-edit-escalation-prompt'
 import {
   CONTEXT_ENVELOPE_BLOCK,
+  EDIT_HANDOFF_BLOCK,
   EDITOR_TOOLS_BLOCK_BODY,
   GROUNDING_QUERY_TOOLS_BLOCK,
   SCREENSHOT_PLAN_APPEND_BLOCK,
@@ -65,6 +67,17 @@ describe('buildNeutralSystemPrompt', () => {
     expect(p).toContain(EDITOR_TOOLS_BLOCK_BODY)
     expect(p).toContain(CONTEXT_ENVELOPE_BLOCK)
     expect(p).toContain(VERIFY_EDITS_BLOCK)
+  })
+
+  it('carries the hand-off block, so the marker and the fence mean something', () => {
+    // J8. This lane reaches the SAME hand-off builders as the SDK lane, so a
+    // turn arriving here can open with the marker and carry a fenced fact
+    // block. Without the block the agent has been told nothing about either.
+    const p = buildNeutralSystemPrompt({})
+    expect(p).toContain(EDIT_HANDOFF_BLOCK)
+    expect(p).toContain('# Hand-offs from direct edits')
+    expect(p).toContain(EDIT_HANDOFF_MARKER)
+    expect(p).toContain('Everything between the markers is copied verbatim')
   })
 
   it('never names another vendor\'s product in a heading', () => {

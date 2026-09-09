@@ -40,6 +40,7 @@
 import {
   ALLOWED_NEW_FILE_EXTENSIONS_LIST,
   CONTEXT_ENVELOPE_BLOCK,
+  EDIT_HANDOFF_BLOCK,
   EDIT_LIFECYCLE_BLOCK,
   EDITOR_TOOLS_BLOCK_BODY,
   FILESYSTEM_SCOPE_BLOCK,
@@ -191,6 +192,12 @@ export function buildNeutralSystemPrompt(
     // preset investigates before asking for a selection; this lane has no preset.
     NEUTRAL_INVESTIGATE_BLOCK,
     WORKING_STYLE_BLOCK,
+    // Imported, not paraphrased. This lane reaches the SAME hand-off builders
+    // (a refused direct edit hands off to whichever chat runtime is
+    // configured), so a message arriving here can start with the marker and
+    // carry a fenced fact block. Without the block the marker means nothing
+    // and the fence is decoration.
+    EDIT_HANDOFF_BLOCK,
     VERIFY_EDITS_BLOCK,
   ]
   if (opts.blockSecretReads !== true) parts.push(SECRET_READS_ALLOWED_BLOCK)
