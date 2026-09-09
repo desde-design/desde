@@ -109,7 +109,7 @@ interface EditorRightRailProps {
    * Escalate-to-chat seam forwarded to the Comments tab's per-comment
    * "Fix with AI" action. Same handler direct-manipulation edits use.
    */
-  onEscalateToChat?: (prompt: string) => boolean
+  onEscalateToChat?: (prompt: string) => Promise<boolean>
   /**
    * Active responsive breakpoint from the surface's global viewport
    * control. Forwarded to the inspector so its style sections edit the

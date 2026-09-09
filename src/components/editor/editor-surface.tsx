@@ -226,13 +226,13 @@ export function EditorSurface({
   // prompt and the agent's answer visible in the tab strip. `chatSubmitRef`
   // is pointed at a submit that mints the session (see `submitChatInNewSession`).
   const handleEditEscalation = useCallback(
-    (prompt: string): boolean => {
+    async (prompt: string): Promise<boolean> => {
       const submit = chatSubmitRef.current
       const canStart = canStartChatSessionRef.current
       if (!submit || !canStart) return false
       // `canStartChatSession` (declared with `submitChatInNewSession` below)
       // gates on the same "a chat is already running" rule and shows its own
-      // toast on refusal. Check it here too, synchronously, so a refused
+      // toast on refusal. Check it here too, before submitting, so a refused
       // hand-off returns `false` with no success toast instead of the
       // contradictory pair a caller used to see before this fix (both the
       // refusal toast from `canStartChatSession` AND "Sent this edit to
@@ -240,12 +240,14 @@ export function EditorSurface({
       if (!canStart()) return false
       setView("editor")
       setActiveTab("chat")
-      // Deliberately synchronous, and deliberately not awaited. The caller
-      // (`useEditorEditing`) decides whether to keep or clear its buffer from
-      // this boolean, and it cannot hold an edit for the length of a turn.
-      // The guard above is the only refusal knowable at this instant; a later
-      // HTTP refusal surfaces in the chat panel's own failure banner.
-      void submit(prompt)
+      // AWAITED, not fired and forgotten. `submit` reports whether the server
+      // actually took the turn, and the caller (`useEditorEditing`) decides
+      // from this boolean whether to keep or clear its edit buffer. Returning
+      // `true` before the POST answered told the caller an edit was safely in
+      // chat when an HTTP or network refusal could still drop it, and the
+      // buffer was already cleared by then.
+      const accepted = await submit(prompt)
+      if (!accepted) return false
       toast.message("Sent this edit to chat", {
         description: "The assistant will check the source and ask if it needs a decision.",
       })

@@ -210,11 +210,14 @@ interface UseEditorEditingOptions {
    * deterministic lane refused, and for iteration prompts whose loop
    * could not be found in source.
    *
-   * Returns whether the handoff was ACCEPTED: `true` when a chat turn was
-   * dispatched, `false` when it no-ops (no chat transport available). The
-   * internal `needsChat` auto-fire paths ignore the return value.
+   * Resolves to whether the hand-off was ACCEPTED: `true` when the server
+   * took the chat turn, `false` when the client-side guard refused it (a chat
+   * is already streaming, or no transport exists) or when the POST itself
+   * failed. Asynchronous on purpose: the guard is knowable at once, but the
+   * server's answer is not, and a caller that clears its edit buffer on a
+   * synchronous `true` can lose an edit the server then refused.
    */
-  escalateToChat?: (prompt: string) => boolean
+  escalateToChat?: (prompt: string) => Promise<boolean>
 }
 
 /**
@@ -2273,7 +2276,7 @@ export function useEditorEditing({
         column: location.column,
         ...(signal ? { signal } : {}),
       }).then(
-        (outcome) => {
+        async (outcome) => {
           if (gone()) {
             // No status: the panel that would show it is gone too.
             releaseBridgeDraft(pending)
@@ -2298,9 +2301,23 @@ export function useEditorEditing({
             return
           }
           if (action.kind === "hand-off") {
-            releaseBridgeDraft(pending)
             const handOff = escalateToChatRef.current
-            if (!handOff || !handOff(action.prompt)) {
+            // AWAIT the hand-off before letting the draft go. The transport
+            // can refuse after the client-side guard accepted (an HTTP error,
+            // a dropped fetch), and releasing first meant the bridge had
+            // already dropped the live preview by the time we learned nothing
+            // was sent.
+            const accepted = handOff ? await handOff(action.prompt) : false
+            // The draft goes either way: on a refusal the bridge cannot hold
+            // it usefully (the dialog will never open for it), and on
+            // acceptance chat owns the edit from here.
+            releaseBridgeDraft(pending)
+            // Re-read both facts AFTER the await. The surface can be disposed
+            // and newer keystrokes can land while the POST is in flight; a
+            // result that went stale in that window must not speak, though
+            // releasing its own draft above is still right.
+            if (gone() || isStaleVerify(seq, verifySeqRef.current)) return
+            if (!accepted) {
               setSaveStatus("This edit needs a decision and could not be sent to chat.")
             }
             return
@@ -2870,11 +2887,13 @@ export function useEditorEditing({
           const editTargetLocation = editTarget
             ? `${editTarget.file}:${editTarget.line}`
             : null
-          // The hand-off can be REFUSED (detached sessions off and a chat
-          // already streaming). Clearing the buffer on a refusal loses the
-          // value: nothing was submitted, nothing is on disk, and the
-          // optimistic override reverts later with no explanation.
-          const accepted = escalateToChatRef.current(
+          // The hand-off can be REFUSED, either by the client guard (a chat
+          // is already streaming) or by the server answering the POST with an
+          // error. Awaited, so the second kind is known here too. Clearing the
+          // buffer on a refusal loses the value: nothing was submitted,
+          // nothing is on disk, and the optimistic override reverts later with
+          // no explanation.
+          const accepted = await escalateToChatRef.current(
             buildPropEditEscalationPrompt({
               propName: current.propName,
               // Pass the raw value (string | number | boolean) so the
@@ -4349,11 +4368,12 @@ export function useEditorEditing({
           // the chat agent and clear the dispatched mutations from the
           // buffer instead of surfacing a save error.
           if (result.needsChat && escalateToChatRef.current) {
-            // A refused hand-off (detached sessions off and a chat already
-            // streaming) submitted nothing. Dropping the bundle here and
-            // returning ok:true reported a successful Save for edits that
-            // were never written and no longer existed anywhere.
-            const accepted = escalateToChatRef.current(
+            // A refused hand-off submitted nothing, whether the client guard
+            // refused it (a chat is already streaming) or the server refused
+            // the POST. Dropping the bundle here and returning ok:true
+            // reported a successful Save for edits that were never written and
+            // no longer existed anywhere.
+            const accepted = await escalateToChatRef.current(
               buildEditEscalationPrompt(normalizedMutations),
             )
             const aftermath = afterEscalation(

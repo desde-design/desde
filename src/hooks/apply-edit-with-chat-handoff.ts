@@ -152,7 +152,11 @@ export function describeStructuralEditForHandoff(
 export async function applyEditWithChatHandoff(
   edit: StructuralEdit,
   adapter: Pick<BridgeFrameworkAdapter, "applyEdit">,
-  handOff: ((prompt: string) => boolean) | undefined,
+  // Asynchronous, and awaited below. The hand-off is an HTTP POST that starts
+  // a chat turn, and the server can refuse it after the client-side guard has
+  // already said yes. A synchronous `true` here was a promise the transport
+  // had not made, and every caller cleared its buffer on it.
+  handOff: ((prompt: string) => Promise<boolean>) | undefined,
 ): Promise<{ result: EditResult; handoff: ChatHandoffOutcome }> {
   const initial = await adapter.applyEdit(edit)
   if (initial.kind !== "failed") {
@@ -168,6 +172,6 @@ export async function applyEditWithChatHandoff(
   if (!described || !handOff) {
     return { result: initial, handoff: { attempted: false, started: false, originalReason: initial.reason } }
   }
-  const started = handOff(buildStructuralEditHandoffPrompt(described))
+  const started = await handOff(buildStructuralEditHandoffPrompt(described))
   return { result: initial, handoff: { attempted: true, started, originalReason: initial.reason } }
 }

@@ -28,7 +28,7 @@ interface CommentsPanelProps {
   onPinClicked?: (id: string, kind: "comment" | "note") => void
   enabled?: boolean
   /** Forwarded to the container's per-comment "Fix with AI" affordance. */
-  onEscalateToChat?: (prompt: string) => boolean
+  onEscalateToChat?: (prompt: string) => Promise<boolean>
 }
 
 function CommentsPanelImpl({

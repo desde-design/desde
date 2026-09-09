@@ -119,7 +119,7 @@ interface EditorCommentsContainerProps {
    * (e.g. no chat surface wired), the per-comment "Fix with AI" affordance
    * hides.
    */
-  onEscalateToChat?: (prompt: string) => boolean
+  onEscalateToChat?: (prompt: string) => Promise<boolean>
 }
 
 export function EditorCommentsContainer({
@@ -267,7 +267,7 @@ export function EditorCommentsContainer({
   const handleCommentFix = useMemo(
     () =>
       onEscalateToChat
-        ? (commentId: string): boolean => {
+        ? async (commentId: string): Promise<boolean> => {
             const comment = comments.find((c) => c.id === commentId)
             if (!comment) return false
             const prompt = buildCommentFixPrompt({
@@ -277,8 +277,10 @@ export function EditorCommentsContainer({
               number: comment.number,
             })
             // Forward the accept/reject verdict so the popup keeps the
-            // thread open when the handoff is gated (session not active).
-            return onEscalateToChat(prompt)
+            // thread open when the handoff is gated (session not active) or
+            // when the server refuses the turn. Awaited: the second kind of
+            // refusal is only known once the POST answers.
+            return await onEscalateToChat(prompt)
           }
         : undefined,
     [onEscalateToChat, comments],

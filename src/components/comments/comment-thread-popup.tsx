@@ -50,12 +50,12 @@ interface CommentThreadPopupProps {
   /**
    * Optional "Fix with AI" action for an existing comment (CLI only).
    * When provided, the active comment's card shows a button that hands the
-   * comment to the chat agent. Returns whether chat ACCEPTED the handoff —
+   * comment to the chat agent. Resolves to whether chat ACCEPTED the handoff —
    * the popup only closes the thread on `true`, so a rejected handoff (edit
-   * session not active) keeps the comment open instead of silently losing
-   * the user's intent. Omitted on the web path → no button.
+   * session not active, or a server refusal) keeps the comment open instead of
+   * silently losing the user's intent. Omitted on the web path → no button.
    */
-  onFixWithAI?: (commentId: string) => boolean
+  onFixWithAI?: (commentId: string) => Promise<boolean>
   /**
    * The @-mention directory, when this repo is linked to a Viewer prototype
    * (`useEditorParticipants`). Empty on a local-only repo, where there is no
@@ -200,10 +200,14 @@ export function CommentThreadPopup({
               onFixWithAI
                 ? () => {
                     // Only close the thread when chat ACCEPTED the handoff.
-                    // On a rejected handoff (session not active → the seam
-                    // toasts why) keep the comment open so the intent isn't
-                    // silently lost — mirrors session-log-panel's escalate.
-                    if (onFixWithAI(activeComment.id)) handleClose()
+                    // On a rejected handoff (session not active, or the server
+                    // refused the turn → the seam toasts why) keep the comment
+                    // open so the intent isn't silently lost — mirrors
+                    // session-log-panel's escalate. Awaited through `.then`
+                    // because the verdict now arrives with the POST's answer.
+                    void onFixWithAI(activeComment.id).then((accepted) => {
+                      if (accepted) handleClose()
+                    })
                   }
                 : undefined
             }

@@ -33,7 +33,7 @@ function adapterReturning(result: EditResult) {
 describe("applyEditWithChatHandoff", () => {
   it("returns the deterministic result untouched when it applies", async () => {
     const adapter = adapterReturning(applied)
-    const handOff = vi.fn(() => true)
+    const handOff = vi.fn(async () => true)
     const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff)
     expect(r.result).toBe(applied)
     expect(r.handoff).toEqual({ attempted: false, started: false })
@@ -43,7 +43,7 @@ describe("applyEditWithChatHandoff", () => {
 
   it("hands a refusal to chat with the marker, the position, and the reason, and never re-applies", async () => {
     const adapter = adapterReturning(refused)
-    const handOff = vi.fn((_prompt: string) => true)
+    const handOff = vi.fn(async (_prompt: string) => true)
     const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff)
     expect(r.result).toBe(refused)
     expect(r.handoff).toEqual({ attempted: true, started: true, originalReason: refused.kind === "failed" ? refused.reason : "" })
@@ -57,8 +57,24 @@ describe("applyEditWithChatHandoff", () => {
 
   it("reports started:false when the hand-off declines", async () => {
     const adapter = adapterReturning(refused)
-    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, () => false)
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, async () => false)
     expect(r.handoff).toMatchObject({ attempted: true, started: false })
+  })
+
+  it("waits for the hand-off's answer instead of reporting the guard's", async () => {
+    // The transport can refuse AFTER the client-side guard accepted (an HTTP
+    // error on `POST /api/editor/chat`). `started` must be the awaited value,
+    // or a caller clears its edit buffer on a turn that was never taken.
+    const adapter = adapterReturning(refused)
+    let settle: ((accepted: boolean) => void) | undefined
+    const handOff = vi.fn(
+      (_prompt: string) => new Promise<boolean>((resolve) => { settle = resolve }),
+    )
+    const pending = applyEditWithChatHandoff(deleteEdit(), adapter, handOff)
+    await Promise.resolve()
+    expect(handOff).toHaveBeenCalledTimes(1)
+    settle?.(false)
+    expect((await pending).handoff).toMatchObject({ attempted: true, started: false })
   })
 
   it("does not attempt a hand-off without a chat transport", async () => {
@@ -153,7 +169,7 @@ describe("policy refusals are not handed to chat", () => {
   }
 
   it("reports a dormant-lane refusal as a plain failure", async () => {
-    const handOff = vi.fn(() => true)
+    const handOff = vi.fn(async () => true)
     const r = await applyEditWithChatHandoff(deleteEdit(), adapterReturning(dormant), handOff)
     expect(handOff).not.toHaveBeenCalled()
     expect(r.handoff).toEqual({
@@ -164,13 +180,13 @@ describe("policy refusals are not handed to chat", () => {
   })
 
   it("reports a library refusal as a plain failure", async () => {
-    const handOff = vi.fn(() => true)
+    const handOff = vi.fn(async () => true)
     await applyEditWithChatHandoff(deleteEdit(), adapterReturning(library), handOff)
     expect(handOff).not.toHaveBeenCalled()
   })
 
   it("still hands off a capability refusal", async () => {
-    const handOff = vi.fn(() => true)
+    const handOff = vi.fn(async () => true)
     const r = await applyEditWithChatHandoff(deleteEdit(), adapterReturning(refused), handOff)
     expect(handOff).toHaveBeenCalledTimes(1)
     expect(r.handoff.attempted).toBe(true)

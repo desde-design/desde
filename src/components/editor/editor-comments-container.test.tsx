@@ -111,7 +111,7 @@ function TestHarness({
   setEditorActive = vi.fn(async () => {}),
 }: {
   onPinClicked?: (id: string, kind: "comment" | "note") => void
-  onEscalateToChat?: (prompt: string) => boolean
+  onEscalateToChat?: (prompt: string) => Promise<boolean>
   setEditorActive?: (active: boolean) => Promise<void>
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -483,7 +483,7 @@ describe("EditorCommentsContainer", () => {
         participantEmails: [],
       },
     ])
-    const onEscalateToChat = vi.fn((_prompt: string) => true)
+    const onEscalateToChat = vi.fn(async (_prompt: string) => true)
     render(<TestHarness onEscalateToChat={onEscalateToChat} />)
     await waitFor(() => expect(useAppStore.getState().comments).toHaveLength(1))
 
@@ -500,8 +500,10 @@ describe("EditorCommentsContainer", () => {
     expect(prompt).toContain("selector: #app > main > h1")
     expect(prompt).toContain('page "/dashboard"')
 
-    // Thread closes after handing off.
-    expect(useAppStore.getState().activeCommentId).toBeNull()
+    // Thread closes after handing off. `waitFor`, not a bare read: the
+    // verdict now arrives with the POST's answer, so the close is one
+    // microtask later than the click.
+    await waitFor(() => expect(useAppStore.getState().activeCommentId).toBeNull())
   })
 
   it("keeps the comment thread OPEN when the chat handoff is rejected", async () => {
@@ -520,7 +522,7 @@ describe("EditorCommentsContainer", () => {
       },
     ])
     // Handoff rejected (e.g. edit session not active yet).
-    const onEscalateToChat = vi.fn((_prompt: string) => false)
+    const onEscalateToChat = vi.fn(async (_prompt: string) => false)
     render(<TestHarness onEscalateToChat={onEscalateToChat} />)
     await waitFor(() => expect(useAppStore.getState().comments).toHaveLength(1))
     useAppStore.setState({ activeCommentId: "c-reject" })
@@ -528,6 +530,10 @@ describe("EditorCommentsContainer", () => {
     fireEvent.click(await screen.findByText(/Fix with AI/i))
 
     expect(onEscalateToChat).toHaveBeenCalledTimes(1)
+    // Let the refused hand-off's promise settle before reading the store, or
+    // this asserts on a thread that had not been given the chance to close.
+    await waitFor(() => expect(onEscalateToChat.mock.results).toHaveLength(1))
+    await Promise.resolve()
     // Intent preserved: the thread stays open so the user can retry.
     expect(useAppStore.getState().activeCommentId).toBe("c-reject")
   })
