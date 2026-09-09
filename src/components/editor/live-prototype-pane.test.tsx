@@ -120,6 +120,8 @@ function emitFromBridge(message: Record<string, unknown>): void {
 
 interface HarnessProps {
   prototypeUrl?: string
+  /** Flip to false to detach the adapter with the panels still mounted. */
+  enabled?: boolean
   manifestSource?: ComponentManifestSource
   /** Capture the hook's return so a test can drive it (e.g. setEditorActive). */
   onEditing?: (editing: ReturnType<typeof useEditorEditing>) => void
@@ -132,6 +134,7 @@ interface HarnessProps {
 
 function Harness({
   prototypeUrl = PROTOTYPE_URL,
+  enabled = true,
   manifestSource,
   onEditing,
   escalateToChat,
@@ -140,6 +143,7 @@ function Harness({
   const editing = useEditorEditing({
     iframeRef,
     prototypeUrl,
+    enabled,
     manifestSource,
     escalateToChat,
   })
@@ -1341,6 +1345,102 @@ describe("bridge session boundary", () => {
     const { current } = await connectHoldingAnEdit("doc-a")
     expect(current().disambiguationPrompt).not.toBeNull()
     expect(current().saveStatus ?? "").not.toMatch(RESET_STATUS)
+  })
+
+  describe("what a detaching adapter does to the edit buffers", () => {
+    // Round 15 W2. Retirement is for a DOCUMENT change. Round 14's fix retired
+    // on every reason, so detaching the adapter with the same page still on
+    // screen discarded the designer's buffered edits for a page that never went
+    // anywhere.
+    //
+    // The count in the reset line is the observable: it is the parked question
+    // PLUS every buffered entry that was retired. One of each, so the two cases
+    // read 1 and 2 and cannot be confused.
+    const BUFFERED_CLASS_CAPTURE = {
+      id: "dom-mut-buffered",
+      kind: "class" as const,
+      sourceLoc: "src/components/Card.vue:9:4",
+      sourceVersion: "abc123",
+      resolutionKind: "direct" as const,
+      scope: "definition" as const,
+      callsiteLoc: null,
+      callsiteVersion: null,
+      instancePath: "0",
+      selector: "#card",
+      before: "card",
+      after: "card bg-red-500",
+    }
+
+    /**
+     * Connect, park one question, and buffer one capture whose debounced write
+     * has NOT fired. The teardown that follows cancels that timer, so nothing
+     * is ever dispatched and no transport is involved.
+     */
+    async function connectHoldingBoth(prototypeUrl: string, enabled = true) {
+      let editing: ReturnType<typeof useEditorEditing> | null = null
+      const view = render(
+        <Harness
+          prototypeUrl={prototypeUrl}
+          enabled={enabled}
+          onEditing={(e) => { editing = e }}
+        />,
+      )
+      await act(async () => {
+        emitFromBridge({
+          type: "BRIDGE_READY",
+          payload: { version: "2026-09-09a", documentId: "doc-a" },
+        })
+      })
+      await act(async () => {
+        emitFromBridge({
+          type: "MUTATION_AWAITING_DISAMBIGUATION",
+          payload: HELD_PROMPT,
+        })
+      })
+      await waitFor(() => {
+        expect(editing!.disambiguationPrompt).not.toBeNull()
+      })
+      await act(async () => {
+        emitFromBridge({
+          type: "MUTATION_CAPTURED",
+          payload: BUFFERED_CLASS_CAPTURE,
+        })
+      })
+      return {
+        /** Re-render, keeping the capture wired so `current()` stays live. */
+        rerenderWith: (props: HarnessProps) =>
+          view.rerender(<Harness {...props} onEditing={(e) => { editing = e }} />),
+        current: () => editing!,
+      }
+    }
+
+    it("keeps them when the adapter detaches with the same page on screen", async () => {
+      const { rerenderWith, current } = await connectHoldingBoth(PROTOTYPE_URL)
+
+      // `enabled` off: the panels stay mounted, the page stays on screen, and
+      // the buffered capture is still the designer's to save.
+      await act(async () => {
+        rerenderWith({ prototypeUrl: PROTOTYPE_URL, enabled: false })
+      })
+
+      expect(current().saveStatus).toBe(
+        "The page connection was reset; 1 pending edit was discarded.",
+      )
+    })
+
+    it("retires them when the iframe is pointed at another prototype", async () => {
+      const { rerenderWith, current } = await connectHoldingBoth(PROTOTYPE_URL)
+
+      // A different URL IS a document change, whatever the effect's cleanup is
+      // called: the buffered capture describes a page that is about to be gone.
+      await act(async () => {
+        rerenderWith({ prototypeUrl: "https://prototype.example.com/settings" })
+      })
+
+      expect(current().saveStatus).toBe(
+        "The page connection was reset; 2 pending edits were discarded.",
+      )
+    })
   })
 
   it("ends nothing on the first handshake of an attachment with an id-less bridge", async () => {

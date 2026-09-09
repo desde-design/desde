@@ -32,6 +32,7 @@ import {
   SAVE_HANDOFF_TIMEOUT_STATUS,
   isSupersededHandshake,
   retireForeignEntries,
+  retiresBufferedEntries,
   sessionEndPlan,
   settleHandOff,
   shouldEndSessionOnHandshake,
@@ -1213,6 +1214,10 @@ describe("sessionEndPlan", () => {
     rows: [],
     heldDraftIds: [],
     retiredBuffered: 0,
+    // The default for these cases is a DOCUMENT change, because that is the
+    // only kind of end that retires buffered entries at all. The reasons that
+    // do not are the subject of their own cases below.
+    reason: "reconnect" as const,
   }
 
   it("says nothing when the session was holding nothing", () => {
@@ -1230,6 +1235,7 @@ describe("sessionEndPlan", () => {
       rows: [mutation("dom-pending-3")],
       heldDraftIds: ["dom-pending-4"],
       retiredBuffered: 0,
+      reason: "reconnect",
     })
     expect(plan.discarded).toBe(4)
     expect(plan.cancelDraftIds).toEqual([
@@ -1297,6 +1303,7 @@ describe("sessionEndPlan", () => {
       rows: [mutation("dom-pending-3")],
       heldDraftIds: ["dom-pending-1", "dom-pending-4"],
       retiredBuffered: 0,
+      reason: "reconnect" as const,
     }
     const onCleanup = sessionEndPlan(state)
     const onReconnect = sessionEndPlan(state)
@@ -1315,6 +1322,7 @@ describe("sessionEndPlan", () => {
       rows,
       heldDraftIds,
       retiredBuffered: 0,
+      reason: "reconnect",
     })
     expect(queued).toHaveLength(1)
     expect(rows).toHaveLength(1)
@@ -1339,6 +1347,7 @@ describe("sessionEndPlan", () => {
       rows: [mutation("dom-pending-3")],
       heldDraftIds: ["dom-pending-4"],
       retiredBuffered: 2,
+      reason: "reconnect",
     })
     expect(plan.discarded).toBe(6)
     // The buffered entries are not drafts, so they add nothing here.
@@ -1350,8 +1359,47 @@ describe("sessionEndPlan", () => {
     ])
   })
 
+  it("counts no buffered entry for a reason that does not retire them", () => {
+    // Round 15 W2. A `teardown` leaves the same page on screen with its
+    // buffers untouched, so a count measured there would report edits as
+    // discarded that are still sitting where the designer left them. The
+    // drafts and the questions still count: those ARE cleared, whatever the
+    // reason.
+    for (const reason of ["teardown", "unmount"] as const) {
+      const plan = sessionEndPlan({
+        ...empty,
+        reason,
+        openPrompt: scopePrompt("dom-pending-1"),
+        retiredBuffered: 3,
+      })
+      expect(plan.discarded).toBe(1)
+      expect(plan.status).toBe(discardedOnResetStatus(1))
+    }
+    for (const reason of ["reload", "reconnect"] as const) {
+      expect(sessionEndPlan({ ...empty, reason, retiredBuffered: 3 }).discarded).toBe(3)
+    }
+  })
+
   it("says nothing when the buffers were empty and nothing else was held", () => {
     expect(sessionEndPlan({ ...empty, retiredBuffered: 0 }).status).toBeNull()
+  })
+})
+
+describe("retiresBufferedEntries", () => {
+  // Round 15 W2. Retirement is for a DOCUMENT change. Round 14's fix applied it
+  // to every reason, so an `enabled: true → false → true` flip would have
+  // thrown the designer's buffered edits away for a page that never moved.
+  it("retires for the two reasons that replace the document", () => {
+    expect(retiresBufferedEntries("reload")).toBe(true)
+    expect(retiresBufferedEntries("reconnect")).toBe(true)
+  })
+
+  it("keeps the buffers when the document stays", () => {
+    // `teardown` detaches the adapter with the same page still on screen and
+    // its previews still visible; `unmount` needs nothing because React drops
+    // the buffers with the hook.
+    expect(retiresBufferedEntries("teardown")).toBe(false)
+    expect(retiresBufferedEntries("unmount")).toBe(false)
   })
 })
 

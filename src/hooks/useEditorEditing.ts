@@ -135,6 +135,7 @@ import {
   promptCollision,
   PROMPT_BUSY_STATUS,
   retireForeignEntries,
+  retiresBufferedEntries,
   iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
@@ -147,6 +148,7 @@ import {
   thisRowTemplateLocation,
   UNIDENTIFIED_DOCUMENT,
   verifyKeyFor,
+  type BridgeSessionEndReason,
   type ModalKind,
   type ModalRequest,
   type PendingIterationEdit,
@@ -220,26 +222,6 @@ export type ConnectionStatus =
   | { kind: "connecting" }
   | { kind: "ready" }
   | { kind: "error"; message: string }
-
-/**
- * Why a bridge session is ending. See `endBridgeSession`, which is the only
- * thing that reads it.
- *
- * The four are not four behaviours. `unmount` is `teardown` with nobody left to
- * read the status bar, and `reload` is `reconnect` seen one step earlier: the
- * shell knows the document is about to be replaced rather than finding out from
- * the `load` event. They are named separately so the call sites read as what
- * happened rather than as a pair of booleans.
- */
-type BridgeSessionEndReason =
-  /** The adapter is detaching and the panels stay on screen. */
-  | "teardown"
-  /** The adapter is detaching because the hook is unmounting. */
-  | "unmount"
-  /** The shell is about to replace the document (the conflict reload). */
-  | "reload"
-  /** The iframe has just loaded a different document. */
-  | "reconnect"
 
 interface UseEditorEditingOptions {
   iframeRef: RefObject<HTMLIFrameElement | null>
@@ -688,6 +670,19 @@ export function useEditorEditing({
    * the designer their typed text.
    */
   const hookUnmountingRef = useRef(false)
+  /**
+   * The prototype URL as of the LATEST render, so the adapter effect's cleanup
+   * can tell why it is running.
+   *
+   * The cleanup closes over the url its own attachment used; this ref already
+   * holds the new one, because React renders before it runs cleanups. Different
+   * values mean the iframe is being pointed at another prototype, which is a
+   * document change and must retire the buffers; equal values mean the effect
+   * re-ran for one of its other dependencies (`enabled`, the manifest source,
+   * an attribution callback) with the same page still on screen.
+   */
+  const prototypeUrlRef = useRef(prototypeUrl)
+  prototypeUrlRef.current = prototypeUrl
   useEffect(() => {
     // Reset on every (re-)mount, the same way `useEditorChat`'s `disposedRef`
     // does. StrictMode runs mount → unmount → mount on ONE instance, so the
@@ -942,8 +937,22 @@ export function useEditorEditing({
       // because the callback is defined far below this effect; see its
       // declaration.
       disposedRef.current = true
+      // WHICH REASON. `unmount` when React is taking the hook away. Otherwise
+      // the effect is re-running for one of its dependencies, and the one that
+      // means the DOCUMENT is being replaced is `prototypeUrl`: the iframe is
+      // about to point at another prototype, which is `reload` by any other
+      // name and must retire the buffers (see `retiresBufferedEntries`). Every
+      // other dependency (`enabled`, the manifest source, an attribution
+      // callback) detaches the adapter with the same page still on screen, and
+      // that is a plain `teardown` which leaves the designer's buffered edits
+      // where they are.
+      const documentReplaced = prototypeUrlRef.current !== prototypeUrl
       endBridgeSessionRef.current?.({
-        reason: hookUnmountingRef.current ? "unmount" : "teardown",
+        reason: hookUnmountingRef.current
+          ? "unmount"
+          : documentReplaced
+            ? "reload"
+            : "teardown",
         cancelWithBridge: true,
       })
       iframe.removeEventListener("load", onIframeLoad)
@@ -3083,21 +3092,31 @@ export function useEditorEditing({
       // The generation was bumped a few lines up, so "the new one" is the
       // session about to run, and every entry from the session that just ended
       // is foreign to it.
+      //
+      // ONLY FOR A DOCUMENT CHANGE, which is `reload` and `reconnect`
+      // (`retiresBufferedEntries`). A `teardown` detaches the adapter and
+      // leaves the SAME page on screen with its previews still showing, so
+      // retiring there would throw the designer's buffered edits away on an
+      // `enabled: true → false → true` flip over a page that never went
+      // anywhere. `unmount` needs nothing: React drops the buffers with the
+      // hook. Everything else below is cleared for every reason, because it is
+      // bound to the adapter rather than to the document.
       const liveGeneration = adapterGenerationRef.current
-      const propPartition = retireForeignEntries(
-        pendingPropEditsRef.current,
-        liveGeneration,
-      )
-      const mutationPartition = retireForeignEntries(
-        mutationsRef.current,
-        liveGeneration,
-      )
+      const noneRetired = { retired: [] as never[] }
+      const retireBuffers = retiresBufferedEntries(reason)
+      const propPartition = retireBuffers
+        ? retireForeignEntries(pendingPropEditsRef.current, liveGeneration)
+        : { kept: pendingPropEditsRef.current, ...noneRetired }
+      const mutationPartition = retireBuffers
+        ? retireForeignEntries(mutationsRef.current, liveGeneration)
+        : { kept: mutationsRef.current, ...noneRetired }
       const plan = sessionEndPlan({
         openPrompt: iterationScopePromptRef.current,
         queued: modalQueueRef.current,
         rows: pendingDisambiguationsRef.current,
         heldDraftIds: [...bridgeDraftsByPendingIdRef.current.keys()],
         retiredBuffered: propPartition.retired.length + mutationPartition.retired.length,
+        reason,
       })
       if (propPartition.retired.length > 0) {
         const retiredIds = new Set(propPartition.retired.map((e) => e.id))

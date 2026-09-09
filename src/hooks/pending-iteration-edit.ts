@@ -1023,8 +1023,64 @@ export interface SessionEndState {
    * and the only caller that can measure it is the one ending the session; a
    * default of zero would let a caller under-report a discard silently, which
    * is the failure this whole function exists to stop.
+   *
+   * Only counted for a reason that actually retires them
+   * ({@link retiresBufferedEntries}). A caller that measures a count on a
+   * `teardown` cannot report a discard that did not happen.
    */
   retiredBuffered: number
+  /** Why the session is ending. See {@link retiresBufferedEntries}. */
+  reason: BridgeSessionEndReason
+}
+
+/**
+ * Why a bridge session ended.
+ *
+ * `cancelWithBridge` used to be the only thing the call sites disagreed about,
+ * and it was passed as a bare boolean. The reason is what actually happened,
+ * and two decisions now read it: whether the status line is worth setting, and
+ * whether the edit buffers are retired.
+ *
+ * The four are not four behaviours. `unmount` is `teardown` with nobody left to
+ * read the status bar, and `reload` is `reconnect` seen one step earlier: the
+ * shell knows the document is about to be replaced rather than finding out from
+ * the `load` event.
+ */
+export type BridgeSessionEndReason =
+  /** The adapter is detaching and the panels stay on screen. */
+  | "teardown"
+  /** The adapter is detaching because the hook is unmounting. */
+  | "unmount"
+  /** The shell is about to replace the document (the conflict reload). */
+  | "reload"
+  /** The iframe has just loaded a different document. */
+  | "reconnect"
+
+/**
+ * Does ending the session for this reason retire the edit buffers?
+ *
+ * Retirement is for a DOCUMENT CHANGE, and only two reasons are one: `reload`
+ * (the shell is about to replace the document) and `reconnect` (the iframe
+ * already did, including the handshake that never answered). An entry captured
+ * against the departed page cannot be written into the page that replaced it,
+ * so it is discarded and counted.
+ *
+ * The other two are not document changes:
+ *
+ * - `teardown` detaches the adapter and leaves the same document on screen with
+ *   its previews still showing. An `enabled: true → false → true` flip would
+ *   otherwise throw the designer's buffered edits away for a page that never
+ *   went anywhere.
+ * - `unmount` needs nothing done: React drops the buffers with the hook, and
+ *   there is no status bar left to say what was discarded.
+ *
+ * Everything else a session end clears (the open prompt, the queued questions,
+ * the dialog rows, the held drafts, the in-flight markers and the debounce
+ * timers) is cleared for EVERY reason, because all of it is bound to the
+ * adapter rather than to the document.
+ */
+export function retiresBufferedEntries(reason: BridgeSessionEndReason): boolean {
+  return reason === "reload" || reason === "reconnect"
 }
 
 /** What ending a bridge session has to do, decided from {@link SessionEndState}. */
@@ -1062,7 +1118,9 @@ export interface SessionEndPlan {
  *   dropped.
  * - Every buffered entry the departed document left behind counts, and none of
  *   them holds a bridge draft, so there is nothing to cancel for them. See
- *   {@link retireForeignEntries} for what "left behind" means.
+ *   {@link retireForeignEntries} for what "left behind" means, and
+ *   {@link retiresBufferedEntries} for the reasons that leave them alone
+ *   entirely (a `teardown` keeps the document, so it keeps the buffers).
  *
  * Releasing the prompt's draft also drops any queued question about that same
  * draft, which is what {@link dropModalRequestsForDraft} does at the call site
@@ -1085,8 +1143,15 @@ export function sessionEndPlan(state: SessionEndState): SessionEndPlan {
   claim(promptDraftId)
   for (const request of queued) claim(modalRequestDraftId(request))
   for (const row of rows) claim(row.pendingId)
+  // The reason has the last word on the buffered count. The caller only
+  // measures one for a reason that retires, and this is the second lock on the
+  // same door: a `teardown` cannot report edits as discarded when it left them
+  // exactly where they were.
+  const retiredBuffered = retiresBufferedEntries(state.reason)
+    ? state.retiredBuffered
+    : 0
   let discarded =
-    (state.openPrompt ? 1 : 0) + queued.length + rows.length + state.retiredBuffered
+    (state.openPrompt ? 1 : 0) + queued.length + rows.length + retiredBuffered
   for (const draftId of state.heldDraftIds) {
     if (claim(draftId)) discarded += 1
   }
