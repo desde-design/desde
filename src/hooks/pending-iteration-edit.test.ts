@@ -15,6 +15,7 @@ import {
   endSentence,
   errorMessage,
   handOffFailureStatus,
+  isStaleGeneration,
   isStaleVerify,
   iterationRouteFor,
   iterationTemplateLocation,
@@ -1014,18 +1015,18 @@ describe("parkedReason", () => {
 
 describe("settleHandOff", () => {
   it("settles accepted when the hand-off resolves true in time", async () => {
-    await expect(settleHandOff(() => Promise.resolve(true), 50)).resolves.toBe("accepted")
+    await expect(settleHandOff(() => Promise.resolve(true), { timeoutMs: 50 })).resolves.toBe("accepted")
   })
 
   it("settles refused when the hand-off resolves false", async () => {
-    await expect(settleHandOff(() => Promise.resolve(false), 50)).resolves.toBe("refused")
+    await expect(settleHandOff(() => Promise.resolve(false), { timeoutMs: 50 })).resolves.toBe("refused")
   })
 
   it("treats a throw as a refusal, not as a failure of the caller", async () => {
     // The chat POST failing says nothing about the loop check that preceded
     // it, and letting the throw out would blame the wrong step.
     await expect(
-      settleHandOff(() => Promise.reject(new Error("network")), 50),
+      settleHandOff(() => Promise.reject(new Error("network")), { timeoutMs: 50 }),
     ).resolves.toBe("refused")
   })
 
@@ -1033,12 +1034,12 @@ describe("settleHandOff", () => {
     await expect(
       settleHandOff(() => {
         throw new Error("no chat")
-      }, 50),
+      }, { timeoutMs: 50 }),
     ).resolves.toBe("refused")
   })
 
   it("times out rather than holding the draft for as long as chat takes", async () => {
-    await expect(settleHandOff(() => new Promise<boolean>(() => {}), 5)).resolves.toBe(
+    await expect(settleHandOff(() => new Promise<boolean>(() => {}), { timeoutMs: 5 })).resolves.toBe(
       "timed-out",
     )
   })
@@ -1050,7 +1051,7 @@ describe("settleHandOff", () => {
     let settle: ((accepted: boolean) => void) | undefined
     const outcome = await settleHandOff(
       () => new Promise<boolean>((resolve) => { settle = resolve }),
-      5,
+      { timeoutMs: 5 },
     )
     expect(outcome).toBe("timed-out")
     settle?.(true)
@@ -1067,7 +1068,7 @@ describe("settleHandOff", () => {
     const outcome = await settleHandOff((signal) => {
       seen = signal
       return new Promise<boolean>(() => {})
-    }, 5)
+    }, { timeoutMs: 5 })
     expect(outcome).toBe("timed-out")
     expect(seen?.aborted).toBe(true)
   })
@@ -1078,7 +1079,7 @@ describe("settleHandOff", () => {
       seen = signal
       expect(signal.aborted).toBe(false)
       return Promise.resolve(true)
-    }, 50)
+    }, { timeoutMs: 50 })
     expect(outcome).toBe("accepted")
     expect(seen?.aborted).toBe(false)
   })
@@ -1090,8 +1091,72 @@ describe("settleHandOff", () => {
     await settleHandOff((signal) => {
       seen = signal
       return Promise.resolve(false)
-    }, 50)
+    }, { timeoutMs: 50 })
     expect(seen?.aborted).toBe(false)
+  })
+
+  it("never starts the POST when the caller's signal is already aborted", async () => {
+    // The bridge session ended before this hand-off got to run. Submitting now
+    // would start an agent turn about a page that is gone.
+    const controller = new AbortController()
+    controller.abort()
+    let ran = false
+    const outcome = await settleHandOff(
+      () => {
+        ran = true
+        return Promise.resolve(true)
+      },
+      { timeoutMs: 50, signal: controller.signal },
+    )
+    expect(outcome).toBe("refused")
+    expect(ran).toBe(false)
+  })
+
+  it("settles as a refusal and aborts the attempt when the caller's signal fires", async () => {
+    const controller = new AbortController()
+    let seen: AbortSignal | undefined
+    const settled = settleHandOff(
+      (signal) => {
+        seen = signal
+        return new Promise<boolean>(() => {})
+      },
+      // A deadline long enough that only the caller's abort can settle this.
+      { timeoutMs: 10_000, signal: controller.signal },
+    )
+    controller.abort()
+    await expect(settled).resolves.toBe("refused")
+    expect(seen?.aborted).toBe(true)
+  })
+
+  it("leaves a caller signal that never fires out of the outcome", async () => {
+    const controller = new AbortController()
+    let seen: AbortSignal | undefined
+    const outcome = await settleHandOff(
+      (signal) => {
+        seen = signal
+        return Promise.resolve(true)
+      },
+      { timeoutMs: 50, signal: controller.signal },
+    )
+    expect(outcome).toBe("accepted")
+    expect(seen?.aborted).toBe(false)
+    expect(controller.signal.aborted).toBe(false)
+  })
+})
+
+describe("isStaleGeneration", () => {
+  it("is stale only when the generation moved", () => {
+    expect(isStaleGeneration(3, 3)).toBe(false)
+    expect(isStaleGeneration(3, 4)).toBe(true)
+    // Direction does not matter: any difference means a different session.
+    expect(isStaleGeneration(4, 3)).toBe(true)
+    expect(isStaleGeneration(0, 0)).toBe(false)
+  })
+
+  it("reads the same way as isStaleVerify, one level up", () => {
+    // Same shape, different question: isStaleVerify asks whether a newer edit
+    // replaced this one, isStaleGeneration whether the session itself ended.
+    expect(isStaleGeneration(1, 2)).toBe(isStaleVerify(1, 2))
   })
 })
 

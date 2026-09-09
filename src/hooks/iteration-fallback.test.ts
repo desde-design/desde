@@ -103,4 +103,51 @@ describe('requestIterationProposal', () => {
       'METRICS is imported from ../data but is not a plain array. The AI fallback could not run: Network error: socket closed',
     )
   })
+
+  it("passes the caller's signal to BOTH requests, so a teardown cancels the work and not only the answer", async () => {
+    // The client holds the bridge's draft across this whole round trip. When
+    // the bridge session ends the proposal is a rewrite for a page that is
+    // gone, so the requests have to stop, not just be ignored.
+    editorFetchMock.mockReset()
+    const seen: Array<AbortSignal | undefined> = []
+    editorFetchMock.mockImplementation(async (path: string, init: RequestInit) => {
+      seen.push(init.signal ?? undefined)
+      if (path === '/api/editor/edit-iteration') {
+        return { status: 422, ok: false, json: async () => ({ reason: 'unresolved' }) }
+      }
+      return { status: 200, ok: true, json: async () => ({ ok: false, reason: 'refused', kind: 'refused' }) }
+    })
+    const controller = new AbortController()
+    await requestIterationProposal({
+      editKind: 'dom-text',
+      templateLocation: { file: 'src/pages/overview.tsx', line: 3, column: 20 },
+      iterationContext: { source: 'map', key: 1, index: 0, siblingCount: 1, expression: null },
+      pageSourceFile: null,
+      payload: { operation: 'patch-text', value: 'x' },
+      description: 'Set the text of row 1',
+      signal: controller.signal,
+    })
+    expect(seen).toHaveLength(2)
+    expect(seen[0]).toBe(controller.signal)
+    expect(seen[1]).toBe(controller.signal)
+  })
+
+  it('sends no signal at all when the caller has none', async () => {
+    editorFetchMock.mockReset()
+    const seen: Array<RequestInit> = []
+    editorFetchMock.mockImplementation(async (_path: string, init: RequestInit) => {
+      seen.push(init)
+      return { status: 404, ok: false, json: async () => ({ reason: 'nope' }) }
+    })
+    await requestIterationProposal({
+      editKind: 'dom-text',
+      templateLocation: { file: 'src/pages/overview.tsx', line: 3, column: 20 },
+      iterationContext: { source: 'map', key: 1, index: 0, siblingCount: 1, expression: null },
+      pageSourceFile: null,
+      payload: { operation: 'patch-text', value: 'x' },
+      description: 'Set the text of row 1',
+    })
+    expect(seen).toHaveLength(1)
+    expect('signal' in seen[0]!).toBe(false)
+  })
 })

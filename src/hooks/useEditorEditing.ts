@@ -6,6 +6,7 @@ import type {
   ComponentManifestSource,
   DisambiguationChoice,
   DragMoveRequest,
+  EditResult,
   FrameworkAdapter,
   InsertAtPointRequest,
   ResizeRequest,
@@ -60,6 +61,7 @@ import {
   requestIterationProposal,
 } from "./iteration-fallback"
 import { applyEditWithChatHandoff } from "./apply-edit-with-chat-handoff"
+import type { ChatHandoffOutcome } from "./apply-edit-with-chat-handoff"
 import {
   afterEscalation,
   buildEditEscalationPrompt,
@@ -126,6 +128,7 @@ import {
   errorMessage,
   handOffFailureStatus,
   hasUndispatchedWork,
+  isStaleGeneration,
   isStaleVerify,
   iterationRouteFor,
   parkedReason,
@@ -560,11 +563,32 @@ export function useEditorEditing({
    * True whenever no adapter is attached: the hook is disabled, unmounted, or
    * between attachments. An in-flight iteration verify that resolves in that
    * window must NOT open a dialog or start an agent turn; the UI that
-   * authorized the edit is gone. Paired with `verifyAbortRef`, which stops the
+   * authorized the edit is gone. Paired with `adapterAbortRef`, which stops the
    * request itself rather than only ignoring its answer.
    */
   const disposedRef = useRef(true)
-  const verifyAbortRef = useRef<AbortController | null>(null)
+  /**
+   * The current bridge session's lifetime, as a signal.
+   *
+   * Every request the iteration lane makes while holding a bridge draft races
+   * against it: the loop verify, the row proposal, and the chat hand-off. A
+   * teardown aborts it, so those stop where they are instead of answering into
+   * a session that has ended. Renewed on each attach, and by the conflict
+   * reload, which ends the drafts' session without detaching the adapter.
+   */
+  const adapterAbortRef = useRef<AbortController | null>(null)
+  /**
+   * Which bridge session a continuation belongs to.
+   *
+   * Bumped on every adapter attach, every teardown, and the conflict reload.
+   * `disposedRef` says the surface is gone RIGHT NOW; this says the surface an
+   * await started under is not the one that came back. The two differ in the
+   * case that matters: teardown, reconnect, and a continuation resuming into a
+   * live adapter that is not its own. The bridge restarts its draft ids at
+   * `dom-pending-1` on reconnect, so that continuation's ids now name someone
+   * else's drafts. See `isStaleGeneration` for what it must then do (nothing).
+   */
+  const adapterGenerationRef = useRef(0)
   /**
    * Monotonic id for iteration verifies, PER TARGET. Each intercept takes the
    * next one for its own key and records it as that key's latest; only a key's
@@ -621,7 +645,10 @@ export function useEditorEditing({
     const iframe = iframeRef.current
     if (!iframe) return
     disposedRef.current = false
-    verifyAbortRef.current = new AbortController()
+    // A new session starts here. Anything still in flight from the previous
+    // one is now stale, whatever it does next.
+    adapterGenerationRef.current += 1
+    adapterAbortRef.current = new AbortController()
 
     const adapter = new BridgeFrameworkAdapter()
     let cancelled = false
@@ -759,11 +786,14 @@ export function useEditorEditing({
 
     return () => {
       cancelled = true
-      // Stop any iteration verify still in flight, and mark the window in
-      // which a late answer must do nothing but release its own draft.
+      // Stop everything the iteration lane still has in flight, and end the
+      // session those requests belong to: a late answer must do NOTHING, not
+      // even release its own draft, because the teardown below hands every
+      // held draft back and the next adapter re-uses the same draft ids.
       disposedRef.current = true
-      verifyAbortRef.current?.abort()
-      verifyAbortRef.current = null
+      adapterGenerationRef.current += 1
+      adapterAbortRef.current?.abort()
+      adapterAbortRef.current = null
       // Hand every held draft back before the adapter goes. The open scope
       // prompt, the questions queued behind it, and the rows in the
       // deterministic dialog are all drafts THIS adapter is holding, and every
@@ -809,6 +839,34 @@ export function useEditorEditing({
     setEditorSelection,
     setEditorManifest,
   ])
+
+  /**
+   * The ONE continuation for every `applyEditWithChatHandoff` call.
+   *
+   * Eleven call sites used to write the same three lines each, which is how a
+   * guard gets added to ten of them. Built at DISPATCH time so it captures the
+   * bridge session the edit belongs to, and silent when that session has ended
+   * before the answer came back: the status bar it would write to is either
+   * gone or is now describing a different page, and the edit it names was
+   * applied through an adapter nobody is looking at any more. The apply itself
+   * is not in question here — `applyEditWithChatHandoff` holds its own adapter
+   * reference and has already finished with it. Only the report is dropped.
+   */
+  const reportEditOutcome = useCallback((kindLabel: string) => {
+    const generation = adapterGenerationRef.current
+    return ({
+      result,
+      handoff,
+    }: {
+      result: EditResult
+      handoff: ChatHandoffOutcome
+    }): void => {
+      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
+      const outcome = describeEditOutcome(kindLabel, result, handoff)
+      // Success carries a null message, so a successful edit says nothing.
+      if (outcome.message) setSaveStatus(outcome.message)
+    }
+  }, [])
 
   /**
    * Phase 6 — multi-select. Resolves each selector via the adapter
@@ -954,12 +1012,9 @@ export function useEditorEditing({
       // refusal we hand the edit off to chat (a new session, with the
       // selector and the refusal text) so cycle / coordinate-drift refusals
       // don't dead-end the user.
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
-        const outcome = describeEditOutcome("Move", result, handoff)
-        if (outcome.message) setSaveStatus(outcome.message)
-      })
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Move"))
     },
-    [],
+    [reportEditOutcome],
   )
 
   /**
@@ -1011,11 +1066,8 @@ export function useEditorEditing({
     }
     // Drag-move dispatches immediately, like every other edit (branch mode
     // is the only editor edit substrate).
-    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
-      const outcome = describeEditOutcome("Move", result, handoff)
-      if (outcome.message) setSaveStatus(outcome.message)
-    })
-  }, [])
+    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Move"))
+  }, [reportEditOutcome])
 
   const handleLayerMoveRefused = useCallback((reason: LayersDropRefusal) => {
     // The layers panel silently rejects most invalid drops (returns false
@@ -1232,12 +1284,9 @@ export function useEditorEditing({
         removeFromImport: false,
       }
       // Immediate dispatch (see Move handler).
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
-        const outcome = describeEditOutcome("Swap", result, handoff)
-        if (outcome.message) setSaveStatus(outcome.message)
-      })
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Swap"))
     },
-    [],
+    [reportEditOutcome],
   )
 
   // Icon picker — dispatches a SwapEdit (kind: 'swap') with identity
@@ -1310,12 +1359,9 @@ export function useEditorEditing({
       // and selection updates to the swapped-in icon, so a subsequent pick
       // sees the right fromComponentName naturally — no buffering or replace
       // logic needed.
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
-        const outcome = describeEditOutcome("Icon swap", result, handoff)
-        if (outcome.message) setSaveStatus(outcome.message)
-      })
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Icon swap"))
     },
-    [],
+    [reportEditOutcome],
   )
 
   const handleDetach = useCallback(() => {
@@ -1338,11 +1384,8 @@ export function useEditorEditing({
       componentFile: selection.componentFile,
     }
     // Immediate dispatch (see Move handler).
-    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
-      const outcome = describeEditOutcome("Detach", result, handoff)
-      if (outcome.message) setSaveStatus(outcome.message)
-    })
-  }, [])
+    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Detach"))
+  }, [reportEditOutcome])
 
   // Layers-panel insert (right-click → "Insert child…"). Targets a
   // specific OutlineNode as the destination PARENT and buffers an
@@ -1378,12 +1421,9 @@ export function useEditorEditing({
         snippet,
       }
       // Immediate dispatch (see Move handler).
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
-        const outcome = describeEditOutcome("Insert", result, handoff)
-        if (outcome.message) setSaveStatus(outcome.message)
-      })
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Insert"))
     },
-    [],
+    [reportEditOutcome],
   )
 
   // Phase 3 — insert-at-point: the pending palette snippet while the bridge is
@@ -1435,15 +1475,13 @@ export function useEditorEditing({
         contentKind: pending.contentKind,
       }
       // Immediate dispatch (see Move handler).
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
-        const outcome = describeEditOutcome("Insert", result, handoff)
-        // Deviation from the common outcome shape (see edit-outcome.ts):
-        // insert-at-point never surfaced a success message even before this
-        // change, but a hand-off to chat still needs to be announced.
-        if (outcome.kind !== "success") setSaveStatus(outcome.message)
-      })
+      // This site used to write its own continuation, on the grounds that
+      // insert-at-point announces a hand-off but not a success. It shares the
+      // common one: `describeEditOutcome` gives success a null message, so
+      // "not success" and "has a message" are the same set.
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Insert"))
     },
-    [],
+    [reportEditOutcome],
   )
 
   // Dispatches a DeleteEdit immediately (branch mode — see Move handler)
@@ -1473,12 +1511,9 @@ export function useEditorEditing({
       // editing in place — `:last-child` and other structural CSS recompute
       // against the real new DOM (the source changed and Vite HMR'd), not
       // against a `display:none` overlay that lies about the tree.
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
-        const outcome = describeEditOutcome("Delete", result, handoff)
-        if (outcome.message) setSaveStatus(outcome.message)
-      })
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Delete"))
     },
-    [],
+    [reportEditOutcome],
   )
 
   // Layers-panel delete (right-click → "Delete"). When the element lives
@@ -1570,11 +1605,8 @@ export function useEditorEditing({
       },
     }
     // Immediate dispatch (see Move handler).
-    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
-      const outcome = describeEditOutcome("Unwrap", result, handoff)
-      if (outcome.message) setSaveStatus(outcome.message)
-    })
-  }, [])
+    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Unwrap"))
+  }, [reportEditOutcome])
 
   // Layers-panel flatten-conditional. Collapses a v-if chain down to a
   // single chosen branch. V1 only exposes "this branch" (v-if itself,
@@ -1600,12 +1632,9 @@ export function useEditorEditing({
         branchToKeep,
       }
       // Immediate dispatch (see Move handler).
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
-        const outcome = describeEditOutcome("Flatten", result, handoff)
-        if (outcome.message) setSaveStatus(outcome.message)
-      })
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Flatten"))
     },
-    [],
+    [reportEditOutcome],
   )
 
   // Layers-panel detach (right-click → "Detach component"). Same buffer
@@ -1629,11 +1658,8 @@ export function useEditorEditing({
       componentFile: node.componentFile,
     }
     // Immediate dispatch (see Move handler).
-    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(({ result, handoff }) => {
-      const outcome = describeEditOutcome("Detach", result, handoff)
-      if (outcome.message) setSaveStatus(outcome.message)
-    })
-  }, [])
+    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Detach"))
+  }, [reportEditOutcome])
 
   // Prop edits accumulate here. The bridge gets an APPLY_PROP_OVERRIDE /
   // APPLY_ATTR_OVERRIDE for each so the iframe shows the change live; a
@@ -2523,9 +2549,22 @@ export function useEditorEditing({
    * kind earlier in the session). On "all-rows" we run today's
    * applicator; on "this-row" we POST to the LLM fallback and buffer
    * the resulting full-file rewrite as an OverwriteEdit.
+   *
+   * Every await in the "this-row" lane is followed by the same generation
+   * check. The lane holds a bridge draft across a hand-off POST, a proposal
+   * POST and a file write, and a teardown anywhere in there ends the session
+   * the draft belonged to. See `isStaleGeneration`.
    */
   const dispatchIterationEdit = useCallback(
     async (pending: PendingIterationEdit, scope: IterationScope) => {
+      // The session this dispatch belongs to, captured before the first await.
+      // The signal is captured with it, deliberately: read at request time it
+      // could be the NEXT session's live controller, and this lane's requests
+      // would then run on past the teardown they should have been cancelled by.
+      const generation = adapterGenerationRef.current
+      const adapterSignal = adapterAbortRef.current?.signal
+      const staleSession = (): boolean =>
+        isStaleGeneration(generation, adapterGenerationRef.current)
       if (scope === "all-rows") {
         // Today's behavior — route back to the legacy handler with the
         // same arguments. Each variant has a tiny re-entry point.
@@ -2589,6 +2628,11 @@ export function useEditorEditing({
       // write left neither a source edit nor anything to retry, with the page
       // still showing text that reached no file.
       const failThisRow = (message: string) => {
+        // Reached from four places, three of them after an await. A park takes
+        // the draft out of the maps and puts a row in the deterministic dialog,
+        // so doing it for an ended session strands the NEW session's draft
+        // behind a question about an edit that no longer exists.
+        if (staleSession()) return
         // `parkedReason` rather than a literal: it is the same status three
         // exits now show, and it ends the refusal with a full stop first
         // because these reasons come from three places (our own literals, an
@@ -2635,11 +2679,18 @@ export function useEditorEditing({
         )
         // Bounded for the reason the other hand-off is: a thrown or unanswered
         // POST is a refusal, and the park below keeps the edit answerable. The
-        // signal is the deadline's: an unanswered submission is cancelled, not
-        // merely stopped being waited for.
-        const outcome = await settleHandOff((signal) =>
-          handOff ? handOff(prompt, { signal }) : Promise.resolve(false),
+        // signal handed to `run` is the deadline's: an unanswered submission is
+        // cancelled, not merely stopped being waited for. The session's own
+        // signal goes in alongside it, so a teardown cancels the submission
+        // too.
+        const outcome = await settleHandOff(
+          (signal) => (handOff ? handOff(prompt, { signal }) : Promise.resolve(false)),
+          adapterSignal ? { signal: adapterSignal } : {},
         )
+        // The session ended while the POST was in flight: the teardown gave the
+        // draft back and the id names the next session's draft now, so neither
+        // the release below nor the park may run.
+        if (staleSession()) return
         if (outcome === "accepted") {
           // Chat owns the edit from here, so a held draft (in-page typing) goes.
           releaseBridgeDraft(pending)
@@ -2691,6 +2742,9 @@ export function useEditorEditing({
         const result = await requestIterationProposal({
           editKind: pending.editKind,
           templateLocation,
+          // The session's signal: a teardown cancels the proposal rather than
+          // leaving the server to compute a rewrite for a page that is gone.
+          ...(adapterSignal ? { signal: adapterSignal } : {}),
           // The clicked element's OWN position, when the verify moved
           // `templateLocation` up to the loop root. The data resolver needs
           // the loop; the text-field extractor needs the field. Sending only
@@ -2703,6 +2757,12 @@ export function useEditorEditing({
           payload,
           description,
         })
+        // The whole rest of this lane belongs to a session that has ended: the
+        // proposal was computed for source the page no longer shows, the draft
+        // went back to the bridge at teardown, and `adapterRef.current` below
+        // is a DIFFERENT adapter. Applying here writes the old overwrite into
+        // the new session.
+        if (staleSession()) return
         if (!result.ok) {
           failThisRow(`Iteration edit refused: ${result.reason}`)
           return
@@ -2727,6 +2787,12 @@ export function useEditorEditing({
           return
         }
         const applied = await adapter.applyEdit(overwrite)
+        // The write itself spans a teardown window. `releaseBridgeDraft` below
+        // reads `adapterRef.current`, which is the NEXT adapter by now, and
+        // this pending's draft id is the id that adapter just issued to the
+        // designer's current edit. Cancelling it would take their live preview
+        // away and blame this row's write for it.
+        if (staleSession()) return
         if (applied.kind === "failed") {
           failThisRow(
             `Iteration edit failed for ${result.proposal.file}: ${applied.reason}`,
@@ -2888,21 +2954,30 @@ export function useEditorEditing({
       // to release is no longer its own to release.
       const claimedDraftId = bridgeDraftIdOf(pending)
       if (claimedDraftId) latestPendingByDraftRef.current.set(claimedDraftId, pending)
-      const signal = verifyAbortRef.current?.signal
+      // Claim the SESSION. Every continuation below is guarded on it, and the
+      // requests race against its signal.
+      const generation = adapterGenerationRef.current
+      const adapterSignal = adapterAbortRef.current?.signal
       // The window between "this verify started" and "this verify answered"
-      // is one in which the surface can go away. Both facts are read at
+      // is one in which the surface can go away. All three facts are read at
       // resolve time, not captured now.
-      const gone = (): boolean => disposedRef.current || signal?.aborted === true
+      const gone = (): boolean =>
+        isStaleGeneration(generation, adapterGenerationRef.current) ||
+        disposedRef.current ||
+        adapterSignal?.aborted === true
       void verifyIterationLoop({
         file: location.file,
         line: location.line,
         column: location.column,
-        ...(signal ? { signal } : {}),
+        ...(adapterSignal ? { signal: adapterSignal } : {}),
       }).then(
         async (outcome) => {
           if (gone()) {
-            // No status: the panel that would show it is gone too.
-            releaseBridgeDraft(pending)
+            // NOTHING. Not even a release: the teardown that ended this session
+            // handed every held draft back already, and the next adapter starts
+            // its draft ids at `dom-pending-1` again, so cancelling "this"
+            // draft id now would cancel the new session's first edit. No status
+            // either, since the panel that would show it is gone too.
             return
           }
           if (isStaleVerify(seq, latestSeqForKey())) {
@@ -2944,14 +3019,23 @@ export function useEditorEditing({
             // draft this branch has already parked. The deadline also ABORTS
             // the submission, so a turn accepted after the park cannot edit
             // the same element behind the deterministic dialog.
-            const outcome = await settleHandOff((signal) =>
-              handOff ? handOff(action.prompt, { signal }) : Promise.resolve(false),
+            //
+            // The session's own signal goes in as well, so a teardown cancels
+            // the submission rather than leaving a turn to be accepted for a
+            // page that is gone. See `settleHandOff`.
+            const outcome = await settleHandOff(
+              (signal) =>
+                handOff ? handOff(action.prompt, { signal }) : Promise.resolve(false),
+              adapterSignal ? { signal: adapterSignal } : {},
             )
-            // Staleness FIRST, and it decides the release. While this POST was
+            // The session ending outranks everything: no release, for the
+            // reason the verify's own arm gives.
+            if (gone()) return
+            // Staleness next, and it decides the release. While this POST was
             // in flight a newer intercept can have taken over the same draft
             // (the user kept typing); releasing here would cancel THEIR draft,
             // and the newer one is the one the user can still see.
-            if (gone() || isStaleVerify(seq, latestSeqForKey())) {
+            if (isStaleVerify(seq, latestSeqForKey())) {
               releaseBridgeDraftUnlessShared(pending)
               return
             }
@@ -3062,10 +3146,9 @@ export function useEditorEditing({
         // The hand-off's own failures never arrive here; that branch catches
         // them itself, so this message is only ever about the loop check.
         if (gone()) {
-          // The panel that would hold a parked edit is gone with the surface,
-          // so there is nothing to park it in and no status to show. Releasing
-          // the bridge's draft is all that is left.
-          releaseBridgeDraftUnlessShared(pending)
+          // Nothing to park it in, no status to show, and no draft of ours left
+          // to release: the teardown released it, and the id belongs to the
+          // next session now. See the verify's own arm.
           return
         }
         releaseOrParkUnlessShared(

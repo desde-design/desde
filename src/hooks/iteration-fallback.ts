@@ -78,6 +78,16 @@ export interface RequestIterationProposalArgs {
   payload: IterationDataPayload
   /** Free-form one-line description that ends up in the prompt header. */
   description: string
+  /**
+   * The caller's lifetime, when it has one.
+   *
+   * The client holds the bridge's draft across this whole round trip, which
+   * can be two POSTs (the deterministic resolver, then the AI lane). If the
+   * bridge session ends meanwhile, the proposal is a rewrite of source for a
+   * page that is gone, and the caller drops it. Passing the signal through to
+   * both fetches stops the work as well as the answer.
+   */
+  signal?: AbortSignal
 }
 
 export async function requestIterationProposal(
@@ -143,6 +153,7 @@ export async function requestIterationProposal(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ file, intent }),
+      ...(args.signal ? { signal: args.signal } : {}),
     })
   } catch (err) {
     // The AI lane never ran, so the deterministic reason still leads.
@@ -252,6 +263,7 @@ async function tryStaticEndpoint(
         iterationContext: args.iterationContext,
         payload: args.payload,
       }),
+      ...(args.signal ? { signal: args.signal } : {}),
     })
   } catch (err) {
     return { kind: "hard-error", reason: (err as Error).message }

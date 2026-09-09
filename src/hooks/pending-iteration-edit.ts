@@ -165,6 +165,23 @@ export const HANDOFF_TIMEOUT_MS = 30_000
 /** What a hand-off attempt settled as. */
 export type HandOffOutcome = "accepted" | "refused" | "timed-out"
 
+/** Options for {@link settleHandOff}. */
+export interface SettleHandOffOptions {
+  /** Override the {@link HANDOFF_TIMEOUT_MS} deadline (tests, mostly). */
+  timeoutMs?: number
+  /**
+   * The caller's own lifetime, when it has one.
+   *
+   * The iteration lane's hand-offs belong to one bridge session: the draft
+   * being held, the page showing it, and the adapter that would receive the
+   * release all go away together. When they do, this signal aborts, the POST
+   * is cancelled, and the attempt settles as a refusal without waiting out the
+   * deadline. An already-aborted signal means `run` is never called at all, so
+   * a torn-down surface cannot start a chat turn on its way out.
+   */
+  signal?: AbortSignal
+}
+
 /**
  * Run a chat hand-off and settle within {@link HANDOFF_TIMEOUT_MS}, whatever
  * the transport does.
@@ -184,12 +201,21 @@ export type HandOffOutcome = "accepted" | "refused" | "timed-out"
  * server sees the stream close, and the turn winds down (`chat-handler.ts`
  * pipes `stream.aborted` into the runtime's abort controller, both before and
  * after it emits `accepted`).
+ *
+ * `options.signal` is the same argument for a different clock: a hand-off
+ * whose bridge session ended must stop for the same reason a slow one must,
+ * and a turn accepted after the adapter is gone edits a file for a page that
+ * nobody is looking at any more.
  */
 export async function settleHandOff(
   run: (signal: AbortSignal) => Promise<boolean>,
-  timeoutMs: number = HANDOFF_TIMEOUT_MS,
+  options: SettleHandOffOptions = {},
 ): Promise<HandOffOutcome> {
+  const { timeoutMs = HANDOFF_TIMEOUT_MS, signal } = options
   const controller = new AbortController()
+  // Nothing to send: the session this hand-off belongs to is already over, so
+  // starting the POST would submit a turn about a page that is gone.
+  if (signal?.aborted) return "refused"
   const attempt: Promise<HandOffOutcome> = (async () => {
     try {
       return (await run(controller.signal)) ? "accepted" : "refused"
@@ -206,10 +232,26 @@ export async function settleHandOff(
       resolve("timed-out")
     }, timeoutMs)
   })
+  // A refusal, because nothing was accepted. The caller that was awaiting this
+  // is superseded either way and does not act on the value; what matters is
+  // that the submission is cancelled rather than left running.
+  let onAbort: (() => void) | undefined
+  const cancelled: Promise<HandOffOutcome> | null = signal
+    ? new Promise<HandOffOutcome>((resolve) => {
+        onAbort = () => {
+          controller.abort()
+          resolve("refused")
+        }
+        signal.addEventListener("abort", onAbort, { once: true })
+      })
+    : null
   try {
-    return await Promise.race([attempt, timeout])
+    return await Promise.race(
+      cancelled ? [attempt, timeout, cancelled] : [attempt, timeout],
+    )
   } finally {
     if (timer !== undefined) clearTimeout(timer)
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort)
   }
 }
 
@@ -828,6 +870,26 @@ export const DEFERRED_PARK_STATUS =
  */
 export function isStaleVerify(seq: number, latest: number): boolean {
   return seq !== latest
+}
+
+/**
+ * Does this continuation belong to a bridge session that has ended?
+ *
+ * The sibling of {@link isStaleVerify}, one level up. That one asks whether a
+ * NEWER edit replaced this one inside the same session; this one asks whether
+ * the session itself is over: the adapter was torn down and re-attached, or
+ * the page was reloaded out from under the edit.
+ *
+ * It matters because the bridge restarts its draft ids from `dom-pending-1` on
+ * every reconnect. A continuation that resumes across that boundary is holding
+ * an id that now names SOMEONE ELSE'S draft, so applying its edit writes an
+ * overwrite computed for a page that is gone, and releasing "its" draft
+ * cancels the live one the designer can still see. Teardown has already handed
+ * every held draft back, so the right answer at a stale generation is to do
+ * nothing at all: no apply, no release, no park, no status.
+ */
+export function isStaleGeneration(captured: number, current: number): boolean {
+  return captured !== current
 }
 
 /**
