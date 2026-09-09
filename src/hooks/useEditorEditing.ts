@@ -128,6 +128,7 @@ import {
   hasUndispatchedWork,
   isStaleGeneration,
   isStaleVerify,
+  mayClearInFlightMarker,
   iterationRouteFor,
   parkedReason,
   promptCollision,
@@ -3789,6 +3790,13 @@ export function useEditorEditing({
     )
     if (!current) return
     const dispatchedValue = current.value
+    // The session this dispatch belongs to. The marker it is about to set is
+    // keyed on the element and the prop, NOT on the session, so a dispatch that
+    // outlives its session would otherwise delete a marker a new dispatch for
+    // the same element set after the page reloaded, and two writes for one
+    // identity could then run at once. See `mayClearInFlightMarker`, which the
+    // `finally` consults, and `endBridgeSession`, which empties the set.
+    const generation = adapterGenerationRef.current
     branchPropInFlight.current.add(key)
     inFlightOverrideIdsRef.current.add(current.id)
     // The prop request is a plain synchronous POST — when the deterministic
@@ -3863,6 +3871,12 @@ export function useEditorEditing({
           const refreshed = await adapter
             .selectBySelector(current.target.selector)
             .catch(() => null)
+          // The session ended while the re-select was out. `refreshed` then
+          // describes a document this dispatch never wrote against, and the
+          // re-entry below would run under a marker this dispatch no longer
+          // owns. Report nothing: the buffered entry stays, and the next
+          // keystroke on it re-arms the debounce under the live session.
+          if (!mayClearInFlightMarker(generation, adapterGenerationRef.current)) return
           if (refreshed?.editTarget) {
             setPendingPropEdits((prev) => {
               const idx = prev.findIndex(
@@ -3877,6 +3891,11 @@ export function useEditorEditing({
             if (existing) clearTimeout(existing)
             const timer = setTimeout(() => {
               branchPropDispatchTimers.current.delete(key)
+              // Same guard again, at the other end of the debounce. The retry
+              // re-enters through the live ref and reads the live adapter, so a
+              // session that ended during the wait would have it rebasing the
+              // previous document's stamps onto the current one.
+              if (!mayClearInFlightMarker(generation, adapterGenerationRef.current)) return
               dispatchBranchPropEditRef.current?.(key)
             }, BRANCH_PROP_DISPATCH_DEBOUNCE_MS)
             branchPropDispatchTimers.current.set(key, timer)
@@ -4026,7 +4045,13 @@ export function useEditorEditing({
     } finally {
       clearTimeout(askingAiTimer)
       inFlightOverrideIdsRef.current.delete(current.id)
-      branchPropInFlight.current.delete(key)
+      // Only when this dispatch still owns the marker. Once the session has
+      // ended, `endBridgeSession` has emptied the set and any key in it was put
+      // there by a dispatch that started afterwards; deleting it would let a
+      // second write for that identity run alongside the first.
+      if (mayClearInFlightMarker(generation, adapterGenerationRef.current)) {
+        branchPropInFlight.current.delete(key)
+      }
     }
   }, [scheduleSelectionStampRefresh])
   dispatchBranchPropEditRef.current = dispatchBranchPropEdit

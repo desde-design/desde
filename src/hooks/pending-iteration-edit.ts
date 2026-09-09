@@ -893,6 +893,28 @@ export function isStaleGeneration(captured: number, current: number): boolean {
 }
 
 /**
+ * May a dispatch that has just finished delete its own in-flight marker?
+ *
+ * The marker sets (one key per selector+prop identity) are SHARED across bridge
+ * sessions, and a dispatch can outlive the session it started in: the page
+ * reloads, the adapter re-attaches, a new dispatch for the same key starts and
+ * adds the same key. The old dispatch's `finally` then deletes a marker that
+ * now belongs to the new one, and a second dispatch for that identity can run
+ * concurrently with the first.
+ *
+ * So a marker may only be cleared by the dispatch that still owns it, i.e. one
+ * whose session is the current one. The session end clears the whole set, so a
+ * marker left behind here is not stranded.
+ *
+ * It is the negation of {@link isStaleGeneration} and it is still its own named
+ * function: "is this answer stale" and "may I clear this marker" are different
+ * questions, and the second one is the whole of the concurrency rule.
+ */
+export function mayClearInFlightMarker(captured: number, current: number): boolean {
+  return !isStaleGeneration(captured, current)
+}
+
+/**
  * Everything a bridge session is holding when it ends, as plain values.
  *
  * The three places a session ends (the adapter effect's cleanup, the iframe's

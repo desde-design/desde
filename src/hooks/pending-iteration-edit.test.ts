@@ -17,6 +17,7 @@ import {
   handOffFailureStatus,
   isStaleGeneration,
   isStaleVerify,
+  mayClearInFlightMarker,
   iterationRouteFor,
   iterationTemplateLocation,
   parkedReason,
@@ -1158,6 +1159,29 @@ describe("isStaleGeneration", () => {
     // Same shape, different question: isStaleVerify asks whether a newer edit
     // replaced this one, isStaleGeneration whether the session itself ended.
     expect(isStaleGeneration(1, 2)).toBe(isStaleVerify(1, 2))
+  })
+})
+
+describe("mayClearInFlightMarker", () => {
+  it("lets a dispatch clear its own marker", () => {
+    expect(mayClearInFlightMarker(7, 7)).toBe(true)
+  })
+
+  it("refuses once the session has moved on", () => {
+    // The key in the set is no longer this dispatch's: the page reloaded, the
+    // session end emptied the set, and a new dispatch for the same element and
+    // prop put the same key back. Deleting it here would let a second write for
+    // that identity start alongside the first.
+    expect(mayClearInFlightMarker(7, 8)).toBe(false)
+    expect(mayClearInFlightMarker(8, 7)).toBe(false)
+  })
+
+  it("is exactly the negation of isStaleGeneration", () => {
+    for (const [captured, current] of [[0, 0], [1, 2], [5, 5], [9, 3]] as const) {
+      expect(mayClearInFlightMarker(captured, current)).toBe(
+        !isStaleGeneration(captured, current),
+      )
+    }
   })
 })
 
