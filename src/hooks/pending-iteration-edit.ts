@@ -13,6 +13,7 @@ import type { AmbiguousIterationHandoff } from "@/editor/edit-service/build-edit
 import {
   buildAmbiguousIterationHandoffPrompt,
   describeMoveDestination,
+  safeCount,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
 import type { IterationVerifyOutcome } from "./iteration-verify"
 
@@ -134,8 +135,11 @@ export function describeAmbiguousIteration(
     ...namesOf(pending),
     selector: selectorOf(pending),
     location: { file: location.file, line: location.line, column: location.column },
-    index: pending.iterationContext.index,
-    siblingCount: pending.iterationContext.siblingCount,
+    // Coerced here as well as at the wire boundary and in the builder. This
+    // is the point where two page-supplied numbers become part of a message
+    // to an agent, and each of the three gates is cheap.
+    index: safeCount(pending.iterationContext.index),
+    siblingCount: safeCount(pending.iterationContext.siblingCount),
     noLoopReason,
   }
 }

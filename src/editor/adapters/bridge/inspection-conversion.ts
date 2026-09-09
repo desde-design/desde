@@ -27,9 +27,81 @@ import type {
   BridgePendingMutation,
   ComponentTreeNode,
   InspectionData,
+  IterationContext,
+  OutlineNode,
 } from '@/types/bridge'
 
+const ITERATION_SOURCES: readonly IterationContext['source'][] = [
+  'v-for',
+  'map',
+  'each',
+  'unknown',
+]
+
+/**
+ * The iframe's messages are cast, not parsed, so `iterationContext` arrives
+ * as whatever the page put on the wire. It is not decoration: `index` and
+ * `siblingCount` are rendered into the hand-off prompt's own sentences ("The
+ * page shows N elements ...", "item N of M"), which sit OUTSIDE the fenced
+ * fact block. A hostile prototype sending `siblingCount` as a string with
+ * newlines and an instruction paragraph would write into the request half of
+ * a message to the agent.
+ *
+ * So the shape is checked at the boundary and a context that fails is
+ * DROPPED, not repaired. A malformed context means "this is not an
+ * iteration", which is exactly the ordinary edit path. `siblingCount` must be
+ * at least 2 because the whole question the context unlocks is "this one or
+ * all of them", which needs more than one. The returned object is rebuilt
+ * field by field, so nothing else the page attached rides along.
+ */
+export function validateIterationContext(value: unknown): IterationContext | null {
+  if (!value || typeof value !== 'object') return null
+  const c = value as Record<string, unknown>
+  if (typeof c.key !== 'string' && typeof c.key !== 'number') return null
+  if (!Number.isInteger(c.index) || (c.index as number) < 0) return null
+  if (!Number.isInteger(c.siblingCount) || (c.siblingCount as number) < 2) return null
+  if (!ITERATION_SOURCES.includes(c.source as IterationContext['source'])) return null
+  // `expression` is optional in practice (every emitter writes it, most of
+  // them as null) but must never be a non-string when present: it reaches the
+  // dialog's copy.
+  if (c.expression !== null && c.expression !== undefined && typeof c.expression !== 'string') {
+    return null
+  }
+  return {
+    source: c.source as IterationContext['source'],
+    key: c.key,
+    index: c.index as number,
+    siblingCount: c.siblingCount as number,
+    expression: typeof c.expression === 'string' ? c.expression : null,
+  }
+}
+
+/**
+ * The same gate for the OTHER wire path that carries iteration contexts: the
+ * layers tree, whose nodes reach `useEditorEditing` straight off
+ * `STRUCTURE_CAPTURED` with no conversion step to hang this on. A delete from
+ * the Layers panel reads its context from the node, so leaving this path
+ * unchecked would leave the hand-off prompt reachable with page-controlled
+ * numbers. Mutates in place: these nodes are our own structured-clone of the
+ * message, and rebuilding the tree to drop a field would be a copy for
+ * nothing.
+ */
+export function sanitizeOutlineIterationContexts(roots: readonly OutlineNode[]): void {
+  for (const node of roots) {
+    if (node.iterationContext !== undefined) {
+      const valid = validateIterationContext(node.iterationContext)
+      if (valid) node.iterationContext = valid
+      else delete node.iterationContext
+    }
+    if (node.children) sanitizeOutlineIterationContexts(node.children)
+  }
+}
+
 export function inspectionDataToSelection(data: InspectionData): Selection {
+  // Validated once, used by both returns below. `undefined`, not `null`: the
+  // field is optional on `Selection`, and "absent" is what a rejected context
+  // means.
+  const iterationContext = validateIterationContext(data.iterationContext) ?? undefined
   const componentTree = data.componentTree ?? []
   // Prefer the edit-target component (the one whose source declaration
   // carries the resolved data-desde-src) over the leaf of the Vue parent
@@ -120,7 +192,7 @@ export function inspectionDataToSelection(data: InspectionData): Selection {
       editTarget: data.editTarget,
       domAnchor: data.domAnchor,
       isLibrary: data.isLibrary,
-      iterationContext: data.iterationContext,
+      iterationContext,
       classes: data.classes,
       editableTexts: data.editableTexts,
       attributionContext: data.attributionContext,
@@ -160,7 +232,7 @@ export function inspectionDataToSelection(data: InspectionData): Selection {
     editTarget: primaryEditTarget ?? data.editTarget,
     domAnchor: data.domAnchor,
     isLibrary: data.isLibrary,
-    iterationContext: data.iterationContext,
+    iterationContext,
     // Live prop values from the primary component instance. Without this,
     // after a manual page reload the inspector renders manifest defaults
     // that disagree with the already-rendered iframe.

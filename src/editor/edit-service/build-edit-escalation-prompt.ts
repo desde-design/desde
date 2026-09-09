@@ -319,6 +319,27 @@ function sanitizeField(value: string, limit = FIELD_LIMIT): string {
 }
 
 /**
+ * `sanitizeField` for a count.
+ *
+ * The two counts on an iteration hand-off (`index`, `siblingCount`) are the
+ * only page-supplied values rendered OUTSIDE the fence: "The page shows N
+ * elements ..." is a sentence in the request half of the message. They are
+ * typed `number`, but the type is a claim the wire never checked, so a string
+ * carrying newlines and an instruction paragraph could arrive in one. The
+ * boundary validator (`validateIterationContext`) is the first gate; this is
+ * the second, at the point of rendering, so the builder is safe on its own
+ * terms rather than on a caller's promise.
+ *
+ * Anything that is not a finite non-negative integer becomes 0. A wrong count
+ * reads as a strange sentence; a smuggled paragraph reads as an instruction.
+ */
+export function safeCount(value: unknown): number {
+  const n = Number(value)
+  if (!Number.isInteger(n) || n < 0) return 0
+  return n
+}
+
+/**
  * A random envelope tag, the same idea as `wrapUntrustedSource` in
  * `wrap-untrusted-source.ts`. That module is not reused directly: it imports
  * `node:crypto`, and these builders run in the browser.
@@ -449,15 +470,20 @@ export function buildAmbiguousIterationHandoffPrompt(h: AmbiguousIterationHandof
   // the opening sentence, outside the fence. A field that reaches the
   // instruction half of the message must not be able to carry a line break.
   const requested = sanitizeField(h.requested)
+  // Coerced, then rendered through `String(...)` of the coerced value only.
+  // Interpolating `h.siblingCount` directly would print whatever the page
+  // sent, and the first sentence below is outside the fence.
+  const siblingCount = String(safeCount(h.siblingCount))
+  const itemNumber = String(safeCount(h.index) + 1)
   return [
     EDIT_HANDOFF_MARKER,
     "",
-    `I tried to ${requested} by direct manipulation. The page shows ${h.siblingCount} elements that come from the same source line, so the Editor could not tell whether I meant this one or all of them, and there is no loop at that line in source.`,
+    `I tried to ${requested} by direct manipulation. The page shows ${siblingCount} elements that come from the same source line, so the Editor could not tell whether I meant this one or all of them, and there is no loop at that line in source.`,
     "",
     HANDOFF_FENCE_NOTE,
     "",
     ...fenceHandoffFacts([
-      `- What I did: ${requested} on ${elementLabel(h)} (selector: ${sanitizeField(h.selector)}), item ${h.index + 1} of ${h.siblingCount}`,
+      `- What I did: ${requested} on ${elementLabel(h)} (selector: ${sanitizeField(h.selector)}), item ${itemNumber} of ${siblingCount}`,
       ...(h.detail ? [`- Details: ${sanitizeField(h.detail, DETAIL_LIMIT)}`] : []),
       `- Source position: ${locationLabel(h.location)}`,
       `- Loop check: ${sanitizeField(h.noLoopReason)}`,

@@ -52,6 +52,7 @@ import {
   bridgeMutationDraftToCore,
   bridgeMutationToCore,
   inspectionDataToSelection,
+  sanitizeOutlineIterationContexts,
 } from './inspection-conversion'
 
 const REQUIRED_BRIDGE_VERSION = '2026-05-06a'
@@ -1555,6 +1556,11 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     const pending = this.pendingStructureRequests.get(requestId)
     if (!pending) return
     this.pendingStructureRequests.delete(requestId)
+    // The tree comes off the wire uncast-checked. Its iteration contexts feed
+    // the Layers-panel delete, which can reach the hand-off prompt, so they
+    // are shape-checked here, at the boundary, exactly as the inspection path
+    // checks its own.
+    sanitizeOutlineIterationContexts(roots)
     pending.resolve(roots)
   }
 
