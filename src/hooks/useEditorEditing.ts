@@ -5868,9 +5868,21 @@ export function useEditorEditing({
           clearTimeout(streamFlushTimer)
           streamFlushTimer = null
         }
-        // THE PAGE. Checked before the result is read at all: an abort arrives
-        // here as `failed`, and reporting "Save failed at DOM mutations: edit
-        // request cancelled" would blame the write for the page going away.
+        // THE HASHES FIRST, whatever happens to the save. They are disk truth,
+        // not session state: this write landed on files that are the same files
+        // whichever page is on screen now, and dropping the new hashes leaves
+        // the shell's stale-target guard holding pre-write ones. The next save
+        // of the same file then 409s against Desde's own change. Same order as
+        // the four single-edit lanes.
+        if (result.kind === "applied" && result.newHashes) {
+          fileHashesRef.current = {
+            ...fileHashesRef.current,
+            ...result.newHashes,
+          }
+        }
+        // THE PAGE. Checked before the rest of the result is read: an abort
+        // arrives here as `failed`, and reporting "Save failed at DOM mutations:
+        // edit request cancelled" would blame the write for the page going away.
         if (isStaleGeneration(generation, adapterGenerationRef.current)) {
           return stopForPageChange()
         }
@@ -5965,12 +5977,8 @@ export function useEditorEditing({
           setSavePendingLLMInput(null)
           return { ok: false, reason }
         }
-        if (result.kind === "applied" && result.newHashes) {
-          fileHashesRef.current = {
-            ...fileHashesRef.current,
-            ...result.newHashes,
-          }
-        }
+        // (The new hashes were recorded above, before the staleness check, so a
+        // save the page change stops still leaves them on record.)
         // Capture the LLM trace if the server invoked it. Absent on the
         // fast-path; presence is what the dialog uses to decide between
         // "Saved" (deterministic) and "AI made the changes" (LLM) framing.

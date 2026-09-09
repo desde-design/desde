@@ -1576,6 +1576,126 @@ describe("bridge session boundary", () => {
     })
   })
 
+  it("keeps the hashes of a write that landed, even when the page changed under it", async () => {
+    // Round 16 X5. The stale return used to fire before the flush's `newHashes`
+    // were recorded, so the shell went on holding pre-write hashes for files
+    // this very save had just written. The next edit to one of them 409s
+    // against Desde's own change. The hashes are disk truth, not session state.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const bodies: string[] = []
+      let answerFlush: (() => void) | undefined
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+          bodies.push(String(init?.body))
+          if (!answerFlush) {
+            return new Promise<Response>((resolve) => {
+              answerFlush = () =>
+                resolve(
+                  new Response(
+                    JSON.stringify({
+                      newHashes: { "src/components/Card.vue": "hash-after-write" },
+                    }),
+                    { status: 200, headers: { "content-type": "application/json" } },
+                  ),
+                )
+            })
+          }
+          return new Response(JSON.stringify({ newHashes: {} }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        }),
+      )
+      let editing: ReturnType<typeof useEditorEditing> | null = null
+      render(<Harness onEditing={(e) => { editing = e }} />)
+      await act(async () => {
+        emitFromBridge({
+          type: "BRIDGE_READY",
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+        })
+      })
+      await act(async () => {
+        emitFromBridge({
+          type: "MUTATION_CAPTURED",
+          payload: {
+            id: "dom-mut-hash-1",
+            kind: "text",
+            sourceLoc: "src/components/Card.vue:12:4",
+            sourceVersion: "abc123",
+            resolutionKind: "direct",
+            scope: "definition",
+            callsiteLoc: null,
+            callsiteVersion: null,
+            instancePath: "0",
+            selector: "#card-title",
+            before: "Hello",
+            after: "Hi",
+          },
+        })
+      })
+      let save: Promise<{ ok: true } | { ok: false; reason: string }> | null = null
+      await act(async () => {
+        save = editing!.handleSaveAll()
+      })
+      await waitFor(() => {
+        expect(answerFlush).toBeDefined()
+      })
+
+      // The page is replaced, and only then does the write answer.
+      const iframe = screen.getByTitle("Prototype") as HTMLIFrameElement
+      await act(async () => {
+        iframe.dispatchEvent(new Event("load"))
+      })
+      await act(async () => {
+        emitFromBridge({
+          type: "BRIDGE_READY",
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
+        })
+      })
+      await act(async () => {
+        answerFlush!()
+        await save!
+      })
+
+      // An edit to that same file on the page that is there now must carry the
+      // hash this save's write produced, not the one it replaced.
+      await act(async () => {
+        emitFromBridge({
+          type: "MUTATION_CAPTURED",
+          payload: {
+            id: "dom-mut-hash-2",
+            kind: "text",
+            sourceLoc: "src/components/Card.vue:20:4",
+            sourceVersion: "hash-after-write",
+            resolutionKind: "direct",
+            scope: "definition",
+            callsiteLoc: null,
+            callsiteVersion: null,
+            instancePath: "0",
+            selector: "#card-body",
+            before: "Body",
+            after: "Body!",
+          },
+        })
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      expect(bodies).toHaveLength(2)
+      const second = JSON.parse(bodies[1]) as {
+        edit?: { baseHashes?: Record<string, string> }
+      }
+      expect(second.edit?.baseHashes?.["src/components/Card.vue"]).toBe(
+        "hash-after-write",
+      )
+    } finally {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
+  })
+
   it("cancels the save's chat hand-off when the page is replaced under it", async () => {
     // Round 16 X1. The save's hand-off had the deadline's signal but not the
     // session's, so a page changed while the POST was out could still let the
