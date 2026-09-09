@@ -24,7 +24,8 @@ export const ITERATION_TEXT_LIMIT = 200
  */
 export const ITERATION_DESCRIPTION_LIMIT = 500
 
-// eslint-disable-next-line no-control-regex -- matching control characters IS the check
+// Escaped, not literal, so the rule reads as a rule; `no-control-regex` only
+// fires on literal control characters, which is why there is no directive here.
 const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/
 
 /**
