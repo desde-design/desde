@@ -11,15 +11,26 @@
 import {
   isStaleGeneration,
   mayClearInFlightMarker,
+  resumePlan,
+  retireForeignEntries,
+  retiresBufferedEntries,
+  sessionEndPlan,
+  shouldEndSessionOnHandshake,
   type BridgeSessionEndReason,
 } from "./session-state"
+import {
+  createModalQueue,
+  type ModalKind,
+  type ModalQueue,
+  type ModalRequest,
+} from "./modal-queue"
 import type {
   LaneId,
   LaneSession,
   SessionRunContext,
   SessionRunResult,
 } from "./lane-session"
-import type { Mutation, PropEdit } from "@/editor/core"
+import type { Mutation, PendingMutation, PropEdit } from "@/editor/core"
 
 export type { LaneId, LaneSession, SessionRunContext, SessionRunResult }
 
@@ -30,6 +41,36 @@ export interface EditSessionOptions<Prompt> {
   propEditKey: (edit: PropEdit) => string
   /** The buffer key for one captured mutation. */
   mutationKey: (mutation: Mutation) => string
+  /**
+   * A dialog just went on screen. The hook writes the status line for it: a
+   * park explains itself, and the bridge's ordinary route explains nothing,
+   * which is the difference `request.reason` carries.
+   */
+  onModalOpened?: (request: ModalRequest<Prompt>) => void
+}
+
+/** What the hook renders. Rebuilt only on change, so the identity is stable. */
+export interface EditSessionSnapshot<Prompt> {
+  propEdits: readonly PropEdit[]
+  mutations: readonly Mutation[]
+  rows: readonly PendingMutation[]
+  scopePrompt: Prompt | null
+  queued: readonly ModalRequest<Prompt>[]
+}
+
+export interface SessionEndResult {
+  /** Drafts to hand back to the bridge, when the document can still hear it. */
+  cancelDraftIds: string[]
+  discarded: number
+  status: string | null
+  /** The departed document's buffered entries, for the caller's side tables. */
+  retiredPropEdits: PropEdit[]
+  retiredMutations: Mutation[]
+}
+
+export interface ResumePlan {
+  propEdits: PropEdit[]
+  mutations: Mutation[]
 }
 
 export class EditSession<Prompt> implements LaneSession {
@@ -46,7 +87,226 @@ export class EditSession<Prompt> implements LaneSession {
   }
   private readonly verifySeq = new Map<string, number>()
 
-  constructor(protected readonly options: EditSessionOptions<Prompt>) {}
+  private propEdits: readonly PropEdit[] = []
+  private mutations: readonly Mutation[] = []
+  private rows: readonly PendingMutation[] = []
+  private scopePrompt: Prompt | null = null
+  private queue: readonly ModalRequest<Prompt>[] = []
+  private owner: ModalKind | null = null
+  private readonly drafts = new Map<string, PendingMutation>()
+  private readonly latestPending = new Map<string, Prompt>()
+  private readonly listeners = new Set<() => void>()
+  private readonly modals: ModalQueue<Prompt>
+  private snapshot: EditSessionSnapshot<Prompt>
+
+  constructor(protected readonly options: EditSessionOptions<Prompt>) {
+    this.modals = createModalQueue(options.promptDraftId)
+    this.snapshot = this.buildSnapshot()
+  }
+
+  private buildSnapshot(): EditSessionSnapshot<Prompt> {
+    return {
+      propEdits: this.propEdits,
+      mutations: this.mutations,
+      rows: this.rows,
+      scopePrompt: this.scopePrompt,
+      queued: this.queue,
+    }
+  }
+
+  /**
+   * One new snapshot, then one notification.
+   *
+   * The identity has to change on a change and NOT change otherwise:
+   * `useSyncExternalStore` re-renders on identity and would loop forever on a
+   * fresh object per read.
+   */
+  private notify(): void {
+    this.snapshot = this.buildSnapshot()
+    for (const listener of this.listeners) listener()
+  }
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  getSnapshot = (): EditSessionSnapshot<Prompt> => this.snapshot
+
+  updatePropEdits(update: (prev: readonly PropEdit[]) => readonly PropEdit[]): void {
+    const next = update(this.propEdits)
+    if (next === this.propEdits) return
+    this.propEdits = next
+    this.notify()
+  }
+
+  updateMutations(update: (prev: readonly Mutation[]) => readonly Mutation[]): void {
+    const next = update(this.mutations)
+    if (next === this.mutations) return
+    this.mutations = next
+    this.notify()
+  }
+
+  updateRows(update: (prev: readonly PendingMutation[]) => readonly PendingMutation[]): void {
+    const next = update(this.rows)
+    if (next === this.rows) return
+    this.rows = next
+    this.notify()
+  }
+
+  setScopePrompt(prompt: Prompt | null): void {
+    if (this.scopePrompt === prompt) return
+    this.scopePrompt = prompt
+    this.notify()
+  }
+
+  /** The bridge is holding this draft for us. */
+  holdDraft(pendingId: string, payload: PendingMutation): void {
+    this.drafts.set(pendingId, payload)
+  }
+
+  getDraft(pendingId: string): PendingMutation | undefined {
+    return this.drafts.get(pendingId)
+  }
+
+  heldDraftIds(): string[] {
+    return [...this.drafts.keys()]
+  }
+
+  /**
+   * Forget a draft. The bridge is told by the caller, which owns the adapter;
+   * a queued question about it goes too, because answering it would resolve an
+   * id the bridge no longer knows.
+   */
+  releaseDraft(pendingId: string): void {
+    this.drafts.delete(pendingId)
+    this.latestPending.delete(pendingId)
+    const next = this.modals.dropForDraft(this.queue, pendingId)
+    if (next.length === this.queue.length) return
+    this.queue = next
+    this.notify()
+  }
+
+  /**
+   * The NEWEST pending edit per draft id. An in-page typing session rebuilds
+   * the pending object on every keystroke round trip, so an older completion
+   * must not release a draft the newer one is using, and object identity is
+   * the only thing that separates them.
+   */
+  claimPending(draftId: string, prompt: Prompt): void {
+    this.latestPending.set(draftId, prompt)
+  }
+
+  latestPendingFor(draftId: string): Prompt | undefined {
+    return this.latestPending.get(draftId)
+  }
+
+  get modalOwner(): ModalKind | null {
+    return this.owner
+  }
+
+  get queuedCount(): number {
+    return this.queue.length
+  }
+
+  /**
+   * Ask for a dialog. THE way either one is raised. True when it opened now,
+   * false when it is waiting behind the one on screen; a false answer is not a
+   * failure, and the caller's only job then is to say so in the status bar.
+   */
+  requestModal(request: ModalRequest<Prompt>): boolean {
+    const decision = this.modals.enqueue(this.queue, request, this.owner)
+    if ("open" in decision) {
+      this.openModal(decision.open)
+      return true
+    }
+    this.queue = decision.deferred
+    this.notify()
+    return false
+  }
+
+  /** The open dialog has closed. Give the modal up and ask the next question. */
+  releaseModal(): void {
+    this.owner = null
+    const { next, queue } = this.modals.dequeue(this.queue)
+    this.queue = queue
+    if (!next) {
+      this.notify()
+      return
+    }
+    this.openModal(next)
+  }
+
+  private openModal(request: ModalRequest<Prompt>): void {
+    if (request.kind === "scope") {
+      this.owner = "scope"
+      this.scopePrompt = request.pending
+    } else {
+      this.owner = "disambiguation"
+      // The dialog owns the draft from here: its confirm and its cancel both
+      // resolve it with the bridge, so nothing else may park or release it.
+      this.drafts.delete(request.mutation.pendingId)
+      this.latestPending.delete(request.mutation.pendingId)
+      if (!this.rows.some((row) => row.pendingId === request.mutation.pendingId)) {
+        this.rows = [...this.rows, request.mutation]
+      }
+    }
+    this.notify()
+    this.options.onModalOpened?.(request)
+  }
+
+  /**
+   * A handshake completed. Decide what it means, and say what the caller has
+   * to do about it.
+   *
+   * The document boundary is the HANDSHAKE, not the iframe's `load` event
+   * (finding U1): the bridge announces itself as soon as its script runs, so a
+   * page whose images finish afterwards fires `load` on a document the shell is
+   * already editing.
+   */
+  start(
+    /**
+     * `string | null`, matching `shouldEndSessionOnHandshake`. The adapter's
+     * `bridgeDocumentId` getter is `string | null`, and an id-less handshake is
+     * refused at the adapter, so null cannot reach here through the wiring.
+     * Taking it anyway keeps the caller from inventing an empty string, which
+     * would be adopted as a real document.
+     */
+    documentId: string | null,
+    mutationEligible: (mutation: Mutation) => boolean = () => true,
+  ): { ended: SessionEndResult | null; resumed: ResumePlan | null } {
+    const previous = this.document
+    const ended = shouldEndSessionOnHandshake(previous, documentId)
+      ? this.end("reconnect")
+      : null
+    this.document = documentId
+    const resumed =
+      previous !== null && previous === documentId
+        ? this.resume(mutationEligible)
+        : null
+    return { ended, resumed }
+  }
+
+  /**
+   * Which buffered entries get their debounced write re-armed after a session
+   * end that KEPT them (finding X2). An entry being written right now is
+   * skipped: its own dispatch re-fires if the buffer moved under it.
+   */
+  resume(mutationEligible: (mutation: Mutation) => boolean = () => true): ResumePlan {
+    const propEntries = this.propEdits.map((edit) => ({
+      key: this.options.propEditKey(edit),
+      edit,
+    }))
+    const mutationEntries = this.mutations
+      .filter(mutationEligible)
+      .map((mutation) => ({ key: this.options.mutationKey(mutation), mutation }))
+    return {
+      propEdits: resumePlan(propEntries, this.inFlight.prop).map((e) => e.edit),
+      mutations: resumePlan(mutationEntries, this.inFlight.text).map((e) => e.mutation),
+    }
+  }
 
   get generation(): number {
     return this.currentGeneration
@@ -199,14 +459,60 @@ export class EditSession<Prompt> implements LaneSession {
     return this.verifySeq.get(key) ?? fallback
   }
 
-  /** Ends the session. Task 3 fills this in; part 1 only moves the lifetime. */
-  end(reason: BridgeSessionEndReason): void {
-    void reason
+  /**
+   * End the session. ONE order, for every reason.
+   *
+   * The generation moves and the controller is aborted FIRST, before anything
+   * is cleared: every continuation still awaiting belongs to the session that
+   * is ending, and the clearing below is what it would otherwise resume into.
+   * The controller is renewed rather than left aborted, because the reasons
+   * that keep the adapter need a live one for the next edit.
+   */
+  end(reason: BridgeSessionEndReason): SessionEndResult {
     this.currentGeneration += 1
     this.controller.abort()
     this.controller = new AbortController()
+    const retire = retiresBufferedEntries(reason)
+    // The document is forgotten for exactly the reasons that retire the
+    // buffers. A teardown keeps it, because the page is still on screen and
+    // the buffered edits it kept belong to it.
+    if (retire) this.document = null
+    const propPartition = retire
+      ? retireForeignEntries(this.propEdits, this.currentGeneration)
+      : { kept: [...this.propEdits], retired: [] as PropEdit[] }
+    const mutationPartition = retire
+      ? retireForeignEntries(this.mutations, this.currentGeneration)
+      : { kept: [...this.mutations], retired: [] as Mutation[] }
+    const plan = sessionEndPlan(
+      {
+        openPrompt: this.scopePrompt,
+        queued: this.queue,
+        rows: this.rows,
+        heldDraftIds: this.heldDraftIds(),
+        retiredBuffered:
+          propPartition.retired.length + mutationPartition.retired.length,
+        reason,
+      },
+      this.options.promptDraftId,
+    )
+    this.propEdits = propPartition.kept
+    this.mutations = mutationPartition.kept
+    this.scopePrompt = null
+    this.queue = []
+    this.owner = null
+    this.rows = []
+    this.drafts.clear()
+    this.latestPending.clear()
     this.inFlight.prop.clear()
     this.inFlight.text.clear()
     this.cancelTimers()
+    this.notify()
+    return {
+      cancelDraftIds: plan.cancelDraftIds,
+      discarded: plan.discarded,
+      status: plan.status,
+      retiredPropEdits: propPartition.retired,
+      retiredMutations: mutationPartition.retired,
+    }
   }
 }
