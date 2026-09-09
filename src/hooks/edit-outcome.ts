@@ -25,6 +25,9 @@ export function describeEditOutcome(
   if (handoff.started) {
     return { kind: "handed-off", message: `${kindLabel} needs a decision. Sent to chat.` }
   }
-  const tail = handoff.attempted ? ". Chat is not available, so nothing was changed." : ""
+  // "Chat is not available" was wrong more often than right: the common
+  // cause of a declined hand-off is a refusal (a chat turn is already
+  // running and detached sessions are off), not a missing chat.
+  const tail = handoff.attempted ? ". The edit could not be sent to chat, so nothing was changed." : ""
   return { kind: "failed", message: `${kindLabel} failed: ${result.reason}${tail}` }
 }

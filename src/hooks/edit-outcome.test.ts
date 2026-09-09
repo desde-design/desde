@@ -25,10 +25,10 @@ describe("describeEditOutcome", () => {
     })
   })
 
-  it("refused, hand-off declined: failed, and says chat was not available", () => {
+  it("refused, hand-off declined: failed, and says the edit did not reach chat", () => {
     expect(describeEditOutcome("Move", failed("cycle detected"), { attempted: true, started: false, originalReason: "cycle detected" })).toEqual({
       kind: "failed",
-      message: "Move failed: cycle detected. Chat is not available, so nothing was changed.",
+      message: "Move failed: cycle detected. The edit could not be sent to chat, so nothing was changed.",
     })
   })
 

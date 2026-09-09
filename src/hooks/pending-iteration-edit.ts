@@ -5,10 +5,13 @@
  * mounting the hook.
  */
 import type { IterationContext, Selection, SourceLocation } from "@/editor/core"
+import type { IterationScope } from "@/components/editor/iteration-scope-dialog"
 import type { LayersMovePayload } from "@/components/editor/layers-panel"
 import type { PropControlValue } from "@/components/editor/prop-control"
 import type { EditableTextField, OutlineNode } from "@/types/bridge"
 import type { AmbiguousIterationHandoff } from "@/editor/edit-service/build-edit-escalation-prompt"
+import { buildAmbiguousIterationHandoffPrompt } from "@/editor/edit-service/build-edit-escalation-prompt"
+import type { IterationVerifyOutcome } from "./iteration-verify"
 
 /**
  * Pending iteration edit — held while the IterationScopeDialog asks the
@@ -70,6 +73,11 @@ export function iterationTemplateLocation(pending: PendingIterationEdit): Source
 }
 
 function selectorOf(pending: PendingIterationEdit): string {
+  // `delete` reads the OUTLINE NODE, not the selection. A Layers-panel delete
+  // carries whatever the iframe had selected at the time, which is routinely a
+  // different element from the row the user deleted. Handing chat the
+  // selection's selector pointed the agent at the wrong element.
+  if (pending.editKind === "delete") return pending.node.selector
   return pending.editKind === "move" ? pending.payload.source.selector : pending.selection.selector
 }
 
@@ -114,4 +122,52 @@ export function describeAmbiguousIteration(
     siblingCount: pending.iterationContext.siblingCount,
     noLoopReason,
   }
+}
+
+/**
+ * Do these two pending edits hold the SAME bridge draft? Two verifies can be
+ * in flight at once, and the later one replaces the earlier in the dialog
+ * state. Whatever it replaces must have its bridge draft released, or Save
+ * stays blocked behind an orphaned disambiguation. But when both objects
+ * describe the same in-page typing session, releasing "the previous one"
+ * cancels the draft the survivor still needs. Object identity is not the
+ * test: the pending object is rebuilt on every keystroke round trip.
+ */
+export function sameBridgeDraft(a: PendingIterationEdit, b: PendingIterationEdit): boolean {
+  if (a.editKind !== "dom-text" || b.editKind !== "dom-text") return false
+  if (!a.bridgePendingId || !b.bridgePendingId) return false
+  return a.bridgePendingId === b.bridgePendingId
+}
+
+/**
+ * What the client should do once the server has answered "is there a loop at
+ * this position?". Pure, so the four exits are testable without mounting the
+ * hook: an error surfaces as a status, a missing loop goes to chat, a
+ * remembered scope dispatches straight through, and anything else opens the
+ * dialog.
+ */
+export type AfterVerifyAction =
+  | { kind: "release-and-status"; message: string }
+  | { kind: "hand-off"; prompt: string }
+  | { kind: "remembered"; scope: IterationScope }
+  | { kind: "prompt" }
+
+export function decideAfterVerify(args: {
+  outcome: IterationVerifyOutcome
+  pending: PendingIterationEdit
+  location: SourceLocation
+  remembered: IterationScope | undefined
+}): AfterVerifyAction {
+  const { outcome, pending, location, remembered } = args
+  if (outcome.kind === "error") {
+    return { kind: "release-and-status", message: `Could not check the source for a loop: ${outcome.reason}` }
+  }
+  if (outcome.kind === "no-loop") {
+    return {
+      kind: "hand-off",
+      prompt: buildAmbiguousIterationHandoffPrompt(describeAmbiguousIteration(pending, location, outcome.reason)),
+    }
+  }
+  if (remembered) return { kind: "remembered", scope: remembered }
+  return { kind: "prompt" }
 }

@@ -63,7 +63,6 @@ import { applyEditWithChatHandoff } from "./apply-edit-with-chat-handoff"
 import {
   buildEditEscalationPrompt,
   buildPropEditEscalationPrompt,
-  buildAmbiguousIterationHandoffPrompt,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
   coalesceCapturedMutation,
@@ -111,8 +110,9 @@ import {
   writeStoredLayersDensity,
 } from "./layers-density-storage"
 import {
+  decideAfterVerify,
   iterationTemplateLocation,
-  describeAmbiguousIteration,
+  sameBridgeDraft,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
 import { verifyIterationLoop } from "./iteration-verify"
@@ -2232,40 +2232,46 @@ export function useEditorEditing({
       }
       void verifyIterationLoop({ file: location.file, line: location.line, column: location.column }).then(
         (outcome) => {
-          if (outcome.kind === "error") {
+          const action = decideAfterVerify({
+            outcome,
+            pending,
+            location,
+            remembered: iterationScopeMemoryRef.current[pending.editKind],
+          })
+          if (action.kind === "release-and-status") {
             releaseBridgeDraft(pending)
-            setSaveStatus(`Could not check the source for a loop: ${outcome.reason}`)
+            setSaveStatus(action.message)
             return
           }
-          if (outcome.kind === "no-loop") {
+          if (action.kind === "hand-off") {
             releaseBridgeDraft(pending)
             const handOff = escalateToChatRef.current
-            const prompt = buildAmbiguousIterationHandoffPrompt(
-              describeAmbiguousIteration(pending, location, outcome.reason),
-            )
-            if (!handOff || !handOff(prompt)) {
-              setSaveStatus("This edit needs a decision, and chat is not available.")
+            if (!handOff || !handOff(action.prompt)) {
+              setSaveStatus("This edit needs a decision and could not be sent to chat.")
             }
             return
           }
-          const remembered = iterationScopeMemoryRef.current[pending.editKind]
-          if (remembered) {
+          if (action.kind === "remembered") {
             logIterationScopeChoice({
               editKind: pending.editKind,
-              scope: remembered,
+              scope: action.scope,
               iterationContext: pending.iterationContext,
               remembered: true,
             })
-            void dispatchIterationEdit(pending, remembered)
+            void dispatchIterationEdit(pending, action.scope)
             return
           }
           // Two verifies can be in flight at once (verify is an HTTP round
           // trip). If a second one resolves after a first already opened the
           // dialog, a plain set would overwrite the first pending and leak
           // its bridge draft. Release whatever this replaces, mirroring
-          // `cancelIterationScope`.
+          // `cancelIterationScope`. Object identity is not the test: the same
+          // in-page typing session rebuilds the pending object, and cancelling
+          // its draft would strand the edit that is still open.
           setIterationScopePrompt((previous) => {
-            if (previous && previous !== pending) releaseBridgeDraft(previous)
+            if (previous && previous !== pending && !sameBridgeDraft(previous, pending)) {
+              releaseBridgeDraft(previous)
+            }
             return pending
           })
         },
