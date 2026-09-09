@@ -19,7 +19,7 @@
  * observable at all.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { createNextHost, NEXT_SECURITY } from "../host.js"
@@ -55,6 +55,10 @@ interface FakeNextSpec {
   noPhaseConstant?: boolean
   /** Ship no `constants.js` at all — the third specifier's walk-up. */
   noConstantsModule?: boolean
+  /** Resolve a config with no `distDir` / `distDirRoot` — the isolation seam's shape gone. */
+  noDistDir?: boolean
+  /** Ship no `dist/lib/verify-typescript-setup.js` — the redirect's module moved. */
+  noTypeSetupModule?: boolean
   /** The phase string this install publishes. Distinguishes two installs. */
   phase?: string
   /** Return a FRESH config object per call — the memo-identity break. */
@@ -80,13 +84,17 @@ interface FakeNextSpec {
  */
 function configModuleSource(spec: FakeNextSpec): string {
   const seed = JSON.stringify(spec.configSeed ?? {})
+  // `distDir` / `distDirRoot` as Next's own loader resolves them for the
+  // development phase (`config.js`: root kept, distDir rewritten to
+  // `<root>/dev`). The build-directory isolation reads both.
+  const dirs = spec.noDistDir ? "" : "distDir: '.next/dev', distDirRoot: '.next', "
   return spec.freshConfigPerCall
-    ? `exports.default = async () => ({ configFileName: 'next.config.ts', devFlagAtLoad: process.env.__NEXT_DEV_SERVER ?? null, ...${seed} })\n`
+    ? `exports.default = async () => ({ configFileName: 'next.config.ts', ${dirs}devFlagAtLoad: process.env.__NEXT_DEV_SERVER ?? null, ...${seed} })\n`
     : `const cache = new Map()
 const settle = ${spec.frozenConfig ? "Object.freeze" : "(conf) => conf"}
 exports.default = async (phase, dir) => {
   const key = phase + '|' + dir
-  if (!cache.has(key)) cache.set(key, settle({ configFileName: 'next.config.ts', devFlagAtLoad: process.env.__NEXT_DEV_SERVER ?? null, ...${seed} }))
+  if (!cache.has(key)) cache.set(key, settle({ configFileName: 'next.config.ts', ${dirs}devFlagAtLoad: process.env.__NEXT_DEV_SERVER ?? null, ...${seed} }))
   return cache.get(key)
 }
 `
@@ -117,6 +125,19 @@ function writeFakeNextPackage(pkg: string, spec: FakeNextSpec): void {
   }
   if (!spec.noConfigModule) {
     writeFileSync(join(pkg, "dist", "server", "config.js"), configModuleSource(spec))
+  }
+  if (!spec.noTypeSetupModule) {
+    // The module the dev bundler calls to keep tsconfig.json / next-env.d.ts
+    // current, in the getter-export shape SWC emits. The probe swaps it in
+    // Node's require cache and back; see isolate-dist-dir.ts.
+    mkdirSync(join(pkg, "dist", "lib"), { recursive: true })
+    writeFileSync(
+      join(pkg, "dist", "lib", "verify-typescript-setup.js"),
+      `Object.defineProperty(exports, "__esModule", { value: true })
+Object.defineProperty(exports, "verifyAndRunTypeScript", { enumerable: true, get: () => verifyAndRunTypeScript })
+async function verifyAndRunTypeScript(opts) { return { received: opts } }
+`,
+    )
   }
 }
 
@@ -229,7 +250,7 @@ function context(prototypeRoot: string, overrides: Partial<HostContext> = {}): H
 }
 
 describe("the next host — declarations", () => {
-  it("declares the Turbopack channel, the proxy bridge lane, and three PRIVATE seams", () => {
+  it("declares the Turbopack channel, the proxy bridge lane, and five PRIVATE seams", () => {
     const host = createNextHost()
 
     expect(host.id).toBe("next")
@@ -239,15 +260,20 @@ describe("the next host — declarations", () => {
     // `transformIndexHtml` does not exist here — the tags come from the proxy.
     expect(host.bridgeTags).toBe("proxy-response-injection")
     expect(host.devCommand).toBe("npx next dev")
-    expect(host.buildDirs).toEqual([".next"])
+    // The project's own build output AND Editor's: Editor's Next builds into
+    // `.desde/next` so it never shares a lock or cache with the user's own
+    // `next dev` (see isolate-dist-dir.ts).
+    expect(host.buildDirs).toEqual([".next", join(".desde", "next")])
     expect(host.versionGate).toEqual({ packageName: "next", tested: "^16.3.0" })
 
-    // ALL THREE private, and each carries a greppable expression — the failure
+    // ALL FIVE private, and each carries a greppable expression — the failure
     // message's value is that a user can search for the thing that broke. Three
-    // rather than two because the memoized object can stop accepting the write
-    // without ever losing identity, which is a separate break with a separate
-    // signature (see NEXT_CONFIG_MUTABILITY_SEAM).
-    expect(host.seams).toHaveLength(3)
+    // for the stamper channel rather than two because the memoized object can
+    // stop accepting the write without ever losing identity, which is a
+    // separate break with a separate signature (see NEXT_CONFIG_MUTABILITY_SEAM).
+    // Two more for keeping Editor's build directory separate from the
+    // project's, and out of the project's tracked files (isolate-dist-dir.ts).
+    expect(host.seams).toHaveLength(5)
     expect(host.seams.every((seam) => seam.stability === "private")).toBe(true)
     expect(host.seams.map((seam) => seam.expression).join("\n")).toContain(
       'require("next/dist/server/config").default',
@@ -401,6 +427,67 @@ describe("the next host — probe", () => {
     const loadConfig = (require("next/dist/server/config") as { default: (p: string, d: string) => Promise<unknown> }).default
     const conf = (await loadConfig("phase-development-server", root)) as { turbopack?: unknown }
     expect(conf.turbopack).toBeUndefined()
+  })
+
+  it("REFUSES when the resolved config carries no distDir, naming the isolation seam", async () => {
+    // Without a build directory to move, Editor's Next would share `.next/dev`
+    // with the user's own `next dev` — the lock collision this seam exists to
+    // remove. A silent accept here reintroduces it as a dependency upgrade.
+    const root = fakeNextPrototype({ noDistDir: true })
+    const probe = await createNextHost().probe(context(root))
+    expect(probe.ok).toBe(false)
+    if (probe.ok) throw new Error("unreachable")
+    expect(probe.failure.code).toBe("seam-shape-changed")
+    expect(probe.failure.seam?.id).toContain("distDir")
+    expect(probe.failure.attachCovers).toBe(true)
+  })
+
+  it("REFUSES when Next's TypeScript setup module has moved, so a boot cannot rewrite tsconfig.json", async () => {
+    // The dangerous direction: a boot with a separate build directory and NO
+    // redirect writes `.desde/next/dev/types/**` into the user's tsconfig.json
+    // and next-env.d.ts. Better refused pre-boot, with the module named.
+    const root = fakeNextPrototype({ noTypeSetupModule: true })
+    const probe = await createNextHost().probe(context(root))
+    expect(probe.ok).toBe(false)
+    if (probe.ok) throw new Error("unreachable")
+    expect(probe.failure.code).toBe("seam-missing")
+    expect(probe.failure.seam?.id).toBe("next/dist/lib/verify-typescript-setup")
+    expect(probe.failure.attachCovers).toBe(true)
+  })
+
+  it("REFUSES to build into a .desde that is a symbolic link", async () => {
+    // The rule every other `.desde` writer follows (desde-dir.ts): a link there
+    // would carry Next's artifact writes and cleanup out of the checkout.
+    const root = fakeNextPrototype()
+    mkdirSync(join(root, "elsewhere"))
+    symlinkSync(join(root, "elsewhere"), join(root, ".desde"))
+    const probe = await createNextHost().probe(context(root))
+    expect(probe.ok).toBe(false)
+    if (probe.ok) throw new Error("unreachable")
+    expect(probe.failure.cause).toContain("symbolic link")
+    expect(probe.failure.attachCovers).toBe(true)
+  })
+
+  it("does NOT leave Editor's build directory, or the redirect, behind after the probe", async () => {
+    // Both isolation writes are trial writes at probe time. Leaving either in
+    // place would hand a refused probe's attach-mode fallback a config pointed
+    // at `.desde/next` and a type setup that lies about where it is.
+    const root = fakeNextPrototype()
+    const probe = await createNextHost().probe(context(root))
+    expect(probe.ok).toBe(true)
+
+    const { createRequire } = await import("node:module")
+    const require = createRequire(join(root, "package.json"))
+    const loadConfig = (require("next/dist/server/config") as { default: (p: string, d: string) => Promise<unknown> }).default
+    const conf = (await loadConfig("phase-development-server", root)) as { distDir?: unknown; distDirRoot?: unknown }
+    expect(conf.distDir).toBe(".next/dev")
+    expect(conf.distDirRoot).toBe(".next")
+
+    const typeSetup = require("next/dist/lib/verify-typescript-setup") as {
+      verifyAndRunTypeScript: (o: { distDir: string }) => Promise<{ received: { distDir: string } }>
+    }
+    const out = await typeSetup.verifyAndRunTypeScript({ distDir: "as-passed" })
+    expect(out.received.distDir).toBe("as-passed")
   })
 
   it("accepts a healthy install and reports its version", async () => {

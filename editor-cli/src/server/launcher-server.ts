@@ -32,6 +32,12 @@ import { homeUrlEnv } from "./home-url.js"
 import { existsSync } from "node:fs"
 import { stat } from "node:fs/promises"
 import { basename, resolve as resolvePath } from "node:path"
+import {
+  withRunningEditorReuse,
+  type SpawnEditor,
+  type SpawnedEditor,
+  type SpawnedEditorSeed,
+} from "./running-editors.js"
 import { newSecurityContext, checkAuth, type SecurityContext } from "./auth.js"
 import { checkHost, isCrossSiteFetch, listenOriginFor } from "./host-guard.js"
 import { readJsonBody, sendJson, runHandler } from "./artifact-http.js"
@@ -125,13 +131,23 @@ export interface LauncherHandle {
  * Spawn an editor on `repoPath` and resolve once it's serving.
  * Injectable so tests don't boot a real Vite child.
  */
-export type SpawnEditor = (repoPath: string) => Promise<{ url: string }>
+/**
+ * Re-exported so existing callers keep their import; the type now lives with
+ * the one-editor-per-repo memory that wraps it (`running-editors.ts`).
+ */
+export type { SpawnEditor } from "./running-editors.js"
 
 export interface StartLauncherOptions {
   host?: string
   port?: number
   /** Override the spawn (tests). Default re-invokes this CLI on a free port. */
   spawnEditor?: SpawnEditor
+  /**
+   * Editors already running when this launcher starts, so an open for their
+   * repo answers with them instead of spawning. The editor that starts a
+   * launcher lazily from its own Home breadcrumb passes itself here.
+   */
+  runningEditors?: readonly SpawnedEditorSeed[]
   /** Override the native folder picker (tests). */
   pickFolder?: PickFolder
   /**
@@ -215,10 +231,17 @@ export async function startLauncher(
   // Read at spawn time, not closure-creation time, because with `port: 0`
   // the real origin is only known once the socket is bound (below).
   let launcherOrigin = shellOrigin
-  const spawnEditor =
+  // ONE editor per repository, whichever spawn is behind it. Going Home and
+  // clicking the same project again must come back to the editor already
+  // running, not boot a second dev server in the same directory — on Next
+  // that second boot is refused outright by the per-project lock, and the
+  // refusal named our own first child. See `running-editors.ts`.
+  const spawnEditor = withRunningEditorReuse(
     opts.spawnEditor ??
-    ((repoPath: string) =>
-      defaultSpawnEditor(repoPath, forwardArgs, childTracker, () => launcherOrigin))
+      ((repoPath: string) =>
+        defaultSpawnEditor(repoPath, forwardArgs, childTracker, () => launcherOrigin)),
+    { seed: opts.runningEditors },
+  )
 
   const uiBundleRoot = resolvePath(opts.uiBundleRoot ?? resolveUiBundleRoot())
   if (!existsSync(uiBundleRoot)) {
@@ -1101,7 +1124,7 @@ async function defaultSpawnEditor(
   forwardArgs: string[] = [],
   childTracker?: ChildTracker,
   homeUrl?: () => string,
-): Promise<{ url: string }> {
+): Promise<SpawnedEditor> {
   const port = await pickFreePort()
   // Checked here — immediately before `spawn()`, with no `await` between
   // this check and the `spawn()` + `childTracker.track()` pair below — not
@@ -1165,7 +1188,13 @@ async function defaultSpawnEditor(
   // (and via its own `exit`, already will be) accounted for, and a child
   // that DOES boot keeps running long after this function's promise settles.
   childTracker?.track(child)
-  return new Promise<{ url: string }>((resolve, reject) => {
+  // The liveness signal the one-editor-per-repo memory keys off. Registered
+  // before the ready wait so an exit at any point — pre-ready or hours later —
+  // is seen; `exit` fires exactly once per child, so `once` is enough.
+  const exited = new Promise<void>((done) => {
+    child.once("exit", () => done())
+  })
+  return new Promise<SpawnedEditor>((resolve, reject) => {
     let settled = false
     const readReady = createReadyLineReader()
     const stderrTail = createStderrTail()
@@ -1186,7 +1215,7 @@ async function defaultSpawnEditor(
         // a healthy editor that logs enough would freeze mid-session, which
         // looks nothing like a logging problem from the outside.
         child.stdout?.resume()
-        resolve({ url })
+        resolve({ url, exited })
       }
     }
     child.stdout?.on("data", onData)

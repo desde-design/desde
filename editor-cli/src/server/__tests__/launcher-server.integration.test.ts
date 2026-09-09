@@ -359,6 +359,79 @@ describe("launcher server", () => {
   })
 
   /**
+   * Mo's second screenshot: open a project, go Home, click it again — and get
+   * "Another next dev server is already running", naming the launcher's OWN
+   * first child. The launcher had no memory of what it had spawned, so every
+   * open was a fresh boot in the same directory. Now the second open answers
+   * with the first editor's URL and spawns nothing.
+   */
+  it("answers a second open of the same project with the editor already running", async () => {
+    const openable = path.join(tmp, "reopened")
+    await fs.mkdir(openable)
+    await fs.writeFile(
+      path.join(openable, "package.json"),
+      JSON.stringify({ dependencies: { vue: "^3.4.0" }, devDependencies: { vite: "^5.0.0" } }),
+    )
+    await fs.writeFile(path.join(openable, "vite.config.ts"), "export default {}")
+    await execFileAsync("git", ["-C", openable, "init", "-q"])
+    const token = await tokenFromBootstrap()
+    const open = () =>
+      fetch(handle.url + "/api/launcher/open", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: openable }),
+      }).then((res) => res.json() as Promise<{ ok: boolean; url: string }>)
+
+    const first = await open()
+    const second = await open()
+
+    expect(first.ok).toBe(true)
+    expect(second.ok).toBe(true)
+    expect(second.url).toBe(first.url)
+    expect(spawnStub).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * The direct-start shape: `desde <repo>` with no launcher above it starts
+   * one lazily on Home and passes itself as already running. Opening that
+   * repo from the launcher must answer with the editor that is already up.
+   */
+  it("answers an open for an editor it was told is already running, without spawning", async () => {
+    const parent = path.join(tmp, "parent")
+    await fs.mkdir(parent)
+    await fs.writeFile(
+      path.join(parent, "package.json"),
+      JSON.stringify({ dependencies: { vue: "^3.4.0" }, devDependencies: { vite: "^5.0.0" } }),
+    )
+    await fs.writeFile(path.join(parent, "vite.config.ts"), "export default {}")
+    await execFileAsync("git", ["-C", parent, "init", "-q"])
+    const h = await startLauncher({
+      port: 0,
+      seedDemo: false,
+      spawnEditor: spawnStub,
+      pickFolder: pickFolderStub,
+      uiBundleRoot: bundleRoot,
+      runningEditors: [{ repoPath: parent, url: "http://127.0.0.1:4321" }],
+    })
+    try {
+      const boot = await fetch(`${h.url}/__desde/bootstrap.js`)
+      const m = (await boot.text()).match(/window\.__DESDE_LAUNCHER__=(\{.*\});/)
+      const token = (JSON.parse(m![1]) as { token: string }).token
+      const res = await fetch(h.url + "/api/launcher/open", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}`, origin: h.url },
+        body: JSON.stringify({ path: parent }),
+      })
+      const json = (await res.json()) as { ok: boolean; url: string }
+      expect(json.ok).toBe(true)
+      expect(json.url).toBe("http://127.0.0.1:4321")
+      expect(spawnStub).not.toHaveBeenCalled()
+    } finally {
+      await h.close()
+    }
+  })
+
+  /**
    * The launcher answers "we cannot boot this" ITSELF, instead of spawning a
    * child that answers it to a terminal and exits.
    *
