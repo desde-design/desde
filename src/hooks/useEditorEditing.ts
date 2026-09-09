@@ -5043,9 +5043,14 @@ export function useEditorEditing({
       // "saved!" with nothing written, which is the exact failure this guard
       // exists to prevent. `pendingDisambiguationsRef` is assigned on
       // every render for precisely this read-at-fire-time case.
-      const pendingDisambiguationCount = pendingDisambiguationsRef.current.length
+      // Both counts, because only one dialog is on screen at a time: an edit
+      // whose question is still queued is exactly as unwritable as the one
+      // being asked about, and it appears in no other count.
+      const pendingDisambiguationCount =
+        pendingDisambiguationsRef.current.length + modalQueueRef.current.length
       const gate = saveGate({
-        pendingDisambiguations: pendingDisambiguationCount,
+        pendingDisambiguations: pendingDisambiguationsRef.current.length,
+        queuedModalRequests: modalQueueRef.current.length,
         mutations: directMutations.length,
         scoped: scopedOverrideMutations.length,
       })

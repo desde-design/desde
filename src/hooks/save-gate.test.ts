@@ -2,46 +2,58 @@ import { describe, expect, it } from "vitest"
 import { parkedSaveRefusal, saveGate } from "./save-gate"
 
 describe("saveGate", () => {
+  /** Nothing unsaved anywhere, for a case to vary one field of. */
+  const clear = {
+    pendingDisambiguations: 0,
+    queuedModalRequests: 0,
+    mutations: 0,
+    scoped: 0,
+  }
+
   it("blocks on a parked edit even when there is writable work", () => {
     // THE regression. The parked check used to sit inside the "nothing to
     // apply" branch, so a single writable mutation skipped it entirely: the
     // mutation was applied, Save reported success, and the parked edit stayed
     // unresolved with nothing on screen saying so.
-    expect(saveGate({ pendingDisambiguations: 1, mutations: 3, scoped: 0 })).toBe(
+    expect(saveGate({ ...clear, pendingDisambiguations: 1, mutations: 3 })).toBe(
       "blocked-parked",
     )
-    expect(saveGate({ pendingDisambiguations: 1, mutations: 0, scoped: 2 })).toBe(
+    expect(saveGate({ ...clear, pendingDisambiguations: 1, scoped: 2 })).toBe(
       "blocked-parked",
     )
-    expect(saveGate({ pendingDisambiguations: 2, mutations: 4, scoped: 5 })).toBe(
-      "blocked-parked",
-    )
+    expect(
+      saveGate({ ...clear, pendingDisambiguations: 2, mutations: 4, scoped: 5 }),
+    ).toBe("blocked-parked")
   })
 
   it("blocks on a parked edit with nothing else unsaved", () => {
     // The case that already worked, kept so a future simplification cannot
     // trade one for the other.
-    expect(saveGate({ pendingDisambiguations: 1, mutations: 0, scoped: 0 })).toBe(
+    expect(saveGate({ ...clear, pendingDisambiguations: 1 })).toBe("blocked-parked")
+  })
+
+  it("blocks on a request queued behind the open dialog", () => {
+    // One dialog is on screen at a time, so an edit whose question has not been
+    // reached yet is in `queuedModalRequests` and in no other count. Without
+    // this the writable work would be applied and Save would report success
+    // over an edit the bridge is still holding.
+    expect(saveGate({ ...clear, queuedModalRequests: 1 })).toBe("blocked-parked")
+    expect(saveGate({ ...clear, queuedModalRequests: 1, mutations: 3 })).toBe(
+      "blocked-parked",
+    )
+    expect(saveGate({ ...clear, queuedModalRequests: 2, scoped: 1 })).toBe(
       "blocked-parked",
     )
   })
 
   it("is trivially ok with nothing unsaved at all", () => {
-    expect(saveGate({ pendingDisambiguations: 0, mutations: 0, scoped: 0 })).toBe(
-      "nothing",
-    )
+    expect(saveGate(clear)).toBe("nothing")
   })
 
-  it("proceeds on either lane's work when nothing is parked", () => {
-    expect(saveGate({ pendingDisambiguations: 0, mutations: 1, scoped: 0 })).toBe(
-      "proceed",
-    )
-    expect(saveGate({ pendingDisambiguations: 0, mutations: 0, scoped: 1 })).toBe(
-      "proceed",
-    )
-    expect(saveGate({ pendingDisambiguations: 0, mutations: 2, scoped: 3 })).toBe(
-      "proceed",
-    )
+  it("proceeds on either lane's work when nothing is parked or queued", () => {
+    expect(saveGate({ ...clear, mutations: 1 })).toBe("proceed")
+    expect(saveGate({ ...clear, scoped: 1 })).toBe("proceed")
+    expect(saveGate({ ...clear, mutations: 2, scoped: 3 })).toBe("proceed")
   })
 })
 

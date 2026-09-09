@@ -7,6 +7,9 @@
  * instance or all instances". It is unsaved work, and it is the only unsaved
  * work Save cannot write.
  *
+ * It is counted in two places now, because only one dialog is on screen at a
+ * time: the edits in the OPEN dialog, and the requests queued behind it.
+ *
  * The bug this exists to prevent: the parked check used to live INSIDE the
  * "there is nothing to apply" branch, so it only ran when both mutation arrays
  * were empty. With one writable mutation present, Save applied that mutation,
@@ -23,8 +26,17 @@ export type SaveGateDecision =
   | "proceed"
 
 export function saveGate(args: {
-  /** How many edits are waiting on a scope choice. */
+  /** How many edits are waiting on a scope choice IN the open dialog. */
   pendingDisambiguations: number
+  /**
+   * How many dialogs are waiting behind the open one.
+   *
+   * The same unsaved work, one step further back. Only one dialog is on screen
+   * at a time now, so an edit whose question has not been reached yet shows up
+   * in no other count: without this, Save would apply the writable mutations
+   * and report success over edits that are still holding a bridge draft.
+   */
+  queuedModalRequests: number
   /** Direct (non-class) DOM mutations, which go out as an llm-patch bundle. */
   mutations: number
   /** Class mutations that route through the scoped-css-override lane. */
@@ -34,7 +46,9 @@ export function saveGate(args: {
   // success is worse than a refusal: the refusal is visible and the designer
   // can answer the question, while the success is a claim about work that is
   // still sitting in a dialog.
-  if (args.pendingDisambiguations > 0) return "blocked-parked"
+  if (args.pendingDisambiguations > 0 || args.queuedModalRequests > 0) {
+    return "blocked-parked"
+  }
   if (args.mutations === 0 && args.scoped === 0) return "nothing"
   return "proceed"
 }
