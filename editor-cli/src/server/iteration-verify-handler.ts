@@ -100,6 +100,13 @@ export async function handleIterationVerify(
   const realpathResolution = await resolveRealpathWithinRoot(candidate, rootResolution)
   if (!realpathResolution.ok) return realpathResolution
   const { targetPath } = realpathResolution
+  // The lexical gate above checked the name the CLIENT sent. A symlink named
+  // `src/Alias.vue` can point at `src/secret.txt`, and this route reads the
+  // bytes it resolves to. Gate the RESOLVED target as well, before the read,
+  // with the wording `llm-fallback-handler.ts` uses for the same check.
+  if (!isSupportedIterationFile(targetPath)) {
+    return { ok: false, status: 400, reason: "Resolved target is not a .vue, .tsx, or .jsx file" }
+  }
   if (hasNodeModulesSegment(candidate) || hasNodeModulesSegment(targetPath)) {
     return {
       ok: false,

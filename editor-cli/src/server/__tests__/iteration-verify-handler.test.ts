@@ -77,6 +77,23 @@ describe("iteration-verify-handler", () => {
     })
   })
 
+  it("refuses a supported NAME whose realpath target is unsupported", async () => {
+    // `src/Alias.vue` inside the root, pointing at a `.txt`. The lexical gate
+    // passes (the client sent a `.vue`), so without a second gate on the
+    // resolved target this route reads the secret and hands it to a parser.
+    write("src/secret.txt", "ANTHROPIC_API_KEY=sk-live-x")
+    symlinkSync(join(dir, "src/secret.txt"), join(dir, "src/Alias.vue"))
+    const r = await handleIterationVerify(
+      { file: "src/Alias.vue", templateLocation: { line: 1, column: 0 } },
+      dir,
+    )
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.status).toBe(400)
+      expect(r.reason).toBe("Resolved target is not a .vue, .tsx, or .jsx file")
+    }
+  })
+
   it("refuses a path outside the prototype root", async () => {
     write("src/List.tsx", LIST_TSX)
     const r = await handleIterationVerify({ file: "../outside.tsx", templateLocation: { line: 1, column: 0 } }, dir)
