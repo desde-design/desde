@@ -116,6 +116,7 @@ import {
   bridgeDraftIdOf,
   decideAfterVerify,
   describeRowScopedEdit,
+  errorMessage,
   handOffFailureStatus,
   isStaleVerify,
   iterationRouteFor,
@@ -2478,7 +2479,7 @@ export function useEditorEditing({
           }`,
         )
       } catch (err) {
-        failThisRow(`Iteration edit threw: ${(err as Error).message}`)
+        failThisRow(`Iteration edit threw: ${errorMessage(err)}`)
       }
     },
     // legacyHandle*Ref are stable refs; dispatchDeleteEdit is stable. The deps
@@ -2696,7 +2697,7 @@ export function useEditorEditing({
         }
         releaseOrParkUnlessShared(
           pending,
-          `Could not check the source for a loop: ${(err as Error).message}`,
+          `Could not check the source for a loop: ${errorMessage(err)}`,
         )
       })
       return true

@@ -107,6 +107,30 @@ export function endSentence(message: string): string {
 }
 
 /**
+ * A thrown value as a sentence.
+ *
+ * `(err as Error).message` is a cast, not a check. A rejected fetch, a thrown
+ * string, a rejected `null`: none of them has a `.message`, and the iteration
+ * lane's two catch blocks rendered "undefined" into the status bar for each of
+ * them, which tells the designer nothing about what went wrong.
+ *
+ * The `message` of a real Error, `String(...)` of anything else, and a named
+ * fallback for the values whose string form is empty or absent.
+ */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message
+  if (typeof err === "string" && err) return err
+  try {
+    const asString = String(err)
+    return asString === "" ? "unknown error" : asString
+  } catch {
+    // A thrown object with a hostile `toString`. Nothing to report but the
+    // fact that something was thrown.
+    return "unknown error"
+  }
+}
+
+/**
  * The status line for an edit that has been PARKED: why the deterministic
  * lane could not apply it, then the question the dialog it landed in asks.
  *

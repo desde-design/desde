@@ -9,6 +9,7 @@ import {
   describeAmbiguousIteration,
   describeRowScopedEdit,
   endSentence,
+  errorMessage,
   handOffFailureStatus,
   isStaleVerify,
   iterationRouteFor,
@@ -734,5 +735,37 @@ describe("handOffFailureStatus", () => {
       expect(status.parked).not.toMatch(/—/)
       expect(status.released).not.toMatch(/—/)
     }
+  })
+})
+
+describe("errorMessage", () => {
+  it("reads the message of a real Error", () => {
+    expect(errorMessage(new Error("network down"))).toBe("network down")
+  })
+
+  it("renders a thrown string as itself", () => {
+    // `(err as Error).message` on this rendered "undefined" into the status
+    // bar, which tells the designer nothing about what went wrong.
+    expect(errorMessage("boom")).toBe("boom")
+  })
+
+  it("renders a thrown object, null and undefined without throwing", () => {
+    expect(errorMessage(null)).toBe("null")
+    expect(errorMessage(undefined)).toBe("undefined")
+    expect(errorMessage({ code: 500 })).toBe("[object Object]")
+  })
+
+  it("falls back for an Error with an empty message and for an empty string", () => {
+    expect(errorMessage(new Error(""))).toBe("Error")
+    expect(errorMessage("")).toBe("unknown error")
+  })
+
+  it("survives a value whose toString throws", () => {
+    const hostile = {
+      toString() {
+        throw new Error("no")
+      },
+    }
+    expect(errorMessage(hostile)).toBe("unknown error")
   })
 })
