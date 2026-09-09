@@ -310,8 +310,12 @@ export interface UseEditorChatReturn {
    * exactly that, and a canvas flow generation stuck on "generating" forever
    * because the turn it was waiting to complete had never started.
    *
-   * Resolves when the turn's stream ENDS, like `submit`; the boolean says
-   * whether the server accepted the turn at the start of it.
+   * Resolves at ACCEPTANCE, not at the end of the turn: `true` the instant the
+   * server answers 2xx with a stream, `false` when it refuses or the fetch
+   * throws. It does NOT wait for the stream, because every caller on this seam
+   * is holding something open while it awaits (a Save spinner, a bridge draft,
+   * an in-flight prop, an open comment thread) and a turn runs for tens of
+   * seconds. Waiting for the stream held all of those for the whole turn.
    */
   submitReporting: (userMessage: string, images?: string[]) => Promise<boolean>
   /**
@@ -1512,12 +1516,33 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
     [runSubmit],
   )
 
-  // Same call, with the acceptance kept. See the interface for why a caller
-  // that unwinds its own state needs it and `submit` cannot give it.
+  /**
+   * Same call, with the acceptance kept, settled at ACCEPTANCE.
+   *
+   * `runSubmit` resolves at the END of the turn, so awaiting it here made every
+   * caller on this seam hold its state for the whole agent turn: Save spun, the
+   * bridge draft stayed held with no timeout, the prop stayed in flight, the
+   * "Sent this edit to chat" toast fired after the assistant had finished
+   * answering. `onAccepted` fires the instant the server takes the turn, which
+   * is the event these callers actually mean.
+   *
+   * The turn keeps running after this resolves; the returned promise is a
+   * report about its START. `runSubmit`'s own resolution is still consumed (it
+   * settles the deferred for the refusal case, where `onAccepted` never fires),
+   * and its rejection is impossible by construction: it catches internally.
+   */
   const submitReporting = useCallback(
-    async (userMessage: string, images?: string[]): Promise<boolean> => {
-      const outcome = await runSubmit(userMessage, images)
-      return outcome.serverAccepted
+    (userMessage: string, images?: string[]): Promise<boolean> => {
+      let settle: (accepted: boolean) => void = () => {}
+      const accepted = new Promise<boolean>((resolve) => {
+        settle = resolve
+      })
+      // A promise resolved twice keeps its first value, so the late
+      // `serverAccepted` cannot contradict an acceptance already reported.
+      void runSubmit(userMessage, images, { onAccepted: () => settle(true) })
+        .then((outcome) => settle(outcome.serverAccepted))
+        .catch(() => settle(false))
+      return accepted
     },
     [runSubmit],
   )

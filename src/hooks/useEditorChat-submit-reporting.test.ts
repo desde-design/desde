@@ -41,6 +41,31 @@ describe("useEditorChat — submitReporting", () => {
     }
   }
 
+  /**
+   * A stream that never ends, i.e. an ordinary turn while the agent is still
+   * working. `read()` returns a promise nobody resolves.
+   */
+  function neverEndingSseResponse() {
+    const bytes = new TextEncoder().encode('data: {"type":"turn_start"}\n\n')
+    let sent = false
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (sent) return new Promise<never>(() => {})
+            sent = true
+            return { done: false, value: bytes }
+          },
+          cancel: () => {},
+          releaseLock: () => {},
+        }),
+      },
+      text: async () => "",
+    }
+  }
+
   it("reports true when the server answered 2xx with a stream", async () => {
     fetchMock.mockResolvedValue(
       sseResponse('data: {"type":"turn_complete"}\n\n'),
@@ -76,6 +101,28 @@ describe("useEditorChat — submitReporting", () => {
       accepted = await result.current.submitReporting("hello")
     })
     expect(accepted).toBe(false)
+  })
+
+  /**
+   * The point of the seam. Every caller awaiting it holds something open while
+   * it waits (a Save spinner, a bridge draft, an in-flight prop, an open
+   * comment thread), and a real turn runs for tens of seconds. Settling at the
+   * END of the stream held all of them for the whole turn.
+   */
+  it("reports true at acceptance, without waiting for the stream to end", async () => {
+    fetchMock.mockResolvedValue(neverEndingSseResponse())
+    const { result } = renderHook(() => useEditorChat(baseOpts))
+    let raced: boolean | "timed-out" | undefined
+    await act(async () => {
+      // No `await` on the whole turn: the stream never completes, so awaiting
+      // it would hang forever. That hang is the regression this guards.
+      const reported = result.current.submitReporting("hello")
+      const timeout = new Promise<"timed-out">((resolve) => {
+        setTimeout(() => resolve("timed-out"), 1000)
+      })
+      raced = await Promise.race<boolean | "timed-out">([reported, timeout])
+    })
+    expect(raced).toBe(true)
   })
 
   it("leaves submit's void contract alone", async () => {
