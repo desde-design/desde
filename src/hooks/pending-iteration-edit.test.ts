@@ -5,6 +5,7 @@ import { EDIT_HANDOFF_MARKER } from "@/editor/edit-service/build-edit-escalation
 import {
   bridgeDraftIdOf,
   clickedInsideRow,
+  DEFERRED_PARK_STATUS,
   decideAfterVerify,
   describeAmbiguousIteration,
   describeRowScopedEdit,
@@ -17,6 +18,7 @@ import {
   parkedReason,
   promptCollision,
   PROMPT_BUSY_STATUS,
+  queueDeferredPark,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
   settleHandOff,
@@ -237,6 +239,69 @@ describe("promptCollision", () => {
     expect(promptCollision(del, move)).toBe("keep-open-drop-incoming")
     // An in-page edit with no bridge draft id has nothing held either.
     expect(promptCollision(del, domText())).toBe("keep-open-drop-incoming")
+  })
+})
+
+describe("queueDeferredPark", () => {
+  function domText(bridgePendingId: string, value = "Hello"): PendingIterationEdit {
+    return {
+      editKind: "dom-text",
+      selection: { selector: "p", editTarget: { file: "src/App.vue", line: 3, column: 2 } } as never,
+      field: { id: "f" } as never,
+      value,
+      iterationContext,
+      bridgePendingId,
+    }
+  }
+
+  it("appends a park for a draft the queue does not hold yet", () => {
+    const first = { pending: domText("p-1"), reason: "one" }
+    const second = { pending: domText("p-2"), reason: "two" }
+    const queue = queueDeferredPark(queueDeferredPark([], first), second)
+    expect(queue).toEqual([first, second])
+  })
+
+  it("does not mutate the queue it is given", () => {
+    const queue: ReturnType<typeof queueDeferredPark> = []
+    queueDeferredPark(queue, { pending: domText("p-1"), reason: "one" })
+    expect(queue).toEqual([])
+  })
+
+  it("replaces the entry for the same in-page typing session, keeping its place", () => {
+    // The designer keeps typing on the held element: every keystroke round
+    // trip rebuilds the pending object and re-collides. The queue must end up
+    // with the LATEST text once, not the first keystroke plus a stack of
+    // duplicates.
+    const other = { pending: domText("p-2"), reason: "other" }
+    const early = { pending: domText("p-1", "Hell"), reason: "early" }
+    const late = { pending: domText("p-1", "Hello"), reason: "late" }
+    const queue = queueDeferredPark(queueDeferredPark(queueDeferredPark([], early), other), late)
+    expect(queue).toHaveLength(2)
+    expect(queue[0]).toBe(late)
+    expect(queue[1]).toBe(other)
+  })
+
+  it("replaces an entry re-queued as the very same object", () => {
+    const entry = { pending: domText("p-1"), reason: "one" }
+    expect(queueDeferredPark([entry], { pending: entry.pending, reason: "again" })).toEqual([
+      { pending: entry.pending, reason: "again" },
+    ])
+  })
+})
+
+describe("DEFERRED_PARK_STATUS", () => {
+  it("says the edit is kept and what happens next, unlike PROMPT_BUSY_STATUS", () => {
+    expect(DEFERRED_PARK_STATUS).toBe(
+      "This edit is held behind the open question. Answer it and this one is next.",
+    )
+    // The point of the two sentences differing: this one must NOT tell the
+    // designer to repeat an edit that is still being held for them.
+    expect(DEFERRED_PARK_STATUS).not.toMatch(/repeat/i)
+  })
+
+  it("uses no em dash and no first person", () => {
+    expect(DEFERRED_PARK_STATUS).not.toMatch(/\u2014/)
+    expect(DEFERRED_PARK_STATUS).not.toMatch(/\b(me|my)\b/i)
   })
 })
 

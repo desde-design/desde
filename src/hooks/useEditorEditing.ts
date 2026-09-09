@@ -115,6 +115,7 @@ import {
 import {
   bridgeDraftIdOf,
   decideAfterVerify,
+  DEFERRED_PARK_STATUS,
   describeRowScopedEdit,
   errorMessage,
   handOffFailureStatus,
@@ -123,6 +124,7 @@ import {
   parkedReason,
   promptCollision,
   PROMPT_BUSY_STATUS,
+  queueDeferredPark,
   iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
@@ -132,6 +134,7 @@ import {
   thisRowOperationAllowed,
   thisRowTemplateLocation,
   verifyKeyFor,
+  type DeferredPark,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
 import { verifyIterationLoop } from "./iteration-verify"
@@ -1711,6 +1714,18 @@ export function useEditorEditing({
    */
   const iterationScopePromptRef = useRef<PendingIterationEdit | null>(null)
   iterationScopePromptRef.current = iterationScopePrompt
+  /**
+   * Parks the iteration lane owes but is holding back while a scope prompt is
+   * open.
+   *
+   * Parking puts an edit into `pendingDisambiguations`, and that queue opens
+   * the mutation dialog on its own the moment it is non-empty. Doing it while
+   * the scope dialog is up therefore stacks a second modal over the question
+   * the designer is being asked to answer, and it is the newcomer's dialog
+   * that lands on top. The parks wait here instead and run when the scope
+   * prompt closes, by either of its two exits.
+   */
+  const deferredParksRef = useRef<DeferredPark[]>([])
   // Per-edit-kind remembered scope. Cleared on hook unmount; not persisted
   // across reloads (v1 — the dialog's "Remember for this session" checkbox).
   const iterationScopeMemoryRef = useRef<
@@ -2224,6 +2239,25 @@ export function useEditorEditing({
   )
 
   /**
+   * Perform the parks that were held back while the scope prompt was open.
+   *
+   * Called from both of the prompt's exits. The queue is emptied BEFORE any
+   * park runs, so a park that itself sets state cannot see a queue it is still
+   * in. A draft that has since gone (the bridge no longer holds it) falls back
+   * to the same release the immediate path used.
+   */
+  const flushDeferredParks = useCallback(() => {
+    const queued = deferredParksRef.current
+    if (queued.length === 0) return
+    deferredParksRef.current = []
+    for (const entry of queued) {
+      if (parkDraftForDeterministicFallback(entry.pending, entry.reason)) continue
+      releaseBridgeDraft(entry.pending)
+      setSaveStatus(PROMPT_BUSY_STATUS)
+    }
+  }, [parkDraftForDeterministicFallback, releaseBridgeDraft])
+
+  /**
    * The terminal step for an iteration edit that will NOT be applied: park the
    * bridge's draft in the deterministic dialog when there is one, and release
    * it only when there is nothing to park.
@@ -2534,8 +2568,12 @@ export function useEditorEditing({
       }
       setIterationScopePrompt(null)
       void dispatchIterationEdit(pending, scope)
+      // The question is answered, so anything that was waiting behind it can
+      // ask its own now. Both exits flush: a cancel leaves the queue just as
+      // stuck as a confirm would.
+      flushDeferredParks()
     },
-    [iterationScopePrompt, dispatchIterationEdit],
+    [iterationScopePrompt, dispatchIterationEdit, flushDeferredParks],
   )
 
   const cancelIterationScope = useCallback(() => {
@@ -2543,7 +2581,8 @@ export function useEditorEditing({
       releaseBridgeDraft(current)
       return null
     })
-  }, [releaseBridgeDraft])
+    flushDeferredParks()
+  }, [releaseBridgeDraft, flushDeferredParks])
 
   /**
    * Funnel a pending iteration edit through: verify the loop in source,
@@ -2705,14 +2744,17 @@ export function useEditorEditing({
             // Typed in the page: the text survives in the mutation
             // disambiguation dialog, which asks a blunter question than this
             // one but is answerable and holds the same draft.
-            const parked = parkDraftForDeterministicFallback(
-              verified,
-              parkedReason("Another edit is waiting for a scope choice"),
-            )
-            if (!parked) {
-              releaseBridgeDraft(verified)
-              setSaveStatus(PROMPT_BUSY_STATUS)
-            }
+            //
+            // DEFERRED, not parked now. Parking fills `pendingDisambiguations`,
+            // which opens that dialog on its own, and it would open on top of
+            // the scope dialog the designer is being asked to answer. This arm
+            // is only ever reached with that prompt open, so the park always
+            // waits; `flushDeferredParks` runs it when the prompt closes.
+            deferredParksRef.current = queueDeferredPark(deferredParksRef.current, {
+              pending: verified,
+              reason: parkedReason("Another edit is waiting for a scope choice"),
+            })
+            setSaveStatus(DEFERRED_PARK_STATUS)
             return
           }
           setSaveStatus(PROMPT_BUSY_STATUS)

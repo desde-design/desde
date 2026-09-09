@@ -592,6 +592,56 @@ export function promptCollision(
 }
 
 /**
+ * A park the iteration lane owes but is holding back, because performing it
+ * now would open a second modal on top of the one the designer is answering.
+ */
+export interface DeferredPark {
+  pending: PendingIterationEdit
+  /** The status the park will show when it finally happens. */
+  reason: string
+}
+
+/**
+ * The status shown to a newcomer whose park is being held back.
+ *
+ * It has to say the edit is KEPT, unlike {@link PROMPT_BUSY_STATUS}, which
+ * tells the designer to repeat an edit that really is gone. Nothing is lost
+ * here: the text is still in the bridge's draft and the question about it
+ * opens as soon as the current one is answered.
+ */
+export const DEFERRED_PARK_STATUS =
+  "This edit is held behind the open question. Answer it and this one is next."
+
+/**
+ * Add a park to the deferred queue, or replace the entry already in it for the
+ * same in-page typing session.
+ *
+ * Replacing matters because the designer can keep typing on the held element:
+ * every keystroke round trip rebuilds the pending object and re-collides, and
+ * the queue must end up holding the LATEST text rather than the first
+ * keystroke's plus a stack of duplicates. `sameBridgeDraft` is the same test
+ * that decides it everywhere else; anything without a draft never reaches
+ * here, because `promptCollision` drops those instead of parking them.
+ *
+ * Pure, and returns a new array rather than mutating, so the queue decision is
+ * testable without the hook.
+ */
+export function queueDeferredPark(
+  queue: readonly DeferredPark[],
+  entry: DeferredPark,
+): DeferredPark[] {
+  const at = queue.findIndex(
+    (existing) =>
+      existing.pending === entry.pending ||
+      sameBridgeDraft(existing.pending, entry.pending),
+  )
+  if (at === -1) return [...queue, entry]
+  const next = queue.slice()
+  next[at] = entry
+  return next
+}
+
+/**
  * Is this verify's answer stale, i.e. did a newer intercept start while it was
  * in flight?
  *
