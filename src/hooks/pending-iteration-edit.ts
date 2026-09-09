@@ -120,6 +120,79 @@ export function parkedReason(message: string): string {
 }
 
 /**
+ * How long the client waits for the chat hand-off to answer before treating
+ * it as unanswered.
+ *
+ * The await holds the bridge's draft: the page is showing a change that has
+ * reached no file, and the designer cannot resolve it while it is held. The
+ * loop check that runs just before this has a 15 s bound for exactly that
+ * reason. 30 s because a hand-off POST is a chat submission and the chat's own
+ * first response can be slower than a source lookup.
+ */
+export const HANDOFF_TIMEOUT_MS = 30_000
+
+/** What a hand-off attempt settled as. */
+export type HandOffOutcome = "accepted" | "refused" | "timed-out"
+
+/**
+ * Run a chat hand-off and settle within {@link HANDOFF_TIMEOUT_MS}, whatever
+ * the transport does.
+ *
+ * A throw is a refusal, not a failure of whatever called this: the hand-off
+ * POST failing says nothing about the check that preceded it.
+ *
+ * The race IS the guard the caller needs against a late answer. Once this
+ * returns "timed-out" the caller parks the draft, and the attempt's eventual
+ * `true` resolves into a promise nobody is holding, so no code path can
+ * release a draft that has already been parked.
+ */
+export async function settleHandOff(
+  run: () => Promise<boolean>,
+  timeoutMs: number = HANDOFF_TIMEOUT_MS,
+): Promise<HandOffOutcome> {
+  const attempt: Promise<HandOffOutcome> = (async () => {
+    try {
+      return (await run()) ? "accepted" : "refused"
+    } catch {
+      return "refused"
+    }
+  })()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<HandOffOutcome>((resolve) => {
+    timer = setTimeout(() => resolve("timed-out"), timeoutMs)
+  })
+  try {
+    return await Promise.race([attempt, timeout])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/**
+ * The two statuses a hand-off that did not land shows: one for the edit parked
+ * in the deterministic dialog, one for the case where there was nothing to
+ * park.
+ *
+ * A timeout and a refusal are different facts and a designer can act on the
+ * difference, so they do not share a sentence: a refused hand-off will refuse
+ * again, an unanswered one may just be slow.
+ */
+export function handOffFailureStatus(
+  outcome: "refused" | "timed-out",
+): { parked: string; released: string } {
+  if (outcome === "timed-out") {
+    return {
+      parked: "Chat did not answer in time. Choose how to apply the pending edit.",
+      released: "Chat did not answer in time, and this edit needs a decision.",
+    }
+  }
+  return {
+    parked: parkedReason("This edit could not be sent to chat"),
+    released: "This edit needs a decision and could not be sent to chat.",
+  }
+}
+
+/**
  * Which of the three routes an edit on this element takes.
  *
  * - `refuse`: the page sent loop information that failed the boundary check.

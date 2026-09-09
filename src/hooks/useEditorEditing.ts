@@ -115,12 +115,14 @@ import {
   bridgeDraftIdOf,
   decideAfterVerify,
   describeRowScopedEdit,
+  handOffFailureStatus,
   isStaleVerify,
   iterationRouteFor,
   parkedReason,
   iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
+  settleHandOff,
   structuralRouteFor,
   thisRowOperationAllowed,
   thisRowTemplateLocation,
@@ -2365,23 +2367,23 @@ export function useEditorEditing({
           return
         }
         const handOff = escalateToChatRef.current
-        let accepted = false
-        try {
-          const prompt = buildRowScopedEditHandoffPrompt(
-            describeRowScopedEdit(pending, loopLocation, fieldLocation),
-          )
-          accepted = handOff ? await handOff(prompt) : false
-        } catch {
-          // A thrown hand-off is a refusal. Falling through to the park below
-          // keeps whatever the designer typed answerable.
-          accepted = false
-        }
-        if (accepted) {
+        const prompt = buildRowScopedEditHandoffPrompt(
+          describeRowScopedEdit(pending, loopLocation, fieldLocation),
+        )
+        // Bounded for the reason the other hand-off is: a thrown or unanswered
+        // POST is a refusal, and the park below keeps the edit answerable.
+        const outcome = await settleHandOff(() =>
+          handOff ? handOff(prompt) : Promise.resolve(false),
+        )
+        if (outcome === "accepted") {
           // Chat owns the edit from here, so a held draft (in-page typing) goes.
           releaseBridgeDraft(pending)
           return
         }
-        failThisRow("This edit could not be sent to chat.")
+        const failure = handOffFailureStatus(outcome)
+        if (!parkDraftForDeterministicFallback(pending, failure.parked)) {
+          setSaveStatus(failure.released)
+        }
         return
       }
       const pageSourceFile = useAppStore.getState().currentSourceFile
@@ -2608,15 +2610,15 @@ export function useEditorEditing({
             // a dropped fetch), and releasing first meant the bridge had
             // already dropped the live preview by the time we learned nothing
             // was sent.
-            let accepted = false
-            try {
-              accepted = handOff ? await handOff(action.prompt) : false
-            } catch {
-              // A thrown hand-off is a refusal, not a verify failure. Letting
-              // it reach the outer `.catch` would blame the loop check for
-              // something the chat POST did, and would release the draft.
-              accepted = false
-            }
+            //
+            // BOUNDED, because the draft is held for the whole await: the page
+            // is showing a change that has reached no file and the designer
+            // cannot resolve it meanwhile. A late answer after the timeout
+            // resolves into a promise nobody holds, so it cannot release a
+            // draft this branch has already parked.
+            const outcome = await settleHandOff(() =>
+              handOff ? handOff(action.prompt) : Promise.resolve(false),
+            )
             // Staleness FIRST, and it decides the release. While this POST was
             // in flight a newer intercept can have taken over the same draft
             // (the user kept typing); releasing here would cancel THEIR draft,
@@ -2625,23 +2627,22 @@ export function useEditorEditing({
               releaseBridgeDraftUnlessShared(pending)
               return
             }
-            if (accepted) {
+            if (outcome === "accepted") {
               // Chat owns the edit from here, so the shared-template draft goes.
               releaseBridgeDraft(pending)
               return
             }
-            // Refused, and NOTHING was sent. Cancelling the draft here would
-            // throw away what the designer typed with no record of it in any
-            // file and no way to retry, so park it in the deterministic
-            // dialog instead: "this instance" or "all instances" is a worse
-            // question than the agent would have asked, but it is answerable.
-            const parked = parkDraftForDeterministicFallback(
-              pending,
-              "This edit could not be sent to chat. Choose how to apply it.",
-            )
+            // Refused or unanswered, and NOTHING was sent. Cancelling the draft
+            // here would throw away what the designer typed with no record of
+            // it in any file and no way to retry, so park it in the
+            // deterministic dialog instead: "this instance" or "all instances"
+            // is a worse question than the agent would have asked, but it is
+            // answerable.
+            const failure = handOffFailureStatus(outcome)
+            const parked = parkDraftForDeterministicFallback(pending, failure.parked)
             if (!parked) {
               releaseBridgeDraft(pending)
-              setSaveStatus("This edit needs a decision and could not be sent to chat.")
+              setSaveStatus(failure.released)
             }
             return
           }

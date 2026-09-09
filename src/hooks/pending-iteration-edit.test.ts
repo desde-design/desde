@@ -9,11 +9,13 @@ import {
   describeAmbiguousIteration,
   describeRowScopedEdit,
   endSentence,
+  handOffFailureStatus,
   isStaleVerify,
   iterationRouteFor,
   iterationTemplateLocation,
   parkedReason,
   sameBridgeDraft,
+  settleHandOff,
   structuralRouteFor,
   thisRowOperationAllowed,
   thisRowTemplateLocation,
@@ -660,5 +662,77 @@ describe("parkedReason", () => {
     const reason = "Could not check the source for a loop: network error"
     expect(parkedReason(reason)).toBe(parkedReason(reason))
     expect(parkedReason(reason).endsWith(" Choose how to apply it.")).toBe(true)
+  })
+})
+
+describe("settleHandOff", () => {
+  it("settles accepted when the hand-off resolves true in time", async () => {
+    await expect(settleHandOff(() => Promise.resolve(true), 50)).resolves.toBe("accepted")
+  })
+
+  it("settles refused when the hand-off resolves false", async () => {
+    await expect(settleHandOff(() => Promise.resolve(false), 50)).resolves.toBe("refused")
+  })
+
+  it("treats a throw as a refusal, not as a failure of the caller", async () => {
+    // The chat POST failing says nothing about the loop check that preceded
+    // it, and letting the throw out would blame the wrong step.
+    await expect(
+      settleHandOff(() => Promise.reject(new Error("network")), 50),
+    ).resolves.toBe("refused")
+  })
+
+  it("treats a synchronous throw the same way", async () => {
+    await expect(
+      settleHandOff(() => {
+        throw new Error("no chat")
+      }, 50),
+    ).resolves.toBe("refused")
+  })
+
+  it("times out rather than holding the draft for as long as chat takes", async () => {
+    await expect(settleHandOff(() => new Promise<boolean>(() => {}), 5)).resolves.toBe(
+      "timed-out",
+    )
+  })
+
+  it("a late acceptance after the timeout changes nothing", async () => {
+    // The race is the guard: once this returned "timed-out" the caller has
+    // parked the draft, and the late `true` resolves into a promise nobody is
+    // holding, so no code path can release what was parked.
+    let settle: ((accepted: boolean) => void) | undefined
+    const outcome = await settleHandOff(
+      () => new Promise<boolean>((resolve) => { settle = resolve }),
+      5,
+    )
+    expect(outcome).toBe("timed-out")
+    settle?.(true)
+    await Promise.resolve()
+    expect(outcome).toBe("timed-out")
+  })
+})
+
+describe("handOffFailureStatus", () => {
+  it("a refusal reuses the shared parked sentence", () => {
+    expect(handOffFailureStatus("refused")).toEqual({
+      parked: "This edit could not be sent to chat. Choose how to apply it.",
+      released: "This edit needs a decision and could not be sent to chat.",
+    })
+  })
+
+  it("a timeout says so, because it is a different fact the designer can act on", () => {
+    const status = handOffFailureStatus("timed-out")
+    expect(status.parked).toBe(
+      "Chat did not answer in time. Choose how to apply the pending edit.",
+    )
+    expect(status.released).toBe("Chat did not answer in time, and this edit needs a decision.")
+  })
+
+  it("neither status uses an em dash", () => {
+    for (const outcome of ["refused", "timed-out"] as const) {
+      const status = handOffFailureStatus(outcome)
+      expect(status.parked).not.toMatch(/—/)
+      expect(status.released).not.toMatch(/—/)
+    }
   })
 })
