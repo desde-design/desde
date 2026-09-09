@@ -4431,7 +4431,18 @@ export function useEditorEditing({
       const adapter = adapterRef.current
       const selection = useEditorStore.getState().editorSelection
       if (!adapter || !selection) return
+      // The session this edit is being made in, captured at dispatch, exactly
+      // as the class lane captures it. Read after an await it would be
+      // whichever session is live by then, which is the one this edit is not
+      // about. See `isStaleGeneration` and `ApplyEditOpts.signal`.
+      const generation = adapterGenerationRef.current
+      const sessionSignal = adapterAbortRef.current?.signal
+      // This lane has an await before it writes anything: resolving where a
+      // rule may go can ask the DOCUMENT (`GET_STYLESHEET_TARGETS`), and a page
+      // replaced in that window makes the answer describe another app's
+      // stylesheets.
       const destination = await resolveStyleDestination()
+      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
       if (!destination.ok) {
         setSaveStatus(destination.reason)
         return
@@ -4448,19 +4459,29 @@ export function useEditorEditing({
       }
       const edit = built.edit
       try {
-        const result = await adapter.applyEdit(edit)
-        if (result.kind === "failed") {
-          setSaveStatus(`Scoped style edit failed: ${result.reason}`)
-          return
-        }
+        const result = await adapter.applyEdit(
+          edit,
+          sessionSignal ? { signal: sessionSignal } : undefined,
+        )
         // Keep the external-edit hash guard in sync with our own write, like
         // the other immediate applyEdit paths — else the next save trips the
-        // conflict guard against this change.
+        // conflict guard against this change. Recorded BEFORE the session
+        // check, and for the same reason the text and class lanes do it there:
+        // the hashes are disk truth, not session state, and skipping them
+        // leaves the next save comparing against a hash this write invalidated.
         if (result.kind === "applied" && result.newHashes) {
           fileHashesRef.current = {
             ...fileHashesRef.current,
             ...result.newHashes,
           }
+        }
+        // The page this edit was made on is gone. Say nothing: the status bar
+        // is now describing a different page, and an aborted request arrives
+        // here as a failure that is not one.
+        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
+        if (result.kind === "failed") {
+          setSaveStatus(`Scoped style edit failed: ${result.reason}`)
+          return
         }
         // Blast radius, AFTER the write and only when it is bigger than one.
         // The count comes from the same `resolveDomAnchor` call that produced
@@ -4469,6 +4490,9 @@ export function useEditorEditing({
         // the copy says out loud.
         if (built.notice) setSaveStatus(built.notice)
       } catch (err) {
+        // Same rule for the throw path: a departed page's error is not news
+        // about the page in front of the designer now.
+        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
         setSaveStatus(`Scoped style edit threw: ${(err as Error).message}`)
       }
     },
@@ -4500,6 +4524,11 @@ export function useEditorEditing({
       const adapter = adapterRef.current
       const selection = useEditorStore.getState().editorSelection
       if (!adapter || !selection) return
+      // The session this edit is being made in, captured at dispatch, exactly
+      // as the class lane captures it. Everything between here and the write is
+      // synchronous, so this lane's only await is the write itself.
+      const generation = adapterGenerationRef.current
+      const sessionSignal = adapterAbortRef.current?.signal
       // The ROOT of the var chain is what you'd actually patch — the last hop
       // is the concrete value (`#f7f7f7`), earlier hops are `var(...)` aliases.
       const root = origin.varChain[origin.varChain.length - 1]
@@ -4570,19 +4599,28 @@ export function useEditorEditing({
         selector: root.definedAt.selector,
       }
       try {
-        const result = await adapter.applyEdit(edit)
-        if (result.kind === "failed") {
-          setSaveStatus(`Token edit failed: ${result.reason}`)
-          return
-        }
+        const result = await adapter.applyEdit(
+          edit,
+          sessionSignal ? { signal: sessionSignal } : undefined,
+        )
         // Keep the external-edit hash guard in sync with our own write, like
         // the other immediate applyEdit paths, so the next save doesn't trip
-        // the conflict guard against this change.
+        // the conflict guard against this change. Disk truth first, then the
+        // session check, the same order every other lane uses.
         if (result.kind === "applied" && result.newHashes) {
           fileHashesRef.current = {
             ...fileHashesRef.current,
             ...result.newHashes,
           }
+        }
+        // The page this token edit was made on is gone. Nothing below is
+        // meaningful for the page that replaced it: the verification reads the
+        // NEW document for a value written into the old one's stylesheet, and
+        // the status bar is describing something else now.
+        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
+        if (result.kind === "failed") {
+          setSaveStatus(`Token edit failed: ${result.reason}`)
+          return
         }
         // Cascade verification: confirm the patched token actually wins the
         // cascade for this element/property. Diagnostic-only, like every
@@ -4612,6 +4650,9 @@ export function useEditorEditing({
           expectedDeclarationValue: newValue,
         })
       } catch (err) {
+        // Same rule for the throw path: a departed page's error is not news
+        // about the page in front of the designer now.
+        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
         setSaveStatus(`Token edit threw: ${(err as Error).message}`)
       }
     },
