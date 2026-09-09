@@ -112,9 +112,19 @@ describe('BridgeFrameworkAdapter.getStyleProvenance', () => {
   it('resolves null without sending when no bridge has been accepted', async () => {
     // The version gate's "too old" arm is unreachable through the handshake now
     // (round 16 X3), so the reachable no-read case is an adapter that has seen
-    // no accepted bridge: it must still answer null rather than send.
+    // no accepted bridge: it must still answer null rather than send. Unlike
+    // the next test, an iframe target IS attached here (init() is in flight) —
+    // the handshake just hasn't completed, so no bridge has been accepted.
     adapter = new BridgeFrameworkAdapter()
+    const setup = makeMockIframe()
+    const target: AdapterTarget = { iframe: setup.iframe, origin: '*' }
+    // Never resolves without a BRIDGE_READY reply; swallow the rejection
+    // `dispose()` (afterEach) triggers so it doesn't surface as unhandled.
+    adapter.init(target).catch(() => {})
     await expect(adapter.getStyleProvenance('.a', ['color'])).resolves.toBeNull()
+    expect(
+      setup.postMessages.filter((m) => (m as { type: string }).type === 'GET_STYLE_PROVENANCE'),
+    ).toHaveLength(0)
   })
 
   it('resolves null when no iframe target is attached', async () => {
