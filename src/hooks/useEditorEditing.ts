@@ -2710,10 +2710,12 @@ export function useEditorEditing({
           // Carry the verified loop's position onto the pending edit. Both
           // remaining exits dispatch or open a dialog that dispatches, and
           // "this item" aims at the loop element, which is not necessarily
-          // the element that was clicked.
-          const verified: PendingIterationEdit = action.loopLocation
-            ? { ...pending, loopLocation: action.loopLocation }
-            : pending
+          // the element that was clicked. Unconditional: both remaining
+          // actions carry a position, because a `loop` verdict requires one.
+          const verified: PendingIterationEdit = {
+            ...pending,
+            loopLocation: action.loopLocation,
+          }
           if (action.kind === "remembered") {
             logIterationScopeChoice({
               editKind: pending.editKind,

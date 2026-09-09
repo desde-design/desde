@@ -34,9 +34,11 @@ import type { IterationVerifyOutcome } from "./iteration-verify"
  * clicked element to the enclosing `v-for` / `.map()`, so a `<span>` inside an
  * `<li v-for>` verifies as a loop. Dispatching "this item" against the SPAN's
  * position then reached the data resolver, which matches the loop element
- * EXACTLY, and got "No v-for element at ..." back. Absent when the verify
- * never ran or an older CLI answered without a position; the click's position
- * is the fallback, which is the behaviour before this field existed.
+ * EXACTLY, and got "No v-for element at ..." back.
+ *
+ * Absent only when the verify never ran, i.e. on an edit that never took the
+ * iteration route. A `loop` verdict always carries a position now, so an edit
+ * that verified as a loop always has this set.
  */
 type WithLoopLocation = { loopLocation?: SourceLocation }
 
@@ -332,8 +334,13 @@ export function thisRowTemplateLocation(pending: PendingIterationEdit): SourceLo
  *
  * True only when the verify found a loop AND that loop is somewhere other than
  * the clicked element: a `<span>` inside an `<li v-for>`, say. False when the
- * click landed on the loop element, and false when no verify position is
- * carried at all, which is the pre-`loopLocation` behaviour.
+ * click landed on the loop element.
+ *
+ * It is also false when a position is missing, which is NOT a claim that the
+ * click was on the loop element. This function only ever answers "yes, it is
+ * nested"; a missing position fails closed one layer up, in
+ * {@link thisRowOperationAllowed}, which requires both positions to be present
+ * before it will let a row operation run.
  */
 export function clickedInsideRow(pending: PendingIterationEdit): boolean {
   const loop = pending.loopLocation
@@ -671,13 +678,18 @@ export type AfterVerifyAction =
   | { kind: "release-and-status"; message: string }
   | { kind: "hand-off"; prompt: string }
   /**
-   * `loopLocation` is where the verify found the loop, when that is not the
-   * clicked position. The caller stores it on the pending edit so the "this
-   * item" dispatch aims at the loop element rather than at whatever was
-   * nested inside the row.
+   * `loopLocation` is where the verify found the loop. The caller stores it on
+   * the pending edit so the "this item" dispatch aims at the loop element
+   * rather than at whatever was nested inside the row.
+   *
+   * REQUIRED on both, because the `loop` verdict it comes from now requires a
+   * location. It was optional while a verdict could arrive with the position
+   * dropped, and an absent position there was indistinguishable from "the
+   * click IS the loop element" - which is the fact that decides whether a
+   * remove takes the clicked element or the whole item.
    */
-  | { kind: "remembered"; scope: IterationScope; loopLocation?: SourceLocation }
-  | { kind: "prompt"; loopLocation?: SourceLocation }
+  | { kind: "remembered"; scope: IterationScope; loopLocation: SourceLocation }
+  | { kind: "prompt"; loopLocation: SourceLocation }
 
 export function decideAfterVerify(args: {
   outcome: IterationVerifyOutcome
@@ -695,15 +707,14 @@ export function decideAfterVerify(args: {
       prompt: buildAmbiguousIterationHandoffPrompt(describeAmbiguousIteration(pending, location, outcome.reason)),
     }
   }
-  // The loop's own position, when the server reported one that differs from
-  // the click. The file is the file that was verified; only line and column
-  // move.
-  const found = outcome.kind === "loop" ? outcome.location : undefined
-  const loopLocation: SourceLocation | undefined = found
-    ? { ...location, line: found.line, column: found.column }
-    : undefined
-  if (remembered) {
-    return { kind: "remembered", scope: remembered, ...(loopLocation ? { loopLocation } : {}) }
+  // The loop's own position. The file is the file that was verified; only line
+  // and column move. Unconditional: `error` and `no-loop` have both returned
+  // above, so the outcome is a `loop`, and that variant carries a location.
+  const loopLocation: SourceLocation = {
+    ...location,
+    line: outcome.location.line,
+    column: outcome.location.column,
   }
-  return { kind: "prompt", ...(loopLocation ? { loopLocation } : {}) }
+  if (remembered) return { kind: "remembered", scope: remembered, loopLocation }
+  return { kind: "prompt", loopLocation }
 }
