@@ -592,12 +592,17 @@ export function useEditorEditing({
    * the designer their typed text.
    */
   const hookUnmountingRef = useRef(false)
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // Reset on every (re-)mount, the same way `useEditorChat`'s `disposedRef`
+    // does. StrictMode runs mount → unmount → mount on ONE instance, so the
+    // cleanup below latches `true` and the flag would still be true at the
+    // second mount. A later `enabled` flip would then take the unmount arm of
+    // the adapter teardown on a hook that is still on screen.
+    hookUnmountingRef.current = false
+    return () => {
       hookUnmountingRef.current = true
-    },
-    [],
-  )
+    }
+  }, [])
 
   // Adapter lifecycle. Attached when `enabled` flips true and an iframe
   // is present; disposed on disable, unmount, or url change. Selection
