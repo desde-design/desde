@@ -118,8 +118,11 @@ import {
   DEFERRED_PARK_STATUS,
   dequeueModal,
   describeRowScopedEdit,
+  discardedOnResetStatus,
   dropModalRequestsForDraft,
   enqueueModal,
+  NOT_CONNECTED_STATUS,
+  rowsToRelease,
   errorMessage,
   handOffFailureStatus,
   hasUndispatchedWork,
@@ -580,11 +583,10 @@ export function useEditorEditing({
   /**
    * True only once React has begun unmounting this hook.
    *
-   * The adapter cleanup below cannot tell its two cases apart on its own, and
-   * they want opposite things from the iteration lane's held drafts. `enabled`
-   * flipping off leaves the panels mounted, so a held draft can still be parked
-   * where the designer will see it. Unmounting leaves nothing to park into, so
-   * the drafts have to go back to the bridge instead.
+   * Both cases give every held draft back to the bridge, so this decides only
+   * whether the teardown SAYS what it discarded. `enabled` flipping off leaves
+   * the panels mounted, so the status line is read; unmounting takes the status
+   * bar with it, and a count nobody can see is a state write for nothing.
    *
    * Declared BEFORE the adapter effect deliberately. React runs a component's
    * cleanups in the order its effects were defined, so on unmount this one runs
@@ -762,12 +764,11 @@ export function useEditorEditing({
       disposedRef.current = true
       verifyAbortRef.current?.abort()
       verifyAbortRef.current = null
-      // Hand the iteration lane's held drafts somewhere before the adapter
-      // goes. An open scope prompt and the parks queued behind it are both
-      // holding bridge drafts, and neither has an owner once this adapter is
-      // disposed: the prompt would dispatch against nothing, and the queue is
-      // drained only by the prompt closing. Ordered BEFORE `dispose()` because
-      // releasing a draft is a message to this adapter. Via a ref because the
+      // Hand every held draft back before the adapter goes. The open scope
+      // prompt, the questions queued behind it, and the rows in the
+      // deterministic dialog are all drafts THIS adapter is holding, and every
+      // answer to them is a message only this adapter could receive. Ordered
+      // BEFORE `dispose()` for exactly that reason. Via a ref because the
       // callbacks are defined far below this effect; see its declaration.
       iterationTeardownRef.current?.(hookUnmountingRef.current)
       iframe.removeEventListener("load", runHandshake)
@@ -2774,30 +2775,50 @@ export function useEditorEditing({
   }, [releaseBridgeDraft, closeIterationPrompt])
 
   /**
-   * Wind the iteration lane down because the adapter it edits through is going
-   * away. Called from the adapter effect's cleanup, through a ref.
+   * Wind both dialogs down because the adapter they edit through is going away.
+   * Called from the adapter effect's cleanup, through a ref.
    *
-   * Two shapes, and what separates them is whether anything will still be on
-   * screen. Staying mounted (`enabled` flipped off, a re-attach): the open
-   * question cannot be answered against a disposed adapter, so it ends the way
-   * the dialog's own Cancel ends it, and that close flushes the parks behind it
-   * into the deterministic queue, where they stay visible and answerable.
-   * Unmounting: there is no queue left to flush into, so every held draft goes
-   * back to the bridge instead of being left as an orphan.
+   * ONE rule, in both cases: a bridge-held draft cannot outlive the adapter
+   * that holds it. Every question on screen, every question waiting, and every
+   * row in the deterministic dialog is a draft this adapter is still holding
+   * and an answer only this adapter could receive. So they all go back to it
+   * here, while it is still there to hear it (the cleanup runs this BEFORE
+   * `dispose()`), and the state that showed them is cleared.
+   *
+   * It used to keep the mounted case answerable: cancel the prompt, and let its
+   * close move the queued parks into the deterministic dialog. That dialog then
+   * asked a question about drafts no adapter held any more, and answering it
+   * optional-chained the missing adapter and dropped the row, so choosing a
+   * scope silently discarded the edit. Discarding it OUT LOUD, once, is the
+   * honest version of the same outcome.
+   *
+   * `unmounting` decides only whether the count is worth saying. There is no
+   * status bar left on an unmounting hook to say it in.
    */
   const teardownIterationPrompts = useCallback(
     (unmounting: boolean) => {
-      if (!unmounting) {
-        cancelIterationScope()
-        return
+      let discarded = 0
+      const openPrompt = iterationScopePromptRef.current
+      if (openPrompt) {
+        // Also drops any queued request about the same draft, so it cannot be
+        // counted twice below.
+        releaseBridgeDraft(openPrompt)
+        iterationScopePromptRef.current = null
+        setIterationScopePrompt(null)
+        discarded += 1
       }
-      releaseBridgeDraft(iterationScopePromptRef.current)
-      iterationScopePromptRef.current = null
-      setIterationScopePrompt(null)
+      discarded += releaseQueuedModalRequests()
+      const rows = rowsToRelease(pendingDisambiguationsRef.current)
+      for (const row of rows) {
+        adapterRef.current?.resolveMutationDisambiguation(row.pendingId, "cancel")
+      }
+      discarded += rows.length
+      if (pendingDisambiguationsRef.current.length > 0) setPendingDisambiguations([])
       modalOwnerRef.current = null
-      releaseQueuedModalRequests()
+      const status = discardedOnResetStatus(discarded)
+      if (status && !unmounting) setSaveStatus(status)
     },
-    [cancelIterationScope, releaseBridgeDraft, releaseQueuedModalRequests],
+    [releaseBridgeDraft, releaseQueuedModalRequests],
   )
   // Assigned during render, like the other always-latest mirrors in this hook,
   // so the adapter effect's cleanup always calls the current one.
@@ -3113,7 +3134,18 @@ export function useEditorEditing({
     (choice: DisambiguationChoice) => {
       const prompt = pendingDisambiguations[0]
       if (!prompt) return
-      adapterRef.current?.resolveMutationDisambiguation(prompt.pendingId, choice)
+      // KEEP the row when there is no adapter. Answering this dialog is a
+      // message to the bridge, and an optional-chained call on a disposed
+      // adapter sends nothing while the row is removed regardless: the designer
+      // chooses a scope, the dialog closes, and the edit is gone with no record
+      // of it anywhere. Teardown should have cleared this row already; if one
+      // survives, refusing is the only honest answer.
+      const adapter = adapterRef.current
+      if (!adapter) {
+        setSaveStatus(NOT_CONNECTED_STATUS)
+        return
+      }
+      adapter.resolveMutationDisambiguation(prompt.pendingId, choice)
       const remaining = pendingDisambiguations.filter(
         (p) => p.pendingId !== prompt.pendingId,
       )
@@ -3129,7 +3161,15 @@ export function useEditorEditing({
   const cancelDisambiguation = useCallback(() => {
     const prompt = pendingDisambiguations[0]
     if (!prompt) return
-    adapterRef.current?.resolveMutationDisambiguation(prompt.pendingId, "cancel")
+    // Same refusal as the confirm above, and for the same reason: a discard is
+    // a message to the bridge too. Nothing is settled here either, because the
+    // preview this would revert lives in an iframe that is gone.
+    const adapter = adapterRef.current
+    if (!adapter) {
+      setSaveStatus(NOT_CONNECTED_STATUS)
+      return
+    }
+    adapter.resolveMutationDisambiguation(prompt.pendingId, "cancel")
     // The ONLY settle signal on this path (L1). No mutation is emitted, so no
     // override is ever registered and no `resolveOverride` can fire — the bridge
     // reverts the draft's preview itself (`releasePendingPreview`,
@@ -3144,13 +3184,17 @@ export function useEditorEditing({
     // Same close rule as the confirm above.
     if (remaining.length === 0) releaseModal()
   }, [pendingDisambiguations, releaseModal])
-  // Ref mirror of `pendingDisambiguations.length`, kept in sync on every
-  // render (assignment, not an effect — always current by the time any
-  // event handler reads it). Lets the `beforeunload` guard below register
-  // its listener once at mount and read live counts at fire-time instead
-  // of re-registering on every state change.
-  const pendingDisambiguationsCountRef = useRef(0)
-  pendingDisambiguationsCountRef.current = pendingDisambiguations.length
+  // Ref mirror of `pendingDisambiguations`, kept in sync on every render
+  // (assignment, not an effect — always current by the time any event handler
+  // reads it). Lets the `beforeunload` guard below register its listener once
+  // at mount and read live state at fire-time instead of re-registering on
+  // every state change, and lets the adapter teardown see the rows on screen
+  // without depending on the state and re-running.
+  //
+  // The ROWS, not just their count: teardown has to hand each row's draft back
+  // to the bridge, and a count cannot say which.
+  const pendingDisambiguationsRef = useRef<readonly PendingMutation[]>([])
+  pendingDisambiguationsRef.current = pendingDisambiguations
   const [saving, setSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState<string | null>(null)
   /**
@@ -3233,7 +3277,7 @@ export function useEditorEditing({
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       const undispatched = hasUndispatchedWork({
         aiQueue: queuedForAiRef.current.size,
-        parked: pendingDisambiguationsCountRef.current,
+        parked: pendingDisambiguationsRef.current.length,
         deferred: modalQueueRef.current.length,
       })
       if (!undispatched) return
@@ -4997,9 +5041,9 @@ export function useEditorEditing({
       // rebuild the callback every time one lands), so the captured value can
       // be stale — and a stale 0 here would return `{ ok: true }` and show
       // "saved!" with nothing written, which is the exact failure this guard
-      // exists to prevent. `pendingDisambiguationsCountRef` is assigned on
+      // exists to prevent. `pendingDisambiguationsRef` is assigned on
       // every render for precisely this read-at-fire-time case.
-      const pendingDisambiguationCount = pendingDisambiguationsCountRef.current
+      const pendingDisambiguationCount = pendingDisambiguationsRef.current.length
       const gate = saveGate({
         pendingDisambiguations: pendingDisambiguationCount,
         mutations: directMutations.length,

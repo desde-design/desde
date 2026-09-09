@@ -8,6 +8,9 @@ import {
   DEFERRED_PARK_STATUS,
   decideAfterVerify,
   describeAmbiguousIteration,
+  discardedOnResetStatus,
+  NOT_CONNECTED_STATUS,
+  rowsToRelease,
   describeRowScopedEdit,
   endSentence,
   errorMessage,
@@ -384,6 +387,61 @@ describe("the modal queue: enqueueModal / dequeueModal / dropModalRequestsForDra
     // Nothing to match on: an edit with no draft cannot be identified this way,
     // so the queue is returned whole rather than emptied.
     expect(dropModalRequestsForDraft([gone, kept], undefined)).toEqual([gone, kept])
+  })
+})
+
+describe("rowsToRelease", () => {
+  const row = (pendingId: string) => ({ pendingId } as never)
+
+  it("names every row the bridge is holding a draft for", () => {
+    const rows = [row("p-1"), row("p-2")]
+    expect(rowsToRelease(rows)).toEqual(rows)
+  })
+
+  it("leaves out a row with no bridge id", () => {
+    // Nothing produces one today. The rule is "a row the bridge is holding",
+    // and cancelling an id the adapter never issued is a message about nothing.
+    expect(rowsToRelease([row("p-1"), row("")])).toEqual([row("p-1")])
+  })
+
+  it("does not mutate the rows it is given", () => {
+    const rows = [row("p-1")]
+    rowsToRelease(rows)
+    expect(rows).toHaveLength(1)
+  })
+})
+
+describe("discardedOnResetStatus", () => {
+  it("counts the discarded edits, singular and plural", () => {
+    expect(discardedOnResetStatus(1)).toBe(
+      "The page connection was reset; 1 pending edit was discarded.",
+    )
+    expect(discardedOnResetStatus(3)).toBe(
+      "The page connection was reset; 3 pending edits were discarded.",
+    )
+  })
+
+  it("says nothing when nothing was discarded", () => {
+    // A re-attach that was holding nothing is not an event, and the sentence
+    // would be alarming about a page that lost nothing.
+    expect(discardedOnResetStatus(0)).toBeNull()
+    expect(discardedOnResetStatus(-1)).toBeNull()
+  })
+
+  it("uses no em dash and no first person", () => {
+    for (const count of [1, 2]) {
+      const status = discardedOnResetStatus(count) ?? ""
+      expect(status).not.toMatch(/—/)
+      expect(status).not.toMatch(/\b(me|my)\b/i)
+    }
+  })
+})
+
+describe("NOT_CONNECTED_STATUS", () => {
+  it("says what is wrong and what to do, with no em dash and no first person", () => {
+    expect(NOT_CONNECTED_STATUS).toBe("The page is not connected. Reload and try again.")
+    expect(NOT_CONNECTED_STATUS).not.toMatch(/—/)
+    expect(NOT_CONNECTED_STATUS).not.toMatch(/\b(me|my)\b/i)
   })
 })
 

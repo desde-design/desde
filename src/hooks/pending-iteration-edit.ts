@@ -738,6 +738,46 @@ export function dropModalRequestsForDraft(
 }
 
 /**
+ * The rows on screen in the deterministic dialog whose draft the bridge is
+ * still holding, and which therefore have to be handed back when the adapter
+ * that would answer them goes away.
+ *
+ * Every row reaches that dialog from the bridge, so in practice this is all of
+ * them. It is a named selector rather than the array itself because the rule is
+ * "a row the bridge is holding", not "a row": a row that ever arrives from
+ * somewhere else must not be cancelled against an adapter that never saw it.
+ */
+export function rowsToRelease(
+  rows: readonly PendingMutation[],
+): PendingMutation[] {
+  return rows.filter((row) => Boolean(row.pendingId))
+}
+
+/**
+ * What Save says when the designer answers a dialog whose adapter has gone.
+ *
+ * The dialog's answer is a message to the bridge, and there is no bridge to
+ * send it to. The row STAYS: removing it would drop the edit on the floor while
+ * telling the designer they had chosen something.
+ */
+export const NOT_CONNECTED_STATUS = "The page is not connected. Reload and try again."
+
+/**
+ * What the status bar says when the adapter went away and took held edits with
+ * it, or null when it took none.
+ *
+ * Counted rather than vague, because "some edits" leaves the designer checking
+ * the page for something that is not there. Null at zero: a re-attach with
+ * nothing held is not an event, and reporting it would put a scary sentence on
+ * screen for a page that lost nothing.
+ */
+export function discardedOnResetStatus(count: number): string | null {
+  if (count <= 0) return null
+  const edits = count === 1 ? "1 pending edit was" : `${count} pending edits were`
+  return `The page connection was reset; ${edits} discarded.`
+}
+
+/**
  * Is there work the designer has not dispatched, that reloading the page would
  * throw away without saying so?
  *
