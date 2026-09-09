@@ -124,6 +124,7 @@ import {
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
 import { verifyIterationLoop } from "./iteration-verify"
+import { parkedSaveRefusal, saveGate } from "./save-gate"
 
 /**
  * Shared empty listing for "this refresh found no `.vue` files". A module
@@ -4465,10 +4466,7 @@ export function useEditorEditing({
         m.sourceLoc !== null &&
         (m.resolutionKind === "direct" || m.resolutionKind === "ancestor"),
     )
-    if (
-      directMutations.length === 0 &&
-      scopedOverrideMutations.length === 0
-    ) {
+    {
       // Codex P0 #2: `hasUnsavedChanges` now includes
       // `pendingDisambiguations.length` so Save is click-able when a
       // v-for disambiguation is the only unsaved state. If we
@@ -4479,6 +4477,12 @@ export function useEditorEditing({
       // in onMutationAwaitingDisambiguation, that the bridge couldn't
       // identify an unambiguous origin and the in-iframe edit was
       // genuinely ambiguous).
+      //
+      // The check runs BEFORE anything is applied, and refuses the whole
+      // Save. It used to run only when both mutation arrays were empty, so
+      // one writable mutation was enough to skip it: Save applied that
+      // mutation, said "saved", and left the parked edit sitting in its
+      // dialog. `saveGate` is the decision, kept pure and tested.
       //
       // In practice this should rarely be hit: `MutationDisambiguationDialog`
       // (driven by `disambiguationPrompt`) now opens automatically the
@@ -4496,13 +4500,17 @@ export function useEditorEditing({
       // exists to prevent. `pendingDisambiguationsCountRef` is assigned on
       // every render for precisely this read-at-fire-time case.
       const pendingDisambiguationCount = pendingDisambiguationsCountRef.current
-      if (pendingDisambiguationCount > 0) {
-        const n = pendingDisambiguationCount
-        const reason = `Cannot save: ${n} edit${n === 1 ? "" : "s"} still need a scope choice. Resolve the "Resolve ambiguous edit" dialog, or dismiss it to discard, before saving.`
+      const gate = saveGate({
+        pendingDisambiguations: pendingDisambiguationCount,
+        mutations: directMutations.length,
+        scoped: scopedOverrideMutations.length,
+      })
+      if (gate === "blocked-parked") {
+        const reason = parkedSaveRefusal(pendingDisambiguationCount)
         setSaveStatus(reason)
         return { ok: false, reason }
       }
-      return { ok: true }
+      if (gate === "nothing") return { ok: true }
     }
     setSaving(true)
     setSaveStatus(null)
