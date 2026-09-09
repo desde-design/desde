@@ -52,6 +52,41 @@ const PLAIN_VUE = `<template>
 </template>
 `
 
+// A nested element inside a loop row. The click stamps the SPAN, not the
+// `<li v-for>`, and the span is just as much a loop row as its parent.
+const NESTED_VUE = `<script setup>
+const rows = [{ id: 1 }, { id: 2 }]
+</script>
+<template>
+  <ul>
+    <li v-for="r in rows" :key="r.id">
+      <span class="label">{{ r.id }}</span>
+    </li>
+  </ul>
+</template>
+`
+
+const NESTED_NO_LOOP_VUE = `<template>
+  <ul>
+    <li>
+      <span class="label">one</span>
+    </li>
+  </ul>
+</template>
+`
+
+const NESTED_TSX = `const items = [{ id: 1 }, { id: 2 }]
+export function List() {
+  return (
+    <ul>
+      {items.map((item) => (
+        <li key={item.id}><span className="label">{item.id}</span></li>
+      ))}
+    </ul>
+  )
+}
+`
+
 describe("locateLoopAt", () => {
   it("finds the .map() enclosing a JSX element", () => {
     const r = locateLoopAt({ file: "src/List.tsx", source: LIST_TSX, templateLocation: babelLoc(LIST_TSX, "<li key") })
@@ -78,6 +113,39 @@ describe("locateLoopAt", () => {
   it("reports no loop for a plain Vue element", () => {
     const r = locateLoopAt({ file: "src/Plain.vue", source: PLAIN_VUE, templateLocation: { line: 3, column: 5 } })
     expect(r.found).toBe(false)
+  })
+
+  it("finds the v-for enclosing a NESTED Vue element, not just the v-for node itself", () => {
+    // The bridge stamps the element the user clicked. Clicking the label
+    // inside a loop row used to answer "no loop", which handed the edit to
+    // chat with a false premise and made "all rows" unreachable.
+    const r = locateLoopAt({ file: "src/List.vue", source: NESTED_VUE, templateLocation: { line: 7, column: 7 } })
+    expect(r).toEqual({ found: true, kind: "v-for", expression: "r in rows" })
+  })
+
+  it("reports no loop for a nested Vue element with no enclosing v-for", () => {
+    const r = locateLoopAt({
+      file: "src/Plain.vue",
+      source: NESTED_NO_LOOP_VUE,
+      templateLocation: { line: 4, column: 7 },
+    })
+    expect(r.found).toBe(false)
+    if (!r.found) expect(r.reason).toBe("This element is not inside a `v-for`")
+  })
+
+  it("distinguishes 'nothing at that position' from 'no loop encloses it' in Vue", () => {
+    const r = locateLoopAt({ file: "src/Plain.vue", source: PLAIN_VUE, templateLocation: { line: 99, column: 1 } })
+    expect(r.found).toBe(false)
+    if (!r.found) expect(r.reason).toBe("No element at 99:1")
+  })
+
+  it("finds the .map() enclosing a NESTED JSX element", () => {
+    const r = locateLoopAt({
+      file: "src/List.tsx",
+      source: NESTED_TSX,
+      templateLocation: babelLoc(NESTED_TSX, "<span className"),
+    })
+    expect(r).toEqual({ found: true, kind: "map", expression: "items.map" })
   })
 
   it("refuses an unsupported extension", () => {

@@ -152,6 +152,67 @@ function findVForAt(
   return null
 }
 
+/**
+ * The result of asking "is the element at this position inside a v-for?".
+ * Three answers, not two: "nothing is at that position" and "something is
+ * there but no loop encloses it" are different facts, and the hand-off
+ * message quotes the reason verbatim.
+ */
+type EnclosingVForResult =
+  | { kind: 'found'; vForExpression: string }
+  | { kind: 'no-element' }
+  | { kind: 'no-loop' }
+
+/**
+ * Nearest ANCESTOR-OR-SELF element carrying `v-for`, for the element at the
+ * given SFC-absolute position.
+ *
+ * Deliberately NOT `findVForAt`. That one matches only when the node AT the
+ * position carries the directive, which the data resolver needs (it rewrites
+ * the loop's own iteratee). The loop CHECK is a different question: a
+ * `<span>` inside `<li v-for>` is a loop row, and answering "no loop" for it
+ * both sent a false premise to chat and made the deterministic "all rows"
+ * path unreachable for every nested Vue element. The JSX sibling
+ * (`locateJsxLoopAt`) has always walked up to the enclosing `.map()`; this
+ * brings Vue to the same rule.
+ *
+ * Same coordinate convention as `findVForAt`: template-relative lines are
+ * shifted by `templateStartLine`, columns are Vue's 1-based ones.
+ */
+function findEnclosingVForAt(
+  templateAst: ElementNode,
+  templateStartLine: number,
+  targetLine: number,
+  targetColumn: number,
+): EnclosingVForResult {
+  const stack: Array<{ node: ElementNode; enclosing: string | null }> = [
+    { node: templateAst, enclosing: null },
+  ]
+  while (stack.length > 0) {
+    const { node, enclosing } = stack.pop()!
+    const ownVFor = node.props?.find(
+      (p): p is DirectiveNode =>
+        p.type === NodeTypes.DIRECTIVE && (p as DirectiveNode).name === 'for',
+    )
+    const ownExpression = (ownVFor?.exp as SimpleExpressionNode | undefined)?.content ?? null
+    // Self counts: the clicked element may BE the `v-for` element.
+    const nearest = ownExpression ?? enclosing
+    const loc = node.loc?.start
+    if (loc) {
+      const sfcLine = loc.line + templateStartLine - 1
+      if (sfcLine === targetLine && loc.column === targetColumn) {
+        return nearest ? { kind: 'found', vForExpression: nearest } : { kind: 'no-loop' }
+      }
+    }
+    for (const child of node.children ?? []) {
+      if (child.type === NodeTypes.ELEMENT) {
+        stack.push({ node: child as ElementNode, enclosing: nearest })
+      }
+    }
+  }
+  return { kind: 'no-element' }
+}
+
 /** Every name a v-for expression binds: `(item, i) in rows` → `["item", "i"]`,
  *  `{ rows } in groups` → `["rows"]`. Destructuring is read as "every
  *  identifier in the alias part", which over-includes the KEY of
@@ -603,8 +664,9 @@ export function resolveIterationDataVueSameFile(
 
 /**
  * Loop check only: is the template element at `templateLocation` (SFC-absolute
- * line, 1-based column) inside a `v-for`? Reuses `findVForAt`; does not touch
- * the script block.
+ * line, 1-based column) inside a `v-for`? Walks ancestor-or-self via
+ * `findEnclosingVForAt`, so a nested element inside a loop row answers "yes",
+ * matching the JSX side. Does not touch the script block.
  */
 export function locateVueLoopAt(source: string, templateLocation: LoopPosition): LocateLoopResult {
   let descriptor
@@ -623,14 +685,17 @@ export function locateVueLoopAt(source: string, templateLocation: LoopPosition):
     return { found: false, reason: `Template parse failed: ${(err as Error).message}` }
   }
   const root = templateAst as unknown as ElementNode
-  const match = findVForAt(
+  const match = findEnclosingVForAt(
     root,
     descriptor.template.loc.start.line,
     templateLocation.line,
     templateLocation.column,
   )
-  if (!match) {
-    return { found: false, reason: `No v-for element at ${templateLocation.line}:${templateLocation.column}` }
+  if (match.kind === 'no-element') {
+    return { found: false, reason: `No element at ${templateLocation.line}:${templateLocation.column}` }
+  }
+  if (match.kind === 'no-loop') {
+    return { found: false, reason: 'This element is not inside a `v-for`' }
   }
   return { found: true, kind: 'v-for', expression: match.vForExpression }
 }
