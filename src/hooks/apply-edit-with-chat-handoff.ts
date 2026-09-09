@@ -70,13 +70,20 @@ const SNIPPET_LIMIT = 2000
  *
  * Kept deliberately short. Each pattern pins a message that a colocated test
  * on the producing side already holds stable:
- *  - `lanes.<id>` from `dormantLaneRefusal` in `editor-cli/src/server/enabled-lanes.ts`
+ *  - the dormant-lane sentence from `dormantLaneRefusal` in `editor-cli/src/server/enabled-lanes.ts`
  *  - "never rewrites node_modules" from `build-edit-request.ts`
  *  - "installed library" from the iteration and llm-fallback handlers
+ *
+ * The lane pattern is anchored on that message's fixed prefix AND on the two
+ * ids that exist. `/\blanes\.[a-z-]+\b/` alone matched any sentence that
+ * mentioned a path like `src/lanes.ts`, which would have turned an ordinary
+ * capability refusal into a policy one and silently stopped the hand-off.
  */
+const DORMANT_LANE_REFUSAL = /edit lane is dormant\b[\s\S]*\blanes\.(?:detach|swap)\b/
+
 export function isPolicyRefusal(reason: string): boolean {
   return (
-    /\blanes\.[a-z-]+\b/.test(reason) ||
+    DORMANT_LANE_REFUSAL.test(reason) ||
     /never rewrites node_modules/i.test(reason) ||
     /installed library/i.test(reason)
   )

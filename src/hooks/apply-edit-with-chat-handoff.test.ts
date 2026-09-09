@@ -156,6 +156,22 @@ describe("isPolicyRefusal", () => {
     expect(isPolicyRefusal("Refusing to delete a root or expression-embedded JSX element")).toBe(false)
     expect(isPolicyRefusal("Stale target: the file changed under the captured position")).toBe(false)
   })
+
+  it("is false for a refusal that merely mentions a path or a word starting 'lanes.'", () => {
+    // The pattern used to be `\blanes\.[a-z-]+\b`, which any of these match.
+    // A false positive here silently cancels a hand-off the agent could have
+    // done something about.
+    expect(isPolicyRefusal("Could not parse src/lanes.tsx at 12:4")).toBe(false)
+    expect(isPolicyRefusal("Refusing to edit lanes.config in a dependency")).toBe(false)
+    // A dormant-lane id, but not the dormant-lane refusal.
+    expect(isPolicyRefusal("Unknown option lanes.detach in desde.config.json")).toBe(false)
+  })
+
+  it("is false for a lane id that is not one of the two dormant lanes", () => {
+    expect(
+      isPolicyRefusal('The "wrap" edit lane is dormant. Set lanes.wrap to turn it back on.'),
+    ).toBe(false)
+  })
 })
 
 describe("policy refusals are not handed to chat", () => {
