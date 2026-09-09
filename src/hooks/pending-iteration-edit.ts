@@ -604,73 +604,156 @@ export function promptCollision(
 }
 
 /**
- * A park the iteration lane owes but is holding back, because performing it
- * now would open a second modal on top of the one the designer is answering.
+ * A dialog the hook owes the designer, as a value.
  *
- * Two variants, because two kinds of caller park a draft. The iteration lane
- * names the edit it was working on, so the flush can look the bridge's payload
- * up again and notice that the draft went away meanwhile. The bridge-delivery
- * refusal already HAS the payload in hand, because it runs at the moment the
- * bridge offers it and before anything records it anywhere.
+ * The Editor has two of them and they ask about the same edit from opposite
+ * ends: the SCOPE dialog asks "this item or all items?" for an edit the
+ * iteration lane is still holding, and the DISAMBIGUATION dialog asks "this
+ * instance or all instances?" for a draft the bridge is holding. Either can be
+ * raised while the other is open, from four independent places (a verify
+ * completing, a lane failure, a refused hand-off, the bridge delivering a
+ * fresh ambiguous mutation), so neither could see the other and the two
+ * stacked in whichever order they happened to arrive.
+ *
+ * Making the request a value is what lets ONE owner exist: an opener no longer
+ * opens anything, it hands its request over and is told whether it opened now
+ * or is waiting.
  */
-export type DeferredPark =
-  | {
-      kind: "iteration"
-      pending: PendingIterationEdit
-      /** The status the park will show when it finally happens. */
-      reason: string
-    }
-  | {
-      kind: "held"
-      held: PendingMutation
-      /** The status the park will show when it finally happens. */
-      reason: string
-    }
+export type ModalRequest =
+  /** The scope prompt, for an edit the iteration lane verified. */
+  | { kind: "scope"; pending: PendingIterationEdit }
+  /**
+   * The deterministic mutation dialog, for a draft the bridge is holding.
+   *
+   * `reason` is the status line a park shows when it finally opens. It is
+   * absent for the bridge's ordinary route, because that one is not a park:
+   * nothing failed and there is nothing to explain.
+   */
+  | { kind: "disambiguation"; mutation: PendingMutation; reason?: string }
+
+/** Which of the two dialogs a request is for, and which one currently owns. */
+export type ModalKind = ModalRequest["kind"]
 
 /**
- * Which draft a queued park is about, or null when it is about none.
+ * Which bridge draft a request is about, or undefined when it is about none.
  *
- * The two variants name the same thing two ways: the bridge's `pendingId` IS
- * the iteration edit's `bridgePendingId`. Reducing both to one key is what
- * lets the queue hold one entry per draft no matter which caller queued it.
+ * The two kinds name the same thing two ways: the bridge's `pendingId` IS the
+ * iteration edit's `bridgePendingId`. Reducing both to one key is what lets the
+ * queue hold one entry per draft no matter which dialog asked for it, so an
+ * edit whose scope question is still queued when its lane gives up ends as one
+ * request rather than as two dialogs about one draft.
  */
-function deferredParkDraftId(entry: DeferredPark): string | undefined {
-  return entry.kind === "held" ? entry.held.pendingId : bridgeDraftIdOf(entry.pending)
+export function modalRequestDraftId(request: ModalRequest): string | undefined {
+  return request.kind === "disambiguation"
+    ? request.mutation.pendingId
+    : bridgeDraftIdOf(request.pending)
 }
 
 /**
- * Should a park happen now, or wait for the open question to be answered?
+ * Add a request to the queue, or replace the entry already in it for the same
+ * in-page typing session.
  *
- * Parking puts an edit into the deterministic disambiguation queue, and that
- * queue opens its dialog on its own the moment it is non-empty. With a scope
- * prompt already up, the newcomer's dialog therefore lands ON TOP of the
- * question the designer is being asked. So every park in the hook asks this
- * first, and there is exactly one of it so that a new failure exit cannot
- * quietly skip the check.
+ * Replacing matters because the designer can keep typing on the held element:
+ * every keystroke round trip rebuilds the pending object and re-collides, and
+ * the queue must end up holding the LATEST text rather than the first
+ * keystroke's plus a stack of duplicates. `sameBridgeDraft` is the same test
+ * that decides it everywhere else.
+ *
+ * The match is on the DRAFT, not on the kind, so a park and a scope question
+ * about one draft collapse to one entry, latest wins.
  */
-export type ParkDecision = "park-now" | "defer"
+function queueModalRequest(
+  queue: readonly ModalRequest[],
+  request: ModalRequest,
+): ModalRequest[] {
+  const draftId = modalRequestDraftId(request)
+  const at = queue.findIndex(
+    (existing) =>
+      (existing.kind === "scope" &&
+        request.kind === "scope" &&
+        (existing.pending === request.pending ||
+          sameBridgeDraft(existing.pending, request.pending))) ||
+      (draftId !== undefined && modalRequestDraftId(existing) === draftId),
+  )
+  if (at === -1) return [...queue, request]
+  const next = queue.slice()
+  next[at] = request
+  return next
+}
 
-export function parkDecision(promptOpen: boolean): ParkDecision {
-  return promptOpen ? "defer" : "park-now"
+/** Open it now, or hold it behind whatever is already on screen. */
+export type ModalDecision = { open: ModalRequest } | { deferred: ModalRequest[] }
+
+/**
+ * THE rule for raising either dialog. Pure, so the one-modal invariant can be
+ * read in six lines instead of inferred from four call sites.
+ *
+ * Nothing opens while anything is open, in EITHER direction. The exclusion used
+ * to be one-way and informal: a park asked whether a scope prompt was open, and
+ * a completed verify asked whether another scope prompt was open. Neither asked
+ * about the mutation dialog, so a park that had opened that dialog was
+ * invisible to the verify which then opened the scope prompt on top of it.
+ *
+ * A non-empty queue with no owner cannot happen, because the release opens the
+ * head. It is treated as owned anyway: opening past a queue would put the
+ * newcomer in front of edits that have been waiting longer.
+ */
+export function enqueueModal(
+  queue: readonly ModalRequest[],
+  request: ModalRequest,
+  currentOwner: ModalKind | null,
+): ModalDecision {
+  if (currentOwner === null && queue.length === 0) return { open: request }
+  return { deferred: queueModalRequest(queue, request) }
+}
+
+/**
+ * Take the next request off the queue when the open dialog closes. FIFO: the
+ * edit that has been waiting longest is asked about first.
+ */
+export function dequeueModal(queue: readonly ModalRequest[]): {
+  next: ModalRequest | null
+  queue: ModalRequest[]
+} {
+  const [next, ...rest] = queue
+  if (!next) return { next: null, queue: [] }
+  return { next, queue: rest }
+}
+
+/**
+ * Forget every queued request about a draft that has just been given back to
+ * the bridge.
+ *
+ * A queued request holds a payload, not a promise that the payload still
+ * exists: a late completion can cancel the draft while its question waits. The
+ * dialog would then open on a draft the bridge no longer holds, and answering
+ * it would resolve nothing. So the release drops the request too.
+ */
+export function dropModalRequestsForDraft(
+  queue: readonly ModalRequest[],
+  draftId: string | undefined,
+): ModalRequest[] {
+  if (!draftId) return [...queue]
+  return queue.filter((request) => modalRequestDraftId(request) !== draftId)
 }
 
 /**
  * Is there work the designer has not dispatched, that reloading the page would
  * throw away without saying so?
  *
- * Three counts, and the third is the one that was missing: a deferred park is
- * an edit the bridge is still holding while it waits for a dialog to close. It
- * is exactly as unsaved as the other two, and it is INVISIBLE, because nothing
- * has opened a dialog for it yet. A pure function so the unload warning's rule
- * can be read and tested in one place rather than inferred from a boolean
- * expression inside a listener.
+ * Three counts, and the third is the one that was missing: a queued modal
+ * request is an edit the bridge is still holding while it waits for a dialog to
+ * close. It is exactly as unsaved as the other two, and it is INVISIBLE,
+ * because nothing has opened a dialog for it yet. A pure function so the unload
+ * warning's rule can be read and tested in one place rather than inferred from
+ * a boolean expression inside a listener.
  */
 export function hasUndispatchedWork(counts: {
   /** Mutations queued for the AI lane, which only Save dispatches. */
   aiQueue: number
   /** Edits parked in the deterministic disambiguation dialog. */
   parked: number
-  /** Parks held back behind an open scope prompt. */
+  /** Requests waiting behind the dialog that is open ({@link enqueueModal}). */
   deferred: number
 }): boolean {
   return counts.aiQueue > 0 || counts.parked > 0 || counts.deferred > 0
@@ -686,43 +769,6 @@ export function hasUndispatchedWork(counts: {
  */
 export const DEFERRED_PARK_STATUS =
   "This edit is held behind the open question. Answer it and this one is next."
-
-/**
- * Add a park to the deferred queue, or replace the entry already in it for the
- * same in-page typing session.
- *
- * Replacing matters because the designer can keep typing on the held element:
- * every keystroke round trip rebuilds the pending object and re-collides, and
- * the queue must end up holding the LATEST text rather than the first
- * keystroke's plus a stack of duplicates. `sameBridgeDraft` is the same test
- * that decides it everywhere else; anything without a draft never reaches
- * here, because `promptCollision` drops those instead of parking them.
- *
- * The match is on the DRAFT, not on the variant, so a bridge-delivery refusal
- * and an iteration failure about the same draft collapse to one entry rather
- * than parking the same edit twice.
- *
- * Pure, and returns a new array rather than mutating, so the queue decision is
- * testable without the hook.
- */
-export function queueDeferredPark(
-  queue: readonly DeferredPark[],
-  entry: DeferredPark,
-): DeferredPark[] {
-  const draftId = deferredParkDraftId(entry)
-  const at = queue.findIndex(
-    (existing) =>
-      (existing.kind === "iteration" &&
-        entry.kind === "iteration" &&
-        (existing.pending === entry.pending ||
-          sameBridgeDraft(existing.pending, entry.pending))) ||
-      (draftId !== undefined && deferredParkDraftId(existing) === draftId),
-  )
-  if (at === -1) return [...queue, entry]
-  const next = queue.slice()
-  next[at] = entry
-  return next
-}
 
 /**
  * Is this verify's answer stale, i.e. did a newer intercept start while it was

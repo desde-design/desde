@@ -116,17 +116,18 @@ import {
   bridgeDraftIdOf,
   decideAfterVerify,
   DEFERRED_PARK_STATUS,
+  dequeueModal,
   describeRowScopedEdit,
+  dropModalRequestsForDraft,
+  enqueueModal,
   errorMessage,
   handOffFailureStatus,
   hasUndispatchedWork,
   isStaleVerify,
   iterationRouteFor,
-  parkDecision,
   parkedReason,
   promptCollision,
   PROMPT_BUSY_STATUS,
-  queueDeferredPark,
   iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
@@ -136,7 +137,8 @@ import {
   thisRowOperationAllowed,
   thisRowTemplateLocation,
   verifyKeyFor,
-  type DeferredPark,
+  type ModalKind,
+  type ModalRequest,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
 import { verifyIterationLoop } from "./iteration-verify"
@@ -1754,17 +1756,28 @@ export function useEditorEditing({
   const iterationScopePromptRef = useRef<PendingIterationEdit | null>(null)
   iterationScopePromptRef.current = iterationScopePrompt
   /**
-   * Parks the iteration lane owes but is holding back while a scope prompt is
-   * open.
+   * Which dialog is on screen, if either. THE modal owner.
    *
-   * Parking puts an edit into `pendingDisambiguations`, and that queue opens
-   * the mutation dialog on its own the moment it is non-empty. Doing it while
-   * the scope dialog is up therefore stacks a second modal over the question
-   * the designer is being asked to answer, and it is the newcomer's dialog
-   * that lands on top. The parks wait here instead and run when the scope
-   * prompt closes, by either of its two exits.
+   * The Editor raises two dialogs about edits — the scope prompt and the
+   * deterministic mutation dialog — from four independent places, and until
+   * round 10 they could stack in either order: the mutation dialog opens itself
+   * the moment `pendingDisambiguations` is non-empty, and the scope prompt
+   * opens itself the moment `iterationScopePrompt` is set, and neither state
+   * knew about the other. Every raise now goes through {@link requestModal},
+   * which reads this, and every close through {@link releaseModal}, which
+   * clears it and opens whatever is next.
    */
-  const deferredParksRef = useRef<DeferredPark[]>([])
+  const modalOwnerRef = useRef<ModalKind | null>(null)
+  /**
+   * The dialogs owed to the designer while one is already open, oldest first.
+   *
+   * This is the round-9 deferred-park queue, widened: a park was only ever one
+   * of the two things that can be owed, and holding only parks meant the OTHER
+   * dialog had nowhere to wait and opened on top instead. A queued request is
+   * unsaved work with nothing on screen to mention it, so `hasUndispatchedWork`
+   * and the Save gate both count it.
+   */
+  const modalQueueRef = useRef<ModalRequest[]>([])
   /**
    * How to wind the scope prompt and the deferred-park queue down, for the
    * adapter effect's cleanup to call.
@@ -2215,6 +2228,12 @@ export function useEditorEditing({
     adapterRef.current?.resolveMutationDisambiguation(draftId, "cancel")
     bridgeDraftsByPendingIdRef.current.delete(draftId)
     latestPendingByDraftRef.current.delete(draftId)
+    // A dialog still waiting to ask about this draft has nothing left to ask
+    // about: the bridge has been told to drop it, so answering the question
+    // would resolve an id the bridge no longer knows. The round-9 flush made
+    // the same check by looking the payload up again at park time; the queue
+    // holds the payload itself now, so the release is what has to say so.
+    modalQueueRef.current = dropModalRequestsForDraft(modalQueueRef.current, draftId)
   }, [])
 
   /**
@@ -2239,191 +2258,191 @@ export function useEditorEditing({
   )
 
   /**
-   * Put a bridge draft we are holding into the deterministic disambiguation
-   * queue, and say why in the status bar.
+   * Show the deterministic disambiguation dialog for a bridge draft, and say
+   * why in the status bar when there is a why.
    *
-   * The one write into `pendingDisambiguations` that a park makes, and the
-   * only place in the hook that pushes to that queue outside the bridge's own
-   * delivery route. Nothing calls it from a failure exit: the exits go through
-   * {@link parkOrDefer} or {@link parkHeldOrDefer}, which decide whether a park
-   * may happen at all right now. Its callers are those two, the immediate park
-   * they share ({@link parkDraftForDeterministicFallback}), and the flush.
+   * The ONE write into `pendingDisambiguations` in the whole hook. Nothing
+   * calls it directly: the bridge's delivery route and every failure exit go
+   * through {@link requestModal}, which decides whether any dialog may open
+   * right now, and this runs from {@link openModal} once that decision says so.
    *
-   * The queue owns the draft from here: the dialog's confirm and its cancel
-   * both resolve it with the bridge, so nothing else may park or release it.
-   * Both maps are cleared for that reason.
+   * The dialog owns the draft from here: its confirm and its cancel both
+   * resolve it with the bridge, so nothing else may park or release it. Both
+   * maps are cleared for that reason.
+   *
+   * `reason` is absent for the bridge's ordinary route, which is not a park:
+   * nothing failed, so there is nothing to explain and the status bar is left
+   * as it was.
    */
-  const parkHeldBridgeDraft = useCallback((held: PendingMutation, reason: string) => {
-    bridgeDraftsByPendingIdRef.current.delete(held.pendingId)
-    latestPendingByDraftRef.current.delete(held.pendingId)
-    setPendingDisambiguations((prev) =>
-      prev.some((existing) => existing.pendingId === held.pendingId) ? prev : [...prev, held],
-    )
-    setSaveStatus(reason)
-  }, [])
+  const openDisambiguationDialog = useCallback(
+    (held: PendingMutation, reason?: string) => {
+      bridgeDraftsByPendingIdRef.current.delete(held.pendingId)
+      latestPendingByDraftRef.current.delete(held.pendingId)
+      setPendingDisambiguations((prev) =>
+        prev.some((existing) => existing.pendingId === held.pendingId) ? prev : [...prev, held],
+      )
+      if (reason !== undefined) setSaveStatus(reason)
+    },
+    [],
+  )
 
   /**
-   * The iteration lane could not land this edit. Hand the bridge's held draft
-   * to the deterministic disambiguation dialog instead of cancelling it.
+   * Put one of the two dialogs on screen and record that it owns the modal.
+   *
+   * The only place either dialog's open state is written outside a keystroke
+   * replacing the question it is already asking. Both halves of the ownership
+   * (the state the dialog renders from, and the owner marker the next raise
+   * reads) are set together here, so they cannot come apart.
+   */
+  const openModal = useCallback(
+    (request: ModalRequest) => {
+      if (request.kind === "scope") {
+        modalOwnerRef.current = "scope"
+        // The ref before the state, and both here: a second completion in the
+        // same tick reads the ref, and React has not re-rendered yet.
+        iterationScopePromptRef.current = request.pending
+        setIterationScopePrompt(request.pending)
+        return
+      }
+      modalOwnerRef.current = "disambiguation"
+      openDisambiguationDialog(request.mutation, request.reason)
+    },
+    [openDisambiguationDialog],
+  )
+
+  /**
+   * Ask for a dialog. THE way either one is raised.
+   *
+   * Returns true when it opened now, false when it is waiting behind the dialog
+   * already on screen. A false answer is not a failure: the request is held
+   * with its payload and opens when the current question is answered. The
+   * caller's only job then is to say so in the status bar, because a queued
+   * request has no dialog of its own to be seen in yet.
+   */
+  const requestModal = useCallback(
+    (request: ModalRequest): boolean => {
+      const decision = enqueueModal(modalQueueRef.current, request, modalOwnerRef.current)
+      if ("open" in decision) {
+        openModal(decision.open)
+        return true
+      }
+      modalQueueRef.current = decision.deferred
+      return false
+    },
+    [openModal],
+  )
+
+  /**
+   * The open dialog has closed. Give the modal up and ask the next question.
+   *
+   * Every close calls this: the scope prompt's single close path, and the
+   * mutation dialog's confirm and cancel once the last row leaves it. A close
+   * that forgot it would strand every waiting request with no dialog anywhere
+   * that mentions them, which is what the round-9 flush existed to prevent for
+   * parks alone.
+   */
+  const releaseModal = useCallback(() => {
+    modalOwnerRef.current = null
+    const { next, queue } = dequeueModal(modalQueueRef.current)
+    modalQueueRef.current = queue
+    if (next) openModal(next)
+  }, [openModal])
+
+  /**
+   * The shell is refusing a draft the bridge is holding. Ask the deterministic
+   * question about it instead of cancelling it, now or when the modal frees up.
    *
    * Cancelling loses the designer's typed text with nothing written anywhere:
    * the in-page contentEditable path has no preview ops to revert, so the DOM
    * keeps showing a change that reached no file, and the only remaining record
-   * of what they typed is gone. The dialog this parks it in is the honest
-   * choice that existed before the iteration lane: "this instance" or "all
-   * instances", answerable and already wired to the same draft.
+   * of what they typed is gone. The dialog this asks in is the honest choice
+   * that existed before the iteration lane: "this instance" or "all instances",
+   * answerable and already wired to the same draft.
    *
-   * Returns false when there is nothing to park (no draft, or the bridge's
-   * payload was never recorded), so the caller can fall back to releasing.
-   *
-   * IMMEDIATE, and its only caller is {@link flushDeferredParks}. Everything
-   * else goes through {@link parkOrDefer}, which asks whether a scope prompt is
-   * open first. Calling this one directly from a failure exit is the defect
-   * `parkDecision` exists to make impossible: it stacks the deterministic
-   * dialog on top of the question the designer is answering.
+   * The caller HAS the payload here. {@link parkOrDefer} is the same park for a
+   * caller that has an iteration edit and must look the payload up.
    */
-  const parkDraftForDeterministicFallback = useCallback(
+  const parkHeldOrDefer = useCallback(
+    (held: PendingMutation, reason: string) => {
+      if (!requestModal({ kind: "disambiguation", mutation: held, reason })) {
+        // Waiting behind the open dialog. Say so, because nothing else will:
+        // the question about this edit is not on screen yet.
+        setSaveStatus(DEFERRED_PARK_STATUS)
+      }
+    },
+    [requestModal],
+  )
+
+  /**
+   * THE park choke point for the iteration lane.
+   *
+   * Every failure exit in the lane calls this, because the decision is the same
+   * one at all of them and the exits are added one at a time. Three of them (a
+   * failed loop check, a refused hand-off, a failed row write) opened the
+   * dialog immediately until round 9, so a second edit made while a prompt was
+   * open stacked the deterministic dialog over that prompt.
+   *
+   * Returns true when this call has taken ownership of the draft, by either
+   * route, so the caller must not release it. False means there was nothing
+   * held to park and the caller should say why itself: queueing a park with no
+   * payload would promise a question that can never be asked.
+   */
+  const parkOrDefer = useCallback(
     (pending: PendingIterationEdit, reason: string): boolean => {
       const draftId = bridgeDraftIdOf(pending)
       if (!draftId) return false
       const held = bridgeDraftsByPendingIdRef.current.get(draftId)
       if (!held) return false
-      parkHeldBridgeDraft(held, reason)
+      parkHeldOrDefer(held, reason)
       return true
     },
-    [parkHeldBridgeDraft],
+    [parkHeldOrDefer],
   )
 
   /**
-   * THE park choke point for the iteration lane. Park the bridge's held draft
-   * now, or queue it behind the scope prompt that is currently open.
+   * Give every waiting request's draft back to the bridge, and forget them.
    *
-   * Every failure exit in the lane calls this and nothing calls
-   * {@link parkDraftForDeterministicFallback} directly, because the decision is
-   * the same one at all of them and the exits are added one at a time. Three of
-   * them (a failed loop check, a refused hand-off, a failed row write) parked
-   * immediately until round 9, so a second edit made while a prompt was open
-   * stacked the deterministic dialog over that prompt.
+   * The adapter is going away, so no answer to any of these questions could
+   * reach it. Holding the drafts would leave the bridge blocked on questions
+   * nobody can ever answer. Returns how many drafts were handed back, so the
+   * caller can say how much was discarded.
    *
-   * Returns true when this call has taken ownership of the draft, by either
-   * route, so the caller must not release it. False means there was nothing
-   * held to park and the caller should say why itself.
+   * Both maps are cleared per draft, not only the bridge told: a map entry that
+   * outlives its draft is a payload a later park would find and re-park.
    */
-  const parkOrDefer = useCallback(
-    (pending: PendingIterationEdit, reason: string): boolean => {
-      const draftId = bridgeDraftIdOf(pending)
-      // Deferring an edit with no held draft would queue a park that can never
-      // happen, and the flush would report it with the wrong sentence. The
-      // caller's own message is the right one, so hand it back.
-      if (!draftId || !bridgeDraftsByPendingIdRef.current.has(draftId)) return false
-      if (parkDecision(iterationScopePromptRef.current !== null) === "park-now") {
-        return parkDraftForDeterministicFallback(pending, reason)
-      }
-      deferredParksRef.current = queueDeferredPark(deferredParksRef.current, {
-        kind: "iteration",
-        pending,
-        reason,
-      })
-      setSaveStatus(DEFERRED_PARK_STATUS)
-      return true
-    },
-    [parkDraftForDeterministicFallback],
-  )
-
-  /**
-   * {@link parkOrDefer} for a draft the bridge is offering right now, which the
-   * shell is refusing before anything has recorded it.
-   *
-   * Same decision, different input: this caller HAS the payload and there is
-   * nothing to look up. It is here rather than calling `parkHeldBridgeDraft`
-   * directly because the modal-stacking the decision prevents does not care
-   * which of the two produced the park.
-   */
-  const parkHeldOrDefer = useCallback(
-    (held: PendingMutation, reason: string) => {
-      if (parkDecision(iterationScopePromptRef.current !== null) === "park-now") {
-        parkHeldBridgeDraft(held, reason)
-        return
-      }
-      deferredParksRef.current = queueDeferredPark(deferredParksRef.current, {
-        kind: "held",
-        held,
-        reason,
-      })
-      setSaveStatus(DEFERRED_PARK_STATUS)
-    },
-    [parkHeldBridgeDraft],
-  )
-
-  /**
-   * Perform the parks that were held back while the scope prompt was open.
-   *
-   * Called from the prompt's single close path ({@link closeIterationPrompt})
-   * and from adapter teardown. The queue is emptied BEFORE any park runs, so a
-   * park that itself sets state cannot see a queue it is still in. A draft that
-   * has since gone (the bridge no longer holds it) falls back to the same
-   * release the immediate path used.
-   *
-   * These parks are IMMEDIATE by construction: the flush runs only once the
-   * prompt is closed or is being torn down, and routing them back through
-   * `parkOrDefer` would let a queue re-defer into itself.
-   */
-  const flushDeferredParks = useCallback(() => {
-    const queued = deferredParksRef.current
-    if (queued.length === 0) return
-    deferredParksRef.current = []
-    for (const entry of queued) {
-      if (entry.kind === "held") {
-        parkHeldBridgeDraft(entry.held, entry.reason)
-        continue
-      }
-      if (parkDraftForDeterministicFallback(entry.pending, entry.reason)) continue
-      releaseBridgeDraft(entry.pending)
-      setSaveStatus(PROMPT_BUSY_STATUS)
+  const releaseQueuedModalRequests = useCallback((): number => {
+    const queued = modalQueueRef.current
+    modalQueueRef.current = []
+    for (const request of queued) {
+      const draftId =
+        request.kind === "disambiguation"
+          ? request.mutation.pendingId
+          : bridgeDraftIdOf(request.pending)
+      if (!draftId) continue
+      adapterRef.current?.resolveMutationDisambiguation(draftId, "cancel")
+      bridgeDraftsByPendingIdRef.current.delete(draftId)
+      latestPendingByDraftRef.current.delete(draftId)
     }
-  }, [parkDraftForDeterministicFallback, parkHeldBridgeDraft, releaseBridgeDraft])
+    return queued.length
+  }, [])
 
   /**
-   * Give every queued park's draft back to the bridge without parking it.
+   * Close the scope prompt, by whatever path, and ask the next question.
    *
-   * The unmount case, and only that. There is no dialog left to park into, so
-   * holding the drafts would leave the bridge blocked on prompts nobody can
-   * ever answer. Nothing is lost that was not already going with the page.
-   */
-  const releaseDeferredParks = useCallback(() => {
-    const queued = deferredParksRef.current
-    if (queued.length === 0) return
-    deferredParksRef.current = []
-    for (const entry of queued) {
-      if (entry.kind === "held") {
-        // No `releaseBridgeDraft` for this variant: it takes an iteration edit,
-        // and a held park never became one. The bridge call is the same.
-        adapterRef.current?.resolveMutationDisambiguation(entry.held.pendingId, "cancel")
-        continue
-      }
-      releaseBridgeDraft(entry.pending)
-    }
-  }, [releaseBridgeDraft])
-
-  /**
-   * Close the scope prompt, by whatever path, and run the parks that were
-   * waiting on it.
+   * The ONE close for this dialog. Every exit goes through here so that "the
+   * prompt closed" and "the modal was given up" cannot come apart: a request is
+   * queued precisely because something is open, so a close that forgets to
+   * release strands an edit the bridge is still holding, with no dialog
+   * anywhere that mentions it.
    *
-   * The ONE close. Every exit goes through here so that "the prompt closed" and
-   * "the queue behind it ran" cannot come apart: a park is queued precisely
-   * because a prompt is open, so a close that forgets to flush strands an edit
-   * the bridge is still holding, with no dialog anywhere that mentions it.
-   *
-   * The ref is cleared HERE rather than at the next render. The flush asks
-   * `parkOrDefer`'s decision whether a prompt is open, and React has not
-   * re-rendered yet at this point, so a ref left pointing at the prompt we just
-   * closed would defer the very parks this call exists to release.
+   * The ref is cleared HERE rather than at the next render, because React has
+   * not re-rendered at this point and the late completions read the ref.
    */
   const closeIterationPrompt = useCallback(() => {
     iterationScopePromptRef.current = null
     setIterationScopePrompt(null)
-    flushDeferredParks()
-  }, [flushDeferredParks])
+    releaseModal()
+  }, [releaseModal])
 
   /**
    * The terminal step for an iteration edit that will NOT be applied: park the
@@ -2735,10 +2754,10 @@ export function useEditorEditing({
         iterationScopeMemoryRef.current[pending.editKind] = scope
       }
       // The question is answered, so anything waiting behind it can ask its
-      // own now. Closing and flushing are one call for that reason. It runs
-      // BEFORE the dispatch so that a failure inside the dispatch parks
-      // immediately rather than deferring behind a prompt that is already
-      // closed.
+      // own now. Closing and releasing the modal are one call for that reason.
+      // It runs BEFORE the dispatch so that a failure inside the dispatch asks
+      // its own question immediately rather than queueing behind a prompt that
+      // is already closed.
       closeIterationPrompt()
       void dispatchIterationEdit(pending, scope)
     },
@@ -2775,9 +2794,10 @@ export function useEditorEditing({
       releaseBridgeDraft(iterationScopePromptRef.current)
       iterationScopePromptRef.current = null
       setIterationScopePrompt(null)
-      releaseDeferredParks()
+      modalOwnerRef.current = null
+      releaseQueuedModalRequests()
     },
-    [cancelIterationScope, releaseBridgeDraft, releaseDeferredParks],
+    [cancelIterationScope, releaseBridgeDraft, releaseQueuedModalRequests],
   )
   // Assigned during render, like the other always-latest mirrors in this hook,
   // so the adapter effect's cleanup always calls the current one.
@@ -2937,8 +2957,22 @@ export function useEditorEditing({
           // has to see the first one's prompt.
           const collision = promptCollision(iterationScopePromptRef.current, verified)
           if (collision === "open-incoming") {
-            iterationScopePromptRef.current = verified
-            setIterationScopePrompt(verified)
+            if (modalOwnerRef.current === "scope") {
+              // The scope dialog is open AND `promptCollision` said to open the
+              // incoming one, so by construction it is the same in-page typing
+              // session with newer text. Replace the question in place: it is
+              // the same question, and going through `requestModal` would queue
+              // an edit behind its own dialog.
+              iterationScopePromptRef.current = verified
+              setIterationScopePrompt(verified)
+              return
+            }
+            // Nothing open, or the MUTATION dialog is. That second case is the
+            // round-10 defect: this arm used to open the scope prompt on top of
+            // it, because it only ever asked about another scope prompt.
+            if (!requestModal({ kind: "scope", pending: verified })) {
+              setSaveStatus(DEFERRED_PARK_STATUS)
+            }
             return
           }
           if (collision === "keep-open-park-incoming") {
@@ -2946,13 +2980,13 @@ export function useEditorEditing({
             // disambiguation dialog, which asks a blunter question than this
             // one but is answerable and holds the same draft.
             //
-            // DEFERRED, not parked now. Parking fills `pendingDisambiguations`,
-            // which opens that dialog on its own, and it would open on top of
-            // the scope dialog the designer is being asked to answer. This arm
-            // is only ever reached with that prompt open, so `parkOrDefer`
-            // always defers here; `flushDeferredParks` runs it when the prompt
-            // closes. It goes through the choke point rather than queueing
-            // directly so this arm and the failure exits cannot drift apart.
+            // DEFERRED, not asked now. Opening the mutation dialog fills
+            // `pendingDisambiguations`, and it would land on top of the scope
+            // dialog the designer is being asked to answer. This arm is only
+            // ever reached with that prompt open, so `parkOrDefer` always
+            // queues here; `releaseModal` opens it when the prompt closes. It
+            // goes through the choke point rather than queueing directly so
+            // this arm and the failure exits cannot drift apart.
             if (
               !parkOrDefer(
                 verified,
@@ -2996,6 +3030,7 @@ export function useEditorEditing({
     [
       dispatchIterationEdit,
       parkOrDefer,
+      requestModal,
       releaseBridgeDraft,
       releaseBridgeDraftUnlessShared,
       releaseOrPark,
@@ -3079,11 +3114,16 @@ export function useEditorEditing({
       const prompt = pendingDisambiguations[0]
       if (!prompt) return
       adapterRef.current?.resolveMutationDisambiguation(prompt.pendingId, choice)
-      setPendingDisambiguations((prev) =>
-        prev.filter((p) => p.pendingId !== prompt.pendingId),
+      const remaining = pendingDisambiguations.filter(
+        (p) => p.pendingId !== prompt.pendingId,
       )
+      setPendingDisambiguations(remaining)
+      // A close, so the modal goes back to whatever is waiting. Only once the
+      // last row leaves: the dialog is still on screen while another row is
+      // behind this one, and it stays the owner until it isn't.
+      if (remaining.length === 0) releaseModal()
     },
-    [pendingDisambiguations],
+    [pendingDisambiguations, releaseModal],
   )
   /** Designer discarded `disambiguationPrompt` — no edit is written. */
   const cancelDisambiguation = useCallback(() => {
@@ -3097,10 +3137,13 @@ export function useEditorEditing({
     // stays the shim's: the live run left the swatch on the discarded
     // `bg-amber-500` while the badge had reverted to `rgb(249,250,251)`.
     useEditorStore.getState().notePreviewSettled()
-    setPendingDisambiguations((prev) =>
-      prev.filter((p) => p.pendingId !== prompt.pendingId),
+    const remaining = pendingDisambiguations.filter(
+      (p) => p.pendingId !== prompt.pendingId,
     )
-  }, [pendingDisambiguations])
+    setPendingDisambiguations(remaining)
+    // Same close rule as the confirm above.
+    if (remaining.length === 0) releaseModal()
+  }, [pendingDisambiguations, releaseModal])
   // Ref mirror of `pendingDisambiguations.length`, kept in sync on every
   // render (assignment, not an effect — always current by the time any
   // event handler reads it). Lets the `beforeunload` guard below register
@@ -3177,8 +3220,8 @@ export function useEditorEditing({
   // (`queuedForAiRef` — only flushed by `handleSaveAll`'s LLM dispatch, not
   // by any autosave), unresolved v-for disambiguations
   // (`pendingDisambiguations` — the designer hasn't picked a target yet, so
-  // nothing has been written), and parks deferred behind an open scope prompt
-  // (`deferredParksRef` — the bridge is holding those drafts and no dialog
+  // nothing has been written), and dialogs waiting behind the open one
+  // (`modalQueueRef` — the bridge is holding those drafts and no dialog
   // mentions them yet, which makes them the easiest of the three to lose).
   // The rule itself is `hasUndispatchedWork`, a pure function, so it can be
   // read and tested without a listener. Registers once at mount and reads the
@@ -3191,7 +3234,7 @@ export function useEditorEditing({
       const undispatched = hasUndispatchedWork({
         aiQueue: queuedForAiRef.current.size,
         parked: pendingDisambiguationsCountRef.current,
-        deferred: deferredParksRef.current.length,
+        deferred: modalQueueRef.current.length,
       })
       if (!undispatched) return
       event.preventDefault()
@@ -4453,11 +4496,17 @@ export function useEditorEditing({
         return
       }
 
-      setPendingDisambiguations((prev) =>
-        prev.some((existing) => existing.pendingId === p.pendingId)
-          ? prev
-          : [...prev, p],
-      )
+      // The bridge's ordinary route, and it goes through the SAME owner as
+      // every other raise. It used to push straight into
+      // `pendingDisambiguations`, which opens the dialog on its own the moment
+      // it is non-empty: with a scope prompt already up, this landed on top of
+      // the question the designer was answering. Nothing about this route is a
+      // failure, so it carries no reason and leaves the status bar alone.
+      if (!requestModal({ kind: "disambiguation", mutation: p })) {
+        // Waiting. Say so, because the edit is held with nothing on screen
+        // about it until the open question is answered.
+        setSaveStatus(DEFERRED_PARK_STATUS)
+      }
     })
     // The bridge refused to map this edit to a source position (isolation view,
     // or the only nearby `data-desde-src` is on an ancestor and the kind isn't
@@ -4597,6 +4646,7 @@ export function useEditorEditing({
     handleInsertAtPoint,
     handleResize,
     parkHeldOrDefer,
+    requestModal,
   ])
 
   /**
@@ -4637,6 +4687,14 @@ export function useEditorEditing({
     setConflict(null)
     setMutations([])
     setPendingDisambiguations([])
+    // The modal goes with the rows. Emptying `pendingDisambiguations` closes
+    // the dialog, so leaving the owner set would wedge every later question
+    // behind a dialog that is no longer on screen. The waiting drafts die with
+    // the reload this triggers, which is what the designer asked for.
+    modalOwnerRef.current = null
+    modalQueueRef.current = []
+    iterationScopePromptRef.current = null
+    setIterationScopePrompt(null)
     fileHashesRef.current = {}
     setSaveStatus(null)
     adapterRef.current?.clearPropOverrides()

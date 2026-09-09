@@ -19,8 +19,10 @@ import {
   promptCollision,
   PROMPT_BUSY_STATUS,
   hasUndispatchedWork,
-  parkDecision,
-  queueDeferredPark,
+  dequeueModal,
+  dropModalRequestsForDraft,
+  enqueueModal,
+  modalRequestDraftId,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
   settleHandOff,
@@ -28,6 +30,8 @@ import {
   thisRowOperationAllowed,
   thisRowTemplateLocation,
   verifyKeyFor,
+  type ModalDecision,
+  type ModalRequest,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
 
@@ -244,7 +248,7 @@ describe("promptCollision", () => {
   })
 })
 
-describe("queueDeferredPark", () => {
+describe("the modal queue: enqueueModal / dequeueModal / dropModalRequestsForDraft", () => {
   function domText(bridgePendingId: string, value = "Hello"): PendingIterationEdit {
     return {
       editKind: "dom-text",
@@ -255,17 +259,68 @@ describe("queueDeferredPark", () => {
       bridgePendingId,
     }
   }
+  const scope = (id: string, value = "Hello") => ({
+    kind: "scope" as const,
+    pending: domText(id, value),
+  })
+  const disambiguation = (id: string, reason?: string): ModalRequest => ({
+    kind: "disambiguation",
+    mutation: { pendingId: id } as never,
+    ...(reason === undefined ? {} : { reason }),
+  })
+  /** The queue half of a decision, or a failure if it opened instead. */
+  function deferredOf(decision: ModalDecision): ModalRequest[] {
+    if ("open" in decision) throw new Error("expected the request to be deferred")
+    return decision.deferred
+  }
 
-  it("appends a park for a draft the queue does not hold yet", () => {
-    const first = { kind: "iteration" as const, pending: domText("p-1"), reason: "one" }
-    const second = { kind: "iteration" as const, pending: domText("p-2"), reason: "two" }
-    const queue = queueDeferredPark(queueDeferredPark([], first), second)
-    expect(queue).toEqual([first, second])
+  it("opens the request when nothing owns the modal and nothing is waiting", () => {
+    const request = scope("p-1")
+    expect(enqueueModal([], request, null)).toEqual({ open: request })
+  })
+
+  it.each([
+    ["the scope dialog", "scope" as const],
+    ["the disambiguation dialog", "disambiguation" as const],
+  ])("opens nothing while %s owns the modal", (_label, owner) => {
+    // The round-10 defect, both directions. The exclusion used to be one-way:
+    // a park asked whether a scope prompt was open, and a verify asked whether
+    // another scope prompt was open, so neither saw the mutation dialog.
+    const request = scope("p-1")
+    expect(enqueueModal([], request, owner)).toEqual({ deferred: [request] })
+    const park = disambiguation("p-2", "parked")
+    expect(enqueueModal([], park, owner)).toEqual({ deferred: [park] })
+  })
+
+  it("opens nothing while requests are still waiting, even with no owner", () => {
+    const waiting = scope("p-1")
+    const request = disambiguation("p-2")
+    expect(enqueueModal([waiting], request, null)).toEqual({
+      deferred: [waiting, request],
+    })
+  })
+
+  it("queues FIFO and dequeues in the same order", () => {
+    const first = scope("p-1")
+    const second = disambiguation("p-2")
+    const third = scope("p-3")
+    let queue: ModalRequest[] = []
+    for (const request of [first, second, third]) {
+      queue = deferredOf(enqueueModal(queue, request, "scope"))
+    }
+    expect(queue).toEqual([first, second, third])
+    const afterFirst = dequeueModal(queue)
+    expect(afterFirst.next).toBe(first)
+    const afterSecond = dequeueModal(afterFirst.queue)
+    expect(afterSecond.next).toBe(second)
+    const afterThird = dequeueModal(afterSecond.queue)
+    expect(afterThird.next).toBe(third)
+    expect(dequeueModal(afterThird.queue)).toEqual({ next: null, queue: [] })
   })
 
   it("does not mutate the queue it is given", () => {
-    const queue: ReturnType<typeof queueDeferredPark> = []
-    queueDeferredPark(queue, { kind: "iteration" as const, pending: domText("p-1"), reason: "one" })
+    const queue: ModalRequest[] = []
+    enqueueModal(queue, scope("p-1"), "scope")
     expect(queue).toEqual([])
   })
 
@@ -274,49 +329,61 @@ describe("queueDeferredPark", () => {
     // trip rebuilds the pending object and re-collides. The queue must end up
     // with the LATEST text once, not the first keystroke plus a stack of
     // duplicates.
-    const other = { kind: "iteration" as const, pending: domText("p-2"), reason: "other" }
-    const early = { kind: "iteration" as const, pending: domText("p-1", "Hell"), reason: "early" }
-    const late = { kind: "iteration" as const, pending: domText("p-1", "Hello"), reason: "late" }
-    const queue = queueDeferredPark(queueDeferredPark(queueDeferredPark([], early), other), late)
+    const other = scope("p-2")
+    const early = scope("p-1", "Hell")
+    const late = scope("p-1", "Hello")
+    let queue: ModalRequest[] = []
+    for (const request of [early, other, late]) {
+      queue = deferredOf(enqueueModal(queue, request, "disambiguation"))
+    }
     expect(queue).toHaveLength(2)
     expect(queue[0]).toBe(late)
     expect(queue[1]).toBe(other)
   })
 
-  it("replaces an entry re-queued as the very same object", () => {
-    const entry = { kind: "iteration" as const, pending: domText("p-1"), reason: "one" }
-    expect(
-      queueDeferredPark([entry], {
-        kind: "iteration" as const,
-        pending: entry.pending,
-        reason: "again",
-      }),
-    ).toEqual([{ kind: "iteration" as const, pending: entry.pending, reason: "again" }])
+  it("replaces a request re-queued as the very same object", () => {
+    const request = scope("p-1")
+    const again: ModalRequest = { kind: "scope", pending: request.pending }
+    expect(enqueueModal([request], again, "scope")).toEqual({ deferred: [again] })
   })
 
-  it("holds one entry per draft even when the two variants name the same one", () => {
+  it("holds one entry per draft even when the two kinds name the same one", () => {
     // The bridge's `pendingId` IS the iteration edit's `bridgePendingId`. A
-    // refusal at delivery time and a failure inside the lane are then one park
-    // of one draft, and parking it twice would put the same edit in the
-    // deterministic queue twice.
-    const fromLane = {
-      kind: "iteration" as const,
-      pending: domText("p-1"),
-      reason: "lane",
-    }
-    const fromBridge = {
-      kind: "held" as const,
-      held: { pendingId: "p-1" } as never,
-      reason: "bridge",
-    }
-    expect(queueDeferredPark([fromLane], fromBridge)).toEqual([fromBridge])
-    expect(queueDeferredPark([fromBridge], fromLane)).toEqual([fromLane])
+    // scope question still waiting when its lane gives up is one edit, and
+    // keeping both would ask about one draft in two dialogs.
+    const question = scope("p-1")
+    const park = disambiguation("p-1", "parked")
+    expect(enqueueModal([question], park, "scope")).toEqual({ deferred: [park] })
+    expect(enqueueModal([park], question, "scope")).toEqual({ deferred: [question] })
   })
 
-  it("keeps held parks for different drafts apart", () => {
-    const first = { kind: "held" as const, held: { pendingId: "p-1" } as never, reason: "a" }
-    const second = { kind: "held" as const, held: { pendingId: "p-2" } as never, reason: "b" }
-    expect(queueDeferredPark([first], second)).toEqual([first, second])
+  it("keeps requests for different drafts apart", () => {
+    const first = disambiguation("p-1", "a")
+    const second = disambiguation("p-2", "b")
+    expect(enqueueModal([first], second, "scope")).toEqual({
+      deferred: [first, second],
+    })
+  })
+
+  it("reads the draft id out of either kind", () => {
+    expect(modalRequestDraftId(scope("p-1"))).toBe("p-1")
+    expect(modalRequestDraftId(disambiguation("p-1"))).toBe("p-1")
+    // A structural edit holds no bridge draft, so it names none.
+    expect(
+      modalRequestDraftId({
+        kind: "scope",
+        pending: { editKind: "delete", selection: {} as never, node, iterationContext },
+      }),
+    ).toBeUndefined()
+  })
+
+  it("drops every waiting request about a draft that has gone back to the bridge", () => {
+    const gone = scope("p-1")
+    const kept = disambiguation("p-2", "kept")
+    expect(dropModalRequestsForDraft([gone, kept], "p-1")).toEqual([kept])
+    // Nothing to match on: an edit with no draft cannot be identified this way,
+    // so the queue is returned whole rather than emptied.
+    expect(dropModalRequestsForDraft([gone, kept], undefined)).toEqual([gone, kept])
   })
 })
 
@@ -343,20 +410,6 @@ describe("hasUndispatchedWork", () => {
    */
   it("counts a deferred park even when nothing else is outstanding", () => {
     expect(hasUndispatchedWork({ aiQueue: 0, parked: 0, deferred: 2 })).toBe(true)
-  })
-})
-
-describe("parkDecision", () => {
-  /**
-   * The whole of the round-9 defect in one line. Three failure exits parked
-   * immediately and only the collision arm deferred, so a second edit made
-   * while a scope prompt was open opened the deterministic dialog on top of
-   * it. Every park in the hook now asks this, so there is one answer to get
-   * right rather than one per exit.
-   */
-  it("defers a park while a prompt is open, and parks when none is", () => {
-    expect(parkDecision(true)).toBe("defer")
-    expect(parkDecision(false)).toBe("park-now")
   })
 })
 
