@@ -12,6 +12,7 @@ import {
   iterationTemplateLocation,
   sameBridgeDraft,
   thisRowTemplateLocation,
+  verifyKeyFor,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
 
@@ -184,6 +185,64 @@ describe("isStaleVerify", () => {
     // A (seq 1) and B (seq 2) are both in flight; B is the latest. A's answer,
     // whenever it lands, may not touch the prompt or B's draft.
     expect(isStaleVerify(1, 2)).toBe(true)
+  })
+})
+
+describe("verifyKeyFor", () => {
+  function domTextAt(selector: string, bridgePendingId?: string): PendingIterationEdit {
+    return {
+      editKind: "dom-text",
+      selection: { selector, editTarget: { file: "src/App.vue", line: 3, column: 2 } } as never,
+      field: { id: "f" } as never,
+      value: "Hello",
+      iterationContext,
+      ...(bridgePendingId ? { bridgePendingId } : {}),
+    }
+  }
+
+  it("is the bridge draft id when the edit holds one", () => {
+    // The run of verifies that genuinely supersede each other: one in-page
+    // typing session, rebuilt on every keystroke, keeping the same draft id.
+    expect(verifyKeyFor(domTextAt("p", "p-1"))).toBe("p-1")
+    expect(verifyKeyFor(domTextAt("p.other", "p-1"))).toBe("p-1")
+  })
+
+  it("falls back to the element's selector when there is no draft", () => {
+    expect(verifyKeyFor(domTextAt("main > p"))).toBe("main > p")
+  })
+
+  it("reads the OUTLINE node's selector for a delete, not the selection's", () => {
+    // Same rule `describeAmbiguousIteration` follows: a Layers delete carries
+    // whatever the iframe had selected, which is routinely another element.
+    const del: PendingIterationEdit = {
+      editKind: "delete",
+      selection: { selector: "body > header > button.icon" } as never,
+      node,
+      iterationContext,
+    }
+    expect(verifyKeyFor(del)).toBe(node.selector)
+  })
+
+  it("separates two different elements, which is the whole point", () => {
+    // Under one global counter, editing B made A's answer stale, and a stale
+    // answer releases its own bridge draft and reports "A newer edit replaced
+    // this one." Nothing had replaced it.
+    expect(verifyKeyFor(domTextAt("main > h1"))).not.toBe(
+      verifyKeyFor(domTextAt("main > p")),
+    )
+  })
+
+  it("keys a move on the SOURCE node's selector", () => {
+    const move: PendingIterationEdit = {
+      editKind: "move",
+      payload: {
+        source: { ...node, selector: "main > li:nth-child(2)" },
+        destParent: node,
+        destIndex: 0,
+      } as never,
+      iterationContext,
+    }
+    expect(verifyKeyFor(move)).toBe("main > li:nth-child(2)")
   })
 })
 

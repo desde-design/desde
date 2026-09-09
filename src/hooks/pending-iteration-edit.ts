@@ -236,6 +236,26 @@ export function bridgeDraftIdOf(pending: PendingIterationEdit): string | undefin
 }
 
 /**
+ * The TARGET a verify belongs to. Staleness is decided within one of these,
+ * never across them.
+ *
+ * The sequence used to be one counter for the whole hook, so any second edit
+ * made the first one's answer "stale" — and a stale answer releases its own
+ * bridge draft and says "A newer edit replaced this one." Nothing had replaced
+ * it. Two different elements can be edited in either order, and the loop check
+ * for one says nothing about the other.
+ *
+ * The bridge draft id is the key when there is one: an in-page typing session
+ * rebuilds the pending object on every keystroke and keeps that id, which is
+ * exactly the run of verifies that DO supersede each other. Everything else
+ * keys on the element's selector, which is what identifies the target for an
+ * inspector or Layers edit.
+ */
+export function verifyKeyFor(pending: PendingIterationEdit): string {
+  return bridgeDraftIdOf(pending) ?? selectorOf(pending)
+}
+
+/**
  * Do these two pending edits hold the SAME bridge draft? Two verifies can be
  * in flight at once, and the later one replaces the earlier in the dialog
  * state. Whatever it replaces must have its bridge draft released, or Save

@@ -120,6 +120,7 @@ import {
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
   thisRowTemplateLocation,
+  verifyKeyFor,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
 import { verifyIterationLoop } from "./iteration-verify"
@@ -534,11 +535,19 @@ export function useEditorEditing({
   const disposedRef = useRef(true)
   const verifyAbortRef = useRef<AbortController | null>(null)
   /**
-   * Monotonic id for iteration verifies. Each intercept takes the next one and
-   * records it as the latest; only the latest answer may open the dialog or
-   * hand off. See `isStaleVerify` for what went wrong without it.
+   * Monotonic id for iteration verifies, PER TARGET. Each intercept takes the
+   * next one for its own key and records it as that key's latest; only a key's
+   * latest answer may open the dialog or hand off. See `isStaleVerify` for what
+   * went wrong without the sequence, and `verifyKeyFor` for why one global
+   * counter was wrong: it let an edit on one element declare an unrelated
+   * edit's answer stale, which released that edit's bridge draft and told the
+   * designer a newer edit had replaced it. Nothing had.
+   *
+   * One small entry per distinct element edited in a session; nothing removes
+   * them, because a key's latest sequence has to outlive its own verify (the
+   * hand-off branch re-checks staleness after an awaited POST).
    */
-  const verifySeqRef = useRef(0)
+  const verifySeqByKeyRef = useRef<Map<string, number>>(new Map())
 
   // Adapter lifecycle. Attached when `enabled` flips true and an iframe
   // is present; disposed on disable, unmount, or url change. Selection
@@ -2427,9 +2436,15 @@ export function useEditorEditing({
         setSaveStatus("This edit has no source location, so it cannot be applied.")
         return true
       }
-      // Claim the latest slot. Responses are not ordered, so this is what
-      // tells a late answer that newer keystrokes have replaced it.
-      const seq = ++verifySeqRef.current
+      // Claim the latest slot FOR THIS TARGET. Responses are not ordered, so
+      // this is what tells a late answer that newer keystrokes on the same
+      // element have replaced it. Scoped by key so an edit somewhere else on
+      // the page cannot make this one stale.
+      const verifyKey = verifyKeyFor(pending)
+      const seq = (verifySeqByKeyRef.current.get(verifyKey) ?? 0) + 1
+      verifySeqByKeyRef.current.set(verifyKey, seq)
+      const latestSeqForKey = (): number =>
+        verifySeqByKeyRef.current.get(verifyKey) ?? seq
       // Claim the DRAFT too. A newer intercept for the same in-page typing
       // session shares the draft id and differs only by object identity, so
       // this is what lets an older completion tell that the draft it is about
@@ -2453,7 +2468,7 @@ export function useEditorEditing({
             releaseBridgeDraft(pending)
             return
           }
-          if (isStaleVerify(seq, verifySeqRef.current)) {
+          if (isStaleVerify(seq, latestSeqForKey())) {
             // Release THIS draft only, and only when nothing live is still
             // using it: neither a newer intercept nor the prompt currently
             // open. A stale result and the survivor can describe one in-page
@@ -2495,7 +2510,7 @@ export function useEditorEditing({
             // in flight a newer intercept can have taken over the same draft
             // (the user kept typing); releasing here would cancel THEIR draft,
             // and the newer one is the one the user can still see.
-            if (gone() || isStaleVerify(seq, verifySeqRef.current)) {
+            if (gone() || isStaleVerify(seq, latestSeqForKey())) {
               releaseBridgeDraftUnlessShared(pending)
               return
             }
