@@ -37,6 +37,7 @@ import {
 } from "@/components/editor/iteration-scope-dialog"
 import { MutationDisambiguationDialog } from "@/components/editor/mutation-disambiguation-dialog"
 import { useEditorEditing } from "@/hooks/useEditorEditing"
+import { thisRowOperationAllowed } from "@/hooks/pending-iteration-edit"
 import { useEditorChat } from "@/hooks/useEditorChat"
 import { useChatSessions } from "@/hooks/useChatSessions"
 import { useShellBridgePoll } from "@/hooks/useShellBridgePoll"
@@ -1174,6 +1175,14 @@ export function EditorSurface({
             editing.iterationScopePrompt.iterationContext.siblingCount
           }
           rowIndex={editing.iterationScopePrompt.iterationContext.index}
+          // Both ends of the same gate. `dispatchIterationEdit` refuses a
+          // remove or a reorder when the element the designer picked sits
+          // inside the row rather than being the row, and hands it to chat;
+          // this is what stops the dialog offering a data edit it will not
+          // make. Always false for the kinds that name a field.
+          thisItemGoesToChat={
+            !thisRowOperationAllowed(editing.iterationScopePrompt)
+          }
           // dom-text "this row" was gated here until 2026-08-16, waiting on
           // "the deterministic this-row applicator that composes
           // `extractSlotInterpolationKey` + `applyIterationDataEditStatic`".

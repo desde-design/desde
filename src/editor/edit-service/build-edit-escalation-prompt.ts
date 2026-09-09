@@ -480,6 +480,62 @@ export function buildStructuralEditHandoffPrompt(h: StructuralEditHandoff): stri
   ].join("\n")
 }
 
+export interface RowScopedEditHandoff {
+  /** Lower-case verb phrase: "delete this element in this item only". */
+  requested: string
+  componentName?: string | null
+  tagName?: string | null
+  selector: string
+  /** Where the loop is, as the source check found it. */
+  loopLocation: { file: string; line: number; column: number }
+  /** Where the element the designer clicked is, inside that loop. */
+  elementLocation: { file: string; line: number; column: number }
+  /** 0-based position among the loop's renderings. */
+  index: number
+  siblingCount: number
+  /**
+   * What the kind carries beyond "this element": the destination of a move.
+   * Same "Details:" bullet the other two builders render.
+   */
+  detail?: string
+}
+
+/**
+ * The designer asked to remove or reorder something that sits INSIDE a loop
+ * row rather than being the row itself, and picked "This item".
+ *
+ * The deterministic row lane speaks in whole entries of the data array: it can
+ * drop an entry or move an entry to an index. Neither describes an element
+ * nested inside the row. Dispatching it anyway deleted the whole item the
+ * designer had clicked inside, or reordered the rows using an index counted
+ * among a `<span>`'s siblings. So the edit comes here instead, with both
+ * positions, and the agent asks the question the dialog could not.
+ */
+export function buildRowScopedEditHandoffPrompt(h: RowScopedEditHandoff): string {
+  // Sanitized even though it also appears in the opening sentence, outside the
+  // fence: a field that reaches the instruction half of the message must not
+  // be able to carry a line break. Same rule as the other builders.
+  const requested = sanitizeField(h.requested)
+  const siblingCount = String(safeCount(h.siblingCount))
+  const itemNumber = String(safeCount(h.index) + 1)
+  return [
+    EDIT_HANDOFF_MARKER,
+    "",
+    `I tried to ${requested} by direct manipulation. The element I picked is inside a loop but is not the loop's own element, so the Editor could only have changed the whole item or the whole set, and neither is what I asked for.`,
+    "",
+    HANDOFF_FENCE_NOTE,
+    "",
+    ...fenceHandoffFacts([
+      `- What I did: ${requested} on ${elementLabel(h)} (selector: ${sanitizeField(h.selector)}), item ${itemNumber} of ${siblingCount}`,
+      ...(h.detail ? [`- Details: ${sanitizeField(h.detail, DETAIL_LIMIT)}`] : []),
+      `- The element I picked: ${locationLabel(h.elementLocation)}`,
+      `- The loop it sits inside: ${locationLabel(h.loopLocation)}`,
+    ]),
+    "",
+    "Read the loop and the element inside it. Changing one item on its own means changing the data that item comes from, not the loop's template, so work out first whether this element can vary per item at all. If it cannot, or if more than one reasonable edit fits what I did, ask me before editing. Keep the change minimal and tell me which files you changed.",
+  ].join("\n")
+}
+
 export interface AmbiguousIterationHandoff {
   /** Lower-case verb phrase: "delete the element", "set the prop `size` to \"lg\"". */
   requested: string

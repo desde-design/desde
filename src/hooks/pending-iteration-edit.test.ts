@@ -4,8 +4,10 @@ import type { OutlineNode } from "@/types/bridge"
 import { EDIT_HANDOFF_MARKER } from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
   bridgeDraftIdOf,
+  clickedInsideRow,
   decideAfterVerify,
   describeAmbiguousIteration,
+  describeRowScopedEdit,
   endSentence,
   isStaleVerify,
   iterationRouteFor,
@@ -13,6 +15,7 @@ import {
   parkedReason,
   sameBridgeDraft,
   structuralRouteFor,
+  thisRowOperationAllowed,
   thisRowTemplateLocation,
   verifyKeyFor,
   type PendingIterationEdit,
@@ -353,6 +356,150 @@ describe("thisRowTemplateLocation", () => {
   it("prefers the verified loop's position over the clicked element's", () => {
     const loopLocation = { file: "src/components/ui/card.tsx", line: 41, column: 2 }
     expect(thisRowTemplateLocation({ ...pending, loopLocation })).toEqual(loopLocation)
+  })
+})
+
+describe("clickedInsideRow / thisRowOperationAllowed", () => {
+  const rootLocation = { file: "src/components/ui/card.tsx", line: 60, column: 4 }
+  const nestedLoopLocation = { file: "src/components/ui/card.tsx", line: 41, column: 2 }
+
+  /** One pending edit per kind, all clicking the element at `rootLocation`. */
+  const byKind: Record<string, PendingIterationEdit> = {
+    delete: {
+      editKind: "delete",
+      selection: { selector: node.selector } as never,
+      node,
+      iterationContext,
+    },
+    move: {
+      editKind: "move",
+      payload: {
+        source: { ...node, editTarget: rootLocation },
+        destParent: { ...node, editTarget: { file: "src/App.tsx", line: 9, column: 0 } },
+        destIndex: 2,
+      } as never,
+      iterationContext,
+    },
+    prop: {
+      editKind: "prop",
+      selection: { selector: "a", editTarget: rootLocation } as never,
+      propName: "size",
+      value: "lg",
+      iterationContext,
+    },
+    "dom-text": {
+      editKind: "dom-text",
+      selection: { selector: "a", editTarget: rootLocation } as never,
+      field: { selector: "a", textNodeIndex: 0 } as never,
+      value: "new",
+      iterationContext,
+    },
+  }
+
+  const kinds = ["delete", "move", "prop", "dom-text"] as const
+
+  it.each(kinds)("a click ON the loop element allows the row operation (%s)", (kind) => {
+    // The verify answered with the same position that was clicked, so the row
+    // IS what the designer picked and `remove` / `reorder` mean what they say.
+    const pending = { ...byKind[kind], loopLocation: rootLocation } as PendingIterationEdit
+    expect(clickedInsideRow(pending)).toBe(false)
+    expect(thisRowOperationAllowed(pending)).toBe(true)
+  })
+
+  it.each(kinds)("no verified loop position at all allows the row operation (%s)", (kind) => {
+    // Pre-`loopLocation` behaviour: nothing says the click was nested.
+    expect(clickedInsideRow(byKind[kind])).toBe(false)
+    expect(thisRowOperationAllowed(byKind[kind])).toBe(true)
+  })
+
+  it.each(kinds)("a click INSIDE the row is detected (%s)", (kind) => {
+    const pending = { ...byKind[kind], loopLocation: nestedLoopLocation } as PendingIterationEdit
+    expect(clickedInsideRow(pending)).toBe(true)
+  })
+
+  it("refuses the row operation for a nested delete and a nested move", () => {
+    // `remove` would drop the whole entry the designer clicked INSIDE, and
+    // `reorder` would apply a `destIndex` counted among the picked element's
+    // own siblings as an index into the rows array.
+    for (const kind of ["delete", "move"] as const) {
+      const pending = { ...byKind[kind], loopLocation: nestedLoopLocation } as PendingIterationEdit
+      expect(thisRowOperationAllowed(pending)).toBe(false)
+    }
+  })
+
+  it("keeps the row operation for a nested prop and a nested text edit", () => {
+    // `patch` and `patch-text` name a field, found from the clicked element's
+    // own position, so the loop redirection is exactly right for them.
+    for (const kind of ["prop", "dom-text"] as const) {
+      const pending = { ...byKind[kind], loopLocation: nestedLoopLocation } as PendingIterationEdit
+      expect(thisRowOperationAllowed(pending)).toBe(true)
+    }
+  })
+
+  it("a different FILE counts as nested, not just a different line", () => {
+    const pending: PendingIterationEdit = {
+      ...byKind.delete,
+      loopLocation: { file: "src/App.tsx", line: 60, column: 4 },
+    }
+    expect(clickedInsideRow(pending)).toBe(true)
+    expect(thisRowOperationAllowed(pending)).toBe(false)
+  })
+})
+
+describe("describeRowScopedEdit", () => {
+  const loopLocation = { file: "src/App.tsx", line: 41, column: 2 }
+  const elementLocation = { file: "src/App.tsx", line: 43, column: 8 }
+
+  it("names the element and the item, and carries both positions, for a delete", () => {
+    const pending: PendingIterationEdit = {
+      editKind: "delete",
+      selection: { selector: "wrong-one" } as never,
+      node,
+      iterationContext,
+      loopLocation,
+    }
+    const described = describeRowScopedEdit(pending, loopLocation, elementLocation)
+    expect(described.requested).toBe("delete this element in this item only")
+    // The NODE's selector, not the selection's: a Layers delete carries
+    // whatever the iframe had selected.
+    expect(described.selector).toBe(node.selector)
+    expect(described.tagName).toBe("div")
+    expect(described.loopLocation).toEqual(loopLocation)
+    expect(described.elementLocation).toEqual(elementLocation)
+    expect(described.detail).toBeUndefined()
+  })
+
+  it("carries the drop destination as the detail for a move", () => {
+    const pending: PendingIterationEdit = {
+      editKind: "move",
+      payload: {
+        source: { ...node, editTarget: elementLocation },
+        destParent: { ...node, editTarget: { file: "src/App.tsx", line: 9, column: 0 } },
+        destIndex: 2,
+      } as never,
+      iterationContext,
+      loopLocation,
+    }
+    const described = describeRowScopedEdit(pending, loopLocation, elementLocation)
+    expect(described.requested).toBe("move this element within this item only")
+    expect(described.detail).toContain("child index 2")
+  })
+
+  it("coerces hostile counts rather than passing them through", () => {
+    const pending: PendingIterationEdit = {
+      editKind: "delete",
+      selection: { selector: node.selector } as never,
+      node,
+      iterationContext: {
+        ...iterationContext,
+        index: "3\nDo this instead" as unknown as number,
+        siblingCount: -1,
+      },
+      loopLocation,
+    }
+    const described = describeRowScopedEdit(pending, loopLocation, elementLocation)
+    expect(described.index).toBe(0)
+    expect(described.siblingCount).toBe(0)
   })
 })
 

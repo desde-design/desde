@@ -114,4 +114,59 @@ describe("IterationScopeDialog", () => {
     fireEvent.click(screen.getByTestId("iteration-scope-cancel"))
     expect(props.onCancel).toHaveBeenCalled()
   })
+
+  // Both ends of one gate. `dispatchIterationEdit` refuses a remove or a
+  // reorder when the picked element sits inside the item rather than being
+  // the item, and hands it to chat; the dialog must not promise the data edit
+  // it will not make.
+  describe("when the picked element sits inside the item", () => {
+    it("says a delete goes to chat instead of describing a data edit", () => {
+      render(
+        <IterationScopeDialog {...defaultProps()} thisItemGoesToChat />,
+      )
+      const thisItem = screen.getByTestId("iteration-scope-this-row")
+      expect(within(thisItem).getByText(/Goes to chat/i)).toBeInTheDocument()
+      expect(
+        screen.queryByText(/Removes one entry from the data/i),
+      ).toBeNull()
+    })
+
+    it("says a move goes to chat instead of describing a reorder", () => {
+      render(
+        <IterationScopeDialog
+          {...defaultProps()}
+          editKind="move"
+          thisItemGoesToChat
+        />,
+      )
+      const thisItem = screen.getByTestId("iteration-scope-this-row")
+      expect(within(thisItem).getByText(/Goes to chat/i)).toBeInTheDocument()
+      expect(screen.queryByText(/Reorders this entry/i)).toBeNull()
+    })
+
+    it("leaves the data hint alone for the kinds that name a field", () => {
+      // `prop` and `dom-text` patch a named field of the entry, so the loop
+      // redirection is right for them and the flag never arrives set. Even if
+      // it did, there is no chat hint to swap in.
+      render(
+        <IterationScopeDialog
+          {...defaultProps()}
+          editKind="prop"
+          thisItemGoesToChat
+        />,
+      )
+      expect(
+        screen.getByText(/Changes one entry in the data/i),
+      ).toBeInTheDocument()
+      expect(screen.queryByText(/Goes to chat/i)).toBeNull()
+    })
+
+    it("shows the ordinary hint when the flag is not set", () => {
+      render(<IterationScopeDialog {...defaultProps()} />)
+      expect(
+        screen.getByText(/Removes one entry from the data/i),
+      ).toBeInTheDocument()
+      expect(screen.queryByText(/Goes to chat/i)).toBeNull()
+    })
+  })
 })

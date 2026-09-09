@@ -64,6 +64,7 @@ import {
   afterEscalation,
   buildEditEscalationPrompt,
   buildPropEditEscalationPrompt,
+  buildRowScopedEditHandoffPrompt,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
   coalesceCapturedMutation,
@@ -113,6 +114,7 @@ import {
 import {
   bridgeDraftIdOf,
   decideAfterVerify,
+  describeRowScopedEdit,
   isStaleVerify,
   iterationRouteFor,
   parkedReason,
@@ -120,6 +122,7 @@ import {
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
   structuralRouteFor,
+  thisRowOperationAllowed,
   thisRowTemplateLocation,
   verifyKeyFor,
   type PendingIterationEdit,
@@ -2347,6 +2350,40 @@ export function useEditorEditing({
       // Where the CLICK landed, which is the loop root only when the element
       // the designer touched is itself the loop element.
       const fieldLocation = iterationTemplateLocation(pending)
+      // A `remove` or a `reorder` dispatched for an element NESTED inside the
+      // row is not the edit the designer asked for. The row lane speaks in
+      // whole data entries, so it would delete the entire item they clicked
+      // inside, or reorder the rows using a `destIndex` counted among that
+      // element's own siblings. `patch` and `patch-text` name a field and are
+      // unaffected; see `thisRowOperationAllowed`.
+      if (!thisRowOperationAllowed(pending)) {
+        const loopLocation = pending.loopLocation
+        // Narrowing, not a guard: `thisRowOperationAllowed` returns false only
+        // when both positions exist and differ.
+        if (!loopLocation || !fieldLocation) {
+          failThisRow("Iteration edit refused: no source location on the selection.")
+          return
+        }
+        const handOff = escalateToChatRef.current
+        let accepted = false
+        try {
+          const prompt = buildRowScopedEditHandoffPrompt(
+            describeRowScopedEdit(pending, loopLocation, fieldLocation),
+          )
+          accepted = handOff ? await handOff(prompt) : false
+        } catch {
+          // A thrown hand-off is a refusal. Falling through to the park below
+          // keeps whatever the designer typed answerable.
+          accepted = false
+        }
+        if (accepted) {
+          // Chat owns the edit from here, so a held draft (in-page typing) goes.
+          releaseBridgeDraft(pending)
+          return
+        }
+        failThisRow("This edit could not be sent to chat.")
+        return
+      }
       const pageSourceFile = useAppStore.getState().currentSourceFile
       let payload
       let description: string

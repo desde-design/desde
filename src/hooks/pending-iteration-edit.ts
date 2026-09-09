@@ -9,7 +9,10 @@ import type { IterationScope } from "@/components/editor/iteration-scope-dialog"
 import type { LayersMovePayload } from "@/components/editor/layers-panel"
 import type { PropControlValue } from "@/components/editor/prop-control"
 import type { EditableTextField, OutlineNode } from "@/types/bridge"
-import type { AmbiguousIterationHandoff } from "@/editor/edit-service/build-edit-escalation-prompt"
+import type {
+  AmbiguousIterationHandoff,
+  RowScopedEditHandoff,
+} from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
   buildAmbiguousIterationHandoffPrompt,
   describeMoveDestination,
@@ -200,6 +203,49 @@ export function thisRowTemplateLocation(pending: PendingIterationEdit): SourceLo
   return pending.loopLocation ?? iterationTemplateLocation(pending)
 }
 
+/**
+ * Did the designer click something INSIDE a loop row rather than the row
+ * itself?
+ *
+ * True only when the verify found a loop AND that loop is somewhere other than
+ * the clicked element: a `<span>` inside an `<li v-for>`, say. False when the
+ * click landed on the loop element, and false when no verify position is
+ * carried at all, which is the pre-`loopLocation` behaviour.
+ */
+export function clickedInsideRow(pending: PendingIterationEdit): boolean {
+  const loop = pending.loopLocation
+  if (!loop) return false
+  const element = iterationTemplateLocation(pending)
+  if (!element) return false
+  return (
+    loop.file !== element.file || loop.line !== element.line || loop.column !== element.column
+  )
+}
+
+/**
+ * May the "this item" lane run its DETERMINISTIC row operation for this
+ * pending edit, or does the edit have to go to chat instead?
+ *
+ * The row lane speaks in whole entries of the data array. `patch` and
+ * `patch-text` name a field of the entry, so redirecting them to the loop root
+ * is exactly right: the field is found from the clicked element's own position
+ * and the entry from the loop's.
+ *
+ * `remove` and `reorder` name no field. They remove the entry, or move the
+ * entry to an index. Dispatched from an element nested inside the row, the
+ * first deletes the whole item the designer clicked INSIDE, and the second
+ * applies a `destIndex` counted among the element's own siblings as an index
+ * into the rows array. Both are silent, and both are a different edit from the
+ * one that was asked for, so this returns false and the caller hands off.
+ *
+ * A click on the loop element itself is unaffected: there, removing the entry
+ * IS deleting what was clicked.
+ */
+export function thisRowOperationAllowed(pending: PendingIterationEdit): boolean {
+  if (pending.editKind !== "delete" && pending.editKind !== "move") return true
+  return !clickedInsideRow(pending)
+}
+
 function selectorOf(pending: PendingIterationEdit): string {
   // `delete` reads the OUTLINE NODE, not the selection. A Layers-panel delete
   // carries whatever the iframe had selected at the time, which is routinely a
@@ -265,6 +311,50 @@ export function describeAmbiguousIteration(
     index: safeCount(pending.iterationContext.index),
     siblingCount: safeCount(pending.iterationContext.siblingCount),
     noLoopReason,
+  }
+}
+
+/**
+ * The verb phrase for an edit the "this item" lane refused because the click
+ * landed inside the row rather than on it. Only the two kinds
+ * {@link thisRowOperationAllowed} can refuse have one.
+ *
+ * It says "this element" AND "this item" on purpose: the whole reason the edit
+ * is here is that those are two different things, and a request that named
+ * only one of them would read as the edit the row lane would have made.
+ */
+function requestedRowScopedOf(pending: PendingIterationEdit): string {
+  return pending.editKind === "move"
+    ? "move this element within this item only"
+    : "delete this element in this item only"
+}
+
+/** Everything {@link buildRowScopedEditHandoffPrompt} needs, read off the pending edit. */
+export function describeRowScopedEdit(
+  pending: PendingIterationEdit,
+  loopLocation: SourceLocation,
+  elementLocation: SourceLocation,
+): RowScopedEditHandoff {
+  const detail = detailOf(pending)
+  return {
+    requested: requestedRowScopedOf(pending),
+    ...(detail ? { detail } : {}),
+    ...namesOf(pending),
+    selector: selectorOf(pending),
+    loopLocation: {
+      file: loopLocation.file,
+      line: loopLocation.line,
+      column: loopLocation.column,
+    },
+    elementLocation: {
+      file: elementLocation.file,
+      line: elementLocation.line,
+      column: elementLocation.column,
+    },
+    // Coerced here as well as at the wire boundary and in the builder, for the
+    // reason `describeAmbiguousIteration` gives.
+    index: safeCount(pending.iterationContext.index),
+    siblingCount: safeCount(pending.iterationContext.siblingCount),
   }
 }
 

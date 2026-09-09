@@ -88,6 +88,14 @@ const EDIT_LABELS: Record<IterationEditKind, {
   thisItem: string
   allItems: string
   thisItemHint: (count: number) => string
+  /**
+   * The hint shown INSTEAD of `thisItemHint` when the element the designer
+   * picked sits inside the item rather than being the item. Only `delete` and
+   * `move` have one: they are the two kinds whose row edit names no field, so
+   * a nested element cannot be expressed as a change to one data entry and the
+   * edit goes to chat. See `thisRowOperationAllowed`.
+   */
+  thisItemChatHint?: string
   allItemsHint: string
 }> = {
   delete: {
@@ -99,6 +107,8 @@ const EDIT_LABELS: Record<IterationEditKind, {
       const o = others(n)
       return `Removes one entry from the data. ${o.subject} ${o.verb("stays", "stay")}.`
     },
+    thisItemChatHint:
+      "Goes to chat. What you picked sits inside the item, so removing it from the data would remove the whole item.",
     allItemsHint:
       "Removes the loop that renders them, so nothing will show here, including items added later.",
   },
@@ -129,6 +139,8 @@ const EDIT_LABELS: Record<IterationEditKind, {
     thisItem: "This item",
     allItems: "All items",
     thisItemHint: () => "Reorders this entry within the data.",
+    thisItemChatHint:
+      "Goes to chat. What you picked sits inside the item, so reordering the data would move the whole item instead.",
     allItemsHint: "Moves the whole set on the page, relative to what's around it.",
   },
   // Spec only: `PendingIterationEdit` has no `insert` (or `duplicate`) variant,
@@ -170,6 +182,15 @@ interface IterationScopeDialogProps {
   siblingCount: number
   /** The this-row index (0-based) for the row preview. */
   rowIndex: number
+  /**
+   * The picked element sits INSIDE the item rather than being the item, so
+   * "This item" hands the edit to chat instead of editing the data.
+   *
+   * Gated at both ends: `dispatchIterationEdit` refuses the same case, and
+   * this is what stops the dialog promising a data edit it will not make.
+   * Only `delete` and `move` can set it.
+   */
+  thisItemGoesToChat?: boolean
   /** Designer picked a scope. `remember` is the checkbox state at submit. */
   onConfirm: (scope: IterationScope, remember: boolean) => void
   /** Designer dismissed — no edit is buffered. */
@@ -181,6 +202,7 @@ export function IterationScopeDialog({
   editKind,
   siblingCount,
   rowIndex,
+  thisItemGoesToChat = false,
   onConfirm,
   onCancel,
 }: IterationScopeDialogProps) {
@@ -190,6 +212,12 @@ export function IterationScopeDialog({
   // default is unavailable — the gate that used to guard it is gone.
   const [scope, setScope] = useState<IterationScope>("this-row")
   const labels = EDIT_LABELS[editKind]
+  // The chat hint replaces the data hint rather than sitting beside it: the
+  // data hint describes an edit that will not happen in this case.
+  const thisItemHint =
+    thisItemGoesToChat && labels.thisItemChatHint
+      ? labels.thisItemChatHint
+      : labels.thisItemHint(siblingCount)
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onCancel()}>
@@ -217,7 +245,7 @@ export function IterationScopeDialog({
           <OptionCard
             value="this-row"
             title={labels.thisItem}
-            hint={labels.thisItemHint(siblingCount)}
+            hint={thisItemHint}
             data-testid="iteration-scope-this-row"
           />
 
