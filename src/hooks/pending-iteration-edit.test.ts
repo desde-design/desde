@@ -29,6 +29,7 @@ import {
   modalRequestDraftId,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
+  sessionEndPlan,
   settleHandOff,
   structuralRouteFor,
   thisRowOperationAllowed,
@@ -1157,6 +1158,125 @@ describe("isStaleGeneration", () => {
     // Same shape, different question: isStaleVerify asks whether a newer edit
     // replaced this one, isStaleGeneration whether the session itself ended.
     expect(isStaleGeneration(1, 2)).toBe(isStaleVerify(1, 2))
+  })
+})
+
+describe("sessionEndPlan", () => {
+  const mutation = (pendingId: string) => ({ pendingId } as never)
+  const scopePrompt = (bridgePendingId?: string): PendingIterationEdit => ({
+    editKind: "dom-text",
+    selection: { selector: `#s-${bridgePendingId ?? "none"}` } as never,
+    field: {} as never,
+    value: "x",
+    iterationContext,
+    ...(bridgePendingId ? { bridgePendingId } : {}),
+  })
+  const scopeRequest = (bridgePendingId?: string): ModalRequest => ({
+    kind: "scope",
+    pending: scopePrompt(bridgePendingId),
+  })
+  const parkRequest = (pendingId: string): ModalRequest => ({
+    kind: "disambiguation",
+    mutation: mutation(pendingId),
+  })
+  const empty = { openPrompt: null, queued: [], rows: [], heldDraftIds: [] }
+
+  it("says nothing when the session was holding nothing", () => {
+    expect(sessionEndPlan(empty)).toEqual({
+      cancelDraftIds: [],
+      discarded: 0,
+      status: null,
+    })
+  })
+
+  it("counts the prompt, the queue, the dialog rows and the maps", () => {
+    const plan = sessionEndPlan({
+      openPrompt: scopePrompt("dom-pending-1"),
+      queued: [parkRequest("dom-pending-2")],
+      rows: [mutation("dom-pending-3")],
+      heldDraftIds: ["dom-pending-4"],
+    })
+    expect(plan.discarded).toBe(4)
+    expect(plan.cancelDraftIds).toEqual([
+      "dom-pending-1",
+      "dom-pending-2",
+      "dom-pending-3",
+      "dom-pending-4",
+    ])
+    expect(plan.status).toBe("The page connection was reset; 4 pending edits were discarded.")
+  })
+
+  it("counts a prompt and a queued question that hold no draft at all", () => {
+    // An inspector or Layers edit reaches the scope dialog with nothing held by
+    // the bridge. It is just as lost when the session ends, so it counts; there
+    // is simply no id to hand back.
+    const plan = sessionEndPlan({
+      ...empty,
+      openPrompt: scopePrompt(),
+      queued: [scopeRequest()],
+    })
+    expect(plan.discarded).toBe(2)
+    expect(plan.cancelDraftIds).toEqual([])
+  })
+
+  it("counts a draft once when the prompt and the maps both name it", () => {
+    // The usual case: the prompt on screen is asking about a draft that is
+    // still recorded in the lane's maps. One edit, one cancel, one count.
+    const plan = sessionEndPlan({
+      ...empty,
+      openPrompt: scopePrompt("dom-pending-1"),
+      heldDraftIds: ["dom-pending-1"],
+    })
+    expect(plan.discarded).toBe(1)
+    expect(plan.cancelDraftIds).toEqual(["dom-pending-1"])
+  })
+
+  it("drops a queued question about the draft the open prompt already owns", () => {
+    // Releasing the prompt's draft drops any queued request about it, the same
+    // rule `dropModalRequestsForDraft` states. Counting it as well would report
+    // two discarded edits for one.
+    const plan = sessionEndPlan({
+      ...empty,
+      openPrompt: scopePrompt("dom-pending-1"),
+      queued: [parkRequest("dom-pending-1"), parkRequest("dom-pending-2")],
+    })
+    expect(plan.discarded).toBe(2)
+    expect(plan.cancelDraftIds).toEqual(["dom-pending-1", "dom-pending-2"])
+  })
+
+  it("leaves out a dialog row the bridge is not holding", () => {
+    const plan = sessionEndPlan({ ...empty, rows: [mutation("dom-pending-1"), mutation("")] })
+    expect(plan.discarded).toBe(1)
+    expect(plan.cancelDraftIds).toEqual(["dom-pending-1"])
+  })
+
+  it("is the same plan whichever way the session ends", () => {
+    // The reason a session ends decides only whether the ids are handed BACK to
+    // the bridge and whether the count is said out loud. What was discarded is
+    // one fact, so the cleanup path and the iframe `load` path read it from
+    // here rather than each counting for themselves. This is the assertion that
+    // stops them drifting apart again.
+    const state = {
+      openPrompt: scopePrompt("dom-pending-1"),
+      queued: [parkRequest("dom-pending-2"), scopeRequest("dom-pending-1")],
+      rows: [mutation("dom-pending-3")],
+      heldDraftIds: ["dom-pending-1", "dom-pending-4"],
+    }
+    const onCleanup = sessionEndPlan(state)
+    const onReconnect = sessionEndPlan(state)
+    expect(onReconnect).toEqual(onCleanup)
+    expect(onCleanup.discarded).toBe(4)
+    expect(onCleanup.status).toBe(discardedOnResetStatus(4))
+  })
+
+  it("does not mutate the state it is given", () => {
+    const queued = [parkRequest("dom-pending-2")]
+    const rows = [mutation("dom-pending-3")]
+    const heldDraftIds = ["dom-pending-4"]
+    sessionEndPlan({ openPrompt: scopePrompt("dom-pending-1"), queued, rows, heldDraftIds })
+    expect(queued).toHaveLength(1)
+    expect(rows).toHaveLength(1)
+    expect(heldDraftIds).toEqual(["dom-pending-4"])
   })
 })
 

@@ -893,6 +893,86 @@ export function isStaleGeneration(captured: number, current: number): boolean {
 }
 
 /**
+ * Everything a bridge session is holding when it ends, as plain values.
+ *
+ * The three places a session ends (the adapter effect's cleanup, the iframe's
+ * `load` handler, the conflict reload) used to clear different subsets of this
+ * in different orders, so they discarded different amounts of the same state.
+ */
+export interface SessionEndState {
+  /** The scope question on screen, if one is open. */
+  openPrompt: PendingIterationEdit | null
+  /** Questions waiting behind whatever is open ({@link enqueueModal}). */
+  queued: readonly ModalRequest[]
+  /** Rows in the deterministic disambiguation dialog. */
+  rows: readonly PendingMutation[]
+  /** Draft ids still recorded in the lane's maps, i.e. work in flight. */
+  heldDraftIds: readonly string[]
+}
+
+/** What ending a bridge session has to do, decided from {@link SessionEndState}. */
+export interface SessionEndPlan {
+  /**
+   * Every draft this session was holding, once each, in the order the teardown
+   * used to hand them back. Handed to the bridge only when the document that
+   * issued them is still the one on screen.
+   */
+  cancelDraftIds: string[]
+  /** How many held edits the session end throws away. */
+  discarded: number
+  /** The line to show for that count, or null when nothing was held. */
+  status: string | null
+}
+
+/**
+ * The ONE decision behind ending a bridge session.
+ *
+ * Pure, because the count it produces is the only thing the designer sees and
+ * it was previously computed by three different code paths: the teardown
+ * counted the prompt, the queue, the dialog rows and the maps; the conflict
+ * reload counted nothing and said nothing; the `load` handler did not exist.
+ *
+ * Counting rules, unchanged from the teardown that had them first:
+ *
+ * - The open prompt counts as one whether or not it holds a bridge draft. An
+ *   inspector or Layers edit parked in that dialog is just as lost.
+ * - A queued request counts as one, for the same reason.
+ * - A dialog row counts only when the bridge is holding its draft
+ *   ({@link rowsToRelease}).
+ * - A held draft counts only if nothing above already claimed it. The prompt
+ *   and the queue own their drafts, and cancelling one twice would both
+ *   double-count it and send the bridge a message about an id it has already
+ *   dropped.
+ *
+ * Releasing the prompt's draft also drops any queued question about that same
+ * draft, which is what {@link dropModalRequestsForDraft} does at the call site
+ * that releases it; doing it here keeps the count honest.
+ */
+export function sessionEndPlan(state: SessionEndState): SessionEndPlan {
+  const promptDraftId = state.openPrompt ? bridgeDraftIdOf(state.openPrompt) : undefined
+  const queued = promptDraftId
+    ? dropModalRequestsForDraft(state.queued, promptDraftId)
+    : [...state.queued]
+  const rows = rowsToRelease(state.rows)
+  const cancelDraftIds: string[] = []
+  const claimed = new Set<string>()
+  const claim = (draftId: string | undefined): boolean => {
+    if (!draftId || claimed.has(draftId)) return false
+    claimed.add(draftId)
+    cancelDraftIds.push(draftId)
+    return true
+  }
+  claim(promptDraftId)
+  for (const request of queued) claim(modalRequestDraftId(request))
+  for (const row of rows) claim(row.pendingId)
+  let discarded = (state.openPrompt ? 1 : 0) + queued.length + rows.length
+  for (const draftId of state.heldDraftIds) {
+    if (claim(draftId)) discarded += 1
+  }
+  return { cancelDraftIds, discarded, status: discardedOnResetStatus(discarded) }
+}
+
+/**
  * What the client should do once the server has answered "is there a loop at
  * this position?". Pure, so the four exits are testable without mounting the
  * hook: an error surfaces as a status, a missing loop goes to chat, a

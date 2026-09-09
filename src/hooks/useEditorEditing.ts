@@ -120,11 +120,9 @@ import {
   DEFERRED_PARK_STATUS,
   dequeueModal,
   describeRowScopedEdit,
-  discardedOnResetStatus,
   dropModalRequestsForDraft,
   enqueueModal,
   NOT_CONNECTED_STATUS,
-  rowsToRelease,
   errorMessage,
   handOffFailureStatus,
   hasUndispatchedWork,
@@ -138,6 +136,7 @@ import {
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
+  sessionEndPlan,
   settleHandOff,
   structuralRouteFor,
   thisRowOperationAllowed,
@@ -216,6 +215,26 @@ export type ConnectionStatus =
   | { kind: "connecting" }
   | { kind: "ready" }
   | { kind: "error"; message: string }
+
+/**
+ * Why a bridge session is ending. See `endBridgeSession`, which is the only
+ * thing that reads it.
+ *
+ * The four are not four behaviours. `unmount` is `teardown` with nobody left to
+ * read the status bar, and `reload` is `reconnect` seen one step earlier: the
+ * shell knows the document is about to be replaced rather than finding out from
+ * the `load` event. They are named separately so the call sites read as what
+ * happened rather than as a pair of booleans.
+ */
+type BridgeSessionEndReason =
+  /** The adapter is detaching and the panels stay on screen. */
+  | "teardown"
+  /** The adapter is detaching because the hook is unmounting. */
+  | "unmount"
+  /** The shell is about to replace the document (the conflict reload). */
+  | "reload"
+  /** The iframe has just loaded a different document. */
+  | "reconnect"
 
 interface UseEditorEditingOptions {
   iframeRef: RefObject<HTMLIFrameElement | null>
@@ -781,27 +800,49 @@ export function useEditorEditing({
         })
     }
 
-    iframe.addEventListener("load", runHandshake)
+    /**
+     * A DIFFERENT document is in the iframe now.
+     *
+     * The adapter survives it and re-handshakes, but the bridge does not: it
+     * comes back a fresh instance, numbering its drafts from `dom-pending-1`
+     * again. So the previous document's session ends here, before the
+     * re-attach, and every continuation still awaiting under it goes quiet.
+     * Without this, an older verify or hand-off resolved into the new document
+     * holding ids that now name the designer's current edits.
+     *
+     * Nothing is cancelled with the bridge: the drafts died with the document
+     * that issued them, and the instance that would receive the cancel never
+     * saw them.
+     *
+     * Only the LISTENER does this. The direct `runHandshake()` below is the
+     * first attach, whose session the effect body has just started.
+     */
+    const onIframeLoad = () => {
+      endBridgeSessionRef.current?.({ reason: "reconnect", cancelWithBridge: false })
+      runHandshake()
+    }
+
+    iframe.addEventListener("load", onIframeLoad)
     runHandshake()
 
     return () => {
       cancelled = true
       // Stop everything the iteration lane still has in flight, and end the
       // session those requests belong to: a late answer must do NOTHING, not
-      // even release its own draft, because the teardown below hands every
-      // held draft back and the next adapter re-uses the same draft ids.
+      // even release its own draft, because ending the session hands every held
+      // draft back and the next adapter re-uses the same draft ids.
+      //
+      // `endBridgeSession` bumps the generation, aborts the session's requests,
+      // and hands every held draft back — while the adapter is still there to
+      // hear it, which is why this is ordered BEFORE `dispose()`. Via a ref
+      // because the callback is defined far below this effect; see its
+      // declaration.
       disposedRef.current = true
-      adapterGenerationRef.current += 1
-      adapterAbortRef.current?.abort()
-      adapterAbortRef.current = null
-      // Hand every held draft back before the adapter goes. The open scope
-      // prompt, the questions queued behind it, and the rows in the
-      // deterministic dialog are all drafts THIS adapter is holding, and every
-      // answer to them is a message only this adapter could receive. Ordered
-      // BEFORE `dispose()` for exactly that reason. Via a ref because the
-      // callbacks are defined far below this effect; see its declaration.
-      iterationTeardownRef.current?.(hookUnmountingRef.current)
-      iframe.removeEventListener("load", runHandshake)
+      endBridgeSessionRef.current?.({
+        reason: hookUnmountingRef.current ? "unmount" : "teardown",
+        cancelWithBridge: true,
+      })
+      iframe.removeEventListener("load", onIframeLoad)
       treeUpdateUnsubRef.current?.()
       treeUpdateUnsubRef.current = null
       unsubSelection()
@@ -1806,15 +1847,17 @@ export function useEditorEditing({
    */
   const modalQueueRef = useRef<ModalRequest[]>([])
   /**
-   * How to wind the scope prompt and the deferred-park queue down, for the
-   * adapter effect's cleanup to call.
+   * How to end the bridge session, for the adapter effect and its iframe `load`
+   * handler to call.
    *
    * A ref because that effect is defined ABOVE these callbacks in source order,
    * so it cannot name them in its dependency array without a temporal-dead-zone
    * error. Same trick, and the same reason, as `interceptIterationEditRef`. The
-   * assignment happens during render, next to the callbacks themselves.
+   * assignment happens during render, next to the callback itself.
    */
-  const iterationTeardownRef = useRef<((unmounting: boolean) => void) | null>(null)
+  const endBridgeSessionRef = useRef<
+    ((args: { reason: BridgeSessionEndReason; cancelWithBridge: boolean }) => void) | null
+  >(null)
   // Per-edit-kind remembered scope. Cleared on hook unmount; not persisted
   // across reloads (v1 — the dialog's "Remember for this session" checkbox).
   const iterationScopeMemoryRef = useRef<
@@ -2427,57 +2470,6 @@ export function useEditorEditing({
   )
 
   /**
-   * Give every waiting request's draft back to the bridge, and forget them.
-   *
-   * The adapter is going away, so no answer to any of these questions could
-   * reach it. Holding the drafts would leave the bridge blocked on questions
-   * nobody can ever answer. Returns how many drafts were handed back, so the
-   * caller can say how much was discarded.
-   *
-   * Both maps are cleared per draft, not only the bridge told: a map entry that
-   * outlives its draft is a payload a later park would find and re-park.
-   */
-  const releaseQueuedModalRequests = useCallback((): number => {
-    const queued = modalQueueRef.current
-    modalQueueRef.current = []
-    for (const request of queued) {
-      const draftId =
-        request.kind === "disambiguation"
-          ? request.mutation.pendingId
-          : bridgeDraftIdOf(request.pending)
-      if (!draftId) continue
-      adapterRef.current?.resolveMutationDisambiguation(draftId, "cancel")
-      bridgeDraftsByPendingIdRef.current.delete(draftId)
-      latestPendingByDraftRef.current.delete(draftId)
-    }
-    return queued.length
-  }, [])
-
-  /**
-   * Give back every bridge draft still recorded in the maps, and empty them.
-   *
-   * The last owner. A draft is recorded the moment the bridge's delivery route
-   * hands it to the iteration lane, and it stays recorded for the whole of that
-   * lane's work: the verify round trip, the awaited hand-off, the row write. A
-   * teardown in that window leaves a draft with nothing on screen about it and
-   * nothing scheduled to release it, because the completion that would has an
-   * adapter that is already gone.
-   *
-   * Runs LAST in the teardown, after the prompt and the queue have released
-   * theirs and deleted their entries, so nothing is counted or cancelled twice.
-   */
-  const releaseHeldBridgeDrafts = useCallback((): number => {
-    const held = bridgeDraftsByPendingIdRef.current
-    const ids = [...held.keys()]
-    held.clear()
-    latestPendingByDraftRef.current.clear()
-    for (const draftId of ids) {
-      adapterRef.current?.resolveMutationDisambiguation(draftId, "cancel")
-    }
-    return ids.length
-  }, [])
-
-  /**
    * Close the scope prompt, by whatever path, and ask the next question.
    *
    * The ONE close for this dialog. Every exit goes through here so that "the
@@ -2864,58 +2856,96 @@ export function useEditorEditing({
   }, [releaseBridgeDraft, closeIterationPrompt])
 
   /**
-   * Wind both dialogs down because the adapter they edit through is going away.
-   * Called from the adapter effect's cleanup, through a ref.
+   * END THE BRIDGE SESSION. The one place a session ends, for all three of the
+   * ways one can end.
    *
-   * ONE rule, in both cases: a bridge-held draft cannot outlive the adapter
-   * that holds it. Every question on screen, every question waiting, and every
-   * row in the deterministic dialog is a draft this adapter is still holding
-   * and an answer only this adapter could receive. So they all go back to it
-   * here, while it is still there to hear it (the cleanup runs this BEFORE
-   * `dispose()`), and the state that showed them is cleared.
+   * A "bridge session" is one document in the iframe, seen through one adapter
+   * attachment. Everything the iteration lane is holding belongs to exactly one
+   * of them: the drafts the bridge issued, the questions on screen about those
+   * drafts, the requests waiting to become questions, and every continuation
+   * that is mid-await. When the session ends, all of it ends with it.
    *
-   * It used to keep the mounted case answerable: cancel the prompt, and let its
-   * close move the queued parks into the deterministic dialog. That dialog then
-   * asked a question about drafts no adapter held any more, and answering it
-   * optional-chained the missing adapter and dropped the row, so choosing a
-   * scope silently discarded the edit. Discarding it OUT LOUD, once, is the
-   * honest version of the same outcome.
+   * It ends in three ways, and until this function existed each of them cleared
+   * a different subset:
    *
-   * `unmounting` decides only whether the count is worth saying. There is no
-   * status bar left on an unmounting hook to say it in.
+   * | Reason | What happens to the document | Was |
+   * | --- | --- | --- |
+   * | `teardown` / `unmount` | the adapter detaches | cleared everything |
+   * | `reload` | the conflict reload replaces it | cleared everything but the maps' cancels |
+   * | `reconnect` | the iframe loaded a NEW document | cleared NOTHING |
+   *
+   * The third one is why this exists. A reload the shell asks for (the
+   * post-turn refresh, the post-edit backstop, the conflict reload) fires the
+   * iframe's `load` event and the bridge comes back with its draft ids
+   * restarted at `dom-pending-1`. Nothing bumped the generation, so an older
+   * verify or hand-off resolved as if it were still current: it opened a dialog
+   * about a draft the new document does not hold, applied an overwrite computed
+   * for a document that is gone, or cancelled the NEW document's draft that
+   * happens to have been given the same id.
+   *
+   * `cancelWithBridge` is the one thing the reasons genuinely disagree about.
+   * A detaching adapter is still there to hear a cancel, and the cleanup runs
+   * this BEFORE `dispose()` for exactly that reason. A reloaded document is
+   * not: the drafts died with the document that issued them, and a cancel sent
+   * afterwards names ids that now belong to somebody else.
+   *
+   * The count is what the designer sees, and it is decided by `sessionEndPlan`
+   * rather than accumulated here, so the three reasons cannot drift apart on
+   * it. `unmount` is the one reason that does not say it: there is no status
+   * bar left on an unmounting hook to say it in.
    */
-  const teardownIterationPrompts = useCallback(
-    (unmounting: boolean) => {
-      let discarded = 0
-      const openPrompt = iterationScopePromptRef.current
-      if (openPrompt) {
-        // Also drops any queued request about the same draft, so it cannot be
-        // counted twice below.
-        releaseBridgeDraft(openPrompt)
-        iterationScopePromptRef.current = null
-        setIterationScopePrompt(null)
-        discarded += 1
-      }
-      discarded += releaseQueuedModalRequests()
-      const rows = rowsToRelease(pendingDisambiguationsRef.current)
-      for (const row of rows) {
-        adapterRef.current?.resolveMutationDisambiguation(row.pendingId, "cancel")
-      }
-      discarded += rows.length
-      if (pendingDisambiguationsRef.current.length > 0) setPendingDisambiguations([])
+  const endBridgeSession = useCallback(
+    ({
+      reason,
+      cancelWithBridge,
+    }: {
+      reason: BridgeSessionEndReason
+      cancelWithBridge: boolean
+    }) => {
+      // FIRST, before anything is cleared: every continuation still awaiting
+      // belongs to the session that is ending, and the clearing below is what
+      // it would otherwise resume into.
+      adapterGenerationRef.current += 1
+      adapterAbortRef.current?.abort()
+      // Renewed rather than left aborted. `teardown` is followed by an attach
+      // that would replace it anyway, and the other two reasons keep the
+      // adapter, so the next edit needs a live controller. A continuation that
+      // captured the old signal keeps the old signal.
+      adapterAbortRef.current = new AbortController()
+      const plan = sessionEndPlan({
+        openPrompt: iterationScopePromptRef.current,
+        queued: modalQueueRef.current,
+        rows: pendingDisambiguationsRef.current,
+        heldDraftIds: [...bridgeDraftsByPendingIdRef.current.keys()],
+      })
+      iterationScopePromptRef.current = null
+      setIterationScopePrompt(null)
+      modalQueueRef.current = []
+      // The modal goes with the questions. Leaving the owner set would wedge
+      // every later question behind a dialog that is no longer on screen.
       modalOwnerRef.current = null
-      // Whatever is left in the maps is a draft the lane is still working on:
-      // a verify in flight, a hand-off being awaited. Nothing on screen mentions
-      // it and its own completion cannot release it any more.
-      discarded += releaseHeldBridgeDrafts()
-      const status = discardedOnResetStatus(discarded)
-      if (status && !unmounting) setSaveStatus(status)
+      if (pendingDisambiguationsRef.current.length > 0) setPendingDisambiguations([])
+      bridgeDraftsByPendingIdRef.current.clear()
+      latestPendingByDraftRef.current.clear()
+      // The prop lane's markers are per identity and shared across sessions, so
+      // they die with the session that set them. Its `finally` refuses to
+      // delete a marker once the generation has moved (it would be deleting the
+      // NEXT session's), which is only safe because this clears them.
+      branchPropInFlight.current.clear()
+      if (cancelWithBridge) {
+        const adapter = adapterRef.current
+        for (const draftId of plan.cancelDraftIds) {
+          adapter?.resolveMutationDisambiguation(draftId, "cancel")
+        }
+      }
+      if (plan.status && reason !== "unmount") setSaveStatus(plan.status)
     },
-    [releaseBridgeDraft, releaseHeldBridgeDrafts, releaseQueuedModalRequests],
+    [],
   )
   // Assigned during render, like the other always-latest mirrors in this hook,
-  // so the adapter effect's cleanup always calls the current one.
-  iterationTeardownRef.current = teardownIterationPrompts
+  // so the adapter effect's cleanup and its `load` handler always call the
+  // current one.
+  endBridgeSessionRef.current = endBridgeSession
 
   /**
    * Funnel a pending iteration edit through: verify the loop in source,
@@ -4840,32 +4870,23 @@ export function useEditorEditing({
   const handleReloadAfterConflict = useCallback(() => {
     setConflict(null)
     setMutations([])
-    setPendingDisambiguations([])
-    // The modal goes with the rows. Emptying `pendingDisambiguations` closes
-    // the dialog, so leaving the owner set would wedge every later question
-    // behind a dialog that is no longer on screen.
-    modalOwnerRef.current = null
-    modalQueueRef.current = []
-    iterationScopePromptRef.current = null
-    setIterationScopePrompt(null)
-    // Hand every draft still in the maps back, while the adapter that holds
-    // them is still there to hear it. Clearing the queue and the prompt above
-    // drops the REFERENCES only; the drafts themselves live in the maps, and
-    // the reload below makes the bridge re-issue those same ids from
-    // `dom-pending-1`. A verify still in flight would then open a dialog about
-    // a draft the reloaded page does not hold, under an id that names someone
-    // else's edit.
-    releaseHeldBridgeDrafts()
-    // A reload ends the drafts' session as surely as a teardown does, without
-    // detaching the adapter. So the generation moves and the session's requests
-    // are cancelled: every in-flight continuation stops where it is. The
-    // controller is renewed rather than left aborted, because the adapter is
-    // staying and the next edit needs a live one.
-    adapterGenerationRef.current += 1
-    adapterAbortRef.current?.abort()
-    adapterAbortRef.current = new AbortController()
     fileHashesRef.current = {}
+    // Cleared BEFORE the session ends, not after: ending it says how many held
+    // edits the reload threw away, and that sentence is the last word here.
     setSaveStatus(null)
+    // A reload ends the drafts' session as surely as a teardown does, without
+    // detaching the adapter — the bridge comes back a fresh instance numbering
+    // its drafts from `dom-pending-1` again. So it goes through the same one
+    // function: the generation moves, every in-flight continuation stops where
+    // it is, and the prompt, the queue, the dialog rows and the maps are all
+    // emptied together.
+    //
+    // Nothing is handed back to the bridge. The reload below destroys the state
+    // those ids name, and the instance that would receive a cancel is not the
+    // one that issued them. This is the one asymmetry with a teardown, and it
+    // is now said out loud rather than being the difference between two code
+    // paths that looked alike.
+    endBridgeSessionRef.current?.({ reason: "reload", cancelWithBridge: false })
     adapterRef.current?.clearPropOverrides()
     adapterRef.current?.clearAttrOverrides()
     adapterRef.current?.clearClassOverrides()
@@ -4883,7 +4904,7 @@ export function useEditorEditing({
     // backstop flag. The flag only governs the AUTOMATIC post-edit
     // safety net; explicit user actions bypass it.
     requestPrototypeReload(iframeRef.current, "conflict-reload", "force")
-  }, [iframeRef, releaseHeldBridgeDrafts])
+  }, [iframeRef])
 
   /**
    * Merge a chat-proposed edit into the live editing state. Called by
