@@ -204,6 +204,18 @@ export function describeAmbiguousIteration(
 }
 
 /**
+ * The bridge draft this pending edit is holding, when it is holding one.
+ *
+ * Only an in-page typing session has one: the designer typed into the DOM, the
+ * bridge captured a draft mutation and is waiting to be told what to do with
+ * it. Every other pending edit came from the inspector or the Layers panel and
+ * the bridge holds nothing.
+ */
+export function bridgeDraftIdOf(pending: PendingIterationEdit): string | undefined {
+  return pending.editKind === "dom-text" ? pending.bridgePendingId : undefined
+}
+
+/**
  * Do these two pending edits hold the SAME bridge draft? Two verifies can be
  * in flight at once, and the later one replaces the earlier in the dialog
  * state. Whatever it replaces must have its bridge draft released, or Save

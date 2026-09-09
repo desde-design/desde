@@ -111,6 +111,7 @@ import {
   writeStoredLayersDensity,
 } from "./layers-density-storage"
 import {
+  bridgeDraftIdOf,
   decideAfterVerify,
   isStaleVerify,
   iterationRouteFor,
@@ -2049,6 +2050,107 @@ export function useEditorEditing({
 
   const cancelDeleteScope = useCallback(() => setDeleteScopePrompt(null), [])
 
+  // ─── The bridge draft an in-page typing session is holding ───────────
+  //
+  // Three facts about one draft id, kept together because every rule below
+  // reads more than one of them.
+
+  /**
+   * The bridge's own `PendingMutation` for a draft we routed to the iteration
+   * dialog, keyed by draft id.
+   *
+   * Routing to that dialog takes the pending OUT of `pendingDisambiguations`
+   * before it is ever added, which is right while the iteration lane can still
+   * land the edit. When it cannot — chat refused the hand-off, the proposal
+   * failed, the write failed — the honest fallback is the deterministic
+   * question that path replaced ("this instance" / "all instances"), and that
+   * dialog needs the real payload. Kept rather than reconstructed: the
+   * candidate list is the bridge's answer about the live DOM, and a
+   * reconstruction would have to invent it.
+   */
+  const bridgeDraftsByPendingIdRef = useRef<Map<string, PendingMutation>>(new Map())
+
+  /**
+   * The NEWEST pending edit per draft id.
+   *
+   * An in-page typing session rebuilds the pending object on every keystroke
+   * round trip, and each one starts an async verify plus (on a no-loop answer)
+   * an awaited hand-off. While an older one is awaiting, a newer one can take
+   * over the same draft. The older completion must not release a draft the
+   * newer one is using, and object identity is the only thing that separates
+   * them: they share the draft id by construction.
+   */
+  const latestPendingByDraftRef = useRef<Map<string, PendingIterationEdit>>(new Map())
+
+  // A prompt that arrived from the BRIDGE (in-page typing) means the bridge
+  // is still holding a draft mutation keyed by `bridgePendingId`. Every exit
+  // from the pending state (cancel, hand-off to chat, refusal) must release
+  // it, or the orphaned draft blocks Save behind `handleSaveAll`'s gate.
+  // Harmless for prompts that never came from the bridge:
+  // `resolveDisambiguation` no-ops on an unknown id.
+  const releaseBridgeDraft = useCallback((pending: PendingIterationEdit | null) => {
+    if (!pending) return
+    const draftId = bridgeDraftIdOf(pending)
+    if (!draftId) return
+    adapterRef.current?.resolveMutationDisambiguation(draftId, "cancel")
+    bridgeDraftsByPendingIdRef.current.delete(draftId)
+    latestPendingByDraftRef.current.delete(draftId)
+  }, [])
+
+  /**
+   * Release this pending's bridge draft, unless something LIVE still needs it.
+   *
+   * Two owners can outrank a completing pending: a NEWER intercept for the same
+   * draft (the user kept typing), and the dialog currently open on it. Both
+   * describe the same in-page typing session, so cancelling "this one's" draft
+   * would cancel theirs. Used by every late completion — stale, disposed, or
+   * post-await.
+   */
+  const releaseBridgeDraftUnlessShared = useCallback(
+    (pending: PendingIterationEdit) => {
+      const draftId = bridgeDraftIdOf(pending)
+      if (draftId && latestPendingByDraftRef.current.get(draftId) !== pending) return
+      setIterationScopePrompt((current) => {
+        if (!current || !sameBridgeDraft(current, pending)) releaseBridgeDraft(pending)
+        return current
+      })
+    },
+    [releaseBridgeDraft],
+  )
+
+  /**
+   * The iteration lane could not land this edit. Hand the bridge's held draft
+   * to the deterministic disambiguation dialog instead of cancelling it.
+   *
+   * Cancelling loses the designer's typed text with nothing written anywhere:
+   * the in-page contentEditable path has no preview ops to revert, so the DOM
+   * keeps showing a change that reached no file, and the only remaining record
+   * of what they typed is gone. The dialog this parks it in is the honest
+   * choice that existed before the iteration lane: "this instance" or "all
+   * instances", answerable and already wired to the same draft.
+   *
+   * Returns false when there is nothing to park (no draft, or the bridge's
+   * payload was never recorded), so the caller can fall back to releasing.
+   */
+  const parkDraftForDeterministicFallback = useCallback(
+    (pending: PendingIterationEdit, reason: string): boolean => {
+      const draftId = bridgeDraftIdOf(pending)
+      if (!draftId) return false
+      const held = bridgeDraftsByPendingIdRef.current.get(draftId)
+      if (!held) return false
+      // The disambiguation queue owns the draft from here; its confirm and
+      // cancel both resolve it with the bridge.
+      bridgeDraftsByPendingIdRef.current.delete(draftId)
+      latestPendingByDraftRef.current.delete(draftId)
+      setPendingDisambiguations((prev) =>
+        prev.some((existing) => existing.pendingId === held.pendingId) ? prev : [...prev, held],
+      )
+      setSaveStatus(reason)
+      return true
+    },
+    [],
+  )
+
   /**
    * Drive a pending iteration edit through the chosen scope. Used by
    * both the dialog confirm path AND the remembered-scope fast path
@@ -2092,6 +2194,9 @@ export function useEditorEditing({
                 pending.bridgePendingId,
                 "all-instances",
               )
+              // Resolved, so nothing may park or re-release it later.
+              bridgeDraftsByPendingIdRef.current.delete(pending.bridgePendingId)
+              latestPendingByDraftRef.current.delete(pending.bridgePendingId)
             } else {
               const targetSelector =
                 pending.field.selector ?? pending.selection.selector
@@ -2106,26 +2211,23 @@ export function useEditorEditing({
         return
       }
 
-      // The designer picked the narrower scope, so the bridge's draft — which is
-      // the SHARED-template edit — must never reach the edit route. Cancel it.
+      // The designer picked the narrower scope, so the bridge's draft — which
+      // is the SHARED-template edit — must never reach the edit route. It is
+      // released once this lane has actually WRITTEN the row edit, and parked
+      // in the deterministic dialog if it cannot (see
+      // `parkDraftForDeterministicFallback`).
       //
-      // Cancelling does NOT restore the typed text, and an earlier version of
-      // this comment claimed it did. `releaseUnownedPreview` returns early when
+      // It used to be cancelled here, before the request ran. Cancelling does
+      // not restore the typed text: `releaseUnownedPreview` returns early when
       // there are no `previewOps`, and the in-page contentEditable path
-      // (`inspector.setCaptureTextMutation`) supplies none — the designer typed
-      // into the DOM directly, so there was never an optimistic preview to
-      // revert. The text therefore stays as typed until HMR renders the real
-      // write. On the success path that is momentary and correct; on a refusal
-      // the DOM keeps showing a change that was never written, which
-      // `setSaveStatus` reports but the page does not undo. That gap is
-      // pre-existing (the mutation-disambiguation dialog's own Cancel has it
-      // too) and closing it means giving this capture path real `previewOps`,
-      // which is its own change.
-      if (pending.editKind === "dom-text" && pending.bridgePendingId) {
-        adapterRef.current?.resolveMutationDisambiguation(
-          pending.bridgePendingId,
-          "cancel",
-        )
+      // (`inspector.setCaptureTextMutation`) supplies none, because the
+      // designer typed into the DOM directly. So a failed proposal or a failed
+      // write left neither a source edit nor anything to retry, with the page
+      // still showing text that reached no file.
+      const failThisRow = (message: string) => {
+        if (!parkDraftForDeterministicFallback(pending, `${message} Choose how to apply it.`)) {
+          setSaveStatus(message)
+        }
       }
 
       // "this-row" → deterministic iteration-data edit, LLM fallback behind it.
@@ -2135,9 +2237,7 @@ export function useEditorEditing({
       // `thisRowTemplateLocation`.
       const templateLocation = thisRowTemplateLocation(pending)
       if (!templateLocation) {
-        setSaveStatus(
-          "Iteration edit refused: no source location on the selection.",
-        )
+        failThisRow("Iteration edit refused: no source location on the selection.")
         return
       }
       const pageSourceFile = useAppStore.getState().currentSourceFile
@@ -2186,7 +2286,7 @@ export function useEditorEditing({
           description,
         })
         if (!result.ok) {
-          setSaveStatus(`Iteration edit refused: ${result.reason}`)
+          failThisRow(`Iteration edit refused: ${result.reason}`)
           return
         }
         const id = makeEditId()
@@ -2205,23 +2305,26 @@ export function useEditorEditing({
         // rewrite; write it to the working tree so Vite HMR reflects it.
         const adapter = adapterRef.current
         if (!adapter) {
-          setSaveStatus("Editor adapter not ready. Try again in a moment.")
+          failThisRow("Editor adapter not ready. Try again in a moment.")
           return
         }
         const applied = await adapter.applyEdit(overwrite)
         if (applied.kind === "failed") {
-          setSaveStatus(
+          failThisRow(
             `Iteration edit failed for ${result.proposal.file}: ${applied.reason}`,
           )
           return
         }
+        // WRITTEN. Only now is the bridge's shared-template draft safe to drop:
+        // the row edit is on disk and HMR will render it.
+        releaseBridgeDraft(pending)
         setSaveStatus(
           `Iteration applied to ${result.proposal.file}: ${
             result.proposal.explanation ?? description
           }`,
         )
       } catch (err) {
-        setSaveStatus(`Iteration edit threw: ${(err as Error).message}`)
+        failThisRow(`Iteration edit threw: ${(err as Error).message}`)
       }
     },
     // legacyHandle*Ref are stable refs; dispatchDeleteEdit is stable. The deps
@@ -2262,18 +2365,6 @@ export function useEditorEditing({
     [iterationScopePrompt, dispatchIterationEdit],
   )
 
-  // A prompt that arrived from the BRIDGE (in-page typing) means the bridge
-  // is still holding a draft mutation keyed by `bridgePendingId`. Every exit
-  // from the pending state (cancel, hand-off to chat, refusal) must release
-  // it, or the orphaned draft blocks Save behind `handleSaveAll`'s gate.
-  // Harmless for prompts that never came from the bridge:
-  // `resolveDisambiguation` no-ops on an unknown id.
-  const releaseBridgeDraft = useCallback((pending: PendingIterationEdit | null) => {
-    if (pending?.editKind === "dom-text" && pending.bridgePendingId) {
-      adapterRef.current?.resolveMutationDisambiguation(pending.bridgePendingId, "cancel")
-    }
-  }, [])
-
   const cancelIterationScope = useCallback(() => {
     setIterationScopePrompt((current) => {
       releaseBridgeDraft(current)
@@ -2306,6 +2397,12 @@ export function useEditorEditing({
       // Claim the latest slot. Responses are not ordered, so this is what
       // tells a late answer that newer keystrokes have replaced it.
       const seq = ++verifySeqRef.current
+      // Claim the DRAFT too. A newer intercept for the same in-page typing
+      // session shares the draft id and differs only by object identity, so
+      // this is what lets an older completion tell that the draft it is about
+      // to release is no longer its own to release.
+      const claimedDraftId = bridgeDraftIdOf(pending)
+      if (claimedDraftId) latestPendingByDraftRef.current.set(claimedDraftId, pending)
       const signal = verifyAbortRef.current?.signal
       // The window between "this verify started" and "this verify answered"
       // is one in which the surface can go away. Both facts are read at
@@ -2324,16 +2421,13 @@ export function useEditorEditing({
             return
           }
           if (isStaleVerify(seq, verifySeqRef.current)) {
-            // Release THIS draft only, and only when the prompt that is
-            // currently open is not holding the SAME one. A stale result and
-            // the prompted pending can describe one in-page typing session:
-            // the pending object is rebuilt on every keystroke round trip, so
-            // they are different objects sharing a `bridgePendingId`.
-            // Cancelling it there cancels the draft the open dialog needs.
-            setIterationScopePrompt((current) => {
-              if (!current || !sameBridgeDraft(current, pending)) releaseBridgeDraft(pending)
-              return current
-            })
+            // Release THIS draft only, and only when nothing live is still
+            // using it: neither a newer intercept nor the prompt currently
+            // open. A stale result and the survivor can describe one in-page
+            // typing session, because the pending object is rebuilt on every
+            // keystroke round trip, so they are different objects sharing a
+            // `bridgePendingId`. Cancelling here cancels theirs.
+            releaseBridgeDraftUnlessShared(pending)
             setSaveStatus("A newer edit replaced this one.")
             return
           }
@@ -2355,17 +2449,39 @@ export function useEditorEditing({
             // a dropped fetch), and releasing first meant the bridge had
             // already dropped the live preview by the time we learned nothing
             // was sent.
-            const accepted = handOff ? await handOff(action.prompt) : false
-            // The draft goes either way: on a refusal the bridge cannot hold
-            // it usefully (the dialog will never open for it), and on
-            // acceptance chat owns the edit from here.
-            releaseBridgeDraft(pending)
-            // Re-read both facts AFTER the await. The surface can be disposed
-            // and newer keystrokes can land while the POST is in flight; a
-            // result that went stale in that window must not speak, though
-            // releasing its own draft above is still right.
-            if (gone() || isStaleVerify(seq, verifySeqRef.current)) return
-            if (!accepted) {
+            let accepted = false
+            try {
+              accepted = handOff ? await handOff(action.prompt) : false
+            } catch {
+              // A thrown hand-off is a refusal, not a verify failure. Letting
+              // it reach the outer `.catch` would blame the loop check for
+              // something the chat POST did, and would release the draft.
+              accepted = false
+            }
+            // Staleness FIRST, and it decides the release. While this POST was
+            // in flight a newer intercept can have taken over the same draft
+            // (the user kept typing); releasing here would cancel THEIR draft,
+            // and the newer one is the one the user can still see.
+            if (gone() || isStaleVerify(seq, verifySeqRef.current)) {
+              releaseBridgeDraftUnlessShared(pending)
+              return
+            }
+            if (accepted) {
+              // Chat owns the edit from here, so the shared-template draft goes.
+              releaseBridgeDraft(pending)
+              return
+            }
+            // Refused, and NOTHING was sent. Cancelling the draft here would
+            // throw away what the designer typed with no record of it in any
+            // file and no way to retry, so park it in the deterministic
+            // dialog instead: "this instance" or "all instances" is a worse
+            // question than the agent would have asked, but it is answerable.
+            const parked = parkDraftForDeterministicFallback(
+              pending,
+              "This edit could not be sent to chat. Choose how to apply it.",
+            )
+            if (!parked) {
+              releaseBridgeDraft(pending)
               setSaveStatus("This edit needs a decision and could not be sent to chat.")
             }
             return
@@ -2405,14 +2521,23 @@ export function useEditorEditing({
         // A throw inside the `.then` body above (not an `outcome.kind ===
         // "error"` result, an actual exception) must still release the
         // draft and surface a status, or it leaves the bridge blocked with
-        // nothing shown.
-        releaseBridgeDraft(pending)
+        // nothing shown. `UnlessShared`, because this is a late completion
+        // like any other: a newer intercept may already own the draft.
+        //
+        // The hand-off's own failures never arrive here; that branch catches
+        // them itself, so this message is only ever about the loop check.
+        releaseBridgeDraftUnlessShared(pending)
         if (gone()) return
         setSaveStatus(`Could not check the source for a loop: ${(err as Error).message}`)
       })
       return true
     },
-    [dispatchIterationEdit, releaseBridgeDraft],
+    [
+      dispatchIterationEdit,
+      parkDraftForDeterministicFallback,
+      releaseBridgeDraft,
+      releaseBridgeDraftUnlessShared,
+    ],
   )
 
   // Keep the early-handler ref pointed at the latest interceptor. The
@@ -3801,6 +3926,11 @@ export function useEditorEditing({
       }
 
       if (route.kind === "iteration-dialog" && iterationEdit) {
+        // Keep the bridge's own payload. The iteration lane may fail to land
+        // this edit (chat refuses the hand-off, the proposal or the write
+        // fails), and the honest fallback is the deterministic dialog this
+        // route skipped, which needs the real candidate list.
+        bridgeDraftsByPendingIdRef.current.set(p.pendingId, p)
         iterationEdit.intercept(iterationEdit.args)
         return
       }

@@ -3,6 +3,7 @@ import type { IterationContext } from "@/editor/core"
 import type { OutlineNode } from "@/types/bridge"
 import { EDIT_HANDOFF_MARKER } from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
+  bridgeDraftIdOf,
   decideAfterVerify,
   describeAmbiguousIteration,
   isStaleVerify,
@@ -315,5 +316,30 @@ describe("iterationRouteFor", () => {
     // Belt and braces: the boundary clears one when it sets the other, but the
     // refusal must not depend on that ordering holding.
     expect(iterationRouteFor({ iterationContext, iterationContextMalformed: true })).toBe("refuse")
+  })
+})
+
+describe("bridgeDraftIdOf", () => {
+  const domText: PendingIterationEdit = {
+    editKind: "dom-text",
+    selection: { selector: node.selector } as never,
+    field: { id: "dom-text", kind: "dom-text", label: "Text", value: "old" } as never,
+    value: "new",
+    iterationContext,
+    bridgePendingId: "pending-7",
+  }
+
+  it("names the draft an in-page typing session is holding", () => {
+    expect(bridgeDraftIdOf(domText)).toBe("pending-7")
+  })
+
+  it("names nothing for an edit the bridge holds no draft for", () => {
+    // Inspector-typed text: same edit kind, no draft.
+    const { bridgePendingId: _none, ...typedInInspector } = domText
+    expect(bridgeDraftIdOf(typedInInspector as PendingIterationEdit)).toBeUndefined()
+    // And every other kind reaches us from a panel, never from the page.
+    expect(
+      bridgeDraftIdOf({ editKind: "delete", selection: {} as never, node, iterationContext }),
+    ).toBeUndefined()
   })
 })
