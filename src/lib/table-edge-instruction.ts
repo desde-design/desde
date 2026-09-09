@@ -67,7 +67,10 @@ function formatLocation(
  * capped on its own, then the whole list rides one bullet inside the envelope.
  */
 function formatFingerprints(strings: readonly string[], totalCount: number): string {
-  const shown = strings.slice(0, 50)
+  // The payload is cast off `postMessage`, so `cellFingerprints` being an
+  // array is a claim nothing checked. `sanitizeField` handles each ENTRY not
+  // being a string; this handles the list itself not being a list.
+  const shown = Array.isArray(strings) ? strings.slice(0, 50) : []
   if (shown.length === 0) return "(no visible text in cells)"
   const list = shown.map((s) => `"${sanitizeField(s)}"`).join(", ")
   const total = safeCount(totalCount)
@@ -81,8 +84,12 @@ export function buildTableEdgeInstruction(
   action: TableEdgeAction,
   payload: TableEdgeContextMenuPayload,
 ): string {
-  const verb = actionLabel(action, payload.kind)
+  // Normalise the kind FIRST and label off the normalised value. `kind` is
+  // typed `"row" | "column"` but arrives off `postMessage`, and
+  // `ACTION_VERBS[action][kind]` on any third value is `undefined`, which used
+  // to reach `sanitizeField` and throw partway through building the message.
   const kind = payload.kind === "column" ? "column" : "row"
+  const verb = actionLabel(action, kind)
   const facts: string[] = [
     `- Action: ${verb}`,
     `- Targeted band: ${kind} index ${String(safeCount(payload.index))} of ${String(safeCount(payload.totalBands))}`,

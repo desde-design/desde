@@ -10,6 +10,8 @@
  * decoupled from the full edit type.
  */
 
+import { flattenControlCharacters } from "./control-characters"
+
 export interface EscalationMutation {
   kind: "text" | "attr" | "class" | "style"
   /** `data-desde-src` "file:line:column" of the edited node, or null. */
@@ -318,11 +320,19 @@ export function describeMoveDestination(
  * line break and control character to one space is what keeps the block's
  * one-bullet-per-fact shape true, which is in turn what makes the fence below
  * meaningful: a value can no longer forge a marker line or a new bullet.
+ *
+ * Takes `unknown`, not `string`, for the same reason {@link safeCount} does:
+ * these values are typed off a `postMessage` payload, and the type is a claim
+ * the wire never checked. A missing or non-string field becomes the empty
+ * string, so a hostile payload can make a builder render "(none)" but can no
+ * longer make one throw halfway through composing a message.
+ *
+ * The class of characters it collapses is {@link flattenControlCharacters}'s,
+ * shared with the boundary check that REFUSES them.
  */
-export function sanitizeField(value: string, limit = FIELD_LIMIT): string {
-  // The class is the C0 and C1 control ranges plus the two Unicode line
-  // separators, which JavaScript treats as line terminators.
-  const flat = value.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ").trim()
+export function sanitizeField(value: unknown, limit = FIELD_LIMIT): string {
+  if (typeof value !== "string") return ""
+  const flat = flattenControlCharacters(value).trim()
   if (flat.length <= limit) return flat
   return `${flat.slice(0, limit)}... (truncated at ${limit} characters)`
 }

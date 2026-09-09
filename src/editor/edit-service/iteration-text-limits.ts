@@ -9,10 +9,18 @@
  * carrying a newline is not an expression that got mangled in transit, it is a
  * page writing extra lines into a message.
  *
- * Lives here, in a module with no imports, because BOTH ends apply it: the
- * client's wire boundary (`validateIterationContext`) and the CLI's two
- * iteration routes, which must not trust a hand-built request either.
+ * Lives here, in a module whose only import is a sibling with no imports of
+ * its own, because BOTH ends apply it: the client's wire boundary
+ * (`validateIterationContext`) and the CLI's two iteration routes, which must
+ * not trust a hand-built request either.
+ *
+ * What counts as a control character is NOT decided here. It comes from
+ * `control-characters.ts`, shared with `sanitizeField`, which flattens the
+ * same class downstream. The two used to disagree: this check covered C0 and
+ * DEL, while `sanitizeField` also covered C1 and U+2028/U+2029, so the
+ * narrower of the two was the one deciding what was safe to send.
  */
+import { hasControlCharacters } from "./control-characters"
 
 /** A `v-for` expression or a row key that is longer than this is not one. */
 export const ITERATION_TEXT_LIMIT = 200
@@ -23,10 +31,6 @@ export const ITERATION_TEXT_LIMIT = 200
  * rule otherwise: it reaches the same prompt, so it may not carry lines.
  */
 export const ITERATION_DESCRIPTION_LIMIT = 500
-
-// Escaped, not literal, so the rule reads as a rule; `no-control-regex` only
-// fires on literal control characters, which is why there is no directive here.
-const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/
 
 /**
  * Why `value` is not acceptable as `label`, or null when it is fine.
@@ -42,6 +46,6 @@ export function iterationTextProblem(
   if (value.length > limit) {
     return `${label} is longer than ${limit} characters`
   }
-  if (CONTROL_CHARACTERS.test(value)) return `${label} contains control characters`
+  if (hasControlCharacters(value)) return `${label} contains control characters`
   return null
 }

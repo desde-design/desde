@@ -141,3 +141,55 @@ describe("buildTableEdgeInstruction", () => {
     expect(p).not.toContain('"cell 60"')
   })
 })
+
+describe("buildTableEdgeInstruction on a payload that lies about its types", () => {
+  // Everything here arrives off `postMessage`, so every field's type is a
+  // claim nothing checked. A builder that throws mid-message is worse than
+  // one that renders "(none)": the caller is starting a chat turn.
+  it("renders (none) for a missing selector instead of throwing", () => {
+    const p = buildTableEdgeInstruction(
+      "delete",
+      payload({
+        containerSelector: undefined as unknown as string,
+        targetSelector: undefined as unknown as string,
+      }),
+    )
+    expect(p).toContain("- Container selector: (none)")
+    expect(p).toContain("- Target selector: (none)")
+  })
+
+  it("survives a non-string selector, file path and cell entry", () => {
+    const p = buildTableEdgeInstruction(
+      "duplicate",
+      payload({
+        containerSelector: { toString: null } as unknown as string,
+        containerEditTarget: {
+          file: 42 as unknown as string,
+          line: 3,
+          column: 1,
+        },
+        cellFingerprints: [null, 7] as unknown as string[],
+      }),
+    )
+    expect(p).toContain("- Container selector: (none)")
+    expect(p).toContain("- Container source: :3:1")
+    expect(p).toContain('- Visible cell text: "", ""')
+  })
+
+  it("survives a cell list that is not a list", () => {
+    const p = buildTableEdgeInstruction(
+      "delete",
+      payload({ cellFingerprints: "Ada" as unknown as string[], cellCount: 1 }),
+    )
+    expect(p).toContain("- Visible cell text: (no visible text in cells)")
+  })
+
+  it("normalises an unknown band kind to a row rather than throwing", () => {
+    const p = buildTableEdgeInstruction(
+      "addAfter",
+      payload({ kind: "diagonal" as unknown as "row" }),
+    )
+    expect(p).toContain("- Action: Add row below")
+    expect(p).toContain("- Targeted band: row index 2 of 6")
+  })
+})
