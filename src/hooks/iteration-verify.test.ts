@@ -9,9 +9,11 @@ describe("verifyIterationLoop", () => {
   const args = { file: "src/components/ui/card.tsx", line: 60, column: 4 }
 
   it("posts file + templateLocation and reports a loop", async () => {
-    const fetchImpl = vi.fn(async () => json({ ok: true, loop: { kind: "map", expression: "items.map" } }))
+    const fetchImpl = vi.fn(async () =>
+      json({ ok: true, loop: { kind: "map", expression: "items.map", location: { line: 60, column: 4 } } }),
+    )
     const r = await verifyIterationLoop(args, fetchImpl as never)
-    expect(r).toEqual({ kind: "loop", expression: "items.map" })
+    expect(r).toEqual({ kind: "loop", expression: "items.map", location: { line: 60, column: 4 } })
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe("/api/editor/iteration/verify")
     expect(JSON.parse(init.body as string)).toEqual({ file: args.file, templateLocation: { line: 60, column: 4 } })
@@ -30,15 +32,34 @@ describe("verifyIterationLoop", () => {
     })
   })
 
-  it("drops a position that is not a usable coordinate", async () => {
-    // It is dispatched as an edit coordinate. A non-integer reaches a parser
-    // as a position nothing can match, so the click's position is better.
+  /**
+   * The position is what decides whether the click landed ON the loop element
+   * or INSIDE a row, and that decides whether a remove takes the clicked
+   * element or the whole item. Dropping a bad one left the caller reading the
+   * click's own position, which is exactly the "the click IS the loop" answer.
+   * There is no safe fallback, so this fails the verify instead.
+   */
+  it.each([
+    ["a non-integer line", { line: "51", column: 8 }],
+    ["a fractional column", { line: 51, column: 8.5 }],
+    ["a line below 1", { line: 0, column: 8 }],
+    ["a negative column", { line: 51, column: -1 }],
+    ["a null location", null],
+    ["no location at all", undefined],
+  ])("errors on a loop verdict with %s", async (_label, location) => {
     const fetchImpl = vi.fn(async () =>
-      json({ ok: true, loop: { kind: "map", expression: "items.map", location: { line: "51", column: 8 } } }),
+      json({
+        ok: true,
+        loop: {
+          kind: "map",
+          expression: "items.map",
+          ...(location === undefined ? {} : { location }),
+        },
+      }),
     )
     expect(await verifyIterationLoop(args, fetchImpl as never)).toEqual({
-      kind: "loop",
-      expression: "items.map",
+      kind: "error",
+      reason: "The loop check returned no position",
     })
   })
 

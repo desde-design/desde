@@ -2372,8 +2372,12 @@ export function useEditorEditing({
       // unaffected; see `thisRowOperationAllowed`.
       if (!thisRowOperationAllowed(pending)) {
         const loopLocation = pending.loopLocation
-        // Narrowing, not a guard: `thisRowOperationAllowed` returns false only
-        // when both positions exist and differ.
+        // `thisRowOperationAllowed` fails closed, so it also returns false when
+        // a position is MISSING, and the row-scoped hand-off needs both to say
+        // which element inside which loop. In practice a verified pending
+        // always carries one (a `loop` verdict without a position is an error
+        // now), so this is the defensive arm: park the edit and say so rather
+        // than dispatch a row operation on half the information.
         if (!loopLocation || !fieldLocation) {
           failThisRow("Iteration edit refused: no source location on the selection.")
           return

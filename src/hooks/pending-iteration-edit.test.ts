@@ -302,25 +302,27 @@ describe("decideAfterVerify", () => {
   })
 
   it("loop with a remembered scope: dispatches that scope without asking", () => {
+    // The loop is AT the clicked position here, so the carried position equals
+    // the click. It is still carried: a `loop` verdict always has one now.
     expect(
       decideAfterVerify({
-        outcome: { kind: "loop", expression: "items.map" },
+        outcome: { kind: "loop", expression: "items.map", location: { line: 60, column: 4 } },
         pending,
         location,
         remembered: "this-row",
       }),
-    ).toEqual({ kind: "remembered", scope: "this-row" })
+    ).toEqual({ kind: "remembered", scope: "this-row", loopLocation: location })
   })
 
   it("loop with nothing remembered: opens the dialog", () => {
     expect(
       decideAfterVerify({
-        outcome: { kind: "loop", expression: "items.map" },
+        outcome: { kind: "loop", expression: "items.map", location: { line: 60, column: 4 } },
         pending,
         location,
         remembered: undefined,
       }),
-    ).toEqual({ kind: "prompt" })
+    ).toEqual({ kind: "prompt", loopLocation: location })
   })
 
   it("carries the loop's own position on both loop exits, keeping the verified file", () => {
@@ -410,10 +412,39 @@ describe("clickedInsideRow / thisRowOperationAllowed", () => {
     expect(thisRowOperationAllowed(pending)).toBe(true)
   })
 
-  it.each(kinds)("no verified loop position at all allows the row operation (%s)", (kind) => {
-    // Pre-`loopLocation` behaviour: nothing says the click was nested.
-    expect(clickedInsideRow(byKind[kind])).toBe(false)
-    expect(thisRowOperationAllowed(byKind[kind])).toBe(true)
+  it.each(["delete", "move"] as const)(
+    "no verified loop position REFUSES the row operation (%s)",
+    (kind) => {
+      // Fails closed. "Not nested" has to be positively established, because
+      // reading a missing position as "the click IS the loop" produces the
+      // worst edit available (the whole item removed, the rows reordered by a
+      // sibling index) from the least information.
+      expect(clickedInsideRow(byKind[kind])).toBe(false)
+      expect(thisRowOperationAllowed(byKind[kind])).toBe(false)
+    },
+  )
+
+  it.each(["prop", "dom-text"] as const)(
+    "no verified loop position still allows a field edit (%s)",
+    (kind) => {
+      // `patch` / `patch-text` name a field, so they are the same edit either
+      // way and there is nothing for a missing position to get wrong.
+      expect(thisRowOperationAllowed(byKind[kind])).toBe(true)
+    },
+  )
+
+  it("refuses a delete whose own position is missing, even with a verified loop", () => {
+    // Both positions are needed to say "this element, inside that loop". One
+    // of them alone cannot decide it.
+    const noEditTarget = { ...node, editTarget: undefined }
+    const pending = {
+      editKind: "delete",
+      selection: { selector: node.selector } as never,
+      node: noEditTarget,
+      iterationContext,
+      loopLocation: rootLocation,
+    } as PendingIterationEdit
+    expect(thisRowOperationAllowed(pending)).toBe(false)
   })
 
   it.each(kinds)("a click INSIDE the row is detected (%s)", (kind) => {

@@ -9,10 +9,16 @@ export type IterationVerifyOutcome =
   /**
    * `location` is where the LOOP is in source, which is not always the
    * position that was asked about: the server walks up from a nested element
-   * to the enclosing `v-for` / `.map()`. Absent when an older CLI answered
-   * without it, in which case the caller keeps using the clicked position.
+   * to the enclosing `v-for` / `.map()`.
+   *
+   * REQUIRED. It used to be optional, to allow for a CLI that answered without
+   * it, and a `loop` verdict with no position then read downstream as "the
+   * click IS the loop element" — which is the one thing the position exists to
+   * decide. On that reading a remove or a reorder aimed at a `<span>` inside a
+   * row was dispatched against the whole row. A verdict without a position is
+   * now an error instead, and this branch's server always sends one.
    */
-  | { kind: "loop"; expression: string; location?: { line: number; column: number } }
+  | { kind: "loop"; expression: string; location: { line: number; column: number } }
   | { kind: "no-loop"; reason: string }
   | { kind: "error"; reason: string }
 
@@ -135,15 +141,24 @@ export async function verifyIterationLoop(
   if (body.loop) {
     // The position is validated, not trusted: it is dispatched as an edit
     // coordinate, and a non-integer there reaches a parser as a position that
-    // can never match. A bad one is dropped, which falls back to the clicked
-    // position rather than failing the verify.
+    // can never match.
+    //
+    // A missing or unusable one is now an ERROR, not a `loop` verdict with the
+    // position dropped. Dropping it looked harmless (the caller fell back to
+    // the clicked position) but the fallback is indistinguishable from "the
+    // click landed on the loop element", and that is what decides whether a
+    // remove takes the clicked element or the whole row. Failing the verify
+    // parks the edit and asks; falling back silently made the wrong edit.
     const loc = body.loop.location
     const usable =
       loc && Number.isInteger(loc.line) && Number.isInteger(loc.column) && loc.line >= 1 && loc.column >= 0
+    if (!usable) {
+      return { kind: "error", reason: "The loop check returned no position" }
+    }
     return {
       kind: "loop",
       expression: body.loop.expression,
-      ...(usable ? { location: { line: loc.line, column: loc.column } } : {}),
+      location: { line: loc.line, column: loc.column },
     }
   }
   return { kind: "no-loop", reason: body.reason ?? "No loop at that position" }

@@ -363,9 +363,19 @@ export function clickedInsideRow(pending: PendingIterationEdit): boolean {
  *
  * A click on the loop element itself is unaffected: there, removing the entry
  * IS deleting what was clicked.
+ *
+ * It fails CLOSED. "Not nested" has to be POSITIVELY established: both
+ * positions present, and equal. Reading a missing position as "not nested" is
+ * the same mistake the verify used to make one layer up, and it produces the
+ * worst outcome of the three (the whole item removed, or the rows reordered by
+ * an index counted among a nested element's siblings) from the least
+ * information. A hand-off asks the agent instead, which is answerable.
  */
 export function thisRowOperationAllowed(pending: PendingIterationEdit): boolean {
   if (pending.editKind !== "delete" && pending.editKind !== "move") return true
+  const loop = pending.loopLocation
+  if (!loop) return false
+  if (!iterationTemplateLocation(pending)) return false
   return !clickedInsideRow(pending)
 }
 
