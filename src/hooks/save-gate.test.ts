@@ -47,14 +47,25 @@ describe("saveGate", () => {
 
 describe("parkedSaveRefusal", () => {
   it("is singular for one and plural above it", () => {
-    expect(parkedSaveRefusal(1)).toContain("1 edit still need a scope choice")
+    expect(parkedSaveRefusal(1)).toContain("1 edit still needs a scope choice")
     expect(parkedSaveRefusal(3)).toContain("3 edits still need a scope choice")
   })
 
-  it("names the dialog and says what dismissing does", () => {
+  it("says what to do and what dismissing does", () => {
     // Dismissing DISCARDS rather than resolves, which is not guessable from
     // the dialog, so the refusal has to say it.
-    expect(parkedSaveRefusal(1)).toContain('"Resolve ambiguous edit"')
-    expect(parkedSaveRefusal(1)).toContain("dismiss it to discard")
+    expect(parkedSaveRefusal(1)).toContain(
+      "Choose how to apply the pending edit in the dialog, then save again.",
+    )
+    expect(parkedSaveRefusal(1)).toContain("Dismissing the dialog discards the edit.")
+    expect(parkedSaveRefusal(3)).toContain("Dismissing the dialog discards the edits.")
+  })
+
+  it("names no dialog title, because the one it used to name no longer exists", () => {
+    // The dialog asks "Change this item or all items?" now. A refusal that
+    // points at a title is one rename away from sending the designer to look
+    // for something that is not on screen.
+    expect(parkedSaveRefusal(1)).not.toContain("Resolve ambiguous edit")
+    expect(parkedSaveRefusal(1)).not.toMatch(/—/)
   })
 })

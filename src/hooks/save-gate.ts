@@ -42,9 +42,19 @@ export function saveGate(args: {
 /**
  * The status line for a Save refused by a parked edit.
  *
- * Says the count, names the dialog, and says what dismissing it does, because
+ * Says the count, says what to do, and says what dismissing does, because
  * dismissing discards rather than resolves and that is not guessable.
+ *
+ * It does NOT name a dialog title. It used to say `the "Resolve ambiguous
+ * edit" dialog`, and that title no longer exists: the dialog asks "Change this
+ * item or all items?" now, so the refusal was sending the designer to look for
+ * something that was not on screen. A refusal that points at a name is only
+ * ever one rename away from being wrong, so this one describes the action
+ * instead.
  */
 export function parkedSaveRefusal(count: number): string {
-  return `Cannot save: ${count} edit${count === 1 ? "" : "s"} still need a scope choice. Resolve the "Resolve ambiguous edit" dialog, or dismiss it to discard, before saving.`
+  const edits = count === 1 ? "1 edit" : `${count} edits`
+  const verb = count === 1 ? "needs" : "need"
+  const them = count === 1 ? "the edit" : "the edits"
+  return `Cannot save: ${edits} still ${verb} a scope choice. Choose how to apply the pending edit in the dialog, then save again. Dismissing the dialog discards ${them}.`
 }

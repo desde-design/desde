@@ -66,7 +66,7 @@ describe("SaveProgressDialog", () => {
         lastLLMTrace={null}
         streamingText=""
         saveStatus={
-          'Cannot save: 2 edits still need a v-for scope choice. Resolve the "Resolve ambiguous edit" dialog (or dismiss it to discard) before saving.'
+          "Cannot save: 2 edits still need a scope choice. Choose how to apply the pending edit in the dialog, then save again. Dismissing the dialog discards the edits."
         }
       />,
     )
