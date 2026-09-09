@@ -249,6 +249,65 @@ describe("EditSession: the state it owns", () => {
     expect(opened).toEqual(["scope", "disambiguation"])
   })
 
+  it("opens the first dialog and queues the second, the other direction (finding R1)", () => {
+    const session = newSession()
+    expect(
+      session.requestModal({ kind: "disambiguation", mutation: held("dom-pending-2") }),
+    ).toBe(true)
+    expect(
+      session.requestModal({ kind: "scope", pending: { bridgePendingId: "dom-pending-1" } }),
+    ).toBe(false)
+    expect(session.modalOwner).toBe("disambiguation")
+    expect(session.queuedCount).toBe(1)
+
+    session.releaseModal()
+    expect(session.modalOwner).toBe("scope")
+    expect(session.getSnapshot().scopePrompt).toEqual({ bridgePendingId: "dom-pending-1" })
+  })
+
+  it("releaseModal clears the scope prompt it was showing, on its own (finding R1)", () => {
+    // The caller does NOT call setScopePrompt(null) first here. That used to
+    // be required, and forgetting it left a stale prompt in the snapshot
+    // alongside whatever opened next: the exact stacking finding R1 exists to
+    // stop. The class must close that hole itself.
+    const session = newSession()
+    session.holdDraft("dom-pending-2", held("dom-pending-2"))
+    session.requestModal({ kind: "scope", pending: { bridgePendingId: "dom-pending-1" } })
+    session.requestModal({ kind: "disambiguation", mutation: held("dom-pending-2") })
+
+    session.releaseModal()
+
+    expect(session.getSnapshot().scopePrompt).toBeNull()
+    expect(session.getSnapshot().rows.map((row) => row.pendingId)).toEqual(["dom-pending-2"])
+    expect(session.modalOwner).toBe("disambiguation")
+  })
+
+  it("keeps the newest pending edit claimed per draft id", () => {
+    const session = newSession()
+    const first: Prompt = { bridgePendingId: "dom-pending-1" }
+    const second: Prompt = { bridgePendingId: "dom-pending-1" }
+    session.claimPending("dom-pending-1", first)
+    expect(session.latestPendingFor("dom-pending-1")).toBe(first)
+    session.claimPending("dom-pending-1", second)
+    expect(session.latestPendingFor("dom-pending-1")).toBe(second)
+  })
+
+  it("has nothing pending for a draft id nobody claimed", () => {
+    const session = newSession()
+    expect(session.latestPendingFor("dom-pending-9")).toBeUndefined()
+  })
+
+  it("clears a held draft's pending claim once its disambiguation dialog opens (finding R5)", () => {
+    const session = newSession()
+    session.holdDraft("dom-pending-1", held("dom-pending-1"))
+    session.claimPending("dom-pending-1", { bridgePendingId: "dom-pending-1" })
+
+    session.requestModal({ kind: "disambiguation", mutation: held("dom-pending-1") })
+
+    expect(session.heldDraftIds()).not.toContain("dom-pending-1")
+    expect(session.latestPendingFor("dom-pending-1")).toBeUndefined()
+  })
+
   it("drops a queued question about a draft that was released", () => {
     const session = newSession()
     session.holdDraft("dom-pending-1", held("dom-pending-1"))

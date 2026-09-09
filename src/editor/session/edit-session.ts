@@ -227,11 +227,22 @@ export class EditSession<Prompt> implements LaneSession {
     return false
   }
 
-  /** The open dialog has closed. Give the modal up and ask the next question. */
+  /**
+   * The open dialog has closed. Give the modal up and ask the next question.
+   *
+   * The class clears the scope prompt itself, when a scope dialog was the one
+   * that just closed. A caller must not have to call `setScopePrompt(null)`
+   * first: if it forgot, the old prompt would otherwise stay in the snapshot
+   * next to whatever opens after it, which is the stacking finding R1 exists
+   * to stop. This is one snapshot rebuild and one notification, same as any
+   * other change here.
+   */
   releaseModal(): void {
+    const departingOwner = this.owner
     this.owner = null
     const { next, queue } = this.modals.dequeue(this.queue)
     this.queue = queue
+    if (departingOwner === "scope") this.scopePrompt = null
     if (!next) {
       this.notify()
       return
