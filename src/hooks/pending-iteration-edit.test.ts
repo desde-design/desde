@@ -15,6 +15,8 @@ import {
   iterationRouteFor,
   iterationTemplateLocation,
   parkedReason,
+  promptCollision,
+  PROMPT_BUSY_STATUS,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
   settleHandOff,
@@ -181,6 +183,71 @@ describe("sameBridgeDraft", () => {
       iterationContext,
     }
     expect(sameBridgeDraft(del, domText("p-1"))).toBe(false)
+  })
+})
+
+describe("promptCollision", () => {
+  function domText(bridgePendingId?: string, value = "Hello"): PendingIterationEdit {
+    return {
+      editKind: "dom-text",
+      selection: { selector: "p", editTarget: { file: "src/App.vue", line: 3, column: 2 } } as never,
+      field: { id: "f" } as never,
+      value,
+      iterationContext,
+      ...(bridgePendingId ? { bridgePendingId } : {}),
+    }
+  }
+  const del: PendingIterationEdit = {
+    editKind: "delete",
+    selection: { selector: "x" } as never,
+    node,
+    iterationContext,
+  }
+  const move: PendingIterationEdit = {
+    editKind: "move",
+    payload: { source: node, destParent: node, destIndex: 1 } as never,
+    iterationContext,
+  }
+
+  it("opens the incoming edit when no prompt is on screen", () => {
+    expect(promptCollision(null, del)).toBe("open-incoming")
+    expect(promptCollision(undefined, del)).toBe("open-incoming")
+  })
+
+  it("opens the incoming edit when it IS the open one", () => {
+    expect(promptCollision(del, del)).toBe("open-incoming")
+  })
+
+  it("keeps today's behaviour for two objects holding the same bridge draft", () => {
+    // One in-page typing session, rebuilt per keystroke. The newer object has
+    // the newer text, so it replaces the older one as it always did.
+    expect(promptCollision(domText("p-1", "Hell"), domText("p-1", "Hello"))).toBe("open-incoming")
+  })
+
+  it("parks a NEWCOMER that holds a bridge draft, keeping the open question", () => {
+    // Replacing the open prompt cancelled its draft. Keeping it and cancelling
+    // the newcomer's would lose the newly typed text instead. Parking loses
+    // neither.
+    expect(promptCollision(del, domText("p-2"))).toBe("keep-open-park-incoming")
+    expect(promptCollision(domText("p-1"), domText("p-2"))).toBe("keep-open-park-incoming")
+  })
+
+  it("drops a newcomer with nothing to park, so it is reported rather than silent", () => {
+    expect(promptCollision(domText("p-1"), del)).toBe("keep-open-drop-incoming")
+    expect(promptCollision(del, move)).toBe("keep-open-drop-incoming")
+    // An in-page edit with no bridge draft id has nothing held either.
+    expect(promptCollision(del, domText())).toBe("keep-open-drop-incoming")
+  })
+})
+
+describe("PROMPT_BUSY_STATUS", () => {
+  it("says what to do first and that the edit must be repeated", () => {
+    expect(PROMPT_BUSY_STATUS).toBe("Answer the open dialog first, then repeat this edit.")
+  })
+
+  it("uses no em dash and no first person", () => {
+    expect(PROMPT_BUSY_STATUS).not.toMatch(/—/)
+    expect(PROMPT_BUSY_STATUS).not.toMatch(/\b(me|my)\b/i)
   })
 })
 

@@ -539,6 +539,59 @@ export function sameBridgeDraft(a: PendingIterationEdit, b: PendingIterationEdit
 }
 
 /**
+ * The status shown to an edit that arrived while a scope question was already
+ * on screen and had nothing to park.
+ *
+ * It names the thing to do first and the thing to do after, because the edit
+ * really is gone: there is no draft anywhere holding it, and a designer who is
+ * not told to repeat it will assume it landed.
+ */
+export const PROMPT_BUSY_STATUS = "Answer the open dialog first, then repeat this edit."
+
+/** What to do when a verified edit arrives and a scope prompt is already open. */
+export type PromptCollision =
+  /** No prompt open, or the same in-page typing session: today's behaviour. */
+  | "open-incoming"
+  /** Keep the open one; the newcomer's typed text goes to the mutation dialog. */
+  | "keep-open-park-incoming"
+  /** Keep the open one; the newcomer has nothing to hold, so say so and drop it. */
+  | "keep-open-drop-incoming"
+
+/**
+ * Which of the two edits survives when both verify.
+ *
+ * The prompt is per HOOK; the verify sequence is per TARGET. So two edits on
+ * two different elements can both pass their loop check, and the second one
+ * used to be written straight over the first: the previous pending's bridge
+ * draft was cancelled (an in-page typing session lost its text with nothing
+ * written anywhere), and a delete or a move with no draft simply vanished with
+ * no status at all.
+ *
+ * The open prompt therefore always wins. It is the one the designer is looking
+ * at and the only one they can answer; replacing it also moves the question
+ * under their cursor between the reading and the click.
+ *
+ * The NEWCOMER is not thrown away either, when there is anything to keep. A
+ * bridge draft is parked in the mutation-disambiguation dialog, which asks a
+ * blunter question ("this instance" or "all instances") but keeps the text.
+ * Everything else has nothing to park, so it is dropped with a status saying
+ * to repeat it.
+ *
+ * The same-draft case is unchanged: an in-page typing session rebuilds its
+ * pending object on every keystroke, so "previous" and "incoming" there are
+ * two objects describing one edit, and the newer one has the newer text.
+ */
+export function promptCollision(
+  previous: PendingIterationEdit | null | undefined,
+  incoming: PendingIterationEdit,
+): PromptCollision {
+  if (!previous || previous === incoming || sameBridgeDraft(previous, incoming)) {
+    return "open-incoming"
+  }
+  return bridgeDraftIdOf(incoming) ? "keep-open-park-incoming" : "keep-open-drop-incoming"
+}
+
+/**
  * Is this verify's answer stale, i.e. did a newer intercept start while it was
  * in flight?
  *

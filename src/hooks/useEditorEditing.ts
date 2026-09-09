@@ -121,6 +121,8 @@ import {
   isStaleVerify,
   iterationRouteFor,
   parkedReason,
+  promptCollision,
+  PROMPT_BUSY_STATUS,
   iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
@@ -2683,19 +2685,37 @@ export function useEditorEditing({
             void dispatchIterationEdit(verified, action.scope)
             return
           }
-          // Two verifies can be in flight at once (verify is an HTTP round
-          // trip). If a second one resolves after a first already opened the
-          // dialog, a plain set would overwrite the first pending and leak
-          // its bridge draft. Release whatever this replaces, mirroring
-          // `cancelIterationScope`. Object identity is not the test: the same
-          // in-page typing session rebuilds the pending object, and cancelling
-          // its draft would strand the edit that is still open.
-          setIterationScopePrompt((previous) => {
-            if (previous && previous !== verified && !sameBridgeDraft(previous, verified)) {
-              releaseBridgeDraft(previous)
+          // An open prompt is never REPLACED. Two verifies can be in flight at
+          // once (verify is an HTTP round trip) and the sequence that decides
+          // staleness is per target, so two edits on two different elements
+          // both arrive here legitimately. Overwriting cancelled the first
+          // one's bridge draft, or made a delete or a move disappear with
+          // nothing said. See `promptCollision`.
+          //
+          // The ref is written here as well as at render time: two completions
+          // can land in the same tick, before React re-renders, and the second
+          // has to see the first one's prompt.
+          const collision = promptCollision(iterationScopePromptRef.current, verified)
+          if (collision === "open-incoming") {
+            iterationScopePromptRef.current = verified
+            setIterationScopePrompt(verified)
+            return
+          }
+          if (collision === "keep-open-park-incoming") {
+            // Typed in the page: the text survives in the mutation
+            // disambiguation dialog, which asks a blunter question than this
+            // one but is answerable and holds the same draft.
+            const parked = parkDraftForDeterministicFallback(
+              verified,
+              parkedReason("Another edit is waiting for a scope choice"),
+            )
+            if (!parked) {
+              releaseBridgeDraft(verified)
+              setSaveStatus(PROMPT_BUSY_STATUS)
             }
-            return verified
-          })
+            return
+          }
+          setSaveStatus(PROMPT_BUSY_STATUS)
         },
       ).catch((err) => {
         // A throw inside the `.then` body above (not an `outcome.kind ===
