@@ -350,7 +350,7 @@ export interface HttpServerOptions {
   security: SecurityContext
   /** Applicator loaders (defaults to in-tree edit-service). */
   applicatorLoaders?: ApplicatorLoaders
-  /** Tier 2 LLM-fallback loaders (defaults to in-tree repair-edit service). */
+  /** Iteration-data LLM lane loaders (defaults to in-tree iteration-data service). */
   llmFallbackLoaders?: LLMFallbackLoaders
   /** Phase 1 chat orchestrator loaders. */
   chatLoaders?: ChatHandlerLoaders
@@ -5178,7 +5178,6 @@ async function handleLLMFallbackRequest(
     ctx.repoRoot,
     ctx.llmFallbackLoaders,
     ctx.conventions,
-    ctx.enabledLanes,
     () => getProvider({ config: llmConfigFor(ctx) }),
   )
   sendJson(res, result.status, {

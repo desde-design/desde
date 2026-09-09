@@ -16,11 +16,14 @@ import type { DormantLaneId } from "../enabled-lanes.js"
  * surfaces are exercised here over a socket, exactly as the shell and a stale
  * client reach them.
  *
- * Three routes, because a dormant lane has three ways out:
+ * Two routes, because a dormant lane has two ways out:
  *   · `/__desde/bootstrap.js` — what the UI reads to decide what to offer
  *   · `POST /api/editor/edit`      — the deterministic dispatcher
- *   · `POST /api/editor/llm-fallback` — the repair lane, which takes the same
- *     `intent.kind` and rewrites the whole file
+ *
+ * `POST /api/editor/llm-fallback` used to be a THIRD way out: the single-shot
+ * repair lane there took the same `intent.kind` and rewrote the whole file.
+ * That lane was removed 2026-09-08 — the iteration-data lane left at that
+ * route carries no `intent.kind` this gate would recognize.
  */
 
 let handle: HttpServerHandle
@@ -127,18 +130,6 @@ describe("dormant lanes over HTTP — default (nothing opted in)", () => {
     expect(status).toBe(400)
     expect(json.ok).toBe(false)
     expect(json.reason).toContain("lanes.detach")
-  })
-
-  it("POST /api/editor/llm-fallback refuses the same kind 400", async () => {
-    await boot()
-    const { status, json } = await post("/api/editor/llm-fallback", {
-      file: "App.vue",
-      intent: { kind: "swap", description: "swap it" },
-      errorReason: "applicator refused",
-    })
-    expect(status).toBe(400)
-    expect(json.ok).toBe(false)
-    expect(json.reason).toContain("lanes.swap")
   })
 })
 

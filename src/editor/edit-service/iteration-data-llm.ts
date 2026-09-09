@@ -10,7 +10,7 @@
  * `buildIterationDataPrompt` had no caller and the user saw a bare
  * "Iteration edit refused" with no repair (stress-test finding F-11).
  *
- * Same contract discipline as `repair-edit.ts`, deliberately: pure (no
+ * Same contract discipline as `apply-llm-patch.ts`, deliberately: pure (no
  * filesystem I/O), provider injected for tests, full-file JSON response
  * validated, no-op result refused so the diff view never shows an
  * empty change.

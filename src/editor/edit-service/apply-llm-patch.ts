@@ -165,7 +165,7 @@ export async function applyLLMPatch(
   // THROWS on missing credentials, and a default-parameter throw is evaluated
   // during destructuring, so it escapes every try/catch below and reaches the
   // caller as a raw 500 with a stack in the response body. This is the shape
-  // `repair-edit.ts` and `iteration-data-llm.ts` already use.
+  // `iteration-data-llm.ts` already uses.
   let provider = input.provider
   if (!provider) {
     try {

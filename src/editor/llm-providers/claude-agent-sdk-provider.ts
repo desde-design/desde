@@ -13,7 +13,7 @@
  * Scope:
  *   - `complete()` and `streamComplete()` are first-class. They cover
  *     every edit-pipeline call site (apply-iteration-data-edit,
- *     apply-source-aware-text-edit, repair-edit, agent-request,
+ *     apply-source-aware-text-edit, agent-request,
  *     apply-llm-patch).
  *   - `streamConversation()` is intentionally NOT implemented — the
  *     legacy chat orchestrator that calls it is being superseded by
@@ -262,7 +262,7 @@ export class ClaudeAgentSdkProvider implements LLMProvider {
     // produced". When the SDK routes the answer to `structured_output`,
     // the assistant `result` text is empty — so synthesize the JSON
     // string from `parsed`. Without this, every consumer that gates on
-    // `text` before consulting `parsed` (apply-llm-patch, repair-edit,
+    // `text` before consulting `parsed` (apply-llm-patch,
     // agent-request, apply-iteration-data-edit) rejects a perfectly
     // good structured response with "produced no text block" — which is
     // exactly the "edit didn't save" error on the Claude-subscription

@@ -12,10 +12,11 @@
  * it. The throw escapes the lane entirely, misses the handler's error mapping,
  * and reaches the client as a raw 500 with a stack trace in the response body.
  *
- * MEASURED on the iteration lane before it was fixed. The repair lane had the
- * identical wart and was fixed the same way. Neither had a test, which is why
- * one file covers both: this invariant belongs to the LANE PATTERN, not to
- * either function, and the next lane someone adds should be added here too.
+ * MEASURED on the iteration lane before it was fixed. The single-shot repair
+ * lane (removed 2026-09-08) had the identical wart and was fixed the same
+ * way; it had no test either, which is why this invariant belongs to the LANE
+ * PATTERN, not to any one function, and the next lane someone adds should be
+ * added here too.
  *
  * These call the real `getProvider()` rather than mocking the registry. The
  * throw is the thing under test, so faking it would only prove the fake works.
@@ -23,7 +24,6 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { applyIterationDataLlm, type ApplyIterationDataLlmInput } from './iteration-data-llm'
-import { applyRepairEdit, type ApplyRepairEditInput } from './repair-edit'
 
 /**
  * Strip both credential paths so `getProvider()` reaches its throw.
@@ -45,19 +45,12 @@ afterEach(() => {
 const SOURCE = `<template>\n  <p>hello</p>\n</template>\n`
 
 /**
- * Both inputs are spelled out against their real types, with no cast. The
- * credentials check runs before either lane looks at its intent, so the
- * content here does not matter — but the SHAPE does: a cast would let these
- * drift from the types they claim to exercise, which is how the first draft
- * of this file passed its tests and failed typecheck.
+ * Spelled out against its real type, with no cast. The credentials check
+ * runs before the lane looks at its intent, so the content here does not
+ * matter — but the SHAPE does: a cast would let this drift from the type it
+ * claims to exercise, which is how the first draft of this file passed its
+ * tests and failed typecheck.
  */
-const REPAIR_INPUT: ApplyRepairEditInput = {
-  source: SOURCE,
-  file: 'src/App.vue',
-  intent: { kind: 'unwrap', description: 'Unwrap <KCard>' },
-  errorReason: 'the deterministic applicator refused',
-}
-
 const ITERATION_INPUT: ApplyIterationDataLlmInput = {
   files: [{ path: 'src/App.vue', source: SOURCE }],
   intent: {
@@ -77,18 +70,6 @@ const ITERATION_INPUT: ApplyIterationDataLlmInput = {
 }
 
 describe('an LLM edit lane with no credentials configured', () => {
-  it('refuses from applyRepairEdit instead of throwing', async () => {
-    withNoCredentials()
-
-    // Not `.rejects` — the whole point is that this resolves.
-    const result = await applyRepairEdit(REPAIR_INPUT)
-
-    expect(result.ok).toBe(false)
-    // The registry's own sentence reaches the caller, so the person is told
-    // which variable to set rather than seeing a generic failure.
-    expect(result.ok === false && result.reason).toMatch(/ANTHROPIC_API_KEY/)
-  })
-
   it('refuses from applyIterationDataLlm instead of throwing', async () => {
     withNoCredentials()
 

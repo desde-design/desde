@@ -124,7 +124,7 @@ export class AnthropicProvider implements LLMProvider {
     if (opts.responseFormat && opts.responseFormat.kind === 'json_schema') {
       // The SDK's typed surface for `output_config` doesn't expose the
       // `json_schema` format in every version; cast at the boundary
-      // (matches the pattern in apply-llm-patch.ts and repair-edit.ts).
+      // (matches the pattern in apply-llm-patch.ts and iteration-data-llm.ts).
       ;(request as unknown as { output_config: unknown }).output_config = {
         format: {
           type: 'json_schema',

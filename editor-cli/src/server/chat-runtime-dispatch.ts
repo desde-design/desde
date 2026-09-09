@@ -12,7 +12,7 @@
  * `editor-cli/src/server/http-server.ts` statically imports `getProvider`
  * from `../../../src/editor/llm-providers/registry.js`, which itself
  * statically imports `claude-agent-sdk-provider.ts`, for the non-chat
- * LLM-fallback lane (`apply-llm-patch.ts` / `repair-edit.ts` /
+ * LLM-fallback lane (`apply-llm-patch.ts` / `iteration-data-llm.ts` /
  * `translate-goal.ts` / `llm-generate-hints.ts`). That import runs on every
  * boot regardless of provider or chat runtime. Two OTHER confirmed leaks on
  * this same claim — `model-catalog-source.ts`'s top-level `query` import,

@@ -21,8 +21,8 @@ import { readLlmCredentials } from "./llm-credential-store.js"
  *
  * There are two consumers and both read env, so one injection covers both:
  *   - Chat, via the Claude Agent SDK, which spawns the `claude` binary.
- *   - The six non-chat lanes, via `getProvider()` -> `pickDefaultConfig(env)`:
- *     `apply-llm-patch`, `repair-edit`, `verification/translate-goal`,
+ *   - The five non-chat lanes, via `getProvider()` -> `pickDefaultConfig(env)`:
+ *     `apply-llm-patch`, `verification/translate-goal`,
  *     `hints/llm-generate-hints`, `iteration-data-llm`, `design-systems-handler`.
  *
  * KNOWN TRADE-OFF, recorded deliberately: this puts the key in reach of every

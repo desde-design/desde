@@ -1,15 +1,12 @@
 /**
- * Tier 2 LLM-assisted-repair handler for the editor-cli HTTP server
- * (`POST /api/editor/llm-fallback`). Input validation,
- * path-containment checks, and response shape for the repair lane:
- * reads the source for the failed edit, calls `applyRepairEdit`,
- * returns the LLM's proposed full-file rewrite. Bound through
- * `http-server.ts`.
+ * POST /api/editor/llm-fallback: the iteration-data AI lane. The structural
+ * repair lane that also lived here was removed 2026-09-08; refused
+ * structural edits are handed to chat by
+ * `src/hooks/apply-edit-with-chat-handoff.ts`.
  */
 
 import { promises as fs } from "node:fs"
 import path from "node:path"
-import type { RepairIntent } from "../../../src/editor/edit-service/repair-edit-prompt"
 import type {
   IterationDataIntent,
   IterationDataPromptFile,
@@ -23,18 +20,10 @@ import {
   type ResolvedRoot,
 } from "./resolve-editable-path"
 import { resolveRelativeModule } from "./resolve-relative-module.js"
-import { dormantLaneRefusal, type DormantLaneId } from "./enabled-lanes"
 
 export interface LLMFallbackRequestBody {
   file: string
-  intent: RepairIntent | IterationDataIntent
-  /**
-   * The applicator's refusal reason. Required for the structural-repair
-   * kinds; ABSENT for `iteration-data`, whose client dispatches to this
-   * lane directly when the static resolver soft-refuses (the 422 reason
-   * never leaves the static endpoint).
-   */
-  errorReason?: string
+  intent: IterationDataIntent
 }
 
 export interface LLMFallbackResult {
@@ -64,13 +53,10 @@ export interface LLMFallbackResult {
 }
 
 export interface LLMFallbackLoaders {
-  loadApplyRepairEdit: () => Promise<
-    typeof import("../../../src/editor/edit-service/repair-edit")
-  >
   /**
    * Loads the project-knowledge digest (the prototype repo's documented
-   * conventions). Optional — when unconfigured the repair runs without the
-   * conventions block.
+   * conventions). Optional — when unconfigured the iteration-data lane runs
+   * without the conventions block.
    */
   loadProjectKnowledge?: () => Promise<
     typeof import("../../../src/editor/edit-service/load-project-knowledge")
@@ -87,10 +73,10 @@ export interface LLMFallbackLoaders {
 }
 
 /**
- * File extensions the repair lane can rewrite. `.vue` goes through the Vue-SFC
- * repair prompt; `.tsx`/`.jsx` through the React/JSX prompt (selected by
- * `buildRepairPrompt` on the file extension). The applied rewrite is validated
- * per-framework by `validateOverwriteSource` in the edit-handler's overwrite lane.
+ * File extensions the iteration-data lane can rewrite: `.vue` (Vue SFC) and
+ * `.tsx`/`.jsx` (React/JSX), both served by one framework-agnostic prompt
+ * (`iteration-data-prompt.ts`). Also gates which files `readBundleFile` may
+ * add to the bundle.
  */
 function isRepairableSource(filePath: string): boolean {
   return (
@@ -99,16 +85,6 @@ function isRepairableSource(filePath: string): boolean {
     filePath.endsWith(".jsx")
   )
 }
-
-const ALLOWED_INTENT_KINDS: ReadonlySet<RepairIntent["kind"]> = new Set([
-  "move",
-  "delete",
-  "detach",
-  "insert",
-  "swap",
-  "unwrap",
-  "flatten-conditional",
-])
 
 function validate(body: unknown): string | null {
   if (!body || typeof body !== "object") return "Body must be an object"
@@ -139,42 +115,7 @@ function validate(body: unknown): string | null {
     }
     return null
   }
-  if (typeof b.errorReason !== "string" || b.errorReason.length === 0) {
-    return "body.errorReason required"
-  }
-  if (
-    typeof intent.kind !== "string" ||
-    !ALLOWED_INTENT_KINDS.has(intent.kind as RepairIntent["kind"])
-  ) {
-    return `body.intent.kind must be one of ${[...ALLOWED_INTENT_KINDS].join(" | ")}`
-  }
-  if (typeof intent.description !== "string" || intent.description.length === 0) {
-    return "body.intent.description required"
-  }
-  // Lines are 1-based in both frameworks; columns are 1-based for Vue but
-  // 0-based for React/JSX (Babel `loc.start.column`), so a column-0 element
-  // (top-level, no indentation) is valid and must not 400 here.
-  for (const name of ["sourceLine", "destParentLine"] as const) {
-    const v = intent[name]
-    if (v === undefined) continue
-    if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
-      return `body.intent.${name} must be a positive integer when provided`
-    }
-  }
-  for (const name of ["sourceColumn", "destParentColumn"] as const) {
-    const v = intent[name]
-    if (v === undefined) continue
-    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
-      return `body.intent.${name} must be a non-negative integer when provided`
-    }
-  }
-  if (
-    intent.destIndex !== undefined &&
-    (typeof intent.destIndex !== "number" || !Number.isInteger(intent.destIndex))
-  ) {
-    return "body.intent.destIndex must be an integer when provided"
-  }
-  return null
+  return 'body.intent.kind must be "iteration-data"'
 }
 
 /**
@@ -247,7 +188,6 @@ export async function handleLLMFallback(
   repoRoot: string,
   loaders: LLMFallbackLoaders,
   conventions?: ProjectKnowledgeConfig,
-  enabledLanes?: ReadonlySet<DormantLaneId>,
   getLlmProvider?: () => CompletionProvider,
 ): Promise<LLMFallbackResult> {
   // No API-key gate here — the provider registry falls back to whichever
@@ -258,15 +198,6 @@ export async function handleLLMFallback(
   // useful auth error rather than a stale "no env var" message.
   const validation = validate(body)
   if (validation) return { status: 400, ok: false, reason: validation }
-
-  // The repair lane is the SECOND dispatch surface for a structural edit kind:
-  // it takes the same `intent.kind` and returns an LLM full-file rewrite when
-  // the deterministic applicator refused. Gating only `POST /api/editor/edit`
-  // would leave a dormant lane reachable here — and reachable in its most
-  // permissive form, since this path rewrites the whole file rather than
-  // splicing at a coordinate. Same fail-closed default as the edit handler.
-  const laneRefusal = dormantLaneRefusal(body.intent.kind, enabledLanes)
-  if (laneRefusal) return { status: 400, ok: false, reason: laneRefusal }
 
   const rootResolution = await resolvePrototypeRoot(repoRoot)
   if (!rootResolution.ok) return rootResolution
@@ -291,7 +222,7 @@ export async function handleLLMFallback(
       reason: "Resolved target is not a .vue, .tsx, or .jsx file",
     }
   }
-  // Both lanes here return a FULL-FILE rewrite of `file`. A dependency is
+  // This lane returns a FULL-FILE rewrite of `file`. A dependency is
   // never a legal target: the write broker would refuse it at save time, but
   // by then the file has been shown to the model and the user has a
   // proposal that cannot land (codex round 2). Same wording rule as the edit
@@ -329,140 +260,115 @@ export async function handleLLMFallback(
     })
   }
 
-  const { applyRepairEdit } = await loaders.loadApplyRepairEdit()
-  // Key the repair prompt off the RESOLVED target, not the requested `body.file`:
-  // an allowed symlink whose suffix differs from its target (e.g. `Alias.vue` →
-  // `App.tsx`) would otherwise send TSX bytes to the Vue SFC prompt. The resolved
-  // relative path matches the bytes in `source` and is identical to `body.file`
-  // in the common (non-symlink) case.
+  // Key the prompt off the RESOLVED target, not the requested `body.file`: an
+  // allowed symlink whose suffix differs from its target (e.g. `Alias.vue` →
+  // `App.tsx`) would otherwise send TSX bytes to the Vue SFC prompt. The
+  // resolved relative path matches the bytes in `source` and is identical to
+  // `body.file` in the common (non-symlink) case.
   const resolvedRelPath = path.relative(rootReal, targetPath)
 
-  if (body.intent.kind === "iteration-data") {
-    if (!loaders.loadApplyIterationDataLlm) {
-      return {
-        status: 500,
-        ok: false,
-        reason: "iteration-data LLM lane loader not configured",
-      }
-    }
-    const intent = body.intent
-
-    // The model is shown a BUNDLE and rewrites exactly one file of it: the
-    // loop file first (where `templateLocation` points), the page that
-    // renders it when known, and then the modules the iteratee's name is
-    // imported from, followed hop by hop. Every path here has passed the
-    // same containment guards as `body.file`; the lane refuses a response
-    // naming any other file. One prompt serves Vue and JSX alike, so there
-    // is no per-framework gate in front of this lane any more (the `.vue`
-    // gate that stood here until 2026-09-08 is what the React demo hit).
-    const files: IterationDataPromptFile[] = [{ path: resolvedRelPath, source }]
-    const seen = new Set<string>([resolvedRelPath])
-    const addFile = (file: IterationDataPromptFile | null): void => {
-      if (!file || seen.has(file.path)) return
-      seen.add(file.path)
-      files.push(file)
-    }
-
-    if (intent.pageSourceFile && intent.pageSourceFile !== resolvedRelPath) {
-      // The page hint comes from the client (the route's current source
-      // file). It only becomes a legal rewrite target if it actually renders
-      // the loop file — i.e. imports it. Any in-root rewritable file could
-      // otherwise be claimed as "the page" and handed to the model as a file
-      // it may overwrite (codex round 2).
-      const page = await readBundleFile(intent.pageSourceFile, rootResolution)
-      if (page) {
-        const [{ importsRelativeFile, hasAnyLocalImport }, { moduleSourceOfFile }] =
-          await Promise.all([
-            import("../../../src/editor/edit-service/import-binding.js"),
-            import("../../../src/editor/edit-service/vue-script-content.js"),
-          ])
-        const pageModule = moduleSourceOfFile(page.path, page.source)
-        // Imports the loop file (relative or alias), or imports nothing local
-        // at all (auto-imports, where the check has nothing to read).
-        if (
-          importsRelativeFile(pageModule, page.path, resolvedRelPath) ||
-          !hasAnyLocalImport(pageModule)
-        ) {
-          addFile(page)
-        }
-      }
-    }
-
-    const iterateeRoot = await iterateeRootOfLoop(
-      resolvedRelPath,
-      source,
-      intent.templateLocation,
-    )
-    if (iterateeRoot) {
-      const [{ collectImportChain }, { moduleSourceOfFile }] = await Promise.all([
-        import("../../../src/editor/edit-service/import-binding.js"),
-        import("../../../src/editor/edit-service/vue-script-content.js"),
-      ])
-      const chain = await collectImportChain({
-        startPath: resolvedRelPath,
-        startSource: source,
-        name: iterateeRoot,
-        resolve: async (fromPath, specifier) => {
-          const mod = await resolveRelativeModule(
-            path.resolve(rootReal, fromPath),
-            specifier,
-            rootResolution,
-          )
-          return mod.ok ? { path: mod.relativePath, source: mod.source } : null
-        },
-        moduleSourceOf: (file) => moduleSourceOfFile(file.path, file.source),
-      })
-      for (const file of chain) addFile(file)
-    }
-
-    const { applyIterationDataLlm } = await loaders.loadApplyIterationDataLlm()
-    const iteration = await applyIterationDataLlm({
-      files,
-      intent,
-      projectKnowledge,
-      ...(getLlmProvider ? { resolveProvider: getLlmProvider } : {}),
-    })
-    if (!iteration.ok) {
-      return { status: 422, ok: false, reason: iteration.reason, kind: iteration.kind }
-    }
+  if (!loaders.loadApplyIterationDataLlm) {
     return {
-      status: 200,
-      ok: true,
-      proposal: {
-        newSource: iteration.newSource,
-        explanation: iteration.explanation,
-        baseHash: iteration.originalSourceHash,
-        // The file the MODEL chose out of the bundle — the data module, the
-        // page, or the loop file itself. The client writes this path.
-        file: iteration.file,
-      },
+      status: 500,
+      ok: false,
+      reason: "iteration-data LLM lane loader not configured",
+    }
+  }
+  const intent = body.intent
+
+  // The model is shown a BUNDLE and rewrites exactly one file of it: the
+  // loop file first (where `templateLocation` points), the page that
+  // renders it when known, and then the modules the iteratee's name is
+  // imported from, followed hop by hop. Every path here has passed the
+  // same containment guards as `body.file`; the lane refuses a response
+  // naming any other file. One prompt serves Vue and JSX alike, so there
+  // is no per-framework gate in front of this lane any more (the `.vue`
+  // gate that stood here until 2026-09-08 is what the React demo hit).
+  const files: IterationDataPromptFile[] = [{ path: resolvedRelPath, source }]
+  const seen = new Set<string>([resolvedRelPath])
+  const addFile = (file: IterationDataPromptFile | null): void => {
+    if (!file || seen.has(file.path)) return
+    seen.add(file.path)
+    files.push(file)
+  }
+
+  if (intent.pageSourceFile && intent.pageSourceFile !== resolvedRelPath) {
+    // The page hint comes from the client (the route's current source
+    // file). It only becomes a legal rewrite target if it actually renders
+    // the loop file — i.e. imports it. Any in-root rewritable file could
+    // otherwise be claimed as "the page" and handed to the model as a file
+    // it may overwrite (codex round 2).
+    const page = await readBundleFile(intent.pageSourceFile, rootResolution)
+    if (page) {
+      const [{ importsRelativeFile, hasAnyLocalImport }, { moduleSourceOfFile }] =
+        await Promise.all([
+          import("../../../src/editor/edit-service/import-binding.js"),
+          import("../../../src/editor/edit-service/vue-script-content.js"),
+        ])
+      const pageModule = moduleSourceOfFile(page.path, page.source)
+      // Imports the loop file (relative or alias), or imports nothing local
+      // at all (auto-imports, where the check has nothing to read).
+      if (
+        importsRelativeFile(pageModule, page.path, resolvedRelPath) ||
+        !hasAnyLocalImport(pageModule)
+      ) {
+        addFile(page)
+      }
     }
   }
 
-  const result = await applyRepairEdit({
+  const iterateeRoot = await iterateeRootOfLoop(
+    resolvedRelPath,
     source,
-    file: resolvedRelPath,
-    intent: body.intent,
-    errorReason: body.errorReason as string,
+    intent.templateLocation,
+  )
+  if (iterateeRoot) {
+    const [{ collectImportChain }, { moduleSourceOfFile }] = await Promise.all([
+      import("../../../src/editor/edit-service/import-binding.js"),
+      import("../../../src/editor/edit-service/vue-script-content.js"),
+    ])
+    const chain = await collectImportChain({
+      startPath: resolvedRelPath,
+      startSource: source,
+      name: iterateeRoot,
+      resolve: async (fromPath, specifier) => {
+        const mod = await resolveRelativeModule(
+          path.resolve(rootReal, fromPath),
+          specifier,
+          rootResolution,
+        )
+        return mod.ok ? { path: mod.relativePath, source: mod.source } : null
+      },
+      moduleSourceOf: (file) => moduleSourceOfFile(file.path, file.source),
+    })
+    for (const file of chain) addFile(file)
+  }
+
+  const { applyIterationDataLlm } = await loaders.loadApplyIterationDataLlm()
+  const iteration = await applyIterationDataLlm({
+    files,
+    intent,
     projectKnowledge,
     ...(getLlmProvider ? { resolveProvider: getLlmProvider } : {}),
   })
-  if (!result.ok) {
-    return { status: 422, ok: false, reason: result.reason }
+  if (!iteration.ok) {
+    return { status: 422, ok: false, reason: iteration.reason, kind: iteration.kind }
   }
   return {
     status: 200,
     ok: true,
     proposal: {
-      newSource: result.newSource,
-      explanation: result.explanation,
-      baseHash: result.originalSourceHash,
+      newSource: iteration.newSource,
+      explanation: iteration.explanation,
+      baseHash: iteration.originalSourceHash,
+      // The file the MODEL chose out of the bundle — the data module, the
+      // page, or the loop file itself. The client writes this path.
+      file: iteration.file,
     },
   }
 }
 
 export const defaultLLMFallbackLoaders: LLMFallbackLoaders = {
-  loadApplyRepairEdit: () => import("../../../src/editor/edit-service/repair-edit"),
   loadProjectKnowledge: () =>
     import("../../../src/editor/edit-service/load-project-knowledge"),
   loadApplyIterationDataLlm: () =>

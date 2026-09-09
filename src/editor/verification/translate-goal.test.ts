@@ -5,7 +5,7 @@
  * is to pick + validate predicates, never to judge; these tests guard that
  * boundary and the degrade-to-refusal paths.
  *
- * Same fake-provider pattern as repair-edit.test.ts.
+ * Same fake-provider pattern as iteration-data-llm.test.ts.
  */
 
 import { describe, expect, it, vi } from 'vitest'

@@ -13,7 +13,7 @@
  * duplicate, reorder, and insert by varying the operation payload.
  *
  * Wraps source in `wrap-untrusted-source` for the same prompt-injection
- * defense as the repair-edit prompt.
+ * defense as the other LLM-fallback prompts.
  */
 
 import type { ProjectKnowledge } from '../core/project-knowledge'

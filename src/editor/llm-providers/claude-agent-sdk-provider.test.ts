@@ -6,7 +6,7 @@
  * "the JSON string the model produced" for json_schema responses — by
  * synthesizing `text` from `parsed`. Without it, every consumer that
  * gates on `!result.text` before consulting `parsed` (apply-llm-patch,
- * repair-edit, agent-request, apply-iteration-data-edit) spuriously
+ * agent-request, apply-iteration-data-edit) spuriously
  * rejects a good structured response with "produced no text block" —
  * the "edit didn't save" error on the no-API-key Claude-subscription
  * path, which is the CLI default.

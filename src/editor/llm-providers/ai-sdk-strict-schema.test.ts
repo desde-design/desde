@@ -5,16 +5,17 @@
  * `Output.object` makes `@ai-sdk/openai` send `strict: true` alongside the
  * caller's schema, and strict mode requires EVERY key in `properties` to be
  * listed in `required` (and `additionalProperties: false` on every object).
- * All five `json_schema` call sites in this repo declare optional properties,
+ * All four `json_schema` call sites in this repo declare optional properties,
  * so before `toStrictJsonSchema` existed every LLM-fallback lane answered 400
- * on OpenAI: apply-llm-patch, repair-edit, iteration-data, translate-goal and
- * generate-hints.
+ * on OpenAI: apply-llm-patch, iteration-data, translate-goal and
+ * generate-hints. (A fifth, repair-edit, existed here too until its lane was
+ * removed 2026-09-08.)
  *
  * Two levels of coverage here:
  *  - end to end, against a stubbed `fetch` driving the REAL `@ai-sdk/openai`
  *    Responses model, asserting the exact request body;
  *  - one case per call site, asserting its own schema satisfies the strict
- *    rule after normalisation, so a sixth call site added later is covered by
+ *    rule after normalisation, so a new call site added later is covered by
  *    the same rule rather than by a new hand-written expectation.
  *
  * No network and no key: the stub `fetch` never leaves the process.
@@ -23,7 +24,6 @@ import { describe, expect, it } from 'vitest'
 import { buildOpenAiProvider } from './ai-sdk-openai'
 import { toStrictJsonSchema } from './ai-sdk-provider'
 import { buildPatchPrompt } from '../edit-service/llm-patch-prompt'
-import { REPAIR_RESPONSE_SCHEMA } from '../edit-service/repair-edit'
 import { ITERATION_DATA_RESPONSE_SCHEMA } from '../edit-service/iteration-data-llm'
 import { TRANSLATE_RESPONSE_SCHEMA } from '../verification/translate-goal'
 import { HINTS_SCHEMA } from '../hints/llm-generate-hints'
@@ -206,7 +206,6 @@ describe('prompt retention (the reason this lane runs on the Responses API)', ()
 describe('every json_schema call site in the repo', () => {
   it.each([
     ['apply-llm-patch', PATCH_SCHEMA as unknown as JsonObject],
-    ['repair-edit', REPAIR_RESPONSE_SCHEMA as unknown as JsonObject],
     ['iteration-data', ITERATION_DATA_RESPONSE_SCHEMA as unknown as JsonObject],
     ['translate-goal', TRANSLATE_RESPONSE_SCHEMA as unknown as JsonObject],
     ['generate-hints', HINTS_SCHEMA as unknown as JsonObject],

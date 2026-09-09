@@ -1174,7 +1174,7 @@ describe('the model id comes from the provider, never from this file', () => {
  * `getProvider()` THROWS on missing credentials, and a default-parameter throw
  * is evaluated during destructuring, so it escaped every try/catch in this
  * file and reached the caller as a raw 500 with a stack in the response body.
- * `repair-edit.ts` and `iteration-data-llm.ts` already resolve inside the
+ * `iteration-data-llm.ts` already resolves inside the
  * function for exactly this reason; this lane was the last one that did not.
  */
 describe('a credential failure is a clean refusal, not a 500', () => {

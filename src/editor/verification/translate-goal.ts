@@ -9,7 +9,7 @@
  *
  * Pure of side effects beyond the injected provider call. Tests pass a mock
  * `CompletionProvider`; production uses the registry default. Mirrors
- * `repair-edit.ts` (provider DI, json_schema, parsed-undefined guard).
+ * `iteration-data-llm.ts` (provider DI, json_schema, parsed-undefined guard).
  *
  * Spec: tasks/editor-edit-verification.md (P2, decision 2).
  */

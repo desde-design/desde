@@ -1,8 +1,9 @@
 /**
- * Tests for the React-enabling changes to the Tier 2 repair endpoint
- * (`handleLLMFallback`): `.tsx`/`.jsx` files are now repairable, and the
- * intent validator accepts 0-based JSX columns (Babel convention) — a
- * column-0 React target must not 400 before the repair lane runs.
+ * Tests for `handleLLMFallback` — the iteration-data AI lane (F-11). The
+ * structural repair lane that used to share this endpoint (and the React
+ * (.tsx/.jsx) support tests that exercised it) was removed 2026-09-08;
+ * refused structural edits are now handed to chat instead. See
+ * `src/hooks/apply-edit-with-chat-handoff.ts`.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -15,102 +16,10 @@ import {
 } from "../llm-fallback-handler"
 import type { IterationDataPromptFile } from "../../../../src/editor/edit-service/iteration-data-prompt.js"
 
-const REWRITTEN = "export default function App() {\n  return <main>repaired</main>\n}\n"
-
-// Stub the repair service so no LLM call happens — we only exercise the
-// endpoint's gates (extension + intent validation + path containment).
-const loaders: LLMFallbackLoaders = {
-  // Cast because the loader's type is the WHOLE module and this stub is only
-  // the one function the handler calls. `repair-edit` also exports its
-  // response schema (read by `ai-sdk-strict-schema.test.ts`), which a stub
-  // has no business reproducing.
-  loadApplyRepairEdit: async () =>
-    ({
-      applyRepairEdit: async () => ({
-        ok: true as const,
-        newSource: REWRITTEN,
-        originalSourceHash: "deadbeef",
-        explanation: "stubbed repair",
-      }),
-    }) as unknown as Awaited<ReturnType<NonNullable<LLMFallbackLoaders["loadApplyRepairEdit"]>>>,
-}
-
-describe("handleLLMFallback — React (.tsx/.jsx) support", () => {
-  let dir: string
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "llm-fallback-react-"))
-  })
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true })
-  })
-
-  function body(overrides: Partial<LLMFallbackRequestBody> = {}): LLMFallbackRequestBody {
-    return {
-      file: "App.tsx",
-      intent: {
-        kind: "delete",
-        description: "Delete <button>",
-        sourceLine: 2,
-        sourceColumn: 0, // 0-based Babel column — a top-level, unindented element
-      },
-      errorReason: "No JSX element found at 2:0",
-      ...overrides,
-    }
-  }
-
-  it("repairs a .tsx file (no longer Vue-only) and accepts a 0-based column", async () => {
-    writeFileSync(join(dir, "App.tsx"), "export default function App() {\n<button/>\n}\n")
-    const r = await handleLLMFallback(body(), dir, loaders)
-    expect(r.ok).toBe(true)
-    expect(r.status).toBe(200)
-    expect(r.proposal?.newSource).toBe(REWRITTEN)
-  })
-
-  it("repairs a .jsx file", async () => {
-    writeFileSync(join(dir, "Card.jsx"), "export default function Card() {\n  return <div/>\n}\n")
-    const r = await handleLLMFallback(body({ file: "Card.jsx" }), dir, loaders)
-    expect(r.ok).toBe(true)
-    expect(r.status).toBe(200)
-  })
-
-  it("still rejects unsupported extensions", async () => {
-    writeFileSync(join(dir, "styles.css"), ".x{}")
-    const r = await handleLLMFallback(body({ file: "styles.css" }), dir, loaders)
-    expect(r.ok).toBe(false)
-    expect(r.status).toBe(400)
-    expect(r.reason).toMatch(/Only \.vue, \.tsx, and \.jsx/)
-  })
-
-  it("rejects a negative column (still guards garbage input)", async () => {
-    writeFileSync(join(dir, "App.tsx"), "export default function App() {\n<button/>\n}\n")
-    const r = await handleLLMFallback(body({
-      intent: {
-        kind: "delete",
-        description: "Delete <button>",
-        sourceLine: 2,
-        sourceColumn: -1,
-      },
-    }), dir, loaders)
-    expect(r.ok).toBe(false)
-    expect(r.status).toBe(400)
-    expect(r.reason).toMatch(/non-negative integer/)
-  })
-
-  it("still rejects a 0 LINE (lines are 1-based in both frameworks)", async () => {
-    writeFileSync(join(dir, "App.tsx"), "export default function App() {\n<button/>\n}\n")
-    const r = await handleLLMFallback(body({
-      intent: {
-        kind: "delete",
-        description: "Delete <button>",
-        sourceLine: 0,
-        sourceColumn: 0,
-      },
-    }), dir, loaders)
-    expect(r.ok).toBe(false)
-    expect(r.status).toBe(400)
-    expect(r.reason).toMatch(/positive integer/)
-  })
-})
+// Base loaders with nothing configured — every property on `LLMFallbackLoaders`
+// is optional. Iteration-lane tests spread this and add their own
+// `loadApplyIterationDataLlm` stub.
+const loaders: LLMFallbackLoaders = {}
 
 describe("handleLLMFallback — iteration-data lane (F-11)", () => {
   let dir: string
@@ -756,24 +665,19 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
     expect(r.proposal?.file).toBe("List.vue")
   })
 
-  it("still requires errorReason for the structural-repair kinds", async () => {
-    writeFileSync(join(dir, "App.tsx"), "export default () => <div/>\n")
-    const r = await handleLLMFallback(
+  it("refuses a structural repair intent: the repair lane is gone", async () => {
+    const result = await handleLLMFallback(
       {
-        file: "App.tsx",
-        intent: {
-          kind: "delete",
-          description: "Delete <div>",
-          sourceLine: 1,
-          sourceColumn: 0,
-        },
-      } as LLMFallbackRequestBody,
+        file: "src/App.tsx",
+        intent: { kind: "delete", description: "Delete <div>", sourceLine: 1, sourceColumn: 0 } as never,
+        errorReason: "refused",
+      } as never,
       dir,
-      iterationLoaders,
+      loaders,
     )
-    expect(r.ok).toBe(false)
-    expect(r.status).toBe(400)
-    expect(r.reason).toMatch(/errorReason required/)
+    expect(result.status).toBe(400)
+    expect(result.ok).toBe(false)
+    expect(result.reason).toContain('"iteration-data"')
   })
 
   it("400s an iteration-data request whose payload has no operation", async () => {

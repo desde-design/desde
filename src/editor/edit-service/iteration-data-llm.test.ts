@@ -1,7 +1,7 @@
 /**
  * Colocated tests for the iteration-data LLM lane. The provider is injected
  * so tests return canned JSON without an API call — same pattern as
- * `repair-edit.test.ts`.
+ * `apply-llm-patch.test.ts`.
  *
  * As of 2026-09-08 this lane takes a BUNDLE (`files: [{ path, source }]`,
  * loop file first, then page file, then the import chain) instead of a

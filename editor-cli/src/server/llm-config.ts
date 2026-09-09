@@ -1,7 +1,7 @@
 /**
  * Which provider the NON-CHAT lanes run on for this project.
  *
- * The six lanes (`apply-llm-patch`, `repair-edit`, `iteration-data-llm`,
+ * The five lanes (`apply-llm-patch`, `iteration-data-llm`,
  * `verification/translate-goal`, `hints/llm-generate-hints`, and
  * `design-systems-handler`'s hint generation) run outside any chat session, so
  * the model picker's per-session choice does not apply to them. They get a

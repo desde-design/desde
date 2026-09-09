@@ -21,9 +21,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "nod
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { applyEdit, type ApplicatorLoaders, type EditRequestBody } from "../edit-handler.js"
-import { handleLLMFallback, type LLMFallbackLoaders } from "../llm-fallback-handler.js"
 import {
-  DORMANT_LANE_IDS,
   dormantLaneRefusal,
   loadEnabledLanes,
   type DormantLaneId,
@@ -181,58 +179,13 @@ describe("dormant lanes — dispatch refuses detach/swap by default", () => {
   })
 })
 
-/**
- * The repair lane is the SECOND dispatch surface for these kinds — it takes an
- * `intent.kind` of `detach`/`swap` and returns an LLM full-file rewrite. Gating
- * only `POST /api/editor/edit` would leave the dormant lane reachable here.
- */
-describe("dormant lanes — the LLM repair lane refuses the same kinds", () => {
-  let dir: string
-  const loaders: LLMFallbackLoaders = {
-    loadApplyRepairEdit: async () => {
-      throw new Error("the repair lane must not be reached for a dormant kind")
-    },
-  }
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "editor-dormant-repair-"))
-    writeFileSync(join(dir, "App.vue"), CONSUMER)
-  })
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true })
-  })
-
-  for (const kind of DORMANT_LANE_IDS) {
-    it(`refuses intent.kind "${kind}" with 400 naming lanes.${kind}`, async () => {
-      const result = await handleLLMFallback(
-        {
-          file: "App.vue",
-          intent: { kind, description: "repair it" },
-          errorReason: "applicator refused",
-        },
-        dir,
-        loaders,
-      )
-      expect(result.ok).toBe(false)
-      expect(result.status).toBe(400)
-      expect(result.reason).toContain(`lanes.${kind}`)
-    })
-  }
-
-  it("still admits a non-dormant intent kind (reaches the repair loader)", async () => {
-    await expect(
-      handleLLMFallback(
-        {
-          file: "App.vue",
-          intent: { kind: "move", description: "move it" },
-          errorReason: "applicator refused",
-        },
-        dir,
-        loaders,
-      ),
-    ).rejects.toThrow(/must not be reached/)
-  })
-})
+// The dormant-lane gate for detach/swap used to have a SECOND dispatch
+// surface here: the single-shot repair lane took the same `intent.kind` and
+// returned an LLM full-file rewrite, so gating only `POST /api/editor/edit`
+// would have left it reachable through `POST /api/editor/llm-fallback`. That
+// lane (and this file's coverage of it) was removed 2026-09-08 — the
+// iteration-data lane that remains at that route is not a dormant lane, and
+// carries no `intent.kind` this gate would recognize.
 
 describe("dormantLaneRefusal", () => {
   it("names the kind, the config key and the config file", () => {
