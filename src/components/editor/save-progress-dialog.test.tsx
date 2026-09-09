@@ -165,6 +165,7 @@ describe("SaveProgressDialog", () => {
         lastLLMTrace={null}
         streamingText=""
         saveStatus="Save failed at DOM mutations: file not found"
+        failureReason="Save failed at DOM mutations: file not found"
       />,
     )
     // Title shows the failed state; body shows the verbatim error.
@@ -323,10 +324,10 @@ describe("SaveProgressDialog", () => {
    * `saveStatus` channel, with no save in flight and a scope or
    * disambiguation dialog already open asking the designer to answer. When
    * this dialog decided failure by wording, those four sentences opened a
-   * "Save failed" modal on top of the question. The wording heuristic is
-   * narrow again and the save's own failures come in structurally, so the
-   * only thing that can open this dialog with nothing saving is
-   * `failureReason`.
+   * "Save failed" modal on top of the question. Narrowing the pattern only
+   * shrank the target: the wording is gone entirely now, and the one thing
+   * that can open this dialog with nothing saving is `failureReason`, which
+   * every save failure sets.
    */
   describe("the shared saveStatus channel", () => {
     const iterationStatuses: [string, string][] = [
@@ -372,7 +373,31 @@ describe("SaveProgressDialog", () => {
       expect(screen.queryByText(/Saved 2 DOM mutation/)).toBeNull()
     })
 
-    it("still opens on the legacy prose failures it always covered", () => {
+    /**
+     * The last of the wording. A save that really threw sets `failureReason`
+     * too, so nothing is lost by refusing to read the prose - and reading it
+     * cost false positives, because any lane's status is free to contain the
+     * word. These four are ordinary sentences, not save failures.
+     */
+    it.each([
+      ["threw", "Save threw: boom"],
+      ["failed", "Iteration edit failed for src/App.vue: no v-for at that line"],
+      ["error", "Could not check the source for a loop: network error"],
+      ["refused", "Iteration edit refused: no source location on the selection."],
+    ])("stays shut on the word %s alone, with no failure reason", (_word, status) => {
+      render(
+        <SaveProgressDialog
+          saving={false}
+          pendingLLMInput={null}
+          lastLLMTrace={null}
+          streamingText=""
+          saveStatus={status}
+        />,
+      )
+      expect(screen.queryByRole("dialog")).toBeNull()
+    })
+
+    it("opens on the same sentence once the save reports it structurally", () => {
       render(
         <SaveProgressDialog
           saving={false}
@@ -380,6 +405,7 @@ describe("SaveProgressDialog", () => {
           lastLLMTrace={null}
           streamingText=""
           saveStatus="Save threw: boom"
+          failureReason="Save threw: boom"
         />,
       )
       expect(screen.getByRole("dialog")).toBeInTheDocument()

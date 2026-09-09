@@ -30,7 +30,21 @@ interface SaveProgressDialogProps {
   lastLLMTrace: SaveLLMTrace | null
   /** Accumulated streaming text — live LLM output as tokens arrive. Empty on fast-path. */
   streamingText: string
-  /** Latest save status string (errors, "Saved …" text). */
+  /**
+   * Latest save status string (errors, "Saved …" text).
+   *
+   * ACCEPTED AND DELIBERATELY NOT READ. It is still part of this dialog's
+   * shape because the surface has it to hand and dropping it would churn every
+   * call site, but nothing here decides anything from it, which is why it is
+   * not destructured below.
+   *
+   * It is a channel this dialog does not own. The iteration lane writes
+   * sentences to it with no save in flight, and any reason at all is free to
+   * contain "error" or "failed". Deciding "the save failed" from that wording
+   * opened a "Save failed" modal over the dialog the sentence was asking the
+   * designer to answer. `failureReason` says the same thing structurally, on
+   * every save failure, so there is nothing left for the wording to add.
+   */
   saveStatus: string | null
   /**
    * The reason the LAST STARTED save ended badly, or null if it did not.
@@ -88,7 +102,6 @@ export function SaveProgressDialog({
   pendingLLMInput,
   lastLLMTrace,
   streamingText,
-  saveStatus,
   failureReason,
   conflict,
   onForceOverwrite,
@@ -118,14 +131,13 @@ export function SaveProgressDialog({
     saving,
     pendingLLMInput,
     lastLLMTrace,
-    saveStatus,
     failureReason,
     conflict,
   })
-  // The one string this dialog reports a failure with, from either channel.
-  // Structured first: when a save handed its reason over, that is the sentence
-  // about the save, and `saveStatus` may since have been overwritten.
-  const failureText = failureMessage({ failureReason, saveStatus })
+  // The one string this dialog reports a failure with. The save hands its own
+  // reason over, so there is nothing to reconcile against a shared channel
+  // that may since have been overwritten by another lane.
+  const failureText = failureMessage({ failureReason })
   const open = phase !== null && !dismissed
 
   // `phase` going non-null → null while the dialog is open is the COMMON
@@ -419,20 +431,23 @@ type Phase =
  * what keeps the two from drifting apart again: every phase is an
  * open-reason, and every open-reason is a phase.
  *
- * Failures arrive on two channels. `failureReason` is structured and
- * authoritative: a save that started and ended badly hands its reason over
- * directly, the way a 409 hands over `conflict`. `saveStatus` is the legacy
- * prose channel, still read for the failures that only announce themselves
- * there, and deliberately matched by a NARROW pattern: it is a shared channel
- * that other lanes write to with no save in flight, so every word added to
- * that pattern is a chance to open this modal over someone else's dialog. A
- * new failure that must hold this dialog open goes through `failureReason`.
+ * A failure opens this dialog on ONE channel: `failureReason`, which a save
+ * that started and ended badly hands over directly, the way a 409 hands over
+ * `conflict`. `saveStatus` no longer decides anything here.
+ *
+ * It used to, by wording, and that was always a guess about a channel this
+ * dialog does not own. `saveStatus` is shared: the iteration lane writes
+ * sentences to it with no save in flight, and a network reason is free to
+ * contain "error" or "failed" and open a "Save failed" modal over the dialog
+ * that sentence was asking the designer to answer. Once every save failure
+ * reported itself structurally, the wording read was redundant for saves and
+ * nothing but false positives for everyone else. A new failure that must hold
+ * this dialog open goes through `failureReason`.
  */
 function derivePhase(args: {
   saving: boolean
   pendingLLMInput: SaveLLMTrace["mutationSummary"] | null
   lastLLMTrace: SaveLLMTrace | null
-  saveStatus: string | null
   failureReason?: string | null
   conflict?: ExternalEditConflict | null
 }): Phase | null {
@@ -441,8 +456,8 @@ function derivePhase(args: {
     return "failed"
   }
   // A 409 renders recovery actions the designer can't reach anywhere else,
-  // so it holds the dialog open on the structured prop rather than on the
-  // wording of `saveStatus` — which the next notice is free to overwrite.
+  // so it holds the dialog open on the structured prop. Same rule as the
+  // failure above: a modal opens on a fact, never on a sentence.
   if (args.conflict && args.conflict.files.length > 0) return "failed"
   if (args.saving) {
     if (args.pendingLLMInput) return "asking-ai"
@@ -460,25 +475,14 @@ function derivePhase(args: {
  * The sentence this dialog should report as the failure, or null for "no
  * failure to report".
  *
- * Two channels, structured first. `failureReason` is set only by a save that
- * actually started and ended badly, so it is authoritative. `saveStatus` is
- * the legacy channel and is read only through the wording heuristic below,
- * which is why the heuristic must stay NARROW: the iteration lane writes its
- * own hand-off sentences to `saveStatus` with no save in flight, and widening
- * the pattern to catch them opened a "Save failed" modal over the scope
- * dialog those sentences were asking the user to answer. Those cases arrive
- * through `failureReason` now.
+ * One channel. `failureReason` is set by every save that actually started and
+ * ended badly, so it is both authoritative and complete, and reading the
+ * shared `saveStatus` prose alongside it added nothing a save needed while
+ * letting another lane's wording open this modal. A reason containing the word
+ * "error" is not evidence that a save failed.
  */
-function failureMessage(args: {
-  failureReason?: string | null
-  saveStatus: string | null
-}): string | null {
-  if (args.failureReason) return args.failureReason
-  return looksLikeFailure(args.saveStatus) ? args.saveStatus : null
-}
-
-function looksLikeFailure(saveStatus: string | null): boolean {
-  return saveStatus ? /failed|threw|conflict|refused|error/i.test(saveStatus) : false
+function failureMessage(args: { failureReason?: string | null }): string | null {
+  return args.failureReason ?? null
 }
 
 function phaseTitle(p: Phase): string {
