@@ -478,15 +478,21 @@ describe("handleChatRequest", () => {
     // Phase 1 of detached chat sessions: the very first SSE event is a
     // `session` envelope identifying the resolved sessionId so the client
     // can correlate the response with the session record it minted.
+    // …followed by `accepted`, which is the DURABLE acceptance signal: it is
+    // sent only once the session has loaded, was not cancelled, and the
+    // in-flight marker for this turn is on disk. The headers flushed long
+    // before any of that, so a 200 alone does not mean the turn was taken.
     expect(events.map((e) => e.kind)).toEqual([
       "session",
+      "accepted",
       "turn_start",
       "text_delta",
       "turn_complete",
     ])
     expect(events[0].sessionId).toBeDefined()
     expect(events[0].projectId).toBeDefined()
-    const textDelta = events[2]
+    expect(events[1].sessionId).toBe(events[0].sessionId)
+    const textDelta = events[3]
     expect(textDelta.delta).toBe("Hello")
     expect(mock.ended.value).toBe(true)
   })
@@ -1297,6 +1303,51 @@ describe("handleChatRequest — Phase 5 route-level lifecycle", () => {
     expect(refusal).toBeDefined()
     expect((refusal as { reason: string }).reason).toMatch(/cancelled/i)
     expect((refusal as { reason: string }).reason).toMatch(/Start a new chat/i)
+    // And NO `accepted`. This refusal happens after the response headers have
+    // flushed, so the stream is the only channel that can carry it — which is
+    // exactly why the client may not treat the 200 as acceptance.
+    expect(events.map((e) => e.kind)).not.toContain("accepted")
+  })
+
+  it("emits no `accepted` when the in-flight marker cannot be persisted", async () => {
+    // The other post-flush refusal. `saveSession` throwing is fatal for the
+    // turn: the orchestrator never runs and the client is told on the stream.
+    const { makeEmptySession } = await import(
+      "../../../../src/editor/agent-chat/types.js"
+    )
+    const sessionId = "lifecycle-unpersistable"
+    let orchestratorCalled = false
+    const base = makeLifecycleLoaders(
+      [],
+      sessionId,
+      async () => {
+        orchestratorCalled = true
+        throw new Error("orchestrator should NOT be called when the persist failed")
+      },
+      makeEmptySession("p", sessionId),
+    )
+    const loaders: ChatHandlerLoaders = {
+      ...base,
+      loadSessionStore: async () => {
+        const store = await base.loadSessionStore()
+        return {
+          ...store,
+          saveSession: async () => {
+            throw new Error("disk full")
+          },
+        } as typeof store
+      },
+    }
+
+    const mock = makeMockReqRes()
+    mock.setBody({ userMessage: "hi", sessionId })
+    await handleChatRequest(mock.req, mock.res, { repoRoot, loaders })
+
+    expect(orchestratorCalled).toBe(false)
+    const events = mock.events()
+    expect(events.map((e) => e.kind)).not.toContain("accepted")
+    const refusal = events.find((e) => e.kind === "error")
+    expect((refusal as { reason: string }).reason).toMatch(/Could not persist in-flight marker/)
   })
 })
 

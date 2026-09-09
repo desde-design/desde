@@ -140,6 +140,28 @@ export type ChatStreamEvent =
     }
   | {
       /**
+       * The turn is DURABLY accepted: the session was loaded, it was not
+       * cancelled, and the in-flight marker carrying this turn was persisted.
+       *
+       * This is the acceptance signal, not the HTTP response. The response
+       * headers flush before any of that work happens (the SSE stream is
+       * opened first so a failure can be reported on it), so a 200 proves only
+       * that the route was reached. Everything between the flush and this
+       * event can still refuse the turn: a cancelled session, a `saveSession`
+       * that throws, a concurrency-cap acquire that fails. Each of those
+       * reports an `error` event and closes the stream, and a client that
+       * treated the headers as acceptance had already thrown away the thing it
+       * would need to retry with (the prop edit, the mutation bundle, the
+       * bridge draft).
+       *
+       * Emitted exactly once per accepted turn, before `turn_start`. A stream
+       * that ends without it never accepted the turn.
+       */
+      kind: 'accepted'
+      sessionId: string
+    }
+  | {
+      /**
        * A message the user typed WHILE this turn was running, accepted by
        * `POST /api/editor/chat/steer` and pushed into the turn's input
        * channel. The model receives it at the next model boundary INSIDE this

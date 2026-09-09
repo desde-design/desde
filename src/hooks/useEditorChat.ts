@@ -473,8 +473,15 @@ interface RunSubmitOptions {
    */
   suppressRejectionBanner?: boolean
   /**
-   * Fired the instant the server answers 2xx with a stream, i.e. the moment
-   * acceptance becomes KNOWN.
+   * Fired when the server's `accepted` SSE event arrives, i.e. the moment
+   * acceptance becomes KNOWN and DURABLE.
+   *
+   * Not the HTTP response. The server flushes the SSE headers before it loads
+   * the session or persists the turn, so a 200 says only that the route was
+   * reached; a cancelled session or a failed persist still refuses the turn
+   * afterwards, on the stream. Callers on this seam throw away the thing they
+   * would need to retry with the moment they are told "accepted", so the
+   * signal has to be the durable one.
    *
    * It exists because `runSubmit`'s RETURN is a much later event: it resolves
    * when the whole turn's SSE stream ends, which on a real turn is tens of
@@ -496,9 +503,10 @@ interface RunSubmitOptions {
  */
 interface SubmitTurnOutcome {
   /**
-   * True once the server answered 2xx with a stream. From that moment the
+   * True once the server's `accepted` event arrived. From that moment the
    * message is a persisted turn on the server, whatever later happens to the
-   * stream.
+   * stream. A 200 alone is not enough: the headers flush before the session
+   * load and the in-flight persist, either of which can still refuse the turn.
    */
   serverAccepted: boolean
   /** HTTP status of a refusal, when one was observed (null on a thrown fetch). */
@@ -705,8 +713,9 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
     // unconfirmed rather than confirmed: repeat over drop, always.
     let streamClosedCleanly = false
     // The outcome reported to the caller (the steer sweep). Acceptance is
-    // latched the moment the server answers 2xx with a stream — from then on
-    // the message is a persisted turn server-side, whatever the stream does.
+    // latched when the server's `accepted` event arrives — from then on the
+    // message is a persisted turn server-side, whatever the stream does. A
+    // stream that ends without it never accepted the turn.
     let serverAccepted = false
     let rejectionStatus: number | null = null
     let assistantId: string | null = null
@@ -936,13 +945,11 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
         }
         return { serverAccepted, rejectionStatus }
       }
-      serverAccepted = true
-      try {
-        options?.onAccepted?.()
-      } catch {
-        // A subscriber's throw must not become "Chat stream failed" — this
-        // callback is a notification about the turn, not part of running it.
-      }
+      // Acceptance is NOT latched here. A 200 with a body proves the route was
+      // reached; the server flushes these headers before it loads the session
+      // or persists the turn, and both of those can still refuse it. The
+      // `accepted` SSE event below is the first durable signal, and that is
+      // where `serverAccepted` and `onAccepted` now fire.
       for await (const event of parseSseStream<ChatStreamEvent>(response.body, abort.signal)) {
         await handleEvent(event)
       }
@@ -1040,6 +1047,24 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
         flushDeltas()
       }
       switch (event.kind) {
+        case "accepted": {
+          // The server's first durable signal. Latched here rather than on the
+          // HTTP response because the response is flushed before the session
+          // load and the in-flight persist, and either can still refuse.
+          // Idempotent: the server sends it once, but a duplicate must not
+          // re-notify a subscriber that has already acted on it.
+          if (!serverAccepted) {
+            serverAccepted = true
+            try {
+              options?.onAccepted?.()
+            } catch {
+              // A subscriber's throw must not become "Chat stream failed" —
+              // this callback is a notification about the turn, not part of
+              // running it.
+            }
+          }
+          break
+        }
         case "session": {
           // Re-key the bucket from the initial client-side guess
           // (SOLO_BUCKET when no sessionId was known) to the server-

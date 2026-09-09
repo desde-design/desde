@@ -90,6 +90,7 @@ function jsonResponse(status: number, body: unknown): Response {
 /** A turn that streams nothing and ends — enough for a resubmit to complete. */
 function silentTurn(id: string): Response {
   return completedSse([
+    { kind: "accepted", sessionId: "s1" },
     { kind: "turn_start", turnId: id },
     { kind: "turn_complete", turnId: id },
   ])
@@ -132,6 +133,15 @@ const soloOptions: UseEditorChatOptions = {
 
 const SESSION_EVENT = { kind: "session", sessionId: "s1", projectId: "p1" }
 
+/**
+ * The server's durable acceptance signal, emitted after the session is loaded
+ * and the in-flight turn is persisted. The client latches acceptance on this,
+ * not on the HTTP response — the response headers flush before either of those
+ * happen. A fixture turn that omits it is a turn the server never took, so
+ * every turn here that is meant to be accepted sends it.
+ */
+const ACCEPTED_EVENT = { kind: "accepted", sessionId: "s1" }
+
 beforeEach(() => {
   chatResponses.length = 0
   steerResponses.length = 0
@@ -171,6 +181,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       turn.push({ kind: "turn_start", turnId: "t1" })
       await settle()
     })
@@ -210,6 +221,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       await settle()
     })
     await act(async () => {
@@ -246,6 +258,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       await settle()
     })
     await act(async () => {
@@ -269,6 +282,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       turn.push({ kind: "turn_start", turnId: "t1" })
       await settle()
     })
@@ -308,6 +322,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       await settle()
     })
     await act(async () => {
@@ -345,6 +360,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       await settle()
     })
     await act(async () => {
@@ -383,6 +399,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       // Typed in another tab: this client has no ledger entry and no bubble.
       turn.push({
         kind: "resubmit_required",
@@ -477,6 +494,7 @@ describe("useEditorChat.steer", () => {
 
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       await settle()
     })
     await act(async () => {
@@ -505,6 +523,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       turn.push({ kind: "turn_start", turnId: "t1" })
       turn.push({ kind: "text_delta", turnId: "t1", delta: "before" })
       // Typed in ANOTHER tab; this client's ledger knows nothing about it.
@@ -547,6 +566,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       turn.push({ kind: "turn_start", turnId: "t1" })
       await settle()
     })
@@ -589,6 +609,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       turn.push({ kind: "turn_start", turnId: "t1" })
       await settle()
     })
@@ -683,6 +704,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       await settle()
     })
     await act(async () => {
@@ -774,6 +796,8 @@ describe("useEditorChat.steer", () => {
       })
       await act(async () => {
         turn.push(SESSION_EVENT)
+        turn.push(ACCEPTED_EVENT)
+      turn.push(ACCEPTED_EVENT)
         turn.push({ kind: "turn_start", turnId: "t1" })
         await vi.advanceTimersByTimeAsync(0)
       })
@@ -831,6 +855,8 @@ describe("useEditorChat.steer", () => {
       })
       await act(async () => {
         turn.push(SESSION_EVENT)
+        turn.push(ACCEPTED_EVENT)
+      turn.push(ACCEPTED_EVENT)
         turn.push({ kind: "turn_start", turnId: "t1" })
         await vi.advanceTimersByTimeAsync(0)
       })
@@ -889,6 +915,8 @@ describe("useEditorChat.steer", () => {
       })
       await act(async () => {
         turn.push(SESSION_EVENT)
+        turn.push(ACCEPTED_EVENT)
+      turn.push(ACCEPTED_EVENT)
         turn.push({ kind: "turn_start", turnId: "t1" })
         await vi.advanceTimersByTimeAsync(0)
       })
@@ -934,6 +962,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       turn.push({ kind: "turn_start", turnId: "t1" })
       turn.push({ kind: "text_delta", turnId: "t1", delta: "all of it" })
       await settle()
@@ -1001,6 +1030,7 @@ describe("useEditorChat.steer", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       turn.push({ kind: "turn_start", turnId: "t1" })
       turn.push({ kind: "text_delta", turnId: "t1", delta: "before" })
       await settle()
@@ -1120,6 +1150,7 @@ describe("useEditorChat.resendingSteers", () => {
     })
     await act(async () => {
       turn.push(SESSION_EVENT)
+      turn.push(ACCEPTED_EVENT)
       turn.push({ kind: "turn_start", turnId: "t1" })
       await vi.advanceTimersByTimeAsync(0)
     })
@@ -1217,6 +1248,10 @@ describe("useEditorChat.resendingSteers", () => {
     vi.useFakeTimers()
     try {
       const resent = liveSse()
+      // Accepted the instant the retry lands, as the server does: the frame is
+      // already in the stream's buffer when the fetch resolves. It is what the
+      // assertion below reads, and it arrives before anything is streamed.
+      resent.push(ACCEPTED_EVENT)
       chatResponses.push(
         jsonResponse(409, { error: "turn in flight" }),
         // The retry is accepted and then keeps streaming, like a real turn.
@@ -1275,6 +1310,7 @@ describe("useEditorChat.resendingSteers", () => {
     vi.useFakeTimers()
     try {
       const resent = liveSse()
+      resent.push(ACCEPTED_EVENT)
       // No 409: the lock had already cleared by the time the sweep fired.
       chatResponses.push(resent.response)
       const { result } = renderHook(() => useEditorChat(soloOptions))

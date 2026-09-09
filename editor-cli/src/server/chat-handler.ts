@@ -931,6 +931,15 @@ export async function handleChatRequest(
       return
     }
 
+    // THE acceptance signal. Everything that can still refuse this turn has
+    // now run: the session loaded, it was not cancelled, and the in-flight
+    // marker carrying it is on disk. The client latches acceptance here and
+    // not on the HTTP response, because `openSseStream` flushes headers as
+    // the very first thing this handler does — a 200 says the route was
+    // reached, nothing more. See the `accepted` docblock in
+    // src/editor/agent-chat/chat-stream-events.ts.
+    stream.send({ kind: "accepted", sessionId })
+
     // Project-knowledge digest — folded into the chat agent's system
     // prompt (the adapter realpath-contains `repoRoot` internally).
     // Skipped when the project config turns conventions off; `excludeFiles`
