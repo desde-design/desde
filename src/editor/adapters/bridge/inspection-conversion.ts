@@ -30,6 +30,7 @@ import type {
   IterationContext,
   OutlineNode,
 } from '@/types/bridge'
+import { iterationTextProblem } from '@/editor/edit-service/iteration-text-limits'
 
 const ITERATION_SOURCES: readonly IterationContext['source'][] = [
   'v-for',
@@ -48,31 +49,56 @@ const ITERATION_SOURCES: readonly IterationContext['source'][] = [
  * a message to the agent.
  *
  * So the shape is checked at the boundary and a context that fails is
- * DROPPED, not repaired. A malformed context means "this is not an
- * iteration", which is exactly the ordinary edit path. `siblingCount` must be
- * at least 2 because the whole question the context unlocks is "this one or
- * all of them", which needs more than one. The returned object is rebuilt
- * field by field, so nothing else the page attached rides along.
+ * DROPPED, not repaired. `siblingCount` must be at least 2 because the whole
+ * question the context unlocks is "this one or all of them", which needs more
+ * than one. The returned object is rebuilt field by field, so nothing else the
+ * page attached rides along.
+ *
+ * **The result is TAGGED, and the tag is the point.** It used to return
+ * `null`, and every caller read "no context" as "not an iteration" — which
+ * routed a malformed context to the ORDINARY edit path. For a Layers-panel
+ * delete on a real loop row that means a definition-scope delete of the shared
+ * template: every row gone, from a message the page got wrong. Refusing is the
+ * only safe answer, and a caller cannot refuse what it cannot distinguish from
+ * "there is no loop here". `reason` is for logs and tests, never for a prompt.
  */
-export function validateIterationContext(value: unknown): IterationContext | null {
-  if (!value || typeof value !== 'object') return null
+export type IterationContextCheck =
+  | { ok: true; value: IterationContext }
+  | { ok: false; reason: string }
+
+export function validateIterationContext(value: unknown): IterationContextCheck {
+  const fail = (reason: string): IterationContextCheck => ({ ok: false, reason })
+  if (!value || typeof value !== 'object') return fail('not an object')
   const c = value as Record<string, unknown>
-  if (typeof c.key !== 'string' && typeof c.key !== 'number') return null
-  if (!Number.isInteger(c.index) || (c.index as number) < 0) return null
-  if (!Number.isInteger(c.siblingCount) || (c.siblingCount as number) < 2) return null
-  if (!ITERATION_SOURCES.includes(c.source as IterationContext['source'])) return null
+  if (typeof c.key !== 'string' && typeof c.key !== 'number') return fail('key is not a string or number')
+  if (typeof c.key === 'string') {
+    const problem = iterationTextProblem('key', c.key)
+    if (problem) return fail(problem)
+  }
+  if (!Number.isInteger(c.index) || (c.index as number) < 0) return fail('index is not a non-negative integer')
+  if (!Number.isInteger(c.siblingCount) || (c.siblingCount as number) < 2) {
+    return fail('siblingCount is not an integer of at least 2')
+  }
+  if (!ITERATION_SOURCES.includes(c.source as IterationContext['source'])) return fail('source is not a known kind')
   // `expression` is optional in practice (every emitter writes it, most of
   // them as null) but must never be a non-string when present: it reaches the
   // dialog's copy.
   if (c.expression !== null && c.expression !== undefined && typeof c.expression !== 'string') {
-    return null
+    return fail('expression is neither a string nor null')
+  }
+  if (typeof c.expression === 'string') {
+    const problem = iterationTextProblem('expression', c.expression)
+    if (problem) return fail(problem)
   }
   return {
-    source: c.source as IterationContext['source'],
-    key: c.key,
-    index: c.index as number,
-    siblingCount: c.siblingCount as number,
-    expression: typeof c.expression === 'string' ? c.expression : null,
+    ok: true,
+    value: {
+      source: c.source as IterationContext['source'],
+      key: c.key,
+      index: c.index as number,
+      siblingCount: c.siblingCount as number,
+      expression: typeof c.expression === 'string' ? c.expression : null,
+    },
   }
 }
 
@@ -85,13 +111,22 @@ export function validateIterationContext(value: unknown): IterationContext | nul
  * numbers. Mutates in place: these nodes are our own structured-clone of the
  * message, and rebuilding the tree to drop a field would be a copy for
  * nothing.
+ *
+ * A node whose context FAILS keeps no context and gains
+ * `iterationContextMalformed`, so the delete path can refuse rather than treat
+ * it as an ordinary element. See {@link validateIterationContext}.
  */
 export function sanitizeOutlineIterationContexts(roots: readonly OutlineNode[]): void {
   for (const node of roots) {
     if (node.iterationContext !== undefined) {
-      const valid = validateIterationContext(node.iterationContext)
-      if (valid) node.iterationContext = valid
-      else delete node.iterationContext
+      const checked = validateIterationContext(node.iterationContext)
+      if (checked.ok) {
+        node.iterationContext = checked.value
+        delete node.iterationContextMalformed
+      } else {
+        delete node.iterationContext
+        node.iterationContextMalformed = true
+      }
     }
     if (node.children) sanitizeOutlineIterationContexts(node.children)
   }
@@ -99,9 +134,17 @@ export function sanitizeOutlineIterationContexts(roots: readonly OutlineNode[]):
 
 export function inspectionDataToSelection(data: InspectionData): Selection {
   // Validated once, used by both returns below. `undefined`, not `null`: the
-  // field is optional on `Selection`, and "absent" is what a rejected context
-  // means.
-  const iterationContext = validateIterationContext(data.iterationContext) ?? undefined
+  // field is optional on `Selection`. A page that SENT a context we could not
+  // read is not the same as a page that sent none, so the failure is recorded
+  // as well: every edit entry point refuses on the flag instead of quietly
+  // taking the shared-template path. An ABSENT context sets neither field.
+  const checked =
+    data.iterationContext === undefined ? null : validateIterationContext(data.iterationContext)
+  const iterationContext = checked?.ok ? checked.value : undefined
+  const malformed = checked !== null && !checked.ok
+  const iterationFields = malformed
+    ? ({ iterationContextMalformed: true } as const)
+    : ({ iterationContext } as const)
   const componentTree = data.componentTree ?? []
   // Prefer the edit-target component (the one whose source declaration
   // carries the resolved data-desde-src) over the leaf of the Vue parent
@@ -192,7 +235,7 @@ export function inspectionDataToSelection(data: InspectionData): Selection {
       editTarget: data.editTarget,
       domAnchor: data.domAnchor,
       isLibrary: data.isLibrary,
-      iterationContext,
+      ...iterationFields,
       classes: data.classes,
       editableTexts: data.editableTexts,
       attributionContext: data.attributionContext,
@@ -232,7 +275,7 @@ export function inspectionDataToSelection(data: InspectionData): Selection {
     editTarget: primaryEditTarget ?? data.editTarget,
     domAnchor: data.domAnchor,
     isLibrary: data.isLibrary,
-    iterationContext,
+    ...iterationFields,
     // Live prop values from the primary component instance. Without this,
     // after a manual page reload the inspector renders manifest defaults
     // that disagree with the already-rendered iframe.

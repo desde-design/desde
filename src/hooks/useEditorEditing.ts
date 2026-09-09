@@ -113,7 +113,9 @@ import {
 import {
   decideAfterVerify,
   isStaleVerify,
+  iterationRouteFor,
   iterationTemplateLocation,
+  MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
   thisRowTemplateLocation,
   type PendingIterationEdit,
@@ -824,15 +826,25 @@ export function useEditorEditing({
       if (!adapter || !source.editTarget || !destParent.editTarget) {
         return
       }
-      if (!skipIterationCheck && source.iterationContext) {
-        if (
-          interceptIterationEditRef.current?.({
-            editKind: "move",
-            payload,
-            iterationContext: source.iterationContext,
-          })
-        ) {
+      if (!skipIterationCheck) {
+        const route = iterationRouteFor(source)
+        // See `iterationRouteFor`: a context the page sent and we could not
+        // read is refused, never treated as "not a loop". Moving a loop row as
+        // if it were an ordinary element rewrites the shared template.
+        if (route === "refuse") {
+          setSaveStatus(MALFORMED_ITERATION_STATUS)
           return
+        }
+        if (route === "iteration" && source.iterationContext) {
+          if (
+            interceptIterationEditRef.current?.({
+              editKind: "move",
+              payload,
+              iterationContext: source.iterationContext,
+            })
+          ) {
+            return
+          }
         }
       }
       const id = makeEditId()
@@ -1397,6 +1409,14 @@ export function useEditorEditing({
       // that case — the dispatcher only reads selector + editTarget /
       // authoredAt off it for the iteration intent, both of which the
       // node carries.
+      // A context the page sent that failed the boundary check is the WORST
+      // case for this handler specifically: falling through means
+      // `dispatchDeleteEdit(node, "definition")`, which removes the shared
+      // template and with it every row. See `iterationRouteFor`.
+      if (iterationRouteFor(node) === "refuse") {
+        setSaveStatus(MALFORMED_ITERATION_STATUS)
+        return
+      }
       if (node.iterationContext) {
         const live = useEditorStore.getState().editorSelection
         const selectionForIntent: Selection =
@@ -1730,17 +1750,27 @@ export function useEditorEditing({
     const adapter = adapterRef.current
     const selection = useEditorStore.getState().editorSelection
     if (!adapter || !selection) return
-    if (!skipIterationCheck && selection.iterationContext) {
-      if (
-        interceptIterationEditRef.current?.({
-          editKind: "prop",
-          selection,
-          propName,
-          value,
-          iterationContext: selection.iterationContext,
-        })
-      ) {
+    if (!skipIterationCheck) {
+      // See `iterationRouteFor`. `dispatchAllRowsPropEdit` below is the
+      // shared-template write, which is exactly what an unreadable loop
+      // context must not silently become.
+      const route = iterationRouteFor(selection)
+      if (route === "refuse") {
+        setSaveStatus(MALFORMED_ITERATION_STATUS)
         return
+      }
+      if (route === "iteration" && selection.iterationContext) {
+        if (
+          interceptIterationEditRef.current?.({
+            editKind: "prop",
+            selection,
+            propName,
+            value,
+            iterationContext: selection.iterationContext,
+          })
+        ) {
+          return
+        }
       }
     }
     dispatchAllRowsPropEdit(selection, propName, value, renderSite)
@@ -1879,7 +1909,15 @@ export function useEditorEditing({
       // wrong for slot interpolations whose semantics demand a
       // data-array edit, not a template literal rewrite. Skipped for
       // non-iterated elements — same gate as `handlePropEdit`.
-      if (selection.iterationContext) {
+      const textRoute = iterationRouteFor(selection)
+      // See `iterationRouteFor`. Falling through here rewrites the template
+      // literal for every row, which is the wrong edit for a loop row and is
+      // not a decision an unreadable message from the page gets to make.
+      if (textRoute === "refuse") {
+        setSaveStatus(MALFORMED_ITERATION_STATUS)
+        return
+      }
+      if (textRoute === "iteration" && selection.iterationContext) {
         if (
           interceptIterationEditRef.current?.({
             editKind: "dom-text",
@@ -3688,6 +3726,22 @@ export function useEditorEditing({
       const selectionLoc = selection?.editTarget
         ? `${selection.editTarget.file}:${selection.editTarget.line}:${selection.editTarget.column}`
         : null
+      // Same refusal as every other entry point (see `iterationRouteFor`),
+      // with two differences. It is SCOPED by the same source-position gate
+      // the iteration route below uses, because only then does the selection
+      // describe this mutation at all: a drifted selection must not cancel a
+      // draft it has nothing to do with. And it must cancel, not just return:
+      // the bridge is holding a draft for this pendingId, and an orphaned
+      // draft blocks Save behind `handleSaveAll`'s gate forever.
+      if (
+        iterationRouteFor(selection) === "refuse" &&
+        selectionLoc !== null &&
+        selectionLoc === p.draft.sourceLoc
+      ) {
+        adapter.resolveMutationDisambiguation(p.pendingId, "cancel")
+        setSaveStatus(MALFORMED_ITERATION_STATUS)
+        return
+      }
       // Built as a nullable PAYLOAD rather than a bare boolean so TypeScript
       // narrows `selection`, `iteration` and the interceptor here, at the one
       // place the predicate is written. Folding the same conjunction into a

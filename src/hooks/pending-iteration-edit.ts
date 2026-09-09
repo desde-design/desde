@@ -73,6 +73,39 @@ export type PendingIterationEdit =
     } & WithLoopLocation)
 
 /**
+ * The status every refusing entry point sets when the page's loop information
+ * did not survive the wire boundary. One string, in one place, because five
+ * call sites say it and they must not drift apart.
+ *
+ * It says what happened and what to do, and it does NOT say "malformed" or
+ * name a field: the designer did not write the message that failed.
+ */
+export const MALFORMED_ITERATION_STATUS =
+  "The page reported loop information it could not describe, so this edit was not applied. Reload and try again."
+
+/**
+ * Which of the three routes an edit on this element takes.
+ *
+ * - `refuse`: the page sent loop information that failed the boundary check.
+ *   Nothing is dispatched. The alternative, treating it as "not a loop",
+ *   rewrites the SHARED template, and for a delete that removes every row.
+ * - `iteration`: a valid loop context, so the "this item or all items"
+ *   question applies.
+ * - `plain`: no loop context at all, i.e. the ordinary edit path.
+ *
+ * Pure and tiny on purpose. The five entry points that consult it live inside
+ * a 4700-line hook with no test harness, so the decision they share is tested
+ * here instead.
+ */
+export function iterationRouteFor(
+  target: { iterationContext?: IterationContext; iterationContextMalformed?: boolean } | null | undefined,
+): "refuse" | "iteration" | "plain" {
+  if (!target) return "plain"
+  if (target.iterationContextMalformed) return "refuse"
+  return target.iterationContext ? "iteration" : "plain"
+}
+
+/**
  * Where the loop would be in source for this pending edit. Same derivation
  * `dispatchIterationEdit`'s "this-row" branch used inline; now shared with
  * the verify step that runs before any prompt opens.

@@ -175,6 +175,19 @@ export interface SelectionTarget {
    */
   iterationContext?: IterationContext
   /**
+   * The page SENT an iteration context and it failed the wire boundary's
+   * shape check, so {@link iterationContext} was dropped (see
+   * `validateIterationContext`).
+   *
+   * "No context" and "a context we could not read" have to be different
+   * answers. Reading them as the same one sends the edit down the ordinary
+   * path, which for a real loop row means rewriting the SHARED template: a
+   * delete would take every row. Every edit entry point refuses on this flag
+   * instead. Absent means the page sent no context at all, which is the
+   * ordinary non-iterated element.
+   */
+  iterationContextMalformed?: boolean
+  /**
    * Manifest-first attribution snapshot the bridge extracted for this
    * selection (component chain + clicked-element descriptor). Consumed by
    * `attribute()` in the edit pipeline to decide deterministic vs.

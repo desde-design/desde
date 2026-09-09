@@ -6,6 +6,7 @@ import {
   decideAfterVerify,
   describeAmbiguousIteration,
   isStaleVerify,
+  iterationRouteFor,
   iterationTemplateLocation,
   sameBridgeDraft,
   thisRowTemplateLocation,
@@ -289,5 +290,30 @@ describe("thisRowTemplateLocation", () => {
   it("prefers the verified loop's position over the clicked element's", () => {
     const loopLocation = { file: "src/components/ui/card.tsx", line: 41, column: 2 }
     expect(thisRowTemplateLocation({ ...pending, loopLocation })).toEqual(loopLocation)
+  })
+})
+
+describe("iterationRouteFor", () => {
+  it("routes a valid context to the iteration question", () => {
+    expect(iterationRouteFor({ iterationContext })).toBe("iteration")
+  })
+
+  it("routes an element with no context to the ordinary path", () => {
+    expect(iterationRouteFor({})).toBe("plain")
+    expect(iterationRouteFor(null)).toBe("plain")
+    expect(iterationRouteFor(undefined)).toBe("plain")
+  })
+
+  it("REFUSES when the page sent a context the boundary could not read", () => {
+    // The whole of J2. Before the flag existed this case was indistinguishable
+    // from "plain", and "plain" for a real loop row is a shared-template
+    // rewrite: a delete would take every row.
+    expect(iterationRouteFor({ iterationContextMalformed: true })).toBe("refuse")
+  })
+
+  it("refuses even if a context somehow survives alongside the flag", () => {
+    // Belt and braces: the boundary clears one when it sets the other, but the
+    // refusal must not depend on that ordering holding.
+    expect(iterationRouteFor({ iterationContext, iterationContextMalformed: true })).toBe("refuse")
   })
 })

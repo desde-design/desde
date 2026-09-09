@@ -586,6 +586,14 @@ export interface OutlineNode {
    */
   iterationContext?: IterationContext
   /**
+   * The bridge sent an iteration context for this node and it failed the
+   * wire boundary's shape check, so the context was dropped (see
+   * `sanitizeOutlineIterationContexts`). The Layers-panel delete refuses on
+   * this rather than falling through to a definition-scope delete, which on a
+   * real loop row would remove every row.
+   */
+  iterationContextMalformed?: boolean
+  /**
    * Present when this node is a SYNTHETIC row standing in for a
    * `<template v-if>` / `<template v-for>` group (see
    * `src/editor/edit-service/list-conditional-groups.ts`). Those
