@@ -2428,6 +2428,30 @@ export function useEditorEditing({
   }, [])
 
   /**
+   * Give back every bridge draft still recorded in the maps, and empty them.
+   *
+   * The last owner. A draft is recorded the moment the bridge's delivery route
+   * hands it to the iteration lane, and it stays recorded for the whole of that
+   * lane's work: the verify round trip, the awaited hand-off, the row write. A
+   * teardown in that window leaves a draft with nothing on screen about it and
+   * nothing scheduled to release it, because the completion that would has an
+   * adapter that is already gone.
+   *
+   * Runs LAST in the teardown, after the prompt and the queue have released
+   * theirs and deleted their entries, so nothing is counted or cancelled twice.
+   */
+  const releaseHeldBridgeDrafts = useCallback((): number => {
+    const held = bridgeDraftsByPendingIdRef.current
+    const ids = [...held.keys()]
+    held.clear()
+    latestPendingByDraftRef.current.clear()
+    for (const draftId of ids) {
+      adapterRef.current?.resolveMutationDisambiguation(draftId, "cancel")
+    }
+    return ids.length
+  }, [])
+
+  /**
    * Close the scope prompt, by whatever path, and ask the next question.
    *
    * The ONE close for this dialog. Every exit goes through here so that "the
@@ -2815,10 +2839,14 @@ export function useEditorEditing({
       discarded += rows.length
       if (pendingDisambiguationsRef.current.length > 0) setPendingDisambiguations([])
       modalOwnerRef.current = null
+      // Whatever is left in the maps is a draft the lane is still working on:
+      // a verify in flight, a hand-off being awaited. Nothing on screen mentions
+      // it and its own completion cannot release it any more.
+      discarded += releaseHeldBridgeDrafts()
       const status = discardedOnResetStatus(discarded)
       if (status && !unmounting) setSaveStatus(status)
     },
-    [releaseBridgeDraft, releaseQueuedModalRequests],
+    [releaseBridgeDraft, releaseHeldBridgeDrafts, releaseQueuedModalRequests],
   )
   // Assigned during render, like the other always-latest mirrors in this hook,
   // so the adapter effect's cleanup always calls the current one.
