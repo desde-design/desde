@@ -292,6 +292,21 @@ export const SAVE_HANDOFF_TIMEOUT_STATUS =
   "Chat did not answer in time. Nothing was discarded; try again when the chat is free."
 
 /**
+ * What Save says when the page was replaced while it was running.
+ *
+ * A save is several requests, and the document can go away between any two of
+ * them. Anything after that point would resolve a stylesheet against the new
+ * page, write the departed page's mutations, clear the new page's previews, or
+ * reload it. So the save stops where it is and says so.
+ *
+ * "Nothing further" is the honest wording: whatever had already been written
+ * before the page changed is written, and the buffer still holds the rest, so
+ * a second Save on the page that is there now picks it up.
+ */
+export const SAVE_PAGE_CHANGED_STATUS =
+  "The page changed during the save. Nothing further was applied."
+
+/**
  * Which of the three routes an edit on this element takes.
  *
  * - `refuse`: the page sent loop information that failed the boundary check.

@@ -140,6 +140,7 @@ import {
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
+  SAVE_PAGE_CHANGED_STATUS,
   sessionEndPlan,
   settleHandOff,
   shouldEndSessionOnHandshake,
@@ -5529,6 +5530,36 @@ export function useEditorEditing({
     saveStartedRef.current = false
     const adapter = adapterRef.current
     if (!adapter) return { ok: true } // nothing to do, trivially ok
+    // THE SESSION THIS SAVE BELONGS TO, captured once at the top.
+    //
+    // A save is several requests in a row, and the page can be replaced between
+    // any two of them: the AI-queue flush runs an LLM on the server and takes
+    // as long as that takes, and the scoped-CSS flush is one request per
+    // mutation. Everything after the boundary would act on the wrong document.
+    // It resolves a stylesheet against the NEW page, writes the departed page's
+    // scoped-CSS mutations into it, clears the new page's preview overrides,
+    // and reloads it.
+    //
+    // So: the signal goes to every request whose transport takes one, and every
+    // await is followed by a staleness check that stops the save where it is.
+    // The lanes' own `isStaleGeneration` guards cover a single edit; this
+    // covers the multi-request run.
+    const generation = adapterGenerationRef.current
+    const sessionSignal = adapterAbortRef.current?.signal
+    /**
+     * Stop the save because the document went away. Touches no overrides, no
+     * mutations, and reloads nothing: the buffer still holds whatever was not
+     * written, and it belongs to a page that is no longer on screen.
+     *
+     * The in-flight LLM snapshot IS cleared, because it is the save dialog's
+     * own "asking AI to interpret these N edits" panel and leaving it up would
+     * describe a request that is over.
+     */
+    const stopForPageChange = (): { ok: false; reason: string } => {
+      setSavePendingLLMInput(null)
+      setSaveStatus(SAVE_PAGE_CHANGED_STATUS)
+      return { ok: false, reason: SAVE_PAGE_CHANGED_STATUS }
+    }
     // Track per-call success so callers can chain a session-merge or
     // similar after a successful buffered-edit flush. Set false on any
     // failure path; the function still resolves normally so existing
@@ -5727,14 +5758,27 @@ export function useEditorEditing({
               saveStreamingTextRef.current += delta
               flushStreamSoon()
             },
+            // The session's lifetime. Ending it aborts this request, which
+            // settles as an ordinary failed result; the check below is what
+            // decides what happens next, before the result is even read.
+            ...(sessionSignal ? { signal: sessionSignal } : {}),
           },
         )
-        // Final flush so the last tokens land in state even if the
-        // throttled timer hadn't fired yet.
+        // The throttled timer is this call's own, so it is cancelled whichever
+        // way the flush ends. Cancelled BEFORE the staleness check, or a stale
+        // save would leave a timeout writing into the dialog behind it.
         if (streamFlushTimer !== null) {
           clearTimeout(streamFlushTimer)
           streamFlushTimer = null
         }
+        // THE PAGE. Checked before the result is read at all: an abort arrives
+        // here as `failed`, and reporting "Save failed at DOM mutations: edit
+        // request cancelled" would blame the write for the page going away.
+        if (isStaleGeneration(generation, adapterGenerationRef.current)) {
+          return stopForPageChange()
+        }
+        // Final flush so the last tokens land in state even if the
+        // throttled timer hadn't fired yet.
         setSaveStreamingText(saveStreamingTextRef.current)
         if (result.kind === "failed") {
           // `'chat'` fallback mode: the deterministic lane couldn't apply
@@ -5757,6 +5801,13 @@ export function useEditorEditing({
             const handOff = escalateToChatRef.current
             const prompt = buildEditEscalationPrompt(normalizedMutations)
             const outcome = await settleHandOff((signal) => handOff(prompt, { signal }))
+            // The hand-off can hold for as long as the project's other turns
+            // take, which is easily long enough for the page to be replaced.
+            // Both arms below write `mutations`, so neither may run for a
+            // document that is gone.
+            if (isStaleGeneration(generation, adapterGenerationRef.current)) {
+              return stopForPageChange()
+            }
             if (outcome === "timed-out") {
               // Neither accepted nor refused: the POST is aborted and the
               // mutations stay in the buffer, so this is a failed save with
@@ -5857,6 +5908,13 @@ export function useEditorEditing({
       // slicing by a counter would silently remove the wrong ids.
       const scopedOverrideSavedIds: string[] = []
       const flushDestination = await resolveStyleDestination()
+      // Resolving a destination stylesheet can ask the DOCUMENT
+      // (`GET_STYLESHEET_TARGETS`), so a page replaced in that window makes the
+      // answer describe a different app's stylesheets. Nothing may be written
+      // against it.
+      if (isStaleGeneration(generation, adapterGenerationRef.current)) {
+        return stopForPageChange()
+      }
       if (!flushDestination.ok && scopedOverrideMutations.length > 0) {
         setSaveStatus(`Save failed: ${flushDestination.reason}`)
         return { ok: false, reason: flushDestination.reason }
@@ -5884,7 +5942,16 @@ export function useEditorEditing({
           setSaveStatus(reason)
           return { ok: false, reason }
         }
-        const result = await adapter.applyEdit(edit)
+        const result = await adapter.applyEdit(
+          edit,
+          sessionSignal ? { signal: sessionSignal } : undefined,
+        )
+        // Same rule as the bundle above, and the same reason for checking
+        // before the result is read: an abort is a `failed` result, and the
+        // page going away is not a failure of this write.
+        if (isStaleGeneration(generation, adapterGenerationRef.current)) {
+          return stopForPageChange()
+        }
         if (result.kind === "failed") {
           const reason = `Save failed at scoped-css-override ${scopedOverrideSavedIds.length + 1}: ${result.reason}`
           setSaveStatus(reason)

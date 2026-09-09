@@ -30,6 +30,7 @@ import {
   modalRequestDraftId,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
+  SAVE_PAGE_CHANGED_STATUS,
   isSupersededHandshake,
   retireForeignEntries,
   retiresBufferedEntries,
@@ -1477,6 +1478,21 @@ describe("handOffFailureStatus", () => {
       expect(status.parked).not.toMatch(/—/)
       expect(status.released).not.toMatch(/—/)
     }
+  })
+})
+
+describe("SAVE_PAGE_CHANGED_STATUS", () => {
+  // Round 15 W1. Save is several requests, and the page can be replaced between
+  // any two of them. This is what the designer reads when it stops there.
+  it("says the save stopped and does not claim nothing was written", () => {
+    expect(SAVE_PAGE_CHANGED_STATUS).toBe(
+      "The page changed during the save. Nothing further was applied.",
+    )
+  })
+
+  it("uses no em dash and no first person", () => {
+    expect(SAVE_PAGE_CHANGED_STATUS).not.toMatch(/—/)
+    expect(SAVE_PAGE_CHANGED_STATUS).not.toMatch(/\b(me|my)\b/i)
   })
 })
 

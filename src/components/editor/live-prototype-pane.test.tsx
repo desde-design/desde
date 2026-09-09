@@ -13,6 +13,7 @@ import { toast } from "sonner"
 import { LivePrototypePane } from "./live-prototype-pane"
 import { useEditorEditing } from "@/hooks/useEditorEditing"
 import { useEditorStore } from "@/stores/editor-only"
+import { SAVE_PAGE_CHANGED_STATUS } from "@/hooks/pending-iteration-edit"
 import type { ComponentManifest, ComponentManifestSource } from "@/editor/core"
 
 // Bridge-connection status is now a bottom-right toast, not a pane banner.
@@ -1441,6 +1442,104 @@ describe("bridge session boundary", () => {
         "The page connection was reset; 2 pending edits were discarded.",
       )
     })
+  })
+
+  it("stops the save when the page is replaced while its flush is out", async () => {
+    // Round 15 W1. The AI-queue flush runs an LLM on the server, so it is out
+    // for as long as that takes. Its continuation used to run whatever had
+    // happened in between: it cleared the NEW page's preview overrides and
+    // reloaded it, on the strength of a write made for the page that left.
+    vi.useFakeTimers()
+    try {
+      let answerFlush: (() => void) | undefined
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Promise<Response>((resolve) => {
+              answerFlush = () =>
+                resolve(
+                  new Response(JSON.stringify({ newHashes: {} }), {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                  }),
+                )
+            }),
+        ),
+      )
+      let editing: ReturnType<typeof useEditorEditing> | null = null
+      render(<Harness onEditing={(e) => { editing = e }} />)
+      await act(async () => {
+        emitFromBridge({
+          type: "BRIDGE_READY",
+          payload: { version: "2026-09-09a", documentId: "doc-a" },
+        })
+      })
+      // One buffered text capture. Its own debounced write never fires: no
+      // timer is advanced, and the page change cancels it.
+      await act(async () => {
+        emitFromBridge({
+          type: "MUTATION_CAPTURED",
+          payload: {
+            id: "dom-mut-save-1",
+            kind: "text",
+            sourceLoc: "src/components/Card.vue:12:4",
+            sourceVersion: "abc123",
+            resolutionKind: "direct",
+            scope: "definition",
+            callsiteLoc: null,
+            callsiteVersion: null,
+            instancePath: "0",
+            selector: "#card-title",
+            before: "Hello",
+            after: "Hi",
+          },
+        })
+      })
+
+      let save: Promise<{ ok: true } | { ok: false; reason: string }> | null = null
+      await act(async () => {
+        save = editing!.handleSaveAll()
+      })
+      expect(answerFlush).toBeDefined()
+
+      // The page is replaced while the flush is still out.
+      const iframe = screen.getByTitle("Prototype") as HTMLIFrameElement
+      await act(async () => {
+        iframe.dispatchEvent(new Event("load"))
+      })
+      await act(async () => {
+        emitFromBridge({
+          type: "BRIDGE_READY",
+          payload: { version: "2026-09-09a", documentId: "doc-b" },
+        })
+      })
+
+      // ... and only then does the write answer.
+      let result: { ok: true } | { ok: false; reason: string } | null = null
+      await act(async () => {
+        answerFlush!()
+        result = await save!
+      })
+
+      expect(result).toEqual({ ok: false, reason: SAVE_PAGE_CHANGED_STATUS })
+      expect(editing!.saveStatus).toBe(SAVE_PAGE_CHANGED_STATUS)
+      // And the save's own after-effects never touched the page that is there
+      // now: no preview overrides cleared, no reload asked for.
+      const sent = activeMockSetup!.postMessages.map((m) => (m as { type: string }).type)
+      expect(sent).not.toContain("CLEAR_PROP_OVERRIDES")
+      expect(sent).not.toContain("CLEAR_ATTR_OVERRIDES")
+      expect(sent).not.toContain("RELOAD_PROTOTYPE")
+      // Nor did it confirm the departed page's preview override against the
+      // new page's bridge, which numbers its own overrides from scratch. This
+      // is the assertion that pins the check on the FIRST await rather than a
+      // later one: everything above happens at the end of the flush, and this
+      // happens the moment its result is read.
+      expect(sent).not.toContain("RESOLVE_OVERRIDE")
+    } finally {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
   })
 
   it("ends nothing on the first handshake of an attachment with an id-less bridge", async () => {
