@@ -2004,6 +2004,16 @@ export function useEditorEditing({
     ((args: { reason: BridgeSessionEndReason; cancelWithBridge: boolean }) => void) | null
   >(null)
   /**
+   * The status line the last session end put on screen, or null.
+   *
+   * A page change ends the session and a save running through it stops, and both
+   * write to the one status channel. The session end's line is the one worth
+   * keeping: it says how many edits were discarded, which the designer cannot
+   * see anywhere else. The save's line only says the save stopped, which the
+   * page changing under them already told them.
+   */
+  const sessionEndStatusRef = useRef<string | null>(null)
+  /**
    * How to re-arm the buffered edits' debounced writes, for the handshake that
    * finds the same document still there.
    *
@@ -3199,7 +3209,14 @@ export function useEditorEditing({
           adapter?.resolveMutationDisambiguation(draftId, "cancel")
         }
       }
-      if (plan.status && reason !== "unmount") setSaveStatus(plan.status)
+      const endStatus = reason === "unmount" ? null : plan.status
+      if (endStatus) setSaveStatus(endStatus)
+      // Remembered so a save stopping for the same page change does not replace
+      // it: that line names what the designer LOST, and the save's own line only
+      // says the save stopped, which they can already see. Written on EVERY end,
+      // null included, so a session end that said nothing cannot leave an older
+      // end's line looking like its own.
+      sessionEndStatusRef.current = endStatus
     },
     [],
   )
@@ -5654,7 +5671,18 @@ export function useEditorEditing({
      */
     const stopForPageChange = (): { ok: false; reason: string } => {
       setSavePendingLLMInput(null)
-      setSaveStatus(SAVE_PAGE_CHANGED_STATUS)
+      // The session end that stopped this save may already have said something
+      // better on this one channel: "N pending edits were discarded" names what
+      // the designer LOST, and this line would replace it with the fact that the
+      // save stopped, which the page changing under them already showed. So it
+      // only writes when the line on screen is not that one.
+      setSaveStatus((current) =>
+        current !== null && current === sessionEndStatusRef.current
+          ? current
+          : SAVE_PAGE_CHANGED_STATUS,
+      )
+      // The RETURN is unchanged either way: the caller records why the save
+      // failed, and that is the page change whatever the status bar reads.
       return { ok: false, reason: SAVE_PAGE_CHANGED_STATUS }
     }
     // Track per-call success so callers can chain a session-merge or

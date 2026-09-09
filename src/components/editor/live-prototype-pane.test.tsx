@@ -1863,7 +1863,14 @@ describe("bridge session boundary", () => {
       })
 
       expect(result).toEqual({ ok: false, reason: SAVE_PAGE_CHANGED_STATUS })
-      expect(editing!.saveStatus).toBe(SAVE_PAGE_CHANGED_STATUS)
+      // Round 16 X6: the save's reason is what the caller records, but the line
+      // on screen stays the session end's. That one names what the designer
+      // LOST — the buffered capture, discarded with the page it was made on —
+      // and this test used to pin the opposite ordering, where the save
+      // overwrote it with the fact that it had stopped.
+      expect(editing!.saveStatus).toBe(
+        "The page connection was reset; 1 pending edit was discarded.",
+      )
       // And the save's own after-effects never touched the page that is there
       // now: no preview overrides cleared, no reload asked for.
       const sent = activeMockSetup!.postMessages.map((m) => (m as { type: string }).type)
