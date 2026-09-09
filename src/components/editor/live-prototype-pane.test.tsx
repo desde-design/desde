@@ -1427,6 +1427,140 @@ describe("bridge session boundary", () => {
       )
     })
 
+    it("re-arms a kept prop edit when the same page comes back", async () => {
+      // Round 16 X2. The teardown keeps the buffer and cancels the timer that
+      // would have written it, and the prop buffer has no save-time flush: with
+      // nothing to re-arm it, the edit is simply never made. Only a further
+      // keystroke on that same field would have brought it back.
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        // The parameters are declared so the body assertion below can read the
+        // request init off `mock.calls`: a no-argument mock types them as [].
+        const fetchMock = vi.fn(
+          async (_input: string | URL | Request, _init?: RequestInit) =>
+            new Response(JSON.stringify({ newHashes: {} }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
+        )
+        vi.stubGlobal("fetch", fetchMock)
+        let editing: ReturnType<typeof useEditorEditing> | null = null
+        const view = render(
+          <Harness enabled onEditing={(e) => { editing = e }} />,
+        )
+        await act(async () => {
+          emitFromBridge({
+            type: "BRIDGE_READY",
+            payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+          })
+        })
+        await act(async () => {
+          emitFromBridge({ type: "ELEMENT_INSPECTED", payload: INSPECTED_BUTTON })
+        })
+        await waitFor(() => {
+          expect(useEditorStore.getState().editorSelection).not.toBeNull()
+        })
+
+        // Typed, and then the adapter detaches INSIDE the 500ms debounce
+        // window, with the page still on screen.
+        await act(async () => {
+          editing!.handlePropEdit("label", "Save changes")
+        })
+        await act(async () => {
+          view.rerender(
+            <Harness enabled={false} onEditing={(e) => { editing = e }} />,
+          )
+        })
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000)
+        })
+        // The cancelled timer wrote nothing, which is correct on its own.
+        expect(fetchMock).not.toHaveBeenCalled()
+
+        // The adapter comes back over the SAME document.
+        await act(async () => {
+          view.rerender(<Harness enabled onEditing={(e) => { editing = e }} />)
+        })
+        await act(async () => {
+          emitFromBridge({
+            type: "BRIDGE_READY",
+            payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+          })
+        })
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000)
+        })
+
+        expect(fetchMock).toHaveBeenCalled()
+        const init = fetchMock.mock.calls[0]?.[1]
+        const body = JSON.parse(String(init?.body)) as {
+          edit?: { propName?: string; value?: unknown }
+        }
+        expect(body.edit?.propName).toBe("label")
+        expect(body.edit?.value).toBe("Save changes")
+      } finally {
+        vi.unstubAllGlobals()
+        vi.useRealTimers()
+      }
+    })
+
+    it("re-arms a kept class capture too", async () => {
+      // The other buffer, on the other lane: a class capture rides the
+      // scoped-css-override dispatch, and its debounce is cancelled by the same
+      // teardown. The resume asks the capture scheduler's own two questions, so
+      // both lanes come back.
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        // The parameters are declared so the body assertion below can read the
+        // request init off `mock.calls`: a no-argument mock types them as [].
+        const fetchMock = vi.fn(
+          async (_input: string | URL | Request, _init?: RequestInit) =>
+            new Response(JSON.stringify({ newHashes: {} }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
+        )
+        vi.stubGlobal("fetch", fetchMock)
+        const view = render(<Harness enabled />)
+        await act(async () => {
+          emitFromBridge({
+            type: "BRIDGE_READY",
+            payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+          })
+        })
+        await act(async () => {
+          emitFromBridge({ type: "MUTATION_CAPTURED", payload: BUFFERED_CLASS_CAPTURE })
+        })
+        await act(async () => {
+          view.rerender(<Harness enabled={false} />)
+        })
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000)
+        })
+        expect(fetchMock).not.toHaveBeenCalled()
+
+        await act(async () => {
+          view.rerender(<Harness enabled />)
+        })
+        await act(async () => {
+          emitFromBridge({
+            type: "BRIDGE_READY",
+            payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+          })
+        })
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000)
+        })
+        expect(fetchMock).toHaveBeenCalled()
+        const init = fetchMock.mock.calls[0]?.[1]
+        const body = JSON.parse(String(init?.body)) as { edit?: { kind?: string } }
+        expect(body.edit?.kind).toBe("scoped-css-override")
+      } finally {
+        vi.unstubAllGlobals()
+        vi.useRealTimers()
+      }
+    })
+
     it("retires them when the iframe is pointed at another prototype", async () => {
       const { rerenderWith, current } = await connectHoldingBoth(PROTOTYPE_URL)
 

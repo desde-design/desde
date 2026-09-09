@@ -108,3 +108,27 @@ export function shouldProbeTextMutation(
   const key = mutationIdentity(m)
   return !refs.inFlight.has(key) && !refs.queued.has(key)
 }
+
+/**
+ * Whether a captured mutation should kick off a debounced branch-mode dispatch
+ * on the CLASS lane (scoped-css-override, a different applicator from the
+ * text/attr/style llm-patch lane above).
+ *
+ * The same filter the commit-time flush uses for `scopedOverrideMutations`: a
+ * class mutation with a source location a rule can be aimed at, resolved to the
+ * styled element itself or to its ancestor. An in-flight identity is suppressed
+ * for the same reason as on the text lane — that dispatch reconciles when it
+ * lands and re-fires if the buffer moved under it.
+ *
+ * Extracted so the capture scheduler and the same-document resume ask ONE
+ * question rather than two copies of it.
+ */
+export function shouldProbeClassMutation(
+  m: Mutation,
+  refs: { inFlight: ReadonlySet<string> },
+): boolean {
+  if (m.kind !== "class") return false
+  if (m.sourceLoc === null) return false
+  if (m.resolutionKind !== "direct" && m.resolutionKind !== "ancestor") return false
+  return !refs.inFlight.has(mutationIdentity(m))
+}

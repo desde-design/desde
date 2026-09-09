@@ -1184,6 +1184,39 @@ export function retireForeignEntries<T extends { generation?: number }>(
 }
 
 /**
+ * Which buffered entries get their debounced write re-armed when the adapter
+ * re-attaches over the SAME document.
+ *
+ * Ending a bridge session cancels every debounce timer, because a timer that
+ * outlived a page change writes the previous page's edit into the page in front
+ * of the designer. A plain teardown ends the session but KEEPS the buffers (see
+ * {@link retiresBufferedEntries}), so a prop typed inside the debounce window
+ * before a detach kept its preview and its buffered entry with nothing left to
+ * write it: there is no save-time flush for the prop buffer, and only another
+ * keystroke on that same field would have re-armed it.
+ *
+ * So a re-attach over the same document re-arms them, which is exactly what
+ * that next keystroke would have done.
+ *
+ * `inFlightKeys` is the lane's in-flight marker set. An entry being written
+ * right now must NOT be re-armed: its own dispatch re-fires if the buffer moved
+ * under it, and a second timer for the same identity is the parallel-write race
+ * the markers exist to stop. Duplicate keys collapse to the last entry, since
+ * the dispatch reads the buffer by key anyway.
+ */
+export function resumePlan<T extends { key: string }>(
+  entries: readonly T[],
+  inFlightKeys: ReadonlySet<string>,
+): T[] {
+  const byKey = new Map<string, T>()
+  for (const entry of entries) {
+    if (inFlightKeys.has(entry.key)) continue
+    byKey.set(entry.key, entry)
+  }
+  return [...byKey.values()]
+}
+
+/**
  * What the client should do once the server has answered "is there a loop at
  * this position?". Pure, so the four exits are testable without mounting the
  * hook: an error surfaces as a status, a missing loop goes to chat, a

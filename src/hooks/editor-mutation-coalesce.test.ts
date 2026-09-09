@@ -17,6 +17,7 @@ import {
   coalesceCapturedMutation,
   mutationIdentity,
   pruneAiQueue,
+  shouldProbeClassMutation,
   shouldProbeTextMutation,
 } from "./editor-mutation-coalesce"
 
@@ -126,6 +127,43 @@ describe("shouldProbeTextMutation (capture-scheduler suppression)", () => {
     const inFlight = new Set([mutationIdentity(m)])
     expect(
       shouldProbeTextMutation(m, { inFlight, queued: new Set() }),
+    ).toBe(false)
+  })
+})
+
+describe("shouldProbeClassMutation (the scoped-css lane's own filter)", () => {
+  // Extracted in round 16 X2 so the capture scheduler and the same-document
+  // resume ask one question rather than two copies of it. The rules are the
+  // ones the class lane already had inline.
+  const none = { inFlight: new Set<string>() }
+  const classMutation = (overrides: Partial<Mutation> = {}) =>
+    makeMutation({ kind: "class", before: "card", after: "card p-4", ...overrides })
+
+  it("schedules a class edit resolved to the element or its ancestor", () => {
+    expect(shouldProbeClassMutation(classMutation(), none)).toBe(true)
+    expect(
+      shouldProbeClassMutation(classMutation({ resolutionKind: "ancestor" }), none),
+    ).toBe(true)
+  })
+
+  it("does NOT schedule the text lane's kinds", () => {
+    expect(shouldProbeClassMutation(makeMutation({ kind: "text" }), none)).toBe(false)
+  })
+
+  it("refuses a class edit with no source location to aim a rule at", () => {
+    expect(shouldProbeClassMutation(classMutation({ sourceLoc: null }), none)).toBe(false)
+  })
+
+  it("refuses a resolution the scoped-css writer cannot place", () => {
+    expect(
+      shouldProbeClassMutation(classMutation({ resolutionKind: "none" }), none),
+    ).toBe(false)
+  })
+
+  it("suppresses scheduling for an identity with a dispatch already in flight", () => {
+    const m = classMutation()
+    expect(
+      shouldProbeClassMutation(m, { inFlight: new Set([mutationIdentity(m)]) }),
     ).toBe(false)
   })
 })

@@ -72,6 +72,7 @@ import {
   coalesceCapturedMutation,
   mutationIdentity,
   pruneAiQueue,
+  shouldProbeClassMutation,
   shouldProbeTextMutation,
 } from "./editor-mutation-coalesce"
 import { recordHmrTreeUpdate, requestPrototypeReload } from "./editor-hmr-watchdog"
@@ -138,6 +139,7 @@ import {
   retiresBufferedEntries,
   iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
+  resumePlan,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
   SAVE_PAGE_CHANGED_STATUS,
@@ -622,6 +624,11 @@ export function useEditorEditing({
    * The value is the bridge's own per-document id, which every bridge the shell
    * accepts reports (`REQUIRED_BRIDGE_VERSION`). See
    * `shouldEndSessionOnHandshake` for the decision it feeds.
+   *
+   * It SURVIVES a plain teardown, so a re-attach can tell that the document is
+   * the one the buffered edits were made against and re-arm their dispatches
+   * (`resumePlan`). It is cleared only where the document is genuinely no longer
+   * known: a failed handshake, and the attach that follows a document change.
    */
   const sessionDocumentRef = useRef<string | null>(null)
   /**
@@ -697,10 +704,15 @@ export function useEditorEditing({
     // one is now stale, whatever it does next.
     adapterGenerationRef.current += 1
     adapterAbortRef.current = new AbortController()
-    // No document is adopted yet for THIS attachment, so its first handshake
-    // ends nothing. The session that was running before it ended in the
-    // previous cleanup, which is the only other way an attachment begins.
-    sessionDocumentRef.current = null
+    // NOTE: `sessionDocumentRef` is deliberately NOT cleared here. The session
+    // that was running ended in the previous cleanup, and the reason it ended
+    // decided whether the document is still the same one: a plain `teardown`
+    // detaches the adapter with the page still on screen and keeps the id, so
+    // this attachment's first handshake can recognise the page and re-arm the
+    // buffered edits made against it (`resumePlan`). Every reason that IS a
+    // document change clears the id in `endBridgeSession`, and so does a failed
+    // handshake, so the first-handshake-ends-nothing case is still covered
+    // wherever it is true.
 
     const adapter = new BridgeFrameworkAdapter()
     let cancelled = false
@@ -820,7 +832,8 @@ export function useEditorEditing({
           // decide this on their own; a bridge that reports none is refused at
           // the handshake instead (`REQUIRED_BRIDGE_VERSION`).
           const documentToken = adapter.bridgeDocumentId
-          if (shouldEndSessionOnHandshake(sessionDocumentRef.current, documentToken)) {
+          const previousToken = sessionDocumentRef.current
+          if (shouldEndSessionOnHandshake(previousToken, documentToken)) {
             endBridgeSessionRef.current?.({
               reason: "reconnect",
               cancelWithBridge: false,
@@ -828,6 +841,16 @@ export function useEditorEditing({
           }
           sessionDocumentRef.current = documentToken
           setStatus({ kind: "ready" })
+          // THE SAME DOCUMENT, ANSWERING AGAIN. This is either the page's own
+          // second handshake or an adapter that detached and came back with the
+          // page still on screen. A plain teardown keeps the buffered edits but
+          // cancels the debounce timers that would have written them, so the
+          // entries would sit in the buffer with nothing left to write them.
+          // Re-arm them here, which is what the designer's next keystroke would
+          // have done anyway.
+          if (previousToken !== null && previousToken === documentToken) {
+            resumeBufferedDispatchesRef.current?.()
+          }
           if (!adapterReadyAnnounced) {
             adapterReadyAnnounced = true
             adapterRef.current = adapter
@@ -1980,6 +2003,15 @@ export function useEditorEditing({
   const endBridgeSessionRef = useRef<
     ((args: { reason: BridgeSessionEndReason; cancelWithBridge: boolean }) => void) | null
   >(null)
+  /**
+   * How to re-arm the buffered edits' debounced writes, for the handshake that
+   * finds the same document still there.
+   *
+   * A ref for the same reason as `endBridgeSessionRef`: the adapter effect is
+   * defined above the callback, and both dispatch lanes it schedules are
+   * defined below it.
+   */
+  const resumeBufferedDispatchesRef = useRef<(() => void) | null>(null)
   // Per-edit-kind remembered scope. Cleared on hook unmount; not persisted
   // across reloads (v1 — the dialog's "Remember for this session" checkbox).
   const iterationScopeMemoryRef = useRef<
@@ -3071,6 +3103,13 @@ export function useEditorEditing({
       const liveGeneration = adapterGenerationRef.current
       const noneRetired = { retired: [] as never[] }
       const retireBuffers = retiresBufferedEntries(reason)
+      // THE DOCUMENT ITSELF, forgotten for exactly the reasons that retire the
+      // buffers. `reload` and `reconnect` mean the page is being replaced, so
+      // the next handshake is the first of a fresh session and ends nothing. A
+      // `teardown` keeps the id, because the page is still on screen and the
+      // buffered edits it kept belong to it: the re-attach's handshake compares
+      // against this id and re-arms them (`resumeBufferedDispatches`).
+      if (retireBuffers) sessionDocumentRef.current = null
       const propPartition = retireBuffers
         ? retireForeignEntries(pendingPropEditsRef.current, liveGeneration)
         : { kept: pendingPropEditsRef.current, ...noneRetired }
@@ -4855,6 +4894,84 @@ export function useEditorEditing({
   >(null)
   dispatchBranchClassMutationRef.current = dispatchBranchClassMutation
 
+  /**
+   * Arm (or re-arm) the debounced write for one buffered mutation.
+   *
+   * The two lanes share one timer map, keyed by an identity that carries the
+   * mutation's kind, so `class` and `text` on the same element cannot collide.
+   * Which lane a mutation takes is its kind's business and nothing else's: the
+   * class lane writes a scoped-CSS rule, everything else rides the llm-patch
+   * lane.
+   *
+   * The generation is captured HERE, at schedule time, not read inside the
+   * callback half a second later — read there it would be whichever session is
+   * live when the timer fires, so a timer that outlived a page change would
+   * write the previous page's edit under the new page's session.
+   */
+  const scheduleBranchMutationDispatch = useCallback((m: Mutation) => {
+    const key = mutationIdentity(m)
+    const timers = branchTextDispatchTimers.current
+    const existing = timers.get(key)
+    if (existing) clearTimeout(existing)
+    const scheduledGeneration = adapterGenerationRef.current
+    const isClass = m.kind === "class"
+    const timer = setTimeout(() => {
+      timers.delete(key)
+      if (isClass) {
+        void dispatchBranchClassMutationRef.current?.(key, scheduledGeneration)
+      } else {
+        void dispatchBranchTextMutationRef.current?.(key, scheduledGeneration)
+      }
+    }, BRANCH_TEXT_DISPATCH_DEBOUNCE_MS)
+    timers.set(key, timer)
+  }, [])
+
+  /**
+   * Re-arm every buffered edit whose debounced write was cancelled by a session
+   * end that KEPT it.
+   *
+   * Called from the handshake when the document that answers is the one the
+   * previous session was on (round 16 X2). A plain teardown keeps both buffers
+   * — the page never went anywhere — but cancels every debounce timer, so a
+   * prop typed inside the debounce window before the detach kept its preview
+   * and its buffered entry with nothing left to write it. The prop buffer has
+   * no save-time flush at all, so without this the edit is simply never made.
+   *
+   * Entries currently being written are skipped: their own dispatch re-fires if
+   * the buffer moved under it, and a second timer for the same identity is the
+   * parallel-write race the in-flight markers exist to stop. That is
+   * {@link resumePlan}, which is where the rule is tested.
+   */
+  const resumeBufferedDispatches = useCallback(() => {
+    const propEntries = pendingPropEditsRef.current.map((entry) => ({
+      key: propEditKey(entry.target.selector, entry.propName),
+      selector: entry.target.selector,
+      propName: entry.propName,
+    }))
+    for (const entry of resumePlan(propEntries, branchPropInFlight.current)) {
+      scheduleBranchPropDispatch(entry.selector, entry.propName)
+    }
+    // Exactly the two questions the capture scheduler asks, in the same order:
+    // a mutation that would not have armed a timer when it was captured must
+    // not get one now either (a `class` capture with no source location, an
+    // identity parked for the AI queue).
+    const mutationEntries = mutationsRef.current
+      .filter(
+        (m) =>
+          shouldProbeTextMutation(m, {
+            inFlight: branchTextInFlight.current,
+            queued: queuedForAiRef.current,
+          }) || shouldProbeClassMutation(m, { inFlight: branchTextInFlight.current }),
+      )
+      .map((m) => ({ key: mutationIdentity(m), mutation: m }))
+    for (const entry of resumePlan(mutationEntries, branchTextInFlight.current)) {
+      scheduleBranchMutationDispatch(entry.mutation)
+    }
+  }, [scheduleBranchPropDispatch, scheduleBranchMutationDispatch])
+  // Assigned during render, like the hook's other always-latest mirrors, so the
+  // adapter effect's handshake always calls the current one.
+  resumeBufferedDispatchesRef.current = resumeBufferedDispatches
+
   useEffect(() => {
     const adapter = adapterRef.current
     if (!adapter) return
@@ -4903,40 +5020,14 @@ export function useEditorEditing({
           queued: queuedForAiRef.current,
         })
       ) {
-        const key = mutationIdentity(m)
-        const existing = timers.get(key)
-        if (existing) clearTimeout(existing)
-        // The session this keystroke was typed in, captured at SCHEDULE time.
-        // Read inside the callback instead, it would be whichever session is
-        // live when the timer fires, and a timer that outlived a page reload
-        // would write the previous page's text under the new page's session.
-        const scheduledGeneration = adapterGenerationRef.current
-        const timer = setTimeout(() => {
-          timers.delete(key)
-          void dispatchBranchTextMutation(key, scheduledGeneration)
-        }, BRANCH_TEXT_DISPATCH_DEBOUNCE_MS)
-        timers.set(key, timer)
+        scheduleBranchMutationDispatch(m)
       }
       // `class` mutations auto-commit too, but via the scoped-css-override
       // dispatch (different applicator). Same filter the commit-time flush
       // uses for `scopedOverrideMutations` (sourceLoc + direct/ancestor).
       // Reuses the shared timers/in-flight maps — identity carries `kind`.
-      if (
-        m.kind === "class" &&
-        m.sourceLoc !== null &&
-        (m.resolutionKind === "direct" || m.resolutionKind === "ancestor") &&
-        !inFlight.has(mutationIdentity(m))
-      ) {
-        const key = mutationIdentity(m)
-        const existing = timers.get(key)
-        if (existing) clearTimeout(existing)
-        // Same capture as the text lane above, for the same reason.
-        const scheduledGeneration = adapterGenerationRef.current
-        const timer = setTimeout(() => {
-          timers.delete(key)
-          void dispatchBranchClassMutation(key, scheduledGeneration)
-        }, BRANCH_TEXT_DISPATCH_DEBOUNCE_MS)
-        timers.set(key, timer)
+      if (shouldProbeClassMutation(m, { inFlight })) {
+        scheduleBranchMutationDispatch(m)
       }
     })
     const unsubAwaiting = adapter.onMutationAwaitingDisambiguation((p) => {
@@ -5237,8 +5328,7 @@ export function useEditorEditing({
     // dep list reactive, make the cleanup re-entrant-safe first.
   }, [
     adapterReadyMarker,
-    dispatchBranchTextMutation,
-    dispatchBranchClassMutation,
+    scheduleBranchMutationDispatch,
     handleDragMove,
     handleInsertAtPoint,
     handleResize,

@@ -32,6 +32,7 @@ import {
   SAVE_HANDOFF_TIMEOUT_STATUS,
   SAVE_PAGE_CHANGED_STATUS,
   isSupersededHandshake,
+  resumePlan,
   retireForeignEntries,
   retiresBufferedEntries,
   sessionEndPlan,
@@ -1400,6 +1401,39 @@ describe("retiresBufferedEntries", () => {
     // the buffers with the hook.
     expect(retiresBufferedEntries("teardown")).toBe(false)
     expect(retiresBufferedEntries("unmount")).toBe(false)
+  })
+})
+
+describe("resumePlan", () => {
+  // Round 16 X2. A `teardown` keeps the buffers but cancels every debounce
+  // timer, so a prop typed inside the debounce window before a detach had its
+  // preview, its buffered entry, and nothing left to write it. A re-attach over
+  // the same document re-arms exactly the entries that are not being written.
+  it("re-arms every buffered entry when nothing is in flight", () => {
+    const entries = [{ key: "a" }, { key: "b" }]
+    expect(resumePlan(entries, new Set())).toEqual([{ key: "a" }, { key: "b" }])
+  })
+
+  it("leaves an entry whose write is already out alone", () => {
+    // That dispatch reconciles when it lands and re-fires if the buffer moved
+    // under it. A second timer for the same identity is the parallel-write race
+    // the in-flight markers exist to stop.
+    const entries = [{ key: "a" }, { key: "b" }]
+    expect(resumePlan(entries, new Set(["a"]))).toEqual([{ key: "b" }])
+  })
+
+  it("arms one timer per identity, keeping the latest entry", () => {
+    // The dispatch reads the buffer by key, so two entries under one key are one
+    // write. Arming twice would be two timers racing for the same identity.
+    const entries = [
+      { key: "a", value: "first" },
+      { key: "a", value: "second" },
+    ]
+    expect(resumePlan(entries, new Set())).toEqual([{ key: "a", value: "second" }])
+  })
+
+  it("re-arms nothing when the buffers are empty", () => {
+    expect(resumePlan([], new Set(["a"]))).toEqual([])
   })
 })
 
