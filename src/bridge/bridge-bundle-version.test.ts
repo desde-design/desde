@@ -96,22 +96,29 @@ describe("bridge bundle version anchor", () => {
     expect(rebuilt).toBe(committed)
   })
 
-  it("returns early when a bridge is already running in this document", () => {
-    // Round 14 V5. A page can load this bundle twice: two `<script src=…>`
-    // tags, a bundler that inlines it as well, or a re-injection after a soft
-    // navigation. Each evaluation would mint its own document id and announce
-    // itself, and the shell reads a second id as a NEW document, ending the
-    // session and discarding the designer's pending edits on a page that never
-    // went anywhere.
+  it("returns early only when THIS version is already running in this document", () => {
+    // Round 14 V5, tightened by round 15 W3(a). A page can load this bundle
+    // twice: two `<script src=…>` tags, a bundler that inlines it as well, or a
+    // re-injection after a soft navigation. Each evaluation would mint its own
+    // document id and announce itself, and the shell reads a second id as a NEW
+    // document, ending the session and discarding the designer's pending edits
+    // on a page that never went anywhere.
+    //
+    // The version has to MATCH. A prototype carrying its own copy of an older
+    // bridge runs first and writes the global; a truthiness guard would let it
+    // suppress the bridge the shell just injected, and an older bridge reports
+    // no document id, so the shell falls back to guessing the boundary.
     //
     // Checked against the BUILT artifact, because minification is what would
-    // quietly drop a guard whose result nothing reads. Two facts: the guard
-    // exists, and it runs BEFORE the assignment that would satisfy it.
+    // quietly drop a guard whose result nothing reads. The shape asserted:
+    // capture the global, assign ours, read it back, return only on equality.
     const bundle = readFileSync(BUNDLE, "utf-8")
-    const guard = bundle.indexOf("__DESDE_BRIDGE_VERSION__)return")
-    const assignment = bundle.search(/__DESDE_BRIDGE_VERSION__\s*=\s*"/)
-    expect(guard).toBeGreaterThan(-1)
-    expect(assignment).toBeGreaterThan(guard)
+    expect(bundle).toMatch(
+      /(?:let|var|const)?\s*(\w+)\s*=\s*window\.__DESDE_BRIDGE_VERSION__\s*[;,]\s*window\.__DESDE_BRIDGE_VERSION__\s*=\s*"[^"]+"\s*[;,]\s*(?:let|var|const)?\s*(\w+)\s*=\s*window\.__DESDE_BRIDGE_VERSION__\s*[;,]\s*if\s*\(\s*\1\s*===\s*\2\s*\)\s*return/,
+    )
+    // And nothing weaker survives alongside it: no bare truthiness return on
+    // the global, which is the exact shape W3(a) replaced.
+    expect(bundle).not.toContain("__DESDE_BRIDGE_VERSION__)return")
   })
 
   it("still recovers the version with the guard in front of the assignment", () => {

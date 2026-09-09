@@ -145,6 +145,7 @@ import {
   structuralRouteFor,
   thisRowOperationAllowed,
   thisRowTemplateLocation,
+  UNIDENTIFIED_DOCUMENT,
   verifyKeyFor,
   type ModalKind,
   type ModalRequest,
@@ -637,17 +638,25 @@ export function useEditorEditing({
    * live bridge holding a draft nothing would ever cancel.
    *
    * The value is the bridge's own per-document id where the bridge reports one
-   * (2026-09-09a+), and a shell-minted token per handshake otherwise. See
+   * (2026-09-09a+), and `UNIDENTIFIED_DOCUMENT` otherwise. See
    * `shouldEndSessionOnHandshake` for the decision it feeds.
    */
   const sessionDocumentRef = useRef<string | null>(null)
   /**
-   * Counter behind the fallback token, for a bridge that reports no document
-   * id. Per hook instance and never reset: a token must not repeat across
-   * attachments, or the first handshake after a re-attach could match the last
-   * one before it and read a new document as the old one.
+   * Has the iframe fired `load` since the last handshake completed?
+   *
+   * This is the whole fallback rule for a bridge that reports no document id.
+   * Such a bridge cannot say whether it is a new page or the page the shell is
+   * already on, and the shell used to mint a fresh token per handshake — so
+   * every re-handshake read as a new document and threw the designer's pending
+   * edits away. A document cannot be replaced without a `load`, so: no load
+   * since the last completed handshake means the same document.
+   *
+   * Set by the `load` listener, cleared where a handshake completes. A failed
+   * handshake deliberately leaves it alone: it clears the document token
+   * instead, and with no previous token the flag is not read at all.
    */
-  const handshakeSeqRef = useRef(0)
+  const loadSinceHandshakeRef = useRef(false)
   /**
    * Monotonic id for iteration verifies, PER TARGET. Each intercept takes the
    * next one for its own key and records it as that key's latest; only a key's
@@ -712,6 +721,9 @@ export function useEditorEditing({
     // ends nothing. The session that was running before it ended in the
     // previous cleanup, which is the only other way an attachment begins.
     sessionDocumentRef.current = null
+    // No load has been seen for this attachment either. The flag only means
+    // anything relative to a completed handshake, and there has been none.
+    loadSinceHandshakeRef.current = false
 
     const adapter = new BridgeFrameworkAdapter()
     let cancelled = false
@@ -826,15 +838,28 @@ export function useEditorEditing({
           // document that issued them, and the instance that would receive the
           // cancel is a different one that numbers its own drafts from
           // `dom-pending-1`.
-          const documentToken =
-            adapter.bridgeDocumentId ?? `handshake-${(handshakeSeqRef.current += 1)}`
-          if (shouldEndSessionOnHandshake(sessionDocumentRef.current, documentToken)) {
+          //
+          // A bridge that reports no id at all (older than 2026-09-09a) is
+          // decided by the iframe's `load` event instead: a document cannot be
+          // replaced without one, so a re-handshake with no load in between is
+          // the same document answering again.
+          const documentToken = adapter.bridgeDocumentId
+          if (
+            shouldEndSessionOnHandshake(
+              sessionDocumentRef.current,
+              documentToken,
+              loadSinceHandshakeRef.current,
+            )
+          ) {
             endBridgeSessionRef.current?.({
               reason: "reconnect",
               cancelWithBridge: false,
             })
           }
-          sessionDocumentRef.current = documentToken
+          sessionDocumentRef.current = documentToken ?? UNIDENTIFIED_DOCUMENT
+          // A handshake completed, so the next one measures its loads from
+          // here. Cleared AFTER the decision above, which is what reads it.
+          loadSinceHandshakeRef.current = false
           setStatus({ kind: "ready" })
           if (!adapterReadyAnnounced) {
             adapterReadyAnnounced = true
@@ -891,8 +916,13 @@ export function useEditorEditing({
      * was still right in front of them. The handshake carries the document's
      * id, so the boundary is decided where that id is read, in the `.then`
      * above.
+     *
+     * The one thing it records is that a load HAPPENED. That is the fallback
+     * evidence for a bridge too old to report a document id, and it is set
+     * before the handshake starts so the handshake's own decision can read it.
      */
     const onIframeLoad = () => {
+      loadSinceHandshakeRef.current = true
       runHandshake()
     }
 

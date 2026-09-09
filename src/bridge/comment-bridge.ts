@@ -64,11 +64,25 @@ import { createOverridePreview } from "./override-preview"
   // that never went anywhere.
   //
   // The version global is the marker, because it is already the first thing
-  // written and every serve layer already looks for it. If it is set, a
-  // bridge is running in this document; leave it alone and return.
-  if ((window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__) {
-    return
-  }
+  // written and every serve layer already looks for it.
+  //
+  // ONLY OUR OWN VERSION COUNTS. The guard used to return whenever the global
+  // was set at all, whoever set it. A prototype that ships its own copy of an
+  // OLDER bridge — bundled into the app, or served by a stale cache — runs
+  // first, writes the global, and would then suppress the bridge the shell
+  // just injected. That is worse than the duplicate it was defending against:
+  // an older bridge sends no document id, so the shell falls back to guessing
+  // the document boundary and discards valid edits on a re-handshake.
+  //
+  // So the capture happens here, the comparison happens after the assignment
+  // below (the version literal is written straight into the global and read
+  // back, and it has to stay single-use — see the note there), and only an
+  // exact match returns. A DIFFERENT version proceeds and takes the document
+  // over, which is the behaviour that shipped before the guard existed. Two
+  // bridges of different versions both listening is a pre-existing problem and
+  // is not what this guard is about.
+  const previousBridgeVersion = (window as unknown as Record<string, unknown>)
+    .__DESDE_BRIDGE_VERSION__
 
   // ── BRIDGE_VERSION ────────────────────────────────────────────────────
   //
@@ -85,9 +99,17 @@ import { createOverridePreview } from "./override-preview"
   // the viewer's `html-inject`). Keep it a single-use literal;
   // bridge-bundle-version.test.ts fails if that stops holding.
   ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__ =
-    "2026-09-09a-document-id"
+    "2026-09-09b-document-id-guard"
   const BRIDGE_VERSION = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__ as string
+
+  // The other half of ONE BRIDGE PER DOCUMENT, above. THIS version was already
+  // running here, so this is the same bundle evaluated twice in one document:
+  // leave the running instance alone and return. Re-writing the global first
+  // is a no-op, it is the same string.
+  if (previousBridgeVersion === BRIDGE_VERSION) {
+    return
+  }
 
   // ── DOCUMENT_ID ───────────────────────────────────────────────────────
   //

@@ -933,17 +933,52 @@ export function mayClearInFlightMarker(captured: number, current: number): boole
  * | a document | the SAME document | ends nothing: the page answered again |
  * | a document | a DIFFERENT document | ends the session: a new page is here |
  *
- * The token is the bridge's own per-document id when it reports one. A bridge
- * older than that (2026-09-09a) reports none, and the shell mints a fresh token
- * per completed handshake instead — which reads every handshake after the first
- * as a new document, i.e. the older, blunter rule, never a missed boundary.
+ * `nextToken` is the bridge's own per-document id. A bridge older than
+ * 2026-09-09a reports none and arrives here as `null`, and the shell used to
+ * mint a fresh token per handshake for that case — which read EVERY handshake
+ * after the first as a new document, so a page that simply answered twice had
+ * the designer's pending edits discarded.
+ *
+ * `loadSinceLast` is the honest answer for a bridge that cannot say who it is:
+ * did the iframe fire a `load` event since the previous completed handshake?
+ * A document cannot be replaced without one, so no load means the same
+ * document, and a load means a new one may be here and the conservative call
+ * is to end the session. `previousToken` for such a bridge is
+ * {@link UNIDENTIFIED_DOCUMENT}: it is not null, so the shell can still tell
+ * "a handshake completed" from "none has yet".
+ *
+ * | `previousToken` | `nextToken` | `loadSinceLast` | Decision |
+ * | --- | --- | --- | --- |
+ * | unidentified | null | false | ends nothing: the same page answered again |
+ * | unidentified | null | true | ends the session: a page loaded in between |
  */
 export function shouldEndSessionOnHandshake(
   previousToken: string | null,
-  nextToken: string,
+  nextToken: string | null,
+  loadSinceLast: boolean,
 ): boolean {
-  return previousToken !== null && previousToken !== nextToken
+  // No handshake has completed in this attachment yet, so there is no session
+  // about a document for this one to end.
+  if (previousToken === null) return false
+  // Both sides name their document: the ids decide, and nothing else can.
+  if (nextToken !== null) return previousToken !== nextToken
+  // A bridge that reports no id. The iframe's `load` event is the only
+  // evidence left that the document underneath changed.
+  return loadSinceLast
 }
+
+/**
+ * The token stored for a completed handshake whose bridge reported no document
+ * id (a bridge older than 2026-09-09a).
+ *
+ * It exists so `previousToken` can distinguish "a handshake completed, and the
+ * bridge would not say which document" from "no handshake has completed yet",
+ * which is the difference between consulting `loadSinceLast` and ending
+ * nothing. It never has to be unique per document, because it is never
+ * compared for equality against another document's id: the no-id branch of
+ * {@link shouldEndSessionOnHandshake} is decided by the load event instead.
+ */
+export const UNIDENTIFIED_DOCUMENT = "unidentified-document"
 
 /**
  * Did a handshake fail because a newer one replaced it?

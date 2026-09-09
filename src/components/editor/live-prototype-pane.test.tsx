@@ -1135,14 +1135,20 @@ const INSPECTED_BUTTON = {
 }
 
 describe("bridge session boundary", () => {
-  /** Render, connect as `documentId`, and park one edit in the dialog. */
-  async function connectHoldingAnEdit(documentId: string) {
+  /**
+   * Render, connect as `documentId`, and park one edit in the dialog.
+   *
+   * `null` is the id-less bridge (anything older than 2026-09-09a): the
+   * BRIDGE_READY carries no `documentId` field at all, which is what such a
+   * bridge actually sends.
+   */
+  async function connectHoldingAnEdit(documentId: string | null) {
     let editing: ReturnType<typeof useEditorEditing> | null = null
     render(<Harness onEditing={(e) => { editing = e }} />)
     await act(async () => {
       emitFromBridge({
         type: "BRIDGE_READY",
-        payload: { version: "2026-09-09a", documentId },
+        payload: { version: "2026-09-09a", ...(documentId ? { documentId } : {}) },
       })
     })
     await act(async () => {
@@ -1163,14 +1169,17 @@ describe("bridge session boundary", () => {
   }
 
   /** The iframe finished loading, and the bridge answers the re-handshake. */
-  async function reloadAndAnswer(iframe: HTMLIFrameElement, documentId: string) {
+  async function reloadAndAnswer(
+    iframe: HTMLIFrameElement,
+    documentId: string | null,
+  ) {
     await act(async () => {
       iframe.dispatchEvent(new Event("load"))
     })
     await act(async () => {
       emitFromBridge({
         type: "BRIDGE_READY",
-        payload: { version: "2026-09-09a", documentId },
+        payload: { version: "2026-09-09a", ...(documentId ? { documentId } : {}) },
       })
     })
   }
@@ -1332,5 +1341,30 @@ describe("bridge session boundary", () => {
     const { current } = await connectHoldingAnEdit("doc-a")
     expect(current().disambiguationPrompt).not.toBeNull()
     expect(current().saveStatus ?? "").not.toMatch(RESET_STATUS)
+  })
+
+  it("ends nothing on the first handshake of an attachment with an id-less bridge", async () => {
+    // Round 15 W3(b). Same rule, and it has to hold for a bridge that reports
+    // no document id too: the shell now stores `UNIDENTIFIED_DOCUMENT` for
+    // those, and that token must not read as "a previous document" on the very
+    // handshake that wrote it.
+    const { current } = await connectHoldingAnEdit(null)
+    expect(current().disambiguationPrompt).not.toBeNull()
+    expect(current().saveStatus ?? "").not.toMatch(RESET_STATUS)
+  })
+
+  it("ends the session for an id-less bridge when the iframe loaded in between", async () => {
+    // A bridge older than 2026-09-09a cannot say which document it is, so the
+    // iframe's `load` event is the only evidence there is, and the conservative
+    // call stands: a boundary too many rather than a boundary missed. The
+    // session boundary must not quietly disappear for old bridges.
+    const { iframe, current } = await connectHoldingAnEdit(null)
+
+    await reloadAndAnswer(iframe, null)
+
+    await waitFor(() => {
+      expect(current().disambiguationPrompt).toBeNull()
+    })
+    expect(current().saveStatus ?? "").toMatch(RESET_STATUS)
   })
 })

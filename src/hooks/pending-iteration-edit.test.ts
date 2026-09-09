@@ -35,6 +35,7 @@ import {
   sessionEndPlan,
   settleHandOff,
   shouldEndSessionOnHandshake,
+  UNIDENTIFIED_DOCUMENT,
   structuralRouteFor,
   thisRowOperationAllowed,
   thisRowTemplateLocation,
@@ -1486,7 +1487,11 @@ describe("shouldEndSessionOnHandshake", () => {
     // Nothing was adopted yet. The session this handshake connects to is the
     // one the attach just started, and ending it here would abort the
     // controller it had only just made.
-    expect(shouldEndSessionOnHandshake(null, "doc-a")).toBe(false)
+    expect(shouldEndSessionOnHandshake(null, "doc-a", false)).toBe(false)
+    // Even after a load: the attach's own first handshake follows the iframe
+    // loading the page, and there is still no earlier session to end.
+    expect(shouldEndSessionOnHandshake(null, "doc-a", true)).toBe(false)
+    expect(shouldEndSessionOnHandshake(null, null, true)).toBe(false)
   })
 
   it("ends nothing when the same document answers again", () => {
@@ -1494,20 +1499,46 @@ describe("shouldEndSessionOnHandshake", () => {
     // script runs, so a page with a slow image fires `load` afterwards and the
     // shell re-handshakes with the page it is already on. Ending the session
     // there discarded a draft the live bridge was still holding.
-    expect(shouldEndSessionOnHandshake("doc-a", "doc-a")).toBe(false)
+    expect(shouldEndSessionOnHandshake("doc-a", "doc-a", false)).toBe(false)
+  })
+
+  it("believes the ids over the load event when the bridge reports one", () => {
+    // A document whose subresources finish after the bridge announced itself
+    // fires `load` on the page the shell is already editing. The id is the
+    // whole point of the 2026-09-09a bridge: it settles that case outright.
+    expect(shouldEndSessionOnHandshake("doc-a", "doc-a", true)).toBe(false)
+    expect(shouldEndSessionOnHandshake("doc-a", "doc-b", false)).toBe(true)
   })
 
   it("ends the session when a different document is there", () => {
-    expect(shouldEndSessionOnHandshake("doc-a", "doc-b")).toBe(true)
+    expect(shouldEndSessionOnHandshake("doc-a", "doc-b", true)).toBe(true)
   })
 
-  it("reads every handshake after the first as new when tokens never repeat", () => {
-    // The fallback shape, for a bridge that reports no document id: the shell
-    // mints a fresh token per completed handshake, so this is the older,
-    // blunter rule. Blunter in the safe direction, a boundary too many rather
-    // than a boundary missed.
-    expect(shouldEndSessionOnHandshake(null, "handshake-1")).toBe(false)
-    expect(shouldEndSessionOnHandshake("handshake-1", "handshake-2")).toBe(true)
+  describe("a bridge that reports no document id", () => {
+    // Round 15 W3(b). The shell used to mint a fresh token per completed
+    // handshake for these, which read EVERY re-handshake as a new document and
+    // discarded the designer's valid pending edits. The load event is the only
+    // honest evidence available, and a document cannot be replaced without one.
+    it("ends nothing when no load happened since the last handshake", () => {
+      expect(
+        shouldEndSessionOnHandshake(UNIDENTIFIED_DOCUMENT, null, false),
+      ).toBe(false)
+    })
+
+    it("ends the session when a load happened since the last handshake", () => {
+      expect(
+        shouldEndSessionOnHandshake(UNIDENTIFIED_DOCUMENT, null, true),
+      ).toBe(true)
+    })
+
+    it("ends the session when a bridge that DOES report an id takes over", () => {
+      // Only reachable through a document swap: an id is minted once per
+      // document evaluation, so a page cannot start reporting one in place.
+      // Ending is the conservative call either way.
+      expect(
+        shouldEndSessionOnHandshake(UNIDENTIFIED_DOCUMENT, "doc-a", false),
+      ).toBe(true)
+    })
   })
 })
 

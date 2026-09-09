@@ -656,8 +656,8 @@ export type BridgeToShellMessage =
   // reload or navigation carries a different one. The shell uses it to tell a
   // re-handshake of the page it is already on from a genuinely new page: the
   // first is not a session boundary, the second is. Absent on bridges older
-  // than 2026-09-09a, where the shell falls back to treating every completed
-  // handshake after the first as a new document.
+  // than 2026-09-09a, where the shell falls back to the iframe's `load` event:
+  // a handshake with no load since the previous one is the same document.
   | { type: "BRIDGE_READY"; payload?: { version?: string; documentId?: string } }
   // Tier-2 edit verification response (paired with a READ_RENDERED_VALUE
   // requestId). `value` is null when the selector matched nothing.
