@@ -703,7 +703,7 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
     async function refusal(intentPatch: Record<string, unknown>): Promise<string> {
       writeFileSync(join(dir, "List.vue"), ITER_SOURCE)
       const bad = iterationBody()
-      Object.assign(bad.intent as Record<string, unknown>, intentPatch)
+      Object.assign(bad.intent as unknown as Record<string, unknown>, intentPatch)
       const r = await handleLLMFallback(bad, dir, iterationLoaders)
       expect(r.ok).toBe(false)
       expect(r.status).toBe(400)

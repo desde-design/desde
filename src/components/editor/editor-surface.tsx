@@ -207,10 +207,13 @@ export function EditorSurface({
   const chatSubmitRef = useRef<
     ((message: string) => Promise<boolean>) | null
   >(null)
-  // Synchronous twin of `chatSubmitRef`: lets `handleEditEscalation` (defined
-  // below, before `chat`/`chatSessions` exist) know WITHOUT awaiting whether
-  // a hand-off will actually be accepted. Populated once `canStartChatSession`
-  // exists (see `submitChatInNewSession`).
+  // Synchronous twin of `chatSubmitRef`: the CLIENT-side half of the decision,
+  // which `handleEditEscalation` (defined below, before `chat`/`chatSessions`
+  // exist) can read without awaiting. It answers one question — is a chat
+  // already running — and that is the only refusal knowable up front. Whether
+  // the server takes the turn is the awaited half, and only the awaited value
+  // says a hand-off was accepted. Populated once `canStartChatSession` exists
+  // (see `submitChatInNewSession`).
   const canStartChatSessionRef = useRef<(() => boolean) | null>(null)
   // Right-rail active tab. Declared here (ahead of `editing`) so the
   // escalate-to-chat callback below can flip the rail to the Chat

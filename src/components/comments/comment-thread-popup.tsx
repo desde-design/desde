@@ -205,9 +205,20 @@ export function CommentThreadPopup({
                     // open so the intent isn't silently lost — mirrors
                     // session-log-panel's escalate. Awaited through `.then`
                     // because the verdict now arrives with the POST's answer.
-                    void onFixWithAI(activeComment.id).then((accepted) => {
-                      if (accepted) handleClose()
-                    })
+                    // A THROWN hand-off is the same answer as a refused one:
+                    // nothing was sent. Without the catch it was an unhandled
+                    // rejection, the thread stayed open with no reason given,
+                    // and the only record was a console warning nobody reads.
+                    void onFixWithAI(activeComment.id)
+                      .then((accepted) => {
+                        if (accepted) handleClose()
+                      })
+                      .catch((err: unknown) => {
+                        console.error(
+                          "[desde] Fix with AI could not reach chat; the comment stays open.",
+                          err,
+                        )
+                      })
                   }
                 : undefined
             }

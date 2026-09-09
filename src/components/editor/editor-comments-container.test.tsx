@@ -498,7 +498,7 @@ describe("EditorCommentsContainer", () => {
     expect(prompt).toContain("comment #7")
     expect(prompt).toContain("Make this larger, cc @Mo") // mention decoded
     expect(prompt).toContain("selector: #app > main > h1")
-    expect(prompt).toContain('page "/dashboard"')
+    expect(prompt).toContain("Page: /dashboard")
 
     // Thread closes after handing off. `waitFor`, not a bare read: the
     // verdict now arrives with the POST's answer, so the close is one
