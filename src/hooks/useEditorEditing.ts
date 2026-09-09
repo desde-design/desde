@@ -113,9 +113,9 @@ import {
 import {
   bridgeDraftIdOf,
   decideAfterVerify,
-  endSentence,
   isStaleVerify,
   iterationRouteFor,
+  parkedReason,
   iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
@@ -1679,6 +1679,19 @@ export function useEditorEditing({
   // "this-row." Adding a new edit kind = adding a variant.
   const [iterationScopePrompt, setIterationScopePrompt] =
     useState<PendingIterationEdit | null>(null)
+  /**
+   * The open prompt as a ref, for the late completions that have to know
+   * whether the dialog currently open holds the bridge draft they are about to
+   * dispose of.
+   *
+   * `releaseBridgeDraftUnlessShared` reads that fact through
+   * `setIterationScopePrompt`'s updater, which works only while React
+   * evaluates the updater eagerly, and that is an optimization rather than a
+   * guarantee. A PARK also sets state, and setting state inside another
+   * setState updater is not safe at all, so the park path reads the ref.
+   */
+  const iterationScopePromptRef = useRef<PendingIterationEdit | null>(null)
+  iterationScopePromptRef.current = iterationScopePrompt
   // Per-edit-kind remembered scope. Cleared on hook unmount; not persisted
   // across reloads (v1 — the dialog's "Remember for this session" checkbox).
   const iterationScopeMemoryRef = useRef<
@@ -2192,6 +2205,53 @@ export function useEditorEditing({
   )
 
   /**
+   * The terminal step for an iteration edit that will NOT be applied: park the
+   * bridge's draft in the deterministic dialog when there is one, and release
+   * it only when there is nothing to park.
+   *
+   * Cancelling is not a neutral cleanup. For an in-page typing session the
+   * bridge's cancel has no preview ops to revert, so the DOM keeps showing
+   * text that reached no file, nothing anywhere records what was typed, and
+   * Save then reports success over an edit that no longer exists. Two exits
+   * used to cancel: a failed loop check, and a throw inside the verify
+   * completion. The refused-hand-off exit already parked, which is what these
+   * two now share.
+   *
+   * The parked status itself is `parkedReason`, shared with the proposal
+   * refusal so the same situation is not described two ways.
+   */
+  const releaseOrPark = useCallback(
+    (pending: PendingIterationEdit, message: string): void => {
+      const parked = parkDraftForDeterministicFallback(pending, parkedReason(message))
+      // `parkHeldBridgeDraft` sets its own status, so only the release path
+      // states the reason here.
+      if (parked) return
+      releaseBridgeDraft(pending)
+      setSaveStatus(message)
+    },
+    [parkDraftForDeterministicFallback, releaseBridgeDraft],
+  )
+
+  /**
+   * {@link releaseOrPark} for a LATE completion: does nothing when something
+   * live still owns the draft. The two owners are the same ones
+   * `releaseBridgeDraftUnlessShared` checks — a newer intercept for the same
+   * in-page typing session, and the dialog currently open on it — and the
+   * reason is stronger here: parking takes the draft out of the maps, so doing
+   * it to someone else's draft strands the edit they can still see.
+   */
+  const releaseOrParkUnlessShared = useCallback(
+    (pending: PendingIterationEdit, message: string): void => {
+      const draftId = bridgeDraftIdOf(pending)
+      if (draftId && latestPendingByDraftRef.current.get(draftId) !== pending) return
+      const open = iterationScopePromptRef.current
+      if (open && sameBridgeDraft(open, pending)) return
+      releaseOrPark(pending, message)
+    },
+    [releaseOrPark],
+  )
+
+  /**
    * Drive a pending iteration edit through the chosen scope. Used by
    * both the dialog confirm path AND the remembered-scope fast path
    * (when the user already picked "this row"/"all rows" for this edit
@@ -2265,14 +2325,12 @@ export function useEditorEditing({
       // write left neither a source edit nor anything to retry, with the page
       // still showing text that reached no file.
       const failThisRow = (message: string) => {
-        // `endSentence` because these reasons come from three places — our own
-        // literals, an applicator's refusal text, a server's 400 body — and
-        // not all of them end in punctuation. Without it the two sentences
-        // ran together.
-        const parked = parkDraftForDeterministicFallback(
-          pending,
-          `${endSentence(message)} Choose how to apply it.`,
-        )
+        // `parkedReason` rather than a literal: it is the same status three
+        // exits now show, and it ends the refusal with a full stop first
+        // because these reasons come from three places (our own literals, an
+        // applicator's refusal text, a server's 400 body) and not all of them
+        // end in punctuation.
+        const parked = parkDraftForDeterministicFallback(pending, parkedReason(message))
         if (!parked) setSaveStatus(message)
       }
 
@@ -2500,8 +2558,10 @@ export function useEditorEditing({
             remembered: iterationScopeMemoryRef.current[pending.editKind],
           })
           if (action.kind === "release-and-status") {
-            releaseBridgeDraft(pending)
-            setSaveStatus(action.message)
+            // Park, do not cancel. The loop check failing says nothing about
+            // what the designer typed, and cancelling a dom-text draft loses
+            // it with no record anywhere. See `releaseOrPark`.
+            releaseOrPark(pending, action.message)
             return
           }
           if (action.kind === "hand-off") {
@@ -2588,9 +2648,17 @@ export function useEditorEditing({
         //
         // The hand-off's own failures never arrive here; that branch catches
         // them itself, so this message is only ever about the loop check.
-        releaseBridgeDraftUnlessShared(pending)
-        if (gone()) return
-        setSaveStatus(`Could not check the source for a loop: ${(err as Error).message}`)
+        if (gone()) {
+          // The panel that would hold a parked edit is gone with the surface,
+          // so there is nothing to park it in and no status to show. Releasing
+          // the bridge's draft is all that is left.
+          releaseBridgeDraftUnlessShared(pending)
+          return
+        }
+        releaseOrParkUnlessShared(
+          pending,
+          `Could not check the source for a loop: ${(err as Error).message}`,
+        )
       })
       return true
     },
@@ -2599,6 +2667,8 @@ export function useEditorEditing({
       parkDraftForDeterministicFallback,
       releaseBridgeDraft,
       releaseBridgeDraftUnlessShared,
+      releaseOrPark,
+      releaseOrParkUnlessShared,
     ],
   )
 

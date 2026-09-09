@@ -10,6 +10,7 @@ import {
   isStaleVerify,
   iterationRouteFor,
   iterationTemplateLocation,
+  parkedReason,
   sameBridgeDraft,
   structuralRouteFor,
   thisRowTemplateLocation,
@@ -489,5 +490,28 @@ describe("endSentence", () => {
     expect(`${endSentence("Iteration edit refused: no adapter")} Choose how to apply it.`).toBe(
       "Iteration edit refused: no adapter. Choose how to apply it.",
     )
+  })
+})
+
+describe("parkedReason", () => {
+  it("ends the refusal, then asks the question the dialog is asking", () => {
+    expect(parkedReason("Iteration edit refused: no adapter")).toBe(
+      "Iteration edit refused: no adapter. Choose how to apply it.",
+    )
+  })
+
+  it("does not double the stop on a reason that already has one", () => {
+    expect(parkedReason("Could not check the source for a loop: offline.")).toBe(
+      "Could not check the source for a loop: offline. Choose how to apply it.",
+    )
+  })
+
+  it("is the same string for all three parking exits", () => {
+    // The refused proposal, the failed loop check and the throw inside the
+    // verify completion all park, and a designer seeing the same situation
+    // described two ways has to work out whether it is the same situation.
+    const reason = "Could not check the source for a loop: network error"
+    expect(parkedReason(reason)).toBe(parkedReason(reason))
+    expect(parkedReason(reason).endsWith(" Choose how to apply it.")).toBe(true)
   })
 })

@@ -104,6 +104,19 @@ export function endSentence(message: string): string {
 }
 
 /**
+ * The status line for an edit that has been PARKED: why the deterministic
+ * lane could not apply it, then the question the dialog it landed in asks.
+ *
+ * One function because three exits now park — a refused proposal, a failed
+ * loop check, and a throw inside the verify completion — and a designer who
+ * sees the same situation described two ways has to work out whether they are
+ * the same situation.
+ */
+export function parkedReason(message: string): string {
+  return `${endSentence(message)} Choose how to apply it.`
+}
+
+/**
  * Which of the three routes an edit on this element takes.
  *
  * - `refuse`: the page sent loop information that failed the boundary check.
