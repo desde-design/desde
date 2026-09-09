@@ -32,6 +32,25 @@ describe("verifyIterationLoop", () => {
     expect(await verifyIterationLoop(args, fetchImpl as never)).toEqual({ kind: "error", reason: "offline" })
   })
 
+  it("times out a transport that never answers, so the bridge draft is released", async () => {
+    // A fetch that never resolves AND ignores the signal: the shape a wedged
+    // CLI has. Passing the signal alone would leave this pending forever.
+    const fetchImpl = vi.fn(() => new Promise<Response>(() => {}))
+    const r = await verifyIterationLoop({ ...args, timeoutMs: 10 }, fetchImpl as never)
+    expect(r.kind).toBe("error")
+    if (r.kind !== "error") return
+    expect(r.reason).toBe("the check did not answer within 10ms")
+  })
+
+  it("says cancelled, not timed out, when the caller's own signal fires", async () => {
+    const controller = new AbortController()
+    const fetchImpl = vi.fn(() => new Promise<Response>(() => {}))
+    const pending = verifyIterationLoop({ ...args, signal: controller.signal }, fetchImpl as never)
+    controller.abort()
+    const r = await pending
+    expect(r).toEqual({ kind: "error", reason: "the check was cancelled" })
+  })
+
   it("forwards the caller's abort signal to fetch, so a disposed surface stops the request", async () => {
     const controller = new AbortController()
     const fetchImpl = vi.fn(async () => json({ ok: true, loop: null, reason: "x" }))

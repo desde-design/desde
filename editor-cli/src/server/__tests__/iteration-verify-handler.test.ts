@@ -89,6 +89,29 @@ describe("iteration-verify-handler", () => {
     if (!r.ok) expect(r.status).toBe(404)
   })
 
+  it("refuses an unsupported extension BEFORE touching the filesystem", async () => {
+    // The path does not exist AND has the wrong extension. A 400 (not the
+    // 404 a missing supported file gets) is what proves the extension gate
+    // runs first: reading the bytes first would have made this route an
+    // existence oracle, and would have pulled a `.env` into memory.
+    writeFileSync(join(dir, ".env"), "SECRET=1", "utf8")
+    for (const file of [".env", "src/Nope.env", "src/does-not-exist.env"]) {
+      const r = await handleIterationVerify({ file, templateLocation: { line: 1, column: 0 } }, dir)
+      expect(r.ok).toBe(false)
+      if (!r.ok) {
+        expect(r.status).toBe(400)
+        expect(r.reason).toBe("Only .vue, .tsx, and .jsx files are supported")
+      }
+    }
+  })
+
+  it("gives an existing and a missing unsupported path the same answer", async () => {
+    writeFileSync(join(dir, "present.env"), "SECRET=1", "utf8")
+    const present = await handleIterationVerify({ file: "present.env", templateLocation: { line: 1, column: 0 } }, dir)
+    const absent = await handleIterationVerify({ file: "absent.env", templateLocation: { line: 1, column: 0 } }, dir)
+    expect(present).toEqual(absent)
+  })
+
   it("validates the body shape", () => {
     expect(validateIterationVerifyBody(null)).toBe("Body must be an object")
     expect(validateIterationVerifyBody({ file: "" })).toBe("body.file required")

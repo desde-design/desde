@@ -66,10 +66,23 @@ export function validateIterationVerifyBody(body: unknown): string | null {
   return null
 }
 
+function isSupportedIterationFile(p: string): boolean {
+  return p.endsWith(".vue") || p.endsWith(".tsx") || p.endsWith(".jsx")
+}
+
 export async function handleIterationVerify(
   body: IterationVerifyRequestBody,
   repoRoot: string,
 ): Promise<IterationVerifyResult> {
+  // Extension gate FIRST, lexically, before anything touches the filesystem.
+  // `edit-iteration-handler.ts` gates on the resolved candidate; this route
+  // gates one step earlier because it was the ordering that leaked. Reading
+  // the bytes first pulled `.env` into memory, and answering 404 for a
+  // missing path while answering 200 for an existing one made the route an
+  // existence oracle for any path inside the root.
+  if (!isSupportedIterationFile(body.file)) {
+    return { ok: false, status: 400, reason: "Only .vue, .tsx, and .jsx files are supported" }
+  }
   const rootResolution = await resolvePrototypeRoot(repoRoot)
   if (!rootResolution.ok) return rootResolution
   const candidateResolution = resolveCandidateWithinRoot(body.file, rootResolution)
