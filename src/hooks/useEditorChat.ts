@@ -316,8 +316,17 @@ export interface UseEditorChatReturn {
    * is holding something open while it awaits (a Save spinner, a bridge draft,
    * an in-flight prop, an open comment thread) and a turn runs for tens of
    * seconds. Waiting for the stream held all of those for the whole turn.
+   *
+   * `options.signal` cancels the submission. A caller with a deadline needs
+   * that as well as the timeout: giving up on the WAIT leaves the POST in
+   * flight, and a turn accepted afterwards edits the same element the caller
+   * has by then routed somewhere else.
    */
-  submitReporting: (userMessage: string, images?: string[]) => Promise<boolean>
+  submitReporting: (
+    userMessage: string,
+    images?: string[],
+    options?: { signal?: AbortSignal },
+  ) => Promise<boolean>
   /**
    * Deliver a message INTO the turn that is currently running, instead of
    * aborting that turn and starting a new one (which is what `submit` does to
@@ -495,6 +504,21 @@ interface RunSubmitOptions {
    * Called at most once per `runSubmit`, and never for a refused submit.
    */
   onAccepted?: () => void
+  /**
+   * An EXTERNAL abort, combined with the turn's own controller.
+   *
+   * A caller that has given up on a submission needs the submission to stop,
+   * not merely to stop being awaited. The hand-off seam is the case: it parks
+   * the edit in a deterministic dialog after 30 s, and a turn still on its way
+   * to the same element would then be a second writer for one click. Aborting
+   * cancels the fetch, which closes the SSE stream, which is what the server
+   * watches to wind the turn down (`chat-handler.ts` pipes `stream.aborted`
+   * into the runtime's controller, before and after `accepted`).
+   *
+   * The turn's own controller stays in charge of everything else: Stop, and a
+   * newer submit on the same bucket, are unaffected.
+   */
+  signal?: AbortSignal
 }
 
 /**
@@ -684,6 +708,17 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
     if (prior) prior.abort()
     const abort = new AbortController()
     bucketStateRef.current.aborts.set(turnId, abort)
+    // Combine the caller's abort with this turn's. `AbortSignal.any` is not
+    // used: it is missing from the jsdom this hook's tests run in, and a
+    // forwarding listener is the same thing in two lines. Removed in the
+    // `finally` so a long-lived caller signal cannot retain a finished turn's
+    // controller.
+    const externalSignal = options?.signal
+    const forwardExternalAbort = (): void => abort.abort()
+    if (externalSignal) {
+      if (externalSignal.aborted) abort.abort()
+      else externalSignal.addEventListener("abort", forwardExternalAbort, { once: true })
+    }
     // Display label for the user bubble. An image-only turn would otherwise
     // render blank, so fall back to an attachment marker. (Display-only —
     // the server receives the real text + images, not this label.)
@@ -983,6 +1018,7 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
       // flushDeltas → clearFlushTimer) so it can never fire after the turn
       // has ended.
       flushDeltas()
+      externalSignal?.removeEventListener("abort", forwardExternalAbort)
       // Only clear the bucket's submitting flag if this submit still
       // owns its abort controller. If a newer submit raced and replaced
       // the controller, the newer turn is still running.
@@ -1557,14 +1593,21 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
    * and its rejection is impossible by construction: it catches internally.
    */
   const submitReporting = useCallback(
-    (userMessage: string, images?: string[]): Promise<boolean> => {
+    (
+      userMessage: string,
+      images?: string[],
+      options?: { signal?: AbortSignal },
+    ): Promise<boolean> => {
       let settle: (accepted: boolean) => void = () => {}
       const accepted = new Promise<boolean>((resolve) => {
         settle = resolve
       })
       // A promise resolved twice keeps its first value, so the late
       // `serverAccepted` cannot contradict an acceptance already reported.
-      void runSubmit(userMessage, images, { onAccepted: () => settle(true) })
+      void runSubmit(userMessage, images, {
+        onAccepted: () => settle(true),
+        ...(options?.signal ? { signal: options.signal } : {}),
+      })
         .then((outcome) => settle(outcome.serverAccepted))
         .catch(() => settle(false))
       return accepted

@@ -207,6 +207,66 @@ describe("useEditorChat — submitReporting", () => {
     expect(raced).toBe("timed-out")
   })
 
+  /** The last `init` the mocked `editorFetch` was called with. */
+  function lastFetchInit(): { signal: AbortSignal } {
+    const init = fetchMock.mock.calls.at(-1)?.[1]
+    return init as { signal: AbortSignal }
+  }
+
+  /** Let the submit's own awaits run before reading the fetch mock. */
+  async function settleMicrotasks(): Promise<void> {
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  /**
+   * The hand-off seam's deadline. `settleHandOff` parks the edit in the
+   * deterministic dialog after 30 s; if the POST keeps going the server can
+   * accept the turn afterwards and the agent writes the same element the
+   * designer is at that moment choosing a scope for. Giving up on the WAIT is
+   * not enough, so the caller's signal has to reach the fetch.
+   */
+  it("aborts the turn's request when the caller's signal aborts", async () => {
+    fetchMock.mockResolvedValue(neverEndingSseResponse(""))
+    const { result } = renderHook(() => useEditorChat(baseOpts))
+    const controller = new AbortController()
+    await act(async () => {
+      void result.current.submitReporting("hello", undefined, { signal: controller.signal })
+      await settleMicrotasks()
+    })
+    const init = lastFetchInit()
+    expect(init.signal.aborted).toBe(false)
+    await act(async () => {
+      controller.abort()
+      await settleMicrotasks()
+    })
+    expect(init.signal.aborted).toBe(true)
+  })
+
+  it("carries an already-aborted signal into the request rather than ignoring it", async () => {
+    fetchMock.mockResolvedValue(neverEndingSseResponse(""))
+    const { result } = renderHook(() => useEditorChat(baseOpts))
+    const controller = new AbortController()
+    controller.abort()
+    let accepted: boolean | undefined
+    await act(async () => {
+      accepted = await result.current.submitReporting("hello", undefined, {
+        signal: controller.signal,
+      })
+    })
+    expect(lastFetchInit().signal.aborted).toBe(true)
+    expect(accepted).toBe(false)
+  })
+
+  it("leaves the turn alone when no signal is passed", async () => {
+    fetchMock.mockResolvedValue(neverEndingSseResponse(""))
+    const { result } = renderHook(() => useEditorChat(baseOpts))
+    await act(async () => {
+      void result.current.submitReporting("hello")
+      await settleMicrotasks()
+    })
+    expect(lastFetchInit().signal.aborted).toBe(false)
+  })
+
   it("leaves submit's void contract alone", async () => {
     fetchMock.mockResolvedValue(
       sseResponse(ACCEPTED + frame({ kind: "turn_complete", turnId: "t1" })),

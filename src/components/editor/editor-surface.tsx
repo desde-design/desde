@@ -206,7 +206,7 @@ export function EditorSurface({
   // before `chat`, so the submit fn is reached through a ref populated once
   // `chat` exists (below).
   const chatSubmitRef = useRef<
-    ((message: string) => Promise<boolean>) | null
+    ((message: string, signal?: AbortSignal) => Promise<boolean>) | null
   >(null)
   // Synchronous twin of `chatSubmitRef`: the CLIENT-side half of the decision,
   // which `handleEditEscalation` (defined below, before `chat`/`chatSessions`
@@ -230,7 +230,10 @@ export function EditorSurface({
   // prompt and the agent's answer visible in the tab strip. `chatSubmitRef`
   // is pointed at a submit that mints the session (see `submitChatInNewSession`).
   const handleEditEscalation = useCallback(
-    async (prompt: string): Promise<boolean> => {
+    async (
+      prompt: string,
+      options?: { signal?: AbortSignal },
+    ): Promise<boolean> => {
       const submit = chatSubmitRef.current
       const canStart = canStartChatSessionRef.current
       if (!submit || !canStart) return false
@@ -250,7 +253,12 @@ export function EditorSurface({
       // `true` before the POST answered told the caller an edit was safely in
       // chat when an HTTP or network refusal could still drop it, and the
       // buffer was already cleared by then.
-      const accepted = await submit(prompt)
+      //
+      // The caller's signal rides along: a hand-off it has given up on has to
+      // stop being submitted, not just stop being awaited. Otherwise the turn
+      // lands after the edit was parked and the agent writes the file the
+      // designer is still choosing a scope for.
+      const accepted = await submit(prompt, options?.signal)
       if (!accepted) return false
       toast.message("Sent this edit to chat", {
         description: "The assistant will check the source and ask if it needs a decision.",
@@ -883,10 +891,14 @@ export function EditorSurface({
   // for a `turn_complete` that could never arrive. `submitReporting` is the
   // same call with the server's acceptance kept.
   const submitChatInNewSession = useCallback(
-    async (prompt: string): Promise<boolean> => {
+    async (prompt: string, signal?: AbortSignal): Promise<boolean> => {
       if (!canStartChatSession()) return false
       chatSessions.newSession()
-      return await chat.submitReporting(prompt)
+      // `signal` belongs to the caller's deadline (see `settleHandOff`). It is
+      // combined with the turn's own controller inside `runSubmit`, so
+      // aborting it cancels the POST and closes the SSE stream, which is what
+      // tells the server to wind the turn down.
+      return await chat.submitReporting(prompt, undefined, { signal })
     },
     // Same rationale as submitChatAutoFork: the reactive inputs are listed
     // directly; depending on the whole `chat` object would rebuild this on

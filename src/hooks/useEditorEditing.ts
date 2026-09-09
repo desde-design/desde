@@ -231,8 +231,17 @@ interface UseEditorEditingOptions {
    * failed. Asynchronous on purpose: the guard is knowable at once, but the
    * server's answer is not, and a caller that clears its edit buffer on a
    * synchronous `true` can lose an edit the server then refused.
+   *
+   * `options.signal` aborts the submission itself, not just the wait for it.
+   * A hand-off that has passed its deadline is parked in the deterministic
+   * dialog, and the chat turn must not still be on its way to the same
+   * element: the agent would write the file while the designer picks a scope
+   * for the very same edit. See `settleHandOff`.
    */
-  escalateToChat?: (prompt: string) => Promise<boolean>
+  escalateToChat?: (
+    prompt: string,
+    options?: { signal?: AbortSignal },
+  ) => Promise<boolean>
 }
 
 /**
@@ -2373,9 +2382,11 @@ export function useEditorEditing({
           describeRowScopedEdit(pending, loopLocation, fieldLocation),
         )
         // Bounded for the reason the other hand-off is: a thrown or unanswered
-        // POST is a refusal, and the park below keeps the edit answerable.
-        const outcome = await settleHandOff(() =>
-          handOff ? handOff(prompt) : Promise.resolve(false),
+        // POST is a refusal, and the park below keeps the edit answerable. The
+        // signal is the deadline's: an unanswered submission is cancelled, not
+        // merely stopped being waited for.
+        const outcome = await settleHandOff((signal) =>
+          handOff ? handOff(prompt, { signal }) : Promise.resolve(false),
         )
         if (outcome === "accepted") {
           // Chat owns the edit from here, so a held draft (in-page typing) goes.
@@ -2617,9 +2628,11 @@ export function useEditorEditing({
             // is showing a change that has reached no file and the designer
             // cannot resolve it meanwhile. A late answer after the timeout
             // resolves into a promise nobody holds, so it cannot release a
-            // draft this branch has already parked.
-            const outcome = await settleHandOff(() =>
-              handOff ? handOff(action.prompt) : Promise.resolve(false),
+            // draft this branch has already parked. The deadline also ABORTS
+            // the submission, so a turn accepted after the park cannot edit
+            // the same element behind the deterministic dialog.
+            const outcome = await settleHandOff((signal) =>
+              handOff ? handOff(action.prompt, { signal }) : Promise.resolve(false),
             )
             // Staleness FIRST, and it decides the release. While this POST was
             // in flight a newer intercept can have taken over the same draft

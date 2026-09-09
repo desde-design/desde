@@ -711,6 +711,42 @@ describe("settleHandOff", () => {
     await Promise.resolve()
     expect(outcome).toBe("timed-out")
   })
+
+  it("aborts the attempt's signal on timeout, so the submission stops too", async () => {
+    // Dropping the race's loser stops a late `true` from releasing a parked
+    // draft. It does not stop the POST: the server can accept the turn after
+    // the park and the agent then writes the same element the designer is
+    // choosing a deterministic scope for.
+    let seen: AbortSignal | undefined
+    const outcome = await settleHandOff((signal) => {
+      seen = signal
+      return new Promise<boolean>(() => {})
+    }, 5)
+    expect(outcome).toBe("timed-out")
+    expect(seen?.aborted).toBe(true)
+  })
+
+  it("hands the attempt a live signal and leaves it alone when the hand-off answers", async () => {
+    let seen: AbortSignal | undefined
+    const outcome = await settleHandOff((signal) => {
+      seen = signal
+      expect(signal.aborted).toBe(false)
+      return Promise.resolve(true)
+    }, 50)
+    expect(outcome).toBe("accepted")
+    expect(seen?.aborted).toBe(false)
+  })
+
+  it("does not abort a refused hand-off", async () => {
+    // A refusal already settled the transport; aborting after it would fire an
+    // abort listener on a request that is over.
+    let seen: AbortSignal | undefined
+    await settleHandOff((signal) => {
+      seen = signal
+      return Promise.resolve(false)
+    }, 50)
+    expect(seen?.aborted).toBe(false)
+  })
 })
 
 describe("handOffFailureStatus", () => {
@@ -737,6 +773,7 @@ describe("handOffFailureStatus", () => {
     }
   })
 })
+
 
 describe("errorMessage", () => {
   it("reads the message of a real Error", () => {

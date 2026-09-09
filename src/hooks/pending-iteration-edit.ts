@@ -165,25 +165,39 @@ export type HandOffOutcome = "accepted" | "refused" | "timed-out"
  * A throw is a refusal, not a failure of whatever called this: the hand-off
  * POST failing says nothing about the check that preceded it.
  *
- * The race IS the guard the caller needs against a late answer. Once this
- * returns "timed-out" the caller parks the draft, and the attempt's eventual
- * `true` resolves into a promise nobody is holding, so no code path can
- * release a draft that has already been parked.
+ * The race is not enough on its own. Dropping the loser's resolution stops a
+ * late `true` from releasing a parked draft, but it does not stop the POST:
+ * the request keeps running, the server can answer `accepted` after the
+ * timeout, and the agent then edits the same element the designer is at that
+ * moment choosing a deterministic scope for. Two writes, from two lanes, for
+ * one click.
+ *
+ * So the timeout ABORTS as well as settling. `run` receives the signal and is
+ * expected to pass it to the transport; the client's fetch is aborted, the
+ * server sees the stream close, and the turn winds down (`chat-handler.ts`
+ * pipes `stream.aborted` into the runtime's abort controller, both before and
+ * after it emits `accepted`).
  */
 export async function settleHandOff(
-  run: () => Promise<boolean>,
+  run: (signal: AbortSignal) => Promise<boolean>,
   timeoutMs: number = HANDOFF_TIMEOUT_MS,
 ): Promise<HandOffOutcome> {
+  const controller = new AbortController()
   const attempt: Promise<HandOffOutcome> = (async () => {
     try {
-      return (await run()) ? "accepted" : "refused"
+      return (await run(controller.signal)) ? "accepted" : "refused"
     } catch {
       return "refused"
     }
   })()
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<HandOffOutcome>((resolve) => {
-    timer = setTimeout(() => resolve("timed-out"), timeoutMs)
+    timer = setTimeout(() => {
+      // Abort BEFORE resolving, so the caller's park and the transport's
+      // cancellation are not separated by a turn of the event loop.
+      controller.abort()
+      resolve("timed-out")
+    }, timeoutMs)
   })
   try {
     return await Promise.race([attempt, timeout])
@@ -215,6 +229,7 @@ export function handOffFailureStatus(
     released: "This edit needs a decision and could not be sent to chat.",
   }
 }
+
 
 /**
  * Which of the three routes an edit on this element takes.
