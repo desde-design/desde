@@ -437,6 +437,10 @@ function stubChat(submitting: boolean): {
     resendingSteers: [],
     abort: () => {},
     clearLocal: () => {},
+    submitReporting: async (text: string, images?: string[]) => {
+      submitted.push([text, ...(images ?? [])])
+      return true
+    },
     dismissMessage: () => {},
     hydrateFromTranscript: () => {},
     hasSessionBucket: () => false,

@@ -302,6 +302,19 @@ export interface UseEditorChatReturn {
    */
   submit: (userMessage: string, images?: string[]) => Promise<void>
   /**
+   * {@link submit}, except it REPORTS whether the server took the turn.
+   *
+   * `submit` is void, so a caller that needs to unwind its own state on a
+   * refusal (an HTTP 400/500, or a thrown fetch) had no way to learn about
+   * one and treated every call as a success. `submitChatInNewSession` did
+   * exactly that, and a canvas flow generation stuck on "generating" forever
+   * because the turn it was waiting to complete had never started.
+   *
+   * Resolves when the turn's stream ENDS, like `submit`; the boolean says
+   * whether the server accepted the turn at the start of it.
+   */
+  submitReporting: (userMessage: string, images?: string[]) => Promise<boolean>
+  /**
    * Deliver a message INTO the turn that is currently running, instead of
    * aborting that turn and starting a new one (which is what `submit` does to
    * an in-flight turn on the same bucket). The agent receives it at the turn's
@@ -1499,6 +1512,16 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
     [runSubmit],
   )
 
+  // Same call, with the acceptance kept. See the interface for why a caller
+  // that unwinds its own state needs it and `submit` cannot give it.
+  const submitReporting = useCallback(
+    async (userMessage: string, images?: string[]): Promise<boolean> => {
+      const outcome = await runSubmit(userMessage, images)
+      return outcome.serverAccepted
+    },
+    [runSubmit],
+  )
+
   /**
    * Resubmit one ledgered steer as an ordinary turn.
    *
@@ -1900,6 +1923,7 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
       submitting: visibleBucket.submitting,
       error: visibleBucket.error,
       submit,
+      submitReporting,
       steer,
       resendingSteers: visibleResendingSteers,
       abort,
@@ -1918,6 +1942,7 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
       visibleBucket.modelConfig,
       visibleResendingSteers,
       submit,
+      submitReporting,
       steer,
       abort,
       clearLocal,

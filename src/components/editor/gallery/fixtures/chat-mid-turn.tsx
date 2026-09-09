@@ -97,6 +97,10 @@ function buildChat(
     submitting: true,
     error: null,
     submit: async (text, images) => ctx.log("submit", text, images),
+    submitReporting: async (text, images) => {
+      ctx.log("submitReporting", text, images)
+      return true
+    },
     steer: async (text, images) => ctx.log("steer", text, images),
     resendingSteers: [],
     abort: () => ctx.log("abort"),

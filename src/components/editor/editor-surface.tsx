@@ -240,6 +240,11 @@ export function EditorSurface({
       if (!canStart()) return false
       setView("editor")
       setActiveTab("chat")
+      // Deliberately synchronous, and deliberately not awaited. The caller
+      // (`useEditorEditing`) decides whether to keep or clear its buffer from
+      // this boolean, and it cannot hold an edit for the length of a turn.
+      // The guard above is the only refusal knowable at this instant; a later
+      // HTTP refusal surfaces in the chat panel's own failure banner.
       void submit(prompt)
       toast.message("Sent this edit to chat", {
         description: "The assistant will check the source and ask if it needs a decision.",
@@ -861,21 +866,24 @@ export function EditorSurface({
     [chat.submitting, chatSessions.currentSessionId],
   )
 
-  // Hand-offs always start a fresh session. Returns `false` (no session
-  // minted, nothing submitted) when `canStartChatSession` refuses; `true`
-  // once the turn has been submitted.
+  // Hand-offs always start a fresh session. Returns `false` when
+  // `canStartChatSession` refuses (no session minted, nothing submitted) AND
+  // when the server refused the turn (400/500/network). It used to return
+  // `true` in the second case, because `chat.submit` is void: a caller that
+  // unwinds on failure, like `generateFlowOntoCanvas`, then waited forever
+  // for a `turn_complete` that could never arrive. `submitReporting` is the
+  // same call with the server's acceptance kept.
   const submitChatInNewSession = useCallback(
     async (prompt: string): Promise<boolean> => {
       if (!canStartChatSession()) return false
       chatSessions.newSession()
-      await chat.submit(prompt)
-      return true
+      return await chat.submitReporting(prompt)
     },
     // Same rationale as submitChatAutoFork: the reactive inputs are listed
     // directly; depending on the whole `chat` object would rebuild this on
     // every streamed token.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [canStartChatSession, chat.submit, chatSessions.newSession],
+    [canStartChatSession, chat.submitReporting, chatSessions.newSession],
   )
 
   // Keep the escalate-to-chat bridges pointed at the live fns so a
