@@ -174,6 +174,17 @@ export interface ApplyEditWithChatHandoffOptions {
    * caller without a bridge session call it.
    */
   isStale?: () => boolean
+  /**
+   * The bridge session's lifetime, as a signal, captured at dispatch.
+   *
+   * Two jobs, and they are different from `isStale`'s. It is read once here,
+   * alongside `isStale`, so a session that ended without the generation being
+   * the thing the caller tracks still stops the hand-off. And it is HANDED TO
+   * the transport, so the submission itself is cancelled rather than merely
+   * unwatched: a hand-off POST already on its way would otherwise start a chat
+   * turn for a page that is gone, and the agent would edit files for it.
+   */
+  signal?: AbortSignal
 }
 
 export async function applyEditWithChatHandoff(
@@ -183,7 +194,9 @@ export async function applyEditWithChatHandoff(
   // a chat turn, and the server can refuse it after the client-side guard has
   // already said yes. A synchronous `true` here was a promise the transport
   // had not made, and every caller cleared its buffer on it.
-  handOff: ((prompt: string) => Promise<boolean>) | undefined,
+  handOff:
+    | ((prompt: string, options?: { signal?: AbortSignal }) => Promise<boolean>)
+    | undefined,
   options: ApplyEditWithChatHandoffOptions = {},
 ): Promise<{ result: EditResult; handoff: ChatHandoffOutcome }> {
   const initial = await adapter.applyEdit(edit)
@@ -191,8 +204,11 @@ export async function applyEditWithChatHandoff(
     return { result: initial, handoff: { attempted: false, started: false } }
   }
   // The page this edit was made on is no longer the page on screen. Report the
-  // refusal to a caller that will itself drop it, and start nothing.
-  if (options.isStale?.()) {
+  // refusal to a caller that will itself drop it, and start nothing. Both facts
+  // are read HERE, after the apply: read before it, either would still say
+  // "current" for a session that ends while the apply is out, which is the
+  // whole window this closes.
+  if (options.isStale?.() || options.signal?.aborted === true) {
     return { result: initial, handoff: { attempted: false, started: false, originalReason: initial.reason } }
   }
   // A policy refusal is not something the agent can read its way out of, and
@@ -205,6 +221,12 @@ export async function applyEditWithChatHandoff(
   if (!described || !handOff) {
     return { result: initial, handoff: { attempted: false, started: false, originalReason: initial.reason } }
   }
-  const started = await handOff(buildStructuralEditHandoffPrompt(described))
+  // The signal goes WITH the submission, not just around the wait for it. A
+  // session that ends while the POST is in flight must cancel the turn, not
+  // leave it to start and edit files for the page that has gone.
+  const started = await handOff(
+    buildStructuralEditHandoffPrompt(described),
+    options.signal ? { signal: options.signal } : undefined,
+  )
   return { result: initial, handoff: { attempted: true, started, originalReason: initial.reason } }
 }

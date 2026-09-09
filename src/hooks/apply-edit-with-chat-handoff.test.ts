@@ -130,6 +130,48 @@ describe("applyEditWithChatHandoff", () => {
     expect(r.handoff).toMatchObject({ attempted: true, started: true })
   })
 
+  it("starts no chat when the session's signal aborted while the apply was out", async () => {
+    // The same window `isStale` closes, seen through the other fact the caller
+    // holds. A caller that tracks the session as a signal rather than as a
+    // generation gets the same protection.
+    const controller = new AbortController()
+    const adapter = {
+      applyEdit: async () => {
+        controller.abort()
+        return refused
+      },
+    }
+    const handOff = vi.fn(async () => true)
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, {
+      signal: controller.signal,
+    })
+    expect(handOff).not.toHaveBeenCalled()
+    expect(r.handoff).toMatchObject({ attempted: false, started: false })
+  })
+
+  it("hands the session's signal to the transport, so a reload cancels the submission", async () => {
+    // Not only "stop waiting for it": the POST that starts the turn must be
+    // abortable, or a session that ends while it is in flight still leaves a
+    // turn on its way to a page that has gone.
+    const controller = new AbortController()
+    const adapter = adapterReturning(refused)
+    const handOff = vi.fn(async (_prompt: string, _options?: { signal?: AbortSignal }) => true)
+    await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, {
+      signal: controller.signal,
+    })
+    expect(handOff).toHaveBeenCalledTimes(1)
+    expect(handOff.mock.calls[0][1]?.signal).toBe(controller.signal)
+  })
+
+  it("asks the transport for no options at all when there is no session signal", async () => {
+    // The pure callers pass none, and a transport that reads `options.signal`
+    // must see undefined rather than an object claiming a signal it has not got.
+    const adapter = adapterReturning(refused)
+    const handOff = vi.fn(async (_prompt: string, _options?: { signal?: AbortSignal }) => true)
+    await applyEditWithChatHandoff(deleteEdit(), adapter, handOff)
+    expect(handOff.mock.calls[0][1]).toBeUndefined()
+  })
+
   it("never asks about the session for an edit that applied", async () => {
     // Nothing to hand off, so nothing to guard. Asking would suggest a
     // successful write could be undone by a reload, which it cannot.

@@ -977,8 +977,13 @@ export function useEditorEditing({
       kindLabel: string,
     ): void => {
       const generation = adapterGenerationRef.current
+      // Captured with the generation, not read at hand-off time. Read then, it
+      // would be the NEXT session's live controller, and this edit's hand-off
+      // would run on past the reload it should have been cancelled by.
+      const signal = adapterAbortRef.current?.signal
       void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current, {
         isStale: () => isStaleGeneration(generation, adapterGenerationRef.current),
+        ...(signal ? { signal } : {}),
       }).then(reportEditOutcome(kindLabel))
     },
     [reportEditOutcome],
@@ -3909,6 +3914,10 @@ export function useEditorEditing({
     )
     if (!current) return
     const dispatchedValue = current.value
+    // This session's lifetime, as a signal, captured with everything else this
+    // dispatch decides now. It goes to the chat hand-off below so a turn this
+    // dispatch starts is CANCELLED by a reload rather than merely unwatched.
+    const sessionSignal = adapterAbortRef.current?.signal
     branchPropInFlight.current.add(key)
     inFlightOverrideIdsRef.current.add(current.id)
     // The prop request is a plain synchronous POST — when the deterministic
@@ -3931,6 +3940,14 @@ export function useEditorEditing({
         // instead of leaving it stuck in the buffer, and drop the entry.
         // Mirrors the inline text path at ~line 2311.
         if (result.needsChat && escalateToChatRef.current) {
+          // The refusal can arrive up to ~90 seconds after the request left
+          // (the server runs its AI mini-turn inside the POST), and the page
+          // can be replaced inside that. Starting a chat turn now would tell
+          // the agent to make an edit happen on an element of a document that
+          // is gone, and the agent WOULD edit files for it. Say nothing: the
+          // session end has already told the designer their pending edits went
+          // with the page.
+          if (isStaleGeneration(generation, adapterGenerationRef.current)) return
           const editTarget = current.target.editTarget
           const editTargetLocation = editTarget
             ? `${editTarget.file}:${editTarget.line}`
@@ -3952,13 +3969,20 @@ export function useEditorEditing({
               editTargetLocation,
               selector: current.target.selector,
             }),
+            // The submission races the session: a reload cancels it rather
+            // than leaving a turn on its way to a page nobody is looking at.
+            sessionSignal ? { signal: sessionSignal } : undefined,
           )
           const aftermath = afterEscalation(
             accepted,
             `The "${current.propName}" edit`,
           )
           if (aftermath.buffer === "keep") {
-            setSaveStatus(aftermath.status)
+            // Silent if the session ended while the submission was out: the
+            // status bar is describing a different page now.
+            if (!isStaleGeneration(generation, adapterGenerationRef.current)) {
+              setSaveStatus(aftermath.status)
+            }
             return
           }
           setPendingPropEdits((prev) => prev.filter((e) => e.id !== current.id))

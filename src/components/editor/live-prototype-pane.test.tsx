@@ -123,18 +123,25 @@ interface HarnessProps {
   manifestSource?: ComponentManifestSource
   /** Capture the hook's return so a test can drive it (e.g. setEditorActive). */
   onEditing?: (editing: ReturnType<typeof useEditorEditing>) => void
+  /** The chat transport a refused edit is handed to. */
+  escalateToChat?: (
+    prompt: string,
+    options?: { signal?: AbortSignal },
+  ) => Promise<boolean>
 }
 
 function Harness({
   prototypeUrl = PROTOTYPE_URL,
   manifestSource,
   onEditing,
+  escalateToChat,
 }: HarnessProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const editing = useEditorEditing({
     iframeRef,
     prototypeUrl,
     manifestSource,
+    escalateToChat,
   })
   onEditing?.(editing)
   return (
@@ -1108,6 +1115,25 @@ const HELD_PROMPT = {
 
 const RESET_STATUS = /page connection was reset/i
 
+/** One inspected element, enough for the prop lane to buffer an edit against. */
+const INSPECTED_BUTTON = {
+  tagName: "button",
+  id: "",
+  classes: [],
+  rect: ZERO_RECT,
+  styles: [],
+  tokens: [],
+  boxModel: ZERO_BOX_MODEL,
+  selector: '[data-testid="submit"]',
+  componentTree: [{ name: "UiButton", elementSelector: '[data-testid="submit"]' }],
+  editTarget: {
+    file: "src/pages/Home.vue",
+    line: 8,
+    column: 2,
+    fileHash: "abc123",
+  },
+}
+
 describe("bridge session boundary", () => {
   /** Render, connect as `documentId`, and park one edit in the dialog. */
   async function connectHoldingAnEdit(documentId: string) {
@@ -1169,6 +1195,134 @@ describe("bridge session boundary", () => {
       expect(current().disambiguationPrompt).toBeNull()
     })
     expect(current().saveStatus ?? "").toMatch(RESET_STATUS)
+  })
+
+  it("starts no chat for a prop the departed page refused", async () => {
+    // The prop lane's refusal can arrive up to ~90 seconds after the request
+    // left, because the server runs its AI mini-turn inside the POST. A page
+    // replaced in that window makes the hand-off a turn told to change an
+    // element of a document that is gone, and the agent WOULD edit files for it.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let refuse: (() => void) | undefined
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Promise<Response>((resolve) => {
+              refuse = () =>
+                resolve(
+                  new Response(
+                    JSON.stringify({ reason: "bound binding", needsChat: true }),
+                    { status: 422, headers: { "content-type": "application/json" } },
+                  ),
+                )
+            }),
+        ),
+      )
+      const escalateToChat = vi.fn(async () => true)
+      let editing: ReturnType<typeof useEditorEditing> | null = null
+      render(
+        <Harness escalateToChat={escalateToChat} onEditing={(e) => { editing = e }} />,
+      )
+      await act(async () => {
+        emitFromBridge({
+          type: "BRIDGE_READY",
+          payload: { version: "2026-09-09a", documentId: "doc-a" },
+        })
+      })
+      await act(async () => {
+        emitFromBridge({ type: "ELEMENT_INSPECTED", payload: INSPECTED_BUTTON })
+      })
+      await waitFor(() => {
+        expect(useEditorStore.getState().editorSelection).not.toBeNull()
+      })
+
+      await act(async () => {
+        editing!.handlePropEdit("label", "Save changes")
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      await waitFor(() => {
+        expect(refuse).toBeDefined()
+      })
+
+      // The page is replaced while the prop write is still out.
+      const iframe = screen.getByTitle("Prototype") as HTMLIFrameElement
+      await act(async () => {
+        iframe.dispatchEvent(new Event("load"))
+      })
+      await act(async () => {
+        emitFromBridge({
+          type: "BRIDGE_READY",
+          payload: { version: "2026-09-09a", documentId: "doc-b" },
+        })
+      })
+
+      // ... and only then does the refusal come back.
+      await act(async () => {
+        refuse!()
+        await vi.advanceTimersByTimeAsync(100)
+      })
+
+      expect(escalateToChat).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
+  })
+
+  it("still hands a refused prop to chat while the page is the same one", async () => {
+    // The control for the test above: the guard must not be "never hand off".
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({ reason: "bound binding", needsChat: true }),
+              { status: 422, headers: { "content-type": "application/json" } },
+            ),
+        ),
+      )
+      // The options parameter is declared so the assertion below can read the
+      // signal off `mock.calls`: a one-argument mock types them without it.
+      const escalateToChat = vi.fn(
+        async (_prompt: string, _options?: { signal?: AbortSignal }) => true,
+      )
+      let editing: ReturnType<typeof useEditorEditing> | null = null
+      render(
+        <Harness escalateToChat={escalateToChat} onEditing={(e) => { editing = e }} />,
+      )
+      await act(async () => {
+        emitFromBridge({
+          type: "BRIDGE_READY",
+          payload: { version: "2026-09-09a", documentId: "doc-a" },
+        })
+      })
+      await act(async () => {
+        emitFromBridge({ type: "ELEMENT_INSPECTED", payload: INSPECTED_BUTTON })
+      })
+      await waitFor(() => {
+        expect(useEditorStore.getState().editorSelection).not.toBeNull()
+      })
+      await act(async () => {
+        editing!.handlePropEdit("label", "Save changes")
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+
+      expect(escalateToChat).toHaveBeenCalledTimes(1)
+      // And the session's own signal went with the submission, so a reload
+      // during it cancels the turn instead of leaving it on its way.
+      expect(escalateToChat.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal)
+    } finally {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
   })
 
   it("ends nothing on the first handshake of an attachment", async () => {
