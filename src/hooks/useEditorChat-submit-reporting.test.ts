@@ -6,7 +6,8 @@ vi.mock("@/lib/editor-fetch", () => ({
   editorFetch: (...args: unknown[]) => fetchMock(...args),
 }))
 
-import { useEditorChat } from "./useEditorChat"
+import { HANDOFF_NOT_SENT_REASON, useEditorChat } from "./useEditorChat"
+import type { ChatMessage } from "./useEditorChat"
 
 /**
  * `submit` is void, so every caller had to assume the turn started.
@@ -265,6 +266,95 @@ describe("useEditorChat — submitReporting", () => {
       await settleMicrotasks()
     })
     expect(lastFetchInit().signal.aborted).toBe(false)
+  })
+
+  /**
+   * A fetch that never answers and rejects the way a real aborted `fetch`
+   * does. The SSE-shaped mocks above resolve immediately and ignore the
+   * signal, so none of them can reach the submit's AbortError path.
+   */
+  function abortingFetch(): (url: string, init: { signal: AbortSignal }) => Promise<never> {
+    return (_url, init) =>
+      new Promise<never>((_resolve, reject) => {
+        const fail = (): void => {
+          reject(new DOMException("The operation was aborted.", "AbortError"))
+        }
+        if (init.signal.aborted) fail()
+        else init.signal.addEventListener("abort", fail, { once: true })
+      })
+  }
+
+  type ErrorMessage = Extract<ChatMessage, { kind: "error" }>
+  const errors = (msgs: readonly ChatMessage[]): ErrorMessage[] =>
+    msgs.filter((m): m is ErrorMessage => m.kind === "error")
+  const users = (msgs: readonly ChatMessage[]): ChatMessage[] =>
+    msgs.filter((m) => m.kind === "user")
+
+  /**
+   * The bubble is drawn BEFORE the fetch. A hand-off that runs out of time
+   * aborts the POST, and without a marker the new session is left showing a
+   * message that looks sent and never was; retrying the hand-off then stacks
+   * a second one beside it.
+   */
+  it("marks the optimistic bubble when the caller's deadline cancelled the turn", async () => {
+    fetchMock.mockImplementation(abortingFetch())
+    const { result } = renderHook(() => useEditorChat(baseOpts))
+    const controller = new AbortController()
+    let accepted: boolean | undefined
+    await act(async () => {
+      const reported = result.current.submitReporting("do the thing", undefined, {
+        signal: controller.signal,
+      })
+      await settleMicrotasks()
+      controller.abort()
+      accepted = await reported
+    })
+    expect(accepted).toBe(false)
+    // The bubble stays: it carries the text the designer would have sent, and
+    // this is the same shape a refused POST leaves behind.
+    expect(users(result.current.messages)).toHaveLength(1)
+    expect(errors(result.current.messages).map((e) => e.reason)).toEqual([
+      HANDOFF_NOT_SENT_REASON,
+    ])
+  })
+
+  /**
+   * Stop is a deliberate act on a turn the user watched start, and it has
+   * never been surfaced as a failure. Only the CALLER's signal marks.
+   */
+  it("says nothing when the user's own Stop cancelled the turn", async () => {
+    fetchMock.mockImplementation(abortingFetch())
+    const { result } = renderHook(() => useEditorChat(baseOpts))
+    await act(async () => {
+      void result.current.submitReporting("do the thing")
+      await settleMicrotasks()
+      result.current.abort()
+      await settleMicrotasks()
+    })
+    expect(errors(result.current.messages)).toHaveLength(0)
+  })
+
+  it("marks the bubble once per attempt, so a retry does not accumulate silent ones", async () => {
+    fetchMock.mockImplementation(abortingFetch())
+    const { result } = renderHook(() => useEditorChat(baseOpts))
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const controller = new AbortController()
+      await act(async () => {
+        const reported = result.current.submitReporting("do the thing", undefined, {
+          signal: controller.signal,
+        })
+        await settleMicrotasks()
+        controller.abort()
+        await reported
+      })
+    }
+    expect(users(result.current.messages)).toHaveLength(2)
+    expect(errors(result.current.messages)).toHaveLength(2)
+  })
+
+  it("uses no em dash and no first person in the marker", () => {
+    expect(HANDOFF_NOT_SENT_REASON).not.toMatch(/\u2014/)
+    expect(HANDOFF_NOT_SENT_REASON).not.toMatch(/\b(me|my)\b/i)
   })
 
   it("leaves submit's void contract alone", async () => {

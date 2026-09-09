@@ -456,6 +456,19 @@ const EMPTY_BUCKET: SessionBucket = {
  */
 const RESUBMIT_409_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000]
 
+/**
+ * What the transcript says about an optimistic bubble whose turn was
+ * cancelled by the CALLER's deadline rather than by the Stop button.
+ *
+ * The edit hand-off gives chat 30 seconds to accept; past that it aborts the
+ * POST. The bubble was already drawn, so without this the new session shows a
+ * message that looks sent and never was, and every retry adds another.
+ *
+ * Exported so the hand-off's tests assert the string the hook actually
+ * writes rather than a copy of it.
+ */
+export const HANDOFF_NOT_SENT_REASON = "Not sent: chat did not answer in time."
+
 /** Options threaded through `runSubmit` by internal callers. */
 interface RunSubmitOptions {
   /**
@@ -997,6 +1010,30 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
       flushDeltas()
       if ((err as Error).name === "AbortError") {
         // User cancelled — don't surface as an error.
+        //
+        // Unless the abort came from the CALLER's signal rather than the Stop
+        // button. That is the edit hand-off's deadline, and the difference
+        // matters to the transcript: Stop is a deliberate act on a turn the
+        // user watched start, while a deadline leaves the optimistic user
+        // bubble sitting in a new session looking sent. Retrying the hand-off
+        // then stacks another. Mark it with the same failure shape a refused
+        // POST uses, so the bubble that was never sent says so.
+        //
+        // Not once the server accepted: the turn is persisted server-side
+        // from that point and "Not sent" would be false.
+        if (externalSignal?.aborted && !serverAccepted) {
+          updateBucket(turnId, (b) => ({
+            ...b,
+            messages: [
+              ...b.messages,
+              {
+                kind: "error",
+                id: makeLocalId(),
+                reason: HANDOFF_NOT_SENT_REASON,
+              },
+            ],
+          }))
+        }
       } else if (serverAccepted || !options?.suppressRejectionBanner) {
         // Once the server accepted the turn this is an ordinary mid-stream
         // failure and surfaces normally even on a resubmit; a PRE-acceptance
