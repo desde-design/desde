@@ -1,6 +1,13 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react"
 import type { RefObject } from "react"
 import type {
   ComponentManifestSource,
@@ -119,10 +126,7 @@ import {
   bridgeDraftIdOf,
   decideAfterVerify,
   DEFERRED_PARK_STATUS,
-  dequeueModal,
   describeRowScopedEdit,
-  dropModalRequestsForDraft,
-  enqueueModal,
   NOT_CONNECTED_STATUS,
   errorMessage,
   handOffFailureStatus,
@@ -133,15 +137,12 @@ import {
   parkedReason,
   promptCollision,
   PROMPT_BUSY_STATUS,
-  retireForeignEntries,
-  retiresBufferedEntries,
   iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
   resumePlan,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
   SAVE_PAGE_CHANGED_STATUS,
-  sessionEndPlan,
   settleHandOff,
   shouldEndSessionOnHandshake,
   structuralRouteFor,
@@ -149,7 +150,6 @@ import {
   thisRowTemplateLocation,
   verifyKeyFor,
   type BridgeSessionEndReason,
-  type ModalKind,
   type ModalRequest,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
@@ -614,9 +614,7 @@ export function useEditorEditing({
    * | `verifySeqByKeyRef` | `session.nextVerifySeq` / `session.latestVerifySeq` |
    *
    * The buffers, the dialog rows, the open question and the held drafts are
-   * still this hook's. They move onto this same object next, and until they do
-   * the session holds none of them, so nothing here reads the state half of
-   * what `session.end` returns.
+   * on it too, read through {@link sessionState} below.
    */
   const session = useMemo(
     () =>
@@ -632,6 +630,32 @@ export function useEditorEditing({
       }),
     [],
   )
+
+  /**
+   * What the session is holding, as React sees it.
+   *
+   * `useSyncExternalStore` rather than four `useState`s plus four "always
+   * latest" mirror refs. The mirrors existed because the async lanes have to
+   * read the CURRENT buffer from inside a `setTimeout`, and a state value
+   * captured at render is half a second old by then. Two authorities for one
+   * array is how a retirement and a coalesce could disagree; there is one now,
+   * and React reads it rather than owning it.
+   *
+   * Only the three fields something RENDERS from are named below. The prop
+   * buffer has no render-time reader at all: every lane that touches it runs
+   * inside a callback, and a callback reads `session.getSnapshot().propEdits`
+   * so it sees the buffer as it is at that moment rather than as it was when
+   * the callback was built.
+   */
+  const sessionState = useSyncExternalStore(
+    session.subscribe,
+    session.getSnapshot,
+    session.getSnapshot,
+  )
+  /** The captured DOM mutations, for Save and for the flush's own filters. */
+  const mutations = sessionState.mutations
+  /** The open scope question, rendered by `IterationScopeDialog`. */
+  const iterationScopePrompt = sessionState.scopePrompt
 
   /**
    * True only once React has begun unmounting this hook.
@@ -833,7 +857,9 @@ export function useEditorEditing({
           // `bridgeDocumentId` is `string | null` and `start` takes the same,
           // so there is no `?? ""` here: an empty string would be ADOPTED as a
           // real document and the next handshake would read as a change.
-          const { resumed } = session.start(documentToken)
+          const { resumed } = session.start(documentToken, (mutation) =>
+            mutationResumeEligibleRef.current(mutation),
+          )
           setStatus({ kind: "ready" })
           // THE SAME DOCUMENT, ANSWERING AGAIN, which is what a non-null
           // `resumed` says. It is either the page's own second handshake or an
@@ -843,12 +869,11 @@ export function useEditorEditing({
           // the buffer with nothing left to write them. Re-arm them here, which
           // is what the designer's next keystroke would have done anyway.
           //
-          // The two lists ON `resumed` are the SESSION's own buffers, and those
-          // stay empty until the state half of this migration moves the hook's
-          // buffers onto it. So the answer is used as the question it is, and
-          // the re-arm below still reads this hook's buffers and this hook's
-          // in-flight markers, which is what keeps an entry that is being
-          // written right now from getting a second timer.
+          // The lists ON `resumed` are the session's own answer, filtered by
+          // the eligibility predicate above. Nothing reads them yet: the
+          // re-arm below goes through the two lane schedulers, which is where
+          // the in-flight markers that keep an entry being written right now
+          // from getting a second timer still live.
           if (resumed) {
             resumeBufferedDispatchesRef.current?.()
           }
@@ -1845,13 +1870,13 @@ export function useEditorEditing({
     applyEditThenReport(edit, adapter, "Detach")
   }, [applyEditThenReport])
 
-  // Prop edits accumulate here. The bridge gets an APPLY_PROP_OVERRIDE /
-  // APPLY_ATTR_OVERRIDE for each so the iframe shows the change live; a
-  // debounced per-(selector,propName) dispatch then writes each to the
-  // working tree (see `dispatchBranchPropEdit` below), mirroring the
-  // text path — the buffer is the always-latest source the dispatch
-  // reads.
-  const [pendingPropEdits, setPendingPropEdits] = useState<PropEdit[]>([])
+  // Prop edits accumulate on the SESSION (`session.getSnapshot().propEdits`).
+  // The bridge gets an APPLY_PROP_OVERRIDE / APPLY_ATTR_OVERRIDE for each so
+  // the iframe shows the change live; a debounced per-(selector,propName)
+  // dispatch then writes each to the working tree (see
+  // `dispatchBranchPropEdit` below), mirroring the text path. The buffer is
+  // the always-latest source the dispatch reads, which is why it is the
+  // session's one authority and not a state plus a mirror of it.
   // Tracks which buffered edits target a fallthrough attribute rather
   // than a typed prop, so revert can re-issue the right override.
   // The PropEdit.target only carries SelectionTarget (no live props
@@ -1870,10 +1895,6 @@ export function useEditorEditing({
   const pendingPropRenderSitesRef = useRef<Map<string, RenderSite>>(new Map())
 
   // ── Branch-mode prop dispatch (mirrors the dom-text path) ───────────────
-  // Always-latest mirror of `pendingPropEdits` so the debounced dispatch
-  // reads the freshest buffered value from inside a setTimeout callback.
-  const pendingPropEditsRef = useRef<PropEdit[]>([])
-  pendingPropEditsRef.current = pendingPropEdits
   // Per-(selector,propName) debounce timers + in-flight set, same shape as the
   // dom-text dispatch. Key built by `propEditKey`.
   const branchPropDispatchTimers = useRef<
@@ -1955,44 +1976,16 @@ export function useEditorEditing({
   // carries enough state to (a) route to today's path on "all-rows" without
   // re-collecting inputs, and (b) build an iteration-data intent on
   // "this-row." Adding a new edit kind = adding a variant.
-  const [iterationScopePrompt, setIterationScopePrompt] =
-    useState<PendingIterationEdit | null>(null)
-  /**
-   * The open prompt as a ref, for the late completions that have to know
-   * whether the dialog currently open holds the bridge draft they are about to
-   * dispose of.
-   *
-   * `releaseBridgeDraftUnlessShared` reads that fact through
-   * `setIterationScopePrompt`'s updater, which works only while React
-   * evaluates the updater eagerly, and that is an optimization rather than a
-   * guarantee. A PARK also sets state, and setting state inside another
-   * setState updater is not safe at all, so the park path reads the ref.
-   */
-  const iterationScopePromptRef = useRef<PendingIterationEdit | null>(null)
-  iterationScopePromptRef.current = iterationScopePrompt
-  /**
-   * Which dialog is on screen, if either. THE modal owner.
-   *
-   * The Editor raises two dialogs about edits — the scope prompt and the
-   * deterministic mutation dialog — from four independent places, and until
-   * round 10 they could stack in either order: the mutation dialog opens itself
-   * the moment `pendingDisambiguations` is non-empty, and the scope prompt
-   * opens itself the moment `iterationScopePrompt` is set, and neither state
-   * knew about the other. Every raise now goes through {@link requestModal},
-   * which reads this, and every close through {@link releaseModal}, which
-   * clears it and opens whatever is next.
-   */
-  const modalOwnerRef = useRef<ModalKind | null>(null)
-  /**
-   * The dialogs owed to the designer while one is already open, oldest first.
-   *
-   * This is the round-9 deferred-park queue, widened: a park was only ever one
-   * of the two things that can be owed, and holding only parks meant the OTHER
-   * dialog had nowhere to wait and opened on top instead. A queued request is
-   * unsaved work with nothing on screen to mention it, so `hasUndispatchedWork`
-   * and the Save gate both count it.
-   */
-  const modalQueueRef = useRef<ModalRequest[]>([])
+  // The open one is `sessionState.scopePrompt`, read above as
+  // `iterationScopePrompt`. It is the session's because the modal OWNER and
+  // the queue behind it are, and until round 10 those three could disagree:
+  // the mutation dialog opened itself the moment its rows were non-empty, the
+  // scope prompt opened itself the moment its state was set, and neither knew
+  // about the other. Every raise now goes through `session.requestModal` and
+  // every close through `session.releaseModal`, which is one object deciding
+  // both. A queued request is unsaved work with nothing on screen to mention
+  // it, so `hasUndispatchedWork` and the Save gate both count
+  // `session.queuedCount`.
   /**
    * How to end the bridge session, for the adapter effect and its iframe `load`
    * handler to call.
@@ -2024,6 +2017,20 @@ export function useEditorEditing({
    * defined below it.
    */
   const resumeBufferedDispatchesRef = useRef<(() => void) | null>(null)
+  /**
+   * Which buffered captures a re-arm may still write, for `session.start`.
+   *
+   * `EditSession.resume` takes this predicate because the answer is the
+   * capture scheduler's, not the session's: a mutation that would not have
+   * armed a timer when it was captured (a `class` capture with no source
+   * location, an identity parked for the AI queue, one being written right
+   * now) must not get one on a re-attach either. Passed as a ref for the same
+   * reason as `resumeBufferedDispatchesRef`: the adapter effect is defined
+   * above the callback that decides it.
+   */
+  const mutationResumeEligibleRef = useRef<(mutation: Mutation) => boolean>(
+    () => true,
+  )
   // Per-edit-kind remembered scope. Cleared on hook unmount; not persisted
   // across reloads (v1 — the dialog's "Remember for this session" checkbox).
   const iterationScopeMemoryRef = useRef<
@@ -2074,7 +2081,7 @@ export function useEditorEditing({
       if (renderSite) {
         pendingPropRenderSitesRef.current.set(edit.id, renderSite)
       }
-      setPendingPropEdits((prev) => {
+      session.updatePropEdits((prev) => {
         // Last-write-wins per (selector, propName). Multiple debounced
         // edits on the same prop collapse to one buffered entry.
         const filtered = prev.filter(
@@ -2428,32 +2435,21 @@ export function useEditorEditing({
   // Three facts about one draft id, kept together because every rule below
   // reads more than one of them.
 
-  /**
-   * The bridge's own `PendingMutation` for a draft we routed to the iteration
-   * dialog, keyed by draft id.
-   *
-   * Routing to that dialog takes the pending OUT of `pendingDisambiguations`
-   * before it is ever added, which is right while the iteration lane can still
-   * land the edit. When it cannot — chat refused the hand-off, the proposal
-   * failed, the write failed — the honest fallback is the deterministic
-   * question that path replaced ("this instance" / "all instances"), and that
-   * dialog needs the real payload. Kept rather than reconstructed: the
-   * candidate list is the bridge's answer about the live DOM, and a
-   * reconstruction would have to invent it.
-   */
-  const bridgeDraftsByPendingIdRef = useRef<Map<string, PendingMutation>>(new Map())
-
-  /**
-   * The NEWEST pending edit per draft id.
-   *
-   * An in-page typing session rebuilds the pending object on every keystroke
-   * round trip, and each one starts an async verify plus (on a no-loop answer)
-   * an awaited hand-off. While an older one is awaiting, a newer one can take
-   * over the same draft. The older completion must not release a draft the
-   * newer one is using, and object identity is the only thing that separates
-   * them: they share the draft id by construction.
-   */
-  const latestPendingByDraftRef = useRef<Map<string, PendingIterationEdit>>(new Map())
+  // Both of them are the session's now: `session.holdDraft` / `getDraft` /
+  // `releaseDraft` for the bridge's own `PendingMutation` per draft id, and
+  // `session.claimPending` / `latestPendingFor` for the newest pending edit
+  // per draft id.
+  //
+  // The first is kept rather than reconstructed because routing a draft to the
+  // iteration dialog takes it OUT of the deterministic dialog's rows before it
+  // is ever added, and when the iteration lane cannot land the edit the honest
+  // fallback is the question that path replaced. That dialog needs the real
+  // candidate list, which is the bridge's answer about the live DOM.
+  //
+  // The second exists because an in-page typing session rebuilds the pending
+  // object on every keystroke round trip, and a newer one can take over the
+  // same draft while an older one is still awaiting. Object identity is the
+  // only thing that separates them: they share the draft id by construction.
 
   // A prompt that arrived from the BRIDGE (in-page typing) means the bridge
   // is still holding a draft mutation keyed by `bridgePendingId`. Every exit
@@ -2461,20 +2457,20 @@ export function useEditorEditing({
   // it, or the orphaned draft blocks Save behind `handleSaveAll`'s gate.
   // Harmless for prompts that never came from the bridge:
   // `resolveDisambiguation` no-ops on an unknown id.
-  const releaseBridgeDraft = useCallback((pending: PendingIterationEdit | null) => {
-    if (!pending) return
-    const draftId = bridgeDraftIdOf(pending)
-    if (!draftId) return
-    adapterRef.current?.resolveMutationDisambiguation(draftId, "cancel")
-    bridgeDraftsByPendingIdRef.current.delete(draftId)
-    latestPendingByDraftRef.current.delete(draftId)
-    // A dialog still waiting to ask about this draft has nothing left to ask
-    // about: the bridge has been told to drop it, so answering the question
-    // would resolve an id the bridge no longer knows. The round-9 flush made
-    // the same check by looking the payload up again at park time; the queue
-    // holds the payload itself now, so the release is what has to say so.
-    modalQueueRef.current = dropModalRequestsForDraft(modalQueueRef.current, draftId)
-  }, [])
+  const releaseBridgeDraft = useCallback(
+    (pending: PendingIterationEdit | null) => {
+      if (!pending) return
+      const draftId = bridgeDraftIdOf(pending)
+      if (!draftId) return
+      // The bridge is told here, because the adapter is this hook's. The
+      // bookkeeping is the session's, and `releaseDraft` also drops any queued
+      // question about this draft: the bridge has been told to forget it, so
+      // answering that question would resolve an id it no longer knows.
+      adapterRef.current?.resolveMutationDisambiguation(draftId, "cancel")
+      session.releaseDraft(draftId)
+    },
+    [session],
+  )
 
   /**
    * Release this pending's bridge draft, unless something LIVE still needs it.
@@ -2488,105 +2484,39 @@ export function useEditorEditing({
   const releaseBridgeDraftUnlessShared = useCallback(
     (pending: PendingIterationEdit) => {
       const draftId = bridgeDraftIdOf(pending)
-      if (draftId && latestPendingByDraftRef.current.get(draftId) !== pending) return
-      setIterationScopePrompt((current) => {
-        if (!current || !sameBridgeDraft(current, pending)) releaseBridgeDraft(pending)
-        return current
-      })
+      if (draftId && session.latestPendingFor(draftId) !== pending) return
+      // Read, not a `setState` updater. The open prompt used to be read
+      // through one because that was the only always-current view of it, and
+      // the comment on that ref said outright that releasing a bridge draft
+      // from inside an updater is a side effect in a place React may run
+      // twice. The snapshot is current by construction, so the read is plain.
+      const open = session.getSnapshot().scopePrompt
+      if (!open || !sameBridgeDraft(open, pending)) releaseBridgeDraft(pending)
     },
-    [releaseBridgeDraft],
-  )
-
-  /**
-   * Show the deterministic disambiguation dialog for a bridge draft, and say
-   * why in the status bar when there is a why.
-   *
-   * The ONE write into `pendingDisambiguations` in the whole hook. Nothing
-   * calls it directly: the bridge's delivery route and every failure exit go
-   * through {@link requestModal}, which decides whether any dialog may open
-   * right now, and this runs from {@link openModal} once that decision says so.
-   *
-   * The dialog owns the draft from here: its confirm and its cancel both
-   * resolve it with the bridge, so nothing else may park or release it. Both
-   * maps are cleared for that reason.
-   *
-   * `reason` is absent for the bridge's ordinary route, which is not a park:
-   * nothing failed, so there is nothing to explain and the status bar is left
-   * as it was.
-   */
-  const openDisambiguationDialog = useCallback(
-    (held: PendingMutation, reason?: string) => {
-      bridgeDraftsByPendingIdRef.current.delete(held.pendingId)
-      latestPendingByDraftRef.current.delete(held.pendingId)
-      setPendingDisambiguations((prev) =>
-        prev.some((existing) => existing.pendingId === held.pendingId) ? prev : [...prev, held],
-      )
-      if (reason !== undefined) setSaveStatus(reason)
-    },
-    [],
-  )
-
-  /**
-   * Put one of the two dialogs on screen and record that it owns the modal.
-   *
-   * The only place either dialog's open state is written outside a keystroke
-   * replacing the question it is already asking. Both halves of the ownership
-   * (the state the dialog renders from, and the owner marker the next raise
-   * reads) are set together here, so they cannot come apart.
-   */
-  const openModal = useCallback(
-    (request: ModalRequest) => {
-      if (request.kind === "scope") {
-        modalOwnerRef.current = "scope"
-        // The ref before the state, and both here: a second completion in the
-        // same tick reads the ref, and React has not re-rendered yet.
-        iterationScopePromptRef.current = request.pending
-        setIterationScopePrompt(request.pending)
-        return
-      }
-      modalOwnerRef.current = "disambiguation"
-      openDisambiguationDialog(request.mutation, request.reason)
-    },
-    [openDisambiguationDialog],
+    [releaseBridgeDraft, session],
   )
 
   /**
    * Ask for a dialog. THE way either one is raised.
    *
-   * Returns true when it opened now, false when it is waiting behind the dialog
-   * already on screen. A false answer is not a failure: the request is held
-   * with its payload and opens when the current question is answered. The
+   * Returns true when it opened now, false when it is waiting behind the
+   * dialog already on screen. A false answer is not a failure: the request is
+   * held with its payload and opens when the current question is answered. The
    * caller's only job then is to say so in the status bar, because a queued
    * request has no dialog of its own to be seen in yet.
+   *
+   * A thin forward to the session, kept as a named callback because a dozen
+   * call sites and three dependency arrays name it. The decision itself, and
+   * the opening that follows a true answer, are `EditSession.requestModal`:
+   * putting a dialog on screen writes the owner, the queue and the state the
+   * dialog renders from together, so they cannot come apart. The park status
+   * line a disambiguation request carries is written by the session's
+   * `onModalOpened`, which is the hook's one status channel.
    */
   const requestModal = useCallback(
-    (request: ModalRequest): boolean => {
-      const decision = enqueueModal(modalQueueRef.current, request, modalOwnerRef.current)
-      if ("open" in decision) {
-        openModal(decision.open)
-        return true
-      }
-      modalQueueRef.current = decision.deferred
-      return false
-    },
-    [openModal],
+    (request: ModalRequest): boolean => session.requestModal(request),
+    [session],
   )
-
-  /**
-   * The open dialog has closed. Give the modal up and ask the next question.
-   *
-   * Every close calls this: the scope prompt's single close path, and the
-   * mutation dialog's confirm and cancel once the last row leaves it. A close
-   * that forgot it would strand every waiting request with no dialog anywhere
-   * that mentions them, which is what the round-9 flush existed to prevent for
-   * parks alone.
-   */
-  const releaseModal = useCallback(() => {
-    modalOwnerRef.current = null
-    const { next, queue } = dequeueModal(modalQueueRef.current)
-    modalQueueRef.current = queue
-    if (next) openModal(next)
-  }, [openModal])
 
   /**
    * The shell is refusing a draft the bridge is holding. Ask the deterministic
@@ -2631,12 +2561,12 @@ export function useEditorEditing({
     (pending: PendingIterationEdit, reason: string): boolean => {
       const draftId = bridgeDraftIdOf(pending)
       if (!draftId) return false
-      const held = bridgeDraftsByPendingIdRef.current.get(draftId)
+      const held = session.getDraft(draftId)
       if (!held) return false
       parkHeldOrDefer(held, reason)
       return true
     },
-    [parkHeldOrDefer],
+    [parkHeldOrDefer, session],
   )
 
   /**
@@ -2648,14 +2578,15 @@ export function useEditorEditing({
    * release strands an edit the bridge is still holding, with no dialog
    * anywhere that mentions it.
    *
-   * The ref is cleared HERE rather than at the next render, because React has
-   * not re-rendered at this point and the late completions read the ref.
+   * Two calls, and the first is not redundant. `session.releaseModal` clears
+   * the scope prompt on its own when a SCOPE dialog was the one that just
+   * closed. This close also runs with the prompt open and the modal owned by
+   * the other dialog, and only the explicit null covers that case.
    */
   const closeIterationPrompt = useCallback(() => {
-    iterationScopePromptRef.current = null
-    setIterationScopePrompt(null)
-    releaseModal()
-  }, [releaseModal])
+    session.setScopePrompt(null)
+    session.releaseModal()
+  }, [session])
 
   /**
    * The terminal step for an iteration edit that will NOT be applied: park the
@@ -2696,12 +2627,12 @@ export function useEditorEditing({
   const releaseOrParkUnlessShared = useCallback(
     (pending: PendingIterationEdit, message: string): void => {
       const draftId = bridgeDraftIdOf(pending)
-      if (draftId && latestPendingByDraftRef.current.get(draftId) !== pending) return
-      const open = iterationScopePromptRef.current
+      if (draftId && session.latestPendingFor(draftId) !== pending) return
+      const open = session.getSnapshot().scopePrompt
       if (open && sameBridgeDraft(open, pending)) return
       releaseOrPark(pending, message)
     },
-    [releaseOrPark],
+    [releaseOrPark, session],
   )
 
   /**
@@ -2761,8 +2692,7 @@ export function useEditorEditing({
                 "all-instances",
               )
               // Resolved, so nothing may park or re-release it later.
-              bridgeDraftsByPendingIdRef.current.delete(pending.bridgePendingId)
-              latestPendingByDraftRef.current.delete(pending.bridgePendingId)
+              session.releaseDraft(pending.bridgePendingId)
             } else {
               const targetSelector =
                 pending.field.selector ?? pending.selection.selector
@@ -3020,13 +2950,13 @@ export function useEditorEditing({
   )
 
   const cancelIterationScope = useCallback(() => {
-    // The ref rather than the state updater: `closeIterationPrompt` clears the
-    // ref synchronously, so reading it first is the same value the updater saw,
-    // and releasing a bridge draft from inside a `setState` updater was always
-    // a side effect in a place React may run twice.
-    releaseBridgeDraft(iterationScopePromptRef.current)
+    // The snapshot rather than the rendered value: this runs from a dialog
+    // callback, and the release below has to be about the prompt that is on
+    // screen at this instant. `closeIterationPrompt` clears it on the next
+    // line, so the read has to come first.
+    releaseBridgeDraft(session.getSnapshot().scopePrompt)
     closeIterationPrompt()
-  }, [releaseBridgeDraft, closeIterationPrompt])
+  }, [releaseBridgeDraft, closeIterationPrompt, session])
 
   /**
    * Everything ending a session means OUTSIDE the session object: the bridge
@@ -3127,86 +3057,26 @@ export function useEditorEditing({
       reason: BridgeSessionEndReason
       cancelWithBridge: boolean
     }) => {
-      // THE SESSION'S OWN END, first and before anything is cleared: the
-      // generation moves, every request it holds is aborted, its controller is
-      // renewed for the next edit, its timers are cancelled, and the document
-      // is forgotten when the reason is a document change. Every continuation
-      // still awaiting belongs to the session that is ending, and the clearing
-      // below is what it would otherwise resume into.
+      // THE SESSION'S END, and the whole of it. The generation moves, every
+      // request it holds is aborted, its controller is renewed for the next
+      // edit, its own timers are cancelled, and the document is forgotten when
+      // the reason is a document change. That order matters: every
+      // continuation still awaiting belongs to the session that is ending, and
+      // the clearing is what it would otherwise resume into.
       //
-      // The plan it returns is empty, and is deliberately not read: the
-      // buffers, the dialog rows, the open question and the held drafts are
-      // still this hook's until the state half of the migration moves them onto
-      // the session. So the plan the designer reads is still assembled below,
-      // from them, in the shape `session.end` will hand over when they move.
-      session.end(reason)
-      // THE BUFFERS. Cancelling a debounce timer stops the write from being
-      // attempted; it does nothing about the entry the timer was going to
-      // write. Those entries stay in the two buffers, and the buffers are read
-      // by things that run under the NEXT document: the next Save and the next
-      // Apply-with-AI take the whole `mutations` array, and a prop typed just
-      // before the boundary sits in `pendingPropEdits`, which has no
-      // save-time flush at all. Either way the departed page's source is what
-      // gets written, or the write fails stale-target trying.
-      //
-      // So the buffers are partitioned on the session each entry was captured
-      // in, and everything the departed document left behind is discarded here
-      // and COUNTED, which is the honest outcome: applying one page's buffered
-      // edit to a different page is the hazard, and a silent drop would leave
-      // the designer looking for an edit nothing will ever make.
-      //
-      // The generation moved a few lines up, so "the new one" is the session
-      // about to run, and every entry from the session that just ended is
-      // foreign to it.
-      //
-      // ONLY FOR A DOCUMENT CHANGE, which is `reload` and `reconnect`
-      // (`retiresBufferedEntries`). A `teardown` detaches the adapter and
-      // leaves the SAME page on screen with its previews still showing, so
-      // retiring there would throw the designer's buffered edits away on an
-      // `enabled` flip over a page that never went anywhere. `unmount` needs
-      // nothing: React drops the buffers with the hook. Everything else below
-      // is cleared for every reason, because it is bound to the adapter rather
-      // than to the document.
-      const liveGeneration = session.generation
-      const noneRetired = { retired: [] as never[] }
-      const retireBuffers = retiresBufferedEntries(reason)
-      const propPartition = retireBuffers
-        ? retireForeignEntries(pendingPropEditsRef.current, liveGeneration)
-        : { kept: pendingPropEditsRef.current, ...noneRetired }
-      const mutationPartition = retireBuffers
-        ? retireForeignEntries(mutationsRef.current, liveGeneration)
-        : { kept: mutationsRef.current, ...noneRetired }
-      const plan = sessionEndPlan({
-        openPrompt: iterationScopePromptRef.current,
-        queued: modalQueueRef.current,
-        rows: pendingDisambiguationsRef.current,
-        heldDraftIds: [...bridgeDraftsByPendingIdRef.current.keys()],
-        retiredBuffered: propPartition.retired.length + mutationPartition.retired.length,
-        reason,
-      })
-      if (propPartition.retired.length > 0) {
-        const retiredIds = new Set(propPartition.retired.map((e) => e.id))
-        // The mirror first, so a continuation that reads the buffer before
-        // React re-renders sees the retirement too. Then the state, as a
-        // filter rather than a replacement, so an update queued in this same
-        // tick is not thrown away with it.
-        pendingPropEditsRef.current = propPartition.kept
-        setPendingPropEdits((prev) => prev.filter((e) => !retiredIds.has(e.id)))
-      }
-      if (mutationPartition.retired.length > 0) {
-        const retiredIds = new Set(mutationPartition.retired.map((m) => m.id))
-        mutationsRef.current = mutationPartition.kept
-        setMutations((prev) => prev.filter((m) => !retiredIds.has(m.id)))
-      }
-      iterationScopePromptRef.current = null
-      setIterationScopePrompt(null)
-      modalQueueRef.current = []
-      // The modal goes with the questions. Leaving the owner set would wedge
-      // every later question behind a dialog that is no longer on screen.
-      modalOwnerRef.current = null
-      if (pendingDisambiguationsRef.current.length > 0) setPendingDisambiguations([])
-      bridgeDraftsByPendingIdRef.current.clear()
-      latestPendingByDraftRef.current.clear()
+      // The plan it hands back is what the designer sees. THE BUFFERS are the
+      // half of it that is easy to miss. Cancelling a debounce timer stops the
+      // write from being attempted; it does nothing about the entry the timer
+      // was going to write, and the buffers are read by things that run under
+      // the NEXT document. So the session partitions them on the generation
+      // each entry was captured in, discards everything the departed document
+      // left behind, and COUNTS it: applying one page's buffered edit to a
+      // different page is the hazard, and a silent drop would leave the
+      // designer looking for an edit nothing will ever make. That partition is
+      // only for a DOCUMENT CHANGE (`retiresBufferedEntries`); a `teardown`
+      // leaves the same page on screen with its previews showing, and
+      // `unmount` needs nothing because React drops the hook.
+      const plan = session.end(reason)
       // The lanes' in-flight markers are per identity and shared across
       // sessions, so they die with the session that set them. Each lane's
       // `finally` refuses to delete a marker once the generation has moved (it
@@ -3228,22 +3098,17 @@ export function useEditorEditing({
       // Both maps, and that is all of them: the prop lane has its own
       // (`branchPropDispatchTimers`), and the text and class lanes share one
       // (`branchTextDispatchTimers`, keyed by a mutation identity that carries
-      // the kind, so the two never collide). The session's own timer maps are
-      // empty until the lanes schedule through it.
+      // the kind, so the two never collide). `session.end` cancelled its own
+      // timer maps, which stay empty until the lanes schedule through it.
       for (const timer of branchPropDispatchTimers.current.values()) clearTimeout(timer)
       branchPropDispatchTimers.current.clear()
       for (const timer of branchTextDispatchTimers.current.values()) clearTimeout(timer)
       branchTextDispatchTimers.current.clear()
       applySessionEnd(
-        {
-          cancelDraftIds: plan.cancelDraftIds,
-          discarded: plan.discarded,
-          // `unmount` is the one reason that says nothing: there is no status
-          // bar left on an unmounting hook to say it in.
-          status: reason === "unmount" ? null : plan.status,
-          retiredPropEdits: propPartition.retired,
-          retiredMutations: mutationPartition.retired,
-        },
+        // `unmount` is the one reason that says nothing: there is no status
+        // bar left on an unmounting hook to say it in. The count is the
+        // session's either way; this decides only whether it is spoken.
+        reason === "unmount" ? { ...plan, status: null } : plan,
         { cancelWithBridge },
       )
     },
@@ -3288,7 +3153,7 @@ export function useEditorEditing({
       // this is what lets an older completion tell that the draft it is about
       // to release is no longer its own to release.
       const claimedDraftId = bridgeDraftIdOf(pending)
-      if (claimedDraftId) latestPendingByDraftRef.current.set(claimedDraftId, pending)
+      if (claimedDraftId) session.claimPending(claimedDraftId, pending)
       // Claim the SESSION. Every continuation below is guarded on it, and the
       // requests race against its signal.
       const generation = session.generation
@@ -3419,19 +3284,21 @@ export function useEditorEditing({
           // one's bridge draft, or made a delete or a move disappear with
           // nothing said. See `promptCollision`.
           //
-          // The ref is written here as well as at render time: two completions
-          // can land in the same tick, before React re-renders, and the second
-          // has to see the first one's prompt.
-          const collision = promptCollision(iterationScopePromptRef.current, verified)
+          // The SNAPSHOT, not the rendered value: two completions can land in
+          // the same tick, before React re-renders, and the second has to see
+          // the first one's prompt.
+          const collision = promptCollision(
+            session.getSnapshot().scopePrompt,
+            verified,
+          )
           if (collision === "open-incoming") {
-            if (modalOwnerRef.current === "scope") {
+            if (session.modalOwner === "scope") {
               // The scope dialog is open AND `promptCollision` said to open the
               // incoming one, so by construction it is the same in-page typing
               // session with newer text. Replace the question in place: it is
               // the same question, and going through `requestModal` would queue
               // an edit behind its own dialog.
-              iterationScopePromptRef.current = verified
-              setIterationScopePrompt(verified)
+              session.setScopePrompt(verified)
               return
             }
             // Nothing open, or the MUTATION dialog is. That second case is the
@@ -3540,27 +3407,25 @@ export function useEditorEditing({
   // The bridge stays in inspector mode in compose; shell-initiated text /
   // class edits route through `captureDirectMutation` and surface here.
   // No DOM-edit-mode toggle — editor mode itself implies editability.
-  const [mutations, setMutations] = useState<Mutation[]>([])
-  const [pendingDisambiguations, setPendingDisambiguations] = useState<
-    PendingMutation[]
-  >([])
+  // The captured mutations are `sessionState.mutations`, read as `mutations`
+  // above. The disambiguation dialog's rows are `sessionState.rows`.
   /**
    * The oldest unresolved v-for disambiguation, surfaced by
    * `MutationDisambiguationDialog`. Fix for "stuck disambiguation blocks
-   * Save forever": before this, anything landing in
-   * `pendingDisambiguations` (multiple origin candidates, or
-   * `scope === "definition"` per the honesty-rule comment in
-   * `onMutationAwaitingDisambiguation` below) had no UI to resolve it, so
-   * `handleSaveAll`'s gate refused Save indefinitely. Resolving the head
-   * entry surfaces the next one automatically (queue semantics fall out of
-   * deriving from the array head rather than tracking a separate index).
+   * Save forever": before this, anything landing in the dialog's rows
+   * (multiple origin candidates, or `scope === "definition"` per the
+   * honesty-rule comment in `onMutationAwaitingDisambiguation` below) had no
+   * UI to resolve it, so `handleSaveAll`'s gate refused Save indefinitely.
+   * Resolving the head entry surfaces the next one automatically (queue
+   * semantics fall out of deriving from the array head rather than tracking a
+   * separate index).
    */
-  const disambiguationPrompt = pendingDisambiguations[0] ?? null
+  const disambiguationPrompt = sessionState.rows[0] ?? null
   /**
    * Designer picked a scope for `disambiguationPrompt`. Forwards to the
    * adapter (which promotes the pending item to a `Mutation` and emits
    * `onMutationCaptured`) then drops it from the queue — nothing else
-   * removes a resolved entry from `pendingDisambiguations`.
+   * removes a resolved entry from the dialog's rows.
    *
    * WHERE THE PREVIEW OVERRIDE IS RELEASED on this path (Phase 3 live finding
    * 2): the promoted mutation carries the draft's own id, and the bridge now
@@ -3578,7 +3443,10 @@ export function useEditorEditing({
    */
   const confirmDisambiguation = useCallback(
     (choice: DisambiguationChoice) => {
-      const prompt = pendingDisambiguations[0]
+      // The HEAD ROW off the snapshot, which is what the dialog is asking
+      // about at this instant. Read here rather than closed over, so this
+      // callback does not have to be rebuilt every time a row lands.
+      const prompt = session.getSnapshot().rows[0]
       if (!prompt) return
       // KEEP the row when there is no adapter. Answering this dialog is a
       // message to the bridge, and an optional-chained call on a disposed
@@ -3592,20 +3460,20 @@ export function useEditorEditing({
         return
       }
       adapter.resolveMutationDisambiguation(prompt.pendingId, choice)
-      const remaining = pendingDisambiguations.filter(
-        (p) => p.pendingId !== prompt.pendingId,
+      session.updateRows((prev) =>
+        prev.filter((p) => p.pendingId !== prompt.pendingId),
       )
-      setPendingDisambiguations(remaining)
       // A close, so the modal goes back to whatever is waiting. Only once the
       // last row leaves: the dialog is still on screen while another row is
       // behind this one, and it stays the owner until it isn't.
-      if (remaining.length === 0) releaseModal()
+      if (session.getSnapshot().rows.length === 0) session.releaseModal()
     },
-    [pendingDisambiguations, releaseModal],
+    [session],
   )
   /** Designer discarded `disambiguationPrompt` — no edit is written. */
   const cancelDisambiguation = useCallback(() => {
-    const prompt = pendingDisambiguations[0]
+    // Same head-row read as the confirm above, and for the same reason.
+    const prompt = session.getSnapshot().rows[0]
     if (!prompt) return
     // Same refusal as the confirm above, and for the same reason: a discard is
     // a message to the bridge too. Nothing is settled here either, because the
@@ -3623,24 +3491,12 @@ export function useEditorEditing({
     // stays the shim's: the live run left the swatch on the discarded
     // `bg-amber-500` while the badge had reverted to `rgb(249,250,251)`.
     useEditorStore.getState().notePreviewSettled()
-    const remaining = pendingDisambiguations.filter(
-      (p) => p.pendingId !== prompt.pendingId,
+    session.updateRows((prev) =>
+      prev.filter((p) => p.pendingId !== prompt.pendingId),
     )
-    setPendingDisambiguations(remaining)
     // Same close rule as the confirm above.
-    if (remaining.length === 0) releaseModal()
-  }, [pendingDisambiguations, releaseModal])
-  // Ref mirror of `pendingDisambiguations`, kept in sync on every render
-  // (assignment, not an effect — always current by the time any event handler
-  // reads it). Lets the `beforeunload` guard below register its listener once
-  // at mount and read live state at fire-time instead of re-registering on
-  // every state change, and lets the adapter teardown see the rows on screen
-  // without depending on the state and re-running.
-  //
-  // The ROWS, not just their count: teardown has to hand each row's draft back
-  // to the bridge, and a count cannot say which.
-  const pendingDisambiguationsRef = useRef<readonly PendingMutation[]>([])
-  pendingDisambiguationsRef.current = pendingDisambiguations
+    if (session.getSnapshot().rows.length === 0) session.releaseModal()
+  }, [session])
   const [saving, setSaving] = useState(false)
   /**
    * Why the last STARTED save ended badly, or null if it did not.
@@ -3708,22 +3564,23 @@ export function useEditorEditing({
   // would silently discard: mutations queued for the AI lane
   // (`queuedForAiRef` — only flushed by `handleSaveAll`'s LLM dispatch, not
   // by any autosave), unresolved v-for disambiguations
-  // (`pendingDisambiguations` — the designer hasn't picked a target yet, so
-  // nothing has been written), and dialogs waiting behind the open one
-  // (`modalQueueRef` — the bridge is holding those drafts and no dialog
-  // mentions them yet, which makes them the easiest of the three to lose).
+  // (the disambiguation dialog's rows, where the designer has not picked a
+  // target yet so nothing has been written), and dialogs waiting behind the
+  // open one (`session.queuedCount`, where the bridge is holding the drafts
+  // and no dialog mentions them yet, which makes them the easiest of the
+  // three to lose).
   // The rule itself is `hasUndispatchedWork`, a pure function, so it can be
-  // read and tested without a listener. Registers once at mount and reads the
-  // refs at fire-time rather than re-registering per state change — simpler
-  // and race-free since all three are updated synchronously during render or
-  // by the code that changes them, before any unload can occur.
+  // read and tested without a listener. Registers once at mount and reads all
+  // three at fire-time rather than re-registering per state change: the
+  // session's snapshot is current by construction, so there is nothing to
+  // re-subscribe to.
   useEffect(() => {
     if (typeof window === "undefined") return
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       const undispatched = hasUndispatchedWork({
         aiQueue: queuedForAiRef.current.size,
-        parked: pendingDisambiguationsRef.current.length,
-        deferred: modalQueueRef.current.length,
+        parked: session.getSnapshot().rows.length,
+        deferred: session.queuedCount,
       })
       if (!undispatched) return
       event.preventDefault()
@@ -3731,13 +3588,7 @@ export function useEditorEditing({
     }
     window.addEventListener("beforeunload", handleBeforeUnload)
     return () => window.removeEventListener("beforeunload", handleBeforeUnload)
-  }, [])
-
-  // Always-latest mirror of `mutations` so the branch-mode debounced
-  // dispatch (below) reads the freshest captured state from inside a
-  // setTimeout callback.
-  const mutationsRef = useRef<Mutation[]>([])
-  mutationsRef.current = mutations
+  }, [session])
 
   // Per-mutation-identity debounce timers for branch-mode dom-text
   // immediate-dispatch. Every keystroke in the inspector TEXT input
@@ -3856,7 +3707,7 @@ export function useEditorEditing({
       if (branchTextInFlight.current.has(identityKey)) return
       // Latest captured state for this identity — `after` may have
       // advanced since the timer was scheduled.
-      const current = mutationsRef.current.find(
+      const current = session.getSnapshot().mutations.find(
         (m) => mutationIdentity(m) === identityKey,
       )
       if (!current) return
@@ -3962,7 +3813,7 @@ export function useEditorEditing({
             // now — a "fail" against a value nobody's typing anymore isn't
             // worth a toast (the outcome/store bookkeeping still records it).
             isSuperseded: () => {
-              const m = mutationsRef.current.find(
+              const m = session.getSnapshot().mutations.find(
                 (m) => mutationIdentity(m) === identityKey,
               )
               return !!m && !Object.is(m.after, dispatchedAfter)
@@ -4001,7 +3852,7 @@ export function useEditorEditing({
         //     `before` to the LLM and fail to locate it (file already has
         //     the post-dispatch text).
         let needsRefire = false
-        setMutations((prev) => {
+        session.updateMutations((prev) => {
           const idx = prev.findIndex(
             (m) => mutationIdentity(m) === identityKey,
           )
@@ -4116,7 +3967,7 @@ export function useEditorEditing({
     const adapter = adapterRef.current
     if (!adapter) return
     if (branchPropInFlight.current.has(key)) return
-    const current = pendingPropEditsRef.current.find(
+    const current = session.getSnapshot().propEdits.find(
       (e) => propEditKey(e.target.selector, e.propName) === key,
     )
     if (!current) return
@@ -4209,7 +4060,7 @@ export function useEditorEditing({
             setSaveStatus(aftermath.status)
             return
           }
-          setPendingPropEdits((prev) => prev.filter((e) => e.id !== current.id))
+          session.updatePropEdits((prev) => prev.filter((e) => e.id !== current.id))
           attrEditIdsRef.current.delete(current.id)
           pendingPropRenderSitesRef.current.delete(current.id)
           return
@@ -4238,7 +4089,7 @@ export function useEditorEditing({
           // keystroke on it re-arms the debounce under the live session.
           if (!session.isCurrent(generation)) return
           if (refreshed?.editTarget) {
-            setPendingPropEdits((prev) => {
+            session.updatePropEdits((prev) => {
               const idx = prev.findIndex(
                 (e) => propEditKey(e.target.selector, e.propName) === key,
               )
@@ -4325,7 +4176,7 @@ export function useEditorEditing({
         // lazily at verification-complete time — mirrors the dom-text
         // lane's `isSuperseded` against its own mutations buffer.
         isSuperseded: () => {
-          const stillBuffered = pendingPropEditsRef.current.find(
+          const stillBuffered = session.getSnapshot().propEdits.find(
             (e) => propEditKey(e.target.selector, e.propName) === key,
           )
           return !!stillBuffered && !Object.is(stillBuffered.value, dispatchedValue)
@@ -4345,7 +4196,7 @@ export function useEditorEditing({
       // applicators re-parse source each call, so no `before`-rebase is
       // needed (unlike the text path) — only the stale-target stamp.
       let needsRefire = false
-      setPendingPropEdits((prev) => {
+      session.updatePropEdits((prev) => {
         const idx = prev.findIndex(
           (e) => propEditKey(e.target.selector, e.propName) === key,
         )
@@ -4729,7 +4580,7 @@ export function useEditorEditing({
       const adapter = adapterRef.current
       if (!adapter) return
       if (branchTextInFlight.current.has(identityKey)) return
-      const current = mutationsRef.current.find(
+      const current = session.getSnapshot().mutations.find(
         (m) => mutationIdentity(m) === identityKey,
       )
       if (!current) return
@@ -4875,7 +4726,7 @@ export function useEditorEditing({
             styleProperty: cascadeTarget.property,
             cascadeOwner: cascadeTarget.owner,
             isSuperseded: () => {
-              const m = mutationsRef.current.find(
+              const m = session.getSnapshot().mutations.find(
                 (m) => mutationIdentity(m) === identityKey,
               )
               return !!m && !Object.is(m.after, dispatchedAfter)
@@ -4887,7 +4738,7 @@ export function useEditorEditing({
         // No rebase needed here (unlike text/prop): the class lane has no
         // stale-target stamp to refresh.
         let needsRefire = false
-        setMutations((prev) => {
+        session.updateMutations((prev) => {
           const idx = prev.findIndex(
             (m) => mutationIdentity(m) === identityKey,
           )
@@ -4971,6 +4822,25 @@ export function useEditorEditing({
   }, [session])
 
   /**
+   * May a re-arm still write this captured mutation?
+   *
+   * Exactly the two questions the capture scheduler asks, in the same order:
+   * a mutation that would not have armed a timer when it was captured must not
+   * get one now either (a `class` capture with no source location, an identity
+   * parked for the AI queue). Named because `session.start` takes it too, and
+   * a session whose `resume` answered "everything" would be a different
+   * answer to the same question.
+   */
+  const isMutationResumeEligible = useCallback(
+    (m: Mutation): boolean =>
+      shouldProbeTextMutation(m, {
+        inFlight: branchTextInFlight.current,
+        queued: queuedForAiRef.current,
+      }) || shouldProbeClassMutation(m, { inFlight: branchTextInFlight.current }),
+    [],
+  )
+
+  /**
    * Re-arm every buffered edit whose debounced write was cancelled by a session
    * end that KEPT it.
    *
@@ -4987,7 +4857,8 @@ export function useEditorEditing({
    * {@link resumePlan}, which is where the rule is tested.
    */
   const resumeBufferedDispatches = useCallback(() => {
-    const propEntries = pendingPropEditsRef.current.map((entry) => ({
+    const buffered = session.getSnapshot()
+    const propEntries = buffered.propEdits.map((entry) => ({
       key: propEditKey(entry.target.selector, entry.propName),
       selector: entry.target.selector,
       propName: entry.propName,
@@ -4995,26 +4866,22 @@ export function useEditorEditing({
     for (const entry of resumePlan(propEntries, branchPropInFlight.current)) {
       scheduleBranchPropDispatch(entry.selector, entry.propName)
     }
-    // Exactly the two questions the capture scheduler asks, in the same order:
-    // a mutation that would not have armed a timer when it was captured must
-    // not get one now either (a `class` capture with no source location, an
-    // identity parked for the AI queue).
-    const mutationEntries = mutationsRef.current
-      .filter(
-        (m) =>
-          shouldProbeTextMutation(m, {
-            inFlight: branchTextInFlight.current,
-            queued: queuedForAiRef.current,
-          }) || shouldProbeClassMutation(m, { inFlight: branchTextInFlight.current }),
-      )
+    const mutationEntries = buffered.mutations
+      .filter(isMutationResumeEligible)
       .map((m) => ({ key: mutationIdentity(m), mutation: m }))
     for (const entry of resumePlan(mutationEntries, branchTextInFlight.current)) {
       scheduleBranchMutationDispatch(entry.mutation)
     }
-  }, [scheduleBranchPropDispatch, scheduleBranchMutationDispatch])
+  }, [
+    scheduleBranchPropDispatch,
+    scheduleBranchMutationDispatch,
+    isMutationResumeEligible,
+    session,
+  ])
   // Assigned during render, like the hook's other always-latest mirrors, so the
   // adapter effect's handshake always calls the current one.
   resumeBufferedDispatchesRef.current = resumeBufferedDispatches
+  mutationResumeEligibleRef.current = isMutationResumeEligible
 
   useEffect(() => {
     const adapter = adapterRef.current
@@ -5040,7 +4907,7 @@ export function useEditorEditing({
       const tagged: Mutation = { ...m, generation: session.generation }
       // Coalesce by identity, preserving the first `before` (see
       // coalesceCapturedMutation). "Edit a field repeatedly" → one entry.
-      setMutations((prev) => coalesceCapturedMutation(prev, tagged))
+      session.updateMutations((prev) => coalesceCapturedMutation(prev, tagged))
       // Branch mode: kick off (or reset) a debounced immediate-dispatch
       // so every edit writes straight to the working tree as an
       // uncommitted change — there is no separate Save step.
@@ -5203,7 +5070,7 @@ export function useEditorEditing({
         // this edit (chat refuses the hand-off, the proposal or the write
         // fails), and the honest fallback is the deterministic dialog this
         // route skipped, which needs the real candidate list.
-        bridgeDraftsByPendingIdRef.current.set(p.pendingId, p)
+        session.holdDraft(p.pendingId, p)
         iterationEdit.intercept(iterationEdit.args)
         return
       }
@@ -5298,7 +5165,7 @@ export function useEditorEditing({
       // out), so also resolve the id through the buffers to its dispatch
       // key and check the key-level in-flight sets (codex).
       if (inFlightOverrideIdsRef.current.has(p.id)) return
-      const pendingProp = pendingPropEditsRef.current.find((e) => e.id === p.id)
+      const pendingProp = session.getSnapshot().propEdits.find((e) => e.id === p.id)
       if (
         pendingProp &&
         branchPropInFlight.current.has(
@@ -5307,14 +5174,14 @@ export function useEditorEditing({
       ) {
         return
       }
-      const bufferedMutation = mutationsRef.current.find((m) => m.id === p.id)
+      const bufferedMutation = session.getSnapshot().mutations.find((m) => m.id === p.id)
       if (
         bufferedMutation &&
         branchTextInFlight.current.has(mutationIdentity(bufferedMutation))
       ) {
         return
       }
-      const queued = mutationsRef.current.some(
+      const queued = session.getSnapshot().mutations.some(
         (m) => m.id === p.id && queuedForAiRef.current.has(mutationIdentity(m)),
       )
       if (!queued) {
@@ -5561,7 +5428,7 @@ export function useEditorEditing({
           // same buffer. See `retireForeignEntries`.
           generation: session.generation,
         }
-        setPendingPropEdits((prev) => {
+        session.updatePropEdits((prev) => {
           // Last-write-wins per (selector, propName) — mirrors
           // handlePropEdit so multiple agent proposals on the same
           // prop collapse to the latest value.
@@ -5768,27 +5635,27 @@ export function useEditorEditing({
       //
       // In practice this should rarely be hit: `MutationDisambiguationDialog`
       // (driven by `disambiguationPrompt`) now opens automatically the
-      // moment an item lands in `pendingDisambiguations`, at capture time —
-      // well before the designer ever reaches Save. This gate is
+      // moment an item lands in the dialog's rows, at capture time, well
+      // before the designer ever reaches Save. This gate is
       // belt-and-braces for the gap between capture and the dialog
       // mounting (or a dialog dismissed via Escape without an explicit
       // choice, which — same as its Cancel button — discards rather than
       // resolves).
-      // Read the ALWAYS-CURRENT ref, not the closed-over state. `handleSaveAll`
-      // does not depend on `pendingDisambiguations` (depending on it would
-      // rebuild the callback every time one lands), so the captured value can
-      // be stale — and a stale 0 here would return `{ ok: true }` and show
-      // "saved!" with nothing written, which is the exact failure this guard
-      // exists to prevent. `pendingDisambiguationsRef` is assigned on
-      // every render for precisely this read-at-fire-time case.
+      // Read the SESSION, not a closed-over value. `handleSaveAll` does not
+      // depend on the dialog's rows (depending on them would rebuild the
+      // callback every time one lands), so a captured value could be stale.
+      // A stale 0 here would return `{ ok: true }` and show "saved!" with
+      // nothing written, which is the exact failure this guard exists to
+      // prevent. The snapshot is current at the moment it is read, which is
+      // precisely this read-at-fire-time case.
       // Both counts, because only one dialog is on screen at a time: an edit
       // whose question is still queued is exactly as unwritable as the one
       // being asked about, and it appears in no other count.
-      const pendingDisambiguationCount =
-        pendingDisambiguationsRef.current.length + modalQueueRef.current.length
+      const parkedRows = session.getSnapshot().rows.length
+      const pendingDisambiguationCount = parkedRows + session.queuedCount
       const gate = saveGate({
-        pendingDisambiguations: pendingDisambiguationsRef.current.length,
-        queuedModalRequests: modalQueueRef.current.length,
+        pendingDisambiguations: parkedRows,
+        queuedModalRequests: session.queuedCount,
         mutations: directMutations.length,
         scoped: scopedOverrideMutations.length,
       })
@@ -6002,7 +5869,7 @@ export function useEditorEditing({
               return { ok: false, reason: aftermath.status }
             }
             const escalatedIds = new Set(normalizedMutations.map((m) => m.id))
-            setMutations((prev) =>
+            session.updateMutations((prev) =>
               prev.filter((m) => !escalatedIds.has(m.id)),
             )
             // The identities go with the mutations. Chat owns these edits now,
@@ -6045,7 +5912,7 @@ export function useEditorEditing({
         // outcome view (either the trace, or just "Saved" for fast-path).
         setSavePendingLLMInput(null)
         const directIds = new Set(normalizedMutations.map((m) => m.id))
-        setMutations((prev) => prev.filter((m) => !directIds.has(m.id)))
+        session.updateMutations((prev) => prev.filter((m) => !directIds.has(m.id)))
         // WS3 (codex round-9): the flush just landed every mutation in this
         // bundle — release their preview overrides so the bridge stops
         // re-asserting/reporting them. (The failure paths above deliberately
@@ -6130,7 +5997,7 @@ export function useEditorEditing({
       }
       if (scopedOverrideSavedIds.length > 0) {
         const savedIds = new Set(scopedOverrideSavedIds)
-        setMutations((prev) => prev.filter((m) => !savedIds.has(m.id)))
+        session.updateMutations((prev) => prev.filter((m) => !savedIds.has(m.id)))
         // "N > 1 must say N" (§ 9g.8 item 4). One rule can cover several
         // elements — on React that is the normal shape for a first-party
         // component, whose internal root stamp is shared by every instance —

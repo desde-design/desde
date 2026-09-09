@@ -99,7 +99,12 @@ const capture = (id: string, after: string): Mutation => ({
   resolutionKind: "direct",
   scope: "definition",
   callsiteLoc: null,
-  instancePath: "0",
+  // The id, not a constant. `mutationIdentity` is
+  // `sourceLoc|instancePath|kind|target`, so two captures built from this
+  // helper with a shared constant here are ONE buffer entry by design, and a
+  // test that emits two of them would be measuring the coalescer rather than
+  // whatever it meant to measure. One id, one on-screen field, one entry.
+  instancePath: id,
 })
 
 /**
@@ -806,6 +811,44 @@ describe("useEditorEditing: the bridge session", () => {
       await Promise.resolve()
     })
     expect(signal!.aborted).toBe(true)
+  })
+
+  it("dispatches two captures taken in one tick, not just the last (finding V1's cause)", async () => {
+    // The buffers had two authorities: a useState for rendering and a ref for
+    // the async lanes, assigned during render. A continuation that read the ref
+    // before React re-rendered saw the previous array (the reason
+    // `mutationsRef.current = mutations` exists at all), so the second capture
+    // in a tick could overwrite the first instead of joining it. One authority
+    // now, written synchronously, so both survive to their dispatch.
+    await mount()
+    await act(async () => {
+      lastFakeAdapter().emitCapture(capture("m1", "hello"))
+      lastFakeAdapter().emitCapture(capture("m2", "world"))
+    })
+    await waitFor(() => expect(lastFakeAdapter().applies).toHaveLength(2), {
+      timeout: 3000,
+    })
+  })
+
+  it("opens the queued question when the open one is answered (finding R1)", async () => {
+    await mount()
+    const adapter = lastFakeAdapter()
+    await act(async () => {
+      adapter.emitAwaiting(heldDraft("dom-pending-1"))
+      adapter.emitAwaiting(heldDraft("dom-pending-2"))
+    })
+    await waitFor(() =>
+      expect(editing()?.disambiguationPrompt?.pendingId).toBe("dom-pending-1"),
+    )
+    await act(async () => {
+      // The dialog's own confirm, which takes a `DisambiguationChoice` and
+      // reads the head row itself. There is no `resolveDisambiguation`.
+      editing()!.confirmDisambiguation("this-instance")
+      await Promise.resolve()
+    })
+    await waitFor(() =>
+      expect(editing()?.disambiguationPrompt?.pendingId).toBe("dom-pending-2"),
+    )
   })
 
   it("re-arms a pending write once when the same document answers again", async () => {
