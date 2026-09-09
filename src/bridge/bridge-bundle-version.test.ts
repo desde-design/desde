@@ -95,4 +95,32 @@ describe("bridge bundle version anchor", () => {
     expect(rebuilt.length).toBe(committed.length)
     expect(rebuilt).toBe(committed)
   })
+
+  it("returns early when a bridge is already running in this document", () => {
+    // Round 14 V5. A page can load this bundle twice: two `<script src=…>`
+    // tags, a bundler that inlines it as well, or a re-injection after a soft
+    // navigation. Each evaluation would mint its own document id and announce
+    // itself, and the shell reads a second id as a NEW document, ending the
+    // session and discarding the designer's pending edits on a page that never
+    // went anywhere.
+    //
+    // Checked against the BUILT artifact, because minification is what would
+    // quietly drop a guard whose result nothing reads. Two facts: the guard
+    // exists, and it runs BEFORE the assignment that would satisfy it.
+    const bundle = readFileSync(BUNDLE, "utf-8")
+    const guard = bundle.indexOf("__DESDE_BRIDGE_VERSION__)return")
+    const assignment = bundle.search(/__DESDE_BRIDGE_VERSION__\s*=\s*"/)
+    expect(guard).toBeGreaterThan(-1)
+    expect(assignment).toBeGreaterThan(guard)
+  })
+
+  it("still recovers the version with the guard in front of the assignment", () => {
+    // The guard mentions the same global the serve layers regex for, so a
+    // sloppier extractor could match the guard and report "unknown". Both
+    // layers anchor on `= "…"`, and this is the assertion that keeps that
+    // true for the shape actually shipped.
+    expect(extractBridgeVersion(readFileSync(BUNDLE, "utf-8"))).toBe(
+      extractBridgeVersion(readFileSync(SOURCE, "utf-8")),
+    )
+  })
 })

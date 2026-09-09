@@ -53,6 +53,23 @@ import { createOverridePreview } from "./override-preview"
 ;(function () {
   "use strict"
 
+  // ── ONE BRIDGE PER DOCUMENT ───────────────────────────────────────────
+  //
+  // A page can load this bundle twice: two `<script src=…>` tags (one from
+  // the serve layer, one already in the app's own HTML), a bundler that
+  // inlines it as well, or a re-injection after a soft navigation. Every
+  // evaluation runs this IIFE, mints its OWN document id, and announces
+  // itself with BRIDGE_READY. The shell reads a second id as a NEW document
+  // and ends the session, discarding the designer's pending edits on a page
+  // that never went anywhere.
+  //
+  // The version global is the marker, because it is already the first thing
+  // written and every serve layer already looks for it. If it is set, a
+  // bridge is running in this document; leave it alone and return.
+  if ((window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__) {
+    return
+  }
+
   // ── BRIDGE_VERSION ────────────────────────────────────────────────────
   //
   // Bump this on every bridge change (see CLAUDE.md § Verification), then
