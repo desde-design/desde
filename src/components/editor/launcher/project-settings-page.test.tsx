@@ -103,11 +103,52 @@ describe("ProjectSettingsPage", () => {
         String(c[0]).includes("/api/launcher/project-name"),
       )
       expect(call).toBeDefined()
+      // `rename: true` is the intent that separates this from the create
+      // flow's idempotent "name this repo" on the same route.
       expect(JSON.parse(String((call?.[1] as RequestInit)?.body))).toEqual({
         path: PATH,
         name: "acme console",
+        rename: true,
       })
     })
+  })
+
+  it("tells the launcher a rename landed, and stays quiet when it did not", async () => {
+    // The launcher's project list is fetched once at mount; without this
+    // signal the card kept the old title until a full reload.
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) =>
+      String(input).includes("/api/launcher/project-name")
+        ? jsonRes({ ok: true, identity: { id: "p", name: "acme console", slug: "acme" } })
+        : jsonRes(settingsBody()),
+    )
+    const onRenamed = vi.fn()
+    render(
+      <ProjectSettingsPage
+        path={PATH}
+        onClose={vi.fn()}
+        onRenamed={onRenamed}
+        onInspectReadRoot={vi.fn(async () => null)}
+      />,
+    )
+    await screen.findByTestId("settings-project-name")
+    fireEvent.change(screen.getByTestId("settings-project-name"), {
+      target: { value: "acme console" },
+    })
+    fireEvent.click(screen.getByTestId("settings-save"))
+    await waitFor(() => expect(onRenamed).toHaveBeenCalledTimes(1))
+
+    // A refused rename must not tell the launcher anything changed.
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) =>
+      String(input).includes("/api/launcher/project-name")
+        ? jsonRes({ ok: false, reason: "no" }, 400)
+        : jsonRes(settingsBody()),
+    )
+    fireEvent.change(screen.getByTestId("settings-project-name"), {
+      target: { value: "refused" },
+    })
+    fireEvent.click(screen.getByTestId("settings-save"))
+    await screen.findByText(/no|Couldn't rename/)
+    expect(onRenamed).toHaveBeenCalledTimes(1)
   })
 
   it("reads Done, not Cancel, while nothing is staged", async () => {

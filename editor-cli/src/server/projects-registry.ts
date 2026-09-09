@@ -30,6 +30,12 @@ export interface ProjectRegistryEntry {
   path: string
   /** Cloud project id, if this checkout is linked. */
   projectId?: string
+  /**
+   * Display name from the repo's identity block (`project.name` in
+   * `.desde/config.json`). This is what the launcher card shows as its
+   * title; the slug is a routing preference and never a label.
+   */
+  name?: string
   /** Project slug, if known. */
   slug?: string
   /** ISO timestamp of the most recent boot against this path. */
@@ -96,6 +102,7 @@ export async function readProjectsRegistry(): Promise<ProjectsRegistry> {
       projects.push({
         path: e.path as string,
         ...(typeof e.projectId === "string" ? { projectId: e.projectId } : {}),
+        ...(typeof e.name === "string" ? { name: e.name } : {}),
         ...(typeof e.slug === "string" ? { slug: e.slug } : {}),
         lastOpenedAt:
           typeof e.lastOpenedAt === "string"
@@ -130,6 +137,7 @@ export async function upsertProjectRegistryEntry(
     path: entry.path,
     // Prefer freshly-supplied values, fall back to what we already knew.
     projectId: entry.projectId ?? existing?.projectId,
+    name: entry.name ?? existing?.name,
     slug: entry.slug ?? existing?.slug,
     lastOpenedAt: now,
     lastPort: entry.lastPort ?? existing?.lastPort,
@@ -146,6 +154,31 @@ export async function upsertProjectRegistryEntry(
     projects: [cleaned, ...others],
   }
   await writeRegistryAtomic(next)
+}
+
+/**
+ * Patch the entry for `path` IN PLACE, keeping its position and its
+ * `lastOpenedAt`. For changes that are not an open — a rename from the
+ * Settings page — where `upsertProjectRegistryEntry`'s move-to-front would
+ * jump a project last opened days ago above one opened this morning.
+ *
+ * Returns false, writing nothing, when there is no entry to patch.
+ */
+export async function patchProjectRegistryEntry(
+  path: string,
+  patch: Partial<Pick<ProjectRegistryEntry, "name" | "slug">>,
+): Promise<boolean> {
+  const registry = await readProjectsRegistry()
+  const index = registry.projects.findIndex((p) => p.path === path)
+  if (index === -1) return false
+  const merged = { ...registry.projects[index], ...patch }
+  const cleaned = Object.fromEntries(
+    Object.entries(merged).filter(([, v]) => v !== undefined),
+  ) as unknown as ProjectRegistryEntry
+  const projects = registry.projects.slice()
+  projects[index] = cleaned
+  await writeRegistryAtomic({ version: REGISTRY_VERSION, projects })
+  return true
 }
 
 /**

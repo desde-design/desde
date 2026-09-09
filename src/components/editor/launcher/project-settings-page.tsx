@@ -82,6 +82,12 @@ export interface ProjectSettingsPageProps {
   path: string
   onClose: () => void
   /**
+   * A rename landed. The launcher's project list was fetched once at mount
+   * and would otherwise keep the old title on the card, in search, and in
+   * the delete confirmation until a full reload.
+   */
+  onRenamed?: () => void
+  /**
    * Inspect a candidate reference folder, and pick one with the native
    * dialog. The SAME two props `NewProjectPage` takes, deliberately: both
    * pages hand them to the same form, so a divergence here would be two
@@ -101,6 +107,7 @@ export interface ProjectSettingsPageProps {
 export function ProjectSettingsPage({
   path,
   onClose,
+  onRenamed,
   onInspectReadRoot,
   onPickReadRoot,
 }: ProjectSettingsPageProps) {
@@ -128,8 +135,9 @@ export function ProjectSettingsPage({
 
   const handleSave = useCallback(async () => {
     if (!nameDirty) return
-    await settings.rename(nameDraft.trim())
-  }, [nameDirty, nameDraft, settings])
+    const ok = await settings.rename(nameDraft.trim())
+    if (ok) onRenamed?.()
+  }, [nameDirty, nameDraft, settings, onRenamed])
 
   const designSystemEntries = useMemo(
     () =>

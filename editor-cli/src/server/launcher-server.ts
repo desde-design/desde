@@ -18,7 +18,11 @@
  * clone-by-URL path here and is out of scope.
  */
 
-import { ensureProjectIdentity } from "./project-config.js"
+import {
+  ensureProjectIdentity,
+  readProjectConfig,
+  renameProjectIdentity,
+} from "./project-config.js"
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import { spawn } from "node:child_process"
 import { createChildTracker, type ChildTracker } from "./child-tracker.js"
@@ -52,7 +56,21 @@ import { isClaudeRuntimeResolvable } from "./claude-runtime-available.js"
  * provably is a file.
  */
 const DIRECTORY_NOT_FOUND = "Directory not found"
-import { readProjectsRegistry, removeProjectRegistryEntry } from "./projects-registry.js"
+import {
+  patchProjectRegistryEntry,
+  readProjectsRegistry,
+  removeProjectRegistryEntry,
+} from "./projects-registry.js"
+
+/**
+ * The project's display name from its identity block, or null when the repo
+ * has none (or its config is unreadable — the settings page must still open
+ * so the user can fix it there).
+ */
+async function readProjectIdentityName(repoRoot: string): Promise<string | null> {
+  const result = await readProjectConfig(repoRoot)
+  return result.ok ? (result.config.project?.name ?? null) : null
+}
 import { seedDemoProject } from "./demo/seed.js"
 import { checkLauncherOpen, supportedHostsFor } from "./launcher-open-check.js"
 import { createReadyLineReader } from "./ready-line.js"
@@ -392,6 +410,27 @@ async function route(
       // after; see `demo/seed.ts`.
       await ctx.seedDemo()
       const registry = await readProjectsRegistry()
+      // The cached name is reconciled with the repo's identity block on
+      // every list, because the block changes outside this process: a pull
+      // renames the project, a checkout of an older branch removes the
+      // block, an entry predates the registry carrying a name at all. The
+      // list is the one place every entry passes through, and a handful of
+      // small JSON reads is cheaper than a name that is wrong forever. A
+      // folder that is gone is left alone: there is nothing to reconcile
+      // against, and its stale row is the delete action's job. Best-effort
+      // per entry: a patch that cannot be written still shows the right
+      // name this time.
+      for (const entry of registry.projects) {
+        if (!(await isDirectory(entry.path))) continue
+        const name = (await readProjectIdentityName(entry.path)) ?? undefined
+        if (name === entry.name) continue
+        entry.name = name
+        try {
+          await patchProjectRegistryEntry(entry.path, { name })
+        } catch {
+          // Shown right this time; the next list retries the write.
+        }
+      }
       const demoSeedError = ctx.demoSeedError()
       sendJson(res, 200, {
         ok: true,
@@ -551,7 +590,7 @@ async function route(
 
     if (req.method === "POST" && url.pathname === "/api/launcher/project-name") {
       await runHandler(res, async () => {
-        const body = await readJsonBody<{ path?: unknown; name?: unknown }>(req)
+        const body = await readJsonBody<{ path?: unknown; name?: unknown; rename?: unknown }>(req)
         if (typeof body.path !== "string" || body.path.trim().length === 0) {
           sendJson(res, 400, { ok: false, reason: "path is required" })
           return
@@ -560,6 +599,7 @@ async function route(
           sendJson(res, 400, { ok: false, reason: "name is required" })
           return
         }
+        const renameIntent = body.rename === true
         if (body.name.length > 200) {
           sendJson(res, 400, { ok: false, reason: "name must be 200 characters or fewer" })
           return
@@ -574,8 +614,41 @@ async function route(
         }
         // Writes `.desde/config.json` -- the ONLY place identity is
         // minted, and only ever from this explicit user action.
+        //
+        // Two callers share this route, and they differ in INTENT, which is
+        // why `rename` is an explicit flag rather than inferred from a name
+        // mismatch. The create flow names a repo, with the folder name
+        // prefilled; on a clone that already carries a committed identity
+        // the minter is idempotent BY DESIGN and hands that identity back
+        // untouched, so a teammate's name is never overwritten by a wizard
+        // default. The Settings page sends `rename: true`, and only then
+        // does the explicit rename run: that case used to fall through to
+        // the minter and was a silent no-op (Save reported success and the
+        // name never changed).
         try {
-          const identity = await ensureProjectIdentity(abs, { name: body.name })
+          const requested = body.name.trim()
+          // The rename writer is reached DIRECTLY on intent, not after the
+          // minter: the minter would first mint (and persist) a fresh id
+          // over a malformed block or an unsupported schema, and then the
+          // rename, seeing its own name come back, would have nothing to do.
+          const identity = renameIntent
+            ? await renameProjectIdentity(abs, requested)
+            : await ensureProjectIdentity(abs, { name: requested })
+          // Keep the recents card in step without waiting for the next boot.
+          // Patched in place: a rename is not an open, so the card keeps its
+          // position and its "Opened …" time. Only an EXISTING entry is
+          // touched: the create flow names the project before opening it,
+          // and the card should appear when the editor boots, not when the
+          // name is typed. Best-effort: the config is the truth and has
+          // already changed, so a cache that cannot be written must not turn
+          // a completed rename into a reported failure.
+          try {
+            await patchProjectRegistryEntry(abs, { name: identity.name, slug: identity.slug })
+          } catch (err) {
+            console.error(
+              `[launcher] project renamed, but the recents list could not be updated: ${(err as Error).message}`,
+            )
+          }
           sendJson(res, 200, { ok: true, identity })
         } catch (err) {
           sendJson(res, 400, { ok: false, reason: (err as Error).message })
@@ -678,11 +751,11 @@ async function route(
         sendJson(res, 200, {
           ok: true,
           path: abs,
-          // The registry is where a project's chosen name lives; the folder
-          // basename is the fallback the launcher list already shows.
-          name:
-            (await readProjectsRegistry()).projects.find((entry) => entry.path === abs)
-              ?.slug ?? basename(abs),
+          // The repo's own identity block is where a project's chosen name
+          // lives (the recents registry is only a cache of it); the folder
+          // basename is the fallback the launcher list shows for a repo that
+          // has no identity yet.
+          name: (await readProjectIdentityName(abs)) ?? basename(abs),
           designSystems: ds.ok
             ? ds.declarations.map((d) => ({
                 identity: declarationIdentity(d.source),

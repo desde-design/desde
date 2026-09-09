@@ -3,7 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { readProjectConfig, ensureProjectIdentity } from "../project-config.js"
+import {
+  readProjectConfig,
+  ensureProjectIdentity,
+  renameProjectIdentity,
+} from "../project-config.js"
 
 /**
  * Embedded project identity (schema v2) in `.desde/config.json`.
@@ -128,6 +132,27 @@ describe("ensureProjectIdentity", () => {
     ).rejects.toThrow(/not valid JSON/i)
   })
 
+  it("refuses a schema version it does not know, rather than minting over it", async () => {
+    // The create flow runs against clones too; a newer peer's file must not
+    // come back as v2 with a fresh id. Same guard the rename path has.
+    await writeConfig({ version: 3, someNewV3Field: { x: 1 } })
+    await expect(ensureProjectIdentity(root, { name: "Proto" })).rejects.toThrow(
+      /schema version 3 is not supported/,
+    )
+    expect(await readRaw()).toEqual({ version: 3, someNewV3Field: { x: 1 } })
+
+    await writeConfig({ conventions: { useRepoConventions: false } })
+    await expect(ensureProjectIdentity(root, { name: "Proto" })).rejects.toThrow(
+      /schema version undefined/,
+    )
+  })
+
+  it("treats an empty file as no config and mints", async () => {
+    await fs.writeFile(join(root, ".desde", "config.json"), "\n")
+    const identity = await ensureProjectIdentity(root, { name: "Empty" })
+    expect((await readRaw()).project).toMatchObject({ id: identity.id, name: "Empty" })
+  })
+
   it("falls back to a placeholder rather than persisting a blank name", async () => {
     const identity = await ensureProjectIdentity(root, { name: "   " })
     expect(identity.name).toBe("Untitled project")
@@ -174,5 +199,146 @@ describe("project config under a symlinked .desde", () => {
     expect((result as { message: string }).message).toMatch(
       /\.desde is a symbolic link/,
     )
+  })
+})
+
+describe("renameProjectIdentity", () => {
+  it("changes the name and keeps the id AND the slug", async () => {
+    // The slug is a routing preference the viewer may already serve the
+    // project at; a rename must not move the URL out from under a link.
+    const minted = await ensureProjectIdentity(root, { name: "One" })
+    const renamed = await renameProjectIdentity(root, "Two")
+    expect(renamed).toEqual({ ...minted, name: "Two" })
+    const raw = await readRaw()
+    expect(raw.project).toEqual({ id: minted.id, name: "Two", slug: minted.slug })
+    expect((await readProjectConfig(root) as { config: { project?: { name: string } } }).config.project?.name).toBe("Two")
+  })
+
+  it("preserves every other key", async () => {
+    await writeConfig({ version: 1, conventions: { useRepoConventions: false }, futureThing: 42 })
+    await ensureProjectIdentity(root, { name: "One" })
+    await renameProjectIdentity(root, "Two")
+    const raw = await readRaw()
+    expect(raw.futureThing).toBe(42)
+    expect(raw.conventions).toEqual({ useRepoConventions: false })
+  })
+
+  it("keeps keys under `project` that this build has never heard of", async () => {
+    // A newer peer may write additive fields inside the identity block; a
+    // rename that rebuilt the block from known fields would delete them.
+    await writeConfig({
+      version: 2,
+      project: { id: "id-1", name: "One", slug: "one", futureField: { nested: true } },
+    })
+    const renamed = await renameProjectIdentity(root, "Two")
+    expect(renamed).toMatchObject({ id: "id-1", name: "Two", slug: "one" })
+    expect((await readRaw()).project).toEqual({
+      id: "id-1",
+      name: "Two",
+      slug: "one",
+      futureField: { nested: true },
+    })
+  })
+
+  it("persists a slug that was only ever derived, so the rename does not move it", async () => {
+    // A block with no slug gets `deriveSlug(name)` on every read. Leaving it
+    // absent would let the NEXT read derive a new slug from the new name.
+    await writeConfig({ version: 2, project: { id: "id-1", name: "One" } })
+    const renamed = await renameProjectIdentity(root, "Two")
+    expect(renamed.slug).toBe("one")
+    expect((await readRaw()).project).toEqual({ id: "id-1", name: "Two", slug: "one" })
+    const reread = await readProjectConfig(root)
+    expect(reread.ok && reread.config.project?.slug).toBe("one")
+  })
+
+  it("refuses a schema version this build does not know, rather than relabelling it", async () => {
+    await writeConfig({ version: 3, project: { id: "id-1", name: "One", slug: "one" }, newer: true })
+    await expect(renameProjectIdentity(root, "Two")).rejects.toThrow(/schema version 3 is not supported/)
+    expect(await readRaw()).toEqual({
+      version: 3,
+      project: { id: "id-1", name: "One", slug: "one" },
+      newer: true,
+    })
+  })
+
+  it("mints when there is no identity block at all: a v1 config, or no config", async () => {
+    // The Settings page can show a repo opened straight from a folder; its
+    // first name is a mint, not a rename.
+    await writeConfig({ version: 1, projectSlug: "legacy", futureThing: 42 })
+    const minted = await renameProjectIdentity(root, "First name")
+    expect(minted.name).toBe("First name")
+    expect((await readRaw()).project).toMatchObject({ id: minted.id, name: "First name" })
+    expect((await readRaw()).futureThing).toBe(42)
+
+    await rm(join(root, ".desde"), { recursive: true, force: true })
+    const fresh = await renameProjectIdentity(root, "From nothing")
+    expect((await readRaw()).project).toMatchObject({ id: fresh.id, name: "From nothing" })
+  })
+
+  it("refuses a malformed identity block rather than replacing it", async () => {
+    // The minter would put a fresh id here, and the id is the join key.
+    await writeConfig({ version: 2, project: { name: "No id", slug: "no-id" } })
+    await expect(renameProjectIdentity(root, "Two")).rejects.toThrow(/malformed/)
+    expect((await readRaw()).project).toEqual({ name: "No id", slug: "no-id" })
+  })
+
+  it("refuses an unsupported version even when there is no block to rename, rather than minting over it", async () => {
+    // The mint branch must not reach the minter first: it rewrites the file
+    // as v2 as well.
+    await writeConfig({ version: 3, futureThing: true })
+    await expect(renameProjectIdentity(root, "Two")).rejects.toThrow(/schema version 3 is not supported/)
+    expect(await readRaw()).toEqual({ version: 3, futureThing: true })
+
+    await writeConfig({ futureThing: true })
+    await expect(renameProjectIdentity(root, "Two")).rejects.toThrow(/schema version undefined/)
+    expect(await readRaw()).toEqual({ futureThing: true })
+  })
+
+  it("repairs a block whose defects are confined to the name", async () => {
+    // Supplying a name is exactly the repair being asked for, and the name
+    // is the one field this write overwrites anyway. The slug is derived
+    // from the NEW name only when there was none to keep.
+    await writeConfig({ version: 2, project: { id: "id-1", name: "  " } })
+    expect(await renameProjectIdentity(root, "Fixed")).toEqual({ id: "id-1", name: "Fixed", slug: "fixed" })
+    expect((await readRaw()).project).toEqual({ id: "id-1", name: "Fixed", slug: "fixed" })
+
+    await writeConfig({ version: 2, project: { id: "id-1", name: 5, slug: "five" } })
+    expect(await renameProjectIdentity(root, "Fixed")).toEqual({ id: "id-1", name: "Fixed", slug: "five" })
+
+    await writeConfig({ version: 2, project: { id: "id-1", slug: "kept" } })
+    expect(await renameProjectIdentity(root, "Fixed")).toEqual({ id: "id-1", name: "Fixed", slug: "kept" })
+
+    // A defect anywhere else is still refused.
+    await writeConfig({ version: 2, project: { id: 42, name: "Something" } })
+    await expect(renameProjectIdentity(root, "Fixed")).rejects.toThrow(/malformed/)
+  })
+
+  it("treats an empty file like no file: both writers mint", async () => {
+    await fs.writeFile(join(root, ".desde", "config.json"), "")
+    const minted = await renameProjectIdentity(root, "Empty")
+    expect((await readRaw()).project).toMatchObject({ id: minted.id, name: "Empty" })
+  })
+
+  it("reports a read failure as a read failure, not as bad JSON", async () => {
+    // config.json as a directory: EISDIR, not a parse error.
+    await fs.mkdir(join(root, ".desde", "config.json"))
+    await expect(renameProjectIdentity(root, "Two")).rejects.toThrow(/could not be read/)
+    await expect(ensureProjectIdentity(root, { name: "Two" })).rejects.toThrow(/could not be read/)
+  })
+
+  it("refuses a missing or non-numeric version on a config that has a block", async () => {
+    await writeConfig({ version: "3", project: { id: "id-1", name: "One", slug: "one" } })
+    await expect(renameProjectIdentity(root, "Two")).rejects.toThrow(/schema version "3" is not supported/)
+    expect((await readRaw()).version).toBe("3")
+
+    await writeConfig({ project: { id: "id-1", name: "One", slug: "one" } })
+    await expect(renameProjectIdentity(root, "Two")).rejects.toThrow(/schema version undefined is not supported/)
+    expect((await readRaw()).project).toMatchObject({ name: "One" })
+  })
+
+  it("refuses a blank name", async () => {
+    await ensureProjectIdentity(root, { name: "One" })
+    await expect(renameProjectIdentity(root, "   ")).rejects.toThrow(/name/i)
+    expect((await readRaw()).project).toMatchObject({ name: "One" })
   })
 })

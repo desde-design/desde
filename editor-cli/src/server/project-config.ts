@@ -920,37 +920,57 @@ export async function writeProjectConfig(
  * different `name` here can't silently rename a project out from under a
  * teammate who already committed it.
  */
+/**
+ * What the two identity writers start from: the config as a plain object,
+ * or `null` when there is genuinely nothing there (no file, or an empty
+ * one), which is the one case a writer may start from scratch.
+ *
+ * Everything else that is not a supported config is a refusal, never a
+ * rewrite. Unparseable content is the user's own; a version this build does
+ * not know (or a non-numeric or missing one, on a file that has content) is
+ * a file this build does not understand, and writing `version: 2` over it
+ * would claim otherwise. `readProjectConfig` gives boot the same answers.
+ * A read failure that is not "missing" is reported as what it is, not as
+ * bad JSON.
+ */
+async function readIdentityWriteBase(
+  configPath: string,
+  action: string,
+): Promise<Record<string, unknown> | null> {
+  let text: string
+  try {
+    text = await fs.readFile(configPath, "utf-8")
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null
+    throw new Error(`${configPath} could not be read: ${(err as Error).message}`)
+  }
+  if (text.trim() === "") return null
+
+  let raw: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("not an object")
+    }
+    raw = parsed as Record<string, unknown>
+  } catch {
+    throw new Error(`${configPath} is not valid JSON. Fix or remove it before ${action}.`)
+  }
+
+  if (typeof raw.version !== "number" || !SUPPORTED_VERSIONS.includes(raw.version)) {
+    throw new Error(
+      `${configPath}: schema version ${JSON.stringify(raw.version)} is not supported (this CLI supports ${SUPPORTED_VERSIONS.join(", ")}). Update to a newer editor-cli, or fix the file, before ${action}.`,
+    )
+  }
+  return raw
+}
+
 export async function ensureProjectIdentity(
   repoRoot: string,
   opts: { name: string },
 ): Promise<ProjectIdentity> {
   const configPath = configPathFor(repoRoot)
-
-  let existingText: string | null = null
-  try {
-    existingText = await fs.readFile(configPath, "utf-8")
-  } catch {
-    // Missing is the ordinary first-run case — start from an empty object.
-  }
-
-  let raw: Record<string, unknown> = {}
-  if (existingText !== null && existingText.trim() !== "") {
-    try {
-      const parsed: unknown = JSON.parse(existingText)
-      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-        raw = parsed as Record<string, unknown>
-      } else {
-        throw new Error("not an object")
-      }
-    } catch {
-      // A non-empty file we can't parse is the user's own content. Refuse
-      // rather than overwrite it — silently clobbering a committed config
-      // is far worse than making them fix a typo.
-      throw new Error(
-        `${configPath} is not valid JSON. Fix or remove it before creating a project.`,
-      )
-    }
-  }
+  const raw = (await readIdentityWriteBase(configPath, "creating a project")) ?? {}
 
   const existing = readIdentityFromConfig(raw)
   if (existing) return existing
@@ -964,5 +984,87 @@ export async function ensureProjectIdentity(
   const next = writeIdentityIntoConfig(raw, identity)
   await fs.mkdir(dirname(configPath), { recursive: true })
   await fs.writeFile(configPath, JSON.stringify(next, null, 2) + "\n", "utf-8")
+  return identity
+}
+
+/**
+ * Set the project's name from the Settings page: the deliberate counterpart
+ * to `ensureProjectIdentity`, which never renames (it serves the create flow,
+ * whose prefilled folder name must not overwrite a committed identity).
+ *
+ * A repo with NO identity block at all (no config, or a v1 config) gets one
+ * minted, through the minter: the Settings page can show a repo that was
+ * opened straight from a folder and never named, and its first name is a
+ * mint, not a rename. Everything short of that is a refusal, never a
+ * rewrite: an unsupported or malformed schema version, and a `project` block
+ * that is present but unreadable. The minter would happily replace either
+ * with a fresh id, and the id is the join key the viewer's comments hang off.
+ *
+ * On a real rename the id is untouched, and so is the slug: the slug is the
+ * routing preference a viewer may already be serving the project at, and a
+ * rename must not move a shared link. Every other key round-trips.
+ */
+export async function renameProjectIdentity(
+  repoRoot: string,
+  name: string,
+): Promise<ProjectIdentity> {
+  const trimmed = name.trim()
+  if (trimmed === "") throw new Error("A project name is required.")
+
+  const configPath = configPathFor(repoRoot)
+  const raw = await readIdentityWriteBase(configPath, "renaming")
+  if (raw === null || !("project" in raw)) {
+    // Genuinely nothing there, or a supported config with no block (v1):
+    // the first name is a mint. The reader has already refused anything
+    // this build does not understand, so the minter cannot reach it.
+    return ensureProjectIdentity(repoRoot, { name: trimmed })
+  }
+
+  // A block whose defects are confined to `name` (blank, missing, or not a
+  // string) is repaired by this write: supplying the name is exactly what
+  // was asked for, and it is the one field this function overwrites anyway.
+  // A defect anywhere else (no id, a non-string id, not an object) is
+  // refused, never replaced, because the minter would put a fresh id there
+  // and the id is the join key.
+  const existing =
+    readIdentityFromConfig(raw) ??
+    readIdentityFromConfig({
+      ...raw,
+      project: { ...(raw.project as Record<string, unknown>), name: trimmed },
+    })
+  if (!existing) {
+    throw new Error(
+      `${configPath}: the project identity block is malformed. Fix it before renaming; it will not be replaced.`,
+    )
+  }
+
+  const identity: ProjectIdentity = { ...existing, name: trimmed }
+  // The name is merged INTO the existing block rather than the block being
+  // rebuilt from the fields this build knows: a newer peer may have written
+  // keys under `project` that this one has never heard of, and a rename must
+  // not delete them. (Only the identity minter builds the block from scratch,
+  // and it only ever does so when there is no block.)
+  //
+  // The slug is written out explicitly. A block with no slug gets one DERIVED
+  // from its name on every read, so leaving it absent here would let the next
+  // read derive a new slug from the new name, and the promise that a rename
+  // keeps the route would be broken by the read, not the write.
+  const next = {
+    ...raw,
+    version: 2,
+    project: {
+      ...(raw.project as Record<string, unknown>),
+      name: trimmed,
+      slug: existing.slug,
+    },
+  }
+  const tmp = `${configPath}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    await fs.writeFile(tmp, JSON.stringify(next, null, 2) + "\n", "utf-8")
+    await fs.rename(tmp, configPath)
+  } catch (err) {
+    await fs.unlink(tmp).catch(() => {})
+    throw err
+  }
   return identity
 }

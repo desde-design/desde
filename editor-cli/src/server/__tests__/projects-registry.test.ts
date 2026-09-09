@@ -14,6 +14,7 @@ import os from "node:os"
 import path from "node:path"
 
 import {
+  patchProjectRegistryEntry,
   projectsRegistryPath,
   readProjectsRegistry,
   removeProjectRegistryEntry,
@@ -77,6 +78,41 @@ describe("projects-registry", () => {
     expect(entry.projectId).toBe("proj-1")
     expect(entry.slug).toBe("my-app")
     expect(entry.lastPort).toBe(4321)
+  })
+
+  it("round-trips the project name, and merges it like every other field", async () => {
+    // The name is what the launcher card shows as its title. It was missing
+    // from the registry entirely: the card fell back to the slug and, on a
+    // schema-v2 repo (whose slug lives in the identity block), to the
+    // folder name.
+    await upsertProjectRegistryEntry({
+      path: "/repo/a",
+      name: "Onboarding test",
+      slug: "onboarding-test",
+    })
+    await upsertProjectRegistryEntry({ path: "/repo/a", lastPort: 4321 })
+    const [entry] = (await readProjectsRegistry()).projects
+    expect(entry.name).toBe("Onboarding test")
+    expect(entry.slug).toBe("onboarding-test")
+    expect(entry.lastPort).toBe(4321)
+  })
+
+  describe("patchProjectRegistryEntry", () => {
+    it("renames in place: position and lastOpenedAt are untouched", async () => {
+      await upsertProjectRegistryEntry({ path: "/repo/old", name: "Old", lastOpenedAt: "2026-08-01T00:00:00.000Z" })
+      await upsertProjectRegistryEntry({ path: "/repo/new", name: "New", lastOpenedAt: "2026-08-05T00:00:00.000Z" })
+      expect(await patchProjectRegistryEntry("/repo/old", { name: "Renamed" })).toBe(true)
+      const reg = await readProjectsRegistry()
+      expect(reg.projects.map((p) => [p.path, p.name, p.lastOpenedAt])).toEqual([
+        ["/repo/new", "New", "2026-08-05T00:00:00.000Z"],
+        ["/repo/old", "Renamed", "2026-08-01T00:00:00.000Z"],
+      ])
+    })
+
+    it("reports false and writes nothing for a path that is not listed", async () => {
+      expect(await patchProjectRegistryEntry("/repo/missing", { name: "X" })).toBe(false)
+      await expect(fs.access(projectsRegistryPath())).rejects.toThrow()
+    })
   })
 
   it("tolerates a corrupt registry file (degrades to empty, then repairs)", async () => {

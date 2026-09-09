@@ -395,6 +395,71 @@ describe("trimPathToTail", () => {
   })
 })
 
+describe("project card title", () => {
+  const NOW = new Date("2026-08-13T00:00:00Z").toISOString()
+
+  it("shows the project's name, not its slug and not its folder", async () => {
+    fetchMock.mockImplementation((input) =>
+      String(input).endsWith("/api/launcher/projects")
+        ? Promise.resolve(
+            json(200, {
+              ok: true,
+              projects: [
+                {
+                  path: "/repos/next-shadcn-admin-dashboard",
+                  name: "Onboarding test",
+                  slug: "onboarding-test",
+                  lastOpenedAt: NOW,
+                },
+              ],
+            }),
+          )
+        : Promise.resolve(json(404, { ok: false, reason: "unhandled in test" })),
+    )
+    render(<LauncherPage folderPickerSupported={true} />)
+    // Looked up by the slug KEY (selector-safe), titled by the NAME.
+    const card = await screen.findByTestId("launcher-project-onboarding-test")
+    expect(card).toHaveTextContent("Onboarding test")
+    expect(card).not.toHaveTextContent("onboarding-test")
+    expect(screen.queryByText("next-shadcn-admin-dashboard")).toBeNull()
+  })
+
+  it("takes the folder name off a Windows path too", async () => {
+    fetchMock.mockImplementation((input) =>
+      String(input).endsWith("/api/launcher/projects")
+        ? Promise.resolve(
+            json(200, {
+              ok: true,
+              projects: [{ path: "C:\\repos\\admin-dashboard", lastOpenedAt: NOW }],
+            }),
+          )
+        : Promise.resolve(json(404, { ok: false, reason: "unhandled in test" })),
+    )
+    render(<LauncherPage folderPickerSupported={true} />)
+    const card = await screen.findByTestId("launcher-project-admin-dashboard")
+    // The title span, not the card: the path line below it shows the full
+    // path on purpose.
+    expect(card.firstElementChild).toHaveTextContent(/^admin-dashboard$/)
+  })
+
+  it("falls back to the folder name when the project has no name yet", async () => {
+    fetchMock.mockImplementation((input) =>
+      String(input).endsWith("/api/launcher/projects")
+        ? Promise.resolve(
+            json(200, {
+              ok: true,
+              projects: [{ path: "/repos/next-shadcn-admin-dashboard", slug: "legacy-slug", lastOpenedAt: NOW }],
+            }),
+          )
+        : Promise.resolve(json(404, { ok: false, reason: "unhandled in test" })),
+    )
+    render(<LauncherPage folderPickerSupported={true} />)
+    const card = await screen.findByTestId("launcher-project-legacy-slug")
+    expect(card).toHaveTextContent("next-shadcn-admin-dashboard")
+    expect(card).not.toHaveTextContent("legacy-slug")
+  })
+})
+
 describe("project search", () => {
   const NOW = new Date("2026-08-13T00:00:00Z").toISOString()
   const PROJECTS = [

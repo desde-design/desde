@@ -213,7 +213,11 @@ export function useProjectSettings(path: string | null): UseProjectSettings {
     error,
     refresh,
     rename: useCallback(
-      (name) => mutate("/api/launcher/project-name", { name }, "Couldn't rename this project."),
+      // `rename: true` is the intent the route keys off: without it the
+      // route is the create flow's idempotent "name this repo", which hands
+      // an existing identity back unchanged.
+      (name) =>
+        mutate("/api/launcher/project-name", { name, rename: true }, "Couldn't rename this project."),
       [mutate],
     ),
     addDesignSystem: useCallback(
