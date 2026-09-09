@@ -939,6 +939,59 @@ describe("class-edit lane — release-then-verify sequencing", () => {
     expect(verifications[0].editId).toBe(requestBody.correlationId)
     expect(verifications[0].editId).not.toBe(CLASS_MUTATION.id)
   })
+
+  it("writes nothing when the page is replaced while the debounce is still waiting", async () => {
+    // The debounce is half a second long, and a page can be replaced inside it
+    // (the post-turn reload, the conflict reload, a link the designer clicked).
+    // The callback knows nothing about that on its own: it reads the LIVE
+    // adapter and the live buffer, so left alone it writes the previous page's
+    // edit into the page in front of the designer now.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    // The url parameter is declared so the assertion below can read it off
+    // `mock.calls`: a zero-argument mock types its calls as an empty tuple.
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL) =>
+      new Response(JSON.stringify({ ok: true, newHashes: {} }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    vi.stubGlobal("fetch", fetchMock)
+    render(<Harness />)
+    await act(async () => {
+      emitFromBridge({
+        type: "BRIDGE_READY",
+        payload: { version: "2026-09-09a", documentId: "doc-a" },
+      })
+    })
+    await waitFor(() => {
+      expect(activeMockSetup!.postMessages.length).toBeGreaterThan(0)
+    })
+    // The edit is captured, arming the dispatch debounce.
+    await act(async () => {
+      emitFromBridge({ type: "MUTATION_CAPTURED", payload: CLASS_MUTATION })
+    })
+
+    // A different page arrives before the debounce fires.
+    const iframe = screen.getByTitle("Prototype") as HTMLIFrameElement
+    await act(async () => {
+      iframe.dispatchEvent(new Event("load"))
+    })
+    await act(async () => {
+      emitFromBridge({
+        type: "BRIDGE_READY",
+        payload: { version: "2026-09-09a", documentId: "doc-b" },
+      })
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+
+    const editPosts = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("/api/editor/edit"),
+    )
+    expect(editPosts).toHaveLength(0)
+  })
 })
 
 // ──────────── The document boundary is the handshake, not the load ────────────

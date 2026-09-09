@@ -1829,7 +1829,7 @@ export function useEditorEditing({
   // can schedule it without a TDZ/circular-callback dance — same pattern as
   // `dispatchBranchTextMutationRef` / `handleSaveAllRef`.
   const dispatchBranchPropEditRef = useRef<
-    ((key: string) => void) | null
+    ((key: string, scheduledGeneration?: number) => void) | null
   >(null)
   // Schedule the debounced auto-commit of a buffered prop edit to the working
   // tree. EVERY write to `pendingPropEdits` must call this — the buffer is the
@@ -1842,9 +1842,15 @@ export function useEditorEditing({
       if (branchPropInFlight.current.has(key)) return
       const existing = branchPropDispatchTimers.current.get(key)
       if (existing) clearTimeout(existing)
+      // The session this buffered edit belongs to, captured NOW rather than
+      // read inside the callback half a second later. Read there it would be
+      // whatever session is live when the timer fires, so a timer that outlived
+      // a page reload would write the old page's edit under the new page's
+      // session and pass every guard on the way.
+      const scheduledGeneration = adapterGenerationRef.current
       const timer = setTimeout(() => {
         branchPropDispatchTimers.current.delete(key)
-        dispatchBranchPropEditRef.current?.(key)
+        dispatchBranchPropEditRef.current?.(key, scheduledGeneration)
       }, BRANCH_PROP_DISPATCH_DEBOUNCE_MS)
       branchPropDispatchTimers.current.set(key, timer)
     },
@@ -3007,6 +3013,23 @@ export function useEditorEditing({
       // delete a marker once the generation has moved (it would be deleting the
       // NEXT session's), which is only safe because this clears them.
       branchPropInFlight.current.clear()
+      // Every debounced write this session had armed, cancelled. A debounce
+      // callback is a plain `setTimeout` and knows nothing about sessions: left
+      // running, it fires after the new document has attached, reads the LIVE
+      // adapter and the live buffer, and writes the previous page's edit into
+      // the page in front of the designer now. The dispatches also capture the
+      // generation at SCHEDULE time and refuse a stale one, so this is the first
+      // of two locks on the same door: this one stops the write from being
+      // attempted, that one stops it from landing if a timer ever escapes.
+      //
+      // Both maps, and that is all of them: the prop lane has its own
+      // (`branchPropDispatchTimers`), and the text and class lanes share one
+      // (`branchTextDispatchTimers`, keyed by a mutation identity that carries
+      // the kind, so the two never collide).
+      for (const timer of branchPropDispatchTimers.current.values()) clearTimeout(timer)
+      branchPropDispatchTimers.current.clear()
+      for (const timer of branchTextDispatchTimers.current.values()) clearTimeout(timer)
+      branchTextDispatchTimers.current.clear()
       if (cancelWithBridge) {
         const adapter = adapterRef.current
         for (const draftId of plan.cancelDraftIds) {
@@ -3596,9 +3619,20 @@ export function useEditorEditing({
    * pattern as structural moves and chat-driven prop edits — so the
    * top-bar Commit affordance (an ordinary `git add -A && git commit`)
    * picks it up without the designer needing to trigger anything else.
+   *
+   * `scheduledGeneration` is the bridge session the caller decided to write in.
+   * For a debounced call that is the session that was live when the designer
+   * stopped typing, half a second earlier; it defaults to the session that is
+   * live now for callers with no wait to span. Every guard in here reads it,
+   * not the session of the moment.
    */
   const dispatchBranchTextMutation = useCallback(
-    async (identityKey: string) => {
+    async (identityKey: string, scheduledGeneration?: number) => {
+      const generation = scheduledGeneration ?? adapterGenerationRef.current
+      // The page this write was for is gone. Write nothing: the mutation stays
+      // in the buffer, and the next keystroke re-arms the debounce under the
+      // session that is on screen.
+      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
       const adapter = adapterRef.current
       if (!adapter) return
       // Per-identity serialization. A second dispatch for the same
@@ -3784,7 +3818,9 @@ export function useEditorEditing({
           if (existing) clearTimeout(existing)
           const timer = setTimeout(() => {
             timers.delete(identityKey)
-            void dispatchBranchTextMutationRef.current?.(identityKey)
+            // In THIS dispatch's session: the re-fire is the rest of the text
+            // the designer was typing on the page this dispatch wrote for.
+            void dispatchBranchTextMutationRef.current?.(identityKey, generation)
           }, BRANCH_TEXT_DISPATCH_DEBOUNCE_MS)
           timers.set(identityKey, timer)
         }
@@ -3821,8 +3857,28 @@ export function useEditorEditing({
    * at edit time is the instant preview; HMR re-renders the truthful source.
    * Serialized per identity so two same-key dispatches can't complete out of
    * order (same race the text path's in-flight set guards).
+   *
+   * `scheduledGeneration` is the bridge session the caller decided to write in,
+   * which for a debounced call is the session that was live when the designer
+   * typed, half a second before this runs. It defaults to the session that is
+   * live now, for the immediate callers who have no wait to span.
    */
-  const dispatchBranchPropEdit = useCallback(async (key: string) => {
+  const dispatchBranchPropEdit = useCallback(async (
+    key: string,
+    scheduledGeneration?: number,
+  ) => {
+    // The session this dispatch belongs to. Every guard below reads it, and
+    // the marker this dispatch is about to set is keyed on the element and the
+    // prop, NOT on the session, so a dispatch that outlives its session would
+    // otherwise delete a marker a new dispatch for the same element set after
+    // the page reloaded, and two writes for one identity could then run at
+    // once. See `mayClearInFlightMarker`, which the `finally` consults, and
+    // `endBridgeSession`, which empties the set.
+    const generation = scheduledGeneration ?? adapterGenerationRef.current
+    // The page this write was for is gone. Write nothing: the buffered entry
+    // stays, and the designer's next keystroke re-arms the debounce under the
+    // session that is actually on screen.
+    if (isStaleGeneration(generation, adapterGenerationRef.current)) return
     const adapter = adapterRef.current
     if (!adapter) return
     if (branchPropInFlight.current.has(key)) return
@@ -3831,13 +3887,6 @@ export function useEditorEditing({
     )
     if (!current) return
     const dispatchedValue = current.value
-    // The session this dispatch belongs to. The marker it is about to set is
-    // keyed on the element and the prop, NOT on the session, so a dispatch that
-    // outlives its session would otherwise delete a marker a new dispatch for
-    // the same element set after the page reloaded, and two writes for one
-    // identity could then run at once. See `mayClearInFlightMarker`, which the
-    // `finally` consults, and `endBridgeSession`, which empties the set.
-    const generation = adapterGenerationRef.current
     branchPropInFlight.current.add(key)
     inFlightOverrideIdsRef.current.add(current.id)
     // The prop request is a plain synchronous POST — when the deterministic
@@ -3937,7 +3986,9 @@ export function useEditorEditing({
               // session that ended during the wait would have it rebasing the
               // previous document's stamps onto the current one.
               if (!mayClearInFlightMarker(generation, adapterGenerationRef.current)) return
-              dispatchBranchPropEditRef.current?.(key)
+              // Re-entered in THIS dispatch's session, not in whichever one is
+              // live when the timer fires.
+              dispatchBranchPropEditRef.current?.(key, generation)
             }, BRANCH_PROP_DISPATCH_DEBOUNCE_MS)
             branchPropDispatchTimers.current.set(key, timer)
             return
@@ -4071,7 +4122,9 @@ export function useEditorEditing({
         if (existing) clearTimeout(existing)
         const timer = setTimeout(() => {
           branchPropDispatchTimers.current.delete(key)
-          dispatchBranchPropEditRef.current?.(key)
+          // In THIS dispatch's session: the re-fire is the rest of the edit the
+          // designer was making on the page this dispatch wrote for.
+          dispatchBranchPropEditRef.current?.(key, generation)
         }, BRANCH_PROP_DISPATCH_DEBOUNCE_MS)
         branchPropDispatchTimers.current.set(key, timer)
       }
@@ -4358,7 +4411,12 @@ export function useEditorEditing({
    * `kind`, so class and text identities never collide.
    */
   const dispatchBranchClassMutation = useCallback(
-    async (identityKey: string) => {
+    async (identityKey: string, scheduledGeneration?: number) => {
+      // Same rule as the text lane it shares its timers and markers with: the
+      // session is the one the caller decided to write in, and a debounced call
+      // decided that half a second ago.
+      const generation = scheduledGeneration ?? adapterGenerationRef.current
+      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
       const adapter = adapterRef.current
       if (!adapter) return
       if (branchTextInFlight.current.has(identityKey)) return
@@ -4531,7 +4589,8 @@ export function useEditorEditing({
           if (existing) clearTimeout(existing)
           const timer = setTimeout(() => {
             timers.delete(identityKey)
-            void dispatchBranchClassMutationRef.current?.(identityKey)
+            // In THIS dispatch's session, like the text lane's re-fire.
+            void dispatchBranchClassMutationRef.current?.(identityKey, generation)
           }, BRANCH_TEXT_DISPATCH_DEBOUNCE_MS)
           timers.set(identityKey, timer)
         }
@@ -4599,9 +4658,14 @@ export function useEditorEditing({
         const key = mutationIdentity(m)
         const existing = timers.get(key)
         if (existing) clearTimeout(existing)
+        // The session this keystroke was typed in, captured at SCHEDULE time.
+        // Read inside the callback instead, it would be whichever session is
+        // live when the timer fires, and a timer that outlived a page reload
+        // would write the previous page's text under the new page's session.
+        const scheduledGeneration = adapterGenerationRef.current
         const timer = setTimeout(() => {
           timers.delete(key)
-          void dispatchBranchTextMutation(key)
+          void dispatchBranchTextMutation(key, scheduledGeneration)
         }, BRANCH_TEXT_DISPATCH_DEBOUNCE_MS)
         timers.set(key, timer)
       }
@@ -4618,9 +4682,11 @@ export function useEditorEditing({
         const key = mutationIdentity(m)
         const existing = timers.get(key)
         if (existing) clearTimeout(existing)
+        // Same capture as the text lane above, for the same reason.
+        const scheduledGeneration = adapterGenerationRef.current
         const timer = setTimeout(() => {
           timers.delete(key)
-          void dispatchBranchClassMutation(key)
+          void dispatchBranchClassMutation(key, scheduledGeneration)
         }, BRANCH_TEXT_DISPATCH_DEBOUNCE_MS)
         timers.set(key, timer)
       }
