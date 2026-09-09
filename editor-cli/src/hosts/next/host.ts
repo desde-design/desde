@@ -6,6 +6,17 @@ import { listenOriginFor } from "../../server/host-guard.js"
 import { pickLoopbackPort } from "../loopback-port.js"
 import { materializeNextLoader } from "./loader-cache.js"
 import {
+  EDITOR_NEXT_DIST_ROOT,
+  guardBuildTree,
+  isolateDistDir,
+  mirrorTypeDeclarations,
+  NEXT_DIST_DIR_SEAM,
+  NEXT_TYPE_SETUP_SEAM,
+  probeTypeSetupRedirect,
+  redirectTypeSetup,
+  restoreDistDir,
+} from "./isolate-dist-dir.js"
+import {
   developmentPhaseFrom,
   mergeStampRules,
   probeConfigMemo,
@@ -144,11 +155,22 @@ export function createNextHost(): DevServerHost<"turbopack-loader"> {
     id: "next",
     displayName: "Next.js",
 
-    // Three, and each breaks with a different signature: the module MOVES (throws
-    // at require time), the memo stops SHARING (mutation reaches a copy), and the
-    // shared object stops ACCEPTING the write (throws mid-boot, or — the
-    // dangerous one — swallows it). Only the first is loud on its own.
-    seams: [NEXT_CONFIG_MODULE_SEAM, NEXT_CONFIG_MEMO_SEAM, NEXT_CONFIG_MUTABILITY_SEAM],
+    // Five. The first three are one channel, and each breaks with a different
+    // signature: the module MOVES (throws at require time), the memo stops
+    // SHARING (mutation reaches a copy), and the shared object stops ACCEPTING
+    // the write (throws mid-boot, or — the dangerous one — swallows it). Only
+    // the first is loud on its own. The last two keep Editor's dev server out of
+    // the project's own `.next`: its build directory (and so Next's per-project
+    // lock and Turbopack cache) and the TypeScript-setup redirect that stops that
+    // directory from being written into tsconfig.json and next-env.d.ts. See
+    // `isolate-dist-dir.ts`.
+    seams: [
+      NEXT_CONFIG_MODULE_SEAM,
+      NEXT_CONFIG_MEMO_SEAM,
+      NEXT_CONFIG_MUTABILITY_SEAM,
+      NEXT_DIST_DIR_SEAM,
+      NEXT_TYPE_SETUP_SEAM,
+    ],
 
     // The one to NAME when the server boots healthy and stamps nothing.
     //
@@ -176,10 +198,11 @@ export function createNextHost(): DevServerHost<"turbopack-loader"> {
     devCommand: "npx next dev",
     bridgeTags: BRIDGE_TAGS,
 
-    // `.next` is Next's build/cache output. It sits inside the repo so
-    // root-containment admits it, and it is regenerated — a stamp there is a
-    // stamp on a file that will not exist by the time anyone edits it.
-    buildDirs: [".next"],
+    // `.next` is the project's own Next build/cache output; `.desde/next` is
+    // Editor's (see `isolate-dist-dir.ts`). Both sit inside the repo so
+    // root-containment admits them, and both are regenerated — a stamp there is
+    // a stamp on a file that will not exist by the time anyone edits it.
+    buildDirs: [".next", EDITOR_NEXT_DIST_ROOT],
 
     /**
      * Always `jsx`, whatever detection said — the same reasoning as the Nuxt
@@ -244,6 +267,33 @@ export function createNextHost(): DevServerHost<"turbopack-loader"> {
       const memo = await probeConfigMemo(loadConfig, phase.phase, ctx.prototypeRoot)
       if (!memo.ok) throw new Error(memo.failure.cause ?? memo.failure.summary)
 
+      // ISOLATE, in place, on the same object. Editor's Next builds into
+      // `.desde/next`, so the project's own `next dev` — its lock in
+      // `.next/dev/lock`, its Turbopack cache — is never in the way, and the
+      // two can run at once against the same source. Then keep that directory
+      // OUT of the project: Next's TypeScript setup is redirected to the
+      // original `distDir`, so tsconfig.json and next-env.d.ts come out exactly
+      // as the user's own tool writes them. Order matters — the redirect must
+      // be installed before `app.prepare()` loads the bundler that calls it.
+      const isolated = isolateDistDir(memo.conf, ctx.prototypeRoot)
+      if (!isolated.ok) throw new Error(isolated.failure.cause ?? isolated.failure.summary)
+      const buildRoot = await guardBuildTree(ctx.prototypeRoot, isolated.isolated.distDir, (line) => console.log(line))
+      if (!buildRoot.ok) {
+        restoreDistDir(memo.conf, isolated.original)
+        throw new Error(buildRoot.failure.cause ?? buildRoot.failure.summary)
+      }
+      const redirect = redirectTypeSetup(require, install, isolated.original.distDir)
+      if (!redirect.ok) {
+        // Leave the memo as Next resolved it: the ladder falls to attach mode
+        // from here, and a config still pointed at `.desde/next` is a trap for
+        // whatever loads it next.
+        restoreDistDir(memo.conf, isolated.original)
+        throw new Error(redirect.failure.cause ?? redirect.failure.summary)
+      }
+      console.log(
+        `[host:next] Building into ${isolated.isolated.distDir} (the project's own ${isolated.original.distDir} is left to its own dev server).`,
+      )
+
       // INJECT, in place. `conf.turbopack` is replaced; `conf` itself keeps the
       // identity the memo holds, which is the whole mechanism.
       const merged = mergeStampRules(memo.conf, {
@@ -280,6 +330,17 @@ export function createNextHost(): DevServerHost<"turbopack-loader"> {
       })
       await app.prepare()
 
+      // The generated route types now land under Editor's distDir; the user's
+      // `next-env.d.ts` (kept pointing at THEIR distDir by the redirect above)
+      // imports them from there. Mirror, so the import resolves whether or not
+      // they ever ran `next dev` themselves.
+      const typeMirror = await mirrorTypeDeclarations({
+        prototypeRoot: ctx.prototypeRoot,
+        from: isolated.isolated.distDir,
+        to: isolated.original.distDir,
+        log: (line) => console.log(line),
+      })
+
       const handler = app.getRequestHandler()
       const server = createServer((req, res) => {
         handler(req, res).catch((err: unknown) => {
@@ -304,12 +365,14 @@ export function createNextHost(): DevServerHost<"turbopack-loader"> {
           })
         })
       } catch (err) {
+        typeMirror.stop()
         await app.close?.().catch(() => undefined)
         throw err
       }
 
       const address = server.address()
       if (address === null || typeof address === "string") {
+        typeMirror.stop()
         server.closeAllConnections()
         server.close()
         await app.close?.().catch(() => undefined)
@@ -368,6 +431,7 @@ export function createNextHost(): DevServerHost<"turbopack-loader"> {
         // false"), and it is deliberate rather than missing.
 
         close: async () => {
+          typeMirror.stop()
           // Destroy sockets first: the proxy in front holds a keep-alive
           // connection and Next holds HMR websockets, so a bare `close()` waits
           // for both and the CLI appears to hang on exit.
@@ -539,6 +603,29 @@ async function probeNext(ctx: HostContext): Promise<ProbeResult> {
   //    seam is REACHABLE; only this proves it still WORKS.
   const memo = await probeConfigMemo(loadConfig, phase.phase, ctx.prototypeRoot)
   if (!memo.ok) return { ok: false, failure: memo.failure }
+
+  // 5b. The build-directory write, on the same object, then undone: the probe
+  //     must leave the memo as Next resolved it. What is asserted is that the
+  //     write LANDS — a config that swallows it boots a server that collides
+  //     with the user's own `next dev` exactly as before. In between, the
+  //     directory it names must be real all the way down, not a link Next
+  //     would follow out of the checkout (the rule every `.desde` writer applies).
+  const isolated = isolateDistDir(memo.conf, ctx.prototypeRoot)
+  if (!isolated.ok) return { ok: false, failure: isolated.failure }
+  // Restored FIRST, before the tree walk's await: the memo is shared, and
+  // leaving Editor's distDir on it across a yield point is a window in which
+  // anything else that reads the config sees a build directory the probe is
+  // about to take back.
+  const restored = restoreDistDir(memo.conf, isolated.original)
+  const buildRoot = await guardBuildTree(ctx.prototypeRoot, isolated.isolated.distDir)
+  if (!buildRoot.ok) return { ok: false, failure: buildRoot.failure }
+  if (!restored.ok) return { ok: false, failure: restored.failure }
+
+  // 5c. The type-setup redirect, swapped in and back out. Without it a boot
+  //     with a separate build directory rewrites tsconfig.json and
+  //     next-env.d.ts to point there — two tracked files the user never edited.
+  const redirect = probeTypeSetupRedirect(require, install)
+  if (!redirect.ok) return { ok: false, failure: redirect.failure }
 
   // 6. A rule collision on one of our own globs. Checked pre-boot, against
   //    the config Next actually resolved, so a project that cannot be

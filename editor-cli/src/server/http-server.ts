@@ -3705,6 +3705,13 @@ async function handleHomeRequest(
         // page ships inside it (main.tsx branches on the bootstrap global).
         uiBundleRoot: ctx.uiBundleRoot,
         forwardArgs: ctx.launcherForwardArgs ?? [],
+        // THIS editor is already running its repo. Clicking that project on
+        // the launcher must come back here, not boot a second editor in the
+        // same directory (which the Next host's per-directory lock refuses).
+        // `canonicalRoot` is the directory the user opened, which is what the
+        // launcher's project list holds; `listenOrigin` is the URL the ready
+        // line printed.
+        runningEditors: [{ repoPath: ctx.canonicalRoot, url: ctx.listenOrigin }],
       })
     })()
     holder.current.catch(() => {
