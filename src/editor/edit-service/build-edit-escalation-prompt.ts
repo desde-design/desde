@@ -209,6 +209,36 @@ export function buildPropEditEscalationPrompt(edit: EscalationPropEdit): string 
 export const EDIT_HANDOFF_MARKER = "Hand-off from a direct edit."
 
 /**
+ * What a caller must do with the edit it was about to hand to chat, once the
+ * hand-off has answered.
+ *
+ * A hand-off can be REFUSED: with detached chat sessions off and a chat
+ * already streaming, `handleEditEscalation` returns `false` and nothing is
+ * submitted. Both `needsChat` call sites used to ignore that boolean and
+ * clear their buffer anyway, so the edit vanished. The prop path lost one
+ * value and reverted its optimistic preview later with no explanation; the
+ * save path dropped the whole bundle and still reported success.
+ *
+ * Pure, so the decision is testable without mounting the hook (which has no
+ * test harness). `what` is a short noun phrase naming the thing that was not
+ * sent, e.g. `The "title" edit` or `These 3 edits`.
+ */
+export type EscalationAftermath =
+  | { buffer: "clear" }
+  | { buffer: "keep"; status: string }
+
+export function afterEscalation(accepted: boolean, what: string): EscalationAftermath {
+  if (accepted) return { buffer: "clear" }
+  return {
+    buffer: "keep",
+    // Phrased so it reads the same for one edit and for a bundle: the caller
+    // supplies the noun phrase, and the rest of the sentence stays neutral
+    // about number.
+    status: `${what} could not be sent to chat. Nothing was discarded; try again when the chat finishes.`,
+  }
+}
+
+/**
  * Caps for the fields the hand-off copies out of the page and the applicator.
  * A selector, a component name, a file path and a refusal are all short by
  * nature; a snippet is not, so it gets its own, larger cap. Both are stated

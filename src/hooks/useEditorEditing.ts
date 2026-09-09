@@ -61,6 +61,7 @@ import {
 } from "./iteration-fallback"
 import { applyEditWithChatHandoff } from "./apply-edit-with-chat-handoff"
 import {
+  afterEscalation,
   buildEditEscalationPrompt,
   buildPropEditEscalationPrompt,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
@@ -2815,7 +2816,11 @@ export function useEditorEditing({
           const editTargetLocation = editTarget
             ? `${editTarget.file}:${editTarget.line}`
             : null
-          escalateToChatRef.current(
+          // The hand-off can be REFUSED (detached sessions off and a chat
+          // already streaming). Clearing the buffer on a refusal loses the
+          // value: nothing was submitted, nothing is on disk, and the
+          // optimistic override reverts later with no explanation.
+          const accepted = escalateToChatRef.current(
             buildPropEditEscalationPrompt({
               propName: current.propName,
               // Pass the raw value (string | number | boolean) so the
@@ -2827,6 +2832,14 @@ export function useEditorEditing({
               selector: current.target.selector,
             }),
           )
+          const aftermath = afterEscalation(
+            accepted,
+            `The "${current.propName}" edit`,
+          )
+          if (aftermath.buffer === "keep") {
+            setSaveStatus(aftermath.status)
+            return
+          }
           setPendingPropEdits((prev) => prev.filter((e) => e.id !== current.id))
           attrEditIdsRef.current.delete(current.id)
           pendingPropRenderSitesRef.current.delete(current.id)
@@ -4282,10 +4295,24 @@ export function useEditorEditing({
           // the chat agent and clear the dispatched mutations from the
           // buffer instead of surfacing a save error.
           if (result.needsChat && escalateToChatRef.current) {
-            escalateToChatRef.current(
+            // A refused hand-off (detached sessions off and a chat already
+            // streaming) submitted nothing. Dropping the bundle here and
+            // returning ok:true reported a successful Save for edits that
+            // were never written and no longer existed anywhere.
+            const accepted = escalateToChatRef.current(
               buildEditEscalationPrompt(normalizedMutations),
             )
+            const aftermath = afterEscalation(
+              accepted,
+              normalizedMutations.length === 1
+                ? "This edit"
+                : `These ${normalizedMutations.length} edits`,
+            )
             setSavePendingLLMInput(null)
+            if (aftermath.buffer === "keep") {
+              setSaveStatus(aftermath.status)
+              return { ok: false, reason: aftermath.status }
+            }
             const escalatedIds = new Set(normalizedMutations.map((m) => m.id))
             setMutations((prev) =>
               prev.filter((m) => !escalatedIds.has(m.id)),

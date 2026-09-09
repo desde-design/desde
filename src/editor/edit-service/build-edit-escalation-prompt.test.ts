@@ -7,6 +7,7 @@ import {
   EDIT_HANDOFF_MARKER,
   buildAmbiguousIterationHandoffPrompt,
   buildStructuralEditHandoffPrompt,
+  afterEscalation,
   type EscalationMutation,
 } from "./build-edit-escalation-prompt"
 
@@ -239,6 +240,32 @@ describe("buildStructuralEditHandoffPrompt", () => {
     expect(withDetail[whatIndex + 2]?.startsWith("- Source position:")).toBe(true)
 
     expect(buildStructuralEditHandoffPrompt(base)).not.toContain("- Details:")
+  })
+})
+
+describe("afterEscalation", () => {
+  it("clears the buffer only when the hand-off was accepted", () => {
+    expect(afterEscalation(true, 'The "title" edit')).toEqual({ buffer: "clear" })
+  })
+
+  it("keeps the buffer and says the edit is not lost when it was refused", () => {
+    const r = afterEscalation(false, 'The "title" edit')
+    expect(r.buffer).toBe("keep")
+    if (r.buffer !== "keep") return
+    expect(r.status).toBe(
+      'The "title" edit could not be sent to chat. Nothing was discarded; try again when the chat finishes.',
+    )
+    expect(r.status).not.toMatch(/—/) // no em dashes in copy
+    expect(r.status).not.toMatch(/\bmy?\b/i)
+  })
+
+  it("reads the same for a bundle as for one edit", () => {
+    const r = afterEscalation(false, "These 3 edits")
+    expect(r.buffer).toBe("keep")
+    if (r.buffer !== "keep") return
+    expect(r.status).toBe(
+      "These 3 edits could not be sent to chat. Nothing was discarded; try again when the chat finishes.",
+    )
   })
 })
 
