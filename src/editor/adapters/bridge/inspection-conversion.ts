@@ -118,11 +118,17 @@ export function validateIterationContext(value: unknown): IterationContextCheck 
  */
 export function sanitizeOutlineIterationContexts(roots: readonly OutlineNode[]): void {
   for (const node of roots) {
+    // The flag is OURS: this function is the only thing that sets it, and the
+    // wire never does. So it is cleared unconditionally, before the check,
+    // rather than only on the branch that has a context to re-check. A page
+    // that sets `iterationContextMalformed: true` on a node carrying no
+    // context would otherwise make every Layers delete on that node refuse,
+    // with nothing on the node for us to disagree with.
+    delete node.iterationContextMalformed
     if (node.iterationContext !== undefined) {
       const checked = validateIterationContext(node.iterationContext)
       if (checked.ok) {
         node.iterationContext = checked.value
-        delete node.iterationContextMalformed
       } else {
         delete node.iterationContext
         node.iterationContextMalformed = true

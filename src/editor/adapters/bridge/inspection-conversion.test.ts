@@ -399,4 +399,22 @@ describe("sanitizeOutlineIterationContexts", () => {
     expect(roots[0]!.iterationContextMalformed).toBeUndefined()
     expect(roots[0]!.iterationContext?.source).toBe("map")
   })
+
+  it("clears a page-set flag on a node that carries no context at all", () => {
+    // The flag is shell state. A page that sets it on the wire would
+    // otherwise make every Layers delete on that node refuse forever, with
+    // no context on the node for the validator to disagree with.
+    const roots = [
+      node({
+        id: "root",
+        iterationContextMalformed: true,
+        children: [node({ id: "child", iterationContextMalformed: true })],
+      }),
+    ]
+    sanitizeOutlineIterationContexts(roots)
+    expect(roots[0]!.iterationContextMalformed).toBeUndefined()
+    expect(roots[0]!.iterationContext).toBeUndefined()
+    expect(roots[0]!.children![0]!.iterationContextMalformed).toBeUndefined()
+    expect(roots[0]!.children![0]!.iterationContext).toBeUndefined()
+  })
 })
