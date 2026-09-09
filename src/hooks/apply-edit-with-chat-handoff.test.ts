@@ -82,6 +82,63 @@ describe("applyEditWithChatHandoff", () => {
     const r = await applyEditWithChatHandoff(deleteEdit(), adapter, undefined)
     expect(r.handoff).toMatchObject({ attempted: false, started: false })
   })
+
+  it("starts no chat when the bridge session ended while the apply was out", async () => {
+    // The apply spans a page reload. The refusal is about an element on a
+    // document that is gone; a turn told to "make this edit happen" would edit
+    // files for a page nobody is looking at. The refusal is still returned, so
+    // the caller can decide for itself whether to say anything.
+    const adapter = adapterReturning(refused)
+    const handOff = vi.fn(async () => true)
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, {
+      isStale: () => true,
+    })
+    expect(handOff).not.toHaveBeenCalled()
+    expect(r.result).toBe(refused)
+    expect(r.handoff).toEqual({
+      attempted: false,
+      started: false,
+      originalReason: refused.kind === "failed" ? refused.reason : "",
+    })
+  })
+
+  it("reads the session AFTER the apply, not before it", async () => {
+    // The whole point: the session is live at dispatch and ends during the
+    // round trip. A check taken at call time would still say "current" here.
+    let ended = false
+    const adapter = {
+      applyEdit: async () => {
+        ended = true
+        return refused
+      },
+    }
+    const handOff = vi.fn(async () => true)
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, {
+      isStale: () => ended,
+    })
+    expect(handOff).not.toHaveBeenCalled()
+    expect(r.handoff.attempted).toBe(false)
+  })
+
+  it("still hands off while the session is current, and asks only once", async () => {
+    const adapter = adapterReturning(refused)
+    const handOff = vi.fn(async () => true)
+    const isStale = vi.fn(() => false)
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, { isStale })
+    expect(handOff).toHaveBeenCalledTimes(1)
+    expect(isStale).toHaveBeenCalledTimes(1)
+    expect(r.handoff).toMatchObject({ attempted: true, started: true })
+  })
+
+  it("never asks about the session for an edit that applied", async () => {
+    // Nothing to hand off, so nothing to guard. Asking would suggest a
+    // successful write could be undone by a reload, which it cannot.
+    const adapter = adapterReturning(applied)
+    const isStale = vi.fn(() => true)
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, async () => true, { isStale })
+    expect(isStale).not.toHaveBeenCalled()
+    expect(r.result).toBe(applied)
+  })
 })
 
 describe("describeStructuralEditForHandoff", () => {

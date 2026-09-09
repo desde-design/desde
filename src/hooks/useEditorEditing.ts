@@ -885,13 +885,16 @@ export function useEditorEditing({
    * The ONE continuation for every `applyEditWithChatHandoff` call.
    *
    * Eleven call sites used to write the same three lines each, which is how a
-   * guard gets added to ten of them. Built at DISPATCH time so it captures the
-   * bridge session the edit belongs to, and silent when that session has ended
-   * before the answer came back: the status bar it would write to is either
-   * gone or is now describing a different page, and the edit it names was
-   * applied through an adapter nobody is looking at any more. The apply itself
-   * is not in question here — `applyEditWithChatHandoff` holds its own adapter
-   * reference and has already finished with it. Only the report is dropped.
+   * guard gets added to ten of them. They now share `applyEditThenReport`
+   * below, which is the only caller of this.
+   *
+   * Built at DISPATCH time so it captures the bridge session the edit belongs
+   * to, and silent when that session has ended before the answer came back: the
+   * status bar it would write to is either gone or is now describing a
+   * different page, and the edit it names was applied through an adapter nobody
+   * is looking at any more. The apply itself is not in question here —
+   * `applyEditWithChatHandoff` holds its own adapter reference and has already
+   * finished with it. Only the report is dropped.
    */
   const reportEditOutcome = useCallback((kindLabel: string) => {
     const generation = adapterGenerationRef.current
@@ -908,6 +911,36 @@ export function useEditorEditing({
       if (outcome.message) setSaveStatus(outcome.message)
     }
   }, [])
+
+  /**
+   * THE dispatch for a structural edit: apply it, hand a refusal to chat, then
+   * report — with one captured bridge session governing all three.
+   *
+   * The eleven call sites called `applyEditWithChatHandoff(...).then(report)`
+   * themselves, and that shape had the guard in the wrong place. The report was
+   * guarded; the HAND-OFF was not, and the hand-off is the half that acts. An
+   * apply that spans a page reload could still start a chat turn saying "make
+   * this edit happen" about an element on a document that no longer exists, and
+   * the caller's guard only ran on the result the turn had already been started
+   * for.
+   *
+   * So the session is captured ONCE, here, and read twice: by `isStale` before
+   * the hand-off, and by the continuation before the status. Capturing it in
+   * two places would be capturing it at two moments.
+   */
+  const applyEditThenReport = useCallback(
+    (
+      edit: StructuralEdit,
+      adapter: Pick<BridgeFrameworkAdapter, "applyEdit">,
+      kindLabel: string,
+    ): void => {
+      const generation = adapterGenerationRef.current
+      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current, {
+        isStale: () => isStaleGeneration(generation, adapterGenerationRef.current),
+      }).then(reportEditOutcome(kindLabel))
+    },
+    [reportEditOutcome],
+  )
 
   /**
    * Phase 6 — multi-select. Resolves each selector via the adapter
@@ -1053,9 +1086,9 @@ export function useEditorEditing({
       // refusal we hand the edit off to chat (a new session, with the
       // selector and the refusal text) so cycle / coordinate-drift refusals
       // don't dead-end the user.
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Move"))
+      applyEditThenReport(edit, adapter, "Move")
     },
-    [reportEditOutcome],
+    [applyEditThenReport],
   )
 
   /**
@@ -1107,8 +1140,8 @@ export function useEditorEditing({
     }
     // Drag-move dispatches immediately, like every other edit (branch mode
     // is the only editor edit substrate).
-    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Move"))
-  }, [reportEditOutcome])
+    applyEditThenReport(edit, adapter, "Move")
+  }, [applyEditThenReport])
 
   const handleLayerMoveRefused = useCallback((reason: LayersDropRefusal) => {
     // The layers panel silently rejects most invalid drops (returns false
@@ -1325,9 +1358,9 @@ export function useEditorEditing({
         removeFromImport: false,
       }
       // Immediate dispatch (see Move handler).
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Swap"))
+      applyEditThenReport(edit, adapter, "Swap")
     },
-    [reportEditOutcome],
+    [applyEditThenReport],
   )
 
   // Icon picker — dispatches a SwapEdit (kind: 'swap') with identity
@@ -1400,9 +1433,9 @@ export function useEditorEditing({
       // and selection updates to the swapped-in icon, so a subsequent pick
       // sees the right fromComponentName naturally — no buffering or replace
       // logic needed.
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Icon swap"))
+      applyEditThenReport(edit, adapter, "Icon swap")
     },
-    [reportEditOutcome],
+    [applyEditThenReport],
   )
 
   const handleDetach = useCallback(() => {
@@ -1425,8 +1458,8 @@ export function useEditorEditing({
       componentFile: selection.componentFile,
     }
     // Immediate dispatch (see Move handler).
-    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Detach"))
-  }, [reportEditOutcome])
+    applyEditThenReport(edit, adapter, "Detach")
+  }, [applyEditThenReport])
 
   // Layers-panel insert (right-click → "Insert child…"). Targets a
   // specific OutlineNode as the destination PARENT and buffers an
@@ -1462,9 +1495,9 @@ export function useEditorEditing({
         snippet,
       }
       // Immediate dispatch (see Move handler).
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Insert"))
+      applyEditThenReport(edit, adapter, "Insert")
     },
-    [reportEditOutcome],
+    [applyEditThenReport],
   )
 
   // Phase 3 — insert-at-point: the pending palette snippet while the bridge is
@@ -1520,9 +1553,9 @@ export function useEditorEditing({
       // insert-at-point announces a hand-off but not a success. It shares the
       // common one: `describeEditOutcome` gives success a null message, so
       // "not success" and "has a message" are the same set.
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Insert"))
+      applyEditThenReport(edit, adapter, "Insert")
     },
-    [reportEditOutcome],
+    [applyEditThenReport],
   )
 
   // Dispatches a DeleteEdit immediately (branch mode — see Move handler)
@@ -1552,9 +1585,9 @@ export function useEditorEditing({
       // editing in place — `:last-child` and other structural CSS recompute
       // against the real new DOM (the source changed and Vite HMR'd), not
       // against a `display:none` overlay that lies about the tree.
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Delete"))
+      applyEditThenReport(edit, adapter, "Delete")
     },
-    [reportEditOutcome],
+    [applyEditThenReport],
   )
 
   // Layers-panel delete (right-click → "Delete"). When the element lives
@@ -1646,8 +1679,8 @@ export function useEditorEditing({
       },
     }
     // Immediate dispatch (see Move handler).
-    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Unwrap"))
-  }, [reportEditOutcome])
+    applyEditThenReport(edit, adapter, "Unwrap")
+  }, [applyEditThenReport])
 
   // Layers-panel flatten-conditional. Collapses a v-if chain down to a
   // single chosen branch. V1 only exposes "this branch" (v-if itself,
@@ -1673,9 +1706,9 @@ export function useEditorEditing({
         branchToKeep,
       }
       // Immediate dispatch (see Move handler).
-      void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Flatten"))
+      applyEditThenReport(edit, adapter, "Flatten")
     },
-    [reportEditOutcome],
+    [applyEditThenReport],
   )
 
   // Layers-panel detach (right-click → "Detach component"). Same buffer
@@ -1699,8 +1732,8 @@ export function useEditorEditing({
       componentFile: node.componentFile,
     }
     // Immediate dispatch (see Move handler).
-    void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current).then(reportEditOutcome("Detach"))
-  }, [reportEditOutcome])
+    applyEditThenReport(edit, adapter, "Detach")
+  }, [applyEditThenReport])
 
   // Prop edits accumulate here. The bridge gets an APPLY_PROP_OVERRIDE /
   // APPLY_ATTR_OVERRIDE for each so the iframe shows the change live; a

@@ -156,6 +156,26 @@ export function describeStructuralEditForHandoff(
   }
 }
 
+export interface ApplyEditWithChatHandoffOptions {
+  /**
+   * Has the bridge session this edit was dispatched under ended?
+   *
+   * Consulted ONCE, after the apply and before the hand-off. The apply itself
+   * is never in question: it is already running against the adapter the caller
+   * handed over, and abandoning it half-way would leave a write in an unknown
+   * state. The hand-off is different. It starts a chat turn that says "make
+   * this edit happen" about an element on a page that is gone, and the turn
+   * then edits files for a document nobody is looking at.
+   *
+   * The caller's own guard cannot cover this: it runs on the RESULT, so by the
+   * time it says "stale" the chat turn has already been started.
+   *
+   * Absent means "no session to speak of", which is how the pure tests and any
+   * caller without a bridge session call it.
+   */
+  isStale?: () => boolean
+}
+
 export async function applyEditWithChatHandoff(
   edit: StructuralEdit,
   adapter: Pick<BridgeFrameworkAdapter, "applyEdit">,
@@ -164,10 +184,16 @@ export async function applyEditWithChatHandoff(
   // already said yes. A synchronous `true` here was a promise the transport
   // had not made, and every caller cleared its buffer on it.
   handOff: ((prompt: string) => Promise<boolean>) | undefined,
+  options: ApplyEditWithChatHandoffOptions = {},
 ): Promise<{ result: EditResult; handoff: ChatHandoffOutcome }> {
   const initial = await adapter.applyEdit(edit)
   if (initial.kind !== "failed") {
     return { result: initial, handoff: { attempted: false, started: false } }
+  }
+  // The page this edit was made on is no longer the page on screen. Report the
+  // refusal to a caller that will itself drop it, and start nothing.
+  if (options.isStale?.()) {
+    return { result: initial, handoff: { attempted: false, started: false, originalReason: initial.reason } }
   }
   // A policy refusal is not something the agent can read its way out of, and
   // the hand-off tells the agent to make the edit happen. Report it as a
