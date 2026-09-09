@@ -19,9 +19,15 @@
  * `iteration-text-limits.ts` by relative path, and it must stay loadable from
  * both a browser bundle and a Node process.
  *
- * Written with escapes rather than literal control characters so the class
- * reads as a class. (`no-control-regex` would care about the difference, but
- * that rule is not enabled in this repo.)
+ * The class is written with escapes, so it needs no lint suppression. That is
+ * a property of how it is written, not a change anyone made to it: it has
+ * always been escapes. `no-control-regex` is the rule that would care, and it
+ * is NOT enabled in this repo (`npx eslint --print-config` on this file
+ * reports it absent; the config is `eslint-config-next` only, with no
+ * `eslint:recommended`). The `eslint-disable-next-line no-control-regex`
+ * directive that used to sit above the old copy of this class was therefore
+ * unused, and an unused directive is itself a warning at this repo's bar,
+ * which is what made it worth removing.
  */
 
 const CONTROL_CHARACTER_CLASS = "[\\u0000-\\u001F\\u007F-\\u009F\\u2028\\u2029]"
