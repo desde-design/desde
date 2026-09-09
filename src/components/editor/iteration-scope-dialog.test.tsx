@@ -168,5 +168,64 @@ describe("IterationScopeDialog", () => {
       ).toBeInTheDocument()
       expect(screen.queryByText(/Goes to chat/i)).toBeNull()
     })
+
+    /**
+     * "All items" edits the shared template, and WHAT that edit is depends on
+     * which element in the template was picked. On the loop element it is the
+     * loop. On something nested inside a row it is that element in every item,
+     * and every item goes on rendering. The plain hints described only the
+     * first, so this card promised the set would disappear when one label
+     * inside each item was about to.
+     */
+    it("says a delete takes the element out of every item, not the loop", () => {
+      render(<IterationScopeDialog {...defaultProps()} clickedInsideItem />)
+      const allItems = screen.getByTestId("iteration-scope-all-rows")
+      expect(
+        within(allItems).getByText(
+          "Removes this element from every item. The items themselves stay.",
+        ),
+      ).toBeInTheDocument()
+      expect(screen.queryByText(/Removes the loop that renders them/i)).toBeNull()
+    })
+
+    it("says a move moves the element within every item, not the whole set", () => {
+      render(
+        <IterationScopeDialog {...defaultProps()} editKind="move" clickedInsideItem />,
+      )
+      const allItems = screen.getByTestId("iteration-scope-all-rows")
+      expect(
+        within(allItems).getByText("Moves this element within every item."),
+      ).toBeInTheDocument()
+      expect(screen.queryByText(/Moves the whole set/i)).toBeNull()
+    })
+
+    it("leaves the all-items hint alone for the kinds that name a field", () => {
+      // `prop` and `dom-text` write one named field of the shared template
+      // either way, so nesting does not change what the edit is.
+      render(
+        <IterationScopeDialog {...defaultProps()} editKind="prop" clickedInsideItem />,
+      )
+      expect(screen.getByText(/Changes the loop itself/i)).toBeInTheDocument()
+    })
+
+    it("shows the ordinary all-items hint when the click was on the item itself", () => {
+      render(<IterationScopeDialog {...defaultProps()} />)
+      expect(
+        screen.getByText(/Removes the loop that renders them/i),
+      ).toBeInTheDocument()
+      expect(screen.queryByText(/from every item/i)).toBeNull()
+    })
+
+    it("neither nested hint uses an em dash or the first person", () => {
+      for (const editKind of ["delete", "move"] as const) {
+        const { unmount } = render(
+          <IterationScopeDialog {...defaultProps()} editKind={editKind} clickedInsideItem />,
+        )
+        const hint = screen.getByTestId("iteration-scope-all-rows").textContent ?? ""
+        expect(hint).not.toMatch(/—/)
+        expect(hint).not.toMatch(/\b(me|my)\b/i)
+        unmount()
+      }
+    })
   })
 })

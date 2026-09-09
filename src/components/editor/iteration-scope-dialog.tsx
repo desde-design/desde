@@ -97,6 +97,23 @@ const EDIT_LABELS: Record<IterationEditKind, {
    */
   thisItemChatHint?: string
   allItemsHint: string
+  /**
+   * The hint shown INSTEAD of `allItemsHint` when the picked element sits
+   * inside the item rather than being the item.
+   *
+   * "All items" edits the shared template, and what that DOES depends on which
+   * element in the template was picked. On the loop element it is the loop:
+   * deleting removes the loop, moving moves the whole set. On something nested
+   * inside a row it is that element in every item, and every item keeps
+   * rendering. The two are different edits and the plain hint described only
+   * the first, so a designer reading it would have expected the set to vanish
+   * when one label inside each item was about to.
+   *
+   * Only `delete` and `move` have one, for the same reason as
+   * {@link thisItemChatHint}: they are the kinds whose effect changes with the
+   * element. `prop` and `dom-text` name a field either way.
+   */
+  allItemsNestedHint?: string
 }> = {
   delete: {
     title: "Delete this item or all items?",
@@ -111,6 +128,7 @@ const EDIT_LABELS: Record<IterationEditKind, {
       "Goes to chat. What you picked sits inside the item, so removing it from the data would remove the whole item.",
     allItemsHint:
       "Removes the loop that renders them, so nothing will show here, including items added later.",
+    allItemsNestedHint: "Removes this element from every item. The items themselves stay.",
   },
   prop: {
     title: "Change this item or all items?",
@@ -142,6 +160,7 @@ const EDIT_LABELS: Record<IterationEditKind, {
     thisItemChatHint:
       "Goes to chat. What you picked sits inside the item, so reordering the data would move the whole item instead.",
     allItemsHint: "Moves the whole set on the page, relative to what's around it.",
+    allItemsNestedHint: "Moves this element within every item.",
   },
   // Spec only: `PendingIterationEdit` has no `insert` (or `duplicate`) variant,
   // so nothing can open the dialog with these kinds today. Kept so the
@@ -191,6 +210,17 @@ interface IterationScopeDialogProps {
    * Only `delete` and `move` can set it.
    */
   thisItemGoesToChat?: boolean
+  /**
+   * The picked element sits INSIDE the item, as the loop check established.
+   * Changes what "All items" means: the shared template edit lands on that
+   * element in every item, and every item goes on rendering.
+   *
+   * Separate from {@link thisItemGoesToChat}, which is the gate. The gate
+   * fails closed and so is also true when a position is missing; this one is
+   * only ever true when the nesting was actually measured, because it is the
+   * basis of a sentence describing what will happen.
+   */
+  clickedInsideItem?: boolean
   /** Designer picked a scope. `remember` is the checkbox state at submit. */
   onConfirm: (scope: IterationScope, remember: boolean) => void
   /** Designer dismissed — no edit is buffered. */
@@ -203,6 +233,7 @@ export function IterationScopeDialog({
   siblingCount,
   rowIndex,
   thisItemGoesToChat = false,
+  clickedInsideItem = false,
   onConfirm,
   onCancel,
 }: IterationScopeDialogProps) {
@@ -218,6 +249,13 @@ export function IterationScopeDialog({
     thisItemGoesToChat && labels.thisItemChatHint
       ? labels.thisItemChatHint
       : labels.thisItemHint(siblingCount)
+  // Same substitution on the other card, for the same reason: with a nested
+  // element picked, "Removes the loop that renders them" and "Moves the whole
+  // set" are both descriptions of an edit this dialog will not make.
+  const allItemsHint =
+    clickedInsideItem && labels.allItemsNestedHint
+      ? labels.allItemsNestedHint
+      : labels.allItemsHint
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onCancel()}>
@@ -252,7 +290,7 @@ export function IterationScopeDialog({
           <OptionCard
             value="all-rows"
             title={labels.allItems}
-            hint={labels.allItemsHint}
+            hint={allItemsHint}
             data-testid="iteration-scope-all-rows"
           />
         </OptionCardGroup>
