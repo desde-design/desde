@@ -2120,6 +2120,29 @@ export function useEditorEditing({
   )
 
   /**
+   * Put a bridge draft we are holding into the deterministic disambiguation
+   * queue, and say why in the status bar.
+   *
+   * Two callers, and they differ only in where the draft comes from. The
+   * iteration lane looks its own up by pendingId
+   * ({@link parkDraftForDeterministicFallback}); the pending-disambiguation
+   * refusal already HAS the bridge's payload in hand, because it runs at the
+   * moment the bridge delivers it.
+   *
+   * The queue owns the draft from here: the dialog's confirm and its cancel
+   * both resolve it with the bridge, so nothing else may park or release it.
+   * Both maps are cleared for that reason.
+   */
+  const parkHeldBridgeDraft = useCallback((held: PendingMutation, reason: string) => {
+    bridgeDraftsByPendingIdRef.current.delete(held.pendingId)
+    latestPendingByDraftRef.current.delete(held.pendingId)
+    setPendingDisambiguations((prev) =>
+      prev.some((existing) => existing.pendingId === held.pendingId) ? prev : [...prev, held],
+    )
+    setSaveStatus(reason)
+  }, [])
+
+  /**
    * The iteration lane could not land this edit. Hand the bridge's held draft
    * to the deterministic disambiguation dialog instead of cancelling it.
    *
@@ -2139,17 +2162,10 @@ export function useEditorEditing({
       if (!draftId) return false
       const held = bridgeDraftsByPendingIdRef.current.get(draftId)
       if (!held) return false
-      // The disambiguation queue owns the draft from here; its confirm and
-      // cancel both resolve it with the bridge.
-      bridgeDraftsByPendingIdRef.current.delete(draftId)
-      latestPendingByDraftRef.current.delete(draftId)
-      setPendingDisambiguations((prev) =>
-        prev.some((existing) => existing.pendingId === held.pendingId) ? prev : [...prev, held],
-      )
-      setSaveStatus(reason)
+      parkHeldBridgeDraft(held, reason)
       return true
     },
-    [],
+    [parkHeldBridgeDraft],
   )
 
   /**
@@ -3871,17 +3887,25 @@ export function useEditorEditing({
       // Same refusal as every other entry point (see `iterationRouteFor`),
       // with two differences. It is SCOPED by the same source-position gate
       // the iteration route below uses, because only then does the selection
-      // describe this mutation at all: a drifted selection must not cancel a
-      // draft it has nothing to do with. And it must cancel, not just return:
-      // the bridge is holding a draft for this pendingId, and an orphaned
-      // draft blocks Save behind `handleSaveAll`'s gate forever.
+      // describe this mutation at all: a drifted selection must not disturb a
+      // draft it has nothing to do with. And it cannot simply return: the
+      // bridge is holding a draft for this pendingId, and an orphaned draft
+      // blocks Save behind `handleSaveAll`'s gate forever.
+      //
+      // So it PARKS rather than cancels. Cancelling would throw away what the
+      // designer typed in the page, and the in-page contentEditable path has
+      // no preview ops to revert, so the page would go on showing text that
+      // reached no file. Refusing the ITERATION route is not the same as
+      // refusing the edit: the deterministic "this instance / all instances"
+      // question is still answerable, and the queue below is where it is
+      // asked. Same rule as the iteration lane's own failures
+      // (`parkDraftForDeterministicFallback`).
       if (
         iterationRouteFor(selection) === "refuse" &&
         selectionLoc !== null &&
         selectionLoc === p.draft.sourceLoc
       ) {
-        adapter.resolveMutationDisambiguation(p.pendingId, "cancel")
-        setSaveStatus(MALFORMED_ITERATION_STATUS)
+        parkHeldBridgeDraft(p, MALFORMED_ITERATION_STATUS)
         return
       }
       // Built as a nullable PAYLOAD rather than a bare boolean so TypeScript
@@ -4115,6 +4139,7 @@ export function useEditorEditing({
     handleDragMove,
     handleInsertAtPoint,
     handleResize,
+    parkHeldBridgeDraft,
   ])
 
   /**
