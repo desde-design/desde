@@ -4,7 +4,12 @@
  * around the "this item or all items" prompt can be unit-tested without
  * mounting the hook.
  */
-import type { IterationContext, Selection, SourceLocation } from "@/editor/core"
+import type {
+  IterationContext,
+  PendingMutation,
+  Selection,
+  SourceLocation,
+} from "@/editor/core"
 import type { IterationScope } from "@/components/editor/iteration-scope-dialog"
 import type { LayersMovePayload } from "@/components/editor/layers-panel"
 import type { PropControlValue } from "@/components/editor/prop-control"
@@ -601,11 +606,52 @@ export function promptCollision(
 /**
  * A park the iteration lane owes but is holding back, because performing it
  * now would open a second modal on top of the one the designer is answering.
+ *
+ * Two variants, because two kinds of caller park a draft. The iteration lane
+ * names the edit it was working on, so the flush can look the bridge's payload
+ * up again and notice that the draft went away meanwhile. The bridge-delivery
+ * refusal already HAS the payload in hand, because it runs at the moment the
+ * bridge offers it and before anything records it anywhere.
  */
-export interface DeferredPark {
-  pending: PendingIterationEdit
-  /** The status the park will show when it finally happens. */
-  reason: string
+export type DeferredPark =
+  | {
+      kind: "iteration"
+      pending: PendingIterationEdit
+      /** The status the park will show when it finally happens. */
+      reason: string
+    }
+  | {
+      kind: "held"
+      held: PendingMutation
+      /** The status the park will show when it finally happens. */
+      reason: string
+    }
+
+/**
+ * Which draft a queued park is about, or null when it is about none.
+ *
+ * The two variants name the same thing two ways: the bridge's `pendingId` IS
+ * the iteration edit's `bridgePendingId`. Reducing both to one key is what
+ * lets the queue hold one entry per draft no matter which caller queued it.
+ */
+function deferredParkDraftId(entry: DeferredPark): string | undefined {
+  return entry.kind === "held" ? entry.held.pendingId : bridgeDraftIdOf(entry.pending)
+}
+
+/**
+ * Should a park happen now, or wait for the open question to be answered?
+ *
+ * Parking puts an edit into the deterministic disambiguation queue, and that
+ * queue opens its dialog on its own the moment it is non-empty. With a scope
+ * prompt already up, the newcomer's dialog therefore lands ON TOP of the
+ * question the designer is being asked. So every park in the hook asks this
+ * first, and there is exactly one of it so that a new failure exit cannot
+ * quietly skip the check.
+ */
+export type ParkDecision = "park-now" | "defer"
+
+export function parkDecision(promptOpen: boolean): ParkDecision {
+  return promptOpen ? "defer" : "park-now"
 }
 
 /**
@@ -630,6 +676,10 @@ export const DEFERRED_PARK_STATUS =
  * that decides it everywhere else; anything without a draft never reaches
  * here, because `promptCollision` drops those instead of parking them.
  *
+ * The match is on the DRAFT, not on the variant, so a bridge-delivery refusal
+ * and an iteration failure about the same draft collapse to one entry rather
+ * than parking the same edit twice.
+ *
  * Pure, and returns a new array rather than mutating, so the queue decision is
  * testable without the hook.
  */
@@ -637,10 +687,14 @@ export function queueDeferredPark(
   queue: readonly DeferredPark[],
   entry: DeferredPark,
 ): DeferredPark[] {
+  const draftId = deferredParkDraftId(entry)
   const at = queue.findIndex(
     (existing) =>
-      existing.pending === entry.pending ||
-      sameBridgeDraft(existing.pending, entry.pending),
+      (existing.kind === "iteration" &&
+        entry.kind === "iteration" &&
+        (existing.pending === entry.pending ||
+          sameBridgeDraft(existing.pending, entry.pending))) ||
+      (draftId !== undefined && deferredParkDraftId(existing) === draftId),
   )
   if (at === -1) return [...queue, entry]
   const next = queue.slice()

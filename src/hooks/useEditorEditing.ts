@@ -121,6 +121,7 @@ import {
   handOffFailureStatus,
   isStaleVerify,
   iterationRouteFor,
+  parkDecision,
   parkedReason,
   promptCollision,
   PROMPT_BUSY_STATUS,
@@ -2193,11 +2194,12 @@ export function useEditorEditing({
    * Put a bridge draft we are holding into the deterministic disambiguation
    * queue, and say why in the status bar.
    *
-   * Two callers, and they differ only in where the draft comes from. The
-   * iteration lane looks its own up by pendingId
-   * ({@link parkDraftForDeterministicFallback}); the pending-disambiguation
-   * refusal already HAS the bridge's payload in hand, because it runs at the
-   * moment the bridge delivers it.
+   * The one write into `pendingDisambiguations` that a park makes, and the
+   * only place in the hook that pushes to that queue outside the bridge's own
+   * delivery route. Nothing calls it from a failure exit: the exits go through
+   * {@link parkOrDefer} or {@link parkHeldOrDefer}, which decide whether a park
+   * may happen at all right now. Its callers are those two, the immediate park
+   * they share ({@link parkDraftForDeterministicFallback}), and the flush.
    *
    * The queue owns the draft from here: the dialog's confirm and its cancel
    * both resolve it with the bridge, so nothing else may park or release it.
@@ -2225,6 +2227,12 @@ export function useEditorEditing({
    *
    * Returns false when there is nothing to park (no draft, or the bridge's
    * payload was never recorded), so the caller can fall back to releasing.
+   *
+   * IMMEDIATE, and its only caller is {@link flushDeferredParks}. Everything
+   * else goes through {@link parkOrDefer}, which asks whether a scope prompt is
+   * open first. Calling this one directly from a failure exit is the defect
+   * `parkDecision` exists to make impossible: it stacks the deterministic
+   * dialog on top of the question the designer is answering.
    */
   const parkDraftForDeterministicFallback = useCallback(
     (pending: PendingIterationEdit, reason: string): boolean => {
@@ -2239,23 +2247,93 @@ export function useEditorEditing({
   )
 
   /**
+   * THE park choke point for the iteration lane. Park the bridge's held draft
+   * now, or queue it behind the scope prompt that is currently open.
+   *
+   * Every failure exit in the lane calls this and nothing calls
+   * {@link parkDraftForDeterministicFallback} directly, because the decision is
+   * the same one at all of them and the exits are added one at a time. Three of
+   * them (a failed loop check, a refused hand-off, a failed row write) parked
+   * immediately until round 9, so a second edit made while a prompt was open
+   * stacked the deterministic dialog over that prompt.
+   *
+   * Returns true when this call has taken ownership of the draft, by either
+   * route, so the caller must not release it. False means there was nothing
+   * held to park and the caller should say why itself.
+   */
+  const parkOrDefer = useCallback(
+    (pending: PendingIterationEdit, reason: string): boolean => {
+      const draftId = bridgeDraftIdOf(pending)
+      // Deferring an edit with no held draft would queue a park that can never
+      // happen, and the flush would report it with the wrong sentence. The
+      // caller's own message is the right one, so hand it back.
+      if (!draftId || !bridgeDraftsByPendingIdRef.current.has(draftId)) return false
+      if (parkDecision(iterationScopePromptRef.current !== null) === "park-now") {
+        return parkDraftForDeterministicFallback(pending, reason)
+      }
+      deferredParksRef.current = queueDeferredPark(deferredParksRef.current, {
+        kind: "iteration",
+        pending,
+        reason,
+      })
+      setSaveStatus(DEFERRED_PARK_STATUS)
+      return true
+    },
+    [parkDraftForDeterministicFallback],
+  )
+
+  /**
+   * {@link parkOrDefer} for a draft the bridge is offering right now, which the
+   * shell is refusing before anything has recorded it.
+   *
+   * Same decision, different input: this caller HAS the payload and there is
+   * nothing to look up. It is here rather than calling `parkHeldBridgeDraft`
+   * directly because the modal-stacking the decision prevents does not care
+   * which of the two produced the park.
+   */
+  const parkHeldOrDefer = useCallback(
+    (held: PendingMutation, reason: string) => {
+      if (parkDecision(iterationScopePromptRef.current !== null) === "park-now") {
+        parkHeldBridgeDraft(held, reason)
+        return
+      }
+      deferredParksRef.current = queueDeferredPark(deferredParksRef.current, {
+        kind: "held",
+        held,
+        reason,
+      })
+      setSaveStatus(DEFERRED_PARK_STATUS)
+    },
+    [parkHeldBridgeDraft],
+  )
+
+  /**
    * Perform the parks that were held back while the scope prompt was open.
    *
-   * Called from both of the prompt's exits. The queue is emptied BEFORE any
-   * park runs, so a park that itself sets state cannot see a queue it is still
-   * in. A draft that has since gone (the bridge no longer holds it) falls back
-   * to the same release the immediate path used.
+   * Called from the prompt's single close path ({@link closeIterationPrompt})
+   * and from adapter teardown. The queue is emptied BEFORE any park runs, so a
+   * park that itself sets state cannot see a queue it is still in. A draft that
+   * has since gone (the bridge no longer holds it) falls back to the same
+   * release the immediate path used.
+   *
+   * These parks are IMMEDIATE by construction: the flush runs only once the
+   * prompt is closed or is being torn down, and routing them back through
+   * `parkOrDefer` would let a queue re-defer into itself.
    */
   const flushDeferredParks = useCallback(() => {
     const queued = deferredParksRef.current
     if (queued.length === 0) return
     deferredParksRef.current = []
     for (const entry of queued) {
+      if (entry.kind === "held") {
+        parkHeldBridgeDraft(entry.held, entry.reason)
+        continue
+      }
       if (parkDraftForDeterministicFallback(entry.pending, entry.reason)) continue
       releaseBridgeDraft(entry.pending)
       setSaveStatus(PROMPT_BUSY_STATUS)
     }
-  }, [parkDraftForDeterministicFallback, releaseBridgeDraft])
+  }, [parkDraftForDeterministicFallback, parkHeldBridgeDraft, releaseBridgeDraft])
 
   /**
    * The terminal step for an iteration edit that will NOT be applied: park the
@@ -2275,14 +2353,14 @@ export function useEditorEditing({
    */
   const releaseOrPark = useCallback(
     (pending: PendingIterationEdit, message: string): void => {
-      const parked = parkDraftForDeterministicFallback(pending, parkedReason(message))
-      // `parkHeldBridgeDraft` sets its own status, so only the release path
-      // states the reason here.
+      const parked = parkOrDefer(pending, parkedReason(message))
+      // Both park routes set their own status, so only the release path states
+      // the reason here.
       if (parked) return
       releaseBridgeDraft(pending)
       setSaveStatus(message)
     },
-    [parkDraftForDeterministicFallback, releaseBridgeDraft],
+    [parkOrDefer, releaseBridgeDraft],
   )
 
   /**
@@ -2383,7 +2461,7 @@ export function useEditorEditing({
         // because these reasons come from three places (our own literals, an
         // applicator's refusal text, a server's 400 body) and not all of them
         // end in punctuation.
-        const parked = parkDraftForDeterministicFallback(pending, parkedReason(message))
+        const parked = parkOrDefer(pending, parkedReason(message))
         if (!parked) setSaveStatus(message)
       }
 
@@ -2435,7 +2513,7 @@ export function useEditorEditing({
           return
         }
         const failure = handOffFailureStatus(outcome)
-        if (!parkDraftForDeterministicFallback(pending, failure.parked)) {
+        if (!parkOrDefer(pending, failure.parked)) {
           setSaveStatus(failure.released)
         }
         return
@@ -2700,7 +2778,7 @@ export function useEditorEditing({
             // is a worse question than the agent would have asked, but it is
             // answerable.
             const failure = handOffFailureStatus(outcome)
-            const parked = parkDraftForDeterministicFallback(pending, failure.parked)
+            const parked = parkOrDefer(pending, failure.parked)
             if (!parked) {
               releaseBridgeDraft(pending)
               setSaveStatus(failure.released)
@@ -2750,13 +2828,23 @@ export function useEditorEditing({
             // DEFERRED, not parked now. Parking fills `pendingDisambiguations`,
             // which opens that dialog on its own, and it would open on top of
             // the scope dialog the designer is being asked to answer. This arm
-            // is only ever reached with that prompt open, so the park always
-            // waits; `flushDeferredParks` runs it when the prompt closes.
-            deferredParksRef.current = queueDeferredPark(deferredParksRef.current, {
-              pending: verified,
-              reason: parkedReason("Another edit is waiting for a scope choice"),
-            })
-            setSaveStatus(DEFERRED_PARK_STATUS)
+            // is only ever reached with that prompt open, so `parkOrDefer`
+            // always defers here; `flushDeferredParks` runs it when the prompt
+            // closes. It goes through the choke point rather than queueing
+            // directly so this arm and the failure exits cannot drift apart.
+            if (
+              !parkOrDefer(
+                verified,
+                parkedReason("Another edit is waiting for a scope choice"),
+              )
+            ) {
+              // `promptCollision` only returns this arm for an edit with a
+              // draft id, but the bridge's payload for it can have gone
+              // (released by a stale completion) between then and here. Then
+              // there is nothing to hold, which is the same situation the
+              // drop-incoming arm below reports.
+              setSaveStatus(PROMPT_BUSY_STATUS)
+            }
             return
           }
           setSaveStatus(PROMPT_BUSY_STATUS)
@@ -2786,7 +2874,7 @@ export function useEditorEditing({
     },
     [
       dispatchIterationEdit,
-      parkDraftForDeterministicFallback,
+      parkOrDefer,
       releaseBridgeDraft,
       releaseBridgeDraftUnlessShared,
       releaseOrPark,
@@ -4139,13 +4227,15 @@ export function useEditorEditing({
       // refusing the edit: the deterministic "this instance / all instances"
       // question is still answerable, and the queue below is where it is
       // asked. Same rule as the iteration lane's own failures
-      // (`parkDraftForDeterministicFallback`).
+      // (`parkOrDefer`). DEFERRED when a scope prompt is open, for the same
+      // reason the lane's own parks are: the deterministic dialog opens itself
+      // and would land on top of the question being asked.
       if (
         iterationRouteFor(selection) === "refuse" &&
         selectionLoc !== null &&
         selectionLoc === p.draft.sourceLoc
       ) {
-        parkHeldBridgeDraft(p, MALFORMED_ITERATION_STATUS)
+        parkHeldOrDefer(p, MALFORMED_ITERATION_STATUS)
         return
       }
       // Built as a nullable PAYLOAD rather than a bare boolean so TypeScript
@@ -4379,7 +4469,7 @@ export function useEditorEditing({
     handleDragMove,
     handleInsertAtPoint,
     handleResize,
-    parkHeldBridgeDraft,
+    parkHeldOrDefer,
   ])
 
   /**

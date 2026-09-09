@@ -18,6 +18,7 @@ import {
   parkedReason,
   promptCollision,
   PROMPT_BUSY_STATUS,
+  parkDecision,
   queueDeferredPark,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
@@ -255,15 +256,15 @@ describe("queueDeferredPark", () => {
   }
 
   it("appends a park for a draft the queue does not hold yet", () => {
-    const first = { pending: domText("p-1"), reason: "one" }
-    const second = { pending: domText("p-2"), reason: "two" }
+    const first = { kind: "iteration" as const, pending: domText("p-1"), reason: "one" }
+    const second = { kind: "iteration" as const, pending: domText("p-2"), reason: "two" }
     const queue = queueDeferredPark(queueDeferredPark([], first), second)
     expect(queue).toEqual([first, second])
   })
 
   it("does not mutate the queue it is given", () => {
     const queue: ReturnType<typeof queueDeferredPark> = []
-    queueDeferredPark(queue, { pending: domText("p-1"), reason: "one" })
+    queueDeferredPark(queue, { kind: "iteration" as const, pending: domText("p-1"), reason: "one" })
     expect(queue).toEqual([])
   })
 
@@ -272,9 +273,9 @@ describe("queueDeferredPark", () => {
     // trip rebuilds the pending object and re-collides. The queue must end up
     // with the LATEST text once, not the first keystroke plus a stack of
     // duplicates.
-    const other = { pending: domText("p-2"), reason: "other" }
-    const early = { pending: domText("p-1", "Hell"), reason: "early" }
-    const late = { pending: domText("p-1", "Hello"), reason: "late" }
+    const other = { kind: "iteration" as const, pending: domText("p-2"), reason: "other" }
+    const early = { kind: "iteration" as const, pending: domText("p-1", "Hell"), reason: "early" }
+    const late = { kind: "iteration" as const, pending: domText("p-1", "Hello"), reason: "late" }
     const queue = queueDeferredPark(queueDeferredPark(queueDeferredPark([], early), other), late)
     expect(queue).toHaveLength(2)
     expect(queue[0]).toBe(late)
@@ -282,10 +283,53 @@ describe("queueDeferredPark", () => {
   })
 
   it("replaces an entry re-queued as the very same object", () => {
-    const entry = { pending: domText("p-1"), reason: "one" }
-    expect(queueDeferredPark([entry], { pending: entry.pending, reason: "again" })).toEqual([
-      { pending: entry.pending, reason: "again" },
-    ])
+    const entry = { kind: "iteration" as const, pending: domText("p-1"), reason: "one" }
+    expect(
+      queueDeferredPark([entry], {
+        kind: "iteration" as const,
+        pending: entry.pending,
+        reason: "again",
+      }),
+    ).toEqual([{ kind: "iteration" as const, pending: entry.pending, reason: "again" }])
+  })
+
+  it("holds one entry per draft even when the two variants name the same one", () => {
+    // The bridge's `pendingId` IS the iteration edit's `bridgePendingId`. A
+    // refusal at delivery time and a failure inside the lane are then one park
+    // of one draft, and parking it twice would put the same edit in the
+    // deterministic queue twice.
+    const fromLane = {
+      kind: "iteration" as const,
+      pending: domText("p-1"),
+      reason: "lane",
+    }
+    const fromBridge = {
+      kind: "held" as const,
+      held: { pendingId: "p-1" } as never,
+      reason: "bridge",
+    }
+    expect(queueDeferredPark([fromLane], fromBridge)).toEqual([fromBridge])
+    expect(queueDeferredPark([fromBridge], fromLane)).toEqual([fromLane])
+  })
+
+  it("keeps held parks for different drafts apart", () => {
+    const first = { kind: "held" as const, held: { pendingId: "p-1" } as never, reason: "a" }
+    const second = { kind: "held" as const, held: { pendingId: "p-2" } as never, reason: "b" }
+    expect(queueDeferredPark([first], second)).toEqual([first, second])
+  })
+})
+
+describe("parkDecision", () => {
+  /**
+   * The whole of the round-9 defect in one line. Three failure exits parked
+   * immediately and only the collision arm deferred, so a second edit made
+   * while a scope prompt was open opened the deterministic dialog on top of
+   * it. Every park in the hook now asks this, so there is one answer to get
+   * right rather than one per exit.
+   */
+  it("defers a park while a prompt is open, and parks when none is", () => {
+    expect(parkDecision(true)).toBe("defer")
+    expect(parkDecision(false)).toBe("park-now")
   })
 })
 
