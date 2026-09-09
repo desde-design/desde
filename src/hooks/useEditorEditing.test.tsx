@@ -161,6 +161,28 @@ function answerProposal(body: unknown): void {
 }
 
 /**
+ * Every request the hook made, with the abort signal it carried.
+ *
+ * The lanes race their requests against the bridge session's signal, and the
+ * fetch stub deliberately ignores it (a request already on the wire can answer
+ * after a teardown, which is what the staleness guards are for). Recording it
+ * is how a test can still ask the other question: was the request given a
+ * signal at all, and did the session end abort it?
+ */
+const requests: { url: string; signal: AbortSignal | undefined }[] = []
+
+/** The signal the one request whose url contains `fragment` was handed. */
+function signalFor(fragment: string): AbortSignal | undefined {
+  const match = requests.filter((request) => request.url.includes(fragment))
+  if (match.length !== 1) {
+    throw new Error(
+      `expected exactly one request matching ${fragment}, saw ${match.length}`,
+    )
+  }
+  return match[0]!.signal
+}
+
+/**
  * A selection the iteration lane accepts: it is one rendering of a loop, and
  * its `editTarget` is the position {@link loopDraft} anchors to. Both halves
  * are required by the gate in `onMutationAwaitingDisambiguation`.
@@ -246,6 +268,7 @@ beforeEach(() => {
   captured = null
   holdProposal = false
   heldProposal = null
+  requests.length = 0
   useEditorStore.getState().resetEditor()
   // Nothing reaches the network. The one route with an answer that changes
   // behaviour is the loop check: `verifyIterationLoop` decides whether an
@@ -253,8 +276,9 @@ beforeEach(() => {
   // "there is a loop here" and every other route answers an empty object.
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input)
+      requests.push({ url, signal: init?.signal ?? undefined })
       if (url.includes("/api/editor/iteration/verify")) {
         return new Response(
           JSON.stringify({
@@ -710,5 +734,104 @@ describe("useEditorEditing: the bridge session", () => {
       await Promise.resolve()
     })
     await waitFor(() => expect(editing()?.status.kind).toBe("error"))
+  })
+  it("ends exactly one session per document change, whichever path finds it", async () => {
+    // The three ends (the effect cleanup, the conflict reload, the handshake
+    // that reports another document) produced different counts for the same
+    // state before `sessionEndPlan` (finding T1). One object, one count.
+    const { rerender } = await mount()
+    const adapter = lastFakeAdapter()
+    await act(async () => {
+      adapter.emitAwaiting(heldDraft("dom-pending-1"))
+      adapter.emitCapture(capture("m1", "hello"))
+    })
+    await waitFor(() =>
+      expect(editing()?.disambiguationPrompt?.pendingId).toBe("dom-pending-1"),
+    )
+    await waitForApply()
+    await changeDocument(rerender, "doc-b")
+    expect(editing()?.saveStatus).toBe(
+      "The page connection was reset; 2 pending edits were discarded.",
+    )
+  })
+
+  it("cancels the held drafts on the conflict reload too (findings S2, T4)", async () => {
+    // The third end path. It used to empty the dialog rows without telling the
+    // bridge, and to leave the draft maps holding ids the reloaded page hands
+    // out again, so the next page's dom-pending-1 was answered by a dialog row
+    // built for the page before it.
+    await mount()
+    const adapter = lastFakeAdapter()
+    await act(async () => {
+      adapter.emitAwaiting(heldDraft("dom-pending-1"))
+    })
+    await waitFor(() =>
+      expect(editing()?.disambiguationPrompt?.pendingId).toBe("dom-pending-1"),
+    )
+    await act(async () => {
+      editing()!.handleReloadAfterConflict()
+      await Promise.resolve()
+    })
+    expect(adapter.resolvedDrafts).toEqual([
+      { pendingId: "dom-pending-1", choice: "cancel" },
+    ])
+    expect(editing()?.disambiguationPrompt).toBeNull()
+  })
+
+  it("aborts the iteration lane's request when the session ends (finding V3)", async () => {
+    // The text lane's half of V3 is covered above, through the apply the fake
+    // adapter records. The ITERATION lane holds the bridge's draft across an
+    // HTTP round trip instead, and its signal reaches no adapter, so nothing
+    // in this harness could see whether that lane threads the session's
+    // lifetime at all. The fetch stub records the signal it was handed, which
+    // is what makes the question answerable.
+    const { rerender } = await mount()
+    const adapter = lastFakeAdapter()
+    holdProposal = true
+    await act(async () => {
+      adapter.emitSelection(loopSelection)
+      adapter.emitAwaiting(loopDraft(REUSED_DRAFT_ID))
+    })
+    await waitFor(() => expect(editing()?.iterationScopePrompt).not.toBeNull())
+    await act(async () => {
+      editing()!.confirmIterationScope("this-row", false)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(heldProposal).not.toBeNull())
+    const signal = signalFor("/api/editor/edit-iteration")
+    expect(signal).toBeDefined()
+    expect(signal!.aborted).toBe(false)
+    await act(async () => {
+      rerender(<Harness enabled={false} />)
+      await Promise.resolve()
+    })
+    expect(signal!.aborted).toBe(true)
+  })
+
+  it("re-arms a pending write once when the same document answers again", async () => {
+    // The re-arm on a repeat handshake must not put a SECOND timer on an entry
+    // that already has one. `resumePlan` skips an entry that is being written
+    // right now, and the entry here is not: its debounce has not fired yet, so
+    // nothing has marked it. The scheduler cancelling the armed timer before
+    // it arms its own is what makes that safe, and this is the test of it.
+    await mount()
+    const adapter = lastFakeAdapter()
+    await act(async () => {
+      adapter.emitCapture(capture("m1", "hello"))
+    })
+    // Inside the 500 ms debounce: buffered, armed, and not yet dispatched.
+    expect(adapter.applies).toHaveLength(0)
+    const iframe = screen.getByTitle("Prototype")
+    await act(async () => {
+      iframe.dispatchEvent(new Event("load"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    await waitForApply()
+    // Long enough for a second timer, if the re-arm added one, to fire.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700))
+    })
+    expect(adapter.applies).toHaveLength(1)
   })
 })
