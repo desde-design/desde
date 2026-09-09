@@ -188,10 +188,76 @@ export function validateIterationBody(body: unknown): string | null {
   if (!ops.has(p.operation as string)) {
     return `body.payload.operation must be one of ${[...ops].join(" | ")}`
   }
-  if (p.operation === "patch-text" && typeof p.value !== "string") {
-    return "body.payload.value must be a string for operation 'patch-text'"
+  return payloadProblem(p.operation as IterationOperation, p)
+}
+
+/** The operations this route dispatches. */
+type IterationOperation = "remove" | "patch" | "duplicate" | "reorder" | "insert" | "patch-text"
+
+/** A plain object, i.e. not null and not an array. */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
+/**
+ * The rest of the payload, per operation.
+ *
+ * Only the discriminator and `patch-text.value` were checked, and the rewriter
+ * downstream reads every other field as though the type had been honoured.
+ * What that let through:
+ *
+ * - `reorder` with `toIndex: null` or a string. `array-literal-rewriter.ts`
+ *   coerces it, and the entry moved to index 0 instead of the position that
+ *   was asked for. Silent, and a reorder to the top looks like a plausible
+ *   edit rather than a failure.
+ * - `insert` with a `position` that is neither "before" nor "after", which
+ *   every reader treats as "after", and with no `entry` at all, which inserts
+ *   `undefined` into the array.
+ * - `patch` with no `updates`, or with an array or `null` in its place.
+ *
+ * A 400 naming the field is right for all of them: none is a shape a client of
+ * ours can send, so the request is hand-built or a version mismatch, and
+ * guessing what it meant is how the silent wrong edit happened.
+ */
+function payloadProblem(
+  operation: IterationOperation,
+  p: Record<string, unknown>,
+): string | null {
+  switch (operation) {
+    case "remove":
+      // Carries nothing. The key and index on `iterationContext` say which
+      // entry, and those are already checked above.
+      return null
+    case "patch":
+      return isPlainObject(p.updates)
+        ? null
+        : "body.payload.updates must be an object for operation 'patch'"
+    case "patch-text":
+      return typeof p.value === "string"
+        ? null
+        : "body.payload.value must be a string for operation 'patch-text'"
+    case "duplicate":
+      // Optional: absent means the applicator's own default.
+      return p.afterMatch === undefined || typeof p.afterMatch === "boolean"
+        ? null
+        : "body.payload.afterMatch must be a boolean for operation 'duplicate'"
+    case "reorder":
+      // An index into the data array. Same integer rule as the positions
+      // above, and for the same reason: NaN, Infinity and 1.5 are numbers.
+      return Number.isInteger(p.toIndex) && (p.toIndex as number) >= 0
+        ? null
+        : "body.payload.toIndex must be an integer >= 0 for operation 'reorder'"
+    case "insert": {
+      if (p.position !== "before" && p.position !== "after") {
+        return "body.payload.position must be 'before' or 'after' for operation 'insert'"
+      }
+      // `null` is a legitimate entry to insert; `undefined` (absent) is not,
+      // because there is nothing to write.
+      return "entry" in p && p.entry !== undefined
+        ? null
+        : "body.payload.entry is required for operation 'insert'"
+    }
   }
-  return null
 }
 
 // ---------------------------------------------------------------------------

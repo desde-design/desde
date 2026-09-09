@@ -156,11 +156,51 @@ describe("validateIterationBody", () => {
     ).toMatch(/operation must be one of/)
   })
 
-  it("accepts all valid operations", () => {
-    const ops = ["remove", "patch", "duplicate", "reorder", "insert"] as const
-    for (const op of ops) {
-      expect(validateIterationBody(makeBody({ payload: { operation: op } as never }))).toBeNull()
+  /**
+   * One well-formed payload per operation. It used to be the bare
+   * discriminator for each, which passed because nothing but the discriminator
+   * was checked: `reorder` with no `toIndex` moved the entry to index 0 and
+   * `insert` with no `entry` wrote `undefined` into the array.
+   */
+  it("accepts a well-formed payload for every operation", () => {
+    const payloads = [
+      { operation: "remove" },
+      { operation: "patch", updates: { name: "Ada" } },
+      { operation: "duplicate" },
+      { operation: "duplicate", afterMatch: true },
+      { operation: "reorder", toIndex: 0 },
+      { operation: "reorder", toIndex: 3 },
+      { operation: "insert", entry: { name: "Ada" }, position: "before" },
+      { operation: "insert", entry: null, position: "after" },
+      { operation: "patch-text", value: "" },
+    ]
+    for (const payload of payloads) {
+      expect(validateIterationBody(makeBody({ payload: payload as never }))).toBeNull()
     }
+  })
+
+  it.each([
+    ["patch with no updates", { operation: "patch" }, /updates/],
+    ["patch with a null updates", { operation: "patch", updates: null }, /updates/],
+    ["patch with an array updates", { operation: "patch", updates: [] }, /updates/],
+    ["reorder with no toIndex", { operation: "reorder" }, /toIndex/],
+    // The one the rewriter coerced to 0, so the entry moved to the top and
+    // nothing said otherwise.
+    ["reorder with a null toIndex", { operation: "reorder", toIndex: null }, /toIndex/],
+    ["reorder with a string toIndex", { operation: "reorder", toIndex: "2" }, /toIndex/],
+    ["reorder with a fractional toIndex", { operation: "reorder", toIndex: 1.5 }, /toIndex/],
+    ["reorder with a negative toIndex", { operation: "reorder", toIndex: -1 }, /toIndex/],
+    ["reorder with a NaN toIndex", { operation: "reorder", toIndex: Number.NaN }, /toIndex/],
+    // Every reader treats an unknown position as "after".
+    ["insert with no position", { operation: "insert", entry: 1 }, /position/],
+    ["insert with a bogus position", { operation: "insert", entry: 1, position: "above" }, /position/],
+    ["insert with no entry", { operation: "insert", position: "after" }, /entry/],
+    ["duplicate with a non-boolean afterMatch", { operation: "duplicate", afterMatch: "yes" }, /afterMatch/],
+    ["patch-text with no value", { operation: "patch-text" }, /value/],
+    ["patch-text with a number value", { operation: "patch-text", value: 3 }, /value/],
+  ])("rejects %s, naming the field", (_label, payload, expected) => {
+    const problem = validateIterationBody(makeBody({ payload: payload as never }))
+    expect(problem).toMatch(expected)
   })
 
   it("accepts a fieldLocation and rejects a malformed one", () => {
