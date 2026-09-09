@@ -23,10 +23,11 @@ import type {
 } from "@/editor/core"
 import { useEditorEditing } from "./useEditorEditing"
 import { useEditorStore } from "@/stores/editor-only"
-import { DEFERRED_PARK_STATUS } from "./pending-iteration-edit"
+import { bridgeDraftIdOf, DEFERRED_PARK_STATUS } from "./pending-iteration-edit"
 import {
   FakeBridgeAdapter,
   lastFakeAdapter,
+  type RecordedApply,
   resetFakeAdapters,
 } from "./__fixtures__/fake-bridge-adapter"
 
@@ -134,6 +135,32 @@ const heldDraft = (pendingId: string): PendingMutation => ({
 const LOOP_LOC = "src/List.vue:12:4"
 
 /**
+ * The draft id a reconnected bridge hands out again.
+ *
+ * The bridge numbers its held drafts from one per document, so the first draft
+ * of the NEW session carries the id the departed session's edit is still
+ * holding. That collision is the whole of finding S1.
+ */
+const REUSED_DRAFT_ID = "dom-pending-1"
+
+/**
+ * The iteration proposal POST, held open when a test asks for it.
+ *
+ * The "this item" lane holds the bridge's draft across this round trip, so it
+ * is the await a page change has to land inside. `holdProposal` is false by
+ * default and the route then refuses with a 422, which is what every test that
+ * does not drive the lane wants.
+ */
+let holdProposal = false
+let heldProposal: ((body: unknown) => void) | null = null
+
+function answerProposal(body: unknown): void {
+  const answer = heldProposal
+  heldProposal = null
+  answer?.(body)
+}
+
+/**
  * A selection the iteration lane accepts: it is one rendering of a loop, and
  * its `editTarget` is the position {@link loopDraft} anchors to. Both halves
  * are required by the gate in `onMutationAwaitingDisambiguation`.
@@ -217,6 +244,8 @@ beforeEach(() => {
   FakeBridgeAdapter.nextDocumentIds = ["doc-a"]
   FakeBridgeAdapter.nextHandshakeError = null
   captured = null
+  holdProposal = false
+  heldProposal = null
   useEditorStore.getState().resetEditor()
   // Nothing reaches the network. The one route with an answer that changes
   // behaviour is the loop check: `verifyIterationLoop` decides whether an
@@ -234,6 +263,29 @@ beforeEach(() => {
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         )
+      }
+      if (url.includes("/api/editor/edit-iteration")) {
+        if (!holdProposal) {
+          // 422 is the resolver's "I could not work this out", which is a soft
+          // refusal the lane reports rather than a crash.
+          return new Response(
+            JSON.stringify({ reason: "The list's data could not be resolved." }),
+            { status: 422, headers: { "content-type": "application/json" } },
+          )
+        }
+        // Held. The test answers it once the page has been taken away and
+        // brought back, which is the window finding S1 lives in. The abort
+        // signal is deliberately ignored: a request already on the wire can
+        // answer after a teardown, and the guard is what has to cover that.
+        return new Promise<Response>((resolve) => {
+          heldProposal = (body: unknown) =>
+            resolve(
+              new Response(JSON.stringify(body), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              }),
+            )
+        })
       }
       return new Response("{}", { status: 200 })
     }),
@@ -271,6 +323,39 @@ async function changeDocument(
     await Promise.resolve()
   })
   await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+}
+
+type SaveOutcome = Awaited<
+  ReturnType<NonNullable<ReturnType<typeof editing>>["handleSaveAll"]>
+>
+
+/**
+ * Run Save and hand back what it returned.
+ *
+ * A refused Save dispatches nothing, and that is what these tests assert. A
+ * Save that wrongly PROCEEDS reaches `applyEdit`, and the fake adapter parks
+ * every apply, so it would hang the test instead of failing an assertion. The
+ * drain answers whatever this Save starts, so a broken gate shows up as
+ * `ok: true` rather than as a timeout.
+ */
+async function saveAll(): Promise<SaveOutcome | undefined> {
+  let outcome: SaveOutcome | undefined
+  await act(async () => {
+    const answered = new Set<RecordedApply>(lastFakeAdapter().applies)
+    const drain = setInterval(() => {
+      for (const apply of lastFakeAdapter().applies) {
+        if (answered.has(apply)) continue
+        answered.add(apply)
+        apply.settle(applied())
+      }
+    }, 5)
+    try {
+      outcome = await editing()!.handleSaveAll()
+    } finally {
+      clearInterval(drain)
+    }
+  })
+  return outcome
 }
 
 describe("useEditorEditing: the bridge session", () => {
@@ -341,6 +426,10 @@ describe("useEditorEditing: the bridge session", () => {
     })
     await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
     expect(lastFakeAdapter()).not.toBe(firstAdapter)
+    // The departed adapter was let go and the arriving one was not, which is
+    // what makes "the NEW adapter" below mean anything.
+    expect(firstAdapter.disposed).toBe(true)
+    expect(lastFakeAdapter().disposed).toBe(false)
     // The kept entry is re-armed against the NEW adapter, which is X2: before
     // the fix, the buffer survived and the only timer that would flush it did
     // not, so nothing but another keystroke would ever have written it.
@@ -359,7 +448,7 @@ describe("useEditorEditing: the bridge session", () => {
     expect(pending.signal?.aborted).toBe(true)
   })
 
-  it("does nothing with an answer that arrives after the page changed (findings S1, V2)", async () => {
+  it("does nothing with an answer that arrives after the page changed (finding V2)", async () => {
     const { rerender } = await mount()
     await act(async () => {
       lastFakeAdapter().emitCapture(capture("m1", "hello"))
@@ -377,7 +466,7 @@ describe("useEditorEditing: the bridge session", () => {
     expect(lastFakeAdapter().applies).toHaveLength(appliesBefore)
   })
 
-  it("keeps a departed page's failure off the status bar (findings S1, V2)", async () => {
+  it("keeps a departed page's failure off the status bar (finding V2)", async () => {
     // The same boundary as the test above, settled the other way. A failure is
     // the half that is visible: the departed page's answer writes a line of its
     // own, and it would land over the line saying what the page change lost.
@@ -395,7 +484,86 @@ describe("useEditorEditing: the bridge session", () => {
     expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
   })
 
-  it("hands every held draft back to the bridge on a detach (findings R2, R5)", async () => {
+  it("keeps a torn-down iteration edit out of the next session (finding S1)", async () => {
+    // S1's own scenario, and it is the ITERATION lane, not the text one.
+    //
+    // `dispatchIterationEdit`'s "this item" branch holds the bridge's draft
+    // across a proposal POST. The page goes away while that POST is out, the
+    // bridge reconnects, and the new session numbers its first draft
+    // `dom-pending-1` again. Without the generation guard the departed page's
+    // continuation then writes the old row's overwrite into the NEW document
+    // and `releaseBridgeDraft` cancels the new session's identically numbered
+    // draft, which takes the designer's live preview away and blames a write
+    // they never asked for.
+    const { rerender } = await mount()
+    const departing = lastFakeAdapter()
+    holdProposal = true
+    await act(async () => {
+      departing.emitSelection(loopSelection)
+      departing.emitAwaiting(loopDraft(REUSED_DRAFT_ID))
+    })
+    await waitFor(() => expect(editing()?.iterationScopePrompt).not.toBeNull())
+    // "This item" is the branch that posts for a proposal, and the route is
+    // holding that POST open.
+    await act(async () => {
+      editing()!.confirmIterationScope("this-row", false)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(heldProposal).not.toBeNull())
+
+    // The page is taken away and comes back.
+    await act(async () => {
+      rerender(<Harness enabled={false} />)
+      await Promise.resolve()
+    })
+    await act(async () => {
+      rerender(<Harness enabled />)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    const arriving = lastFakeAdapter()
+    expect(arriving).not.toBe(departing)
+    expect(departing.disposed).toBe(true)
+    expect(arriving.disposed).toBe(false)
+
+    // The reconnected bridge hands out the same draft id, and this session is
+    // now the one holding it.
+    await act(async () => {
+      arriving.emitSelection(loopSelection)
+      arriving.emitAwaiting(loopDraft(REUSED_DRAFT_ID))
+    })
+    await waitFor(() => expect(editing()?.iterationScopePrompt).not.toBeNull())
+
+    // Now the departed page's proposal answers.
+    await act(async () => {
+      answerProposal({
+        ok: true,
+        proposal: {
+          file: "src/List.vue",
+          newSource: "<template><ul /></template>",
+          baseHash: "hash-1",
+        },
+      })
+      await Promise.resolve()
+    })
+    // Anything the stale continuation started gets its chance to finish, so a
+    // release that only runs AFTER a write is not missed by the assertions
+    // below. In a hook that guards the boundary there is nothing here to
+    // settle.
+    await act(async () => {
+      for (const apply of arriving.applies) apply.settle(applied())
+      await Promise.resolve()
+    })
+
+    // Nothing was written into the new document.
+    expect(arriving.applies).toEqual([])
+    // And the new session's draft was not cancelled out from under it.
+    expect(arriving.resolvedDrafts).toEqual([])
+    const stillAsking = editing()?.iterationScopePrompt
+    expect(stillAsking && bridgeDraftIdOf(stillAsking)).toBe(REUSED_DRAFT_ID)
+  })
+
+  it("hands every held draft back to the bridge on a detach (findings Q2, R2, R5)", async () => {
     const { rerender } = await mount()
     const adapter = lastFakeAdapter()
     await act(async () => {
@@ -408,14 +576,20 @@ describe("useEditorEditing: the bridge session", () => {
       rerender(<Harness enabled={false} />)
       await Promise.resolve()
     })
+    // Q2(b) is this line: teardown OWNS the parked work. Before it, teardown
+    // neither flushed nor released, so the bridge kept holding a draft nobody
+    // could answer any more.
     expect(adapter.resolvedDrafts).toEqual([
       { pendingId: "dom-pending-1", choice: "cancel" },
     ])
     expect(editing()?.disambiguationPrompt).toBeNull()
     expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+    // The draft went back while the adapter was still there to hear it, which
+    // is why the release is ordered before `dispose()`.
+    expect(adapter.disposed).toBe(true)
   })
 
-  it("holds a second deterministic question behind the open one (finding R1)", async () => {
+  it("holds a second deterministic question behind the open one (findings Q2, R1)", async () => {
     await mount()
     const adapter = lastFakeAdapter()
     await act(async () => {
@@ -432,7 +606,9 @@ describe("useEditorEditing: the bridge session", () => {
     // to the bridge for it, so it is genuinely queued rather than dropped.
     expect(adapter.resolvedDrafts).toEqual([])
     // Answering the first one lets the second through, which is the other half
-    // of the queue: a held question that never opens is a lost edit.
+    // of the queue: a held question that never opens is a lost edit. This is
+    // Q2(d) as well: the prompt closing through ANY path has to flush what is
+    // waiting behind it, and cancel is one of those paths.
     await act(async () => {
       editing()!.cancelDisambiguation()
     })
@@ -475,9 +651,18 @@ describe("useEditorEditing: the bridge session", () => {
     expect(editing()?.disambiguationPrompt).toBeNull()
   })
 
-  it("refuses Save while a question is queued behind the open one (findings L4, Q2, R4)", async () => {
+  it("refuses Save while a question is queued behind the open one (findings L4, R4)", async () => {
     await mount()
     const adapter = lastFakeAdapter()
+    // WRITABLE WORK FIRST, and it is the point of the test rather than
+    // scenery. L4 was that the parked check lived INSIDE the "there is nothing
+    // to apply" branch, so one writable mutation was enough to skip it: Save
+    // applied that mutation and reported success over a question nobody had
+    // answered. With an empty buffer the broken gate and the fixed one refuse
+    // alike, and the test could not tell them apart.
+    await act(async () => {
+      adapter.emitCapture(capture("m1", "hello"))
+    })
     await act(async () => {
       adapter.emitAwaiting(heldDraft("dom-pending-1"))
       adapter.emitAwaiting(heldDraft("dom-pending-2"))
@@ -485,10 +670,7 @@ describe("useEditorEditing: the bridge session", () => {
     await waitFor(() =>
       expect(editing()?.disambiguationPrompt?.pendingId).toBe("dom-pending-1"),
     )
-    let outcome: Awaited<ReturnType<NonNullable<ReturnType<typeof editing>>["handleSaveAll"]>> | undefined
-    await act(async () => {
-      outcome = await editing()!.handleSaveAll()
-    })
+    const outcome = await saveAll()
     expect(outcome?.ok).toBe(false)
     // The SHAPE, which is "Save says a choice is still owed". The exact wording
     // is `parkedSaveRefusal`'s and has its own test.
