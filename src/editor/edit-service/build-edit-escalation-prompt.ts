@@ -44,18 +44,33 @@ function quote(value: string): string {
 
 function describeMutation(m: EscalationMutation): string {
   const where = formatLocation(m.sourceLoc)
-  const at = where ? ` at ${where}` : ""
-  const on = ` (selector: ${m.selector})`
+  const at = where ? ` at ${sanitizeField(where)}` : ""
+  const on = ` (selector: ${sanitizeField(m.selector)})`
+  // Before/after are page text, so they take the LARGER cap. They are also
+  // the request itself: `after` is what the designer typed, and cutting it at
+  // the short field cap would quietly change what was asked for.
+  const before = quote(sanitizeField(m.before, DETAIL_LIMIT))
+  const after = quote(sanitizeField(m.after, DETAIL_LIMIT))
   if (m.kind === "attr" && m.target) {
-    return `Change the \`${m.target}\` attribute from ${quote(m.before)} to ${quote(m.after)}${at}${on}.`
+    return `Change the \`${sanitizeField(m.target)}\` attribute from ${before} to ${after}${at}${on}.`
   }
   if (m.kind === "text") {
-    return `Change the text from ${quote(m.before)} to ${quote(m.after)}${at}${on}.`
+    return `Change the text from ${before} to ${after}${at}${on}.`
   }
   // class / style fall through to a generic description.
-  return `Change ${m.kind} from ${quote(m.before)} to ${quote(m.after)}${at}${on}.`
+  return `Change ${m.kind} from ${before} to ${after}${at}${on}.`
 }
 
+/**
+ * The save-flush hand-off: one or more captured DOM mutations the
+ * deterministic lane could not apply.
+ *
+ * Fenced like the two newer builders. Everything it interpolates comes from
+ * the page (selectors, attribute names, before/after text) or from the source
+ * tree (file paths), and this branch routes it into a NEW chat session, so a
+ * selector carrying a fake instruction paragraph would otherwise read as part
+ * of the request.
+ */
 export function buildEditEscalationPrompt(
   mutations: readonly EscalationMutation[],
 ): string {
@@ -65,10 +80,14 @@ export function buildEditEscalationPrompt(
       ? "I tried to make this edit by directly manipulating the prototype, but it couldn't be applied automatically and needs your help."
       : `I tried to make ${mutations.length} edits by directly manipulating the prototype, but they couldn't be applied automatically and need your help.`
   return [
+    EDIT_HANDOFF_MARKER,
+    "",
     intro,
     "",
+    HANDOFF_FENCE_NOTE,
+    "",
     "Requested change:",
-    ...lines,
+    ...fenceHandoffFacts(lines),
     "",
     "Please apply this to the source. The rendered value may come from a binding, computed value, or expression — edit the right place in the template, and ask me if the intent is ambiguous.",
   ].join("\n")
@@ -174,9 +193,12 @@ export interface EscalationPropEdit {
  * edits in source.
  */
 function describePropValue(value: string | number | boolean): string {
-  if (typeof value === "string") return quote(value)
-  if (typeof value === "number") return `${value} (number literal)`
-  return `${value} (boolean literal)`
+  // A string value is page-typed text, so it is flattened like every other
+  // copied field. Numbers and booleans are typed primitives; `String(...)` of
+  // one cannot carry a line break, so there is nothing to flatten.
+  if (typeof value === "string") return quote(sanitizeField(value, DETAIL_LIMIT))
+  if (typeof value === "number") return `${String(value)} (number literal)`
+  return `${String(value)} (boolean literal)`
 }
 
 /**
@@ -184,17 +206,27 @@ function describePropValue(value: string | number | boolean): string {
  * applicator and the in-process source-aware LLM lane refused. The chat
  * agent has multi-file tool access — useful for the common case where the
  * binding traces to a prop, a parent SFC, or an imported constant.
+ *
+ * Fenced like the two newer builders: the prop name, the component name, the
+ * selector, the file path and the value are all read off the page or the
+ * source tree, and this branch routes them into a NEW chat session.
  */
 export function buildPropEditEscalationPrompt(edit: EscalationPropEdit): string {
-  const where = edit.editTargetLocation ? ` at ${edit.editTargetLocation}` : ""
-  const componentLabel = edit.componentName ? `<${edit.componentName}>` : "element"
+  const where = edit.editTargetLocation ? ` at ${sanitizeField(edit.editTargetLocation)}` : ""
+  const componentLabel = edit.componentName ? `<${sanitizeField(edit.componentName)}>` : "element"
   const intro =
     "I tried to change a prop on a component by directly manipulating the prototype, but the value comes from a binding or expression we couldn't rewrite automatically. I need your help to edit the right place in the source."
   return [
+    EDIT_HANDOFF_MARKER,
+    "",
     intro,
     "",
+    HANDOFF_FENCE_NOTE,
+    "",
     "Requested change:",
-    `- Set the \`${edit.propName}\` prop on ${componentLabel}${where} to ${describePropValue(edit.newValue)} (selector: ${edit.selector}).`,
+    ...fenceHandoffFacts([
+      `- Set the \`${sanitizeField(edit.propName)}\` prop on ${componentLabel}${where} to ${describePropValue(edit.newValue)} (selector: ${sanitizeField(edit.selector)}).`,
+    ]),
     "",
     "The current value is bound to a variable, prop, or computed expression — please trace the binding (possibly across files) and edit the source so the rendered value matches. Preserve the value's type (the requested change above tells you if it's a string, number, or boolean). Ask me if the intent is ambiguous.",
   ].join("\n")
