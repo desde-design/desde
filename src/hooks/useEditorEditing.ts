@@ -2286,9 +2286,16 @@ export function useEditorEditing({
             return
           }
           if (isStaleVerify(seq, verifySeqRef.current)) {
-            // Release THIS draft only. The newer intercept owns the prompt
-            // and whatever draft is in it.
-            releaseBridgeDraft(pending)
+            // Release THIS draft only, and only when the prompt that is
+            // currently open is not holding the SAME one. A stale result and
+            // the prompted pending can describe one in-page typing session:
+            // the pending object is rebuilt on every keystroke round trip, so
+            // they are different objects sharing a `bridgePendingId`.
+            // Cancelling it there cancels the draft the open dialog needs.
+            setIterationScopePrompt((current) => {
+              if (!current || !sameBridgeDraft(current, pending)) releaseBridgeDraft(pending)
+              return current
+            })
             setSaveStatus("A newer edit replaced this one.")
             return
           }
