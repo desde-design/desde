@@ -52,14 +52,16 @@ export function validateIterationVerifyBody(body: unknown): string | null {
   const b = body as Record<string, unknown>
   if (typeof b.file !== "string" || b.file.length === 0) return "body.file required"
   const tl = b.templateLocation as Record<string, unknown> | undefined
+  // `Number.isInteger`, not `typeof === "number"`: NaN and 1.5 are numbers,
+  // and both reach the parser as a position that can never match a node.
   if (
     !tl ||
-    typeof tl.line !== "number" ||
-    typeof tl.column !== "number" ||
-    tl.line < 1 ||
-    tl.column < 0
+    !Number.isInteger(tl.line) ||
+    !Number.isInteger(tl.column) ||
+    (tl.line as number) < 1 ||
+    (tl.column as number) < 0
   ) {
-    return "body.templateLocation must be { line, column } (line 1-based, column >= 0)"
+    return "body.templateLocation must be { line, column } integers (line 1-based, column >= 0)"
   }
   return null
 }
@@ -90,7 +92,13 @@ export async function handleIterationVerify(
     return { ok: false, status: 404, reason: `Could not read file: ${(e as Error).message}` }
   }
   const { locateLoopAt } = await import("../../../src/editor/edit-service/locate-loop.js")
-  const located = locateLoopAt({ file: body.file, source, templateLocation: body.templateLocation })
+  // Parse by the extension of the file the bytes actually came from, not the
+  // one the client named. `body.file` may be a symlink whose extension says
+  // nothing about the target's syntax, and `locateLoopAt` dispatches JSX vs
+  // Vue on the extension alone. Mirrors `llm-fallback-handler.ts`'s
+  // `resolvedRelPath`.
+  const resolvedRelPath = path.relative(rootResolution.rootReal, targetPath)
+  const located = locateLoopAt({ file: resolvedRelPath, source, templateLocation: body.templateLocation })
   if (located.found) {
     return { ok: true, status: 200, loop: { kind: located.kind, expression: located.expression } }
   }
