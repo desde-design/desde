@@ -1228,6 +1228,7 @@ export function EditorSurface({
         lastLLMTrace={editing.saveLastLLMTrace}
         streamingText={editing.saveStreamingText}
         saveStatus={editing.saveStatus}
+        failureReason={editing.lastSaveFailure}
         conflict={editing.conflict}
         onForceOverwrite={editing.handleForceOverwrite}
         onReloadAfterConflict={editing.handleReloadAfterConflict}

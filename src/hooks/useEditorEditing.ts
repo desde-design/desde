@@ -2858,6 +2858,25 @@ export function useEditorEditing({
   const [saving, setSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState<string | null>(null)
   /**
+   * Why the last STARTED save ended badly, or null if it did not.
+   *
+   * The save dialog used to infer this from `saveStatus`'s wording, and
+   * `saveStatus` is a shared channel: the iteration lane writes hand-off
+   * sentences to it with no save in flight, and some of those read as
+   * failures. This is the structured signal instead. It is written only by
+   * `handleSaveAll`, only for a save that got past the pre-save gate (a gate
+   * refusal is toast territory and must not raise a modal over the dialog it
+   * is telling the designer to answer), and it is cleared when the next save
+   * begins.
+   */
+  const [lastSaveFailure, setLastSaveFailure] = useState<string | null>(null)
+  /**
+   * Set the moment a save passes the pre-save gate and goes in flight. A ref
+   * rather than state because the wrapper below reads it immediately after the
+   * inner run resolves, and a state write would not be visible yet.
+   */
+  const saveStartedRef = useRef(false)
+  /**
    * Mutation summary the server expects to send to the LLM. Computed
    * eagerly when the save starts so the dialog can show "Asking AI…"
    * with the input the model is about to see (no need to wait for the
@@ -4586,9 +4605,10 @@ export function useEditorEditing({
     [scheduleBranchPropDispatch],
   )
 
-  const handleSaveAll = useCallback(async (): Promise<
+  const runSaveAll = useCallback(async (): Promise<
     { ok: true } | { ok: false; reason: string }
   > => {
+    saveStartedRef.current = false
     const adapter = adapterRef.current
     if (!adapter) return { ok: true } // nothing to do, trivially ok
     // Track per-call success so callers can chain a session-merge or
@@ -4675,6 +4695,10 @@ export function useEditorEditing({
     }
     setSaving(true)
     setSaveStatus(null)
+    // Past the pre-save gate: from here on a failure is a FAILED SAVE, and the
+    // save dialog is the right place to say so. Before here it is a refusal to
+    // start, which belongs in a toast.
+    saveStartedRef.current = true
     // Reset prior LLM state — the dialog should not show stale trace
     // info from a previous save while the current one is in flight.
     setSavePendingLLMInput(null)
@@ -5024,6 +5048,23 @@ export function useEditorEditing({
     // override), so it is named — it is stable, so this costs nothing.
   }, [iframeRef, mutations, resolveStyleDestination])
 
+  /**
+   * `runSaveAll` plus the one fact the save dialog needs and cannot read off
+   * `saveStatus`: did THIS save fail, and why.
+   *
+   * The wrapper exists so the answer is recorded in one place instead of at
+   * the dozen `{ ok: false }` returns inside the run, which is how the signal
+   * drifted out of sync with the dialog in the first place.
+   */
+  const handleSaveAll = useCallback(async (): Promise<
+    { ok: true } | { ok: false; reason: string }
+  > => {
+    setLastSaveFailure(null)
+    const result = await runSaveAll()
+    if (!result.ok && saveStartedRef.current) setLastSaveFailure(result.reason)
+    return result
+  }, [runSaveAll])
+
   // Wire the ref so handleForceOverwrite can re-trigger the save.
   // Updating on every render is cheap and keeps the ref pointing at
   // the current closure (so it sees the latest mutations + hashes).
@@ -5093,6 +5134,12 @@ export function useEditorEditing({
     handleChatTurnComplete,
     saving,
     saveStatus,
+    /**
+     * Why the last started save failed, or null. The save dialog's failure
+     * signal: structured, so it cannot be confused with another lane's prose
+     * on the shared `saveStatus` channel.
+     */
+    lastSaveFailure,
     /**
      * Count of fuzzy edits queued for the AI (deterministic lane refused
      * mid-edit). Applied at commit via `handleSaveAll`'s `'patch'`

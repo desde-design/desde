@@ -33,6 +33,19 @@ interface SaveProgressDialogProps {
   /** Latest save status string (errors, "Saved …" text). */
   saveStatus: string | null
   /**
+   * The reason the LAST STARTED save ended badly, or null if it did not.
+   *
+   * This is the structured signal the failure heuristic below always wanted.
+   * `saveStatus` is a shared channel: the iteration lane writes its own
+   * hand-off statuses to it with no save in flight, and several of those read
+   * as failures in prose ("could not be sent to chat", "did not answer in
+   * time"). Matching them by wording opened a "Save failed" modal over the
+   * dialog the status was asking the user to answer. Only a save sets this,
+   * and only after it has actually started, so a pre-save refusal (which is
+   * toast territory) still cannot open this dialog.
+   */
+  failureReason?: string | null
+  /**
    * Present when the last save returned 409 + external-edit-conflict.
    * When set, the dialog renders recovery actions (Reload prototype /
    * Force overwrite / Dismiss) so the designer can resolve the conflict
@@ -76,6 +89,7 @@ export function SaveProgressDialog({
   lastLLMTrace,
   streamingText,
   saveStatus,
+  failureReason,
   conflict,
   onForceOverwrite,
   onReloadAfterConflict,
@@ -105,8 +119,13 @@ export function SaveProgressDialog({
     pendingLLMInput,
     lastLLMTrace,
     saveStatus,
+    failureReason,
     conflict,
   })
+  // The one string this dialog reports a failure with, from either channel.
+  // Structured first: when a save handed its reason over, that is the sentence
+  // about the save, and `saveStatus` may since have been overwritten.
+  const failureText = failureMessage({ failureReason, saveStatus })
   const open = phase !== null && !dismissed
 
   // `phase` going non-null → null while the dialog is open is the COMMON
@@ -183,7 +202,7 @@ export function SaveProgressDialog({
   const chosenRecovery = recoveryOptions.find((o) => o.value === recovery)
 
   const issues: { key: string; node: React.ReactNode }[] = [
-    ...(looksLikeFailure(saveStatus)
+    ...(failureText
       ? [
           {
             key: "error",
@@ -193,7 +212,7 @@ export function SaveProgressDialog({
                 className="text-destructive"
                 data-testid="save-dialog-error"
               >
-                {saveStatus}
+                {failureText}
               </span>
             ),
           },
@@ -400,21 +419,24 @@ type Phase =
  * what keeps the two from drifting apart again: every phase is an
  * open-reason, and every open-reason is a phase.
  *
- * Note also why the failure check reads a prose string: `saveStatus` is the
- * only channel most failures arrive on. That makes it a weak signal — the
- * pre-save gate's "Cannot save: N edits still need a v-for scope choice…"
- * matches none of these words and correctly yields `null` (toast territory),
- * but a future notice could match by accident. Anything that MUST hold the
- * dialog open should arrive as a structured prop, the way `conflict` does.
+ * Failures arrive on two channels. `failureReason` is structured and
+ * authoritative: a save that started and ended badly hands its reason over
+ * directly, the way a 409 hands over `conflict`. `saveStatus` is the legacy
+ * prose channel, still read for the failures that only announce themselves
+ * there, and deliberately matched by a NARROW pattern: it is a shared channel
+ * that other lanes write to with no save in flight, so every word added to
+ * that pattern is a chance to open this modal over someone else's dialog. A
+ * new failure that must hold this dialog open goes through `failureReason`.
  */
 function derivePhase(args: {
   saving: boolean
   pendingLLMInput: SaveLLMTrace["mutationSummary"] | null
   lastLLMTrace: SaveLLMTrace | null
   saveStatus: string | null
+  failureReason?: string | null
   conflict?: ExternalEditConflict | null
 }): Phase | null {
-  if (looksLikeFailure(args.saveStatus)) {
+  if (failureMessage(args)) {
     if (args.lastLLMTrace?.outcome === "failed") return "ai-failed"
     return "failed"
   }
@@ -434,19 +456,29 @@ function derivePhase(args: {
   return null
 }
 
+/**
+ * The sentence this dialog should report as the failure, or null for "no
+ * failure to report".
+ *
+ * Two channels, structured first. `failureReason` is set only by a save that
+ * actually started and ended badly, so it is authoritative. `saveStatus` is
+ * the legacy channel and is read only through the wording heuristic below,
+ * which is why the heuristic must stay NARROW: the iteration lane writes its
+ * own hand-off sentences to `saveStatus` with no save in flight, and widening
+ * the pattern to catch them opened a "Save failed" modal over the scope
+ * dialog those sentences were asking the user to answer. Those cases arrive
+ * through `failureReason` now.
+ */
+function failureMessage(args: {
+  failureReason?: string | null
+  saveStatus: string | null
+}): string | null {
+  if (args.failureReason) return args.failureReason
+  return looksLikeFailure(args.saveStatus) ? args.saveStatus : null
+}
+
 function looksLikeFailure(saveStatus: string | null): boolean {
-  // The last two alternatives are the chat hand-off's. A save whose edits went
-  // to chat can end in two ways that are failures without using any of the
-  // words above: the hand-off was refused ("could not be sent to chat"), or it
-  // passed its deadline and was cancelled ("did not answer in time"). Both
-  // leave the mutations in the buffer and nothing on disk, and both used to
-  // close the dialog and report only through a toast, which reads as a
-  // finished save.
-  return saveStatus
-    ? /failed|threw|conflict|refused|error|could not be sent to chat|did not answer in time/i.test(
-        saveStatus,
-      )
-    : false
+  return saveStatus ? /failed|threw|conflict|refused|error/i.test(saveStatus) : false
 }
 
 function phaseTitle(p: Phase): string {

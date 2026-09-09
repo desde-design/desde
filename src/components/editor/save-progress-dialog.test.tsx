@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest"
 import { fireEvent, render, screen } from "@testing-library/react"
 import type { SaveLLMTrace } from "@/editor/core"
-import { SAVE_HANDOFF_TIMEOUT_STATUS } from "@/hooks/pending-iteration-edit"
+import {
+  SAVE_HANDOFF_TIMEOUT_STATUS,
+  handOffFailureStatus,
+} from "@/hooks/pending-iteration-edit"
 import { SaveProgressDialog } from "./save-progress-dialog"
 
 function makeTrace(overrides: Partial<SaveLLMTrace> = {}): SaveLLMTrace {
@@ -173,10 +176,13 @@ describe("SaveProgressDialog", () => {
 
   /**
    * The hand-off's two dead ends. A save that handed its edits to chat can end
-   * refused or unanswered, and neither sentence uses the word "failed" — they
-   * are written for the designer, not for this regex. Both leave the mutations
-   * in the buffer with nothing on disk, so both are failures the dialog has to
-   * show rather than closing over.
+   * refused or unanswered, and neither sentence uses the word "failed" - they
+   * are written for the designer, not for a regex. Both leave the mutations in
+   * the buffer with nothing on disk, so both are failures the dialog has to
+   * show rather than closing over. They arrive as `failureReason`, not as
+   * wording on the shared `saveStatus` channel: the iteration lane writes the
+   * same sentences there with no save in flight (see the pair of cases at the
+   * end of this block).
    */
   it("treats an unanswered chat hand-off as a failure, and lets it be closed", () => {
     render(
@@ -186,6 +192,7 @@ describe("SaveProgressDialog", () => {
         lastLLMTrace={null}
         streamingText=""
         saveStatus={SAVE_HANDOFF_TIMEOUT_STATUS}
+        failureReason={SAVE_HANDOFF_TIMEOUT_STATUS}
       />,
     )
     expect(screen.getByRole("dialog")).toBeInTheDocument()
@@ -209,7 +216,8 @@ describe("SaveProgressDialog", () => {
         pendingLLMInput={null}
         lastLLMTrace={null}
         streamingText=""
-        saveStatus="These 3 edits could not be sent to chat. Nothing was discarded; try again when the chat finishes."
+        saveStatus={null}
+        failureReason="These 3 edits could not be sent to chat. Nothing was discarded; try again when the chat finishes."
       />,
     )
     expect(screen.getByRole("dialog")).toBeInTheDocument()
@@ -309,5 +317,73 @@ describe("SaveProgressDialog", () => {
     expect(screen.getByText(/1 applied/)).toBeInTheDocument()
     expect(screen.getByText(/1 refused/)).toBeInTheDocument()
     expect(screen.getByText(/bound expression/)).toBeInTheDocument()
+  })
+  /**
+   * The iteration lane writes its own hand-off sentences to the SAME
+   * `saveStatus` channel, with no save in flight and a scope or
+   * disambiguation dialog already open asking the designer to answer. When
+   * this dialog decided failure by wording, those four sentences opened a
+   * "Save failed" modal on top of the question. The wording heuristic is
+   * narrow again and the save's own failures come in structurally, so the
+   * only thing that can open this dialog with nothing saving is
+   * `failureReason`.
+   */
+  describe("the shared saveStatus channel", () => {
+    const iterationStatuses: [string, string][] = [
+      ["timed out, parked", handOffFailureStatus("timed-out").parked],
+      ["timed out, released", handOffFailureStatus("timed-out").released],
+      ["refused, parked", handOffFailureStatus("refused").parked],
+      ["refused, released", handOffFailureStatus("refused").released],
+    ]
+
+    it.each(iterationStatuses)(
+      "stays shut for an iteration-lane status (%s) with no save failure",
+      (_label, status) => {
+        render(
+          <SaveProgressDialog
+            saving={false}
+            pendingLLMInput={null}
+            lastLLMTrace={null}
+            streamingText=""
+            saveStatus={status}
+          />,
+        )
+        expect(screen.queryByRole("dialog")).toBeNull()
+      },
+    )
+
+    it("opens on a failureReason even when the status reads like nothing", () => {
+      render(
+        <SaveProgressDialog
+          saving={false}
+          pendingLLMInput={null}
+          lastLLMTrace={null}
+          streamingText=""
+          saveStatus="Saved 2 DOM mutation(s)."
+          failureReason="Chat did not answer in time. Nothing was discarded; try again when the chat is free."
+        />,
+      )
+      expect(screen.getByRole("dialog")).toBeInTheDocument()
+      // The structured reason is what the dialog reports, not the stale
+      // status string that happens to be on the shared channel.
+      expect(screen.getByTestId("save-dialog-error")).toHaveTextContent(
+        /did not answer in time/,
+      )
+      expect(screen.queryByText(/Saved 2 DOM mutation/)).toBeNull()
+    })
+
+    it("still opens on the legacy prose failures it always covered", () => {
+      render(
+        <SaveProgressDialog
+          saving={false}
+          pendingLLMInput={null}
+          lastLLMTrace={null}
+          streamingText=""
+          saveStatus="Save threw: boom"
+        />,
+      )
+      expect(screen.getByRole("dialog")).toBeInTheDocument()
+      expect(screen.getByTestId("save-dialog-error")).toHaveTextContent(/boom/)
+    })
   })
 })
