@@ -128,6 +128,7 @@ import {
   hasUndispatchedWork,
   isStaleGeneration,
   isStaleVerify,
+  isSupersededHandshake,
   mayClearInFlightMarker,
   iterationRouteFor,
   parkedReason,
@@ -857,7 +858,25 @@ export function useEditorEditing({
         .catch((err) => {
           if (cancelled) return
           const message = (err as Error).message ?? ""
-          if (message.includes("superseded")) return
+          // A newer handshake replaced this one. Nothing failed, and the newer
+          // one decides the document boundary itself.
+          if (isSupersededHandshake(message)) return
+          // A REAL failure: the new document never handshaked. It is
+          // off-origin, or it answered 500, or the five-second timeout ran
+          // out. Either way there is no document behind the session the shell
+          // is still holding, and leaving it open leaves the generation where
+          // it was, so every continuation from the OLD page reads itself as
+          // current and acts on a page nobody can see.
+          //
+          // So the session ends here, the same way a reconnect ends one, and
+          // nothing is handed back to the bridge: there is no bridge to hear
+          // it. The document token goes with it, so the next handshake that
+          // does complete is the first of a fresh session and ends nothing.
+          endBridgeSessionRef.current?.({
+            reason: "reconnect",
+            cancelWithBridge: false,
+          })
+          sessionDocumentRef.current = null
           setStatus({ kind: "error", message })
         })
     }

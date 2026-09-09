@@ -946,6 +946,24 @@ export function shouldEndSessionOnHandshake(
 }
 
 /**
+ * Did a handshake fail because a newer one replaced it?
+ *
+ * The adapter rejects the outstanding handshake with "superseded" when the
+ * shell starts another one, which is not a failure at all: the newer handshake
+ * is still running and will decide the document boundary itself. Every OTHER
+ * rejection is a real one. The page never answered (it is off-origin, it 500'd,
+ * or the five-second timeout ran out), so there is no document behind the
+ * session the shell is still holding, and the session has to end there or the
+ * generation never moves and none of the staleness guards engage.
+ *
+ * A string test, because that is what the adapter gives: the rejection is an
+ * `Error` and the reason is in its message.
+ */
+export function isSupersededHandshake(message: string): boolean {
+  return message.includes("superseded")
+}
+
+/**
  * Everything a bridge session is holding when it ends, as plain values.
  *
  * The three places a session ends (the adapter effect's cleanup, the iframe's

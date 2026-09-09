@@ -30,6 +30,7 @@ import {
   modalRequestDraftId,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
+  isSupersededHandshake,
   retireForeignEntries,
   sessionEndPlan,
   settleHandOff,
@@ -1507,5 +1508,22 @@ describe("shouldEndSessionOnHandshake", () => {
     // than a boundary missed.
     expect(shouldEndSessionOnHandshake(null, "handshake-1")).toBe(false)
     expect(shouldEndSessionOnHandshake("handshake-1", "handshake-2")).toBe(true)
+  })
+})
+
+describe("isSupersededHandshake", () => {
+  // Round 14 V4. A handshake that fails for real ends the session; one that was
+  // merely replaced must not, because the replacement is still running and
+  // decides the boundary itself.
+  it("says yes when a newer handshake replaced this one", () => {
+    expect(isSupersededHandshake("handshake superseded by a newer one")).toBe(true)
+  })
+
+  it("says no to a page that never answered", () => {
+    // The three real failures: off-origin, a server error, and the timeout.
+    // Each leaves the shell holding a session with no document behind it.
+    expect(isSupersededHandshake("bridge handshake timed out after 5000ms")).toBe(false)
+    expect(isSupersededHandshake("prototype responded 500")).toBe(false)
+    expect(isSupersededHandshake("")).toBe(false)
   })
 })
