@@ -961,6 +961,17 @@ export interface SessionEndState {
   rows: readonly PendingMutation[]
   /** Draft ids still recorded in the lane's maps, i.e. work in flight. */
   heldDraftIds: readonly string[]
+  /**
+   * How many buffered entries the departed document left behind, from
+   * {@link retireForeignEntries}: the pending prop edits and the captured
+   * mutations that were waiting for their debounce when the page went away.
+   *
+   * Required, not defaulted. It is a separate count from everything else here
+   * and the only caller that can measure it is the one ending the session; a
+   * default of zero would let a caller under-report a discard silently, which
+   * is the failure this whole function exists to stop.
+   */
+  retiredBuffered: number
 }
 
 /** What ending a bridge session has to do, decided from {@link SessionEndState}. */
@@ -996,6 +1007,9 @@ export interface SessionEndPlan {
  *   and the queue own their drafts, and cancelling one twice would both
  *   double-count it and send the bridge a message about an id it has already
  *   dropped.
+ * - Every buffered entry the departed document left behind counts, and none of
+ *   them holds a bridge draft, so there is nothing to cancel for them. See
+ *   {@link retireForeignEntries} for what "left behind" means.
  *
  * Releasing the prompt's draft also drops any queued question about that same
  * draft, which is what {@link dropModalRequestsForDraft} does at the call site
@@ -1018,11 +1032,46 @@ export function sessionEndPlan(state: SessionEndState): SessionEndPlan {
   claim(promptDraftId)
   for (const request of queued) claim(modalRequestDraftId(request))
   for (const row of rows) claim(row.pendingId)
-  let discarded = (state.openPrompt ? 1 : 0) + queued.length + rows.length
+  let discarded =
+    (state.openPrompt ? 1 : 0) + queued.length + rows.length + state.retiredBuffered
   for (const draftId of state.heldDraftIds) {
     if (claim(draftId)) discarded += 1
   }
   return { cancelDraftIds, discarded, status: discardedOnResetStatus(discarded) }
+}
+
+/**
+ * Split buffered entries into the ones the live session may still act on and
+ * the ones the departed document left behind.
+ *
+ * The shell's two edit buffers (the pending prop edits, the captured DOM
+ * mutations) outlive the document that filled them. A prop typed just before a
+ * reload is still sitting in its buffer when the new page attaches; so is a
+ * text or class capture whose debounce had not fired. Nothing in either entry
+ * says which page it came from, so the next Save, the next AI-queue drain, or
+ * the next debounce read the whole array and wrote the departed page's source
+ * into the page the designer is looking at now, or failed stale-target trying.
+ *
+ * The rule is exact equality with the live generation, so an entry captured in
+ * ANY other session is foreign, older or newer. An entry carrying no
+ * generation at all is foreign too: every shell creation site tags its entry,
+ * so an untagged one came from somewhere that cannot say which document it
+ * describes, and applying it to this one is the hazard this exists to stop.
+ *
+ * Retiring is a discard, and the caller says so: the count goes to
+ * {@link sessionEndPlan}, which puts it in the line the designer reads.
+ */
+export function retireForeignEntries<T extends { generation?: number }>(
+  entries: readonly T[],
+  currentGeneration: number,
+): { kept: T[]; retired: T[] } {
+  const kept: T[] = []
+  const retired: T[] = []
+  for (const entry of entries) {
+    if (entry.generation === currentGeneration) kept.push(entry)
+    else retired.push(entry)
+  }
+  return { kept, retired }
 }
 
 /**

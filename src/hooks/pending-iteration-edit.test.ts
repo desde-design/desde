@@ -30,6 +30,7 @@ import {
   modalRequestDraftId,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
+  retireForeignEntries,
   sessionEndPlan,
   settleHandOff,
   shouldEndSessionOnHandshake,
@@ -1204,7 +1205,13 @@ describe("sessionEndPlan", () => {
     kind: "disambiguation",
     mutation: mutation(pendingId),
   })
-  const empty = { openPrompt: null, queued: [], rows: [], heldDraftIds: [] }
+  const empty = {
+    openPrompt: null,
+    queued: [],
+    rows: [],
+    heldDraftIds: [],
+    retiredBuffered: 0,
+  }
 
   it("says nothing when the session was holding nothing", () => {
     expect(sessionEndPlan(empty)).toEqual({
@@ -1220,6 +1227,7 @@ describe("sessionEndPlan", () => {
       queued: [parkRequest("dom-pending-2")],
       rows: [mutation("dom-pending-3")],
       heldDraftIds: ["dom-pending-4"],
+      retiredBuffered: 0,
     })
     expect(plan.discarded).toBe(4)
     expect(plan.cancelDraftIds).toEqual([
@@ -1286,6 +1294,7 @@ describe("sessionEndPlan", () => {
       queued: [parkRequest("dom-pending-2"), scopeRequest("dom-pending-1")],
       rows: [mutation("dom-pending-3")],
       heldDraftIds: ["dom-pending-1", "dom-pending-4"],
+      retiredBuffered: 0,
     }
     const onCleanup = sessionEndPlan(state)
     const onReconnect = sessionEndPlan(state)
@@ -1298,10 +1307,101 @@ describe("sessionEndPlan", () => {
     const queued = [parkRequest("dom-pending-2")]
     const rows = [mutation("dom-pending-3")]
     const heldDraftIds = ["dom-pending-4"]
-    sessionEndPlan({ openPrompt: scopePrompt("dom-pending-1"), queued, rows, heldDraftIds })
+    sessionEndPlan({
+      openPrompt: scopePrompt("dom-pending-1"),
+      queued,
+      rows,
+      heldDraftIds,
+      retiredBuffered: 0,
+    })
     expect(queued).toHaveLength(1)
     expect(rows).toHaveLength(1)
     expect(heldDraftIds).toEqual(["dom-pending-4"])
+  })
+
+  it("counts the buffered entries the departed document left behind", () => {
+    // Round 14 V1. A prop typed just before the boundary and two text captures
+    // whose debounce never fired are three edits the designer loses. They hold
+    // no bridge draft, so there is nothing to cancel for them, but the count
+    // has to say so or the reset line under-reports what went.
+    const plan = sessionEndPlan({ ...empty, retiredBuffered: 3 })
+    expect(plan.discarded).toBe(3)
+    expect(plan.cancelDraftIds).toEqual([])
+    expect(plan.status).toBe("The page connection was reset; 3 pending edits were discarded.")
+  })
+
+  it("adds the buffered count to the drafts, rather than replacing it", () => {
+    const plan = sessionEndPlan({
+      openPrompt: scopePrompt("dom-pending-1"),
+      queued: [parkRequest("dom-pending-2")],
+      rows: [mutation("dom-pending-3")],
+      heldDraftIds: ["dom-pending-4"],
+      retiredBuffered: 2,
+    })
+    expect(plan.discarded).toBe(6)
+    // The buffered entries are not drafts, so they add nothing here.
+    expect(plan.cancelDraftIds).toEqual([
+      "dom-pending-1",
+      "dom-pending-2",
+      "dom-pending-3",
+      "dom-pending-4",
+    ])
+  })
+
+  it("says nothing when the buffers were empty and nothing else was held", () => {
+    expect(sessionEndPlan({ ...empty, retiredBuffered: 0 }).status).toBeNull()
+  })
+})
+
+describe("retireForeignEntries", () => {
+  // Round 14 V1. The two edit buffers outlive the document that filled them,
+  // and nothing on an entry says which page it describes except this tag.
+  const entry = (id: string, generation?: number) =>
+    generation === undefined ? { id } : { id, generation }
+
+  it("keeps only the entries captured in the live session", () => {
+    const { kept, retired } = retireForeignEntries(
+      [entry("a", 4), entry("b", 3), entry("c", 4)],
+      4,
+    )
+    expect(kept.map((e) => e.id)).toEqual(["a", "c"])
+    expect(retired.map((e) => e.id)).toEqual(["b"])
+  })
+
+  it("retires an entry from a NEWER session as readily as an older one", () => {
+    // Exact equality, not "older than". A generation that is not this one
+    // describes a document this one is not, whichever direction it lies in.
+    const { kept, retired } = retireForeignEntries([entry("a", 9)], 4)
+    expect(kept).toEqual([])
+    expect(retired.map((e) => e.id)).toEqual(["a"])
+  })
+
+  it("retires an untagged entry, because it cannot say which page it came from", () => {
+    // Every shell creation site tags its entry, so an untagged one arrived
+    // from somewhere that cannot answer the question. Applying it to this
+    // document is the wrong-file hazard the partition exists to stop.
+    const { kept, retired } = retireForeignEntries([entry("a"), entry("b", 4)], 4)
+    expect(kept.map((e) => e.id)).toEqual(["b"])
+    expect(retired.map((e) => e.id)).toEqual(["a"])
+  })
+
+  it("keeps the buffer's order in both halves", () => {
+    const { kept, retired } = retireForeignEntries(
+      [entry("a", 4), entry("b", 1), entry("c", 4), entry("d", 1)],
+      4,
+    )
+    expect(kept.map((e) => e.id)).toEqual(["a", "c"])
+    expect(retired.map((e) => e.id)).toEqual(["b", "d"])
+  })
+
+  it("does not mutate the buffer it is given", () => {
+    const entries = [entry("a", 4), entry("b", 1)]
+    retireForeignEntries(entries, 4)
+    expect(entries.map((e) => e.id)).toEqual(["a", "b"])
+  })
+
+  it("retires nothing from an empty buffer", () => {
+    expect(retireForeignEntries([], 4)).toEqual({ kept: [], retired: [] })
   })
 })
 

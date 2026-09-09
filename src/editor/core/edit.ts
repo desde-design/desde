@@ -93,6 +93,25 @@ export interface InsertionTarget {
   parentEditTarget?: SourceLocation
 }
 
+/**
+ * Which bridge session a buffered entry was captured in.
+ *
+ * A "bridge session" is one document in the shell's iframe. Buffers outlive
+ * documents: the page reloads or navigates while an entry is still sitting in
+ * the buffer waiting for its debounce, and the entry then describes source the
+ * page in front of the designer no longer renders. Applying it there is the
+ * wrong-file hazard, so the shell partitions its buffers on this number and
+ * discards the entries the departed document left behind.
+ *
+ * Optional, and shell-local: nothing in the edit pipeline reads it, and it
+ * never reaches the wire, because `build-edit-request.ts` maps every field it
+ * sends by name. A consumer with no sessions (the agent, the pure tests) omits
+ * it.
+ */
+export interface BridgeSessionTagged {
+  generation?: number
+}
+
 /** Common fields on every {@link StructuralEdit}. */
 export interface StructuralEditBase {
   /** Stable id for undo/redo correlation in the editor-shell history stack. */
@@ -101,7 +120,10 @@ export interface StructuralEditBase {
   target: SelectionTarget
 }
 
-export interface PropEdit extends StructuralEditBase, IterationScopeChoice {
+export interface PropEdit
+  extends StructuralEditBase,
+    IterationScopeChoice,
+    BridgeSessionTagged {
   kind: 'prop'
   propName: string
   value: ManifestValue
@@ -554,7 +576,7 @@ export type DisambiguationChoice =
  * (or skipped) by the shell. See `tasks/_archive/spikes/dom-edit-patch-spike.md` for the
  * full design rationale.
  */
-export interface Mutation {
+export interface Mutation extends BridgeSessionTagged {
   /** Stable id for revert / verification correlation. */
   id: string
   kind: 'text' | 'attr' | 'class' | 'style'

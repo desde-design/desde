@@ -133,6 +133,7 @@ import {
   parkedReason,
   promptCollision,
   PROMPT_BUSY_STATUS,
+  retireForeignEntries,
   iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
@@ -280,6 +281,18 @@ interface UseEditorEditingOptions {
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>
 }
+
+/**
+ * Buffer key for one element's one prop. Module scope, so every closure that
+ * builds a key gets the SAME function identity: `endBridgeSession` reads it
+ * with an empty dependency list, and a per-render arrow there would be a
+ * dependency the callback silently never updates for.
+ *
+ * The NUL separator is deliberate: a selector can contain anything a CSS
+ * selector can, and a printable separator could be part of one.
+ */
+const propEditKey = (selector: string, propName: string): string =>
+  `${selector}\u0000${propName}`
 
 /**
  * Editor editing state + handlers, decoupled from the iframe owner.
@@ -1828,8 +1841,6 @@ export function useEditorEditing({
    * request is still in flight — in-flight is the expected state.
    */
   const inFlightOverrideIdsRef = useRef<Set<string>>(new Set())
-  const propEditKey = (selector: string, propName: string): string =>
-    `${selector}\u0000${propName}`
   // Hoisted ref so `dispatchAllRowsPropEdit` (defined above the dispatcher)
   // can schedule it without a TDZ/circular-callback dance — same pattern as
   // `dispatchBranchTextMutationRef` / `handleSaveAllRef`.
@@ -1986,6 +1997,10 @@ export function useEditorEditing({
         target: selection,
         propName,
         value,
+        // The session this edit was captured in. The buffer outlives the
+        // document, and this is the only thing on the entry that says which
+        // document it describes. See `retireForeignEntries`.
+        generation: adapterGenerationRef.current,
       }
       if (renderSite) {
         pendingPropRenderSitesRef.current.set(edit.id, renderSite)
@@ -3001,12 +3016,75 @@ export function useEditorEditing({
       // adapter, so the next edit needs a live controller. A continuation that
       // captured the old signal keeps the old signal.
       adapterAbortRef.current = new AbortController()
+      // THE BUFFERS. Cancelling a debounce timer stops the write from being
+      // attempted; it does nothing about the entry the timer was going to
+      // write. Those entries stay in the two buffers, and the buffers are read
+      // by things that run under the NEXT document: the next Save and the next
+      // Apply-with-AI take the whole `mutations` array, and a prop typed just
+      // before the boundary sits in `pendingPropEdits`, which has no
+      // save-time flush at all. Either way the departed page's source is what
+      // gets written, or the write fails stale-target trying.
+      //
+      // So the buffers are partitioned on the session each entry was captured
+      // in, and everything the departed document left behind is discarded here
+      // and COUNTED, which is the honest outcome: applying one page's buffered
+      // edit to a different page is the hazard, and a silent drop would leave
+      // the designer looking for an edit nothing will ever make.
+      //
+      // The generation was bumped a few lines up, so "the new one" is the
+      // session about to run, and every entry from the session that just ended
+      // is foreign to it.
+      const liveGeneration = adapterGenerationRef.current
+      const propPartition = retireForeignEntries(
+        pendingPropEditsRef.current,
+        liveGeneration,
+      )
+      const mutationPartition = retireForeignEntries(
+        mutationsRef.current,
+        liveGeneration,
+      )
       const plan = sessionEndPlan({
         openPrompt: iterationScopePromptRef.current,
         queued: modalQueueRef.current,
         rows: pendingDisambiguationsRef.current,
         heldDraftIds: [...bridgeDraftsByPendingIdRef.current.keys()],
+        retiredBuffered: propPartition.retired.length + mutationPartition.retired.length,
       })
+      if (propPartition.retired.length > 0) {
+        const retiredIds = new Set(propPartition.retired.map((e) => e.id))
+        for (const entry of propPartition.retired) {
+          // The per-entry side tables keyed by edit id. Left behind they leak,
+          // and `attrEditIdsRef` decides how a later revert re-issues the
+          // override, so a stale id there is a wrong answer, not just waste.
+          attrEditIdsRef.current.delete(entry.id)
+          pendingPropRenderSitesRef.current.delete(entry.id)
+          inFlightOverrideIdsRef.current.delete(entry.id)
+          staleRetriedRef.current.delete(
+            propEditKey(entry.target.selector, entry.propName),
+          )
+        }
+        // The mirror first, so a continuation that reads the buffer before
+        // React re-renders sees the retirement too. Then the state, as a
+        // filter rather than a replacement, so an update queued in this same
+        // tick is not thrown away with it.
+        pendingPropEditsRef.current = propPartition.kept
+        setPendingPropEdits((prev) => prev.filter((e) => !retiredIds.has(e.id)))
+      }
+      if (mutationPartition.retired.length > 0) {
+        const retiredIds = new Set(mutationPartition.retired.map((m) => m.id))
+        for (const mutation of mutationPartition.retired) {
+          inFlightOverrideIdsRef.current.delete(mutation.id)
+        }
+        // The AI queue holds IDENTITIES, not entries, and an identity left
+        // behind makes the capture scheduler skip the next inline edit on that
+        // element and keeps the unload warning up over a queue that is empty
+        // in fact.
+        if (pruneAiQueue(queuedForAiRef.current, mutationPartition.retired)) {
+          setAiQueueCount(queuedForAiRef.current.size)
+        }
+        mutationsRef.current = mutationPartition.kept
+        setMutations((prev) => prev.filter((m) => !retiredIds.has(m.id)))
+      }
       iterationScopePromptRef.current = null
       setIterationScopePrompt(null)
       modalQueueRef.current = []
@@ -4710,9 +4788,16 @@ export function useEditorEditing({
     const propTimers = branchPropDispatchTimers.current
     const propInFlight = branchPropInFlight.current
     const unsubCaptured = adapter.onMutationCaptured((m) => {
+      // THE tag, for both buffers' sake: the bridge knows nothing about
+      // sessions, so the shell stamps the capture with the document it came
+      // from as it arrives. A repeat capture on the same identity carries the
+      // live session's number and `coalesceCapturedMutation` takes the
+      // incoming fields, so a re-edited entry belongs to the session that
+      // re-edited it. See `retireForeignEntries`.
+      const tagged: Mutation = { ...m, generation: adapterGenerationRef.current }
       // Coalesce by identity, preserving the first `before` (see
       // coalesceCapturedMutation). "Edit a field repeatedly" → one entry.
-      setMutations((prev) => coalesceCapturedMutation(prev, m))
+      setMutations((prev) => coalesceCapturedMutation(prev, tagged))
       // Branch mode: kick off (or reset) a debounced immediate-dispatch
       // so every edit writes straight to the working tree as an
       // uncommitted change — there is no separate Save step.
@@ -5255,6 +5340,10 @@ export function useEditorEditing({
           target: selection,
           propName: proposal.propName,
           value: proposal.value as PropEdit["value"],
+          // Same tag as the designer's own prop edits: the agent's proposal is
+          // about the document on screen when it arrived, and it sits in the
+          // same buffer. See `retireForeignEntries`.
+          generation: adapterGenerationRef.current,
         }
         setPendingPropEdits((prev) => {
           // Last-write-wins per (selector, propName) — mirrors
