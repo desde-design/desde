@@ -207,7 +207,13 @@ function findEnclosingVForAt(
       (p): p is DirectiveNode =>
         p.type === NodeTypes.DIRECTIVE && (p as DirectiveNode).name === 'for',
     )
-    const ownExpression = (ownVFor?.exp as SimpleExpressionNode | undefined)?.content ?? null
+    // An EMPTY expression is absent, not present. `v-for=""` parses to a
+    // directive whose content is `""`, and a nullish check kept it: the empty
+    // string then shadowed the real enclosing loop, and the check answered
+    // "found" with no expression for an element that is genuinely a row of
+    // the loop above it.
+    const rawExpression = (ownVFor?.exp as SimpleExpressionNode | undefined)?.content ?? null
+    const ownExpression = rawExpression && rawExpression.trim().length > 0 ? rawExpression : null
     const loc = node.loc?.start
     const sfcLine = loc ? loc.line + templateStartLine - 1 : null
     // Self counts: the clicked element may BE the `v-for` element. The

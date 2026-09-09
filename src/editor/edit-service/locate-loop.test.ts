@@ -201,6 +201,30 @@ export function List() {
     if (r.found) expect(r.location).toEqual(babelLoc(DEEP_TSX, "<li key"))
   })
 
+  it("an empty v-for does not shadow the loop that encloses it", () => {
+    // `v-for=""` parses to a directive with an empty expression. Treating
+    // that as "this element has a loop" reported a row of the REAL loop above
+    // it as a loop with no expression.
+    const EMPTY_VFOR_VUE = `<template>
+  <ul>
+    <li v-for="r in rows" :key="r.id">
+      <span v-for="">{{ r.id }}</span>
+    </li>
+  </ul>
+</template>
+`
+    const r = locateLoopAt({
+      file: "src/List.vue",
+      source: EMPTY_VFOR_VUE,
+      templateLocation: { line: 4, column: 7 },
+    })
+    expect(r.found).toBe(true)
+    if (r.found) {
+      expect(r.expression).toBe("r in rows")
+      expect(r.location).toEqual({ line: 3, column: 5 })
+    }
+  })
+
   it("refuses an unsupported extension", () => {
     const r = locateLoopAt({ file: "src/x.svelte", source: "", templateLocation: { line: 1, column: 0 } })
     expect(r).toEqual({ found: false, reason: "Only .vue, .tsx, and .jsx files can be checked for a loop" })
