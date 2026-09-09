@@ -128,6 +128,27 @@ describe("EditSession: the session itself", () => {
     expect(session.isInFlight("prop", "a")).toBe(true)
   })
 
+  it("takes one lane back to rest without touching the other", () => {
+    vi.useFakeTimers()
+    try {
+      const session = newSession()
+      const propTimer = vi.fn()
+      const textTimer = vi.fn()
+      session.markInFlight("prop", "a")
+      session.markInFlight("text", "a")
+      session.schedule("prop", "a", session.generation, propTimer, 500)
+      session.schedule("text", "a", session.generation, textTimer, 500)
+      session.resetLane("prop")
+      expect(session.hasInFlight("prop")).toBe(false)
+      expect(session.hasInFlight("text")).toBe(true)
+      vi.advanceTimersByTime(500)
+      expect(propTimer).not.toHaveBeenCalled()
+      expect(textTimer).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("refuses to clear a marker the next session owns (findings T3, U3)", () => {
     const session = newSession()
     const generation = session.generation

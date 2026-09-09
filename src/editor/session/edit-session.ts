@@ -402,6 +402,30 @@ export class EditSession<Prompt> implements LaneSession {
   }
 
   /**
+   * Is ANY write out on this lane right now? Asked by work that has to wait for
+   * the writes to land rather than for one identity in particular, such as
+   * re-reading a selection's source stamps after HMR.
+   */
+  hasInFlight(lane: LaneId): boolean {
+    return this.inFlight[lane].size > 0
+  }
+
+  /**
+   * One lane, back to rest: every armed write cancelled, every marker given up.
+   *
+   * For the adapter going away rather than the session ending. A debounce
+   * callback that fired afterwards would call into an adapter that is gone, and
+   * a marker left behind would block the first dispatch for that identity once
+   * a new adapter attaches. Not on `LaneSession`, because this is the shell
+   * tearing a lane down, not the lane running.
+   */
+  resetLane(lane: LaneId): void {
+    for (const timer of this.timers[lane].values()) clearTimeout(timer)
+    this.timers[lane].clear()
+    this.inFlight[lane].clear()
+  }
+
+  /**
    * Give the marker back, but only while this dispatch still owns it.
    *
    * The marker sets are keyed on the element and the prop, not on the session,

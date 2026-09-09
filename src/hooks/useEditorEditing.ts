@@ -72,7 +72,6 @@ import type { ChatHandoffOutcome } from "./apply-edit-with-chat-handoff"
 import {
   afterEscalation,
   buildEditEscalationPrompt,
-  buildPropEditEscalationPrompt,
   buildRowScopedEditHandoffPrompt,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
@@ -104,7 +103,6 @@ import { offeredDisambiguationChoices } from "./disambiguation-choices"
 import { routeAwaitingDisambiguation } from "./disambiguation-route"
 import { notifySingleChoiceDisambiguation } from "./single-choice-disambiguation-notice"
 import { notifyOverridePreviewFailure } from "./override-preview-notice"
-import type { ManifestValue } from "@/editor/core/manifest"
 import type { IterationScope } from "@/components/editor/iteration-scope-dialog"
 import {
   collectVueFiles,
@@ -157,6 +155,10 @@ import {
   EditSession,
   type SessionEndResult,
 } from "@/editor/session/edit-session"
+import {
+  dispatchPropEdit,
+  propEditKey,
+} from "@/editor/edit-service/lanes/prop-lane"
 import { verifyIterationLoop } from "./iteration-verify"
 import { parkedSaveRefusal, saveGate } from "./save-gate"
 
@@ -167,26 +169,6 @@ import { parkedSaveRefusal, saveGate } from "./save-gate"
  * re-render the whole panel) for no reason.
  */
 const EMPTY_CONDITIONAL_GROUPS: Map<string, FileConditionalGroups> = new Map()
-
-/**
- * Narrow a {@link PropEdit}'s value to the string|number|boolean shape the
- * escalation prompt expects. The wire protocol's PropEdit body (per
- * {@link validateEditRequest}) only accepts these three primitive kinds —
- * arrays / objects / null get rejected at the server boundary. So in
- * practice this is just a type-narrowing assertion; the fallback
- * stringifies defensively in case a future PropEdit variant slips through.
- */
-function normalizeManifestValueForEscalation(
-  value: ManifestValue,
-): string | number | boolean {
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return value
-  }
-  // ManifestValue widens to null / array / object for non-prop edits.
-  // PropEdits don't carry these — fall back to a labeled string so the
-  // prompt is still readable if the validator drifts.
-  return String(value)
-}
 
 /**
  * `adapter.resolveOverride`, plus the shell-side "the preview shim is gone" edge
@@ -269,18 +251,6 @@ interface UseEditorEditingOptions {
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>
 }
-
-/**
- * Buffer key for one element's one prop. Module scope, so every closure that
- * builds a key gets the SAME function identity: `endBridgeSession` reads it
- * with an empty dependency list, and a per-render arrow there would be a
- * dependency the callback silently never updates for.
- *
- * The NUL separator is deliberate: a selector can contain anything a CSS
- * selector can, and a printable separator could be part of one.
- */
-const propEditKey = (selector: string, propName: string): string =>
-  `${selector}\u0000${propName}`
 
 /**
  * Editor editing state + handlers, decoupled from the iframe owner.
@@ -1895,14 +1865,14 @@ export function useEditorEditing({
   const pendingPropRenderSitesRef = useRef<Map<string, RenderSite>>(new Map())
 
   // ── Branch-mode prop dispatch (mirrors the dom-text path) ───────────────
-  // Per-(selector,propName) debounce timers + in-flight set, same shape as the
-  // dom-text dispatch. Key built by `propEditKey`.
-  const branchPropDispatchTimers = useRef<
-    Map<string, ReturnType<typeof setTimeout>>
-  >(new Map())
-  const branchPropInFlight = useRef<Set<string>>(new Set())
-  /** One-shot stale-target recovery guard, keyed like branchPropInFlight.
-   *  Cleared on a successful dispatch; prevents 409→refresh→409 loops. */
+  // The debounce timers and the in-flight markers are the SESSION's, under the
+  // `"prop"` lane: `dispatchPropEdit` schedules and marks through it, so a
+  // timer or a marker cannot outlive the page it belongs to. Key built by
+  // `propEditKey`.
+  /** One-shot stale-target recovery guard, keyed like the in-flight markers.
+   *  Cleared on a successful dispatch; prevents 409→refresh→409 loops. It stays
+   *  the hook's because a retired buffer entry has to forget its key here, and
+   *  the lane never sees a session end. */
   const staleRetriedRef = useRef<Set<string>>(new Set())
   /**
    * Override ids whose dispatch is currently awaiting the server. The
@@ -1926,20 +1896,21 @@ export function useEditorEditing({
   const scheduleBranchPropDispatch = useCallback(
     (selector: string, propName: string) => {
       const key = propEditKey(selector, propName)
-      if (branchPropInFlight.current.has(key)) return
-      const existing = branchPropDispatchTimers.current.get(key)
-      if (existing) clearTimeout(existing)
+      if (session.isInFlight("prop", key)) return
       // The session this buffered edit belongs to, captured NOW rather than
       // read inside the callback half a second later. Read there it would be
       // whatever session is live when the timer fires, so a timer that outlived
       // a page reload would write the old page's edit under the new page's
-      // session and pass every guard on the way.
-      const scheduledGeneration = session.generation
-      const timer = setTimeout(() => {
-        branchPropDispatchTimers.current.delete(key)
-        dispatchBranchPropEditRef.current?.(key, scheduledGeneration)
-      }, BRANCH_PROP_DISPATCH_DEBOUNCE_MS)
-      branchPropDispatchTimers.current.set(key, timer)
+      // session and pass every guard on the way. `session.schedule` refuses to
+      // run the callback at all once the generation has moved.
+      const generation = session.generation
+      session.schedule(
+        "prop",
+        key,
+        generation,
+        () => dispatchBranchPropEditRef.current?.(key, generation),
+        BRANCH_PROP_DISPATCH_DEBOUNCE_MS,
+      )
     },
     [session],
   )
@@ -3079,12 +3050,11 @@ export function useEditorEditing({
       const plan = session.end(reason)
       // The lanes' in-flight markers are per identity and shared across
       // sessions, so they die with the session that set them. Each lane's
-      // `finally` refuses to delete a marker once the generation has moved (it
-      // would be deleting the NEXT session's), which is only safe because this
-      // clears them. Both sets: the prop lane's, and the one the text and class
-      // lanes share. Still cleared here because the lanes still hold their own
-      // sets; they move onto the session's markers in a later step.
-      branchPropInFlight.current.clear()
+      // `finally` refuses to give a marker up once the generation has moved (it
+      // would be giving up the NEXT session's), which is only safe because the
+      // end clears them. `session.end` did the prop lane's, and every timer it
+      // had armed; the text and class lanes still hold their own set, and it is
+      // cleared here until they move onto the session's too.
       branchTextInFlight.current.clear()
       // Every debounced write this session had armed, cancelled. A debounce
       // callback is a plain `setTimeout` and knows nothing about sessions: left
@@ -3095,13 +3065,10 @@ export function useEditorEditing({
       // of two locks on the same door: this one stops the write from being
       // attempted, that one stops it from landing if a timer ever escapes.
       //
-      // Both maps, and that is all of them: the prop lane has its own
-      // (`branchPropDispatchTimers`), and the text and class lanes share one
+      // One map left here: the text and class lanes share it
       // (`branchTextDispatchTimers`, keyed by a mutation identity that carries
-      // the kind, so the two never collide). `session.end` cancelled its own
-      // timer maps, which stay empty until the lanes schedule through it.
-      for (const timer of branchPropDispatchTimers.current.values()) clearTimeout(timer)
-      branchPropDispatchTimers.current.clear()
+      // the kind, so the two never collide). The prop lane's timers are the
+      // session's, and `session.end` cancelled them above.
       for (const timer of branchTextDispatchTimers.current.values()) clearTimeout(timer)
       branchTextDispatchTimers.current.clear()
       applySessionEnd(
@@ -3638,7 +3605,7 @@ export function useEditorEditing({
         const current = useEditorStore.getState().editorSelection
         if (!adapter || !current || current.selector !== selector) return
         if (
-          branchPropInFlight.current.size > 0 ||
+          session.hasInFlight("prop") ||
           branchTextInFlight.current.size > 0
         ) {
           if (i + 1 < delays.length) attempt(i + 1)
@@ -3658,7 +3625,7 @@ export function useEditorEditing({
       void timer
     }
     attempt(0)
-  }, [])
+  }, [session])
   const BRANCH_TEXT_DISPATCH_DEBOUNCE_MS = 500
   // Prop edits debounce on the same cadence (a slider/number drag fires many
   // intermediate values; we auto-commit only after the designer settles).
@@ -3934,335 +3901,54 @@ export function useEditorEditing({
 
   /**
    * Branch-mode dispatch for a buffered prop/attr edit, keyed by
-   * `propEditKey(selector, propName)`. Mirrors `dispatchBranchTextMutation`:
-   * reads the freshest buffered value, dispatches it to the working tree via
-   * `adapter.applyEdit` (the server's deterministic-first pipeline handles the
-   * bound-binding LLM fallback internally), reconciles the buffer, and re-fires
-   * if the value advanced during the in-flight round-trip. The DOM override set
-   * at edit time is the instant preview; HMR re-renders the truthful source.
-   * Serialized per identity so two same-key dispatches can't complete out of
-   * order (same race the text path's in-flight set guards).
+   * `propEditKey(selector, propName)`.
+   *
+   * The dispatch itself is `dispatchPropEdit` in
+   * `src/editor/edit-service/lanes/prop-lane.ts`, which is a function of the
+   * session and takes no refs. What is left here is the wiring: the adapter
+   * instance, the shell-side side tables keyed by edit id, and the four
+   * callbacks that write to React state.
    *
    * `scheduledGeneration` is the bridge session the caller decided to write in,
    * which for a debounced call is the session that was live when the designer
    * typed, half a second before this runs. It defaults to the session that is
    * live now, for the immediate callers who have no wait to span.
    */
-  const dispatchBranchPropEdit = useCallback(async (
-    key: string,
-    scheduledGeneration?: number,
-  ) => {
-    // The session this dispatch belongs to. Every guard below reads it, and
-    // the marker this dispatch is about to set is keyed on the element and the
-    // prop, NOT on the session, so a dispatch that outlives its session would
-    // otherwise delete a marker a new dispatch for the same element set after
-    // the page reloaded, and two writes for one identity could then run at
-    // once. See `session.isCurrent`, which the `finally` consults, and
-    // `endBridgeSession`, which empties the set.
-    const generation = scheduledGeneration ?? session.generation
-    // The page this write was for is gone. Write nothing: the buffered entry
-    // stays, and the designer's next keystroke re-arms the debounce under the
-    // session that is actually on screen.
-    if (!session.isCurrent(generation)) return
-    const adapter = adapterRef.current
-    if (!adapter) return
-    if (branchPropInFlight.current.has(key)) return
-    const current = session.getSnapshot().propEdits.find(
-      (e) => propEditKey(e.target.selector, e.propName) === key,
-    )
-    if (!current) return
-    const dispatchedValue = current.value
-    // This session's lifetime, as a signal, captured with everything else this
-    // dispatch decides now. It goes to the WRITE below, so a reload cancels the
-    // request instead of leaving it running against a page that is gone, and to
-    // the chat hand-off, so a turn this dispatch starts is cancelled rather
-    // than merely unwatched.
-    const sessionSignal = session.signal
-    branchPropInFlight.current.add(key)
-    inFlightOverrideIdsRef.current.add(current.id)
-    // The prop request is a plain synchronous POST — when the deterministic
-    // lane refuses, the server runs the AI mini-turn INSIDE this request
-    // (up to ~90s) with no streaming signal. The client can't know the
-    // fallback engaged, but a prop dispatch outlasting a couple of seconds
-    // is a reliable tell — surface it so the wait isn't silent.
-    const askingAiTimer = setTimeout(() => {
-      if (branchPropInFlight.current.has(key)) {
-        setSaveStatus(`Asking AI to apply "${current.propName}"…`)
-      }
-    }, 2_000)
-    try {
-      const result = await adapter.applyEdit(
-        current,
-        { signal: sessionSignal },
-      )
-      // Disk truth, not session state, so it is recorded whoever is looking at
-      // the files. Same order and the same reason as the text and class lanes.
-      // Skipping it would leave the external-edit guard comparing against a
-      // hash this very write invalidated.
-      if (result.kind === "applied" && result.newHashes) {
-        fileHashesRef.current = {
-          ...fileHashesRef.current,
-          ...result.newHashes,
-        }
-      }
-      // THE PAGE THIS ANSWER IS ABOUT IS GONE. Do nothing with it, and that
-      // means nothing at all: no buffer filter, no timer replaced, no status.
-      // The request can be out for ~90 seconds (the server runs its AI
-      // mini-turn inside the POST), and a document replaced inside that window
-      // took this dispatch's entry with it. A SUCCESS is the case that used to
-      // slip through here: the reconcile below would clear the live debounce
-      // and re-arm it under this dispatch's dead session, so the replacement
-      // document's edit on the same prop stayed buffered and was never
-      // written. The `finally` leaves the marker alone for the same reason.
-      if (!session.isCurrent(generation)) return
-      if (result.kind === "failed") {
-        // `'chat'` fallback mode: the deterministic applicator refused
-        // (bound-binding / v-model / dynamic-vbind) AND the source-aware
-        // LLM lane refused too, so the server returned `needsChat`. Route
-        // the edit to the chat agent (which has multi-file tool access)
-        // instead of leaving it stuck in the buffer, and drop the entry.
-        // Mirrors the inline text path at ~line 2311.
-        if (result.needsChat && escalateToChatRef.current) {
-          const editTarget = current.target.editTarget
-          const editTargetLocation = editTarget
-            ? `${editTarget.file}:${editTarget.line}`
-            : null
-          // The hand-off can be REFUSED, either by the client guard (a chat
-          // is already streaming) or by the server answering the POST with an
-          // error. Awaited, so the second kind is known here too. Clearing the
-          // buffer on a refusal loses the value: nothing was submitted,
-          // nothing is on disk, and the optimistic override reverts later with
-          // no explanation.
-          const accepted = await escalateToChatRef.current(
-            buildPropEditEscalationPrompt({
-              propName: current.propName,
-              // Pass the raw value (string | number | boolean) so the
-              // prompt renders unquoted for non-string literals — the
-              // agent must not write `:max="42"` as `:max="\"42\""`.
-              newValue: normalizeManifestValueForEscalation(current.value),
-              componentName: current.target.componentName,
-              editTargetLocation,
-              selector: current.target.selector,
-            }),
-            // The submission races the session: a reload cancels it rather
-            // than leaving a turn on its way to a page nobody is looking at.
-            { signal: sessionSignal },
-          )
-          // The session ended while the submission was out. Touch nothing: the
-          // entry this would keep or drop was retired with the page it was
-          // typed on, and the status bar is describing a different page now.
-          if (!session.isCurrent(generation)) return
-          const aftermath = afterEscalation(
-            accepted,
-            `The "${current.propName}" edit`,
-          )
-          if (aftermath.buffer === "keep") {
-            setSaveStatus(aftermath.status)
-            return
-          }
-          session.updatePropEdits((prev) => prev.filter((e) => e.id !== current.id))
-          attrEditIdsRef.current.delete(current.id)
-          pendingPropRenderSitesRef.current.delete(current.id)
-          return
-        }
-        // The source write genuinely failed (not a needsChat refusal). Keep
-        // the entry buffered so it stays consistent with the live preview
-        // override (still showing the attempted value) and `hasUnsavedChanges`
-        // stays true — the value is NOT on disk. There is no save-time flush to
-        // retry it (branch mode has no buffer flush; git Commit records the
-        // working tree, it doesn't re-run dispatch); editing the field again
-        // re-arms the debounced dispatch, which is the retry path.
-        // Stale-target auto-recovery (follow-up to WS1): a 409 means the
-        // file moved under the buffered entry's captured stamps — usually
-        // our own just-landed write. Re-capture coordinates+hash from the
-        // post-HMR DOM once, rebase the entry, and re-fire before
-        // surfacing failure. One shot per key: a second 409 surfaces.
-        if (/stale target/i.test(result.reason) && !staleRetriedRef.current.has(key)) {
-          staleRetriedRef.current.add(key)
-          const refreshed = await adapter
-            .selectBySelector(current.target.selector)
-            .catch(() => null)
-          // The session ended while the re-select was out. `refreshed` then
-          // describes a document this dispatch never wrote against, and the
-          // re-entry below would run under a marker this dispatch no longer
-          // owns. Report nothing: the buffered entry stays, and the next
-          // keystroke on it re-arms the debounce under the live session.
-          if (!session.isCurrent(generation)) return
-          if (refreshed?.editTarget) {
-            session.updatePropEdits((prev) => {
-              const idx = prev.findIndex(
-                (e) => propEditKey(e.target.selector, e.propName) === key,
-              )
-              if (idx === -1) return prev
-              const updated = [...prev]
-              updated[idx] = { ...updated[idx], target: refreshed }
-              return updated
-            })
-            const existing = branchPropDispatchTimers.current.get(key)
-            if (existing) clearTimeout(existing)
-            const timer = setTimeout(() => {
-              branchPropDispatchTimers.current.delete(key)
-              // Same guard again, at the other end of the debounce. The retry
-              // re-enters through the live ref and reads the live adapter, so a
-              // session that ended during the wait would have it rebasing the
-              // previous document's stamps onto the current one.
-              if (!session.isCurrent(generation)) return
-              // Re-entered in THIS dispatch's session, not in whichever one is
-              // live when the timer fires.
-              dispatchBranchPropEditRef.current?.(key, generation)
-            }, BRANCH_PROP_DISPATCH_DEBOUNCE_MS)
-            branchPropDispatchTimers.current.set(key, timer)
-            return
-          }
-        }
-        setSaveStatus(`Inline prop edit failed: ${result.reason}`)
-        // WS3: the write never landed — revert the preview poke. (The
-        // needsChat escalation above does NOT resolve: chat will land the
-        // edit; the preview rides until then or until the store times out.)
-        resolveOverrideSettled(adapter, current.id, "failed", result.reason)
-        return
-      }
-      if (result.kind === "applied" && result.fallbackUsed) {
-        const notes = result.notes
-        const truncatedNotes =
-          notes && notes.length > 140 ? notes.slice(0, 140) + "…" : notes
-        setSaveStatus(
-          `Edited via AI fallback${truncatedNotes ? `: ${truncatedNotes}` : ""}`,
-        )
-      }
-      staleRetriedRef.current.delete(key)
-      // RELEASE-THEN-VERIFY (final-review C1, same shape as the style lane
-      // below). The write landed — release the preview override immediately,
-      // as this lane did before verification was wired here, then verify
-      // diagnostically. Holding the preview until the read-back confirms
-      // means the read-back is partly measuring our own optimistic override
-      // (`APPLY_PROP_OVERRIDE` / `APPLY_ATTR_OVERRIDE`), which is what
-      // `confirmStableMs` has to fight; releasing first lets the post-HMR DOM
-      // be the only thing under the microscope. Exactly ONE resolve per
-      // override id: every failure branch above returns.
-      resolveOverrideSettled(adapter, current.id, "confirmed")
-      // Verify the prop's value actually rendered (diagnostic only — the
-      // override is already released). The oracle needs a manifest dom-hint
-      // (captured at buffer time from `attribute()`'s `renders` — see
-      // `dispatchAllRowsPropEdit`) to know WHERE the value surfaces; without
-      // one `deriveExpectation` declines and nothing is reported.
-      const renderSite = pendingPropRenderSitesRef.current.get(current.id)
-      // Boolean-attribute exclusion: Vue's `patchAttr` renders a *special*
-      // boolean HTML attribute (disabled/checked/readonly/selected/…) as
-      // `attr=""` when true and removes it entirely when false. The
-      // bridge's READ_RENDERED_VALUE only special-cases `checked`/`value`;
-      // every other attribute name falls through to plain `getAttribute`,
-      // so reading it back would compare `""` against `String(true)` →
-      // `"true"` and never match — a CORRECT edit would be reported as
-      // "didn't take effect." A false failure is worse than no signal, so
-      // decline the oracle for this exact combination (same as no hint at
-      // all) rather than try to model boolean-attribute semantics with a
-      // "matches any of" expectation. Numbers are unaffected — Vue
-      // stringifies `4` to `"4"`, which matches — so gate specifically on
-      // `typeof === 'boolean'`, not "non-string".
-      const isBooleanAttributeHint =
-        typeof dispatchedValue === "boolean" && renderSite?.field === "attribute"
-      verifyEditRef.current({
-        editId: current.id,
-        selector: current.target.selector,
-        expectedValue: String(dispatchedValue ?? ""),
-        editKind: "prop",
-        propName: current.propName,
-        domField: isBooleanAttributeHint ? undefined : renderSite?.field,
-        attribute: isBooleanAttributeHint ? undefined : renderSite?.attribute,
-        // Verification settles 0.85-3s later; by then a newer keystroke/
-        // drag has typically re-dispatched (or is in flight) and this
-        // snapshot's `dispatchedValue` is stale. Read the LIVE buffer
-        // lazily at verification-complete time — mirrors the dom-text
-        // lane's `isSuperseded` against its own mutations buffer.
-        isSuperseded: () => {
-          const stillBuffered = session.getSnapshot().propEdits.find(
-            (e) => propEditKey(e.target.selector, e.propName) === key,
-          )
-          return !!stillBuffered && !Object.is(stillBuffered.value, dispatchedValue)
+  const dispatchBranchPropEdit = useCallback(
+    async (key: string, scheduledGeneration?: number) => {
+      const adapter = adapterRef.current
+      if (!adapter) return
+      await dispatchPropEdit(key, scheduledGeneration ?? session.generation, {
+        session,
+        adapter,
+        escalateToChat: escalateToChatRef.current,
+        setStatus: setSaveStatus,
+        recordHashes: (hashes) => {
+          fileHashesRef.current = { ...fileHashesRef.current, ...hashes }
         },
+        // Through the REF, not the captured instance: this is the shell-side
+        // "the preview shim is gone" edge, and the throw path can reach it
+        // after the adapter has been torn down.
+        resolveOverride: (id, outcome, reason) =>
+          resolveOverrideSettledOptional(adapterRef.current, id, outcome, reason),
+        verifyEdit: (request) => verifyEditRef.current(request),
+        refreshSelectionStamps: scheduleSelectionStampRefresh,
+        forgetEditId: (id) => {
+          attrEditIdsRef.current.delete(id)
+          pendingPropRenderSitesRef.current.delete(id)
+          inFlightOverrideIdsRef.current.delete(id)
+        },
+        setOverrideInFlight: (id, inFlight) => {
+          if (inFlight) inFlightOverrideIdsRef.current.add(id)
+          else inFlightOverrideIdsRef.current.delete(id)
+        },
+        renderSiteFor: (id) => pendingPropRenderSitesRef.current.get(id),
+        staleRetried: staleRetriedRef.current,
+        debounceMs: BRANCH_PROP_DISPATCH_DEBOUNCE_MS,
       })
-      // Refresh the (still-open) selection's stamps so the next edit from
-      // it doesn't false-409 against its own predecessor's write.
-      scheduleSelectionStampRefresh(
-        result.kind === "applied" && result.newHashes
-          ? Object.keys(result.newHashes)
-          : [current.target.editTarget?.file].filter((f): f is string => !!f),
-      )
-      // Reconcile (see dispatch-reconcile.ts for the shared decision):
-      // "settled" — the buffered value still matches what we dispatched,
-      // the worktree now holds it — drop the entry. "advanced" — it moved
-      // (the designer kept dragging), keep it and re-fire. Prop
-      // applicators re-parse source each call, so no `before`-rebase is
-      // needed (unlike the text path) — only the stale-target stamp.
-      let needsRefire = false
-      session.updatePropEdits((prev) => {
-        const idx = prev.findIndex(
-          (e) => propEditKey(e.target.selector, e.propName) === key,
-        )
-        const decision = reconcileDispatchedValue(
-          idx !== -1,
-          dispatchedValue,
-          idx === -1 ? undefined : prev[idx].value,
-        )
-        if (decision === "no-entry") return prev
-        if (decision === "settled") {
-          attrEditIdsRef.current.delete(prev[idx].id)
-          pendingPropRenderSitesRef.current.delete(prev[idx].id)
-          return prev.filter((_, i) => i !== idx)
-        }
-        needsRefire = true
-        // Rebase the kept entry's stale-target stamp to THIS write's hash
-        // (codex round-15): the re-fire dispatches this entry, and without
-        // the rebase its pre-write fileHash 409s against our own write.
-        // Coordinates stay valid — the prop splice never moves the
-        // element's start tag.
-        const freshHash =
-          result.kind === "applied" && result.newHashes
-            ? result.newHashes[prev[idx].target.editTarget?.file ?? ""]
-            : undefined
-        if (!freshHash || !prev[idx].target.editTarget) return prev
-        const updated = [...prev]
-        updated[idx] = {
-          ...updated[idx],
-          target: {
-            ...updated[idx].target,
-            editTarget: { ...updated[idx].target.editTarget!, fileHash: freshHash },
-          },
-        }
-        return updated
-      })
-      if (needsRefire) {
-        const existing = branchPropDispatchTimers.current.get(key)
-        if (existing) clearTimeout(existing)
-        const timer = setTimeout(() => {
-          branchPropDispatchTimers.current.delete(key)
-          // In THIS dispatch's session: the re-fire is the rest of the edit the
-          // designer was making on the page this dispatch wrote for.
-          dispatchBranchPropEditRef.current?.(key, generation)
-        }, BRANCH_PROP_DISPATCH_DEBOUNCE_MS)
-        branchPropDispatchTimers.current.set(key, timer)
-      }
-    } catch (err) {
-      setSaveStatus(`Inline prop edit threw: ${(err as Error).message}`)
-      resolveOverrideSettledOptional(
-        adapterRef.current,
-        current.id,
-        "failed",
-        (err as Error).message,
-      )
-    } finally {
-      clearTimeout(askingAiTimer)
-      inFlightOverrideIdsRef.current.delete(current.id)
-      // Only when this dispatch still owns the marker. Once the session has
-      // ended, `endBridgeSession` has emptied the set and any key in it was put
-      // there by a dispatch that started afterwards; deleting it would let a
-      // second write for that identity run alongside the first.
-      if (session.isCurrent(generation)) {
-        branchPropInFlight.current.delete(key)
-      }
-    }
-  }, [scheduleSelectionStampRefresh, session])
+    },
+    [scheduleSelectionStampRefresh, session],
+  )
   dispatchBranchPropEditRef.current = dispatchBranchPropEdit
 
   /**
@@ -4858,13 +4544,10 @@ export function useEditorEditing({
    */
   const resumeBufferedDispatches = useCallback(() => {
     const buffered = session.getSnapshot()
-    const propEntries = buffered.propEdits.map((entry) => ({
-      key: propEditKey(entry.target.selector, entry.propName),
-      selector: entry.target.selector,
-      propName: entry.propName,
-    }))
-    for (const entry of resumePlan(propEntries, branchPropInFlight.current)) {
-      scheduleBranchPropDispatch(entry.selector, entry.propName)
+    // The prop half asks the session, which holds that lane's markers and
+    // applies the same `resumePlan` rule inside `session.resume`.
+    for (const entry of session.resume().propEdits) {
+      scheduleBranchPropDispatch(entry.target.selector, entry.propName)
     }
     const mutationEntries = buffered.mutations
       .filter(isMutationResumeEligible)
@@ -4894,9 +4577,6 @@ export function useEditorEditing({
     // Same local-capture for the in-flight set (added with the Codex
     // P0 #1 fix so the dispatch can detect stale-race conditions).
     const inFlight = branchTextInFlight.current
-    // Same captures for the prop auto-commit timers/in-flight set.
-    const propTimers = branchPropDispatchTimers.current
-    const propInFlight = branchPropInFlight.current
     const unsubCaptured = adapter.onMutationCaptured((m) => {
       // THE tag, for both buffers' sake: the bridge knows nothing about
       // sessions, so the shell stamps the capture with the document it came
@@ -5168,7 +4848,8 @@ export function useEditorEditing({
       const pendingProp = session.getSnapshot().propEdits.find((e) => e.id === p.id)
       if (
         pendingProp &&
-        branchPropInFlight.current.has(
+        session.isInFlight(
+          "prop",
           propEditKey(pendingProp.target.selector, pendingProp.propName),
         )
       ) {
@@ -5211,13 +4892,9 @@ export function useEditorEditing({
       // dispatches when a new adapter mounts.
       inFlight.clear()
       dispatchBranchTextMutationRef.current = null
-      // Same teardown for the prop auto-commit timers/in-flight set, using the
-      // captured locals (not ref.current, which may have changed by cleanup).
-      for (const t of propTimers.values()) {
-        clearTimeout(t)
-      }
-      propTimers.clear()
-      propInFlight.clear()
+      // Same teardown for the prop lane, whose timers and markers are the
+      // session's: one call, and it touches no other lane.
+      session.resetLane("prop")
     }
     // `handleDragMove` / `handleInsertAtPoint` / `handleResize` are listed so a
     // future edit that makes one reactive cannot silently strand a stale
