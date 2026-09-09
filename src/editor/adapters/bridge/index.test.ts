@@ -1292,3 +1292,102 @@ describe("BridgeFrameworkAdapter — applyEdit (V1.3)", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
+
+describe("BridgeFrameworkAdapter — applyEdit carries the caller's abort signal", () => {
+  // Round 14 V3. An edit request is a WRITE, and it outlives the thing that
+  // asked for it. When the caller is a bridge session and the page is replaced
+  // mid-request, the shell's per-identity in-flight markers have already been
+  // emptied by the session end, so an edit on the SAME element in the new
+  // document would start a second write alongside the first. The signal is
+  // what settles the first one.
+  let adapter: BridgeFrameworkAdapter
+  let setup: MockIframeSetup
+  let fetchMock: ReturnType<typeof vi.fn>
+  const originalFetch = globalThis.fetch
+
+  const editTargetLoc = { file: "src/Demo.vue", line: 4, column: 6 }
+  const target = {
+    targetId: '[data-testid="submit-btn"]',
+    selector: '[data-testid="submit-btn"]',
+    componentName: "UiButton",
+    authoredAt: editTargetLoc,
+    editTarget: editTargetLoc,
+  }
+  const propEdit = {
+    kind: "prop" as const,
+    id: "edit-signal-1",
+    target,
+    propName: "variant",
+    value: "danger",
+  }
+
+  beforeEach(async () => {
+    adapter = new BridgeFrameworkAdapter()
+    setup = makeMockIframe()
+    fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: "2026-05-06a" },
+    })
+    await initPromise
+    setup.postMessages.length = 0
+  })
+
+  afterEach(async () => {
+    await adapter.dispose()
+    globalThis.fetch = originalFetch
+  })
+
+  it("hands the signal to the transport", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    )
+    const controller = new AbortController()
+
+    await adapter.applyEdit(propEdit, { signal: controller.signal })
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.signal).toBe(controller.signal)
+  })
+
+  it("sends no signal when the caller passes none, so an ordinary edit is unchanged", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    )
+
+    await adapter.applyEdit(propEdit)
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.signal).toBeUndefined()
+  })
+
+  it("settles an aborted request as a plain failed result, not as an unreachable service", async () => {
+    // Every lane already reads `failed` as "nothing landed", so an abort needs
+    // no new outcome shape. It must not read as a transport failure though:
+    // "unreachable" sends the reader looking for a network problem that never
+    // happened.
+    const controller = new AbortController()
+    fetchMock.mockImplementationOnce(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            const err = new Error("The operation was aborted.")
+            err.name = "AbortError"
+            reject(err)
+          })
+        }),
+    )
+
+    const pending = adapter.applyEdit(propEdit, { signal: controller.signal })
+    controller.abort()
+    const result = await pending
+
+    expect(result.kind).toBe("failed")
+    if (result.kind === "failed") {
+      expect(result.reason).toBe("edit request cancelled")
+      expect(result.needsChat).toBeUndefined()
+    }
+  })
+})

@@ -177,12 +177,14 @@ export interface ApplyEditWithChatHandoffOptions {
   /**
    * The bridge session's lifetime, as a signal, captured at dispatch.
    *
-   * Two jobs, and they are different from `isStale`'s. It is read once here,
+   * Three jobs, and they are different from `isStale`'s. It is read once here,
    * alongside `isStale`, so a session that ended without the generation being
-   * the thing the caller tracks still stops the hand-off. And it is HANDED TO
-   * the transport, so the submission itself is cancelled rather than merely
-   * unwatched: a hand-off POST already on its way would otherwise start a chat
-   * turn for a page that is gone, and the agent would edit files for it.
+   * the thing the caller tracks still stops the hand-off. It is HANDED TO the
+   * hand-off transport, so the submission itself is cancelled rather than
+   * merely unwatched: a hand-off POST already on its way would otherwise start
+   * a chat turn for a page that is gone, and the agent would edit files for it.
+   * And it is handed to the APPLY, so the edit request is cancelled too rather
+   * than left writing for a document that has been replaced.
    */
   signal?: AbortSignal
 }
@@ -199,7 +201,16 @@ export async function applyEditWithChatHandoff(
     | undefined,
   options: ApplyEditWithChatHandoffOptions = {},
 ): Promise<{ result: EditResult; handoff: ChatHandoffOutcome }> {
-  const initial = await adapter.applyEdit(edit)
+  // The signal goes to the APPLY as well as to the hand-off. The apply is the
+  // write, and a write that outlives its session is the one that can collide
+  // with the new document's write for the same element: the shell's in-flight
+  // markers were emptied when the session ended, so nothing else is holding
+  // that door. Aborting settles it as `failed`, which is the outcome the
+  // callers already treat as "nothing landed".
+  const initial = await adapter.applyEdit(
+    edit,
+    options.signal ? { signal: options.signal } : undefined,
+  )
   if (initial.kind !== "failed") {
     return { result: initial, handoff: { attempted: false, started: false } }
   }

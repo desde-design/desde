@@ -163,6 +163,32 @@ describe("applyEditWithChatHandoff", () => {
     expect(handOff.mock.calls[0][1]?.signal).toBe(controller.signal)
   })
 
+  it("hands the session's signal to the APPLY as well, so the write is cancelled too", async () => {
+    // Round 14 V3. The apply is the write, and a write that outlives its
+    // session is the one that can collide with the new document's write for
+    // the same element: the shell's in-flight markers were emptied when the
+    // session ended, so nothing else is holding that door.
+    const controller = new AbortController()
+    const applyEdit = vi.fn(async (_edit: unknown, _opts?: { signal?: AbortSignal }) => applied)
+    await applyEditWithChatHandoff(
+      deleteEdit(),
+      { applyEdit } as unknown as Parameters<typeof applyEditWithChatHandoff>[1],
+      async () => true,
+      { signal: controller.signal },
+    )
+    expect(applyEdit.mock.calls[0][1]?.signal).toBe(controller.signal)
+  })
+
+  it("asks the apply for no options at all when there is no session signal", async () => {
+    const applyEdit = vi.fn(async (_edit: unknown, _opts?: { signal?: AbortSignal }) => applied)
+    await applyEditWithChatHandoff(
+      deleteEdit(),
+      { applyEdit } as unknown as Parameters<typeof applyEditWithChatHandoff>[1],
+      async () => true,
+    )
+    expect(applyEdit.mock.calls[0][1]).toBeUndefined()
+  })
+
   it("asks the transport for no options at all when there is no session signal", async () => {
     // The pure callers pass none, and a transport that reads `options.signal`
     // must see undefined rather than an object claiming a signal it has not got.

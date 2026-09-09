@@ -2864,7 +2864,10 @@ export function useEditorEditing({
           failThisRow("Editor adapter not ready. Try again in a moment.")
           return
         }
-        const applied = await adapter.applyEdit(overwrite)
+        const applied = await adapter.applyEdit(
+          overwrite,
+          adapterSignal ? { signal: adapterSignal } : undefined,
+        )
         // The write itself spans a teardown window. `releaseBridgeDraft` below
         // reads `adapterRef.current`, which is the NEXT adapter by now, and
         // this pending's draft id is the id that adapter just issued to the
@@ -3641,6 +3644,11 @@ export function useEditorEditing({
       // in the buffer, and the next keystroke re-arms the debounce under the
       // session that is on screen.
       if (isStaleGeneration(generation, adapterGenerationRef.current)) return
+      // This session's lifetime, as a signal, captured WITH the generation.
+      // Read at request time it could be the next session's live controller,
+      // and the write would then run on past the reload that should have
+      // cancelled it. See `ApplyEditOpts.signal`.
+      const sessionSignal = adapterAbortRef.current?.signal
       const adapter = adapterRef.current
       if (!adapter) return
       // Per-identity serialization. A second dispatch for the same
@@ -3691,7 +3699,10 @@ export function useEditorEditing({
       branchTextInFlight.current.add(identityKey)
       inFlightOverrideIdsRef.current.add(normalized.id)
       try {
-        const result = await adapter.applyEdit(edit)
+        const result = await adapter.applyEdit(
+          edit,
+          sessionSignal ? { signal: sessionSignal } : undefined,
+        )
         // Disk truth, not session state: the files are what they are whoever
         // is looking at them, so this is recorded before the session check
         // below. Skipping it would leave the external-edit guard comparing
@@ -3915,8 +3926,10 @@ export function useEditorEditing({
     if (!current) return
     const dispatchedValue = current.value
     // This session's lifetime, as a signal, captured with everything else this
-    // dispatch decides now. It goes to the chat hand-off below so a turn this
-    // dispatch starts is CANCELLED by a reload rather than merely unwatched.
+    // dispatch decides now. It goes to the WRITE below, so a reload cancels the
+    // request instead of leaving it running against a page that is gone, and to
+    // the chat hand-off, so a turn this dispatch starts is cancelled rather
+    // than merely unwatched.
     const sessionSignal = adapterAbortRef.current?.signal
     branchPropInFlight.current.add(key)
     inFlightOverrideIdsRef.current.add(current.id)
@@ -3931,7 +3944,10 @@ export function useEditorEditing({
       }
     }, 2_000)
     try {
-      const result = await adapter.applyEdit(current)
+      const result = await adapter.applyEdit(
+        current,
+        sessionSignal ? { signal: sessionSignal } : undefined,
+      )
       if (result.kind === "failed") {
         // `'chat'` fallback mode: the deterministic applicator refused
         // (bound-binding / v-model / dynamic-vbind) AND the source-aware
@@ -4463,6 +4479,10 @@ export function useEditorEditing({
       // decided that half a second ago.
       const generation = scheduledGeneration ?? adapterGenerationRef.current
       if (isStaleGeneration(generation, adapterGenerationRef.current)) return
+      // Captured with the generation, for the same reason the text lane
+      // captures it there: read at request time it would be the next session's
+      // controller. See `ApplyEditOpts.signal`.
+      const sessionSignal = adapterAbortRef.current?.signal
       const adapter = adapterRef.current
       if (!adapter) return
       if (branchTextInFlight.current.has(identityKey)) return
@@ -4497,7 +4517,10 @@ export function useEditorEditing({
       branchTextInFlight.current.add(identityKey)
       inFlightOverrideIdsRef.current.add(current.id)
       try {
-        const result = await adapter.applyEdit(edit)
+        const result = await adapter.applyEdit(
+          edit,
+          sessionSignal ? { signal: sessionSignal } : undefined,
+        )
         // Disk truth first, then the session check — same order and the same
         // reasons as the text lane above.
         if (result.kind === "applied" && result.newHashes) {

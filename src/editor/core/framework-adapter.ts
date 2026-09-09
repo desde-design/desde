@@ -64,6 +64,23 @@ export interface ApplyEditOpts {
    * the response as it's generated.
    */
   onLLMStreamDelta?: (delta: string) => void
+  /**
+   * The caller's lifetime, as a signal, handed to the transport.
+   *
+   * An edit request is a WRITE, and it outlives the thing that asked for it.
+   * In the editor shell that thing is a bridge session, i.e. one document in
+   * the iframe: the page can be replaced while `/api/editor/edit` is still
+   * running. Without a signal the request keeps going, and the shell's
+   * per-identity in-flight markers have already been emptied by the session
+   * end, so an edit on the SAME element in the new document starts a second
+   * write while the first is still active.
+   *
+   * Aborting settles the request as an ordinary failed {@link EditResult},
+   * which is exactly what every lane already treats as "nothing landed". The
+   * server's per-repo write lock stays the last line of defence: a request the
+   * server has already accepted finishes there whatever the client does.
+   */
+  signal?: AbortSignal
 }
 
 /**

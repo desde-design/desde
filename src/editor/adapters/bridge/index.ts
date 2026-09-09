@@ -735,8 +735,19 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
           ...(wantStream ? { Accept: 'text/event-stream, application/json' } : {}),
         },
         body: JSON.stringify(requestBody),
+        // The caller's lifetime (see `ApplyEditOpts.signal`). Where a caller
+        // passes one, ending its session cancels the request instead of
+        // leaving a write running for a page that has been replaced.
+        ...(opts?.signal ? { signal: opts.signal } : {}),
       })
     } catch (err) {
+      // An abort is not a transport failure, and saying "unreachable" for one
+      // sends the reader looking for a network problem that never happened.
+      // Both settle as `failed`, which is what every lane already reads as
+      // "nothing landed".
+      if ((err as Error).name === 'AbortError') {
+        return { kind: 'failed', reason: 'edit request cancelled' }
+      }
       return { kind: 'failed', reason: `edit service unreachable: ${(err as Error).message}` }
     }
 
