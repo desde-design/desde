@@ -37,6 +37,23 @@ export type LocateLoopResult =
        * the loop element exactly and answered "No v-for element at ...".
        */
       location: LoopPosition
+      /**
+       * The loop element's own span in `source`, as absolute character
+       * offsets: the element carrying `v-for` for Vue, the JSX element the
+       * `.map()` callback returns for JSX. `[startOffset, endOffset)`.
+       *
+       * The caller needs it to confine a SECOND position to this loop. The
+       * "this item" text lane takes a `fieldLocation` — the nested element the
+       * designer actually retyped — and reads the property behind the text at
+       * that position. Nothing tied that position to the loop, so a request
+       * could verify a loop here and extract a field from a different loop in
+       * the same file, and the patch would then be applied to THIS loop's
+       * array.
+       *
+       * Optional so a locator that cannot produce it stays usable; a caller
+       * with no range refuses rather than guessing.
+       */
+      range?: { startOffset: number; endOffset: number }
     }
   | { found: false; reason: string }
 

@@ -581,12 +581,21 @@ export function locateJsxLoopAt(source: string, templateLocation: LoopPosition):
   // row (a `<span>` inside the `<li>` the callback returns), and the "this
   // item" lane dispatches against the row. Falls back to the clicked position
   // when the row cannot be identified, which is the behaviour before this.
-  const rootStart = findLoopRootElement(mapCall, el)?.openingElement?.loc?.start
+  const loopRoot = findLoopRootElement(mapCall, el)
+  const rootStart = loopRoot?.openingElement?.loc?.start
   const location =
     rootStart && typeof rootStart.line === "number" && typeof rootStart.column === "number"
       ? { line: rootStart.line, column: rootStart.column }
       : { line: templateLocation.line, column: templateLocation.column }
-  return { found: true, kind: "map", expression, location }
+  // The row element's own span. Callers confine a second position (the
+  // retyped field) to it; Babel's `start`/`end` are already absolute offsets
+  // into `source`. Omitted when the row could not be identified, and a caller
+  // with no range refuses rather than guessing.
+  const range =
+    loopRoot && typeof loopRoot.start === "number" && typeof loopRoot.end === "number"
+      ? { startOffset: loopRoot.start, endOffset: loopRoot.end }
+      : undefined
+  return { found: true, kind: "map", expression, location, ...(range ? { range } : {}) }
 }
 
 /**

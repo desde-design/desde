@@ -275,6 +275,37 @@ export async function handleIterationEdit(
     }
   }
 
+  // `fieldLocation` must be INSIDE the loop at `templateLocation`.
+  //
+  // It was shape-validated and nothing else, so the interpolation extractor
+  // ran wherever it pointed. A request could therefore verify THIS loop, name
+  // a field in a DIFFERENT loop of the same file, and have the property read
+  // there patched into this loop's array: a field the designer never touched,
+  // written with a value from a row that does not contain it.
+  //
+  // Here, before any resolution, because a position that does not belong to
+  // this loop is a bad request (400) whatever the resolver goes on to make of
+  // the file — and this check needs only the source and the two positions. It
+  // runs for `patch-text` alone, which is the one operation that reads the
+  // field's position; the others ignore it.
+  if (body.fieldLocation && body.payload.operation === "patch-text") {
+    const { fieldLocationInsideLoop } = await import(
+      "../../../src/editor/edit-service/field-inside-loop.js"
+    )
+    // The RESOLVED path picks the parser, for the same reason every other gate
+    // here uses it: a symlink's name need not match its target's, and `source`
+    // is the target's bytes.
+    const confinement = fieldLocationInsideLoop({
+      file: targetPath,
+      source,
+      templateLocation: body.templateLocation,
+      fieldLocation: body.fieldLocation,
+    })
+    if (!confinement.ok) {
+      return { ok: false, status: 400, reason: confinement.reason }
+    }
+  }
+
   // Framework-aware resolution by extension: JSX `.map()` for .tsx/.jsx, Vue
   // `v-for` otherwise. Both return { arrayLocation, keyProperty } that the
   // static applicator consumes (it already handles .tsx whole-source rewriting).

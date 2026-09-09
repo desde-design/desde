@@ -90,7 +90,7 @@ export function List() {
 describe("locateLoopAt", () => {
   it("finds the .map() enclosing a JSX element", () => {
     const r = locateLoopAt({ file: "src/List.tsx", source: LIST_TSX, templateLocation: babelLoc(LIST_TSX, "<li key") })
-    expect(r).toEqual({
+    expect(r).toMatchObject({
       found: true,
       kind: "map",
       expression: "items.map",
@@ -114,7 +114,7 @@ describe("locateLoopAt", () => {
   it("finds a v-for in a Vue SFC (SFC-absolute, 1-based column)", () => {
     // Line 6 of the SFC, column of `<li`. Vue positions are 1-based.
     const r = locateLoopAt({ file: "src/List.vue", source: LIST_VUE, templateLocation: { line: 6, column: 5 } })
-    expect(r).toEqual({
+    expect(r).toMatchObject({
       found: true,
       kind: "v-for",
       expression: "r in rows",
@@ -132,7 +132,7 @@ describe("locateLoopAt", () => {
     // inside a loop row used to answer "no loop", which handed the edit to
     // chat with a false premise and made "all rows" unreachable.
     const r = locateLoopAt({ file: "src/List.vue", source: NESTED_VUE, templateLocation: { line: 7, column: 7 } })
-    expect(r).toEqual({
+    expect(r).toMatchObject({
       found: true,
       kind: "v-for",
       expression: "r in rows",
@@ -165,7 +165,7 @@ describe("locateLoopAt", () => {
       source: NESTED_TSX,
       templateLocation: babelLoc(NESTED_TSX, "<span className"),
     })
-    expect(r).toEqual({
+    expect(r).toMatchObject({
       found: true,
       kind: "map",
       expression: "items.map",
@@ -228,5 +228,38 @@ export function List() {
   it("refuses an unsupported extension", () => {
     const r = locateLoopAt({ file: "src/x.svelte", source: "", templateLocation: { line: 1, column: 0 } })
     expect(r).toEqual({ found: false, reason: "Only .vue, .tsx, and .jsx files can be checked for a loop" })
+  })
+
+  /**
+   * The range is what lets a caller confine a SECOND position to this loop —
+   * `fieldLocation` on the "this item" text lane. Offsets are absolute into
+   * the source the caller passed, in both frameworks, so slicing them back out
+   * has to give exactly the loop element.
+   */
+  describe("the loop element's range", () => {
+    it("spans the whole `<li v-for>` element in a Vue SFC", () => {
+      const r = locateLoopAt({ file: "src/List.vue", source: NESTED_VUE, templateLocation: { line: 7, column: 7 } })
+      expect(r.found).toBe(true)
+      if (!r.found || !r.range) throw new Error("expected a range")
+      const slice = NESTED_VUE.slice(r.range.startOffset, r.range.endOffset)
+      expect(slice.startsWith('<li v-for="r in rows"')).toBe(true)
+      expect(slice.endsWith("</li>")).toBe(true)
+      // And it contains the nested span that was clicked.
+      expect(slice).toContain("<span")
+    })
+
+    it("spans the whole `<li>` the .map() callback returns in JSX", () => {
+      const r = locateLoopAt({
+        file: "src/List.tsx",
+        source: NESTED_TSX,
+        templateLocation: babelLoc(NESTED_TSX, "<span className"),
+      })
+      expect(r.found).toBe(true)
+      if (!r.found || !r.range) throw new Error("expected a range")
+      const slice = NESTED_TSX.slice(r.range.startOffset, r.range.endOffset)
+      expect(slice.startsWith("<li key")).toBe(true)
+      expect(slice.endsWith("</li>")).toBe(true)
+      expect(slice).toContain("<span className")
+    })
   })
 })

@@ -169,12 +169,23 @@ type EnclosingVForResult =
        * against the loop element itself, not the nested one.
        */
       location: { line: number; column: number }
+      /**
+       * The v-for element's own span, as absolute offsets into the SFC.
+       * Callers confine a second position (the retyped field) to this loop.
+       */
+      range: { startOffset: number; endOffset: number }
     }
   | { kind: 'no-element' }
   | { kind: 'no-loop' }
 
 /** The nearest ancestor-or-self `v-for`, with the position of the element carrying it. */
-type EnclosingVFor = { expression: string; line: number; column: number }
+type EnclosingVFor = {
+  expression: string
+  line: number
+  column: number
+  startOffset: number
+  endOffset: number
+}
 
 /**
  * Nearest ANCESTOR-OR-SELF element carrying `v-for`, for the element at the
@@ -195,6 +206,7 @@ type EnclosingVFor = { expression: string; line: number; column: number }
 function findEnclosingVForAt(
   templateAst: ElementNode,
   templateStartLine: number,
+  templateStartOffset: number,
   targetLine: number,
   targetColumn: number,
 ): EnclosingVForResult {
@@ -219,9 +231,18 @@ function findEnclosingVForAt(
     // Self counts: the clicked element may BE the `v-for` element. The
     // position travels with the expression, so a nested match can report
     // where the loop actually is rather than where the click landed.
+    // Template-node offsets are relative to the <template> BLOCK's content;
+    // `templateStartOffset` lifts them to SFC-absolute, the same frame the
+    // caller's `source` is in.
     const nearest: EnclosingVFor | null =
       ownExpression !== null && loc && sfcLine !== null
-        ? { expression: ownExpression, line: sfcLine, column: loc.column }
+        ? {
+            expression: ownExpression,
+            line: sfcLine,
+            column: loc.column,
+            startOffset: templateStartOffset + (node.loc?.start?.offset ?? 0),
+            endOffset: templateStartOffset + (node.loc?.end?.offset ?? 0),
+          }
         : enclosing
     if (loc && sfcLine !== null) {
       if (sfcLine === targetLine && loc.column === targetColumn) {
@@ -230,6 +251,7 @@ function findEnclosingVForAt(
               kind: 'found',
               vForExpression: nearest.expression,
               location: { line: nearest.line, column: nearest.column },
+              range: { startOffset: nearest.startOffset, endOffset: nearest.endOffset },
             }
           : { kind: 'no-loop' }
       }
@@ -718,6 +740,7 @@ export function locateVueLoopAt(source: string, templateLocation: LoopPosition):
   const match = findEnclosingVForAt(
     root,
     descriptor.template.loc.start.line,
+    descriptor.template.loc.start.offset,
     templateLocation.line,
     templateLocation.column,
   )
@@ -732,5 +755,6 @@ export function locateVueLoopAt(source: string, templateLocation: LoopPosition):
     kind: 'v-for',
     expression: match.vForExpression,
     location: match.location,
+    range: match.range,
   }
 }

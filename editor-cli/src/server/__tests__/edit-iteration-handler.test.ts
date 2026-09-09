@@ -36,18 +36,28 @@ const items = [{ id: 1, name: 'A' }, { id: 2, name: 'B' }]
 // Stub the dynamic imports so we don't need the real Vue compiler
 // ---------------------------------------------------------------------------
 
-vi.mock("../../../../src/editor/edit-service/resolve-iteration-data-vue.js", () => ({
-  resolveIterationDataVueSameFile: vi.fn(
-    (_opts: { source: string; templateLocation: { line: number; column: number } }) => ({
-      ok: true,
-      file: "src/Foo.vue",
-      arrayLocation: { startOffset: 100, endOffset: 200 },
-      iterateeRoot: "",
-      iterateeChain: [],
-      keyProperty: "id",
-    }),
-  ),
-}))
+// Only the DATA resolver is stubbed. `locateVueLoopAt` is kept real (via
+// `importOriginal`) because the handler now uses it to confine `fieldLocation`
+// to the verified loop, and a stub there would assert nothing: the whole
+// question is whether a real source position falls inside a real loop's span.
+vi.mock("../../../../src/editor/edit-service/resolve-iteration-data-vue.js", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../../../../src/editor/edit-service/resolve-iteration-data-vue.js")
+  >()
+  return {
+    ...actual,
+    resolveIterationDataVueSameFile: vi.fn(
+      (_opts: { source: string; templateLocation: { line: number; column: number } }) => ({
+        ok: true,
+        file: "src/Foo.vue",
+        arrayLocation: { startOffset: 100, endOffset: 200 },
+        iterateeRoot: "",
+        iterateeChain: [],
+        keyProperty: "id",
+      }),
+    ),
+  }
+})
 
 vi.mock(
   "../../../../src/editor/edit-service/resolve-iteration-data-vue-cross-component.js",
@@ -684,6 +694,53 @@ const items = [{ id: 1, name: 'A', email: 'a@x' }]
     expect(vi.mocked(applyIterationDataEditStatic).mock.calls[0][0]).toMatchObject({
       operation: { operation: "patch", updates: { email: "b@x" } },
     })
+  })
+
+  /**
+   * L6. `fieldLocation` was shape-validated and nothing else, so extraction
+   * ran wherever it pointed. A request could verify THIS loop and name a field
+   * in a different loop of the same file: the property read there would be
+   * patched into this loop's array, writing a field the designer never touched
+   * with a value from a row that does not contain it.
+   */
+  it("returns 400 for a fieldLocation in a DIFFERENT loop of the same file", async () => {
+    const TWO_LOOPS = `<template>
+  <li v-for="item in items" :key="item.id">
+    <span>{{ item.name }}</span>
+  </li>
+  <li v-for="other in others" :key="other.id">
+    <span>{{ other.secret }}</span>
+  </li>
+</template>
+<script setup>
+const items = [{ id: 1, name: 'A' }]
+const others = [{ id: 1, secret: 'x' }]
+</script>`
+    writeFileSync(join(dir, "src", "Two.vue"), TWO_LOOPS, "utf8")
+    const { extractSlotInterpolationKey } = await import(
+      "../../../../src/editor/edit-service/extract-slot-interpolation-key.js"
+    )
+    const extractMock = vi.mocked(extractSlotInterpolationKey)
+    extractMock.mockClear()
+
+    const result = await handleIterationEdit(
+      makeBody({
+        file: "src/Two.vue",
+        // The FIRST loop…
+        templateLocation: { line: 2, column: 3 },
+        // …and a field inside the SECOND one.
+        fieldLocation: { line: 6, column: 5 },
+        payload: { operation: "patch-text", value: "leak" },
+      }),
+      dir,
+    )
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.status).toBe(400)
+    expect(result.ok === false && result.reason).toBe(
+      "fieldLocation must be inside the loop at templateLocation",
+    )
+    // And nothing was extracted: the refusal is before the read.
+    expect(extractMock).not.toHaveBeenCalled()
   })
 
   it("falls back to the template location when the client sends no fieldLocation", async () => {
