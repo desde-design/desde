@@ -37,6 +37,7 @@ import {
 import { resolveRelativeModule } from "./resolve-relative-module.js"
 import { readRawBody, BodyTooLargeError, EDIT_BODY_MAX_BYTES } from "./http-body.js"
 import type { IterateeImportCandidate } from "../../../src/editor/edit-service/import-binding"
+import { hasControlCharacters } from "../../../src/editor/edit-service/control-characters"
 import { iterationTextProblem } from "../../../src/editor/edit-service/iteration-text-limits"
 
 // ---------------------------------------------------------------------------
@@ -95,6 +96,34 @@ export interface IterationEditRequestBody {
 
 function hasNodeModulesSegment(p: string): boolean {
   return p.split(path.sep).includes("node_modules")
+}
+
+/** An absolute path under the root, as the repo-relative form with `/`. */
+function relativeToRoot(rootReal: string, absolute: string): string {
+  return path.relative(rootReal, absolute).split(path.sep).join("/")
+}
+
+/**
+ * Refuse any of these paths that carries a control character, or `null` when
+ * they are all clean.
+ *
+ * A path reaches a model two ways from this route: a refusal from here is what
+ * hands the edit to chat, and the AI lane bundles the same paths into its
+ * prompt. A filename can contain a newline, so an unchecked path is a way to
+ * write a line of that message. Rejecting is the right answer rather than
+ * escaping, because such a filename is a broken repo, not a use case.
+ */
+function controlCharacterPathRefusal(
+  paths: ReadonlyArray<string | null | undefined>,
+): IterationEditResult | null {
+  const bad = paths.some((p) => typeof p === "string" && hasControlCharacters(p))
+  if (!bad) return null
+  return {
+    ok: false,
+    status: 400,
+    reason:
+      "A file involved in this edit has a name containing control characters, which the Editor will not handle. Rename the file.",
+  }
 }
 
 export function validateIterationBody(body: unknown): string | null {
@@ -221,6 +250,19 @@ export async function handleIterationEdit(
       reason: "This file belongs to an installed library, which the Editor does not edit",
     }
   }
+
+  // No repo-relative path this route touches may carry control characters.
+  // They are rendered into refusal text the user reads, and a refusal from
+  // here is what hands the edit to chat, where the path becomes part of a
+  // prompt. A newline in a filename is a way to write a line of that message.
+  // Checked on what the request asked for AND on what it resolved to, because
+  // a symlink's target need not share its name.
+  const controlChars = controlCharacterPathRefusal([
+    body.file,
+    body.pageSourceFile ?? null,
+    relativeToRoot(rootReal, targetPath),
+  ])
+  if (controlChars) return controlChars
 
   let source: string
   try {
@@ -428,6 +470,17 @@ export async function handleIterationEdit(
       }
     }
   }
+
+  // The hops above resolve paths of their own — an imported data module, a
+  // parent page reached through a symlink — and those names come off the disk,
+  // not off the request, so the check at the top could not see them.
+  //
+  // Only the PATHS are checked here, not `resolution.reason`. A reason is
+  // prose that can quote source, and turning a 422 into a 400 on a newline in
+  // a quoted expression would stop the client falling through to the AI lane,
+  // which is the whole point of the 422.
+  const resolvedControlChars = controlCharacterPathRefusal([dataFile, resolution.file])
+  if (resolvedControlChars) return resolvedControlChars
 
   if (!resolution.ok) {
     // 422 = "Unresolved" — distinct from 400 (bad body) and 500 (bug).

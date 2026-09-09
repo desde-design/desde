@@ -249,6 +249,33 @@ describe("handleIterationEdit", () => {
     expect(result.ok === false && result.reason).toMatch(/Only \.vue, \.tsx, and \.jsx/)
   })
 
+  /**
+   * L5. A path reaches a model two ways from here: a refusal from this route
+   * is what hands the edit to chat, and the AI lane bundles the same paths
+   * into its prompt. A filename can carry a newline, which is a way to write a
+   * line of that message.
+   */
+  it("returns 400 for a file whose NAME carries a control character", async () => {
+    const hostile = "src/Ro\ngue.vue"
+    writeFileSync(join(dir, hostile), MINIMAL_VUE, "utf8")
+    const result = await handleIterationEdit(makeBody({ file: hostile }), dir)
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.status).toBe(400)
+    expect(result.ok === false && result.reason).toMatch(/control characters/)
+  })
+
+  it("returns 400 for a page source hint whose name carries one", async () => {
+    // Checked even though the hint is only advisory: it is rendered into the
+    // AI lane's bundle metadata by name.
+    const result = await handleIterationEdit(
+      makeBody({ pageSourceFile: "src/Page.vue" }),
+      dir,
+    )
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.status).toBe(400)
+    expect(result.ok === false && result.reason).toMatch(/control characters/)
+  })
+
   it("returns 404 when file does not exist", async () => {
     const result = await handleIterationEdit(makeBody({ file: "src/Missing.vue" }), dir)
     expect(result.ok).toBe(false)

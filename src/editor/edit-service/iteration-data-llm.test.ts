@@ -235,8 +235,18 @@ describe('applyIterationDataLlm', () => {
       system: string
       user: string
     }
-    expect(call.user).toContain('--- File: src/List.tsx ---')
-    expect(call.user).toContain('--- File: src/data.ts ---')
+    // The path label lives INSIDE each file's envelope, as its first line.
+    // Above the BEGIN marker it sat in the instruction half of the message,
+    // and a path is repo-controlled text.
+    expect(call.user).toContain('PATH: src/List.tsx')
+    expect(call.user).toContain('PATH: src/data.ts')
+    expect(call.user).not.toContain('--- File:')
+    for (const path of ['src/List.tsx', 'src/data.ts']) {
+      const label = call.user.indexOf(`PATH: ${path}`)
+      const fence = call.user.lastIndexOf('<<<BEGIN:', label)
+      expect(fence).toBeGreaterThanOrEqual(0)
+      expect(call.user.slice(fence, label)).not.toContain('<<<END:')
+    }
     expect(call.user).toMatch(/Files you may rewrite.*src\/List\.tsx.*src\/data\.ts/)
     expect(call.system).toContain('v-for')
     expect(call.system).toContain('.map(')

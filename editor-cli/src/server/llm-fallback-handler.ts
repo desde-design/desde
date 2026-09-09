@@ -12,6 +12,7 @@ import type {
   IterationDataPromptFile,
 } from "../../../src/editor/edit-service/iteration-data-prompt"
 import type { ProjectKnowledgeConfig } from "../../../src/editor/edit-service/load-project-knowledge"
+import { hasControlCharacters } from "../../../src/editor/edit-service/control-characters"
 import {
   ITERATION_DESCRIPTION_LIMIT,
   iterationTextProblem,
@@ -369,6 +370,23 @@ export async function handleLLMFallback(
       moduleSourceOf: (file) => moduleSourceOfFile(file.path, file.source),
     })
     for (const file of chain) addFile(file)
+  }
+
+  // No bundled path may carry control characters. Every path here is a
+  // `path.relative` of a real path under the root, so this can only be a
+  // filename on disk that contains one — and that path is rendered into the
+  // model's input, where a newline is a way to write a line of the message.
+  // The prompt builder flattens it as well; this is the refusing half, and it
+  // refuses rather than dropping the file because a bundle silently missing
+  // the data module reads to the user as "the model could not find it".
+  const controlCharPath = files.find((f) => hasControlCharacters(f.path))
+  if (controlCharPath) {
+    return {
+      status: 400,
+      ok: false,
+      reason:
+        "A file needed for this edit has a name containing control characters, which the Editor will not send to a model. Rename the file.",
+    }
   }
 
   const { applyIterationDataLlm } = await loaders.loadApplyIterationDataLlm()

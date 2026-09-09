@@ -541,6 +541,36 @@ describe("handleLLMFallback — iteration-data lane (F-11)", () => {
     expect(capturedBundles).toHaveLength(0)
   })
 
+  /**
+   * L5. Every bundled path is rendered into the model's input. A filename can
+   * carry a newline, which is a way to write a line of that message, so a path
+   * with control characters is refused rather than sent. The prompt builder
+   * flattens the label as a second gate; this is the refusing one.
+   */
+  it("refuses a bundle whose path carries a control character, before any model call", async () => {
+    const hostile = "src/Ro\ngue.vue"
+    write(hostile, ITER_SOURCE)
+    const r = await handleLLMFallback(
+      iterationBody({
+        file: hostile,
+        intent: {
+          kind: "iteration-data",
+          description: "Set the text of item a",
+          templateLocation: { file: hostile, line: 2, column: 11 },
+          iterationContext: { source: "v-for" as const, key: "a", index: 0, siblingCount: 1, expression: "rows" },
+          pageSourceFile: null,
+          payload: { operation: "patch-text", value: "A2" },
+        },
+      }),
+      dir,
+      iterationLoaders,
+    )
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(400)
+    expect(r.reason).toMatch(/control characters/)
+    expect(capturedBundles).toHaveLength(0)
+  })
+
   it("keeps a Vue page that imports the component in a plain <script> and holds its data in <script setup> (codex round 3)", async () => {
     write("src/Row.vue", '<script setup>\ndefineProps<{ rows: { id: number }[] }>()\n</script>\n<template>\n  <li v-for="r in rows" :key="r.id">{{ r.id }}</li>\n</template>\n')
     write("src/Page.vue", '<script>\nimport Row from "./Row.vue"\nexport default { components: { Row } }\n</script>\n<script setup>\nconst rows = [{ id: 1 }]\n</script>\n<template><Row :rows="rows" /></template>\n')
