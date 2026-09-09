@@ -69,6 +69,7 @@ import {
 import {
   coalesceCapturedMutation,
   mutationIdentity,
+  pruneAiQueue,
   shouldProbeTextMutation,
 } from "./editor-mutation-coalesce"
 import { recordHmrTreeUpdate, requestPrototypeReload } from "./editor-hmr-watchdog"
@@ -4778,6 +4779,13 @@ export function useEditorEditing({
             setMutations((prev) =>
               prev.filter((m) => !escalatedIds.has(m.id)),
             )
+            // The identities go with the mutations. Chat owns these edits now,
+            // and an identity left in the queue makes the capture scheduler
+            // skip the next inline text edit on that same element, then keeps
+            // the unload warning up over a queue that is empty in fact.
+            if (pruneAiQueue(queuedForAiRef.current, normalizedMutations)) {
+              setAiQueueCount(queuedForAiRef.current.size)
+            }
             return { ok: true }
           }
           // Phase E3 — if the route returned 409 + conflicts, surface
@@ -4827,15 +4835,9 @@ export function useEditorEditing({
         for (const m of normalizedMutations) {
           resolveOverrideSettled(adapter, m.id, "confirmed")
         }
-        // The queued fuzzy edits in this bundle were just applied — clear
-        // them from the AI queue so the Commit badge resets.
-        if (queuedForAiRef.current.size > 0) {
-          const dispatchedKeys = new Set(
-            normalizedMutations.map((m) => mutationIdentity(m)),
-          )
-          for (const k of queuedForAiRef.current) {
-            if (dispatchedKeys.has(k)) queuedForAiRef.current.delete(k)
-          }
+        // The queued fuzzy edits in this bundle were just applied, so they
+        // leave the AI queue with them and the Commit badge resets.
+        if (pruneAiQueue(queuedForAiRef.current, normalizedMutations)) {
           setAiQueueCount(queuedForAiRef.current.size)
         }
       }

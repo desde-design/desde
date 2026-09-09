@@ -16,6 +16,7 @@ import type { Mutation } from "@/editor/core/edit"
 import {
   coalesceCapturedMutation,
   mutationIdentity,
+  pruneAiQueue,
   shouldProbeTextMutation,
 } from "./editor-mutation-coalesce"
 
@@ -126,5 +127,43 @@ describe("shouldProbeTextMutation (capture-scheduler suppression)", () => {
     expect(
       shouldProbeTextMutation(m, { inFlight, queued: new Set() }),
     ).toBe(false)
+  })
+})
+
+describe("pruneAiQueue", () => {
+  it("removes the identities of the mutations that are leaving the buffer", () => {
+    const leaving = makeMutation()
+    const queue = new Set([mutationIdentity(leaving)])
+    expect(pruneAiQueue(queue, [leaving])).toBe(true)
+    expect(queue.size).toBe(0)
+  })
+
+  it("leaves identities that belong to other elements alone", () => {
+    const leaving = makeMutation()
+    const other = makeMutation({ id: "m-2", sourceLoc: "src/App.vue:99:1" })
+    const queue = new Set([mutationIdentity(leaving), mutationIdentity(other)])
+    expect(pruneAiQueue(queue, [leaving])).toBe(true)
+    expect([...queue]).toEqual([mutationIdentity(other)])
+  })
+
+  it("reports false when nothing matched, so the count is not re-published", () => {
+    const queue = new Set([mutationIdentity(makeMutation({ sourceLoc: "src/Other.vue:1:1" }))])
+    expect(pruneAiQueue(queue, [makeMutation()])).toBe(false)
+    expect(queue.size).toBe(1)
+  })
+
+  it("reports false on an empty queue without touching it", () => {
+    const queue = new Set<string>()
+    expect(pruneAiQueue(queue, [makeMutation()])).toBe(false)
+  })
+
+  it("matches on identity, not on id, so a re-captured keystroke still clears", () => {
+    // The queue records identities; the buffer entry's `id` changes across
+    // captures of the same on-screen field.
+    const queued = makeMutation({ id: "m-1", after: "Hi" })
+    const dispatched = makeMutation({ id: "m-9", before: "Hi", after: "Hi there" })
+    const queue = new Set([mutationIdentity(queued)])
+    expect(pruneAiQueue(queue, [dispatched])).toBe(true)
+    expect(queue.size).toBe(0)
   })
 })

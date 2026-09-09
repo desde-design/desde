@@ -23,6 +23,36 @@ export function mutationIdentity(m: Mutation): string {
 }
 
 /**
+ * Drop the identities of `leaving` from the "needs AI" queue, and say whether
+ * anything was removed.
+ *
+ * The queue is what stops the capture scheduler re-dispatching a mutation on
+ * every keystroke, so an identity left behind after its mutation has gone
+ * makes the NEXT inline text edit on that element skip scheduling, and keeps
+ * the unload warning up over nothing.
+ *
+ * Two `handleSaveAll` branches take mutations out of the buffer: the one where
+ * the flush applied them and the one where the flush handed them to chat. Only
+ * the first cleaned the queue. One function for both, so a third branch cannot
+ * quietly forget again.
+ *
+ * Mutates the set in place, because that is what the hook holds; the return
+ * value is what tells the caller whether to re-publish the count.
+ */
+export function pruneAiQueue(queue: Set<string>, leaving: readonly Mutation[]): boolean {
+  if (queue.size === 0) return false
+  const leavingKeys = new Set(leaving.map((m) => mutationIdentity(m)))
+  let removed = false
+  for (const key of queue) {
+    if (leavingKeys.has(key)) {
+      queue.delete(key)
+      removed = true
+    }
+  }
+  return removed
+}
+
+/**
  * Reducer for `adapter.onMutationCaptured`: merge an incoming capture into
  * the buffer by identity. A new identity appends; a repeat updates the
  * existing entry in place — taking the incoming mutation's fields BUT
