@@ -19,10 +19,11 @@
  */
 
 import {
+  configPathFor,
   ensureProjectIdentity,
-  readProjectConfig,
   renameProjectIdentity,
 } from "./project-config.js"
+import { readIdentityFromConfig } from "../../../src/core/project-identity.js"
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import { spawn } from "node:child_process"
 import { createChildTracker, type ChildTracker } from "./child-tracker.js"
@@ -30,7 +31,7 @@ import { launchCwd } from "../launch-cwd.js"
 import { spawnEnvWithInheritedLlmCredentials } from "./inherited-llm-env.js"
 import { homeUrlEnv } from "./home-url.js"
 import { existsSync } from "node:fs"
-import { stat } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 import { basename, resolve as resolvePath } from "node:path"
 import {
   withRunningEditorReuse,
@@ -69,13 +70,38 @@ import {
 } from "./projects-registry.js"
 
 /**
- * The project's display name from its identity block, or null when the repo
- * has none (or its config is unreadable — the settings page must still open
- * so the user can fix it there).
+ * The project's display name, read from the identity block ALONE.
+ *
+ * Not through `readProjectConfig`: that validates the whole file, so a bad
+ * unrelated field (a malformed `chat` setting, say) would report "no name"
+ * for a perfectly good identity block, the list would clear the cached
+ * name, and a rename would never show while the unrelated error stood.
+ *
+ * Two answers, kept apart because the callers do different things with
+ * them. `readable: true, name: null` is a repo with no identity (no config,
+ * or a config without a block): the folder name is the honest title, and a
+ * cached name may be cleared. `readable: false` is a file that exists but
+ * cannot be read or parsed: nothing is known, so a cached name is kept, and
+ * the settings page still opens so the user can fix the file there.
  */
-async function readProjectIdentityName(repoRoot: string): Promise<string | null> {
-  const result = await readProjectConfig(repoRoot)
-  return result.ok ? (result.config.project?.name ?? null) : null
+type IdentityNameRead = { readable: true; name: string | null } | { readable: false }
+
+async function readProjectIdentityName(repoRoot: string): Promise<IdentityNameRead> {
+  let text: string
+  try {
+    text = await readFile(configPathFor(repoRoot), "utf-8")
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { readable: true, name: null }
+    return { readable: false }
+  }
+  if (text.trim() === "") return { readable: true, name: null }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return { readable: false }
+  }
+  return { readable: true, name: readIdentityFromConfig(parsed)?.name ?? null }
 }
 import { seedDemoProject } from "./demo/seed.js"
 import { checkLauncherOpen, supportedHostsFor } from "./launcher-open-check.js"
@@ -442,10 +468,13 @@ async function route(
       // folder that is gone is left alone: there is nothing to reconcile
       // against, and its stale row is the delete action's job. Best-effort
       // per entry: a patch that cannot be written still shows the right
-      // name this time.
+      // name this time. A config that cannot be read keeps the cached name:
+      // nothing is known, and clearing would be a claim.
       for (const entry of registry.projects) {
         if (!(await isDirectory(entry.path))) continue
-        const name = (await readProjectIdentityName(entry.path)) ?? undefined
+        const read = await readProjectIdentityName(entry.path)
+        if (!read.readable) continue
+        const name = read.name ?? undefined
         if (name === entry.name) continue
         entry.name = name
         try {
@@ -771,14 +800,15 @@ async function route(
         if (!ds.ok) warnings.push(...ds.errors)
         if (!roots.ok) warnings.push(...roots.errors)
 
+        // The repo's own identity block is where a project's chosen name
+        // lives (the recents registry is only a cache of it); the folder
+        // basename is the fallback the launcher list shows for a repo that
+        // has no identity yet, and for one whose config cannot be read.
+        const identityName = await readProjectIdentityName(abs)
         sendJson(res, 200, {
           ok: true,
           path: abs,
-          // The repo's own identity block is where a project's chosen name
-          // lives (the recents registry is only a cache of it); the folder
-          // basename is the fallback the launcher list shows for a repo that
-          // has no identity yet.
-          name: (await readProjectIdentityName(abs)) ?? basename(abs),
+          name: identityName.readable ? (identityName.name ?? basename(abs)) : basename(abs),
           designSystems: ds.ok
             ? ds.declarations.map((d) => ({
                 identity: declarationIdentity(d.source),

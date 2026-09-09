@@ -1143,6 +1143,52 @@ describe("launcher server", () => {
       expect(await nameOf(gone)).toBe("Moved away")
     })
 
+    it("reads the name from the identity block alone, so a bad unrelated field cannot hide it", async () => {
+      // `readProjectConfig` validates the whole file; a malformed `chat`
+      // setting used to report "no name", and the list then cleared the
+      // cached one, so even a rename would not show.
+      const target = path.join(tmp, "bad-chat-good-name")
+      await fs.mkdir(path.join(target, ".desde"), { recursive: true })
+      const configPath = path.join(target, ".desde", "config.json")
+      const write = (name: string) =>
+        fs.writeFile(
+          configPath,
+          `${JSON.stringify({ version: 2, chat: "not an object", project: { id: "proj-1", name, slug: "s" } })}\n`,
+        )
+      await write("Good name")
+      const { upsertProjectRegistryEntry } = await import("../projects-registry.js")
+      await upsertProjectRegistryEntry({ path: target, slug: "s" })
+      const token = await tokenFromBootstrap()
+
+      const settings = await fetch(handle.url + "/api/launcher/project-settings", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: target }),
+      })
+      expect((await settings.json()).name).toBe("Good name")
+
+      const list = async () =>
+        ((await (
+          await fetch(handle.url + "/api/launcher/projects", { headers: authedHeaders(token) })
+        ).json()) as { projects: Array<{ path: string; name?: string }> }).projects.find(
+          (e) => e.path === target,
+        )?.name
+      expect(await list()).toBe("Good name")
+      await write("Renamed despite the bad field")
+      expect(await list()).toBe("Renamed despite the bad field")
+
+      // A file that cannot be parsed at all: nothing is known, so the cached
+      // name is kept rather than cleared.
+      await fs.writeFile(configPath, "{ not json")
+      expect(await list()).toBe("Renamed despite the bad field")
+      const unreadable = await fetch(handle.url + "/api/launcher/project-settings", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: target }),
+      })
+      expect((await unreadable.json()).name).toBe("bad-chat-good-name")
+    })
+
     it("project-name WITHOUT rename intent hands an existing identity back untouched", async () => {
       // The create flow on a clone that already carries a committed
       // identity: the wizard prefills the folder name, and that must not

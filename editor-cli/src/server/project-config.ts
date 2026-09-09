@@ -291,7 +291,7 @@ export type ReadProjectConfigResult =
  * a repo — the writers let it surface, and the reader below reports it as an
  * unreadable config.
  */
-function configPathFor(repoRoot: string): string {
+export function configPathFor(repoRoot: string): string {
   return desdePath(repoRoot, "config.json")
 }
 const SUPPORTED_VERSION = 1
