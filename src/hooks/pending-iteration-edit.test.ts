@@ -6,6 +6,7 @@ import {
   bridgeDraftIdOf,
   decideAfterVerify,
   describeAmbiguousIteration,
+  endSentence,
   isStaleVerify,
   iterationRouteFor,
   iterationTemplateLocation,
@@ -341,5 +342,42 @@ describe("bridgeDraftIdOf", () => {
     expect(
       bridgeDraftIdOf({ editKind: "delete", selection: {} as never, node, iterationContext }),
     ).toBeUndefined()
+  })
+})
+
+describe("endSentence", () => {
+  it("adds a stop to a reason that has none", () => {
+    expect(endSentence("Iteration edit refused: no adapter")).toBe(
+      "Iteration edit refused: no adapter.",
+    )
+  })
+
+  it("leaves a reason that already ends in a stop alone", () => {
+    expect(endSentence("Iteration edit refused: no source location.")).toBe(
+      "Iteration edit refused: no source location.",
+    )
+  })
+
+  it("treats ! and ? as ended", () => {
+    // Nothing we author ends this way, but an applicator's or a server's
+    // refusal text might, and a stop hung off one would read as a typo.
+    expect(endSentence("Really?")).toBe("Really?")
+    expect(endSentence("Refused!")).toBe("Refused!")
+  })
+
+  it("trims first, so a trailing space does not carry a stop past it", () => {
+    expect(endSentence("  Could not write the file  ")).toBe("Could not write the file.")
+    expect(endSentence("Already ended.  ")).toBe("Already ended.")
+  })
+
+  it("returns the empty string unchanged rather than a bare stop", () => {
+    expect(endSentence("")).toBe("")
+    expect(endSentence("   ")).toBe("")
+  })
+
+  it("composes into the status line the fallback sets", () => {
+    expect(`${endSentence("Iteration edit refused: no adapter")} Choose how to apply it.`).toBe(
+      "Iteration edit refused: no adapter. Choose how to apply it.",
+    )
   })
 })

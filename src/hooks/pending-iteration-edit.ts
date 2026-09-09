@@ -84,6 +84,26 @@ export const MALFORMED_ITERATION_STATUS =
   "The page reported loop information it could not describe, so this edit was not applied. Reload and try again."
 
 /**
+ * `message` with a full stop, unless it already ends in one.
+ *
+ * The status bar builds a two-sentence line by appending "Choose how to apply
+ * it." to a refusal reason, and those reasons come from several places: our
+ * own literals, an applicator's refusal text, a server's 400 body. Not all of
+ * them end in punctuation, so the two sentences ran together. Trailing
+ * whitespace is trimmed first, so a reason ending in a space does not get a
+ * stop hung off the end of it.
+ *
+ * `!` and `?` count as ended too. Nothing we write ends that way, but a
+ * refusal reason we did not write might, and appending a stop to one would
+ * read as a typo.
+ */
+export function endSentence(message: string): string {
+  const trimmed = message.trim()
+  if (trimmed === "") return trimmed
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`
+}
+
+/**
  * Which of the three routes an edit on this element takes.
  *
  * - `refuse`: the page sent loop information that failed the boundary check.

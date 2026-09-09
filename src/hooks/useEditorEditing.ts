@@ -113,6 +113,7 @@ import {
 import {
   bridgeDraftIdOf,
   decideAfterVerify,
+  endSentence,
   isStaleVerify,
   iterationRouteFor,
   iterationTemplateLocation,
@@ -2225,9 +2226,15 @@ export function useEditorEditing({
       // write left neither a source edit nor anything to retry, with the page
       // still showing text that reached no file.
       const failThisRow = (message: string) => {
-        if (!parkDraftForDeterministicFallback(pending, `${message} Choose how to apply it.`)) {
-          setSaveStatus(message)
-        }
+        // `endSentence` because these reasons come from three places — our own
+        // literals, an applicator's refusal text, a server's 400 body — and
+        // not all of them end in punctuation. Without it the two sentences
+        // ran together.
+        const parked = parkDraftForDeterministicFallback(
+          pending,
+          `${endSentence(message)} Choose how to apply it.`,
+        )
+        if (!parked) setSaveStatus(message)
       }
 
       // "this-row" → deterministic iteration-data edit, LLM fallback behind it.
