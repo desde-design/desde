@@ -178,6 +178,44 @@ describe("validateIterationBody", () => {
     ).toMatch(/fieldLocation/)
   })
 
+  /**
+   * M3. Both positions were shape-checked with `typeof === "number"`, which
+   * NaN, Infinity and 1.5 all pass. Each of them reaches the parser as a
+   * position that can never match a node, and the verify route the client
+   * checked this position against already rejects them: accepting them here
+   * let a hand-built request reach the resolver with a position the client
+   * could not have produced.
+   */
+  it("rejects a non-integer or non-finite templateLocation", () => {
+    for (const bad of [
+      { line: 1.5, column: 0 },
+      { line: 3, column: 2.5 },
+      { line: Number.NaN, column: 0 },
+      { line: 3, column: Number.NaN },
+      { line: Number.POSITIVE_INFINITY, column: 0 },
+      { line: 3, column: Number.POSITIVE_INFINITY },
+    ]) {
+      expect(validateIterationBody(makeBody({ templateLocation: bad }))).toMatch(
+        /templateLocation must be \{ line, column \} integers/,
+      )
+    }
+    // The valid case still passes, so the rule did not tighten past integers.
+    expect(validateIterationBody(makeBody({ templateLocation: { line: 3, column: 0 } }))).toBeNull()
+  })
+
+  it("rejects a non-integer or non-finite fieldLocation", () => {
+    for (const bad of [
+      { line: 1.5, column: 0 },
+      { line: 3, column: 2.5 },
+      { line: Number.NaN, column: 0 },
+      { line: 3, column: Number.NEGATIVE_INFINITY },
+    ]) {
+      expect(validateIterationBody(makeBody({ fieldLocation: bad }))).toMatch(
+        /fieldLocation must be \{ line, column \} integers/,
+      )
+    }
+  })
+
   it("caps the iteration context's free text and rejects control characters (J6)", () => {
     // Both fields ride into the AI lane's prompt when this route refuses. The
     // client checks them at its wire boundary; a hand-built request never

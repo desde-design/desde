@@ -132,15 +132,20 @@ export function validateIterationBody(body: unknown): string | null {
   if (typeof b.file !== "string" || b.file.length === 0)
     return "body.file required"
   const tl = b.templateLocation as Record<string, unknown> | undefined
+  // `Number.isInteger`, not `typeof === "number"`: NaN, Infinity and 1.5 are
+  // all numbers, and all of them reach the parser as a position that can never
+  // match a node. The verify route this position was checked against already
+  // rejects them, so accepting them here let a hand-built request reach the
+  // resolver with a position the client could not have produced.
   if (
     !tl ||
-    typeof tl.line !== "number" ||
-    typeof tl.column !== "number" ||
-    tl.line < 1 ||
-    tl.column < 0
+    !Number.isInteger(tl.line) ||
+    !Number.isInteger(tl.column) ||
+    (tl.line as number) < 1 ||
+    (tl.column as number) < 0
   ) {
     // Column 0 is valid for JSX (Babel 0-based); Vue's are 1-based.
-    return "body.templateLocation must be { line, column } (line 1-based, column >= 0)"
+    return "body.templateLocation must be { line, column } integers (line 1-based, column >= 0)"
   }
   // Same rule when present: it is dispatched as a source coordinate, and a
   // bad one reads a position in a file.
@@ -148,12 +153,12 @@ export function validateIterationBody(body: unknown): string | null {
   if (fl !== undefined && fl !== null) {
     if (
       typeof fl !== "object" ||
-      typeof fl.line !== "number" ||
-      typeof fl.column !== "number" ||
-      fl.line < 1 ||
-      fl.column < 0
+      !Number.isInteger(fl.line) ||
+      !Number.isInteger(fl.column) ||
+      (fl.line as number) < 1 ||
+      (fl.column as number) < 0
     ) {
-      return "body.fieldLocation must be { line, column } (line 1-based, column >= 0)"
+      return "body.fieldLocation must be { line, column } integers (line 1-based, column >= 0)"
     }
   }
   const ic = b.iterationContext as Record<string, unknown> | undefined
