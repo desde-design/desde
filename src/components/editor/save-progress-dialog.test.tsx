@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 import type { SaveLLMTrace } from "@/editor/core"
+import { SAVE_HANDOFF_TIMEOUT_STATUS } from "@/hooks/pending-iteration-edit"
 import { SaveProgressDialog } from "./save-progress-dialog"
 
 function makeTrace(overrides: Partial<SaveLLMTrace> = {}): SaveLLMTrace {
@@ -168,6 +169,51 @@ describe("SaveProgressDialog", () => {
       screen.getAllByText(/Save failed/).length,
     ).toBeGreaterThanOrEqual(1)
     expect(screen.getByText(/file not found/)).toBeInTheDocument()
+  })
+
+  /**
+   * The hand-off's two dead ends. A save that handed its edits to chat can end
+   * refused or unanswered, and neither sentence uses the word "failed" — they
+   * are written for the designer, not for this regex. Both leave the mutations
+   * in the buffer with nothing on disk, so both are failures the dialog has to
+   * show rather than closing over.
+   */
+  it("treats an unanswered chat hand-off as a failure, and lets it be closed", () => {
+    render(
+      <SaveProgressDialog
+        saving={false}
+        pendingLLMInput={null}
+        lastLLMTrace={null}
+        streamingText=""
+        saveStatus={SAVE_HANDOFF_TIMEOUT_STATUS}
+      />,
+    )
+    expect(screen.getByRole("dialog")).toBeInTheDocument()
+    expect(screen.getByTestId("save-dialog-error")).toHaveTextContent(
+      /Chat did not answer in time/,
+    )
+    // A failed save is not in flight, so it carries a way out. Without one the
+    // designer is stuck in front of a modal describing something that is over.
+    // Two of them: the header's X and the footer's button. Both are gated on
+    // the same `inFlight` check, and either one dismisses.
+    const closers = screen.getAllByRole("button", { name: "Close" })
+    expect(closers.length).toBeGreaterThanOrEqual(1)
+    fireEvent.click(closers[closers.length - 1]!)
+    expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
+  it("treats a refused chat hand-off as a failure too", () => {
+    render(
+      <SaveProgressDialog
+        saving={false}
+        pendingLLMInput={null}
+        lastLLMTrace={null}
+        streamingText=""
+        saveStatus="These 3 edits could not be sent to chat. Nothing was discarded; try again when the chat finishes."
+      />,
+    )
+    expect(screen.getByRole("dialog")).toBeInTheDocument()
+    expect(screen.getByTestId("save-dialog-error")).toBeInTheDocument()
   })
 
   it("shows truncation notice when mutationSummary is partial", () => {

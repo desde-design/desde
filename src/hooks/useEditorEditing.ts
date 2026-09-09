@@ -124,6 +124,7 @@ import {
   iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
+  SAVE_HANDOFF_TIMEOUT_STATUS,
   settleHandOff,
   structuralRouteFor,
   thisRowOperationAllowed,
@@ -4775,11 +4776,27 @@ export function useEditorEditing({
             // the POST. Dropping the bundle here and returning ok:true
             // reported a successful Save for edits that were never written and
             // no longer existed anywhere.
-            const accepted = await escalateToChatRef.current(
-              buildEditEscalationPrompt(normalizedMutations),
-            )
+            //
+            // BOUNDED, like the iteration lane's two hand-offs. This await sits
+            // behind the save dialog, which shows no close control while a save
+            // is in flight, and the server can hold a submission for a
+            // concurrency slot for as long as the project's other turns take.
+            // Without a bound the designer is left in front of a modal they
+            // cannot dismiss, over a save that may never answer.
+            const handOff = escalateToChatRef.current
+            const prompt = buildEditEscalationPrompt(normalizedMutations)
+            const outcome = await settleHandOff((signal) => handOff(prompt, { signal }))
+            if (outcome === "timed-out") {
+              // Neither accepted nor refused: the POST is aborted and the
+              // mutations stay in the buffer, so this is a failed save with
+              // everything still there to retry.
+              const reason = SAVE_HANDOFF_TIMEOUT_STATUS
+              setSavePendingLLMInput(null)
+              setSaveStatus(reason)
+              return { ok: false, reason }
+            }
             const aftermath = afterEscalation(
-              accepted,
+              outcome === "accepted",
               normalizedMutations.length === 1
                 ? "This edit"
                 : `These ${normalizedMutations.length} edits`,

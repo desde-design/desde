@@ -16,6 +16,7 @@ import {
   iterationTemplateLocation,
   parkedReason,
   sameBridgeDraft,
+  SAVE_HANDOFF_TIMEOUT_STATUS,
   settleHandOff,
   structuralRouteFor,
   thisRowOperationAllowed,
@@ -774,6 +775,23 @@ describe("handOffFailureStatus", () => {
   })
 })
 
+describe("SAVE_HANDOFF_TIMEOUT_STATUS", () => {
+  it("says the edits are still there and when to retry", () => {
+    expect(SAVE_HANDOFF_TIMEOUT_STATUS).toBe(
+      "Chat did not answer in time. Nothing was discarded; try again when the chat is free.",
+    )
+  })
+
+  it("asks no question, because Save has no dialog to park an edit in", () => {
+    expect(SAVE_HANDOFF_TIMEOUT_STATUS).not.toMatch(/\?/)
+    expect(SAVE_HANDOFF_TIMEOUT_STATUS).not.toMatch(/Choose how to apply/)
+  })
+
+  it("uses no em dash and no first person", () => {
+    expect(SAVE_HANDOFF_TIMEOUT_STATUS).not.toMatch(/—/)
+    expect(SAVE_HANDOFF_TIMEOUT_STATUS).not.toMatch(/\b(me|my)\b/i)
+  })
+})
 
 describe("errorMessage", () => {
   it("reads the message of a real Error", () => {

@@ -435,8 +435,17 @@ function derivePhase(args: {
 }
 
 function looksLikeFailure(saveStatus: string | null): boolean {
+  // The last two alternatives are the chat hand-off's. A save whose edits went
+  // to chat can end in two ways that are failures without using any of the
+  // words above: the hand-off was refused ("could not be sent to chat"), or it
+  // passed its deadline and was cancelled ("did not answer in time"). Both
+  // leave the mutations in the buffer and nothing on disk, and both used to
+  // close the dialog and report only through a toast, which reads as a
+  // finished save.
   return saveStatus
-    ? /failed|threw|conflict|refused|error/i.test(saveStatus)
+    ? /failed|threw|conflict|refused|error|could not be sent to chat|did not answer in time/i.test(
+        saveStatus,
+      )
     : false
 }
 

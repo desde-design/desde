@@ -230,6 +230,17 @@ export function handOffFailureStatus(
   }
 }
 
+/**
+ * The Save lane's version of the same fact.
+ *
+ * Save has no dialog to park an edit in: the mutations are still in the buffer
+ * and the save simply did not happen, so the sentence says that instead of
+ * asking a question. It is a constant rather than a literal in the hook so the
+ * copy rules (no em dash, no "me"/"my") are testable and so the save dialog's
+ * failure test asserts the string the hook actually sets.
+ */
+export const SAVE_HANDOFF_TIMEOUT_STATUS =
+  "Chat did not answer in time. Nothing was discarded; try again when the chat is free."
 
 /**
  * Which of the three routes an edit on this element takes.
