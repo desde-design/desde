@@ -81,7 +81,7 @@ const PROTOTYPE_URL = "https://prototype.example.com/dashboard"
  * bridge (round 16 X3), so every handshake fixture carries both a version at or
  * above it and a `documentId`; a ready without one is refused.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-10d-structure-document-id"
+const CURRENT_BRIDGE_VERSION = "2026-09-10e-unresolved-document-id"
 
 let activeMockSetup: MockIframeSetup | null = null
 

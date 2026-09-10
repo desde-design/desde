@@ -75,8 +75,15 @@ import {
  * events. A bridge that stamps only the mutation family would have those seven
  * arrive with no id, which reads as "not the current document" here and would
  * drop them all — so it is refused at the handshake instead of half-working.
+ *
+ * Raised a fourth time for the id on the two page-originated READS the shell
+ * acts on: `STRUCTURE_CAPTURED`, whose rows carry the coordinates a Layers
+ * delete writes to, and `ELEMENT_INSPECTION_UNRESOLVED`, which settles the
+ * same pending request a selection reply settles. Both are checked here, so a
+ * bridge that does not stamp them would have every one of its answers read as
+ * "not the current document" and dropped.
  */
-const REQUIRED_BRIDGE_VERSION = '2026-09-10d-structure-document-id'
+const REQUIRED_BRIDGE_VERSION = '2026-09-10e-unresolved-document-id'
 
 /**
  * Phase 6 feature gate. Bridges below this version don't know about
@@ -159,6 +166,33 @@ interface BridgeEnvelope {
   requestId?: string
 }
 
+/**
+ * The sequence behind every request id this module mints.
+ *
+ * It lives on the MODULE, not on the adapter instance, and that is the whole
+ * point. Every attachment of the adapter effect constructs a fresh
+ * `BridgeFrameworkAdapter`, so a counter held on the instance restarts at zero
+ * each time and the departed page's adapter and the new one both mint `req-1`.
+ * The departed page can still be answering while the new adapter is waiting,
+ * and a reply carrying a repeated id settles a request it never answered.
+ *
+ * Nothing reads the number back. No parser anywhere splits an id or reads its
+ * numeric part, so the only property that has to hold is that a value is never
+ * handed out twice for the life of the page, which a shared counter gives.
+ */
+let nextRequestSeq = 0
+
+/**
+ * One id, unique across every adapter instance in this page.
+ *
+ * The prefix names the lane it belongs to and is there to be read in a log; it
+ * is not correlation. Correlation is the whole string, matched exactly against
+ * the pending map the request was parked in.
+ */
+function mintRequestId(prefix: string): string {
+  return `${prefix}-${++nextRequestSeq}`
+}
+
 export class BridgeFrameworkAdapter implements FrameworkAdapter {
   /**
    * The declared framework, satisfying the `FrameworkAdapter` interface.
@@ -178,7 +212,6 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
   private currentSelection: Selection | null = null
 
   private boundMessageListener: ((event: MessageEvent) => void) | null = null
-  private requestCounter = 0
   private readonly pendingRequests = new Map<string, PendingRequest>()
   private readonly pendingStructureRequests = new Map<string, PendingStructureRequest>()
   private readonly pendingManyRequests = new Map<string, PendingManyRequest>()
@@ -432,7 +465,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         `BridgeFrameworkAdapter.selectMany: bridge version ${this.lastBridgeVersion} does not support multi-select (need ${REQUIRED_BRIDGE_VERSION_MULTI_SELECT}+)`,
       )
     }
-    const requestId = `many-${++this.requestCounter}`
+    const requestId = mintRequestId('many')
     const promise = new Promise<InspectionData[]>((resolve, reject) => {
       // Bounded wait. Bridge that handshakes the right version but
       // somehow drops INSPECT_MANY (network glitch, message-channel
@@ -489,7 +522,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     if (!this.currentTarget) {
       throw new Error('BridgeFrameworkAdapter.getStructure: adapter not initialized')
     }
-    const requestId = `struct-${++this.requestCounter}`
+    const requestId = mintRequestId('struct')
     const promise = new Promise<OutlineNode[]>((resolve, reject) => {
       // Bounded wait. A bridge that handshakes but drops STRUCTURE_CAPTURED
       // (iframe reload race on refresh, message-channel backpressure) must
@@ -550,7 +583,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     // (Verification callers gate on `supportsRenderedValueRead()` so this null
     // never reaches the comparator as a false failure.)
     if (!this.supportsRenderedValueRead()) return null
-    const requestId = `val-${++this.requestCounter}`
+    const requestId = mintRequestId('val')
     const promise = new Promise<string | null>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pendingValueRequests.delete(requestId)) {
@@ -604,7 +637,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
   async readMeasurements(selector: string): Promise<Measurements | null> {
     if (!this.currentTarget) return null
     if (!this.supportsMeasurementsRead()) return null
-    const requestId = `meas-${++this.requestCounter}`
+    const requestId = mintRequestId('meas')
     const promise = new Promise<Measurements | null>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pendingMeasurementRequests.delete(requestId)) {
@@ -686,7 +719,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     // timing out. Verification callers also gate on `supportsStyleProvenance()`,
     // so this normally isn't even reached.
     if (!this.supportsStyleProvenance()) return null
-    const requestId = `prov-${++this.requestCounter}`
+    const requestId = mintRequestId('prov')
     const promise = new Promise<Record<string, StyleOrigin>>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pendingProvenanceRequests.delete(requestId)) {
@@ -1227,7 +1260,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     if (!this.currentTarget) {
       throw new Error('BridgeFrameworkAdapter.request: adapter not initialized')
     }
-    const requestId = `req-${++this.requestCounter}`
+    const requestId = mintRequestId('req')
     const promise = new Promise<InspectionData | null>((resolve, reject) => {
       this.pendingRequests.set(requestId, { resolve, reject })
     })
@@ -1314,25 +1347,26 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    *   page-background messages other consumers read. None of them writes
    *   anything. The worst a stale one does is clear a selection or ask for a
    *   tree refresh, and the new page corrects both on its own.
-   * - Replies correlated by a requestId the SHELL minted:
-   *   `ELEMENT_INSPECTION_UNRESOLVED`, `STRUCTURE_CAPTURED`,
-   *   `RENDERED_VALUE_READ`, `MEASUREMENTS_READ`, `STYLE_PROVENANCE_RESULT`.
-   *   The id already pairs an answer with its own question, each of them reads
-   *   rather than writes, and every pending request is rejected on `dispose()`
-   *   and bounded by its own timeout, so a missing reply cannot strand one.
-   *   `ELEMENT_INSPECTION_UNRESOLVED` is the closest call of the five, since it
-   *   settles the same pending request the selection replies do. It is left
-   *   unstamped because of how its requestId is minted, not because settling
-   *   with `null` makes the id irrelevant. `requestCounter` only increases for
-   *   the life of this adapter instance, so a reply naming an id from the
-   *   departed document can only name one minted BEFORE the document changed.
-   *   By the time that reply arrives, `discardSelectionFromDepartedDocument`
-   *   has already cleared `pendingRequests`, so `resolveRequest` looks up that
-   *   id, finds nothing, and does nothing. This is the assumption that would
-   *   stop holding if the id scheme ever changed: an id scheme that reuses
-   *   values, or that is not scoped to one adapter instance, could hand a
-   *   departed page's reply an id that still resolves to a live request, and
-   *   this case would need the same stamp the selection replies carry.
+   * - `ELEMENT_INSPECTION_UNRESOLVED` is stamped, and checked here. It settles
+   *   the same pending request the selection replies do, so a stale one clears
+   *   a read the page on screen is still waiting on. It used to be left
+   *   unstamped on the argument that its id could not collide; that argument
+   *   was wrong in one specific way, and the fix has two locks now rather than
+   *   one. The first lock is the stamp. The second is `mintRequestId`: the
+   *   sequence behind every id lives on the module, so no two adapter
+   *   instances can hand out the same id. That matters because every
+   *   attachment of the adapter effect constructs a FRESH adapter, and a
+   *   counter held on the instance restarted at zero each time, which is
+   *   exactly how a departed page's reply could name an id the new adapter
+   *   was waiting on.
+   * - The other replies correlated by a requestId the SHELL minted:
+   *   `STRUCTURE_CAPTURED`, `RENDERED_VALUE_READ`, `MEASUREMENTS_READ`,
+   *   `STYLE_PROVENANCE_RESULT`. `STRUCTURE_CAPTURED` is stamped and checked
+   *   too, because its rows carry the coordinates a Layers delete writes to.
+   *   The remaining three are unstamped: each reads a single value, none of
+   *   them sets the selection, and every pending request is rejected on
+   *   `dispose()` and bounded by its own timeout, so a missing reply cannot
+   *   strand one.
    * - `DOM_EDIT_MODE_EXITED` has no requestId, but it resolves ONE shell-issued
    *   exit that carries its own timeout. A stale one resolves that exit early;
    *   it writes nothing.
@@ -1414,6 +1448,21 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         break
       case 'ELEMENT_INSPECTION_UNRESOLVED':
         if (message.requestId) {
+          if (!this.fromCurrentDocument(message.documentId)) {
+            this.warnForeignDocument(
+              'ELEMENT_INSPECTION_UNRESOLVED',
+              message.documentId,
+            )
+            // Dropped, not settled. This is the one arm where settling would
+            // do the exact harm the check is for: settling means resolving
+            // the pending read with null, which is what accepting the reply
+            // does. Nothing is stranded by dropping it either, because the
+            // only pending reads that could match a departed page's id were
+            // already resolved and cleared by
+            // `discardSelectionFromDepartedDocument` at the new page's
+            // handshake.
+            break
+          }
           this.resolveRequest(message.requestId, null)
         }
         break

@@ -190,3 +190,135 @@ describe("mcp-query-handlers — every selection reply names its document", () =
     expect((reply!.payload as { selector?: unknown }).selector).toBe("#card")
   })
 })
+
+/**
+ * `ELEMENT_INSPECTION_UNRESOLVED` is the other half of the same round trip.
+ *
+ * It settles the same pending request the selection replies settle, so a stale
+ * one clears a read the page on screen is still waiting on. There are seven
+ * places that send it, across three query types, and every one of them names
+ * its document now.
+ */
+describe("mcp-query-handlers — every unresolved reply names its document", () => {
+  let warned: unknown[][]
+  let restoreWarn: () => void
+
+  beforeEach(() => {
+    // The three "inspect threw" rows below log through console.warn on
+    // purpose. Captured rather than printed, so the run stays readable.
+    warned = []
+    const original = console.warn
+    console.warn = (...args: unknown[]) => void warned.push(args)
+    restoreWarn = () => {
+      console.warn = original
+    }
+    // The tiered protocol (the one that answers with this message at all) is
+    // editor-only.
+    editorMode = true
+  })
+
+  afterEach(() => {
+    restoreWarn()
+  })
+
+  /** Re-point the runtime's element reader at one that throws. */
+  function makeInspectThrow(): void {
+    configureBridgeRuntime({
+      sendToShell: (message: { type: string; payload?: unknown }) =>
+        void sent.push(message),
+      inspectElement: () => {
+        throw new Error("inspect failed")
+      },
+      attributeElement: () => undefined,
+      documentId: TEST_DOCUMENT_ID,
+    })
+  }
+
+  function unresolved() {
+    const reply = sent.find((m) => m.type === "ELEMENT_INSPECTION_UNRESOLVED")
+    expect(reply).toBeDefined()
+    return reply!
+  }
+
+  it("stamps the INSPECT_SELECTOR no-match reply", () => {
+    query({
+      type: "INSPECT_SELECTOR",
+      payload: { selector: "#nothing" },
+      requestId: "req-1",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+    expect((unresolved().payload as { reason?: unknown }).reason).toBe("not-found")
+  })
+
+  it("stamps the INSPECT_SELECTOR reply for an element the bridge injected", () => {
+    document.body.innerHTML = `<div id="overlay" data-prototype-flow="1"></div>`
+    query({
+      type: "INSPECT_SELECTOR",
+      payload: { selector: "#overlay" },
+      requestId: "req-2",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+    expect((unresolved().payload as { reason?: unknown }).reason).toBe("in-toolbar")
+  })
+
+  it("stamps the INSPECT_SELECTOR ambiguous reply", () => {
+    query({
+      type: "INSPECT_SELECTOR",
+      payload: { selector: "button" },
+      requestId: "req-3",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+    expect((unresolved().payload as { reason?: unknown }).reason).toBe("ambiguous")
+  })
+
+  it("stamps the INSPECT_SELECTOR reply when reading the element throws", () => {
+    makeInspectThrow()
+    query({
+      type: "INSPECT_SELECTOR",
+      payload: { selector: "#save" },
+      requestId: "req-4",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the INSPECT_POINT reply when nothing is under the point", () => {
+    query({ type: "INSPECT_POINT", payload: { x: 5, y: 5 }, requestId: "req-5" })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the INSPECT_POINT reply when reading the element throws", () => {
+    pointTarget = document.getElementById("save")
+    makeInspectThrow()
+    query({ type: "INSPECT_POINT", payload: { x: 5, y: 5 }, requestId: "req-6" })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the INSPECT_PARENT reply when the source element is gone", () => {
+    query({
+      type: "INSPECT_PARENT",
+      payload: { selector: "#gone" },
+      requestId: "req-7",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the INSPECT_PARENT reply when there is no parent component", () => {
+    query({
+      type: "INSPECT_PARENT",
+      payload: { selector: "#save" },
+      requestId: "req-8",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the INSPECT_PARENT reply when reading the parent throws", () => {
+    parentTarget = document.getElementById("card")
+    makeInspectThrow()
+    query({
+      type: "INSPECT_PARENT",
+      payload: { selector: "#save" },
+      requestId: "req-9",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+})

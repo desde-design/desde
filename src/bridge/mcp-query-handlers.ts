@@ -132,6 +132,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
             type: "ELEMENT_INSPECTION_UNRESOLVED",
             payload: { targetId, reason, ...(extras ?? {}) },
             requestId: reqId,
+            documentId: bridgeDocumentId,
           } as Record<string, unknown>)
         } else {
           sendToShell({ type: "ELEMENT_INSPECTED", payload: null, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
@@ -183,6 +184,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           type: "ELEMENT_INSPECTION_UNRESOLVED",
           payload: { targetId: selectorValue, reason: "ambiguous", candidates },
           requestId: reqId,
+          documentId: bridgeDocumentId,
         } as Record<string, unknown>)
       } else {
         // Legacy: pick the first match (matches existing pre-bump behavior).
@@ -376,6 +378,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
             type: "ELEMENT_INSPECTION_UNRESOLVED",
             payload: { targetId: "", reason: "not-found" },
             requestId: reqId,
+            documentId: bridgeDocumentId,
           } as Record<string, unknown>)
         }
       } else {
@@ -383,6 +386,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           type: "ELEMENT_INSPECTION_UNRESOLVED",
           payload: { targetId: "", reason: "not-found" },
           requestId: reqId,
+          documentId: bridgeDocumentId,
         } as Record<string, unknown>)
       }
       return true
@@ -396,6 +400,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           type: "ELEMENT_INSPECTION_UNRESOLVED",
           payload: { targetId: inSel, reason: "not-found" },
           requestId: reqId,
+          documentId: bridgeDocumentId,
         } as Record<string, unknown>)
         return true
       }
@@ -405,6 +410,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           type: "ELEMENT_INSPECTION_UNRESOLVED",
           payload: { targetId: inSel, reason: "not-found" },
           requestId: reqId,
+          documentId: bridgeDocumentId,
         } as Record<string, unknown>)
         return true
       }
@@ -417,6 +423,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           type: "ELEMENT_INSPECTION_UNRESOLVED",
           payload: { targetId: inSel, reason: "not-found" },
           requestId: reqId,
+          documentId: bridgeDocumentId,
         } as Record<string, unknown>)
       }
       return true

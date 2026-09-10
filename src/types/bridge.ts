@@ -770,6 +770,16 @@ export type BridgeToShellMessage =
   | { type: "ESCAPE_PRESSED" }
   // ── Editor extensions (BRIDGE_VERSION 2026-05-01a+) ────────────
   | { type: "HOVER_TARGET_CHANGED"; payload: HoverTarget | null }
+  /**
+   * The other half of a selection round trip: the page could not resolve what
+   * the shell asked for.
+   *
+   * `documentId` is on the message for the reason `ELEMENT_INSPECTED` carries
+   * it. This reply settles the SAME pending request a selection reply settles,
+   * so one that arrives after the page was replaced clears a read the page on
+   * screen is still waiting on. The requestId cannot tell them apart: it pairs
+   * an answer with a question, not with a page.
+   */
   | {
       type: "ELEMENT_INSPECTION_UNRESOLVED"
       payload:
@@ -778,6 +788,7 @@ export type BridgeToShellMessage =
         | { targetId: string; reason: "metadata-mismatch"; liveCandidate: InspectionData }
         | { targetId: string; reason: "ambiguous"; candidates: InspectionData[] }
       requestId?: string
+      documentId: string
     }
   /**
    * The multi-select reply. `documentId` is on the message for the reason

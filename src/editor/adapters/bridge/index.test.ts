@@ -18,7 +18,7 @@ import type { BridgeMutation, InspectionData } from "@/types/bridge"
  * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
  * so a handshake fixture has to carry both.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-10d-structure-document-id"
+const CURRENT_BRIDGE_VERSION = "2026-09-10e-unresolved-document-id"
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -2031,6 +2031,40 @@ describe("BridgeFrameworkAdapter — a selection cannot outlive its page", () =>
     expect(seen).toEqual([])
   })
 
+  it("does not settle a live read with an ELEMENT_INSPECTION_UNRESOLVED from another document", async () => {
+    // This reply settles the same pending request a selection reply does. It
+    // is a read that answers null, so it looked harmless enough to leave
+    // unstamped; what it actually does is clear a request the page on screen
+    // is still waiting on.
+    const promise = adapter.selectBySelector("#panel")
+    const requestId = requestIdOf("INSPECT_SELECTOR")
+
+    let settled = false
+    void promise.then(() => {
+      settled = true
+    })
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTION_UNRESOLVED",
+      payload: { targetId: "#panel", reason: "not-found" },
+      requestId,
+      documentId: "doc-x",
+    })
+    // A macrotask, so every microtask the resolved read would have queued has
+    // already run. Two `await Promise.resolve()` are not enough here: the
+    // caller settles a few continuations deep, and a short flush passes
+    // whether the drop is there or not.
+    await new Promise((r) => setTimeout(r, 0))
+    expect(settled).toBe(false)
+
+    // The page on screen still gets to answer its own question.
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTION_UNRESOLVED",
+      payload: { targetId: "#panel", reason: "not-found" },
+      requestId,
+    })
+    await expect(promise).resolves.toBeNull()
+  })
+
   it("ignores an unsolicited ELEMENT_INSPECTED from another document", async () => {
     const seen: (Selection | null)[] = []
     adapter.onSelectionChange((s) => seen.push(s))
@@ -2108,5 +2142,70 @@ describe("BridgeFrameworkAdapter — a selection cannot outlive its page", () =>
     } finally {
       await fresh.dispose()
     }
+  })
+})
+
+/**
+ * Request ids have to be unique across ADAPTER INSTANCES, not just within one.
+ *
+ * Every adapter-effect attachment constructs a fresh `BridgeFrameworkAdapter`.
+ * A counter that lives on the instance restarts at zero each time, so the old
+ * adapter and the new one both mint `req-1`. The departed page can still be
+ * answering, and its reply names an id the NEW adapter is waiting on. That
+ * settles a request the departed page never answered.
+ *
+ * The document stamp is the first lock on that. This is the second one, and it
+ * is the one that holds even where a message carries no stamp at all.
+ */
+describe("BridgeFrameworkAdapter — request ids across adapter instances", () => {
+  it("a second adapter never mints an id the first adapter already used", async () => {
+    const first = new BridgeFrameworkAdapter()
+    const firstSetup = makeMockIframe()
+    const second = new BridgeFrameworkAdapter()
+    const secondSetup = makeMockIframe()
+    const ids: string[] = []
+
+    try {
+      for (const [adapter, s] of [
+        [first, firstSetup],
+        [second, secondSetup],
+      ] as const) {
+        const initPromise = adapter.init({ iframe: s.iframe, origin: "*" })
+        emitFromBridge(s.contentWindow, {
+          type: "BRIDGE_READY",
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+        })
+        await initPromise
+        s.postMessages.length = 0
+
+        // One of each id-minting lane. They share the counter, so a per
+        // instance counter makes the SECOND adapter's ids repeat the first
+        // adapter's ids prefix for prefix.
+        void adapter.selectBySelector("#panel").catch(() => {})
+        void adapter.selectMany(["#panel"]).catch(() => {})
+        void adapter.getStructure().catch(() => {})
+        void adapter.readRenderedValue("#panel", { kind: "text" }).catch(() => {})
+        void adapter.readMeasurements("#panel").catch(() => {})
+
+        for (const type of [
+          "INSPECT_SELECTOR",
+          "INSPECT_MANY",
+          "GET_STRUCTURE",
+          "READ_RENDERED_VALUE",
+          "READ_MEASUREMENTS",
+        ]) {
+          const sent = s.postMessages.find(
+            (m) => (m as { type: string }).type === type,
+          ) as { requestId: string } | undefined
+          if (!sent) throw new Error(`no ${type} was sent`)
+          ids.push(sent.requestId)
+        }
+      }
+    } finally {
+      await first.dispose()
+      await second.dispose()
+    }
+
+    expect(new Set(ids).size).toBe(ids.length)
   })
 })
