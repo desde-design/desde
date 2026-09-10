@@ -284,6 +284,36 @@ describe("useEditVerification — session gating on current", () => {
     expect(onOutcome).toHaveBeenCalledWith("didnt-take")
   })
 
+  it("current() throws: the predicate does not get to decide, so it behaves like current() === true", async () => {
+    // The try/catch around `current()` falls through to `stillCurrent = true`
+    // on a throw, same as no predicate at all: the toast fires and the real
+    // outcome is delivered.
+    const failResult = baseResult()
+    resolveWith(failResult)
+    const adapter = makeAdapter()
+    const { result: hookResult } = renderHook(() => useEditVerification(() => adapter))
+
+    const onOutcome = vi.fn()
+    await act(async () => {
+      hookResult.current.verifyEdit(
+        {
+          editId: "e1",
+          selector: "#submit",
+          expectedValue: "Submit",
+          editKind: "dom-text",
+          current: () => {
+            throw new Error("boom")
+          },
+        },
+        onOutcome,
+      )
+      await Promise.resolve()
+    })
+
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+    expect(onOutcome).toHaveBeenCalledWith("didnt-take")
+  })
+
   it("pass + current() === false: outcome is skipped, not verified", async () => {
     // A PASS read off the wrong document is just as wrong as a fail. The text
     // lane resolves its preview override on "verified", and doing that for a

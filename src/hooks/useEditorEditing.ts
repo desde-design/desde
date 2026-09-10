@@ -4203,7 +4203,12 @@ export function useEditorEditing({
     // The cleanup below also takes EVERY lane back to rest, which cancels every
     // armed debounced write and drops every in-flight marker (the out-of-order
     // overwrite guard). Re-running mid-edit therefore DROPS debounced edits and
-    // reopens the race those markers exist to close. If you make anything in
+    // reopens the race those markers exist to close. The `selection` lane
+    // holds no marker and no debounced write, so what it loses is different:
+    // a re-run without a document change drops its pending stamp refresh
+    // (`scheduleSelectionStampRefresh` above). That is not a lost edit. It
+    // just degrades to today's fallback: a false 409 on the next dispatch
+    // from that selection, until the user reselects. If you make anything in
     // this dep list reactive, make the cleanup re-entrant-safe first.
   }, [
     session,

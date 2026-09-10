@@ -1335,6 +1335,16 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    * outlives its page is a write aimed at the wrong one. `useTableEdgeMenu`
    * and `useElementContextMenu` do the checking; the id is on their payloads
    * because those hooks are handed the payload alone.
+   *
+   * `COMMENT_PIN_CLICKED`, `NOTE_PIN_CLICKED`, `PIN_POSITIONS_UPDATED` and
+   * `HOVER_TARGET_CHANGED` are outside this `switch` for the same reason:
+   * there is no `case` for them here, so the document filter this docblock
+   * describes has no reach over them at all. Each is read by its own
+   * `window` message listener elsewhere (the comment and note pin hooks).
+   * Unlike the context-menu pair, none of them writes, so a stale one just
+   * redraws a pin or a hover state for a page that is already gone, and the
+   * next message corrects it. Nothing there needs the per-message id check
+   * `useTableEdgeMenu` and `useElementContextMenu` now do.
    */
   private handleMessage(event: MessageEvent): void {
     if (!this.currentTarget) return

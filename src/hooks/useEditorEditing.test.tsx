@@ -711,6 +711,17 @@ describe("useEditorEditing: the bridge session", () => {
     // A CSS rule, not a source rewrite. This is the one assertion that tells
     // the two dispatches apart from outside the hook.
     expect(write.edit.kind).toBe("scoped-css-override")
+    if (write.edit.kind !== "scoped-css-override") throw new Error("unreachable")
+    // The rule head, parsed from the capture's own `sourceLoc`
+    // ("src/App.vue:10:2"), not the destination the rule is written into.
+    expect(write.edit.anchor).toMatchObject({
+      file: "src/App.vue",
+      line: 10,
+      column: 2,
+    })
+    // The added class ("p-4") resolved to a real CSS declaration, not an
+    // empty rule body.
+    expect(Object.keys(write.edit.declarations ?? {}).length).toBeGreaterThan(0)
     // The session's lifetime rides along, so a page change can cancel it.
     expect(write.signal).toBeDefined()
     await act(async () => {
