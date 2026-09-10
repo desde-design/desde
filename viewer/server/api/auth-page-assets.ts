@@ -127,6 +127,23 @@ async function readWordmarkFont(): Promise<Buffer | null> {
 }
 
 /**
+ * These three files are the same bytes for everyone, for the life of a
+ * release. The API router marks everything under `/api/v1` `no-store` and
+ * `Vary: Cookie`, because everything else there is per-caller; these routes
+ * opt out of BOTH halves, not just the first.
+ *
+ * Dropping the `Vary` matters as much as overriding the `Cache-Control`. A
+ * shared cache that varies on `Cookie` keeps one copy per distinct cookie
+ * value, so a year-long `immutable` on a font would still be re-fetched by
+ * every reader — the caching this route asks for would exist on paper and
+ * never happen.
+ */
+function cacheAsPublicAsset(res: Response): void {
+  res.setHeader("Cache-Control", IMMUTABLE)
+  res.removeHeader("Vary")
+}
+
+/**
  * Mounts both asset routes. Called from `createAuthRoutes`, so they live
  * beside the pages that reference them and share their `/api/v1` prefix.
  */
@@ -137,7 +154,7 @@ export function registerAuthPageAssets(router: Router): void {
       res.status(404).end()
       return
     }
-    res.setHeader("Cache-Control", IMMUTABLE)
+    cacheAsPublicAsset(res)
     res.type("image/svg+xml").send(svg)
   })
 
@@ -147,7 +164,7 @@ export function registerAuthPageAssets(router: Router): void {
       res.status(404).end()
       return
     }
-    res.setHeader("Cache-Control", IMMUTABLE)
+    cacheAsPublicAsset(res)
     res.type("image/svg+xml").send(svg)
   })
 
@@ -157,7 +174,7 @@ export function registerAuthPageAssets(router: Router): void {
       res.status(404).end()
       return
     }
-    res.setHeader("Cache-Control", IMMUTABLE)
+    cacheAsPublicAsset(res)
     res.type("font/woff2").send(font)
   })
 }

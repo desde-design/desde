@@ -34,12 +34,14 @@ import {
   isGithubCheckReturn,
 } from "./github-access-flow"
 import { useCurrentUser } from "./use-current-user"
+import { useRefreshOnReturn } from "./refresh-on-return"
 import { canManageProjects } from "./instance-role"
 import {
   buildFieldsAreValid,
   buildFieldsEqual,
   buildFieldsFromConfig,
   buildRepoConnectRequestBody,
+  decideInitialFlowMode,
   defaultBuildFields,
   deriveConnectFlowStage,
   derivePanelAccess,
@@ -261,13 +263,6 @@ export function ProjectRepoPanel({
     }
   }, [access, githubConfigured, loadInstallations])
 
-  // A project with no connection yet always shows the wizard directly
-  // (no separate "Connect a repo" click first) — see the class doc comment.
-  useEffect(() => {
-    if (access === "can-manage" && repoConfig === null && flowMode === null) {
-      setFlowMode("fresh")
-    }
-  }, [access, repoConfig, flowMode])
 
   const loadRepos = useCallback(async (installationId: number) => {
     setReposError(null)
@@ -355,27 +350,32 @@ export function ProjectRepoPanel({
   }, [])
 
   /**
-   * A caller who can manage, with a connected repo, lands ON the settings form.
+   * Which flow the panel opens on: the from-scratch wizard, or the settings
+   * form for a connection that already exists.
    *
-   * It used to land on a read-only card with an Edit button beside it, so
-   * changing a branch cost a click through a wizard step. Mo, 2026-08-21,
-   * comparing against the original Desde settings dialog: "it allowed
-   * you to change branch, etc." There, the fields WERE the dialog.
-   *
-   * Guarded on `flowMode === null` so it fires once after load and never
-   * yanks someone out of a flow they chose: "Change repo" sets `"fresh"`,
-   * and this leaves that alone.
-   *
-   * Still falls through to the read-only card when GitHub is unconfigured,
-   * because there is nothing an edit could save.
+   * Every branch lives in `decideInitialFlowMode`, which is pure and tested;
+   * this effect only carries out the answer. The same split, for the same
+   * reason, as `decideAccessFlowCheck`. It was two effects reading three
+   * independently-fetched values, and they raced: see that function's doc
+   * comment for what shipped.
    */
   useEffect(() => {
-    if (flowMode !== null) return
-    if (!repoConfig || access !== "can-manage" || githubConfigured !== true) return
-    setBuildFields(buildFieldsFromConfig(repoConfig))
+    const decision = decideInitialFlowMode({
+      projectLoaded,
+      access,
+      githubConfigured,
+      repoConfig,
+      flowMode,
+    })
+    if (decision.action === "wait") return
+    if (decision.action === "fresh") {
+      setFlowMode("fresh")
+      return
+    }
+    setBuildFields(buildFieldsFromConfig(decision.repoConfig))
     setSubmitError(null)
     setFlowMode("edit")
-  }, [flowMode, repoConfig, access, githubConfigured])
+  }, [projectLoaded, access, githubConfigured, repoConfig, flowMode])
 
   /**
    * The repo the branch list should describe: the connection being edited, or
@@ -467,8 +467,34 @@ export function ProjectRepoPanel({
           setSubmitError(message)
           return
         }
+        /*
+         * Straight to the settled state, which after a successful connect is
+         * the settings form for the connection just made — the same place
+         * `cancelWizard` lands on.
+         *
+         * This used to drop `flowMode` to null and let the load-time effects
+         * re-derive it, and that looped the reader back to the account picker
+         * every time they connected a repo (Mo, 2026-09-10: "it kept on
+         * looping me through the new project steps").
+         *
+         * `null` means "no decision yet", and the effect that resolves it
+         * reads `repoConfig` — which is still the PRE-connect value until
+         * `loadProject` resolves. For a first connect that value is null, so
+         * for one render the effect saw a project with nothing connected and
+         * did exactly what it is meant to do for one: opened the fresh
+         * wizard. Awaiting the reload before clearing `flowMode` would happen
+         * to fix the order, but the state would still be derived from data
+         * known to be in flight. Naming the destination is the fix; there is
+         * no render here where nobody has decided.
+         *
+         * The fields just written ARE the connection's settings now, so they
+         * carry over rather than being re-read: `resetWizardSelections`
+         * clears the picker's account and repo, and the form keeps what the
+         * reader just submitted.
+         */
         resetWizardSelections()
-        setFlowMode(null)
+        setBuildFields(buildFields)
+        setFlowMode("edit")
         await loadProject()
       } catch (err) {
         setSubmitError(err instanceof Error ? err.message : String(err))
@@ -478,6 +504,39 @@ export function ProjectRepoPanel({
     },
     [buildFields, projectId, resetWizardSelections, loadProject],
   )
+
+  /*
+   * Granting an App access to a repository happens on github.com, in another
+   * tab, and nothing tells this page when it is done. Before this, the panel
+   * kept showing what it had read before the reader left and the only way out
+   * was reloading (Mo, 2026-09-10, after having to hard-refresh).
+   *
+   * The installations call is the one that reliably helps: it carries whether
+   * a GitHub App is configured at all, which is what changes when the reader
+   * finishes creating one. The repository list rides along because it is a
+   * live GitHub read, so a repository granted while they were away reappears
+   * in it. Whether they can then CONNECT that repository is gated against a
+   * per-user set captured at sign-in and does not move here. See
+   * `refresh-on-return.ts` for the full account of what this cannot fix.
+   *
+   * `loadProject` is deliberately NOT here. The reader was on GitHub, not in
+   * this viewer, so the connection cannot have changed under them, and
+   * refetching it would replace `repoConfig` and reset the form they are
+   * standing in for nothing.
+   *
+   * What this cannot fix: the ACCOUNT list is a snapshot from sign-in and no
+   * provider token is stored, so installing the App on a new account still
+   * needs the "Refresh GitHub access" link. See `refresh-on-return.ts`.
+   */
+  const refreshGithubState = useCallback(() => {
+    void loadInstallations()
+    if (selectedInstallationId !== null) void loadRepos(selectedInstallationId)
+  }, [loadInstallations, loadRepos, selectedInstallationId])
+  useRefreshOnReturn({
+    active: access === "can-manage",
+    busy: submitting,
+    refresh: refreshGithubState,
+  })
 
   // `members` is the reliable "has the initial load completed" signal —
   // `repoConfig` legitimately STAYS `null` forever for a project that's

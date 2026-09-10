@@ -7,6 +7,7 @@ import { SettingsSection } from "@/components/blocks"
 import { LoadFailure } from "../load-failure"
 import { failureMessage } from "../api-client"
 import { useCurrentUser } from "../use-current-user"
+import { useRefreshOnReturn } from "../refresh-on-return"
 import { parseInstallationsResponse } from "../project-repo-utils"
 import { GithubAppSetupCard } from "../github-app-setup-card"
 
@@ -51,6 +52,17 @@ function AdminGithubPanel() {
   useEffect(() => {
     void load()
   }, [load])
+
+  /*
+   * Creating the App finishes on github.com, and the reader may well do it
+   * from another tab. Coming back to a section still offering to set up
+   * something they have just set up is the stale read this closes; there is
+   * nothing to type here, so re-checking costs the reader nothing.
+   *
+   * Always `active`: this component only renders for an admin, which is the
+   * same audience the fetch is for.
+   */
+  useRefreshOnReturn({ active: true, busy: false, refresh: load })
 
   return (
     <SettingsSection

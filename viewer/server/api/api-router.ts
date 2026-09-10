@@ -280,6 +280,38 @@ export function createApiRouter(deps: AppDeps): Router {
   // prototype from reaching this API.
   router.use(createDocumentDestinationGuard())
 
+  /*
+   * Nothing under `/api/v1` is cacheable, and until 2026-09-10 nothing said
+   * so. Express stamps an `ETag` on every `res.json`, and a response carrying
+   * a validator with no freshness directive is one a browser may reuse from
+   * its own cache — which is why a reader who had just changed something on
+   * GitHub could keep being shown the old answer until they did a HARD
+   * refresh, the one kind of reload that bypasses the HTTP cache.
+   *
+   * `Vary: Cookie` is the other half, and the more serious one. These
+   * responses are per-caller by construction — `/github/installations`
+   * returns the accounts THIS user may see, which is authorization input for
+   * the connect-repo surface, at a URL with no user in it. A cache keyed on
+   * the URL alone would hand one reader's account list to the next. Four
+   * routes already set exactly this pair by hand (`auth-routes.ts` names
+   * "user B" in its comment); the rest inherited nothing, so the protection
+   * existed wherever someone had remembered it.
+   *
+   * A default rather than a rule, deliberately: `setHeader` REPLACES, so a
+   * route that genuinely serves a public immutable asset under this prefix
+   * (`auth-page-assets.ts`) still overrides it by setting its own. `res.vary`
+   * appends, so it composes with a route that varies on something else too.
+   *
+   * Placed second, after the destination guard: that guard refuses the
+   * request outright and its refusal is no more cacheable than anything
+   * else, so it wants these headers on its response as well.
+   */
+  router.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader("Cache-Control", "private, no-store")
+    res.vary("Cookie")
+    next()
+  })
+
   const guard = requireWrite(deps)
   const changeBus = deps.changeBus ?? createCommentChangeBus()
   // The auth provider and the App client used to be built HERE, lazily, from

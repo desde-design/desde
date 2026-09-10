@@ -220,6 +220,62 @@ export function derivePanelAccess(input: {
   return "can-manage"
 }
 
+/**
+ * Which flow the panel opens on, as a pure function.
+ *
+ * This was two effects racing each other, and on 2026-09-10 it put a
+ * connected project on the FRESH wizard with a dead Connect button, reachable
+ * on a real install and escapable only by reloading the page. The same shape
+ * of defect `decideAccessFlowCheck` (`github-access-flow.ts`) was pulled out
+ * for, and for the same reason: an effect that decided wrongly and an effect
+ * that correctly decided to do nothing look identical from the outside, so
+ * neither one is testable while it lives inside a `useEffect`.
+ *
+ * The order of the checks is the argument:
+ *
+ * 1. **Already decided.** `flowMode` is only null before anyone has chosen.
+ *    Once it is set — by this function, or by the reader picking "Change
+ *    repo", or by a connect landing — it stands. Nothing here may yank
+ *    someone out of a flow they are in the middle of.
+ * 2. **The reader's role.** Everything below is about which editing surface
+ *    to open, and someone who cannot manage opens none of them.
+ * 3. **The project has loaded.** THE FIX. `repoConfig` is null both before
+ *    the project fetch lands and when the project genuinely has no
+ *    connection, and only the second is an answer. The role comes from a
+ *    different request (`/me`), so when that one won the race the old code
+ *    read the not-yet-loaded null as "nothing connected" and opened the fresh
+ *    wizard for a project that had a repo. Check 1 then made that permanent.
+ * 4. **Nothing connected**: the from-scratch wizard, which a project with no
+ *    connection opens on directly (no "Connect a repo" click first).
+ * 5. **GitHub is not configured**: no editing surface, because there is
+ *    nothing a save could do. Falls through to the read-only card. `null`
+ *    here is "still unknown", which is a wait rather than a no.
+ * 6. **Connected, and manageable**: the settings form, pre-filled. Landing on
+ *    a read-only card with an Edit button beside it cost a click to change a
+ *    branch (Mo, 2026-08-21: "it allowed you to change branch, etc.").
+ */
+export type InitialFlowModeDecision =
+  | { action: "wait" }
+  | { action: "fresh" }
+  | { action: "edit"; repoConfig: ProjectRepoConfigView }
+
+export function decideInitialFlowMode(state: {
+  /** True once `GET /api/v1/projects/:id` has answered at least once. */
+  projectLoaded: boolean
+  access: PanelAccess
+  /** `null` while the installations fetch is still in flight. */
+  githubConfigured: boolean | null
+  repoConfig: ProjectRepoConfigView | null
+  flowMode: "fresh" | "edit" | null
+}): InitialFlowModeDecision {
+  if (state.flowMode !== null) return { action: "wait" }
+  if (state.access !== "can-manage") return { action: "wait" }
+  if (!state.projectLoaded) return { action: "wait" }
+  if (state.repoConfig === null) return { action: "fresh" }
+  if (state.githubConfigured !== true) return { action: "wait" }
+  return { action: "edit", repoConfig: state.repoConfig }
+}
+
 /** The subset of a repo (picked, or an existing connection) the build-fields form needs to submit. */
 export interface RepoRef {
   installationId: number

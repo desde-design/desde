@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { DialogFooter } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { ApiError, fetchJson, failureMessage } from "./api-client"
+import { useRefreshOnReturn } from "./refresh-on-return"
 
 /**
  * The whole create-a-GitHub-App flow as one embeddable card: why the App
@@ -100,6 +101,11 @@ export function GithubAccessSetupStep({ onBack, onClose, returnTo }: GithubAcces
   return (
     <GithubAppSetupCard
       returnTo={returnTo}
+      /* If the App got created while the reader was away, this step is over.
+         `onBack` is the right destination and not merely the convenient one:
+         it returns them to the step that offered the setup, which re-reads
+         GitHub on mount and continues from whatever is now true. */
+      onConfigured={onBack}
       footer={({ submit }) => (
         <DialogFooter className="sm:items-center">
           <Button type="button" size="sm" variant="ghost" className="sm:mr-auto" onClick={onBack}>
@@ -140,9 +146,25 @@ export interface GithubAppSetupCardProps {
    * the new App's install page (right for Settings › GitHub).
    */
   returnTo?: string
+  /**
+   * Called when the reader comes back to this tab and a GitHub App now
+   * exists, so this card has nothing left to ask for.
+   *
+   * Added 2026-09-10 (Mo: "once we notice that the tab is selected after
+   * sending them out to do the github app, we refresh the credentials").
+   * The submit below navigates THIS tab to github.com and GitHub sends the
+   * reader back through our own callback, so the ordinary path is a page
+   * load and needs none of this. It is the path around that one that
+   * stranded people: opening the link in a second tab, finishing there, and
+   * switching back to a card still asking them to begin.
+   *
+   * Optional. A host that tracks configured-ness itself — Settings › GitHub
+   * re-reads and swaps the whole section — wants no second signal.
+   */
+  onConfigured?: () => void
 }
 
-export function GithubAppSetupCard({ footer, returnTo }: GithubAppSetupCardProps = {}) {
+export function GithubAppSetupCard({ footer, returnTo, onConfigured }: GithubAppSetupCardProps = {}) {
   const [data, setData] = useState<ManifestResponse | null>(null)
   const [error, setError] = useState<unknown>(null)
   // The manifest flow has no account picker on GitHub's side: the form's
@@ -158,6 +180,37 @@ export function GithubAppSetupCard({ footer, returnTo }: GithubAppSetupCardProps
       : "/api/v1/setup/github/manifest"
     fetchJson<ManifestResponse>(url).then(setData).catch(setError)
   }, [returnTo])
+
+  /*
+   * `/github/installations` rather than a route of this flow's own: its
+   * `configured` flag is read from the live runtime config, which the
+   * manifest callback replaces the moment it saves the new credentials
+   * (`github-runtime.ts`). It is also the exact question the hosts ask, so
+   * this card and the wizard behind it cannot disagree about the answer.
+   *
+   * A failure is silence, deliberately. This is a convenience on top of a
+   * flow that works without it; a banner about a background check the reader
+   * never asked for would be noise on a screen whose whole job is one button.
+   */
+  useRefreshOnReturn({
+    active: onConfigured !== undefined,
+    busy: false,
+    /*
+     * A plain function, not a `useCallback`. `useRefreshOnReturn` keeps
+     * `refresh` in a ref and never lists it as a dependency, precisely so a
+     * caller does not have to think about its identity — memoizing it here
+     * would buy nothing, and the React Compiler correctly refused to preserve
+     * a memo whose only dependency is a prop it cannot prove stable.
+     */
+    refresh: () => {
+      if (!onConfigured) return
+      fetchJson<{ configured?: unknown }>("/api/v1/github/installations")
+        .then((body) => {
+          if (body?.configured === true) onConfigured()
+        })
+        .catch(() => {})
+    },
+  })
 
   if (error) {
     const expected = expectedNonFailureMessage(error)
