@@ -9,7 +9,7 @@
  */
 
 import type { StructuralEdit } from "@/editor/core"
-import { resolveTailwindClasses } from "@/components/editor/tailwind-declarations"
+import { resolveTailwindClasses } from "@/editor/tailwind/tailwind-declarations"
 import {
   expandStyleDeclarations,
   type CascadeOwner,

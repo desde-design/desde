@@ -12,7 +12,7 @@ import {
   setFontFamily,
   setLeading,
   withArbitraryOption,
-} from "./tailwind-classes"
+} from "@/editor/tailwind/tailwind-classes"
 
 describe("composeVariant — canonical prefix", () => {
   it("returns empty string for base + default", () => {

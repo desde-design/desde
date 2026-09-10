@@ -38,7 +38,7 @@ import { ResizableVerticalSplit } from "@/components/editor/resizable-vertical-s
 import { EditorChatPanel } from "@/components/editor/editor-chat-panel"
 import { ModelPickerChip } from "@/components/editor/model-picker-chip"
 import { InspectorPanel } from "@/components/editor/inspector-panel"
-import type { ActiveBreakpoint } from "@/components/editor/tailwind-classes"
+import type { ActiveBreakpoint } from "@/editor/tailwind/tailwind-classes"
 import { LayersPanel } from "@/components/editor/layers-panel"
 import { CommentsPanel } from "@/components/editor/comments-panel"
 import { ActivityPanel } from "@/components/editor/activity-panel"

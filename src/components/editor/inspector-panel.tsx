@@ -41,7 +41,7 @@ import {
   type ActiveBreakpoint,
   type ActiveState,
   type VariantState,
-} from "./tailwind-classes"
+} from "@/editor/tailwind/tailwind-classes"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import {
   useIframeStyleProvenance,

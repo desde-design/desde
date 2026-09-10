@@ -33,7 +33,7 @@ import {
   SPACING_SCALE,
   TEXT_ALIGNMENTS,
   TRACKING_VALUES,
-} from "./tailwind-classes"
+} from "@/editor/tailwind/tailwind-classes"
 import {
   TAILWIND_COLOR_FAMILIES,
   TAILWIND_COLOR_HEX,
@@ -41,7 +41,7 @@ import {
   TAILWIND_SPECIAL_COLORS,
   type ColorProperty,
   type ColorValue,
-} from "./tailwind-colors"
+} from "@/editor/tailwind/tailwind-colors"
 
 // ── Length parsing ──────────────────────────────────────────────────
 

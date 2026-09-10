@@ -24,7 +24,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { SegmentedToggleOption } from "@/components/editor/segmented-toggle";
-import type { ActiveBreakpoint } from "@/components/editor/tailwind-classes";
+import type { ActiveBreakpoint } from "@/editor/tailwind/tailwind-classes";
 
 interface BreakpointMenuProps {
   value: ActiveBreakpoint;

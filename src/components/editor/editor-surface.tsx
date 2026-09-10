@@ -13,7 +13,7 @@ import {
   type CanvasMode,
 } from "@/components/editor/editor-toolbar"
 import type { SegmentedToggleOption } from "@/components/editor/segmented-toggle"
-import type { ActiveBreakpoint } from "@/components/editor/tailwind-classes"
+import type { ActiveBreakpoint } from "@/editor/tailwind/tailwind-classes"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { Minimize2 } from "lucide-react"

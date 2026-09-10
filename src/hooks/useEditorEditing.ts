@@ -56,7 +56,7 @@ import type {
 } from "@/components/editor/layers-panel"
 import { applyClassMutation } from "@/components/editor/align-size"
 import type { PropControlValue } from "@/components/editor/prop-control"
-import { resolveTailwindClasses } from "@/components/editor/tailwind-declarations"
+import { resolveTailwindClasses } from "@/editor/tailwind/tailwind-declarations"
 import { resolveTokenScopeFile } from "@/components/editor/resolve-token-source-file"
 import type { EditableTextField, OutlineNode, StyleOrigin } from "@/types/bridge"
 import { editorFetch } from "@/lib/editor-fetch"
