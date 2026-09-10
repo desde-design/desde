@@ -26,7 +26,7 @@ import type {
   StructuralEdit,
 } from "@/editor/core"
 import type { FrameworkId } from "@/editor/core/manifest"
-import type { OutlineNode } from "@/types/bridge"
+import type { OutlineNode, StyleOrigin } from "@/types/bridge"
 
 export interface RecordedApply {
   edit: StructuralEdit
@@ -46,6 +46,21 @@ export interface RecordedApply {
   emitLLMDelta: (delta: string) => void
 }
 
+/**
+ * One cascade read the verification lane asked for, parked until the test
+ * answers it.
+ *
+ * The point of parking it is ordering: a verification settles up to three
+ * seconds after the write, and the question the session guard exists for is
+ * what happens when the page is replaced INSIDE that window. Holding the read
+ * lets a test put the page change exactly there instead of racing it.
+ */
+export interface RecordedProvenanceRead {
+  selector: string
+  properties: readonly string[]
+  settle: (origins: Record<string, StyleOrigin> | null) => void
+}
+
 type Listener<T> = (value: T) => void
 
 const instances: FakeBridgeAdapter[] = []
@@ -62,6 +77,9 @@ export function lastFakeAdapter(): FakeBridgeAdapter {
 
 export function resetFakeAdapters(): void {
   instances.length = 0
+  // A static that is not reset here leaks into the next test, and this one
+  // decides whether verification runs at all.
+  FakeBridgeAdapter.verificationEnabled = false
 }
 
 /**
@@ -81,6 +99,16 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   static nextDocumentIds: string[] = ["doc-a"]
   /** Set to reject the next `init()` with this message. */
   static nextHandshakeError: string | null = null
+  /**
+   * Does this adapter claim the bridge reads verification needs?
+   *
+   * OFF by default, which is the shape every test written before this one was
+   * built against: `useEditVerification` opts out silently on an adapter that
+   * cannot read, so no verification runs and no toast can fire. A test that
+   * wants the verification lane turns it on, and `resetFakeAdapters` turns it
+   * back off.
+   */
+  static verificationEnabled = false
 
   readonly framework: FrameworkId = "vue3"
 
@@ -111,6 +139,15 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   readonly settledOverrides: { id: string; outcome: string }[] = []
   readonly resolvedDrafts: { pendingId: string; choice: string }[] = []
   readonly structure: OutlineNode[] = []
+  /** Cascade reads still waiting for the test to answer them. */
+  readonly provenanceReads: RecordedProvenanceRead[] = []
+  /**
+   * The standing answer every later cascade read gets, once the test has given
+   * one. The verification lane POLLS: it re-reads every 100 ms until the
+   * cascade is won or the budget runs out, so parking every read would stall
+   * the run forever rather than let it reach a verdict.
+   */
+  private provenanceAnswer: Record<string, StyleOrigin> | null | undefined
 
   private readonly selectionListeners = new Set<Listener<Selection | null>>()
   private readonly captureListeners = new Set<Listener<Mutation>>()
@@ -308,8 +345,43 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   resolveOverride(id: string, outcome: string): void {
     this.settledOverrides.push({ id, outcome })
   }
+  /**
+   * Present but never useful: `useEditVerification` opts out entirely unless
+   * `supportsRenderedValueRead()` agrees, and the value lane is not what this
+   * fixture stages. It exists because the hook checks for the METHOD first and
+   * skips before it ever consults the flag.
+   */
+  async readRenderedValue(): Promise<string | null> {
+    return null
+  }
   supportsRenderedValueRead(): boolean {
-    return false
+    return FakeBridgeAdapter.verificationEnabled
+  }
+  supportsStyleProvenance(): boolean {
+    return FakeBridgeAdapter.verificationEnabled
+  }
+  getStyleProvenance(
+    selector: string,
+    properties: readonly string[],
+  ): Promise<Record<string, StyleOrigin> | null> {
+    if (this.provenanceAnswer !== undefined) {
+      return Promise.resolve(this.provenanceAnswer)
+    }
+    return new Promise((resolve) => {
+      this.provenanceReads.push({ selector, properties, settle: resolve })
+    })
+  }
+  /**
+   * Answer every parked cascade read, and every later one, with `origins`.
+   *
+   * One call rather than settling reads by hand: the lane polls, so a test
+   * that answered only the read it is holding would immediately be holding
+   * the next one.
+   */
+  settleProvenance(origins: Record<string, StyleOrigin> | null): void {
+    this.provenanceAnswer = origins
+    const parked = this.provenanceReads.splice(0, this.provenanceReads.length)
+    for (const read of parked) read.settle(origins)
   }
   supportsMeasurementsRead(): boolean {
     return false

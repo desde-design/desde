@@ -192,6 +192,21 @@ describe("dispatchTextMutation", () => {
     expect(deps.resolveOverride).not.toHaveBeenCalled()
   })
 
+  it("hands verification a session predicate that goes false when the page does (finding C5)", async () => {
+    // The outcome callback below already carries this guard. The predicate is
+    // the OTHER half: the callback stops the lane resolving a preview against
+    // the wrong page, and this stops the hook warning the designer about it.
+    const { session, deps } = harness(Promise.resolve(applied()))
+    const m = textMutation("m1")
+    session.updateMutations(() => [m])
+    await dispatchTextMutation(mutationIdentity(m), session.generation, deps)
+    const input = vi.mocked(deps.verifyEdit).mock.calls[0]![0]
+    expect(input.current).toBeTypeOf("function")
+    expect(input.current!()).toBe(true)
+    session.end("reconnect")
+    expect(input.current!()).toBe(false)
+  })
+
   it("resolves the preview when verification settles inside its own session (control)", async () => {
     // The control for the test above: the same callback, invoked while the
     // session it was created in is still the live one, DOES resolve. Without
@@ -345,6 +360,21 @@ describe("dispatchClassMutation", () => {
     // And the marker is given back, so the next class edit on this element is
     // not blocked by the one that finished.
     expect(session.isInFlight("text", identity)).toBe(false)
+  })
+
+  it("hands cascade verification a session predicate (finding C5)", async () => {
+    // The class lane has NO outcome callback, so this predicate is the only
+    // session guard on its verification: without it a cascade walk taken
+    // against the next document could warn about this one.
+    const { session, deps } = harness(Promise.resolve(applied()))
+    const m = classMutation("m1")
+    session.updateMutations(() => [m])
+    await dispatchClassMutation(mutationIdentity(m), session.generation, deps)
+    const input = vi.mocked(deps.verifyEdit).mock.calls[0]![0]
+    expect(input.current).toBeTypeOf("function")
+    expect(input.current!()).toBe(true)
+    session.end("reconnect")
+    expect(input.current!()).toBe(false)
   })
 
   it("keeps the entry and re-arms when the value advanced", async () => {

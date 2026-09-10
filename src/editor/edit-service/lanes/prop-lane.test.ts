@@ -111,6 +111,22 @@ describe("dispatchPropEdit", () => {
     expect(deps.verifyEdit).not.toHaveBeenCalled()
   })
 
+  it("hands verification a session predicate that goes false when the page does (finding C5)", async () => {
+    // Verification settles 0.85 to 3 seconds after the write, and it reads the
+    // DOM. A page replaced in that window makes the read a measurement of some
+    // other document, so the hook needs to be able to ask. The predicate is
+    // lazy on purpose: it is read at verification-complete time, not now.
+    const { session, deps } = harness(Promise.resolve(applied()))
+    session.updatePropEdits(() => [edit("#a", "label", session.generation)])
+    await dispatchPropEdit(propEditKey("#a", "label"), session.generation, deps)
+    const input = vi.mocked(deps.verifyEdit).mock.calls[0]![0]
+    expect(input.current).toBeTypeOf("function")
+    // While the page is still the one this edit was made on.
+    expect(input.current!()).toBe(true)
+    session.end("reconnect")
+    expect(input.current!()).toBe(false)
+  })
+
   it("leaves the marker for the next session's dispatch (findings T3, U3)", async () => {
     let settle!: (result: EditResult) => void
     const pending = new Promise<EditResult>((resolve) => { settle = resolve })

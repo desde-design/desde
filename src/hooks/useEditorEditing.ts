@@ -3615,6 +3615,11 @@ export function useEditorEditing({
             // to carry it. A chained definition (`var(...)`) or an
             // un-canonicalizable value declines back to ownership-only.
             expectedDeclarationValue: newValue,
+            // THE SESSION, read at verification-complete time. This lane had
+            // no session predicate at all: the cascade walk runs seconds after
+            // the write, and a page replaced in that window would be measured
+            // for a token this document's stylesheet never carried.
+            current: () => ctx.current,
           })
         } catch (err) {
           // Same rule for the throw path: a departed page's error is not news

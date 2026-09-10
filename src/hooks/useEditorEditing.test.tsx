@@ -15,6 +15,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react"
 import { StrictMode, type ReactElement, useRef } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { toast } from "sonner"
 import type {
   EditResult,
   Mutation,
@@ -1576,4 +1577,69 @@ describe("useEditorEditing: the bridge session", () => {
     })
     expect(editing()?.saveStatus).toBe(statusAfterChange)
   })
+
+  it("does not warn about a token edit whose page went away before verification settled (finding C5)", async () => {
+    // The write LANDS, and the page changes while the verification that
+    // follows it is still reading. That read is taken against the document
+    // that replaced this one, whose stylesheets never carried this token, so
+    // it reports a cascade loss. Warning the designer about it would be
+    // telling them an edit failed on a page they are no longer looking at.
+    //
+    // Verification is off on this fixture by default, because the hook opts
+    // out on an adapter that cannot read and every other test here relies on
+    // that. This one turns it on.
+    FakeBridgeAdapter.verificationEnabled = true
+    const { rerender } = await mount()
+    // The adapter this edit is written through, held by hand: `changeDocument`
+    // builds a NEW one, and the parked cascade read belongs to this one.
+    const adapter = lastFakeAdapter()
+    await act(async () => {
+      adapter.emitSelection(styleSelection)
+    })
+    await waitFor(() =>
+      expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+    )
+    let done: Promise<void> | undefined
+    await act(async () => {
+      done = editing()!.handleTokenStyleEdit("background-color", tokenOrigin, [
+        "bg-red-500",
+      ])
+      await Promise.resolve()
+    })
+    const write = await waitForApply()
+    expect(write.edit.kind).toBe("token-value")
+    const editId = write.edit.id
+    await act(async () => {
+      write.settle(applied())
+      await done
+    })
+    // The verification is now running. Its first cascade read parks, which is
+    // what puts the page change inside the window rather than racing it.
+    await waitFor(() => expect(adapter.provenanceReads.length).toBeGreaterThan(0), {
+      timeout: 5000,
+    })
+    await changeDocument(rerender, "doc-b")
+    // The read answers now, and it answers that some other rule owns the
+    // property: the token this edit patched is nowhere in the chain.
+    adapter.settleProvenance({
+      "background-color": {
+        property: "background-color",
+        computedValue: "rgb(255, 255, 255)",
+        winningRule: {
+          selector: ".other-page-card",
+          stylesheet: { href: "/src/other.css" },
+          declaration: "background-color: #ffffff",
+          specificity: [0, 1, 0],
+        },
+        varChain: [],
+      },
+    })
+    const recordFor = () =>
+      useEditorStore.getState().verifications.find((v) => v.editId === editId)
+    await waitFor(() => expect(recordFor()?.phase).toBe("done"), { timeout: 15000 })
+    // The verification really did fail. The Checks tab keeps saying so: what
+    // the session guard suppresses is the interruption, not the record.
+    expect(recordFor()?.result?.status).toBe("fail")
+    expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
+  }, 30000)
 })

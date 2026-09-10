@@ -17,6 +17,13 @@
  * hook's own `complete` callback logic (the toast-gating boundary), not the
  * DOM-settle/confirm timing machinery already covered by
  * `src/editor/verification/verification.test.ts`.
+ *
+ * The second describe block below covers the other predicate, `current`
+ * (codex round-1 finding C5). A verification settles up to 3 seconds after
+ * the write, so the page it read can be gone by the time it completes: the
+ * reading is then about whatever document replaced it. `current` is what the
+ * lanes hand in from their `session.run` context, and the hook uses it to
+ * decline both the toast and the real outcome.
  */
 
 import { act, renderHook } from "@testing-library/react"
@@ -208,5 +215,164 @@ describe("useEditVerification — toast gating on isSuperseded", () => {
       .getState()
       .verifications.find((v) => v.editId === "e1")
     expect(record?.result).toEqual(passResult)
+  })
+})
+
+describe("useEditVerification — session gating on current", () => {
+  it("fail + current() === false: no toast, record kept, outcome skipped", async () => {
+    // The page this verification read was replaced while it ran. The DOM it
+    // measured belongs to another document, so the failure is not evidence
+    // about this edit: no warning, and the caller is told "skipped" so it
+    // cannot resolve a preview override against the wrong page.
+    const failResult = baseResult()
+    resolveWith(failResult)
+    const adapter = makeAdapter()
+    const { result: hookResult } = renderHook(() => useEditVerification(() => adapter))
+
+    const onOutcome = vi.fn()
+    await act(async () => {
+      hookResult.current.verifyEdit(
+        {
+          editId: "e1",
+          selector: "#submit",
+          expectedValue: "Submit",
+          editKind: "dom-text",
+          current: () => false,
+        },
+        onOutcome,
+      )
+      await Promise.resolve()
+    })
+
+    expect(toast.warning).not.toHaveBeenCalled()
+    expect(onOutcome).toHaveBeenCalledTimes(1)
+    expect(onOutcome).toHaveBeenCalledWith("skipped")
+    // The Checks tab stays truthful: the verification DID run and DID fail,
+    // and the log of what ran is not the place to hide that.
+    const record = useEditorStore
+      .getState()
+      .verifications.find((v) => v.editId === "e1")
+    expect(record?.phase).toBe("done")
+    expect(record?.result).toEqual(failResult)
+  })
+
+  it("fail + current() === true: toast fires and the real outcome is delivered (control)", async () => {
+    // Without this row the gate could be a `return` that never lets anything
+    // through, and the test above would pass on a hook that reports every
+    // verification as skipped.
+    const failResult = baseResult()
+    resolveWith(failResult)
+    const adapter = makeAdapter()
+    const { result: hookResult } = renderHook(() => useEditVerification(() => adapter))
+
+    const onOutcome = vi.fn()
+    await act(async () => {
+      hookResult.current.verifyEdit(
+        {
+          editId: "e1",
+          selector: "#submit",
+          expectedValue: "Submit",
+          editKind: "dom-text",
+          current: () => true,
+        },
+        onOutcome,
+      )
+      await Promise.resolve()
+    })
+
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+    expect(onOutcome).toHaveBeenCalledWith("didnt-take")
+  })
+
+  it("pass + current() === false: outcome is skipped, not verified", async () => {
+    // A PASS read off the wrong document is just as wrong as a fail. The text
+    // lane resolves its preview override on "verified", and doing that for a
+    // page that has gone retires a shim the new document has already reused.
+    const passResult = baseResult({ status: "pass", detail: "matched" })
+    resolveWith(passResult)
+    const adapter = makeAdapter()
+    const { result: hookResult } = renderHook(() => useEditVerification(() => adapter))
+
+    const onOutcome = vi.fn()
+    await act(async () => {
+      hookResult.current.verifyEdit(
+        {
+          editId: "e1",
+          selector: "#submit",
+          expectedValue: "Submit",
+          editKind: "dom-text",
+          current: () => false,
+        },
+        onOutcome,
+      )
+      await Promise.resolve()
+    })
+
+    expect(onOutcome).toHaveBeenCalledTimes(1)
+    expect(onOutcome).toHaveBeenCalledWith("skipped")
+  })
+
+  it("no current provided: behaves exactly as before", async () => {
+    // Every pure caller that has no session must keep working unchanged.
+    const failResult = baseResult()
+    resolveWith(failResult)
+    const adapter = makeAdapter()
+    const { result: hookResult } = renderHook(() => useEditVerification(() => adapter))
+
+    const onOutcome = vi.fn()
+    await act(async () => {
+      hookResult.current.verifyEdit(
+        {
+          editId: "e1",
+          selector: "#submit",
+          expectedValue: "Submit",
+          editKind: "dom-text",
+        },
+        onOutcome,
+      )
+      await Promise.resolve()
+    })
+
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+    expect(onOutcome).toHaveBeenCalledWith("didnt-take")
+  })
+
+  it("current() === false and complete fires twice: exactly one skipped", async () => {
+    // `complete` can genuinely run twice (M7): anything throwing inside it
+    // lands in `orchestrateVerification`'s catch, which calls it again with a
+    // synthetic skipped. The delivery stays once-only, and the page is still
+    // gone on the second pass, so the answer does not change either.
+    const failResult = baseResult()
+    const syntheticSkip = baseResult({
+      status: "skipped",
+      detail: "Verification skipped: reader error",
+    })
+    orchestrateVerificationMock.mockImplementation(async (input, callbacks) => {
+      callbacks.begin(input.editId, "label", Date.now())
+      callbacks.complete(input.editId, failResult)
+      callbacks.complete(input.editId, syntheticSkip)
+      return syntheticSkip
+    })
+    const adapter = makeAdapter()
+    const { result: hookResult } = renderHook(() => useEditVerification(() => adapter))
+
+    const onOutcome = vi.fn()
+    await act(async () => {
+      hookResult.current.verifyEdit(
+        {
+          editId: "e1",
+          selector: "#submit",
+          expectedValue: "Submit",
+          editKind: "dom-text",
+          current: () => false,
+        },
+        onOutcome,
+      )
+      await Promise.resolve()
+    })
+
+    expect(toast.warning).not.toHaveBeenCalled()
+    expect(onOutcome).toHaveBeenCalledTimes(1)
+    expect(onOutcome).toHaveBeenCalledWith("skipped")
   })
 })
