@@ -402,6 +402,19 @@ export class EditSession<Prompt> implements LaneSession {
   }
 
   /**
+   * This lane's markers, as a read-only set.
+   *
+   * For the predicates that ask "would this capture have armed a timer" and
+   * take a `ReadonlySet` rather than a session: `shouldProbeTextMutation` and
+   * `shouldProbeClassMutation`. A view, not a copy, so the answer is the live
+   * one at the moment it is asked, and `ReadonlySet` so a caller cannot put a
+   * marker in behind the lane's back.
+   */
+  inFlightKeys(lane: LaneId): ReadonlySet<string> {
+    return this.inFlight[lane]
+  }
+
+  /**
    * Is ANY write out on this lane right now? Asked by work that has to wait for
    * the writes to land rather than for one identity in particular, such as
    * re-reading a selection's source stamps after HMR.

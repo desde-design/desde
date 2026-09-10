@@ -149,6 +149,17 @@ describe("EditSession: the session itself", () => {
     }
   })
 
+  it("shows a lane's markers as a live read-only view", () => {
+    // The capture scheduler's predicates take a `ReadonlySet`, and they have to
+    // see the marker the lane took a moment ago, not a copy from before it.
+    const session = newSession()
+    const keys = session.inFlightKeys("text")
+    expect(keys.has("a")).toBe(false)
+    session.markInFlight("text", "a")
+    expect(keys.has("a")).toBe(true)
+    expect(session.inFlightKeys("prop").has("a")).toBe(false)
+  })
+
   it("refuses to clear a marker the next session owns (findings T3, U3)", () => {
     const session = newSession()
     const generation = session.generation
