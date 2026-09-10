@@ -203,6 +203,22 @@ const REUSED_DRAFT_ID = "dom-pending-1"
 let holdProposal = false
 let heldProposal: ((body: unknown) => void) | null = null
 
+/**
+ * The component-catalog GET, held open when a test asks for it.
+ *
+ * `handleEditComponent` fetches the catalog and then NAVIGATES the iframe, so
+ * this is the await a page change has to land inside. Off by default, and the
+ * default answer is the same empty object every other route gives.
+ */
+let holdCatalog = false
+let heldCatalog: ((body: unknown) => void) | null = null
+
+function answerCatalog(body: unknown): void {
+  const answer = heldCatalog
+  heldCatalog = null
+  answer?.(body)
+}
+
 function answerProposal(body: unknown): void {
   const answer = heldProposal
   heldProposal = null
@@ -448,6 +464,8 @@ beforeEach(() => {
   captured = null
   holdProposal = false
   heldProposal = null
+  holdCatalog = false
+  heldCatalog = null
   requests.length = 0
   useEditorStore.getState().resetEditor()
   // Nothing reaches the network. The one route with an answer that changes
@@ -467,6 +485,19 @@ beforeEach(() => {
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         )
+      }
+      if (url.includes("/api/editor/catalog") && holdCatalog) {
+        // Held. The test takes the page away and then answers, which is the
+        // window the component-editor navigation lives in.
+        return new Promise<Response>((resolve) => {
+          heldCatalog = (body: unknown) =>
+            resolve(
+              new Response(JSON.stringify(body), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              }),
+            )
+        })
       }
       if (url.includes("/api/editor/edit-iteration")) {
         if (!holdProposal) {
@@ -2323,8 +2354,12 @@ describe("useEditorEditing: the bridge session", () => {
   })
 
   it("cannot install a manifest from before a page the session never adopted", async () => {
-    // THE ROW THE SEQUENCE IS THE ONLY LOCK FOR, and the reason
-    // `enterDocument` bumps it.
+    // THE ROW THE SEQUENCE IS THE ONLY LOCK FOR. The bump that makes it so is
+    // the DESELECT's, not `enterDocument`'s: the adapter discards the departed
+    // page's selection first, and the selection listener takes a number for
+    // that null exactly as it does for a click. `enterDocument` bumps too, and
+    // it would cover this row on its own, but it is the second bump and not
+    // the one that does the work here.
     //
     // The other two rows have a second lock behind the sequence: the session
     // generation moves when a page is replaced, and the selector on screen
@@ -2384,5 +2419,143 @@ describe("useEditorEditing: the bridge session", () => {
       await Promise.resolve()
     })
     expect(installedManifest()?.name).toBe("NewCard")
+  })
+  it("cannot open the component editor for a page that left while the catalog was out", async () => {
+    // THE READ IS THE CATALOG AND THE CONTINUATION IS A NAVIGATION, which is
+    // why the catalog being repo data rather than page data was not enough on
+    // its own. `handleEditComponent` reads the iframe url BEFORE the fetch,
+    // and past the fetch it does two things with it: it navigates the iframe
+    // to `/__compose/component/...` on that url's origin, and it stores the
+    // url as the `returnUrl` the Exit button goes back to.
+    //
+    // So a page change inside the fetch took the page that ARRIVED and sent
+    // it to the departed page's component route, with a return url aimed at a
+    // page that had already gone. The designer clicked "Edit component" on one
+    // page and got another page's component, then Exit put them somewhere
+    // else again.
+    holdCatalog = true
+    await mount()
+    const adapter = lastFakeAdapter()
+    const iframe = screen.getByTitle("Prototype") as HTMLIFrameElement
+    const srcBefore = iframe.src
+
+    await act(async () => {
+      adapter.emitSelection({
+        ...componentSelection("#panel", "OldCard"),
+        // A first-party file, so the isolation route HAS a usable import spec.
+        // Without one the handler bails before it navigates, and the row would
+        // pass whether the guard was there or not.
+        componentFile: "src/OldCard.vue",
+      })
+      await Promise.resolve()
+    })
+    await act(async () => {
+      void editing()!.handleEditComponent()
+      await Promise.resolve()
+    })
+    expect(
+      requests.filter((request) => request.url.includes("/api/editor/catalog")),
+    ).toHaveLength(1)
+
+    // The page is replaced while the catalog GET is still out.
+    FakeBridgeAdapter.nextDocumentIds = ["doc-b"]
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+
+    // And the catalog answers, with a row that matches the departed page's
+    // selection exactly.
+    await act(async () => {
+      answerCatalog([{ name: "OldCard", file: "src/OldCard.vue" }])
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(iframe.src).toBe(srcBefore)
+    expect(editing()!.componentEditState).toBeNull()
+  })
+
+  it("clears the Layers tree for the conflict reload too, before the reloaded page answers", async () => {
+    // THE END THAT FORGETS ITS DOCUMENT. The clear used to run under
+    // `shouldEndSessionOnHandshake`, which asks whether the session's previous
+    // document differs from this one. It answers false when there IS no
+    // previous document, and `handleReloadAfterConflict` ends the session with
+    // reason "reload", which retires the buffers and forgets the document.
+    //
+    // So the reloaded page's handshake found `previous === null`, skipped the
+    // clear, and left the PRE-RELOAD tree on screen. Every row in it carries
+    // the coordinates a right-click Delete writes to, and it stayed clickable
+    // until the reloaded page answered its own structure read.
+    FakeBridgeAdapter.parkGetStructure = true
+    const pageA = outlineNode("page-a-root", "src/PageA.tsx")
+
+    await mount()
+    const adapter = lastFakeAdapter()
+    await waitFor(() => expect(adapter.structureReads).toHaveLength(1))
+    await act(async () => {
+      adapter.structureReads[0]!.settle([pageA])
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()!.layersRawRoots).toHaveLength(1))
+
+    await act(async () => {
+      editing()!.handleReloadAfterConflict()
+      await Promise.resolve()
+    })
+
+    // The reloaded page announces itself. A reloaded bridge is a fresh
+    // instance with a document id of its own.
+    FakeBridgeAdapter.nextDocumentIds = ["doc-b"]
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+
+    // Asked for its own tree, and it has not answered yet. That window is the
+    // whole row: the panel must be empty in it, not holding page A's rows.
+    await waitFor(() => expect(adapter.structureReads).toHaveLength(2))
+    expect(editing()!.layersRawRoots).toBeNull()
+    expect(editing()!.layersRoots).toBeNull()
+  })
+
+  it("cannot install a multi-select that answers after the designer clicked something else", async () => {
+    // THE PAGE NEVER MOVES HERE, and that is what makes this the sequence's
+    // case rather than the session's. `handleSelectMany` resolves each
+    // selector through the adapter, and the designer can click a single
+    // element while that read is out. The store write is what makes a late
+    // answer harmful: `setEditorSelectionMany` also pins the primary
+    // `editorSelection`, so the multi read would replace the click that
+    // superseded it, and the next edit would aim at the element it named.
+    FakeBridgeAdapter.parkSelectMany = true
+    await mount()
+    const adapter = lastFakeAdapter()
+
+    const fromTheMultiRead = componentSelection("#row-1", "RowA")
+    const theLaterClick = componentSelection("#header", "Header")
+
+    await act(async () => {
+      void editing()!.handleSelectMany(["#row-1", "#row-2"])
+      await Promise.resolve()
+    })
+    expect(adapter.parkedSelectManyReads).toHaveLength(1)
+
+    await act(async () => {
+      adapter.emitSelection(theLaterClick)
+      await Promise.resolve()
+    })
+    expect(useEditorStore.getState().editorSelection?.selector).toBe("#header")
+
+    // And the multi read answers last.
+    await act(async () => {
+      adapter.parkedSelectManyReads[0]!.settle([fromTheMultiRead])
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(useEditorStore.getState().editorSelection?.selector).toBe("#header")
+    expect(useEditorStore.getState().editorSelectionMany).toEqual([])
   })
 })

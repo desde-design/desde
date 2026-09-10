@@ -55,7 +55,7 @@ const HOOK_PATH = "src/hooks/useEditorEditing.ts"
 const ALLOWED_BARE_AWAITS: readonly AllowedBareAwait[] = [
   {
     snippet: "await session.run(",
-    sites: 8,
+    sites: 9,
     reason:
       "This IS a lane's run. The guard is inside it, and the answer it hands back is a SessionRunResult, so `stale` has to be narrowed before any value is reachable. The five in statement position await nothing afterwards except a spinner reset that carries its own layers-generation check.",
   },
@@ -70,18 +70,6 @@ const ALLOWED_BARE_AWAITS: readonly AllowedBareAwait[] = [
     sites: 2,
     reason:
       "Fire and forget, both sites. Each is the last statement in its branch of the Layers click handler, so no continuation installs anything. The selection this asks for arrives through the adapter's selection listener, filtered there by document id.",
-  },
-  {
-    snippet: "await editorFetch(",
-    sites: 1,
-    reason:
-      "The component catalog, from the CLI over HTTP. It describes the repo, not the page, so a page change while it is out does not make the answer wrong. Everything the continuation reads off the page (the selection and the iframe url) was read before this await.",
-  },
-  {
-    snippet: "await res.json(",
-    sites: 1,
-    reason:
-      "The body of that same catalog response. Same reason: repo data, not page data.",
   },
   {
     snippet: "await dispatchIteration(",
@@ -239,7 +227,11 @@ function maskLiterals(source: string): string {
 /** `[open, close]` offsets of each `session.run(` argument list. */
 function runBodies(masked: string): [number, number][] {
   const bodies: [number, number][] = []
-  const opener = /\bsession\.run\s*\(/g
+  // Whitespace either side of the dot. `void session\n  .run(async (ctx) =>`
+  // is how the drift prefetch is written, and a pattern that only matched
+  // `session.run(` read that body as ordinary code: every await inside it
+  // would have been judged as if it were outside a run.
+  const opener = /\bsession\s*\.\s*run\s*\(/g
   let match: RegExpExecArray | null
   while ((match = opener.exec(masked))) {
     const open = match.index + match[0].length - 1

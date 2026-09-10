@@ -81,6 +81,7 @@ export function resetFakeAdapters(): void {
   // decides whether verification runs at all.
   FakeBridgeAdapter.verificationEnabled = false
   FakeBridgeAdapter.parkSelectBySelector = false
+  FakeBridgeAdapter.parkSelectMany = false
   FakeBridgeAdapter.parkGetStructure = false
 }
 
@@ -118,6 +119,13 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
    * answer at once. `resetFakeAdapters` turns it back off.
    */
   static parkSelectBySelector = false
+  /**
+   * Hold every `selectMany` open until the test settles it.
+   *
+   * OFF by default, and the unparked answer stays the empty list every test
+   * before this one was built against. `resetFakeAdapters` turns it back off.
+   */
+  static parkSelectMany = false
   /**
    * Hold every `getStructure` open until the test settles it.
    *
@@ -279,18 +287,25 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
    * An UNSOLICITED bridge ready from `documentId`, i.e. the new page
    * announcing itself before the iframe's `load` event.
    *
-   * Same order as the real adapter's `handleBridgeReady`, in three steps:
+   * Same order as the real adapter's `handleBridgeReady`, in four steps:
    *
    * 1. The id is adopted first, so a listener that re-handshakes reads the NEW
    *    document.
-   * 2. The selection listeners hear `null`. The real adapter gets there
+   * 2. Every parked selection read settles, with `null` for a single read and
+   *    the empty list for a multi read. That is the first half of
+   *    `discardSelectionFromDepartedDocument`: the page it is talking to
+   *    cannot answer the departed page's question, so the read settles the
+   *    way an unresolved selector already settles. BEFORE the listeners, in
+   *    that method and here, because a lane woken by a listener must not find
+   *    a read from the previous page still open.
+   * 3. The selection listeners hear `null`. The real adapter gets there
    *    through `discardSelectionFromDepartedDocument`, which it calls on a
    *    document REPLACEMENT (a previous id that is not this one) and before it
    *    announces the change. A selection belongs to the page it was made on,
    *    so the shell hears the page go away with the selection already gone.
    *    Only on a replacement, which is why the null is skipped when there was
    *    no previous id: a first handshake replaced nothing.
-   * 3. The document-changed listeners hear the new id.
+   * 4. The document-changed listeners hear the new id.
    *
    * The order is the point. A fixture that told the document-changed
    * listeners first let a test believe the shell still held the departed
@@ -302,6 +317,10 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
     const replacedDocument = this.documentId !== null
     this.documentId = documentId
     if (replacedDocument) {
+      for (const parked of this.parkedSelectReads) parked.settle(null)
+      this.parkedSelectReads.length = 0
+      for (const parked of this.parkedSelectManyReads) parked.settle([])
+      this.parkedSelectManyReads.length = 0
       for (const listener of this.selectionListeners) listener(null)
     }
     for (const listener of this.documentChangedListeners) listener(documentId)
@@ -402,7 +421,25 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
     }
     return this.selectBySelectorResult
   }
-  async selectMany(): Promise<Selection[]> {
+  /**
+   * Every multi-select read parked until the test answers it, when
+   * {@link FakeBridgeAdapter.parkSelectMany} is on.
+   *
+   * The single-read list above exists so a PAGE CHANGE can be put inside a
+   * read. This one exists so a SELECTION change can: the page stays where it
+   * is, the designer clicks something else, and the multi-read that was
+   * already out answers afterwards.
+   */
+  readonly parkedSelectManyReads: {
+    selectors: readonly string[]
+    settle: (selections: Selection[]) => void
+  }[] = []
+  async selectMany(selectors: readonly string[]): Promise<Selection[]> {
+    if (FakeBridgeAdapter.parkSelectMany) {
+      return new Promise<Selection[]>((resolve) => {
+        this.parkedSelectManyReads.push({ selectors, settle: resolve })
+      })
+    }
     return []
   }
   async selectParent(): Promise<Selection | null> {

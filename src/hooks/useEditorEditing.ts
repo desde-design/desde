@@ -609,10 +609,10 @@ export function useEditorEditing({
    * It is a READ, and the reads were still unguarded when every write lane
    * had been covered. Two awaits, and the page can be replaced across either
    * of them: the structure round trip to the bridge, and the
-   * conditional-groups fetch to the CLI. What comes back is the DEPARTED page's tree, and every row in it
-   * carries `authoredAt` and `editTarget` - where a Layers right-click Delete
-   * writes. Installing it points Delete at a file the page on screen may not
-   * even render.
+   * conditional-groups fetch to the CLI. What comes back is the DEPARTED
+   * page's tree. Every row in it carries `authoredAt` and `editTarget`, which
+   * is where a Layers right-click Delete writes. Installing it points Delete
+   * at a file the page on screen may not even render.
    *
    * `layersGenerationRef` does not cover that on its own. It answers "did a
    * newer refresh start", and in the window between the page changing and the
@@ -961,8 +961,47 @@ export function useEditorEditing({
       // for the SAME document do not bump: one page change completes up to
       // three handshakes, and a bump per handshake would drop a lookup for a
       // selection made on the page that is still there.
+      //
+      // BEHIND the adapter's own deselect, in practice. A page replacement
+      // reaches the shell through `discardSelectionFromDepartedDocument`
+      // first, and that null selection runs the selection listener, which
+      // bumps this counter through the listener's own `++`. So on the
+      // ordinary path the bump here is the second one. It is defence in
+      // depth: it is what holds if that order ever changes, and it is what
+      // holds for a boundary the adapter did not announce a deselect for.
       if (session.documentId !== documentId) {
         selectionSeqRef.current += 1
+        // THE LAYERS TREE BELONGS TO THE PAGE THAT JUST LEFT. Every row in it
+        // carries the source coordinates a right-click Delete writes to, so
+        // leaving it up offers the designer rows that aim at another page's
+        // files. Cleared here, synchronously with the boundary, for the same
+        // reason the buffers are: the gap between the page changing and the
+        // new page's handshake is where the old tree would still be clickable.
+        //
+        // UNDER THE ID COMPARISON, not under the end below. The end does not
+        // always run. A session whose document was already forgotten ends
+        // nothing here, and the conflict reload is exactly that case: it ends
+        // the session with reason "reload", which forgets the document, so
+        // the reloaded page's handshake found `previous === null` and left the
+        // PRE-RELOAD tree on screen and clickable until the new page answered.
+        // The comparison is the honest condition for "the page underneath
+        // changed", and it is safe for the two cases that are not a change: a
+        // first handshake clears state that is already empty, and a plain
+        // teardown keeps the id so it does not come here at all.
+        //
+        // The new page's tree is asked for after ITS handshake, in the one
+        // place below that issues that request.
+        setLayersRawRoots(null)
+        setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
+        setLayersError(false)
+        // The reset is belt and braces, and it is worth saying which part is
+        // load-bearing. The one place that issues the request compares
+        // `layersRequestedFor` against the document id, and that comparison
+        // already covers A to B to A on its own: coming back to A finds "B"
+        // on record and asks again. What the reset adds is that the invariant
+        // stops depending on the ids at all. After a boundary, nothing is on
+        // record for any page.
+        layersRequestedFor = undefined
       }
       if (shouldEndSessionOnHandshake(session.documentId, documentId)) {
         // Through `endBridgeSession`, not through the end inside
@@ -974,19 +1013,6 @@ export function useEditorEditing({
           reason: "reconnect",
           cancelWithBridge: false,
         })
-        // THE LAYERS TREE BELONGS TO THE PAGE THAT JUST LEFT. Every row in it
-        // carries the source coordinates a right-click Delete writes to, so
-        // leaving it up offers the designer rows that aim at another page's
-        // files. Cleared here, synchronously with the boundary, for the same
-        // reason the buffers are: the gap between the page changing and the
-        // new page's handshake is where the old tree would still be clickable.
-        //
-        // The new page's tree is asked for after ITS handshake, in the one
-        // place below that issues that request.
-        setLayersRawRoots(null)
-        setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
-        setLayersError(false)
-        layersRequestedFor = undefined
       }
       // `bridgeDocumentId` is `string | null` and `start` takes the same,
       // so there is no `?? ""` here: an empty string would be ADOPTED as a
@@ -1111,6 +1137,15 @@ export function useEditorEditing({
             reason: "reconnect",
             cancelWithBridge: false,
           })
+          // AND THE LAYERS PANEL IS TOLD, because the boundary above cleared
+          // its tree and nothing is coming to replace it. The one place that
+          // asks a new page for its tree runs in the SUCCESS branch, so a
+          // handshake that fails leaves the panel on "Loading layers…" with
+          // no request out and no way back. `layersError` with a null tree is
+          // the panel's error state, and that state carries a Retry button
+          // (`layers-panel.tsx`), so the designer has something to click when
+          // the page does come back.
+          setLayersError(true)
           setStatus({ kind: "error", message })
         })
     }
@@ -1319,10 +1354,22 @@ export function useEditorEditing({
       // adds is the STORE write. Without it a reply that settled just before
       // the boundary would still be written to `editorSelectionMany` after it,
       // and the chat header would name elements from the page that left.
+      //
+      // AND THE SELECTION SEQUENCE BESIDE IT, for the case the session cannot
+      // see. The page can stay exactly where it is while the designer clicks
+      // something else, and this read's answer is then out of date without
+      // any page having gone anywhere. The store write is what makes that
+      // matter: `setEditorSelectionMany` also pins the primary
+      // `editorSelection`, so a late multi-read would replace the single
+      // selection the designer just made, and the next edit would aim at the
+      // element the multi-read named. Same counter, same rule and same
+      // reasoning as the manifest lookup in the selection listener.
+      const seq = selectionSeqRef.current
       const outcome = await session.run(async (ctx) =>
         ctx.step(adapter.selectMany(selectors)),
       )
       if (outcome.stale || outcome.value.stale) return []
+      if (seq !== selectionSeqRef.current) return []
       const selections = outcome.value.value
       useEditorStore.getState().setEditorSelectionMany(selections)
       return selections
@@ -1575,18 +1622,43 @@ export function useEditorEditing({
     // failure mode than blocking navigation.
     let cellsJson = "[]"
     let catalogEntry: CatalogEntry | undefined
-    try {
-      const res = await editorFetch("/api/editor/catalog", { cache: "no-store" })
-      if (res.ok) {
-        const catalog = (await res.json()) as CatalogEntry[]
+    // UNDER THE SESSION, and the reason is the CONTINUATION rather than the
+    // catalog. The catalog describes the repo, so a page change while it is
+    // out does not make its rows wrong. What runs after it belongs to one
+    // page, twice over: it navigates the iframe to the isolation route, and
+    // it records `returnUrl` from the url read BEFORE this await. A page
+    // change inside the fetch therefore sent the page that ARRIVED to the
+    // departed page's component route, with a return url aimed back at the
+    // page that had already gone.
+    //
+    // The fetch stays non-fatal. A throw or a non-ok response answers `null`
+    // and the navigation happens with empty variants, exactly as before.
+    // `stale` is the new stop, and it says something different: the click
+    // belonged to a page that is not there any more, so there is nothing to
+    // open.
+    const catalog = await session.run(async (ctx) => {
+      try {
+        const res = await ctx.step(
+          editorFetch("/api/editor/catalog", { cache: "no-store" }),
+        )
+        if (res.stale || !res.value.ok) return null
+        const body = await ctx.step(res.value.json())
+        return body.stale ? null : (body.value as CatalogEntry[])
+      } catch {
+        return null
+      }
+    })
+    if (catalog.stale) return
+    if (catalog.value) {
+      try {
         // Match by name first (works for design-system components
         // whose catalog `file` field points at a type declaration,
         // not the importable SFC), fall back to file for first-party
         // components where two SFCs might share a name.
         catalogEntry =
-          catalog.find((e) => e.name === selection.componentName) ??
+          catalog.value.find((e) => e.name === selection.componentName) ??
           (selection.componentFile
-            ? catalog.find((e) => e.file === selection.componentFile)
+            ? catalog.value.find((e) => e.file === selection.componentFile)
             : undefined)
         if (catalogEntry) {
           const cells = buildVariantCells(
@@ -1595,9 +1667,12 @@ export function useEditorEditing({
           )
           cellsJson = JSON.stringify(cells)
         }
+      } catch {
+        // A body that is not the array the route documents. Non-fatal for the
+        // same reason a failed fetch is: open the component with no variants.
+        // The cast above is the only thing that made this reachable, and the
+        // try that used to wrap the whole block covered it, so it is kept.
       }
-    } catch {
-      // Non-fatal — navigate with empty variants.
     }
 
     // Determine the import spec for the substrate plugin:
@@ -1674,7 +1749,7 @@ export function useEditorEditing({
     // navigation specifically — but using `.src` is more explicit
     // about staying on the parent-side API.
     iframe.src = target
-  }, [iframeRef, prototypeUrl])
+  }, [iframeRef, prototypeUrl, session])
 
   const handleExitComponentEdit = useCallback(() => {
     const state = componentEditState

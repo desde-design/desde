@@ -52,6 +52,14 @@ same way a write to the departed page's source file is wrong. So a read that
 installs page-derived state goes through `session.run` and `ctx.step`, exactly
 like a write.
 
+A step whose value you do not need still has to have its `stale` read. The type
+system only forces the narrowing when `.value` is read, so a step that is there
+for its side effect, or one whose answer the lane throws away, can be written
+and then ignored, and the guard is gone with no compiler complaint. The
+component catalog is the worked example: its rows do not describe the page at
+all, but the continuation navigates the iframe, so `stale` is the only thing
+that stops a click made on the page that left.
+
 An await that stays outside a run has to say why. The inventory is
 `src/hooks/useEditorEditing.await-inventory.test.ts`: it scans the hook, lists
 every await that is not inside a run body and not a `ctx.step`, and compares
