@@ -4834,6 +4834,13 @@ export function useEditorEditing({
           scopedOverrides: scopedOverrideSavedIds.length,
         })
       } catch (err) {
+        // Same rule as the two style lanes: a departed page's error is not news
+        // about the page in front of the designer now. `ctx.step` turns a throw
+        // from a departed session into a stale answer, so this covers only a
+        // throw from the synchronous code between the steps. `null` is the
+        // body's word for "the page changed", and the `finally` below still
+        // clears `saving` on the way out.
+        if (!ctx.current) return null
         saveOk = false
         const reason = `Save threw: ${(err as Error).message}`
         setSaveStatus(reason)

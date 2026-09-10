@@ -1090,6 +1090,44 @@ describe("useEditorEditing: the bridge session", () => {
     }
   })
 
+  it("hands the save's chat submission a signal the page change aborts (finding X1)", async () => {
+    // The save-time hand-off is a POST that starts a chat turn, and a turn
+    // accepted after the page has gone edits files for a document nobody is
+    // looking at. The step that reads the answer cannot retract a turn that has
+    // already been taken, so the session's own lifetime goes WITH the
+    // submission and cancels it where it is.
+    const escalateToChat = vi.fn(
+      (_prompt: string, _options?: { signal?: AbortSignal }) =>
+        new Promise<boolean>(() => {}),
+    )
+    const { rerender } = await mount({ escalateToChat })
+    await act(async () => {
+      lastFakeAdapter().emitCapture(capture("m1", "hello"))
+    })
+    const typing = await waitForApply()
+    await act(async () => {
+      typing.settle(needsChat())
+      await Promise.resolve()
+    })
+    const save = await startSave()
+    const saveApply = await waitForApply(1)
+    await act(async () => {
+      saveApply.settle(needsChat("the bundle needs a person"))
+      await Promise.resolve()
+    })
+    const signal = escalateToChat.mock.calls[0]?.[1]?.signal
+    expect(signal).toBeDefined()
+    // The control. Without it, a signal that arrived already aborted would pass
+    // the assertion below and prove nothing.
+    expect(signal?.aborted).toBe(false)
+    await changeDocument(rerender, "doc-b")
+    expect(signal?.aborted).toBe(true)
+    await act(async () => {
+      await save.settled
+    })
+    expect(save.outcome()?.ok).toBe(false)
+  })
+
   it("stops counting an identity the save has escalated (finding M6)", async () => {
     const escalateToChat = vi.fn(async () => true)
     await mount({ escalateToChat })

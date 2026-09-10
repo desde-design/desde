@@ -161,4 +161,38 @@ describe("dom-edit-mode — a typed edit is never silently dropped", () => {
     const message = captured()[0] as { payload: { documentId?: string } }
     expect(message.payload.documentId).toBe(TEST_DOCUMENT_ID)
   })
+
+  it("stamps a shell-pinned capture too", () => {
+    // The SECOND of the three paths that leave this module. Shell-initiated
+    // edits (SET_ELEMENT_TEXT / SET_ELEMENT_CLASSES) skip the typing debounce
+    // and the v-for question entirely, so a stamp on the typing path says
+    // nothing about them. An unstamped capture is one the shell attributes to
+    // whichever session was live when it read the message.
+    const mode = createDomEditMode(inspector, overridePreview, adapter)
+    const el = mountEditable("Before")
+
+    mode.captureDirectMutationPinned(el, "text", undefined, "Before", "After")
+
+    expect(captured()).toHaveLength(1)
+    const message = captured()[0] as { payload: { documentId?: string } }
+    expect(message.payload.documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the resolution failure too", () => {
+    // The THIRD path, and the one easiest to forget: it carries no mutation, so
+    // it is not built by `buildMutation` and does not inherit anything from it.
+    // The shell routes this into a status line for the document it names; named
+    // wrongly, the designer is told an edit failed on a page they are no longer
+    // looking at.
+    document.body.innerHTML = "<p>Before</p>"
+    const el = document.body.querySelector("p")!
+    const mode = createDomEditMode(inspector, overridePreview, adapter)
+
+    mode.captureDirectMutation(el, "text", undefined, "Before", "After")
+
+    const failures = sent.filter((m) => m.type === "MUTATION_RESOLUTION_FAILED")
+    expect(failures).toHaveLength(1)
+    const message = failures[0] as { payload: { documentId?: string } }
+    expect(message.payload.documentId).toBe(TEST_DOCUMENT_ID)
+  })
 })
