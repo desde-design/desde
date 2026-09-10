@@ -279,13 +279,31 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
    * An UNSOLICITED bridge ready from `documentId`, i.e. the new page
    * announcing itself before the iframe's `load` event.
    *
-   * Same order as the real adapter's `handleBridgeReady`: the id is adopted
-   * first, so a listener that re-handshakes reads the NEW document, and only
-   * then are the listeners told.
+   * Same order as the real adapter's `handleBridgeReady`, in three steps:
+   *
+   * 1. The id is adopted first, so a listener that re-handshakes reads the NEW
+   *    document.
+   * 2. The selection listeners hear `null`. The real adapter gets there
+   *    through `discardSelectionFromDepartedDocument`, which it calls on a
+   *    document REPLACEMENT (a previous id that is not this one) and before it
+   *    announces the change. A selection belongs to the page it was made on,
+   *    so the shell hears the page go away with the selection already gone.
+   *    Only on a replacement, which is why the null is skipped when there was
+   *    no previous id: a first handshake replaced nothing.
+   * 3. The document-changed listeners hear the new id.
+   *
+   * The order is the point. A fixture that told the document-changed
+   * listeners first let a test believe the shell still held the departed
+   * page's selection at the moment the boundary moved, which the product
+   * never does.
    */
   emitReady(documentId: string): void {
     if (documentId === this.documentId) return
+    const replacedDocument = this.documentId !== null
     this.documentId = documentId
+    if (replacedDocument) {
+      for (const listener of this.selectionListeners) listener(null)
+    }
     for (const listener of this.documentChangedListeners) listener(documentId)
   }
 

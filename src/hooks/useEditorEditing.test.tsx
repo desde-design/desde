@@ -2241,6 +2241,14 @@ describe("useEditorEditing: the bridge session", () => {
     })
     await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
 
+    // The page change took the selection with it, and the manifest with the
+    // selection. The adapter discards the departed page's selection and tells
+    // the selection listeners `null` BEFORE it announces the new document, and
+    // the listener's null branch nulls the manifest. So the window this row is
+    // about opens with nothing installed rather than with page A's manifest
+    // still on screen.
+    expect(installedManifest()).toBeNull()
+
     // Page B has its own `#panel`, and its own component behind it.
     await act(async () => {
       adapter.emitSelection(componentSelection("#panel", "NewCard"))
@@ -2262,31 +2270,51 @@ describe("useEditorEditing: the bridge session", () => {
   })
 
   it("cannot install a manifest for a selection another selection replaced", async () => {
-    // One page, two elements. The answer for the first arrives after the
-    // designer has moved on to the second.
+    // ONE PAGE, ONE SELECTOR, TWO SELECTIONS. The designer clicks `#panel`,
+    // deselects, and clicks `#panel` again, which by then is a different
+    // element behind the same eight characters (an in-page re-render, a table
+    // row swapped, a tab switched). The first click's lookup answers last.
+    //
+    // This row used to click `#a` and then `#b`, and it could not fail: two
+    // selectors differ, so the pre-existing `latestSelector` comparison
+    // rejected the late answer before the sequence was ever consulted. It
+    // asserted a value that was already safe. With one selector the session
+    // has not moved and the selector matches, so `seq` is the only thing
+    // standing between the departed click's answer and the inspector.
     const source = new ParkedManifestSource()
     render(<Harness manifestSource={source} />)
     await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
     const adapter = lastFakeAdapter()
 
     await act(async () => {
-      adapter.emitSelection(componentSelection("#a", "CardA"))
+      adapter.emitSelection(componentSelection("#panel", "CardA"))
       await Promise.resolve()
     })
     await waitFor(() => expect(source.lookups).toHaveLength(1))
+    expect(source.lookups[0]!.name).toBe("CardA")
+
+    // The deselection. It takes a sequence number of its own, which is what
+    // makes the click after it a new selection rather than the same one.
     await act(async () => {
-      adapter.emitSelection(componentSelection("#b", "CardB"))
+      adapter.emitSelection(null)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(installedManifest()).toBeNull())
+
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "CardB"))
       await Promise.resolve()
     })
     await waitFor(() => expect(source.lookups).toHaveLength(2))
+    expect(source.lookups[1]!.name).toBe("CardB")
     await act(async () => {
       source.lookups[1]!.settle(manifestNamed("CardB"))
       await Promise.resolve()
     })
     await waitFor(() => expect(installedManifest()?.name).toBe("CardB"))
 
-    // `#a`'s lookup answers last. `#b` is what is selected, and `#b` is what
-    // the inspector must still be describing.
+    // The first click's lookup answers last. `CardB` is what is selected, and
+    // `CardB` is what the inspector must still be describing.
     await act(async () => {
       source.lookups[0]!.settle(manifestNamed("CardA"))
       await Promise.resolve()
