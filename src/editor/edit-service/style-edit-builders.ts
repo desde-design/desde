@@ -26,7 +26,7 @@ import {
   resolveTailwindClass,
   resolveTailwindClasses,
 } from "@/components/editor/tailwind-declarations"
-import { makeEditId } from "@/hooks/make-edit-id"
+import { makeEditId } from "./make-edit-id"
 
 /**
  * A style-edit build result. `null` = genuine no-op (skip). `{ unsupported }` =

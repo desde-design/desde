@@ -62,11 +62,11 @@ import { editorFetch } from "@/lib/editor-fetch"
 import { useEditorStore } from "@/stores/editor-only"
 import { useAppStore } from "@/stores"
 import { useEditVerification } from "./useEditVerification"
-import type { IterationEditKind } from "./iteration-fallback"
+import type { IterationEditKind } from "@/editor/edit-service/iteration-fallback"
 import {
   logIterationScopeChoice,
   requestIterationProposal,
-} from "./iteration-fallback"
+} from "@/editor/edit-service/iteration-fallback"
 import { applyEditWithChatHandoff } from "./apply-edit-with-chat-handoff"
 import type { ChatHandoffOutcome } from "./apply-edit-with-chat-handoff"
 import {
@@ -87,13 +87,13 @@ import {
   buildStyleEdit,
   isUnsupportedStyleBuild,
   type StyleEditDestinationOptions,
-} from "./style-edit-builders"
+} from "@/editor/edit-service/style-edit-builders"
 import { useIframeStylesheetTargets } from "./useIframeStylesheetTargets"
 import {
   isOverrideStylesheetRefusal,
   resolveOverrideStylesheet,
 } from "@/components/editor/resolve-override-stylesheet"
-import { makeEditId } from "./make-edit-id"
+import { makeEditId } from "@/editor/edit-service/make-edit-id"
 import { describeEditOutcome } from "./edit-outcome"
 import { handleResolutionFailure } from "./resolution-failure-notice"
 import { offeredDisambiguationChoices } from "./disambiguation-choices"
@@ -121,8 +121,6 @@ import {
   bridgeDraftIdOf,
   DEFERRED_PARK_STATUS,
   NOT_CONNECTED_STATUS,
-  hasUndispatchedWork,
-  isSupersededHandshake,
   iterationRouteFor,
   parkedReason,
   MALFORMED_ITERATION_STATUS,
@@ -130,16 +128,23 @@ import {
   SAVE_HANDOFF_TIMEOUT_STATUS,
   SAVE_PAGE_CHANGED_STATUS,
   settleHandOff,
-  shouldEndSessionOnHandshake,
   structuralRouteFor,
-  type BridgeSessionEndReason,
-  type ModalRequest,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
+import {
+  hasUndispatchedWork,
+  isSupersededHandshake,
+  shouldEndSessionOnHandshake,
+  type BridgeSessionEndReason,
+} from "@/editor/session/session-state"
+import type { ModalRequest as SessionModalRequest } from "@/editor/session/modal-queue"
 import {
   EditSession,
   type SessionEndResult,
 } from "@/editor/session/edit-session"
+
+/** The one dialog request shape this hook raises, bound to its prompt type. */
+type ModalRequest = SessionModalRequest<PendingIterationEdit>
 import {
   dispatchPropEdit,
   propEditKey,

@@ -23,7 +23,7 @@
  * day doesn't rediscover this by hand again.
  */
 
-import { makeEditId } from "@/hooks/make-edit-id"
+import { makeEditId } from "@/editor/edit-service/make-edit-id"
 
 export interface FileEditorSaveArgs {
   file: string

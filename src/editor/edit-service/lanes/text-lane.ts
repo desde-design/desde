@@ -25,8 +25,8 @@ import {
   type StyleEditDestinationOptions as StyleEditOpts,
 } from "@/editor/edit-service/style-edit-builders"
 import { cascadeTargetForStyleEdit } from "@/hooks/cascade-target-for-style-edit"
-import { reconcileDispatchedValue } from "@/hooks/dispatch-reconcile"
-import { makeEditId } from "@/hooks/make-edit-id"
+import { reconcileDispatchedValue } from "@/editor/edit-service/dispatch-reconcile"
+import { makeEditId } from "@/editor/edit-service/make-edit-id"
 
 /**
  * The bundle target when nothing is selected. The llm-patch carries its

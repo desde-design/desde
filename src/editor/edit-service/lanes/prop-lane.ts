@@ -15,7 +15,7 @@ import {
   afterEscalation,
   buildPropEditEscalationPrompt,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
-import { reconcileDispatchedValue } from "@/hooks/dispatch-reconcile"
+import { reconcileDispatchedValue } from "@/editor/edit-service/dispatch-reconcile"
 
 /**
  * Buffer key for one element's one prop. Module scope, so every closure that

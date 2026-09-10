@@ -32,7 +32,11 @@ import type {
 } from "./lane-session"
 import type { Mutation, PendingMutation, PropEdit } from "@/editor/core"
 
-export type { LaneId, LaneSession, SessionRunContext, SessionRunResult }
+// `LaneSession` is deliberately NOT re-exported here. A lane takes it, and a
+// lane must not reach for this file: importing `edit-session.ts` would give it
+// the class, the dialogs and the scope prompt, which are the shell's. It comes
+// from `./lane-session` instead.
+export type { LaneId, SessionRunContext, SessionRunResult }
 
 export interface EditSessionOptions<Prompt> {
   /** The bridge draft id a scope prompt is holding, if any. */

@@ -1,8 +1,12 @@
 /**
- * Pure reconciliation-decision core for the branch-mode dispatch machines
- * in `useEditorEditing` — `dispatchBranchTextMutation`,
- * `dispatchBranchPropEdit`, `dispatchBranchClassMutation` — extracted
- * share-readiness Phase 3 Batch B. Each dispatch lands the edit directly on
+ * Pure reconciliation-decision core for the branch-mode dispatch machines.
+ * They were `dispatchBranchTextMutation`, `dispatchBranchPropEdit` and
+ * `dispatchBranchClassMutation` inside `useEditorEditing`; they are the prop
+ * and text lanes under `lanes/` now. Extracted share-readiness Phase 3 Batch
+ * B, and moved out of `src/hooks/` when the lanes moved, because an
+ * edit-service module importing a hook is the wrong direction.
+ *
+ * Each dispatch lands the edit directly on
  * the working tree as an ordinary uncommitted change (no auto-commit —
  * branch mode never commits on the agent's/editor's behalf; the user
  * commits everything at once via the top-bar Commit).

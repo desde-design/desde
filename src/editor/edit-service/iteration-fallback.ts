@@ -3,8 +3,12 @@
  *
  * Posts an `IterationDataIntent` to `/api/editor/llm-fallback` and
  * returns the proposal payload (full-file source + baseHash + optional
- * explanation). Consumers (`useEditorEditing`) buffer the result as
- * an `OverwriteEdit` that flows through the standard save lane.
+ * explanation). The iteration lane buffers the result as an `OverwriteEdit`
+ * that flows through the standard save lane.
+ *
+ * Lived in `src/hooks/` until the iteration lane moved under
+ * `src/editor/edit-service/lanes/`; a lane importing a hook is the wrong
+ * direction, and nothing here was ever a hook.
  *
  * Pure UI-layer code — no Zustand, no React. Centralized so each
  * iteration-aware edit kind (delete / prop / duplicate / move / insert)

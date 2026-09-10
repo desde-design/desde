@@ -179,7 +179,7 @@ const DEEP_SELECTOR_STRUCTURAL_BAN =
  * e.g. `[data-testid="hero"]` (balanced) vs. `[data-testid="hero` (not).
  *
  * **Why balance, not "no quotes."** `deepSelectorFromMutationSelector`
- * (`src/hooks/style-edit-builders.ts`) derives `deepSelector` from the
+ * (`src/editor/edit-service/style-edit-builders.ts`) derives `deepSelector` from the
  * bridge's own stable selector, which already runs attribute VALUES through
  * `CSS.escape()` (`src/bridge/selector-engine.ts`) — so
  * `[data-testid="hero"]` arrives already well-formed. Refusing every `"`

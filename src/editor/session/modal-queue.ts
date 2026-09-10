@@ -31,8 +31,14 @@ export type ModalRequest<Prompt> =
 /** Which of the two dialogs a request is for, and which one currently owns. */
 export type ModalKind = ModalRequest<unknown>["kind"]
 
-/** Open it now, or hold it behind whatever is already on screen. */
-export type ModalDecision<Prompt> =
+/**
+ * Open it now, or hold it behind whatever is already on screen.
+ *
+ * Not exported: `enqueue` is the only thing that produces one and nothing
+ * outside this file names the type. It was exported while the hook re-exported
+ * a bound alias of it; that barrel is gone.
+ */
+type ModalDecision<Prompt> =
   | { open: ModalRequest<Prompt> }
   | { deferred: ModalRequest<Prompt>[] }
 

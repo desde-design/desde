@@ -25,12 +25,12 @@ import type {
 import type { LaneSession } from "@/editor/session/lane-session"
 import type { ModalRequest } from "@/editor/session/modal-queue"
 import type { IterationScope } from "@/components/editor/iteration-scope-dialog"
-import type { IterationEditKind } from "@/hooks/iteration-fallback"
+import type { IterationEditKind } from "@/editor/edit-service/iteration-fallback"
 import type { verifyIterationLoop } from "@/hooks/iteration-verify"
 import {
   logIterationScopeChoice,
   requestIterationProposal,
-} from "@/hooks/iteration-fallback"
+} from "@/editor/edit-service/iteration-fallback"
 import {
   bridgeDraftIdOf,
   decideAfterVerify,
@@ -38,7 +38,6 @@ import {
   describeRowScopedEdit,
   errorMessage,
   handOffFailureStatus,
-  isStaleVerify,
   iterationTemplateLocation,
   parkedReason,
   promptCollision,
@@ -49,8 +48,9 @@ import {
   verifyKeyFor,
   type PendingIterationEdit,
 } from "@/hooks/pending-iteration-edit"
+import { isStaleVerify } from "@/editor/session/session-state"
 import { buildRowScopedEditHandoffPrompt } from "@/editor/edit-service/build-edit-escalation-prompt"
-import { makeEditId } from "@/hooks/make-edit-id"
+import { makeEditId } from "@/editor/edit-service/make-edit-id"
 
 /** The status this lane shows when the click carried no source position. */
 const NO_SOURCE_LOCATION_STATUS =

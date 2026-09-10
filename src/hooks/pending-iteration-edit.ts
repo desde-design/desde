@@ -23,16 +23,6 @@ import {
   safeCount,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
 import type { IterationVerifyOutcome } from "./iteration-verify"
-import {
-  createModalQueue,
-  type ModalDecision as SessionModalDecision,
-  type ModalRequest as SessionModalRequest,
-} from "@/editor/session/modal-queue"
-import {
-  sessionEndPlan as sessionEndPlanOf,
-  type SessionEndPlan,
-  type SessionEndState as SessionEndStateOf,
-} from "@/editor/session/session-state"
 
 /**
  * Pending iteration edit — held while the IterationScopeDialog asks the
@@ -741,38 +731,3 @@ export function decideAfterVerify(args: {
   if (remembered) return { kind: "remembered", scope: remembered, loopLocation }
   return { kind: "prompt", loopLocation }
 }
-
-/**
- * The lifecycle decisions, bound to this file's prompt type.
- *
- * They live in `@/editor/session` now, generic over the scope prompt, because
- * `EditSession` owns them and may not import React (a `PendingIterationEdit`
- * carries a `LayersMovePayload`, which is a component type). These aliases keep
- * the hook and the existing tests on the names they already use; Task 12
- * deletes them and points the callers at `@/editor/session` directly.
- */
-const iterationModals = createModalQueue<PendingIterationEdit>(bridgeDraftIdOf)
-export type ModalRequest = SessionModalRequest<PendingIterationEdit>
-export type ModalDecision = SessionModalDecision<PendingIterationEdit>
-export type SessionEndState = SessionEndStateOf<PendingIterationEdit>
-export type { ModalKind } from "@/editor/session/modal-queue"
-export type { BridgeSessionEndReason, SessionEndPlan } from "@/editor/session/session-state"
-export const modalRequestDraftId = iterationModals.requestDraftId
-export const enqueueModal = iterationModals.enqueue
-export const dequeueModal = iterationModals.dequeue
-export const dropModalRequestsForDraft = iterationModals.dropForDraft
-export const sessionEndPlan = (state: SessionEndState): SessionEndPlan =>
-  sessionEndPlanOf(state, bridgeDraftIdOf)
-export {
-  discardedOnResetStatus,
-  hasUndispatchedWork,
-  isStaleGeneration,
-  isStaleVerify,
-  isSupersededHandshake,
-  mayClearInFlightMarker,
-  resumePlan,
-  retireForeignEntries,
-  retiresBufferedEntries,
-  rowsToRelease,
-  shouldEndSessionOnHandshake,
-} from "@/editor/session/session-state"
