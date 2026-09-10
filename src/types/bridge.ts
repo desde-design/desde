@@ -1157,6 +1157,28 @@ export type ShellToBridgeMessage =
   | { type: "EXIT_EDITOR_MODE" }
   | { type: "RELOAD_PROTOTYPE"; payload?: { reason?: string } }
   | { type: "CLEAR_SELECTION" }
+  /**
+   * The shell says which elements it now holds; the page selects and
+   * highlights exactly that set (BRIDGE_VERSION 2026-09-10g-commit-selection+).
+   *
+   * The inspects (`INSPECT_SELECTOR`, `INSPECT_MANY`, `INSPECT_PARENT`) used
+   * to select as a side effect of answering, before the shell had seen the
+   * answer. The shell can refuse an answer: the designer clicks something
+   * else while the read is out, and the reply then names an element that is
+   * no longer the newest one. The page was left highlighting an element no
+   * panel agreed with. One message was doing two things, so it is two
+   * messages now, and this is the one that changes the page.
+   *
+   * One selector for a single selection, several for a multi-select (the
+   * first that resolves is drawn, because there is one overlay), and an EMPTY
+   * array to clear. The empty case is the same clear `CLEAR_SELECTION`
+   * performs and runs through the same code; `CLEAR_SELECTION` stays for the
+   * callers that mean only that.
+   *
+   * It carries no `requestId` and gets no reply. The shell already holds the
+   * inspection it is committing.
+   */
+  | { type: "COMMIT_SELECTION"; payload: { selectors: string[] } }
   | { type: "PING" }
   /**
    * Non-committal hover preview. Unlike `HIGHLIGHT_COMPONENT`, this does NOT

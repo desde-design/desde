@@ -29,7 +29,19 @@ let pointTarget: Element | null = null
 let parentTarget: Element | null = null
 
 /**
- * Only the six members `handleMcpQuery` reaches on its inspector. The real
+ * Every element the dispatcher told the inspector to select, in order.
+ *
+ * `setSelectedElement` IS the overlay draw: the real manager stores the
+ * element and calls `showOverlay` on it in the same method
+ * (`src/bridge/inspector-overlay.ts`). So an empty list here is the assertion
+ * that nothing was selected AND that no selection chrome was drawn.
+ */
+let selectCalls: Element[] = []
+/** How many times the dispatcher cleared the selection. */
+let clearCalls = 0
+
+/**
+ * Only the seven members `handleMcpQuery` reaches on its inspector. The real
  * manager builds a shadow root and binds document listeners, none of which
  * this dispatcher touches.
  */
@@ -38,6 +50,11 @@ function fakeInspector(): InspectorOverlayManager {
     getSelectedElement: () => selectedElement,
     setSelectedElement: (el: Element) => {
       selectedElement = el
+      selectCalls.push(el)
+    },
+    clearSelectedOnly: () => {
+      selectedElement = null
+      clearCalls += 1
     },
     isEditorMode: () => editorMode,
     selectAtPoint: () => pointTarget,
@@ -52,6 +69,8 @@ function query(data: Record<string, unknown>): boolean {
 beforeEach(() => {
   sent.length = 0
   selectedElement = null
+  selectCalls = []
+  clearCalls = 0
   editorMode = false
   pointTarget = null
   parentTarget = null
@@ -320,5 +339,127 @@ describe("mcp-query-handlers — every unresolved reply names its document", () 
       requestId: "req-9",
     })
     expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+})
+
+/**
+ * An inspect READS. Only a commit changes what the page has selected.
+ *
+ * The bridge used to select and draw the overlay while it handled
+ * `INSPECT_SELECTOR`, `INSPECT_MANY` and `INSPECT_PARENT`, before the shell
+ * had seen the answer. The shell can refuse that answer: the designer clicks
+ * something else while the read is out, and the reply then describes an
+ * element that is no longer the newest one. The page was left highlighting an
+ * element no panel in the shell agreed with.
+ *
+ * One message did two things. Now the read only reads, and `COMMIT_SELECTION`
+ * is how the shell says what it holds.
+ */
+describe("mcp-query-handlers: an inspect reads, and only a commit selects", () => {
+  it("INSPECT_SELECTOR does not change the selected element", () => {
+    editorMode = true
+    query({
+      type: "INSPECT_SELECTOR",
+      payload: { selector: "#save" },
+      requestId: "req-pure-1",
+    })
+
+    // The answer still comes back. Only the selection stayed put.
+    const reply = sent.find((m) => m.type === "ELEMENT_INSPECTED")
+    expect((reply!.payload as { selector?: unknown }).selector).toBe("#save")
+    expect(selectCalls).toEqual([])
+    expect(selectedElement).toBeNull()
+  })
+
+  it("INSPECT_MANY does not change the selected element", () => {
+    editorMode = true
+    query({
+      type: "INSPECT_MANY",
+      payload: { selectors: ["#save", "#cancel"] },
+      requestId: "req-pure-2",
+    })
+
+    const reply = sent.find((m) => m.type === "ELEMENTS_INSPECTED")
+    expect((reply!.payload as unknown[]).length).toBe(2)
+    expect(selectCalls).toEqual([])
+    expect(selectedElement).toBeNull()
+  })
+
+  it("INSPECT_PARENT does not change the selected element", () => {
+    editorMode = true
+    parentTarget = document.getElementById("card")
+    query({
+      type: "INSPECT_PARENT",
+      payload: { selector: "#save" },
+      requestId: "req-pure-3",
+    })
+
+    const reply = sent.find((m) => m.type === "ELEMENT_INSPECTED")
+    expect((reply!.payload as { selector?: unknown }).selector).toBe("#card")
+    expect(selectCalls).toEqual([])
+    expect(selectedElement).toBeNull()
+  })
+
+  it("COMMIT_SELECTION selects and highlights the one element it names", () => {
+    expect(
+      query({ type: "COMMIT_SELECTION", payload: { selectors: ["#save"] } }),
+    ).toBe(true)
+
+    expect(selectCalls).toEqual([document.getElementById("save")])
+    expect(selectedElement).toBe(document.getElementById("save"))
+  })
+
+  it("COMMIT_SELECTION of a set highlights the first element it names", () => {
+    // There is one selection overlay, and the shell pins the first resolved
+    // element as its primary. So a set commits its primary, exactly as the
+    // multi-select read used to pin it.
+    query({
+      type: "COMMIT_SELECTION",
+      payload: { selectors: ["#save", "#cancel"] },
+    })
+
+    expect(selectCalls).toEqual([document.getElementById("save")])
+  })
+
+  it("COMMIT_SELECTION skips a selector that does not resolve", () => {
+    query({
+      type: "COMMIT_SELECTION",
+      payload: { selectors: ["#gone", "#cancel"] },
+    })
+
+    expect(selectCalls).toEqual([document.getElementById("cancel")])
+  })
+
+  it("an empty COMMIT_SELECTION clears the selection", () => {
+    query({ type: "COMMIT_SELECTION", payload: { selectors: ["#save"] } })
+    query({ type: "COMMIT_SELECTION", payload: { selectors: [] } })
+
+    expect(clearCalls).toBe(1)
+    expect(selectedElement).toBeNull()
+  })
+
+  it("a COMMIT_SELECTION that resolves nothing clears rather than leaving another element drawn", () => {
+    query({ type: "COMMIT_SELECTION", payload: { selectors: ["#save"] } })
+    query({ type: "COMMIT_SELECTION", payload: { selectors: ["#gone"] } })
+
+    expect(clearCalls).toBe(1)
+    expect(selectedElement).toBeNull()
+  })
+
+  it("COMMIT_SELECTION does not reply", () => {
+    // The shell already holds the inspection it committed. A reply would be an
+    // unsolicited ELEMENT_INSPECTED, which the shell installs unconditionally,
+    // so the two would trade selections for no reason.
+    query({ type: "COMMIT_SELECTION", payload: { selectors: ["#save"] } })
+    query({ type: "COMMIT_SELECTION", payload: { selectors: [] } })
+
+    expect(sent).toEqual([])
+  })
+
+  it("COMMIT_SELECTION with no usable payload clears", () => {
+    query({ type: "COMMIT_SELECTION" })
+
+    expect(selectCalls).toEqual([])
+    expect(clearCalls).toBe(1)
   })
 })
