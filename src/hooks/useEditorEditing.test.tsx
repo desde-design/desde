@@ -607,6 +607,43 @@ describe("useEditorEditing: the bridge session", () => {
     expect(bundle.mutations.map((m) => m.id)).toEqual(["m2"])
   })
 
+  it("writes the discard line again for a second page change (round-2 item 2)", async () => {
+    // THE SAME SENTENCE, TWICE. Two page changes, one held draft each, and the
+    // notice is word for word identical both times. The status line is a
+    // string, so the second write is a React bail-out and every consumer keyed
+    // on the text alone hears nothing. `saveStatusSeq` is what separates them:
+    // it counts WRITES, so the same text written again is its own event.
+    await mount()
+    const baselineSeq = editing()!.saveStatusSeq
+    await act(async () => {
+      lastFakeAdapter().emitCapture(capture("m1", "hello"))
+    })
+    await waitForApply()
+    FakeBridgeAdapter.nextDocumentIds = ["doc-b"]
+    await act(async () => {
+      lastFakeAdapter().emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.saveStatus).toBe(DISCARDED_ONE))
+    const firstSeq = editing()!.saveStatusSeq
+    expect(firstSeq).toBeGreaterThan(baselineSeq)
+    // A draft on the second page, so the third page's arrival discards exactly
+    // one again and the line reads the same.
+    await act(async () => {
+      lastFakeAdapter().emitCapture(capture("m2", "world"))
+    })
+    await waitForApply(1)
+    FakeBridgeAdapter.nextDocumentIds = ["doc-c"]
+    await act(async () => {
+      lastFakeAdapter().emitReady("doc-c")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()!.saveStatusSeq).toBeGreaterThan(firstSeq))
+    // Same words, and that is the point: the text cannot tell the two notices
+    // apart, so the sequence has to.
+    expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+  })
+
   it("dispatches a captured mutation while the page stays (control)", async () => {
     // The control row. Every test below takes the page away mid-flight; this
     // one proves the same setup reaches the adapter when nothing happens to it.

@@ -58,11 +58,20 @@ export function BannerToasts({ editing }: BannersProps) {
   }, [editState, handleExitComponentEdit])
 
   // Transient save status.
+  //
+  // `saveStatusSeq` is in the dependencies, and it is what makes a REPEATED
+  // notice show. The status is prose in a string, so two notices that say the
+  // same thing are the same value, and an effect keyed on the text alone does
+  // not run for the second one. The sentence that names what a page change
+  // discarded is exactly the kind that repeats: change the page twice with a
+  // draft held each time and the designer saw the notice once. The sequence
+  // moves on every write, so "written again" reaches this effect as the
+  // separate event it is.
   React.useEffect(() => {
     if (editing.saveStatus && !editing.saving) {
       toast(editing.saveStatus, { id: EDITOR_STATUS_TOAST })
     }
-  }, [editing.saveStatus, editing.saving])
+  }, [editing.saveStatus, editing.saveStatusSeq, editing.saving])
 
   return null
 }

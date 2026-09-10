@@ -4,11 +4,12 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
   useSyncExternalStore,
 } from "react"
-import type { RefObject } from "react"
+import type { RefObject, SetStateAction } from "react"
 import type {
   ComponentManifestSource,
   DisambiguationChoice,
@@ -570,9 +571,44 @@ export function useEditorEditing({
    * Declared HERE, above the session, rather than next to `saving` where the
    * rest of the save state lives. The session is built during the first render
    * and its `onModalOpened` writes this line, so the setter has to exist by
-   * then; a `useState` further down the file has not run yet at that point.
+   * then; a state hook further down the file has not run yet at that point.
+   *
+   * THE LINE CARRIES A SEQUENCE, and `seq` is half of what this state is.
+   * The line is prose in a string, and React bails out of a state write that
+   * sets the identical string. Every consumer that has to react to a NEW
+   * notice was therefore keyed on the text alone, and could not tell "nothing
+   * was written" from "the same sentence was written again". The toast in
+   * `banner-toasts.tsx` is the one that hurt: change the page twice with a
+   * draft held each time, and the second discard notice never appeared,
+   * because it was word for word the first one.
+   *
+   * A counter, not a timestamp: two writes in one millisecond are two writes.
+   * It moves on EVERY dispatch, including one that lands on the text already
+   * there and one that clears the line to null.
+   *
+   * `useReducer` rather than a `useState` plus a wrapper, for one reason that
+   * is not style: `setSaveStatus` is read by about twenty callbacks in this
+   * file, and a reducer's dispatch is stable BY THE LINT RULE, exactly as a
+   * `useState` setter is. A `useCallback` wrapper is not, and every one of
+   * those callbacks would have had to name it in its dependency array to keep
+   * the lint bar at zero.
+   *
+   * The action IS a `SetStateAction`, so the call signature is unchanged: a
+   * string, null to clear it, or the updater form. Nothing else in the file
+   * has to know the sequence exists.
    */
-  const [saveStatus, setSaveStatus] = useState<string | null>(null)
+  const [saveStatusState, setSaveStatus] = useReducer(
+    (
+      current: { text: string | null; seq: number },
+      message: SetStateAction<string | null>,
+    ) => ({
+      text: typeof message === "function" ? message(current.text) : message,
+      seq: current.seq + 1,
+    }),
+    { text: null, seq: 0 },
+  )
+  const saveStatus = saveStatusState.text
+  const saveStatusSeq = saveStatusState.seq
   /**
    * THE bridge session. One document in the iframe, as an object.
    *
@@ -5078,6 +5114,14 @@ export function useEditorEditing({
     handleChatTurnComplete,
     saving,
     saveStatus,
+    /**
+     * How many times {@link saveStatus} has been written, the same text
+     * included. A consumer that has to react to a NEW notice rather than to a
+     * DIFFERENT one reads this alongside the text: see the toast effect in
+     * `banner-toasts.tsx`, which without it swallowed a repeat of the very
+     * sentence that names what the designer lost.
+     */
+    saveStatusSeq,
     /**
      * Why the last started save failed, or null. The save dialog's failure
      * signal: structured, so it cannot be confused with another lane's prose
