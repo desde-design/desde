@@ -72,7 +72,6 @@ import type { ChatHandoffOutcome } from "./apply-edit-with-chat-handoff"
 import {
   afterEscalation,
   buildEditEscalationPrompt,
-  buildRowScopedEditHandoffPrompt,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
   coalesceCapturedMutation,
@@ -120,20 +119,12 @@ import {
 } from "./layers-density-storage"
 import {
   bridgeDraftIdOf,
-  decideAfterVerify,
   DEFERRED_PARK_STATUS,
-  describeRowScopedEdit,
   NOT_CONNECTED_STATUS,
-  errorMessage,
-  handOffFailureStatus,
   hasUndispatchedWork,
-  isStaleVerify,
   isSupersededHandshake,
   iterationRouteFor,
   parkedReason,
-  promptCollision,
-  PROMPT_BUSY_STATUS,
-  iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
@@ -141,9 +132,6 @@ import {
   settleHandOff,
   shouldEndSessionOnHandshake,
   structuralRouteFor,
-  thisRowOperationAllowed,
-  thisRowTemplateLocation,
-  verifyKeyFor,
   type BridgeSessionEndReason,
   type ModalRequest,
   type PendingIterationEdit,
@@ -161,6 +149,10 @@ import {
   dispatchTextMutation,
   type TextLaneDeps,
 } from "@/editor/edit-service/lanes/text-lane"
+import {
+  dispatchIteration,
+  interceptIteration,
+} from "@/editor/edit-service/lanes/iteration-lane"
 import { verifyIterationLoop } from "./iteration-verify"
 import { parkedSaveRefusal, saveGate } from "./save-gate"
 
@@ -407,6 +399,20 @@ export function useEditorEditing({
   const escalateToChatRef = useRef(escalateToChat)
   escalateToChatRef.current = escalateToChat
 
+  /**
+   * The chat submission, as one stable function.
+   *
+   * Through the REF, not the captured prop: the iteration lane hands off after
+   * an HTTP round trip that can take fifteen seconds, and the prop can be
+   * replaced in that window. A shell with no chat resolves false, which is the
+   * refusal the lane already treats "there is nowhere to send this" as.
+   */
+  const handOffToChat = useCallback(
+    (prompt: string, options?: { signal?: AbortSignal }): Promise<boolean> =>
+      escalateToChatRef.current?.(prompt, options) ?? Promise.resolve(false),
+    [],
+  )
+
   // Fuzzy-edit queue. When a typing-time dispatch comes back `needsChat`
   // (deterministic lane can't apply it), the mutation is NOT escalated
   // mid-edit — it stays in the buffer and its identity is recorded here
@@ -554,14 +560,6 @@ export function useEditorEditing({
   }, [])
 
   /**
-   * True whenever no adapter is attached: the hook is disabled, unmounted, or
-   * between attachments. An in-flight iteration verify that resolves in that
-   * window must NOT open a dialog or start an agent turn; the UI that
-   * authorized the edit is gone. Paired with the session's signal, which stops
-   * the request itself rather than only ignoring its answer.
-   */
-  const disposedRef = useRef(true)
-  /**
    * The one status line the whole hook writes to.
    *
    * Declared HERE, above the session, rather than next to `saving` where the
@@ -675,14 +673,9 @@ export function useEditorEditing({
   // wiring + manifest lookup mirror what `<LivePrototypePane>` does so
   // the project-route inline mode behaves identically to /compose.
   useEffect(() => {
-    // React runs the PREVIOUS cleanup before this body, so on any
-    // disable/re-attach the flag is already true here. It is cleared only
-    // once an attachment actually follows, never on an early return.
-    disposedRef.current = true
     if (!enabled) return
     const iframe = iframeRef.current
     if (!iframe) return
-    disposedRef.current = false
     // A new session starts here. Anything still in flight from the previous
     // one is now stale, whatever it does next.
     //
@@ -931,7 +924,6 @@ export function useEditorEditing({
       // hear it, which is why this is ordered BEFORE `dispose()`. Via a ref
       // because the callback is defined far below this effect; see its
       // declaration.
-      disposedRef.current = true
       // WHICH REASON. `unmount` when React is taking the hook away. Otherwise
       // the effect is re-running for one of its dependencies, and the one that
       // means the DOCUMENT is being replaced is `prototypeUrl`: the iframe is
@@ -2562,13 +2554,12 @@ export function useEditorEditing({
    * release strands an edit the bridge is still holding, with no dialog
    * anywhere that mentions it.
    *
-   * Two calls, and the first is not redundant. `session.releaseModal` clears
-   * the scope prompt on its own when a SCOPE dialog was the one that just
-   * closed. This close also runs with the prompt open and the modal owned by
-   * the other dialog, and only the explicit null covers that case.
+   * One call. `session.releaseModal` clears the scope prompt itself when a
+   * SCOPE dialog was the one that just closed, and a prompt is only ever
+   * non-null while the scope dialog owns the modal, so there is no second case
+   * for an explicit `setScopePrompt(null)` to cover.
    */
   const closeIterationPrompt = useCallback(() => {
-    session.setScopePrompt(null)
     session.releaseModal()
   }, [session])
 
@@ -2620,279 +2611,43 @@ export function useEditorEditing({
   )
 
   /**
-   * Drive a pending iteration edit through the chosen scope. Used by
-   * both the dialog confirm path AND the remembered-scope fast path
-   * (when the user already picked "this row"/"all rows" for this edit
-   * kind earlier in the session). On "all-rows" we run today's
-   * applicator; on "this-row" we POST to the LLM fallback and buffer
-   * the resulting full-file rewrite as an OverwriteEdit.
+   * Drive a pending iteration edit through the chosen scope. Used by both the
+   * dialog confirm path AND the remembered-scope fast path (when the user
+   * already picked "this row" or "all rows" for this edit kind earlier in the
+   * session).
    *
-   * Every await in the "this-row" lane is followed by the same generation
-   * check. The lane holds a bridge draft across a hand-off POST, a proposal
-   * POST and a file write, and a teardown anywhere in there ends the session
-   * the draft belonged to. See `session.isCurrent`.
+   * The dispatch itself is `dispatchIteration` in
+   * `src/editor/edit-service/lanes/iteration-lane.ts`, which is a function of
+   * the session and takes no refs: every await in it goes through `ctx.step`,
+   * so an answer that arrives after the page changed is never read. What is
+   * left here is the wiring, and the adapter instance it captures.
    */
   const dispatchIterationEdit = useCallback(
     async (pending: PendingIterationEdit, scope: IterationScope) => {
-      // The session this dispatch belongs to, captured before the first await.
-      // The signal is captured with it, deliberately: read at request time it
-      // could be the NEXT session's live controller, and this lane's requests
-      // would then run on past the teardown they should have been cancelled by.
-      const generation = session.generation
-      const adapterSignal = session.signal
-      const staleSession = (): boolean =>
-        !session.isCurrent(generation)
-      if (scope === "all-rows") {
-        // Today's behavior — route back to the legacy handler with the
-        // same arguments. Each variant has a tiny re-entry point.
-        if (pending.editKind === "delete") {
-          dispatchDeleteEdit(pending.node, "definition")
-        } else if (pending.editKind === "prop") {
-          // Codex P1 #4: the legacy prop handler reads
-          // `useEditorStore.getState().editorSelection`, which may
-          // have drifted between dialog-open and dialog-confirm.
-          // Buffer the prop edit directly against the captured
-          // selection here instead of re-entering handlePropEdit.
-          dispatchAllRowsPropEdit(pending.selection, pending.propName, pending.value)
-        } else if (pending.editKind === "move") {
-          legacyHandleLayerMoveRef.current?.(pending.payload)
-        } else if (pending.editKind === "dom-text") {
-          // The intercept short-circuited handleEditTextField before
-          // adapter.setElementText was called, so the bridge hasn't
-          // mutated yet. Re-enter the dom-text dispatch now that the
-          // user confirmed "all rows" — the bridge mutates one DOM
-          // element for preview and captureDirectMutationPinned emits
-          // MUTATION_CAPTURED. Save-time, applySlotTextEdit rewrites
-          // the template literal which Vue re-renders to every row.
-          const adapter = adapterRef.current
-          if (adapter) {
-            if (pending.bridgePendingId) {
-              // The bridge already captured this edit and is holding it. Let it
-              // through as the shared-template rewrite. Re-typing via
-              // setElementText here would emit a SECOND mutation for the same
-              // keystroke and leave the first pending forever.
-              adapter.resolveMutationDisambiguation(
-                pending.bridgePendingId,
-                "all-instances",
-              )
-              // Resolved, so nothing may park or re-release it later.
-              session.releaseDraft(pending.bridgePendingId)
-            } else {
-              const targetSelector =
-                pending.field.selector ?? pending.selection.selector
-              adapter.setElementText(
-                targetSelector,
-                pending.value,
-                pending.field.textNodeIndex,
-              )
-            }
-          }
-        }
-        return
-      }
-
-      // The designer picked the narrower scope, so the bridge's draft — which
-      // is the SHARED-template edit — must never reach the edit route. It is
-      // released once this lane has actually WRITTEN the row edit, and parked
-      // in the deterministic dialog if it cannot (see `parkOrDefer`).
-      //
-      // It used to be cancelled here, before the request ran. Cancelling does
-      // not restore the typed text: `releaseUnownedPreview` returns early when
-      // there are no `previewOps`, and the in-page contentEditable path
-      // (`inspector.setCaptureTextMutation`) supplies none, because the
-      // designer typed into the DOM directly. So a failed proposal or a failed
-      // write left neither a source edit nor anything to retry, with the page
-      // still showing text that reached no file.
-      const failThisRow = (message: string) => {
-        // Reached from four places, three of them after an await. A park takes
-        // the draft out of the maps and puts a row in the deterministic dialog,
-        // so doing it for an ended session strands the NEW session's draft
-        // behind a question about an edit that no longer exists.
-        if (staleSession()) return
-        // `parkedReason` rather than a literal: it is the same status three
-        // exits now show, and it ends the refusal with a full stop first
-        // because these reasons come from three places (our own literals, an
-        // applicator's refusal text, a server's 400 body) and not all of them
-        // end in punctuation.
-        const parked = parkOrDefer(pending, parkedReason(message))
-        if (!parked) setSaveStatus(message)
-      }
-
-      // "this-row" → deterministic iteration-data edit, LLM fallback behind it.
-      // Build the payload that the prompt builder expects (one shape per
-      // operation).
-      // The VERIFIED loop's position when there is one, not the click's. See
-      // `thisRowTemplateLocation`.
-      const templateLocation = thisRowTemplateLocation(pending)
-      if (!templateLocation) {
-        failThisRow("Iteration edit refused: no source location on the selection.")
-        return
-      }
-      // Where the CLICK landed, which is the loop root only when the element
-      // the designer touched is itself the loop element.
-      const fieldLocation = iterationTemplateLocation(pending)
-      // A `remove` or a `reorder` dispatched for an element NESTED inside the
-      // row is not the edit the designer asked for. The row lane speaks in
-      // whole data entries, so it would delete the entire item they clicked
-      // inside, or reorder the rows using a `destIndex` counted among that
-      // element's own siblings. `patch` and `patch-text` name a field and are
-      // unaffected; see `thisRowOperationAllowed`.
-      if (!thisRowOperationAllowed(pending)) {
-        const loopLocation = pending.loopLocation
-        // `thisRowOperationAllowed` fails closed, so it also returns false when
-        // a position is MISSING, and the row-scoped hand-off needs both to say
-        // which element inside which loop. In practice a verified pending
-        // always carries one (a `loop` verdict without a position is an error
-        // now), so this is the defensive arm: park the edit and say so rather
-        // than dispatch a row operation on half the information.
-        if (!loopLocation || !fieldLocation) {
-          failThisRow("Iteration edit refused: no source location on the selection.")
-          return
-        }
-        const handOff = escalateToChatRef.current
-        const prompt = buildRowScopedEditHandoffPrompt(
-          describeRowScopedEdit(pending, loopLocation, fieldLocation),
-        )
-        // Bounded for the reason the other hand-off is: a thrown or unanswered
-        // POST is a refusal, and the park below keeps the edit answerable. The
-        // signal handed to `run` is the deadline's: an unanswered submission is
-        // cancelled, not merely stopped being waited for. The session's own
-        // signal goes in alongside it, so a teardown cancels the submission
-        // too.
-        const outcome = await settleHandOff(
-          (signal) => (handOff ? handOff(prompt, { signal }) : Promise.resolve(false)),
-          { signal: adapterSignal },
-        )
-        // The session ended while the POST was in flight: the teardown gave the
-        // draft back and the id names the next session's draft now, so neither
-        // the release below nor the park may run.
-        if (staleSession()) return
-        if (outcome === "accepted") {
-          // Chat owns the edit from here, so a held draft (in-page typing) goes.
-          releaseBridgeDraft(pending)
-          return
-        }
-        const failure = handOffFailureStatus(outcome)
-        if (!parkOrDefer(pending, failure.parked)) {
-          setSaveStatus(failure.released)
-        }
-        return
-      }
-      const pageSourceFile = useAppStore.getState().currentSourceFile
-      let payload
-      let description: string
-      if (pending.editKind === "delete") {
-        payload = { operation: "remove" as const }
-        description = `Remove row ${JSON.stringify(pending.iterationContext.key)} from the iteration data`
-      } else if (pending.editKind === "prop") {
-        payload = {
-          operation: "patch" as const,
-          updates: { [pending.propName]: serializePropValue(pending.value) },
-        }
-        description = `Patch row ${JSON.stringify(pending.iterationContext.key)}: set ${pending.propName}`
-      } else if (pending.editKind === "move") {
-        payload = {
-          operation: "reorder" as const,
-          toIndex: pending.payload.destIndex,
-        }
-        description = `Reorder row ${JSON.stringify(pending.iterationContext.key)} to index ${pending.payload.destIndex}`
-      } else if (pending.editKind === "dom-text") {
-        // The client deliberately does NOT name the property here. It knows the
-        // new string; it does not know which field of the row rendered it,
-        // because that answer lives in the source file. `patch-text` carries
-        // the value alone and the SERVER derives the key with the
-        // interpolation extractor (Vue or JSX, one shared refusal set).
-        //
-        // The predecessor to this line refused outright, on the correct
-        // reasoning that guessing a key would let the static endpoint write a
-        // literal `"Text (2)": "new"` into the data array. That reasoning
-        // stands; the fix was to stop guessing, not to keep refusing.
-        payload = { operation: "patch-text" as const, value: pending.value }
-        description = `Set the text of row ${JSON.stringify(pending.iterationContext.key)}`
-      } else {
-        return
-      }
-
-      setSaveStatus(null)
-      try {
-        const result = await requestIterationProposal({
-          editKind: pending.editKind,
-          templateLocation,
-          // The session's signal: a teardown cancels the proposal rather than
-          // leaving the server to compute a rewrite for a page that is gone.
-          signal: adapterSignal,
-          // The clicked element's OWN position, when the verify moved
-          // `templateLocation` up to the loop root. The data resolver needs
-          // the loop; the text-field extractor needs the field. Sending only
-          // one made a nested `<span>{item.email}</span>` patch `name`.
-          ...(fieldLocation && fieldLocation !== templateLocation
-            ? { fieldLocation }
-            : {}),
-          iterationContext: pending.iterationContext,
-          pageSourceFile,
-          payload,
-          description,
-        })
-        // The whole rest of this lane belongs to a session that has ended: the
-        // proposal was computed for source the page no longer shows, the draft
-        // went back to the bridge at teardown, and `adapterRef.current` below
-        // is a DIFFERENT adapter. Applying here writes the old overwrite into
-        // the new session.
-        if (staleSession()) return
-        if (!result.ok) {
-          failThisRow(`Iteration edit refused: ${result.reason}`)
-          return
-        }
-        const id = makeEditId()
-        const overwrite: StructuralEdit = {
-          kind: "overwrite",
-          id,
-          target: {
-            targetId: result.proposal.file,
-            selector: result.proposal.file,
-          },
-          file: result.proposal.file,
-          newSource: result.proposal.newSource,
-          baseHash: result.proposal.baseHash,
-        }
-        // Immediate dispatch: the proposal is a deterministic full-file
-        // rewrite; write it to the working tree so Vite HMR reflects it.
-        const adapter = adapterRef.current
-        if (!adapter) {
-          failThisRow("Editor adapter not ready. Try again in a moment.")
-          return
-        }
-        const applied = await adapter.applyEdit(
-          overwrite,
-          { signal: adapterSignal },
-        )
-        // The write itself spans a teardown window. `releaseBridgeDraft` below
-        // reads `adapterRef.current`, which is the NEXT adapter by now, and
-        // this pending's draft id is the id that adapter just issued to the
-        // designer's current edit. Cancelling it would take their live preview
-        // away and blame this row's write for it.
-        if (staleSession()) return
-        if (applied.kind === "failed") {
-          failThisRow(
-            `Iteration edit failed for ${result.proposal.file}: ${applied.reason}`,
-          )
-          return
-        }
-        // WRITTEN. Only now is the bridge's shared-template draft safe to drop:
-        // the row edit is on disk and HMR will render it.
-        releaseBridgeDraft(pending)
-        setSaveStatus(
-          `Iteration applied to ${result.proposal.file}: ${
-            result.proposal.explanation ?? description
-          }`,
-        )
-      } catch (err) {
-        failThisRow(`Iteration edit threw: ${errorMessage(err)}`)
-      }
+      await dispatchIteration(pending, scope, {
+        session,
+        handOff: handOffToChat,
+        // Read ONCE, here, before the lane's first await: an adapter that
+        // replaces this one mid-flight belongs to another session, and the
+        // lane must not write through it.
+        adapter: adapterRef.current,
+        parkOrDefer,
+        releaseDraft: releaseBridgeDraft,
+        setStatus: setSaveStatus,
+        requestProposal: requestIterationProposal,
+        pageSourceFile: () => useAppStore.getState().currentSourceFile,
+        // The three "all rows" re-entries. Each one re-enters an existing
+        // handler with the values CAPTURED on the pending edit, never with
+        // whatever the live selection has drifted to.
+        applyAllRowsDelete: (row) => dispatchDeleteEdit(row.node, "definition"),
+        applyAllRowsProp: (row) =>
+          dispatchAllRowsPropEdit(row.selection, row.propName, row.value),
+        applyAllRowsMove: (row) => legacyHandleLayerMoveRef.current?.(row.payload),
+      })
     },
-    // legacyHandle*Ref are stable refs; dispatchDeleteEdit is stable. The deps
-    // are intentionally minimal so the function identity stays stable.
-    // (The directive below is what actually suppresses the warning — this
+    // legacyHandleLayerMoveRef is a stable ref; dispatchDeleteEdit is stable.
+    // The deps are intentionally minimal so the function identity stays stable.
+    // (The directive below is what actually suppresses the warning - this
     // comment claimed to "suppress" it for a long time while doing nothing.)
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatchDeleteEdit],
@@ -3093,246 +2848,37 @@ export function useEditorEditing({
    * (the caller must not run the legacy path); the decision lands
    * asynchronously.
    *
-   * The verify step exists because the bridge's classification comes from
-   * DOM stamps, and N usages of one component look exactly like N loop rows.
-   * The 2026-09-08 incident: four hand-written cards, "all items" chosen,
-   * the component's root deleted by an AI rewrite of the wrong function.
-   * When source has no loop at the position, the question "this item or all
-   * items" has no right answer, so the edit goes to chat with the evidence
-   * and the agent asks a better one.
+   * The funnel itself is `interceptIteration` in
+   * `src/editor/edit-service/lanes/iteration-lane.ts`. It runs inside
+   * `session.run`, so the `gone()` closure this callback used to build out of
+   * three refs is the run context now, and the verify and the hand-off both
+   * race the session's own signal.
    */
   const interceptIterationEdit = useCallback(
     (pending: PendingIterationEdit): boolean => {
-      const location = iterationTemplateLocation(pending)
-      if (!location) {
-        releaseBridgeDraft(pending)
-        setSaveStatus("This edit has no source location, so it cannot be applied.")
-        return true
-      }
-      // Claim the latest slot FOR THIS TARGET. Responses are not ordered, so
-      // this is what tells a late answer that newer keystrokes on the same
-      // element have replaced it. Scoped by key so an edit somewhere else on
-      // the page cannot make this one stale.
-      const verifyKey = verifyKeyFor(pending)
-      const seq = session.nextVerifySeq(verifyKey)
-      const latestSeqForKey = (): number => session.latestVerifySeq(verifyKey, seq)
-      // Claim the DRAFT too. A newer intercept for the same in-page typing
-      // session shares the draft id and differs only by object identity, so
-      // this is what lets an older completion tell that the draft it is about
-      // to release is no longer its own to release.
-      const claimedDraftId = bridgeDraftIdOf(pending)
-      if (claimedDraftId) session.claimPending(claimedDraftId, pending)
-      // Claim the SESSION. Every continuation below is guarded on it, and the
-      // requests race against its signal.
-      const generation = session.generation
-      const adapterSignal = session.signal
-      // The window between "this verify started" and "this verify answered"
-      // is one in which the surface can go away. All three facts are read at
-      // resolve time, not captured now.
-      const gone = (): boolean =>
-        !session.isCurrent(generation) ||
-        disposedRef.current ||
-        adapterSignal.aborted
-      void verifyIterationLoop({
-        file: location.file,
-        line: location.line,
-        column: location.column,
-        signal: adapterSignal,
-      }).then(
-        async (outcome) => {
-          if (gone()) {
-            // NOTHING. Not even a release: the teardown that ended this session
-            // handed every held draft back already, and the next adapter starts
-            // its draft ids at `dom-pending-1` again, so cancelling "this"
-            // draft id now would cancel the new session's first edit. No status
-            // either, since the panel that would show it is gone too.
-            return
-          }
-          if (isStaleVerify(seq, latestSeqForKey())) {
-            // Release THIS draft only, and only when nothing live is still
-            // using it: neither a newer intercept nor the prompt currently
-            // open. A stale result and the survivor can describe one in-page
-            // typing session, because the pending object is rebuilt on every
-            // keystroke round trip, so they are different objects sharing a
-            // `bridgePendingId`. Cancelling here cancels theirs.
-            releaseBridgeDraftUnlessShared(pending)
-            setSaveStatus("A newer edit replaced this one.")
-            return
-          }
-          const action = decideAfterVerify({
-            outcome,
-            pending,
-            location,
-            remembered: iterationScopeMemoryRef.current[pending.editKind],
-          })
-          if (action.kind === "release-and-status") {
-            // Park, do not cancel. The loop check failing says nothing about
-            // what the designer typed, and cancelling a dom-text draft loses
-            // it with no record anywhere. See `releaseOrPark`.
-            releaseOrPark(pending, action.message)
-            return
-          }
-          if (action.kind === "hand-off") {
-            const handOff = escalateToChatRef.current
-            // AWAIT the hand-off before letting the draft go. The transport
-            // can refuse after the client-side guard accepted (an HTTP error,
-            // a dropped fetch), and releasing first meant the bridge had
-            // already dropped the live preview by the time we learned nothing
-            // was sent.
-            //
-            // BOUNDED, because the draft is held for the whole await: the page
-            // is showing a change that has reached no file and the designer
-            // cannot resolve it meanwhile. A late answer after the timeout
-            // resolves into a promise nobody holds, so it cannot release a
-            // draft this branch has already parked. The deadline also ABORTS
-            // the submission, so a turn accepted after the park cannot edit
-            // the same element behind the deterministic dialog.
-            //
-            // The session's own signal goes in as well, so a teardown cancels
-            // the submission rather than leaving a turn to be accepted for a
-            // page that is gone. See `settleHandOff`.
-            const outcome = await settleHandOff(
-              (signal) =>
-                handOff ? handOff(action.prompt, { signal }) : Promise.resolve(false),
-              { signal: adapterSignal },
-            )
-            // The session ending outranks everything: no release, for the
-            // reason the verify's own arm gives.
-            if (gone()) return
-            // Staleness next, and it decides the release. While this POST was
-            // in flight a newer intercept can have taken over the same draft
-            // (the user kept typing); releasing here would cancel THEIR draft,
-            // and the newer one is the one the user can still see.
-            if (isStaleVerify(seq, latestSeqForKey())) {
-              releaseBridgeDraftUnlessShared(pending)
-              return
-            }
-            if (outcome === "accepted") {
-              // Chat owns the edit from here, so the shared-template draft goes.
-              releaseBridgeDraft(pending)
-              return
-            }
-            // Refused or unanswered, and NOTHING was sent. Cancelling the draft
-            // here would throw away what the designer typed with no record of
-            // it in any file and no way to retry, so park it in the
-            // deterministic dialog instead: "this instance" or "all instances"
-            // is a worse question than the agent would have asked, but it is
-            // answerable.
-            const failure = handOffFailureStatus(outcome)
-            const parked = parkOrDefer(pending, failure.parked)
-            if (!parked) {
-              releaseBridgeDraft(pending)
-              setSaveStatus(failure.released)
-            }
-            return
-          }
-          // Carry the verified loop's position onto the pending edit. Both
-          // remaining exits dispatch or open a dialog that dispatches, and
-          // "this item" aims at the loop element, which is not necessarily
-          // the element that was clicked. Unconditional: both remaining
-          // actions carry a position, because a `loop` verdict requires one.
-          const verified: PendingIterationEdit = {
-            ...pending,
-            loopLocation: action.loopLocation,
-          }
-          if (action.kind === "remembered") {
-            logIterationScopeChoice({
-              editKind: pending.editKind,
-              scope: action.scope,
-              iterationContext: pending.iterationContext,
-              remembered: true,
-            })
-            void dispatchIterationEdit(verified, action.scope)
-            return
-          }
-          // An open prompt is never REPLACED. Two verifies can be in flight at
-          // once (verify is an HTTP round trip) and the sequence that decides
-          // staleness is per target, so two edits on two different elements
-          // both arrive here legitimately. Overwriting cancelled the first
-          // one's bridge draft, or made a delete or a move disappear with
-          // nothing said. See `promptCollision`.
-          //
-          // The SNAPSHOT, not the rendered value: two completions can land in
-          // the same tick, before React re-renders, and the second has to see
-          // the first one's prompt.
-          const collision = promptCollision(
-            session.getSnapshot().scopePrompt,
-            verified,
-          )
-          if (collision === "open-incoming") {
-            if (session.modalOwner === "scope") {
-              // The scope dialog is open AND `promptCollision` said to open the
-              // incoming one, so by construction it is the same in-page typing
-              // session with newer text. Replace the question in place: it is
-              // the same question, and going through `requestModal` would queue
-              // an edit behind its own dialog.
-              session.setScopePrompt(verified)
-              return
-            }
-            // Nothing open, or the MUTATION dialog is. That second case is the
-            // round-10 defect: this arm used to open the scope prompt on top of
-            // it, because it only ever asked about another scope prompt.
-            if (!requestModal({ kind: "scope", pending: verified })) {
-              setSaveStatus(DEFERRED_PARK_STATUS)
-            }
-            return
-          }
-          if (collision === "keep-open-park-incoming") {
-            // Typed in the page: the text survives in the mutation
-            // disambiguation dialog, which asks a blunter question than this
-            // one but is answerable and holds the same draft.
-            //
-            // DEFERRED, not asked now. Opening the mutation dialog fills
-            // `pendingDisambiguations`, and it would land on top of the scope
-            // dialog the designer is being asked to answer. This arm is only
-            // ever reached with that prompt open, so `parkOrDefer` always
-            // queues here; `releaseModal` opens it when the prompt closes. It
-            // goes through the choke point rather than queueing directly so
-            // this arm and the failure exits cannot drift apart.
-            if (
-              !parkOrDefer(
-                verified,
-                parkedReason("Another edit is waiting for a scope choice"),
-              )
-            ) {
-              // `promptCollision` only returns this arm for an edit with a
-              // draft id, but the bridge's payload for it can have gone
-              // (released by a stale completion) between then and here. Then
-              // there is nothing to hold, which is the same situation the
-              // drop-incoming arm below reports.
-              setSaveStatus(PROMPT_BUSY_STATUS)
-            }
-            return
-          }
-          setSaveStatus(PROMPT_BUSY_STATUS)
-        },
-      ).catch((err) => {
-        // A throw inside the `.then` body above (not an `outcome.kind ===
-        // "error"` result, an actual exception) must still release the
-        // draft and surface a status, or it leaves the bridge blocked with
-        // nothing shown. `UnlessShared`, because this is a late completion
-        // like any other: a newer intercept may already own the draft.
-        //
-        // The hand-off's own failures never arrive here; that branch catches
-        // them itself, so this message is only ever about the loop check.
-        if (gone()) {
-          // Nothing to park it in, no status to show, and no draft of ours left
-          // to release: the teardown released it, and the id belongs to the
-          // next session now. See the verify's own arm.
-          return
-        }
-        releaseOrParkUnlessShared(
-          pending,
-          `Could not check the source for a loop: ${errorMessage(err)}`,
-        )
+      // Not awaited: the caller needs its answer now, and the lane reports
+      // everything it decides through the callbacks below.
+      void interceptIteration(pending, {
+        session,
+        verify: verifyIterationLoop,
+        handOff: handOffToChat,
+        rememberedScope: (kind) => iterationScopeMemoryRef.current[kind],
+        releaseDraft: releaseBridgeDraft,
+        releaseDraftUnlessShared: releaseBridgeDraftUnlessShared,
+        parkOrDefer,
+        releaseOrPark,
+        releaseOrParkUnlessShared,
+        dispatch: dispatchIterationEdit,
+        setStatus: setSaveStatus,
+        logScopeChoice: logIterationScopeChoice,
       })
       return true
     },
     [
       session,
       dispatchIterationEdit,
+      handOffToChat,
       parkOrDefer,
-      requestModal,
       releaseBridgeDraft,
       releaseBridgeDraftUnlessShared,
       releaseOrPark,
@@ -5425,17 +4971,6 @@ export function useEditorEditing({
      */
     invalidateAttributionManifest,
   }
-}
-
-/**
- * Coerce a PropControlValue (string | number | boolean) into the JSON
- * payload value the iteration-data prompt expects. Identity for the
- * three primitive types; future PropControlValue expansions land here.
- */
-function serializePropValue(
-  v: PropControlValue,
-): string | number | boolean {
-  return v
 }
 
 /**
