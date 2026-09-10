@@ -18,7 +18,7 @@ import type { BridgeMutation, InspectionData } from "@/types/bridge"
  * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
  * so a handshake fixture has to carry both.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-10g-commit-selection"
+const CURRENT_BRIDGE_VERSION = "2026-09-10h-commit-names-page"
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -2540,15 +2540,76 @@ describe("BridgeFrameworkAdapter: a selection cannot outlive the click it answer
     expect(setup.postMessages).toEqual([])
   })
 
-  it("does not commit a click the designer made in the page", async () => {
-    // The page selected it itself before it told the shell. Committing it
-    // back would be the shell echoing the page's own selection at it.
+  it("commits a click the designer made in the page, exactly once", async () => {
+    // The page selected it itself before it told the shell, so this echo
+    // changes nothing on the page. It buys the ORDER: see the row below.
     emitFromBridge(setup.contentWindow, {
       type: "ELEMENT_INSPECTED",
       payload: makeInspectionData({ selector: "#header" }),
     })
 
-    expect(committedSets()).toEqual([])
+    expect(committedSets()).toEqual([["#header"]])
+  })
+
+  it("commits the empty set when the page reports a deselect", async () => {
+    emitFromBridge(setup.contentWindow, { type: "ELEMENT_DESELECTED" })
+
+    expect(committedSets()).toEqual([[]])
+  })
+
+  /**
+   * The reason the click is echoed at all.
+   *
+   * Reply A is accepted and committed. Then the designer clicks B, and the
+   * shell accepts that too. Messages to one page arrive in the order they
+   * were posted, so before the click was echoed the page could receive commit
+   * A after it had already drawn B on its own, and B would be taken away with
+   * nothing on screen to explain it. Now commit B follows commit A and the
+   * page ends where the shell is.
+   */
+  it("commits an accepted reply and the click that superseded it, in that order", async () => {
+    const read = adapter.selectBySelector("#panel")
+    const requestId = requestIdOf("INSPECT_SELECTOR")
+    setup.postMessages.length = 0
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#panel" }),
+      requestId,
+    })
+    expect((await read)?.selector).toBe("#panel")
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#clicked" }),
+    })
+
+    expect(committedSets()).toEqual([["#panel"], ["#clicked"]])
+    expect(heldSelector()).toBe("#clicked")
+  })
+
+  /**
+   * The commit names the page that produced the answer, not whichever page is
+   * on screen when it arrives.
+   */
+  it("commits with the document id of the page whose reply was accepted", async () => {
+    const read = adapter.selectBySelector("#panel")
+    const requestId = requestIdOf("INSPECT_SELECTOR")
+    setup.postMessages.length = 0
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#panel" }),
+      requestId,
+      documentId: "doc-a",
+    })
+    await read
+
+    const commits = setup.postMessages.filter(
+      (m) => (m as { type: string }).type === "COMMIT_SELECTION",
+    ) as { payload: { selectors: string[]; documentId: string } }[]
+    expect(commits).toHaveLength(1)
+    expect(commits[0].payload.documentId).toBe("doc-a")
   })
 
   it("commits the whole set a multi-select installed", async () => {

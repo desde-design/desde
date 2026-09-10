@@ -83,7 +83,7 @@ import {
  * bridge that does not stamp them would have every one of its answers read as
  * "not the current document" and dropped.
  */
-const REQUIRED_BRIDGE_VERSION = '2026-09-10g-commit-selection'
+const REQUIRED_BRIDGE_VERSION = '2026-09-10h-commit-names-page'
 
 /**
  * Phase 6 feature gate. Bridges below this version don't know about
@@ -506,7 +506,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
       // change put there, and there is nothing to put right.
       return null
     }
-    return this.applySelectionFromInspection(data, { commit: true })
+    return this.applySelectionFromInspection(data)
   }
 
   async selectMany(selectors: readonly string[]): Promise<Selection[]> {
@@ -601,7 +601,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     if (this.selectionEpoch !== epoch) {
       return null
     }
-    return this.applySelectionFromInspection(data, { commit: true })
+    return this.applySelectionFromInspection(data)
   }
 
   async getStructure(): Promise<OutlineNode[]> {
@@ -1522,8 +1522,11 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
           this.resolveRequest(message.requestId, message.payload)
         } else {
           // A click the designer made in the page. The page selected it
-          // itself before it said so, so this install commits nothing.
-          this.applySelectionFromInspection(message.payload, { commit: false })
+          // itself before it said so, and the commit that follows is still
+          // sent: it is the echo that keeps the order of commits equal to the
+          // order of accepted changes, so a commit for an earlier reply
+          // cannot land last and take the click away.
+          this.applySelectionFromInspection(message.payload)
         }
         break
       case 'ELEMENTS_INSPECTED':
@@ -1553,6 +1556,12 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
           break
         }
         this.currentSelection = null
+        // Echoed back, like every other accepted selection change. The page
+        // deselected itself before it said so, so this changes nothing there
+        // and the bridge's clear is idempotent. What it buys is the ORDER: a
+        // commit for a reply accepted just before this deselect cannot arrive
+        // afterwards and put a selection back on a page the designer cleared.
+        this.commitSelectionToBridge([])
         this.notifySelectionListeners()
         break
       case 'ELEMENT_INSPECTION_UNRESOLVED':
@@ -2088,34 +2097,57 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    *
    * This is the ONLY message that changes the page's own selection. The
    * inspects read and nothing more, so the page moves when, and only when,
-   * the shell has accepted an answer and said so here.
+   * the shell has accepted a selection change and said so here.
    *
-   * It is sent for an ACCEPTED reply and for `clearSelection`, never for a
-   * refused reply. A refused reply needs no message at all: the read that was
-   * refused never moved the page, so the page is already showing whatever the
-   * newer change put there.
+   * THE SHELL IS THE SINGLE WRITER OF SELECTION ORDER. Every accepted
+   * selection change is echoed here, whether the shell asked for it or not: a
+   * reply it solicited and accepted, a click the designer made in the page, a
+   * deselect the page reported, and `clearSelection`. Only a REFUSED reply
+   * sends nothing, because a refused read never moved anything.
    *
-   * It cannot echo. The commit carries no requestId and the bridge answers it
-   * with nothing, so there is no reply to install and nothing to refuse.
+   * That is what makes the order safe. Messages to one page arrive in the
+   * order they were posted, so the page ends on whichever change the shell
+   * accepted LAST. Before the click was echoed, a commit for an
+   * earlier-accepted reply could arrive after the click that superseded it
+   * and overwrite the click. Now the click's own commit follows that one, and
+   * the page ends where the shell is.
+   *
+   * It cannot loop. The commit carries no requestId and the bridge answers it
+   * with nothing, so there is no reply to install and nothing to refuse. The
+   * echo of a click is also free on the page: the bridge drops a commit that
+   * names the element it already has selected, rather than redrawing it.
    *
    * The set is the full multi-select, in order. The page has one selection
    * overlay and draws the first selector that resolves, which is the same
    * element the shell pins as its primary. The empty set clears.
+   *
+   * `documentId` is the page the shell believes it is talking to at SEND
+   * time, which for an accepted change is the page that produced it. A bridge
+   * running any other document drops the commit. The send goes through the
+   * iframe's `contentWindow`, and that object survives a navigation, so
+   * without the id a commit for the page that answered could be applied by
+   * the page that replaced it.
    */
   private commitSelectionToBridge(selectors: readonly string[]): void {
     this.send({
       type: 'COMMIT_SELECTION',
-      payload: { selectors: [...selectors] },
+      payload: {
+        selectors: [...selectors],
+        documentId: this.lastBridgeDocumentId ?? '',
+      },
     })
   }
 
   /**
    * Install an inspection as the current selection.
    *
-   * `commit` says whether the page still has to be told. It is TRUE for a
-   * reply the shell solicited and accepted, because the inspect that produced
-   * it only read. It is FALSE for a click the designer made in the page,
-   * because the page selected that element itself before it reported it.
+   * It ALWAYS commits. There used to be a `commit` option, false for a click
+   * the designer made in the page on the grounds that the page had already
+   * selected that element itself. That was true of the element and wrong
+   * about the ORDER: a commit for an earlier accepted reply could arrive
+   * after the click and overwrite it. The echo is cheap, because the bridge
+   * drops a commit that names what it already has selected. See
+   * `commitSelectionToBridge` for the whole argument.
    *
    * The order matters: install, then commit, then notify. The listeners run
    * last so that the epoch bump and the store write both follow the set the
@@ -2123,12 +2155,11 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    */
   private applySelectionFromInspection(
     data: InspectionData | null | undefined,
-    opts: { commit: boolean },
   ): Selection | null {
     if (!data) return null
     const selection = inspectionDataToSelection(data)
     this.currentSelection = selection
-    if (opts.commit) this.commitSelectionToBridge([selection.selector])
+    this.commitSelectionToBridge([selection.selector])
     this.notifySelectionListeners()
     return selection
   }
