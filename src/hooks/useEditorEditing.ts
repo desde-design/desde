@@ -3232,37 +3232,60 @@ export function useEditorEditing({
    * the refreshed stamp differs from the pre-write one. If HMR never
    * lands within the window, we stop — degraded to today's behavior
    * (409 → reselect), never worse.
+   *
+   * The retries are the session's own, on the `selection` lane, so the
+   * session cancels them at `end()`. They used to be bare `setTimeout` calls
+   * that read the adapter when they fired, and a refresh armed for one page
+   * could then run after that page had gone and re-select the same selector
+   * on the next one (finding C6). The adapter and the generation are both
+   * taken once, here, for the same reason.
    */
   const scheduleSelectionStampRefresh = useCallback((changedFiles: string[]) => {
     const selection = useEditorStore.getState().editorSelection
     const file = selection?.editTarget?.file
     if (!selection || !file || !changedFiles.includes(file)) return
+    const adapter = adapterRef.current
+    if (!adapter) return
+    const generation = session.generation
     const selector = selection.selector
     const priorHash = selection.editTarget?.fileHash
     const delays = [300, 800, 1600]
-    const attempt = (i: number): void => {
-      const timer = setTimeout(async () => {
-        const adapter = adapterRef.current
-        const current = useEditorStore.getState().editorSelection
-        if (!adapter || !current || current.selector !== selector) return
-        if (session.hasInFlight("prop") || session.hasInFlight("text")) {
-          if (i + 1 < delays.length) attempt(i + 1)
-          return
-        }
-        try {
-          const refreshed = await adapter.selectBySelector(selector)
-          const freshHash = refreshed?.editTarget?.fileHash
-          if (freshHash && freshHash !== priorHash) return // re-stamped
-        } catch {
-          // Iframe mid-render — next attempt retries.
-        }
-        if (i + 1 < delays.length) attempt(i + 1)
-      }, delays[i])
-      // Fire-and-forget by design; timers die with the page. Void to make
-      // the intent explicit to the linter.
-      void timer
+    // `arm` is a declaration so `attempt` can name it, and `attempt` is a
+    // const so it keeps the null check on `adapter` above (a hoisted
+    // declaration could be called before that check, so TypeScript drops the
+    // narrowing inside one). The key is the selector: a second refresh for the
+    // same selection replaces the pending retry instead of stacking one on it.
+    function arm(i: number): void {
+      session.schedule(
+        "selection",
+        selector,
+        generation,
+        () => void attempt(i),
+        delays[i],
+      )
     }
-    attempt(0)
+    const attempt = async (i: number): Promise<void> => {
+      const current = useEditorStore.getState().editorSelection
+      if (!current || current.selector !== selector) return
+      if (session.hasInFlight("prop") || session.hasInFlight("text")) {
+        if (i + 1 < delays.length) arm(i + 1)
+        return
+      }
+      try {
+        const outcome = await session.run(async (ctx) =>
+          ctx.step(adapter.selectBySelector(selector)),
+        )
+        // The page went away while the read was out. No retry: every later
+        // one would be reading the document that replaced this one.
+        if (outcome.stale || outcome.value.stale) return
+        const freshHash = outcome.value.value?.editTarget?.fileHash
+        if (freshHash && freshHash !== priorHash) return // re-stamped
+      } catch {
+        // Iframe mid-render. The next attempt retries.
+      }
+      if (i + 1 < delays.length) arm(i + 1)
+    }
+    arm(0)
   }, [session])
   const BRANCH_TEXT_DISPATCH_DEBOUNCE_MS = 500
   // Prop edits debounce on the same cadence (a slider/number drag fires many
@@ -4106,11 +4129,13 @@ export function useEditorEditing({
       unsubOverrideUnverified()
       unsubResize()
       dispatchBranchTextMutationRef.current = null
-      // Both lanes back to rest. The adapter is going away (a new mount or an
+      // Every lane back to rest. The adapter is going away (a new mount or an
       // unmount), so a debounce that fired afterwards would call into an
       // adapter that is gone, and a marker left behind would block the first
       // dispatch for that identity once a new adapter attaches. One call per
-      // lane, and neither touches the other.
+      // lane, and none of them touches another. `selection` is here for the
+      // first of those two reasons only: it holds no marker, and its retries
+      // captured the adapter that is going away.
       //
       // WHEN THIS RUNS, said correctly. React runs the previous cleanup before
       // it re-runs an effect whose dependencies changed, so the cleanup at the
@@ -4127,6 +4152,7 @@ export function useEditorEditing({
       // `end()` before it, which is the case the note below is about.
       session.resetLane("prop")
       session.resetLane("text")
+      session.resetLane("selection")
     }
     // `handleDragMove` / `handleInsertAtPoint` / `handleResize` are listed so a
     // future edit that makes one reactive cannot silently strand a stale
@@ -4141,7 +4167,7 @@ export function useEditorEditing({
     //
     // And re-running is NOT free — an earlier version of this comment claimed
     // "the cleanup just unsubscribes, so re-running is safe" and that is wrong.
-    // The cleanup below also takes BOTH lanes back to rest, which cancels every
+    // The cleanup below also takes EVERY lane back to rest, which cancels every
     // armed debounced write and drops every in-flight marker (the out-of-order
     // overwrite guard). Re-running mid-edit therefore DROPS debounced edits and
     // reopens the race those markers exist to close. If you make anything in

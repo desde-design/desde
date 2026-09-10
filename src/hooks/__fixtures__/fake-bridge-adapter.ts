@@ -311,8 +311,19 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   async getStructure(): Promise<OutlineNode[]> {
     return this.structure
   }
-  async selectBySelector(): Promise<Selection | null> {
-    return null
+  /**
+   * Every selector this adapter was asked to re-select, in order.
+   *
+   * The selection-stamp refresh after HMR is the only caller in these tests,
+   * and it is invisible from the hook's return value, so this list is the one
+   * place its retries can be counted.
+   */
+  readonly selectBySelectorCalls: string[] = []
+  /** What the next `selectBySelector` answers. Null unless a test sets one. */
+  selectBySelectorResult: Selection | null = null
+  async selectBySelector(selector: string): Promise<Selection | null> {
+    this.selectBySelectorCalls.push(selector)
+    return this.selectBySelectorResult
   }
   async selectMany(): Promise<Selection[]> {
     return []

@@ -16,6 +16,14 @@ it ended, and what a lane may do with an answer that arrives afterwards.
   scope prompt, the modal queue, the bridge drafts, the in-flight markers, the
   debounce timers and the verify sequences.
 - `lane-session.ts` is the prompt-free surface an edit lane is allowed to see.
+  It also owns `LANE_IDS`, the one list of lanes. The class has to loop over
+  them to cancel every timer and clear every marker, and a lane added to the
+  type alone would be missed by those loops.
+
+The lanes are `prop`, `text` and `selection`. The first two are writes. The
+third is the stamp refresh that re-reads the selected element after our own
+write landed: it arms timers and reads the other two lanes' markers, and takes
+no marker of its own.
 
 ## How a lane uses it
 

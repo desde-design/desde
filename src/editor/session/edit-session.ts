@@ -24,11 +24,12 @@ import {
   type ModalQueue,
   type ModalRequest,
 } from "./modal-queue"
-import type {
-  LaneId,
-  LaneSession,
-  SessionRunContext,
-  SessionRunResult,
+import {
+  LANE_IDS,
+  type LaneId,
+  type LaneSession,
+  type SessionRunContext,
+  type SessionRunResult,
 } from "./lane-session"
 import type { Mutation, PendingMutation, PropEdit } from "@/editor/core"
 
@@ -84,10 +85,12 @@ export class EditSession<Prompt> implements LaneSession {
   private readonly inFlight: Record<LaneId, Set<string>> = {
     prop: new Set(),
     text: new Set(),
+    selection: new Set(),
   }
   private readonly timers: Record<LaneId, Map<string, ReturnType<typeof setTimeout>>> = {
     prop: new Map(),
     text: new Map(),
+    selection: new Map(),
   }
   private readonly verifySeq = new Map<string, number>()
 
@@ -489,7 +492,7 @@ export class EditSession<Prompt> implements LaneSession {
 
   /** Every armed write, cancelled. Called by the session end. */
   cancelTimers(): void {
-    for (const lane of ["prop", "text"] as const) {
+    for (const lane of LANE_IDS) {
       for (const timer of this.timers[lane].values()) clearTimeout(timer)
       this.timers[lane].clear()
     }
@@ -563,8 +566,7 @@ export class EditSession<Prompt> implements LaneSession {
     this.rows = []
     this.drafts.clear()
     this.latestPending.clear()
-    this.inFlight.prop.clear()
-    this.inFlight.text.clear()
+    for (const lane of LANE_IDS) this.inFlight[lane].clear()
     this.cancelTimers()
     this.notify()
     return {

@@ -1642,4 +1642,109 @@ describe("useEditorEditing: the bridge session", () => {
     expect(recordFor()?.result?.status).toBe("fail")
     expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
   }, 30000)
+  it("does not re-select on the page that replaced the one it was scheduled for (finding C6)", async () => {
+    // After our own write lands, the open selection still carries the
+    // pre-write stamp, so the shell re-reads it from the post-HMR DOM. Those
+    // retries used to be bare `setTimeout` calls that read the adapter when
+    // they fired. A refresh armed on one page could therefore run after the
+    // page had been replaced and re-select the SAME selector on the new one,
+    // rebuilding the inspector around another document's element.
+    //
+    // The selection is emitted again on the new page on purpose. The effect
+    // cleanup clears it, and with no live selection carrying that selector the
+    // old code returns early, so the bug could not be staged at all.
+    //
+    // `shouldAdvanceTime` is required, not a preference: `waitFor` only drives
+    // a fake clock itself when a global `jest` exists, and under Vitest it
+    // does not, so a frozen clock hangs every wait in this file forever.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { rerender } = await mount()
+      const departed = lastFakeAdapter()
+      await act(async () => {
+        departed.emitSelection(styleSelection)
+      })
+      await waitFor(() =>
+        expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+      )
+      await act(async () => {
+        departed.emitCapture(capture("m1", "hello"))
+      })
+      const typing = await waitForApply()
+      await act(async () => {
+        // The write lands and names the selected element's file, which is what
+        // arms the refresh.
+        typing.settle(applied({ "src/App.vue": "hash-2" }))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      const armedAt = Date.now()
+      await changeDocument(rerender, "doc-b")
+      const arrived = lastFakeAdapter()
+      expect(arrived).not.toBe(departed)
+      await act(async () => {
+        arrived.emitSelection(styleSelection)
+        await Promise.resolve()
+      })
+      // The control. It says the page change really did land inside the first
+      // retry's window; without it a slow step here would let the retry fire
+      // before the boundary and the assertions below would prove nothing.
+      expect(Date.now() - armedAt).toBeLessThan(300)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      expect(arrived.selectBySelectorCalls).toEqual([])
+      expect(departed.selectBySelectorCalls).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("re-selects once on its own page and stops when the stamp has moved", async () => {
+    // The control for the test above, on a page that never changed: the
+    // refresh has to still happen, and it has to stop as soon as the file hash
+    // it reads back differs from the one the selection was carrying.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      await mount()
+      const adapter = lastFakeAdapter()
+      // What the re-read answers: the same element, re-stamped by HMR.
+      adapter.selectBySelectorResult = {
+        ...styleSelection,
+        editTarget: {
+          file: "src/App.vue",
+          line: 10,
+          column: 2,
+          fileHash: "hash-2",
+        },
+      }
+      await act(async () => {
+        adapter.emitSelection(styleSelection)
+      })
+      await waitFor(() =>
+        expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+      )
+      await act(async () => {
+        adapter.emitCapture(capture("m1", "hello"))
+      })
+      const typing = await waitForApply()
+      await act(async () => {
+        typing.settle(applied({ "src/App.vue": "hash-2" }))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300)
+      })
+      expect(adapter.selectBySelectorCalls).toEqual(["#panel"])
+      // The stamp moved, so the chain is finished: nothing at 800 ms or
+      // 1600 ms.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      expect(adapter.selectBySelectorCalls).toEqual(["#panel"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

@@ -205,6 +205,36 @@ describe("EditSession: the session itself", () => {
     }
   })
 
+  it("arms, cancels and resets the selection lane like any other (finding C6)", () => {
+    // The selection-stamp refresh is a lane too. Its retries used to be bare
+    // `setTimeout` calls outside the session, so a refresh armed for one page
+    // could fire after that page had gone and re-select the same selector on
+    // the next one.
+    vi.useFakeTimers()
+    try {
+      const session = newSession()
+      const ran = vi.fn()
+
+      session.schedule("selection", "#panel", session.generation, ran, 300)
+      vi.advanceTimersByTime(300)
+      expect(ran).toHaveBeenCalledTimes(1)
+
+      // The session ending is what cancels the chain now.
+      session.schedule("selection", "#panel", session.generation, ran, 300)
+      session.end("reconnect")
+      vi.advanceTimersByTime(300)
+      expect(ran).toHaveBeenCalledTimes(1)
+
+      // And the adapter going away takes the lane back to rest on its own.
+      session.schedule("selection", "#panel", session.generation, ran, 300)
+      session.resetLane("selection")
+      vi.advanceTimersByTime(300)
+      expect(ran).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("keeps verify sequences per target, so one edit cannot stale another (finding L3)", () => {
     const session = newSession()
     const a1 = session.nextVerifySeq("#a")
