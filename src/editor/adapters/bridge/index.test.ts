@@ -1560,3 +1560,104 @@ describe("BridgeFrameworkAdapter — a message names the document it came from",
     expect(failures).toEqual([])
   })
 })
+
+describe("BridgeFrameworkAdapter reports a new document's own ready", () => {
+  /**
+   * The bridge sends BRIDGE_READY as soon as its script runs, which is before
+   * the iframe's `load` event. The adapter adopts the new id there, so a
+   * capture made in the window between the two passes its document gate. The
+   * shell needs to hear about the change at the ready, or it stamps that
+   * capture with the departed page's session and then retires it at `load`.
+   */
+  let adapter: BridgeFrameworkAdapter
+  let setup: MockIframeSetup
+
+  async function handshake(documentId: string): Promise<void> {
+    const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId },
+    })
+    await initPromise
+  }
+
+  beforeEach(() => {
+    adapter = new BridgeFrameworkAdapter()
+    setup = makeMockIframe()
+  })
+
+  afterEach(async () => {
+    await adapter.dispose()
+  })
+
+  it("tells the listener once when a new document announces itself", async () => {
+    const seen: string[] = []
+    adapter.onDocumentChanged((documentId) => seen.push(documentId))
+
+    await handshake("doc-a")
+    // Nothing yet: that ready was one this adapter asked for.
+    expect(seen).toEqual([])
+
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
+    })
+    expect(seen).toEqual(["doc-b"])
+    // The id moved with it, so a listener that re-handshakes reads the new
+    // document rather than the one that went away.
+    expect(adapter.bridgeDocumentId).toBe("doc-b")
+  })
+
+  it("says nothing when the SAME document announces itself again", async () => {
+    // A page whose bridge re-emits its ready, which is the shape a PING
+    // answers. Nothing changed, so there is no boundary to report.
+    const seen: string[] = []
+    adapter.onDocumentChanged((documentId) => seen.push(documentId))
+
+    await handshake("doc-a")
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+    })
+    expect(seen).toEqual([])
+  })
+
+  it("says nothing for the ready that resolves a handshake it asked for", async () => {
+    // The other half of "once". A handshake reports its document through
+    // `init()` resolving, and the shell re-handshakes there; announcing the
+    // change as well would run two handshakes for one ready.
+    const seen: string[] = []
+    adapter.onDocumentChanged((documentId) => seen.push(documentId))
+
+    await handshake("doc-a")
+    await handshake("doc-b")
+    expect(seen).toEqual([])
+    expect(adapter.bridgeDocumentId).toBe("doc-b")
+  })
+
+  it("stops telling a listener that unsubscribed", async () => {
+    const seen: string[] = []
+    const unsubscribe = adapter.onDocumentChanged((id) => seen.push(id))
+    await handshake("doc-a")
+    unsubscribe()
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
+    })
+    expect(seen).toEqual([])
+  })
+
+  it("says nothing for a ready the version gate refused", async () => {
+    // A bridge the shell will not talk to must not be able to move the
+    // document, and so must not be able to end the live session either.
+    const seen: string[] = []
+    adapter.onDocumentChanged((id) => seen.push(id))
+    await handshake("doc-a")
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: "2020-01-01a", documentId: "doc-b" },
+    })
+    expect(seen).toEqual([])
+    expect(adapter.bridgeDocumentId).toBe("doc-a")
+  })
+})

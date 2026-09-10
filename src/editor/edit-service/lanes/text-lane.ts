@@ -14,7 +14,8 @@
  * The rule for both: every await goes through `ctx.step`, which will not give
  * up a value once the page the write was for has been replaced. The class lane
  * has the one asymmetry, and it is the reason it is in this file rather than
- * its own: it awaits BEFORE it takes its marker.
+ * its own: it AWAITS before it can build its edit, so it claims its marker
+ * first and holds it across that await.
  */
 import type { FrameworkAdapter, Mutation, Selection } from "@/editor/core"
 import type { LaneSession } from "@/editor/session/lane-session"
@@ -66,8 +67,9 @@ export interface TextLaneDeps {
   queueForAi: (identityKey: string) => void
   forgetEditId: (id: string) => void
   /**
-   * The class lane's ONE pre-marker await: where a style rule may be written.
-   * Stays in the hook because answering it asks the document.
+   * The class lane's one lookup before it can build an edit: where a style
+   * rule may be written. Stays in the hook because answering it asks the
+   * document, and the lane holds its in-flight marker across it.
    */
   resolveStyleDestination: () => Promise<
     { ok: true; opts: StyleEditOpts } | { ok: false; reason: string }
@@ -332,39 +334,45 @@ export async function dispatchClassMutation(
   const { session, adapter } = deps
   if (!session.isCurrent(generation)) return
   await session.run(async (ctx) => {
-    if (session.isInFlight("text", identityKey)) return
     const current = session
       .getSnapshot()
       .mutations.find((m) => deps.mutationKey(m) === identityKey)
     if (!current) return
     const dispatchedAfter = current.after
-    // THE ONE PRE-MARKER AWAIT, and the reason this lane is not the text lane:
-    // resolving where a style rule may be written can ask the DOCUMENT. A page
-    // replaced in that window makes both the answer and the override id below
-    // name a document that is gone, so this is a `ctx.step` like every other
-    // await rather than a hand-placed check after it.
-    const resolved = await ctx.step(deps.resolveStyleDestination())
-    if (resolved.stale) return
-    const destination = resolved.value
-    if (!destination.ok) {
-      deps.setStatus(`Inline style edit failed: ${destination.reason}`)
-      deps.resolveOverride(current.id, "failed", destination.reason)
-      return
-    }
-    const edit = buildStyleEdit(current, destination.opts)
-    if (!edit) return
-    if (isUnsupportedStyleBuild(edit)) {
-      deps.setStatus(`Inline style edit failed: ${edit.unsupported}`)
-      // The applicator cannot express this edit at all, so the write never
-      // landed. Revert the live class preview the bridge is holding under
-      // `current.id`, which is the id the override store registered when the
-      // classes were set.
-      deps.resolveOverride(current.id, "failed", edit.unsupported)
-      return
-    }
-    session.markInFlight("text", identityKey)
-    deps.setOverrideInFlight?.(current.id, true)
+    // THE MARKER IS CLAIMED FIRST, and claimed rather than tested.
+    //
+    // This lane is not the text lane because it AWAITS before it writes:
+    // resolving where a style rule may be written can ask the DOCUMENT. An
+    // `isInFlight` test in front of that await let two dispatches for one
+    // identity both pass while the first lookup was still out, so both wrote,
+    // and if the newer write landed first the older value won on disk.
+    // `markInFlight` asks and takes in one step, so exactly one of the two
+    // gets past this line.
+    if (!session.markInFlight("text", identityKey)) return
     try {
+      // The lookup sits INSIDE the claim, so a refusal, an answer that
+      // outlived the page, or a throw all give the marker back through the
+      // `finally` at the bottom.
+      const resolved = await ctx.step(deps.resolveStyleDestination())
+      if (resolved.stale) return
+      const destination = resolved.value
+      if (!destination.ok) {
+        deps.setStatus(`Inline style edit failed: ${destination.reason}`)
+        deps.resolveOverride(current.id, "failed", destination.reason)
+        return
+      }
+      const edit = buildStyleEdit(current, destination.opts)
+      if (!edit) return
+      if (isUnsupportedStyleBuild(edit)) {
+        deps.setStatus(`Inline style edit failed: ${edit.unsupported}`)
+        // The applicator cannot express this edit at all, so the write never
+        // landed. Revert the live class preview the bridge is holding under
+        // `current.id`, which is the id the override store registered when the
+        // classes were set.
+        deps.resolveOverride(current.id, "failed", edit.unsupported)
+        return
+      }
+      deps.setOverrideInFlight?.(current.id, true)
       // Disk truth first, then staleness, for the same reason as the text lane.
       const write = adapter.applyEdit(edit, { signal: ctx.signal }).then((result) => {
         if (result.kind === "applied" && result.newHashes) {

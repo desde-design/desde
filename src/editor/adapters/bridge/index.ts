@@ -230,6 +230,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    * `bridgeDocumentId` and `shouldEndSessionOnHandshake`.
    */
   private lastBridgeDocumentId: string | null = null
+  private readonly documentChangedListeners = new Set<(documentId: string) => void>()
   private readonly mutationCapturedListeners = new Set<MutationCapturedListener>()
   private readonly dragMoveListeners = new Set<(move: DragMoveRequest) => void>()
   private readonly insertAtPointListeners = new Set<(req: InsertAtPointRequest) => void>()
@@ -385,6 +386,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     }
     this.lastBridgeVersion = null
     this.lastBridgeDocumentId = null
+    this.documentChangedListeners.clear()
     this.mutationCapturedListeners.clear()
     this.dragMoveListeners.clear()
     this.insertAtPointListeners.clear()
@@ -1161,6 +1163,29 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     }
   }
 
+  /**
+   * A DIFFERENT document announced itself, without the shell asking.
+   *
+   * The bridge sends BRIDGE_READY as soon as its script runs, which is well
+   * before the iframe's `load` event. The shell used to learn about the new
+   * page only at `load`, and in the window between the two this adapter had
+   * already adopted the new document id while the shell was still holding the
+   * old page's session. A capture made in that window passed the adapter's own
+   * document gate and was then stamped with the departed session, so the
+   * handshake at `load` retired it and told the designer their edit was
+   * discarded, on the page they were looking at.
+   *
+   * The listener is how the shell hears about it at the READY instead. It runs
+   * only for an UNSOLICITED ready: a ready this adapter asked for is reported
+   * through `init()` resolving, and the shell re-handshakes there.
+   */
+  onDocumentChanged(listener: (documentId: string) => void): AdapterSubscription {
+    this.documentChangedListeners.add(listener)
+    return () => {
+      this.documentChangedListeners.delete(listener)
+    }
+  }
+
   // ────────────────────────── postMessage plumbing ──────────────────────────
 
   private send(message: ShellToBridgeMessage): void {
@@ -1630,12 +1655,34 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
       return
     }
     this.lastBridgeVersion = version ?? null
+    // Read BEFORE the id moves, and read here rather than in the notify below:
+    // a ready this adapter is waiting on has a live `bridgeReadyResolve`, and
+    // resolving it is what tells the shell to re-handshake. Announcing the
+    // change as well would run two handshakes for one ready.
+    const previousDocumentId = this.lastBridgeDocumentId
+    const unsolicited = this.bridgeReadyResolve === null
     // Only from an ACCEPTED ready, below the guards above: a bridge the shell is
     // refusing to talk to must not be able to move the document id and so end
     // the live session.
     this.lastBridgeDocumentId = documentId
     if (this.bridgeReadyResolve) {
       this.bridgeReadyResolve()
+    }
+    if (unsolicited && documentId !== previousDocumentId) {
+      this.notifyDocumentChanged(documentId)
+    }
+  }
+
+  private notifyDocumentChanged(documentId: string): void {
+    for (const listener of this.documentChangedListeners) {
+      try {
+        listener(documentId)
+      } catch (err) {
+        console.warn(
+          '[BridgeFrameworkAdapter] document-changed listener threw:',
+          err,
+        )
+      }
     }
   }
 

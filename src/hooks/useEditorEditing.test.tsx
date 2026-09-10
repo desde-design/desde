@@ -505,6 +505,57 @@ describe("useEditorEditing: the bridge session", () => {
     expect(adapter.applies).toHaveLength(1)
   })
 
+  it("starts the new session at the new document's own ready, before `load` (round-1 item 1)", async () => {
+    // THE WINDOW BETWEEN THE TWO. The bridge announces itself as soon as its
+    // script runs, and the iframe's `load` event comes later. The adapter
+    // adopted the new document id at the ready, so a capture made in that
+    // window passed its document gate; the shell did not start the new session
+    // until `load`, so that capture was stamped with the OLD session and the
+    // handshake at `load` retired it. The designer was told an edit they had
+    // just made on the page in front of them was discarded.
+    await mount()
+    const adapter = lastFakeAdapter()
+    // The departing page is holding one buffered edit, so the boundary is
+    // visible: the line below names what IT lost, and nothing else.
+    await act(async () => {
+      adapter.emitCapture(capture("m1", "hello"))
+    })
+    await waitForApply()
+    // The new document announces itself. No `load` event, and no re-render:
+    // this is the same adapter, re-handshaking because it was told to.
+    FakeBridgeAdapter.nextDocumentIds = ["doc-b"]
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    // THE SESSION MOVED HERE. The one departed entry was retired at the ready.
+    // That is the observable form of "the session's document is doc-b now":
+    // the hook does not return its document id, and this is the same line the
+    // boundary used to write at `load` time.
+    await waitFor(() => expect(editing()?.saveStatus).toBe(DISCARDED_ONE))
+    // An edit on the page that is now on screen.
+    await act(async () => {
+      adapter.emitCapture(capture("m2", "world"))
+    })
+    // And the late `load` for that same document, which is a duplicate
+    // handshake and must cost the designer nothing.
+    const iframe = screen.getByTitle("Prototype")
+    await act(async () => {
+      iframe.dispatchEvent(new Event("load"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    // Unchanged: still the one line about the DEPARTED page's edit. Before the
+    // fix this read "2 pending edits were discarded", the second of them being
+    // the edit made on the page the designer was looking at.
+    expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+    // And it is still a live buffered edit: it reaches the adapter as its own
+    // write, on the session that owns it.
+    const second = await waitForApply(1)
+    const bundle = second.edit as unknown as { mutations: Mutation[] }
+    expect(bundle.mutations.map((m) => m.id)).toEqual(["m2"])
+  })
+
   it("dispatches a captured mutation while the page stays (control)", async () => {
     // The control row. Every test below takes the page away mid-flight; this
     // one proves the same setup reaches the adapter when nothing happens to it.
@@ -568,14 +619,17 @@ describe("useEditorEditing: the bridge session", () => {
     expect(pending.signal?.aborted).toBe(true)
   })
 
-  it("does nothing with an answer that arrives after the page changed (pin for finding V2: the retired entry is already gone; the failure arm is the signal)", async () => {
-    // A PIN, not the guard's proof. The page change retires the departed
-    // document's buffered entry before this answer lands, so the reconcile
-    // below finds nothing to act on and these assertions hold whether or not
-    // the lane narrows `stale` first. Kept because it is the success half of
-    // the boundary and a regression that DID write into the new document would
-    // still be caught here. The test below it, which settles the same apply as
-    // a failure, is the one that fails without `ctx.step`.
+  it("leaves the new page's edit alone when the departed page's write answers success (finding V2)", async () => {
+    // WHAT MAKES THIS A SIGNAL. The page change retires the departed entry, so
+    // settling the old write against an EMPTY buffer proves nothing: the
+    // reconcile finds nothing either way. So the new document gets an entry
+    // with the SAME identity first (same selector, same instance path, same
+    // kind), which is what the designer typing in the same field on the new
+    // page produces. The departed write's reconcile matches on that identity,
+    // and without `ctx.step` narrowing `stale` first it acts on the new page's
+    // entry: it drops it, or it rebases its `before` to the departed page's
+    // value and re-arms the timer, which cancels the debounce that would have
+    // written it.
     const { rerender } = await mount()
     await act(async () => {
       lastFakeAdapter().emitCapture(capture("m1", "hello"))
@@ -583,14 +637,29 @@ describe("useEditorEditing: the bridge session", () => {
     const pending = await waitForApply()
     await changeDocument(rerender, "doc-b")
     const statusAfterReset = editing()?.saveStatus
-    const appliesBefore = lastFakeAdapter().applies.length
+    const arriving = lastFakeAdapter()
+    // The same field, typed again on the page that replaced it.
+    await act(async () => {
+      arriving.emitCapture(capture("m1", "goodbye"))
+    })
     await act(async () => {
       pending.settle(applied({ "src/App.vue": "v2" }))
       await Promise.resolve()
     })
-    // No status of its own, and no second write into the new document.
+    // No status of its own.
     expect(editing()?.saveStatus).toBe(statusAfterReset)
-    expect(lastFakeAdapter().applies).toHaveLength(appliesBefore)
+    // The new page's entry is still armed and still what the designer typed:
+    // it reaches the arriving adapter untouched. `before` is the capture's own
+    // "a", NOT the departed write's "hello" rebased onto it.
+    const second = await waitForApply()
+    const bundle = second.edit as unknown as { mutations: Mutation[] }
+    expect(bundle.mutations).toHaveLength(1)
+    expect(bundle.mutations[0]!.id).toBe("m1")
+    expect(bundle.mutations[0]!.before).toBe("a")
+    expect(bundle.mutations[0]!.after).toBe("goodbye")
+    // And exactly one write reached the new document: the departed answer
+    // neither wrote again nor re-armed anything of its own.
+    expect(arriving.applies).toHaveLength(1)
   })
 
   it("keeps a departed page's failure off the status bar (finding V2)", async () => {
@@ -1057,6 +1126,51 @@ describe("useEditorEditing: the bridge session", () => {
     // session has ended whatever the body did on its way there.
     expect(departing.settledOverrides).toEqual([])
     expect(departing.clearedOverrides).toBe(0)
+  })
+
+  it("keeps a departed save's stream chunks out of the dialog (round-1 item 3)", async () => {
+    // ONE REF, EVERY SAVE. The live text the save dialog renders accumulates
+    // into `saveStreamingTextRef`, and the request that feeds it keeps
+    // streaming for as long as the server takes, which can be past the page
+    // change that ended this save's session. A chunk delivered afterwards used
+    // to append to that shared ref and push it into state, so the departed
+    // save's text appeared under the next save's dialog.
+    const { rerender } = await mount()
+    const departing = lastFakeAdapter()
+    await act(async () => {
+      departing.emitCapture(capture("m1", "hello"))
+    })
+    const typing = await waitForApply()
+    await act(async () => {
+      typing.settle(needsChat())
+      await Promise.resolve()
+    })
+    const save = await startSave()
+    const saveApply = await waitForApply(1)
+    // THE CONTROL. While the page is still there, a chunk reaches the dialog.
+    await act(async () => {
+      saveApply.emitLLMStart()
+      saveApply.emitLLMDelta("thinking")
+    })
+    await waitFor(() => expect(editing()?.saveStreamingText).toBe("thinking"))
+    await changeDocument(rerender, "doc-b")
+    // The same request, still streaming, now answering to nobody.
+    await act(async () => {
+      saveApply.emitLLMStart()
+      saveApply.emitLLMDelta(" about a page that has gone")
+      // Past the 33 ms flush cadence, so a chunk that WAS accepted would have
+      // been pushed into state by now rather than merely being pending.
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    })
+    expect(editing()?.saveStreamingText).toBe("thinking")
+    await act(async () => {
+      saveApply.settle(applied())
+      await save.settled
+    })
+    expect(save.outcome()?.ok).toBe(false)
+    // Still untouched after the save reported the page change: neither the
+    // late start nor the late delta rewrote the buffer behind it.
+    expect(editing()?.saveStreamingText).toBe("thinking")
   })
 
   it("gives up on a save-time hand-off that never answers (finding N6)", async () => {

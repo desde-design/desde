@@ -913,6 +913,27 @@ export function useEditorEditing({
       runHandshake()
     }
 
+    /**
+     * The NEW document announced itself, and `load` has not fired yet.
+     *
+     * The bridge sends its READY as soon as its script runs, and the adapter
+     * adopts the new document id there. Until this listener existed the shell
+     * did not start the new session until the iframe's `load` event, and a
+     * capture made in between passed the adapter's document gate and was then
+     * stamped with the OLD session's generation. The handshake at `load` ended
+     * that session and retired the capture, so the designer was told an edit
+     * they had just made on the page in front of them was discarded.
+     *
+     * The same handshake path runs here, so the boundary is still decided in
+     * one place. The `load` event that follows finds the same document and is
+     * a duplicate: `start` answers it with a resume plan, and re-arming a
+     * debounce that is already armed just re-debounces it.
+     */
+    const onDocumentChanged = () => {
+      runHandshake()
+    }
+
+    const unsubDocumentChanged = adapter.onDocumentChanged(onDocumentChanged)
     iframe.addEventListener("load", onIframeLoad)
     runHandshake()
 
@@ -947,6 +968,7 @@ export function useEditorEditing({
         cancelWithBridge: true,
       })
       iframe.removeEventListener("load", onIframeLoad)
+      unsubDocumentChanged()
       treeUpdateUnsubRef.current?.()
       treeUpdateUnsubRef.current = null
       unsubSelection()
@@ -4013,12 +4035,19 @@ export function useEditorEditing({
       // dispatch for that identity once a new adapter attaches. One call per
       // lane, and neither touches the other.
       //
-      // This cleanup never runs for the teardown-time `adapterReadyMarker`
-      // bump. That render's body returns early at `if (!adapter) return` above,
-      // so no subscription is registered and there is nothing to clean up.
-      // The early return is load-bearing: were this cleanup to run then, it
-      // would clear the markers and the armed timers that W2/X2 exist to keep,
-      // and the buffered edits held over a plain detach would never re-arm.
+      // WHEN THIS RUNS, said correctly. React runs the previous cleanup before
+      // it re-runs an effect whose dependencies changed, so the cleanup at the
+      // teardown-time `adapterReadyMarker` bump is the PREVIOUS run's, and it
+      // does run. An earlier version of this comment claimed it did not.
+      //
+      // Nothing depends on it being skipped. W2 and X2 do not need timers to
+      // survive a detach: `session.end()` cancels every timer and clears both
+      // lanes whatever its reason, and what re-arms the kept entries is the
+      // next handshake's resume plan, not a timer left running. So on the
+      // teardown path these two calls are a no-op after the end that already
+      // happened. Where they matter is the other path: this effect re-running
+      // on one of its own dependencies while the session stays live, with no
+      // `end()` before it, which is the case the note below is about.
       session.resetLane("prop")
       session.resetLane("text")
     }
@@ -4570,6 +4599,10 @@ export function useEditorEditing({
             // without re-rendering the whole dialog per token.
             streamFlushTimer = setTimeout(() => {
               streamFlushTimer = null
+              // THE PAGE, again, and at fire time. The session can end in the
+              // 33 ms between arming this and its callback, and the buffer it
+              // would push is the departed save's.
+              if (!ctx.current) return
               setSaveStreamingText(saveStreamingTextRef.current)
             }, 33)
           }
@@ -4596,7 +4629,14 @@ export function useEditorEditing({
               ...(Object.keys(baseHashes).length > 0 ? { baseHashes } : {}),
             },
             {
+              // BOTH ANSWER THE PAGE FIRST. The stream buffer is one ref
+              // shared by every save, and this request keeps streaming for as
+              // long as the server takes, which can be past the page change
+              // that ended this save's session. A chunk that lands afterwards
+              // used to append to that ref and render the departed save's text
+              // inside the NEXT save's dialog.
               onLLMStreamStart: () => {
+                if (!ctx.current) return
                 // Reset on start so a previous save's tail doesn't
                 // contaminate the new run. (We also reset above on
                 // dispatch, but the start event arrives only AFTER the
@@ -4606,6 +4646,7 @@ export function useEditorEditing({
                 setSaveStreamingText('')
               },
               onLLMStreamDelta: (delta) => {
+                if (!ctx.current) return
                 saveStreamingTextRef.current += delta
                 flushStreamSoon()
               },

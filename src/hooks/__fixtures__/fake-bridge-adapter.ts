@@ -12,6 +12,7 @@
  */
 import type {
   AdapterSubscription,
+  ApplyEditOpts,
   DisambiguationChoice,
   DragMoveRequest,
   EditResult,
@@ -32,6 +33,17 @@ export interface RecordedApply {
   signal: AbortSignal | undefined
   settle: (result: EditResult) => void
   fail: (reason: string) => void
+  /**
+   * The live-stream callbacks this request was handed, so a test can deliver a
+   * chunk itself.
+   *
+   * The server streams the LLM's answer while the request is open, and the
+   * page can be replaced in the middle of that. There is no other way to stage
+   * a chunk arriving after the boundary: the transport is stubbed out here, so
+   * nothing else would ever call these.
+   */
+  emitLLMStart: (info?: { model: string; mutationCount: number }) => void
+  emitLLMDelta: (delta: string) => void
 }
 
 type Listener<T> = (value: T) => void
@@ -104,6 +116,7 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   private readonly captureListeners = new Set<Listener<Mutation>>()
   private readonly awaitingListeners = new Set<Listener<PendingMutation>>()
   private readonly treeListeners = new Set<() => void>()
+  private readonly documentChangedListeners = new Set<Listener<string>>()
 
   constructor() {
     instances.push(this)
@@ -126,16 +139,16 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   }
 
   /** The apply parks until the test settles it. */
-  applyEdit(
-    edit: StructuralEdit,
-    opts?: { signal?: AbortSignal },
-  ): Promise<EditResult> {
+  applyEdit(edit: StructuralEdit, opts?: ApplyEditOpts): Promise<EditResult> {
     return new Promise<EditResult>((resolve) => {
       this.applies.push({
         edit,
         signal: opts?.signal,
         settle: resolve,
         fail: (reason) => resolve({ kind: "failed", reason }),
+        emitLLMStart: (info) =>
+          opts?.onLLMStreamStart?.(info ?? { model: "test-model", mutationCount: 1 }),
+        emitLLMDelta: (delta) => opts?.onLLMStreamDelta?.(delta),
         // `applied` results are built by the test with its own helper, which
         // fills in `appliedEditId` and `affectedTargetIds`; both are required.
       })
@@ -172,6 +185,24 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
     }
   }
 
+  /**
+   * The shell hearing that a DIFFERENT document announced itself, without the
+   * shell having asked for a handshake.
+   *
+   * Not on `FrameworkAdapter`: it is a `BridgeFrameworkAdapter` member, like
+   * the live-preview pokes below. This fixture does not run the real adapter's
+   * postMessage router at all, so what it models is the CONTRACT the hook is
+   * wired to: adopt the new id, then tell the shell. That the real adapter
+   * emits exactly there, once, and not during a handshake it asked for, is
+   * covered by `src/editor/adapters/bridge/index.test.ts`.
+   */
+  onDocumentChanged(listener: Listener<string>): AdapterSubscription {
+    this.documentChangedListeners.add(listener)
+    return () => {
+      this.documentChangedListeners.delete(listener)
+    }
+  }
+
   /** Test drivers. */
   emitCapture(mutation: Mutation): void {
     for (const listener of this.captureListeners) listener(mutation)
@@ -187,6 +218,20 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
 
   emitTreeUpdate(): void {
     for (const listener of this.treeListeners) listener()
+  }
+
+  /**
+   * An UNSOLICITED bridge ready from `documentId`, i.e. the new page
+   * announcing itself before the iframe's `load` event.
+   *
+   * Same order as the real adapter's `handleBridgeReady`: the id is adopted
+   * first, so a listener that re-handshakes reads the NEW document, and only
+   * then are the listeners told.
+   */
+  emitReady(documentId: string): void {
+    if (documentId === this.documentId) return
+    this.documentId = documentId
+    for (const listener of this.documentChangedListeners) listener(documentId)
   }
 
   /** Everything else the hook calls, as no-ops that record nothing. */

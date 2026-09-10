@@ -241,10 +241,15 @@ describe("dispatchTextMutation", () => {
 })
 
 describe("dispatchClassMutation", () => {
-  it("stops before taking the marker when the destination lookup outlives the page", async () => {
-    // This lane awaits BEFORE it takes its marker: resolving where a style rule
-    // may be written can ask the document. A page replaced in that window makes
-    // both the answer and the override id name a document that is gone.
+  it("writes nothing when the destination lookup outlives the page, and holds no marker after it", async () => {
+    // This lane claims its marker BEFORE it resolves where a style rule may be
+    // written, because that lookup can ask the document and two dispatches
+    // must not both get past it. A page replaced in that window makes both the
+    // answer and the override id name a document that is gone, so the lookup
+    // is a `ctx.step` and the write never happens.
+    //
+    // The marker is gone afterwards either way: the session end emptied the
+    // set, and `clearInFlight` refuses to touch a set the next session owns.
     const destination = deferred<{ ok: true; opts: Record<string, never> }>()
     const { session, deps, applyEdit } = harness(Promise.resolve(applied()))
     deps.resolveStyleDestination = vi.fn(() => destination.promise)
@@ -258,6 +263,33 @@ describe("dispatchClassMutation", () => {
     expect(applyEdit).not.toHaveBeenCalled()
     expect(session.isInFlight("text", identity)).toBe(false)
     expect(deps.setStatus).not.toHaveBeenCalled()
+  })
+
+  it("refuses a second dispatch for one identity while the first is still resolving its destination", async () => {
+    // THE RACE THE CLAIM CLOSES. The marker used to be TESTED here and TAKEN
+    // after the destination lookup, so two dispatches for one identity could
+    // both pass the test while the first lookup was still out. Both then
+    // wrote, and if the newer write landed first the older value won on disk.
+    const destination = deferred<{ ok: true; opts: Record<string, never> }>()
+    const resolveDestination = vi.fn(() => destination.promise)
+    const { session, deps, applyEdit } = harness(Promise.resolve(applied()))
+    deps.resolveStyleDestination = resolveDestination
+    const m = classMutation("m1")
+    const identity = mutationIdentity(m)
+    session.updateMutations(() => [m])
+    const first = dispatchClassMutation(identity, session.generation, deps)
+    const second = dispatchClassMutation(identity, session.generation, deps)
+    // Asked ONCE, and asserted before the lookup answers: a dispatch runs
+    // synchronously as far as its first await, so the second one has already
+    // decided by here. It did not take the marker, so it never asked the
+    // document either.
+    expect(resolveDestination).toHaveBeenCalledTimes(1)
+    destination.resolve({ ok: true, opts: {} })
+    await Promise.all([first, second])
+    expect(applyEdit).toHaveBeenCalledTimes(1)
+    // And the marker is back, so the designer's next class edit on this
+    // element is not blocked by the dispatch that finished.
+    expect(session.isInFlight("text", identity)).toBe(false)
   })
 
   it("writes what buildStyleEdit produced, not an llm-patch", async () => {
