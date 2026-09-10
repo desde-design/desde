@@ -750,7 +750,20 @@ export type BridgeToShellMessage =
       requestId?: string
       documentId: string
     }
-  | { type: "ELEMENT_DESELECTED" }
+  /**
+   * The page dropped its own selection, and the shell drops its selection
+   * with it.
+   *
+   * `documentId` is required, and on the message rather than in a payload,
+   * because there is no payload to put it in. It was left unstamped for a
+   * while on the argument that clearing a selection writes nothing. What that
+   * missed is what the clear costs on the shell side: it is a selection
+   * change, so it cancels any selection read the page on screen has out, and
+   * it takes away the element the designer is looking at right now. A deselect
+   * from the page that has just been replaced would do both, and the page on
+   * screen never sent it, so nothing corrects it afterwards.
+   */
+  | { type: "ELEMENT_DESELECTED"; documentId: string }
   | {
       type: "STRUCTURE_CAPTURED"
       payload: { roots: OutlineNode[] }
