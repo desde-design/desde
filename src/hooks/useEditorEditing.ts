@@ -1364,12 +1364,16 @@ export function useEditorEditing({
         // down to read. That branch is about a read that WAS sent and came
         // back empty, which means something else entirely.
         //
-        // The store write is the whole clear, and it is what the code before
-        // this branch existed did (`git show 2136401`): the adapter is not
-        // called, because it was not called then either. What that leaves is
-        // the iframe still drawing its overlay, which is a divergence this
-        // branch inherited rather than introduced.
+        // THE PAGE IS CLEARED TOO. `clearSelection` sends the empty commit,
+        // which is the one message that changes what the page has selected.
+        // Before that message existed this branch wrote the store and nothing
+        // else, so the panels said nothing was selected while the iframe went
+        // on drawing its overlay. The store write stays as well, because it is
+        // the answer this call owes its caller and it does not depend on a
+        // listener having been registered, and it goes FIRST so that nothing
+        // this branch owes anyone depends on the await coming back.
         useEditorStore.getState().setEditorSelectionMany([])
+        await adapter.clearSelection()
         return []
       }
       // Through the session, like every other lane: the read is a round trip

@@ -545,9 +545,18 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
     return null
   }
   async setActive(): Promise<void> {}
+  /**
+   * How many times `clearSelection` was called.
+   *
+   * The harness has no postMessage to watch, so this stands in for the empty
+   * `COMMIT_SELECTION` the real adapter posts. The message itself is asserted
+   * in the adapter suite.
+   */
+  clearSelectionCalls = 0
   async clearSelection(): Promise<void> {
     // The real one nulls its selection and tells the listeners, which is a
     // selection change and moves the epoch.
+    this.clearSelectionCalls += 1
     this.notifySelection(null)
   }
   async exitDomEditMode(): Promise<void> {}

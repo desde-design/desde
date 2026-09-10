@@ -2603,11 +2603,14 @@ describe("useEditorEditing: the bridge session", () => {
     expect(useEditorStore.getState().editorSelectionMany).toEqual([])
   })
 
-  it("an empty pin_selections clears the selection without a round trip", async () => {
+  it("an empty pin_selections clears the store and the page without a round trip", async () => {
     // `pin_selections([])` is the documented way for the chat agent to clear
     // (`src/editor/agent-chat-sdk/system-prompt.ts`). The adapter returns for
     // an empty input without sending anything and without announcing, so if
-    // the hook does not write the store nothing clears at all.
+    // the hook does not write the store nothing clears at all. And the PAGE
+    // has to be cleared as well, which is what `clearSelection` is for: it
+    // posts the empty `COMMIT_SELECTION`, the one message that changes what
+    // the iframe has selected.
     FakeBridgeAdapter.parkSelectMany = true
     await mount()
     const adapter = lastFakeAdapter()
@@ -2633,8 +2636,10 @@ describe("useEditorEditing: the bridge session", () => {
       await Promise.resolve()
     })
 
-    // No read went out for it, and both store fields are empty.
+    // No read went out for it, both store fields are empty, and the page was
+    // told once.
     expect(adapter.parkedSelectManyReads).toHaveLength(1)
+    expect(adapter.clearSelectionCalls).toBe(1)
     expect(useEditorStore.getState().editorSelectionMany).toEqual([])
     expect(useEditorStore.getState().editorSelection).toBeNull()
   })

@@ -83,7 +83,7 @@ import {
  * bridge that does not stamp them would have every one of its answers read as
  * "not the current document" and dropped.
  */
-const REQUIRED_BRIDGE_VERSION = '2026-09-10f-deselect-document-id'
+const REQUIRED_BRIDGE_VERSION = '2026-09-10g-commit-selection'
 
 /**
  * Phase 6 feature gate. Bridges below this version don't know about
@@ -310,16 +310,14 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    * A read's own install still happens after its own check passes. Capturing
    * E+1 leaves `selectionEpoch` AT E+1, so the check on the reply compares
    * equal, and only then does `notifySelectionListeners` take it to E+2.
+   *
+   * A REFUSAL COSTS NOTHING NOW. An inspect does not move the page: it reads
+   * and replies, and the page changes only when the shell sends
+   * `COMMIT_SELECTION`. So refusing a reply is simply declining to install and
+   * declining to commit, and the page is left exactly as the newer change put
+   * it. There is no repair message and nothing to keep in step.
    */
   private selectionEpoch = 0
-  /**
-   * How many selection reads have gone out and not yet settled.
-   *
-   * It gates `resyncBridgeSelection` and nothing else. See that method for
-   * why a re-sync fired while another read is still out would refuse the
-   * answer that read is about to bring back.
-   */
-  private selectionReadsInFlight = 0
   private readonly documentChangedListeners = new Set<(documentId: string) => void>()
   private readonly mutationCapturedListeners = new Set<MutationCapturedListener>()
   private readonly dragMoveListeners = new Set<(move: DragMoveRequest) => void>()
@@ -494,24 +492,21 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     // sent after this one therefore holds a higher number and wins in either
     // reply order. See the `selectionEpoch` docblock.
     const epoch = ++this.selectionEpoch
-    this.selectionReadsInFlight += 1
-    let data: InspectionData | null
-    try {
-      data = await this.request({
-        type: 'INSPECT_SELECTOR',
-        payload: { selector },
-      })
-    } finally {
-      this.selectionReadsInFlight -= 1
-    }
+    const data = await this.request({
+      type: 'INSPECT_SELECTOR',
+      payload: { selector },
+    })
     if (this.selectionEpoch !== epoch) {
       // A newer selection, a newer read, or a deselection happened while this
       // one was out. The answer is about an element that is no longer the
       // newest, so it is not installed and it settles as null.
-      this.resyncBridgeSelection()
+      //
+      // NOTHING IS SENT. The inspect only read: the page's own selection was
+      // never moved by it, so the page is still showing whatever the newer
+      // change put there, and there is nothing to put right.
       return null
     }
-    return this.applySelectionFromInspection(data)
+    return this.applySelectionFromInspection(data, { commit: true })
   }
 
   async selectMany(selectors: readonly string[]): Promise<Selection[]> {
@@ -568,18 +563,12 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
       payload: { selectors: [...selectors] },
       requestId,
     } as ShellToBridgeMessage)
-    this.selectionReadsInFlight += 1
-    let items: InspectionData[]
-    try {
-      items = await promise
-    } finally {
-      this.selectionReadsInFlight -= 1
-    }
+    const items = await promise
     if (this.selectionEpoch !== epoch) {
       // The empty list is this read's null: the caller already treats "no
       // resolved selectors" as a clear rather than as "keep what you had", so
-      // nothing has to learn a new answer.
-      this.resyncBridgeSelection()
+      // nothing has to learn a new answer. And nothing is sent, for the
+      // reason `selectBySelector` gives: the read did not move the page.
       return []
     }
     const selections = items.map((d) => inspectionDataToSelection(d))
@@ -590,6 +579,9 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     // is meaningfully different from "previous selection still
     // applies".
     this.currentSelection = selections[0] ?? null
+    // The whole set, and the empty set on an empty result, because the page
+    // has to show exactly what the shell holds either way.
+    this.commitSelectionToBridge(selections.map((sel) => sel.selector))
     this.notifySelectionListeners()
     return selections
   }
@@ -602,21 +594,14 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     // went out. Once the designer has clicked elsewhere, that parent is not
     // the parent of anything on screen.
     const epoch = ++this.selectionEpoch
-    this.selectionReadsInFlight += 1
-    let data: InspectionData | null
-    try {
-      data = await this.request({
-        type: 'INSPECT_PARENT',
-        payload: { selector: current.selector },
-      })
-    } finally {
-      this.selectionReadsInFlight -= 1
-    }
+    const data = await this.request({
+      type: 'INSPECT_PARENT',
+      payload: { selector: current.selector },
+    })
     if (this.selectionEpoch !== epoch) {
-      this.resyncBridgeSelection()
       return null
     }
-    return this.applySelectionFromInspection(data)
+    return this.applySelectionFromInspection(data, { commit: true })
   }
 
   async getStructure(): Promise<OutlineNode[]> {
@@ -856,8 +841,13 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     // otherwise the next click on the same element takes the bridge's
     // toggle-deselect branch and emits ELEMENT_DESELECTED instead of a
     // fresh ELEMENT_INSPECTED, making re-selection feel broken.
-    this.send({ type: 'CLEAR_SELECTION' })
+    //
+    // The EMPTY COMMIT is that message now. It runs through the same
+    // `clearSelectedOnly` on the bridge as `CLEAR_SELECTION`, and using the
+    // one commit message here means every change the shell makes to the
+    // page's selection is the same message with a different set.
     this.currentSelection = null
+    this.commitSelectionToBridge([])
     this.notifySelectionListeners()
   }
 
@@ -1531,7 +1521,9 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         if (message.requestId) {
           this.resolveRequest(message.requestId, message.payload)
         } else {
-          this.applySelectionFromInspection(message.payload)
+          // A click the designer made in the page. The page selected it
+          // itself before it said so, so this install commits nothing.
+          this.applySelectionFromInspection(message.payload, { commit: false })
         }
         break
       case 'ELEMENTS_INSPECTED':
@@ -2092,59 +2084,51 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
   }
 
   /**
-   * Say the shell's selection to the bridge again, after a reply was refused.
+   * Tell the page which elements the shell now holds.
    *
-   * WHY IT IS NEEDED. The bridge commits its own `selectedElement` and draws
-   * the overlay when it handles `INSPECT_SELECTOR`, `INSPECT_MANY` or
-   * `INSPECT_PARENT`, and it does that BEFORE it replies. So a reply the epoch
-   * refuses leaves the iframe highlighting an element the shell does not hold,
-   * and the designer sees a selection nothing in the panels agrees with. This
-   * puts the shell's truth back on screen.
+   * This is the ONLY message that changes the page's own selection. The
+   * inspects read and nothing more, so the page moves when, and only when,
+   * the shell has accepted an answer and said so here.
    *
-   * WHY IT CANNOT PING-PONG. `HIGHLIGHT_COMPONENT` is not a solicited read: it
-   * carries no requestId, so the bridge answers it with an UNSOLICITED
-   * `ELEMENT_INSPECTED`, which lands on `applySelectionFromInspection` rather
-   * than on a pending request. That path installs and never refuses, so it
-   * cannot reach this method again. It re-installs the element the shell
-   * already holds and bumps the epoch once. `CLEAR_SELECTION` answers nothing
-   * at all, so the null arm is a single message with no reply.
+   * It is sent for an ACCEPTED reply and for `clearSelection`, never for a
+   * refused reply. A refused reply needs no message at all: the read that was
+   * refused never moved the page, so the page is already showing whatever the
+   * newer change put there.
    *
-   * WHY IT WAITS FOR THE OTHER READS. The bump that install makes would refuse
-   * a read that is still out, and that read is one the shell asked for on
-   * purpose: the designer would have picked an element and silently got
-   * nothing. So the re-sync only fires when the last read has settled, which
-   * is also the first moment the shell knows what its truth actually is.
+   * It cannot echo. The commit carries no requestId and the bridge answers it
+   * with nothing, so there is no reply to install and nothing to refuse.
    *
-   * ONE CASE WORTH NAMING. A page replacement refuses every parked read
-   * through `discardSelectionFromDepartedDocument`, which clears the selection
-   * first. The bridge that committed is gone by then, so the clear this sends
-   * reaches the SUCCESSOR page, where it is a no-op. It is not wrong there,
-   * because null really is the shell's truth after a page change.
-   *
-   * FOLLOW-UP. The proper fix is a protocol change: let the bridge answer an
-   * inspect without committing, and commit only when the shell accepts the
-   * answer. That is a bridge change and needs a version bump, so it is not
-   * done here.
+   * The set is the full multi-select, in order. The page has one selection
+   * overlay and draws the first selector that resolves, which is the same
+   * element the shell pins as its primary. The empty set clears.
    */
-  private resyncBridgeSelection(): void {
-    if (this.selectionReadsInFlight > 0) return
-    const current = this.currentSelection
-    if (current) {
-      this.send({
-        type: 'HIGHLIGHT_COMPONENT',
-        payload: { selector: current.selector },
-      })
-    } else {
-      this.send({ type: 'CLEAR_SELECTION' })
-    }
+  private commitSelectionToBridge(selectors: readonly string[]): void {
+    this.send({
+      type: 'COMMIT_SELECTION',
+      payload: { selectors: [...selectors] },
+    })
   }
 
+  /**
+   * Install an inspection as the current selection.
+   *
+   * `commit` says whether the page still has to be told. It is TRUE for a
+   * reply the shell solicited and accepted, because the inspect that produced
+   * it only read. It is FALSE for a click the designer made in the page,
+   * because the page selected that element itself before it reported it.
+   *
+   * The order matters: install, then commit, then notify. The listeners run
+   * last so that the epoch bump and the store write both follow the set the
+   * page has been given, rather than racing it.
+   */
   private applySelectionFromInspection(
     data: InspectionData | null | undefined,
+    opts: { commit: boolean },
   ): Selection | null {
     if (!data) return null
     const selection = inspectionDataToSelection(data)
     this.currentSelection = selection
+    if (opts.commit) this.commitSelectionToBridge([selection.selector])
     this.notifySelectionListeners()
     return selection
   }

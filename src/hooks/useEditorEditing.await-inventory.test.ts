@@ -61,9 +61,9 @@ const ALLOWED_BARE_AWAITS: readonly AllowedBareAwait[] = [
   },
   {
     snippet: "await adapter.clearSelection(",
-    sites: 1,
+    sites: 2,
     reason:
-      "Fire and forget. The store write that empties the multi-selection happens BEFORE this await, and nothing follows it. The resulting deselect comes back through the adapter's selection listener, which drops a reply from a departed document on its own.",
+      "Fire and forget, at both sites. The store write that empties the multi-selection happens BEFORE the await, and nothing follows it. The resulting deselect comes back through the adapter's selection listener, which drops a reply from a departed document on its own. The second site is the empty `pin_selections`, which clears the page as well as the store.",
   },
   {
     snippet: "await adapter.selectBySelector(",

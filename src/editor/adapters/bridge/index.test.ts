@@ -18,7 +18,7 @@ import type { BridgeMutation, InspectionData } from "@/types/bridge"
  * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
  * so a handshake fixture has to carry both.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-10f-deselect-document-id"
+const CURRENT_BRIDGE_VERSION = "2026-09-10g-commit-selection"
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -286,7 +286,7 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
     await expect(initPromise).rejects.toThrow(/disposed before handshake/)
   })
 
-  it("clearSelection sends CLEAR_SELECTION to the bridge before clearing local state", async () => {
+  it("clearSelection commits the empty set to the bridge before clearing local state", async () => {
     const target: AdapterTarget = { iframe: setup.iframe, origin: "*" }
     const initPromise = adapter.init(target)
     emitFromBridge(setup.contentWindow, {
@@ -301,8 +301,16 @@ describe("BridgeFrameworkAdapter — lifecycle", () => {
 
     await adapter.clearSelection()
 
-    const types = setup.postMessages.map((m) => (m as { type: string }).type)
-    expect(types).toContain("CLEAR_SELECTION")
+    // The empty commit is the clear. It runs through the same
+    // `clearSelectedOnly` on the bridge that `CLEAR_SELECTION` runs through,
+    // so the bridge still drops its own selectedElement reference and the
+    // next click on the same element is a fresh selection rather than the
+    // toggle-deselect branch.
+    const cleared = setup.postMessages.filter(
+      (m) => (m as { type: string }).type === "COMMIT_SELECTION",
+    )
+    expect(cleared).toHaveLength(1)
+    expect((cleared[0] as { payload: { selectors: string[] } }).payload.selectors).toEqual([])
     expect(listener).toHaveBeenCalledWith(null)
   })
 
@@ -2398,11 +2406,17 @@ describe("BridgeFrameworkAdapter: a selection cannot outlive the click it answer
       .map((m) => (m as { requestId: string }).requestId)
   }
 
-  /** The selectors the adapter re-asserted to the bridge, in order. */
-  function reassertedSelectors(): string[] {
+  /**
+   * Every set the adapter committed to the bridge, in order.
+   *
+   * A commit is the ONLY message that changes what the page has selected. So
+   * this list is what the iframe is showing, and an empty list is the
+   * assertion that the adapter left the page alone.
+   */
+  function committedSets(): string[][] {
     return setup.postMessages
-      .filter((m) => (m as { type: string }).type === "HIGHLIGHT_COMPONENT")
-      .map((m) => (m as { payload: { selector: string } }).payload.selector)
+      .filter((m) => (m as { type: string }).type === "COMMIT_SELECTION")
+      .map((m) => (m as { payload: { selectors: string[] } }).payload.selectors)
   }
 
   /**
@@ -2436,6 +2450,8 @@ describe("BridgeFrameworkAdapter: a selection cannot outlive the click it answer
     expect((await readB)?.selector).toBe("#b")
 
     expect(seen.map((s) => s?.selector)).toEqual(["#b"])
+    // One commit, for the element that won.
+    expect(committedSets()).toEqual([["#b"]])
     expect(heldSelector()).toBe("#b")
   })
 
@@ -2462,21 +2478,36 @@ describe("BridgeFrameworkAdapter: a selection cannot outlive the click it answer
     await expect(readA).resolves.toBeNull()
 
     expect(seen.map((s) => s?.selector)).toEqual(["#b"])
+    expect(committedSets()).toEqual([["#b"]])
     expect(heldSelector()).toBe("#b")
   })
 
   /**
-   * The bridge commits its own selectedElement when it handles the inspect,
-   * before it replies. A refusal therefore leaves the iframe drawing an
-   * element the shell does not hold, and the adapter has to say its truth
-   * again.
+   * The commit is what moves the page, and it goes out only for an answer the
+   * shell ACCEPTED.
    */
-  it("re-asserts the shell selection to the bridge when a reply is refused", async () => {
+  it("commits an accepted selection reply to the bridge", async () => {
+    const read = adapter.selectBySelector("#panel")
+    const requestId = requestIdOf("INSPECT_SELECTOR")
+    setup.postMessages.length = 0
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#panel" }),
+      requestId,
+    })
+    expect((await read)?.selector).toBe("#panel")
+
+    expect(committedSets()).toEqual([["#panel"]])
+  })
+
+  it("posts nothing to the bridge when a reply is refused", async () => {
     const parked = adapter.selectBySelector("#panel")
     const requestId = requestIdOf("INSPECT_SELECTOR")
 
-    // The designer clicks something else, so the shell now holds #header while
-    // the bridge is about to commit to #panel.
+    // The designer clicks something else. The page selected #header on its
+    // own when it did, and #panel was only ever READ, so the page is already
+    // showing what the shell holds and there is nothing to put right.
     emitFromBridge(setup.contentWindow, {
       type: "ELEMENT_INSPECTED",
       payload: makeInspectionData({ selector: "#header" }),
@@ -2489,20 +2520,11 @@ describe("BridgeFrameworkAdapter: a selection cannot outlive the click it answer
     })
     await expect(parked).resolves.toBeNull()
 
-    expect(reassertedSelectors()).toEqual(["#header"])
-
-    // The bridge answers HIGHLIGHT_COMPONENT with an UNSOLICITED
-    // ELEMENT_INSPECTED. It installs the same element and must not start a
-    // second re-assert, or the two would trade messages forever.
-    emitFromBridge(setup.contentWindow, {
-      type: "ELEMENT_INSPECTED",
-      payload: makeInspectionData({ selector: "#header" }),
-    })
-    expect(reassertedSelectors()).toEqual(["#header"])
+    expect(setup.postMessages).toEqual([])
     expect(heldSelector()).toBe("#header")
   })
 
-  it("re-asserts the CLEAR when the shell holds no selection", async () => {
+  it("posts nothing when a refused reply lands on an empty shell selection", async () => {
     const parked = adapter.selectBySelector("#panel")
     const requestId = requestIdOf("INSPECT_SELECTOR")
 
@@ -2515,39 +2537,76 @@ describe("BridgeFrameworkAdapter: a selection cannot outlive the click it answer
     })
     await expect(parked).resolves.toBeNull()
 
-    expect(
-      setup.postMessages.filter(
-        (m) => (m as { type: string }).type === "CLEAR_SELECTION",
-      ),
-    ).toHaveLength(1)
-    expect(reassertedSelectors()).toEqual([])
+    expect(setup.postMessages).toEqual([])
   })
 
-  /**
-   * The re-assert waits for the last read to settle. Its install bumps the
-   * epoch, and a bump while another read is out would refuse that read: the
-   * shell would have asked for an element and silently got nothing.
-   */
-  it("does not re-assert while another selection read is still out", async () => {
-    const readA = adapter.selectBySelector("#a")
-    // Never answered, and the dispose in afterEach rejects it.
-    void adapter.selectBySelector("#b").catch(() => {})
-    const [idA] = requestIdsOf("INSPECT_SELECTOR")
-
-    setup.postMessages.length = 0
+  it("does not commit a click the designer made in the page", async () => {
+    // The page selected it itself before it told the shell. Committing it
+    // back would be the shell echoing the page's own selection at it.
     emitFromBridge(setup.contentWindow, {
       type: "ELEMENT_INSPECTED",
-      payload: makeInspectionData({ selector: "#a" }),
-      requestId: idA,
+      payload: makeInspectionData({ selector: "#header" }),
     })
-    await expect(readA).resolves.toBeNull()
 
-    expect(reassertedSelectors()).toEqual([])
-    expect(
-      setup.postMessages.filter(
-        (m) => (m as { type: string }).type === "CLEAR_SELECTION",
-      ),
-    ).toHaveLength(0)
+    expect(committedSets()).toEqual([])
+  })
+
+  it("commits the whole set a multi-select installed", async () => {
+    const promise = adapter.selectMany(["#row-1", "#row-2"])
+    const requestId = requestIdOf("INSPECT_MANY")
+    setup.postMessages.length = 0
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENTS_INSPECTED",
+      payload: [
+        makeInspectionData({ selector: "#row-1" }),
+        makeInspectionData({ selector: "#row-2" }),
+      ],
+      requestId,
+    })
+    await promise
+
+    expect(committedSets()).toEqual([["#row-1", "#row-2"]])
+  })
+
+  it("commits the empty set when a multi-select resolved none of its selectors", async () => {
+    // An accepted empty answer clears the shell's selection, so it clears the
+    // page's too.
+    const promise = adapter.selectMany(["#row-1"])
+    const requestId = requestIdOf("INSPECT_MANY")
+    setup.postMessages.length = 0
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENTS_INSPECTED",
+      payload: [],
+      requestId,
+    })
+    await expect(promise).resolves.toEqual([])
+
+    expect(committedSets()).toEqual([[]])
+  })
+
+  it("commits the parent a selectParent installed", async () => {
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#child" }),
+    })
+    const read = adapter.selectParent()
+    const requestId = requestIdOf("INSPECT_PARENT")
+    setup.postMessages.length = 0
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#parent" }),
+      requestId,
+    })
+    expect((await read)?.selector).toBe("#parent")
+
+    expect(committedSets()).toEqual([["#parent"]])
+  })
+
+  it("clearSelection commits the empty set", async () => {
+    await adapter.clearSelection()
+
+    expect(committedSets()).toEqual([[]])
   })
 
   it("drops an ELEMENT_DESELECTED from a page that is no longer on screen", () => {
