@@ -578,15 +578,14 @@ export function useEditorEditing({
    *
    * `useMemo` with no dependencies rather than `useRef`, because the session is
    * created once per hook instance and never replaced: attaching, ending and
-   * reconnecting are transitions ON it, not new ones. The four refs it replaced
-   * were the same object spread across this file:
+   * reconnecting are transitions ON it, not new ones.
    *
-   * | Was | Is |
-   * | --- | --- |
-   * | `adapterAbortRef` | `session.signal`, renewed by `attach` and by `end` |
-   * | `adapterGenerationRef` | `session.generation` and `session.isCurrent` |
-   * | `sessionDocumentRef` | `session.documentId`, adopted by `session.start` |
-   * | `verifySeqByKeyRef` | `session.nextVerifySeq` / `session.latestVerifySeq` |
+   * Seventeen refs used to hold what it holds, spread across this file. The
+   * map from each old name to its replacement is in
+   * `src/editor/session/README.md`; it is not repeated here, because a test in
+   * `src/editor/session/edit-session.test.ts` reads THIS file and fails on any
+   * of those names, and documentation that names them would be the thing that
+   * fails it.
    *
    * The buffers, the dialog rows, the open question and the held drafts are
    * on it too, read through {@link sessionState} below.

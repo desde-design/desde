@@ -454,4 +454,46 @@ describe("EditSession: the state it owns", () => {
     expect(session.heldDraftIds()).toEqual([])
     expect(session.getSnapshot().rows).toEqual([])
   })
+  it("is the only place that owns a bridge session's state", async () => {
+    // A guard against the shape coming back. The hook may hold refs; it may not
+    // hold THESE, because each one was a second authority for something the
+    // session owns, and every one of them was found by a review round rather
+    // than by a test.
+    //
+    // A source scan, deliberately. There is no runtime surface that can answer
+    // "does the hook still keep its own copy of the generation", and the defect
+    // this is about is a NEW ref appearing beside the session rather than a
+    // wrong answer from one. That also means the hook may not name these in a
+    // comment: the map from each old name to its replacement lives in
+    // `src/editor/session/README.md` for exactly that reason.
+    // Resolved from the repo root, which is vitest's cwd. `import.meta.url` is
+    // not a file: URL under this transform, so it cannot be the base.
+    const { readFile } = await import("node:fs/promises")
+    const { join } = await import("node:path")
+    const source = await readFile(
+      join(process.cwd(), "src/hooks/useEditorEditing.ts"),
+      "utf8",
+    )
+    for (const banned of [
+      "adapterGenerationRef",
+      "adapterAbortRef",
+      "sessionDocumentRef",
+      "verifySeqByKeyRef",
+      "modalOwnerRef",
+      "modalQueueRef",
+      "bridgeDraftsByPendingIdRef",
+      "latestPendingByDraftRef",
+      "pendingPropEditsRef",
+      "mutationsRef",
+      "pendingDisambiguationsRef",
+      "branchPropInFlight",
+      "branchTextInFlight",
+      "branchPropDispatchTimers",
+      "branchTextDispatchTimers",
+      "resumeBufferedDispatches",
+      "iterationScopePromptRef",
+    ]) {
+      expect(source).not.toContain(banned)
+    }
+  })
 })
