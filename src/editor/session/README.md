@@ -43,6 +43,24 @@ await session.run(async (ctx) => {
 of the thing. A lane cannot use an answer that arrived after its page went away,
 because there is no way to reach the answer without asking first.
 
+A read is a lane too. "Lane" reads like it means a write, and the writes are
+the obvious ones, but the rule is about any await whose continuation installs
+something the page decided. A manifest lookup, a Layers tree read, a stamp
+refresh: each one asks a question about the page in front of the designer, and
+each one can answer after that page is gone. The answer is then wrong in the
+same way a write to the departed page's source file is wrong. So a read that
+installs page-derived state goes through `session.run` and `ctx.step`, exactly
+like a write.
+
+An await that stays outside a run has to say why. The inventory is
+`src/hooks/useEditorEditing.await-inventory.test.ts`: it scans the hook, lists
+every await that is not inside a run body and not a `ctx.step`, and compares
+that list against an allowlist of `{ snippet, sites, reason }` entries. A new
+bare await fails the test, by line and by snippet, until someone writes down
+what runs after it and why a page change may not stop it. The same file also
+fails an await INSIDE a run body that skipped `ctx.step`, which is the other
+half of the rule above.
+
 Two details that are easy to get wrong and are handled here:
 
 - `ctx.signal` is the session's lifetime, captured with the generation. Read the
