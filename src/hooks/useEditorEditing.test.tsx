@@ -13,7 +13,7 @@
  * changed by this file.
  */
 import { act, render, screen, waitFor } from "@testing-library/react"
-import { type ReactElement, useRef } from "react"
+import { StrictMode, type ReactElement, useRef } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type {
   EditResult,
@@ -21,9 +21,15 @@ import type {
   PendingMutation,
   Selection,
 } from "@/editor/core"
+import type { StyleOrigin } from "@/types/bridge"
 import { useEditorEditing } from "./useEditorEditing"
 import { useEditorStore } from "@/stores/editor-only"
-import { bridgeDraftIdOf, DEFERRED_PARK_STATUS } from "./pending-iteration-edit"
+import {
+  bridgeDraftIdOf,
+  DEFERRED_PARK_STATUS,
+  HANDOFF_TIMEOUT_MS,
+  SAVE_HANDOFF_TIMEOUT_STATUS,
+} from "./pending-iteration-edit"
 import {
   FakeBridgeAdapter,
   lastFakeAdapter,
@@ -230,6 +236,48 @@ const loopDraft = (pendingId: string): PendingMutation => ({
 })
 
 /**
+ * A selection the two style lanes accept.
+ *
+ * `domAnchor` is what the "This page" rule head is built from, and its
+ * `matchCount` has to be non-zero or the builder refuses a dead anchor.
+ * `authoredAt` and `editTarget` share a file so the reused-component guard
+ * passes, and there is no `iterationContext` so the repeated-instance guard
+ * passes too. See `buildPageScopedCssOverrideEdit`.
+ */
+const styleSelection: Selection = {
+  targetId: "t-style",
+  selector: "#panel",
+  ancestry: [],
+  classes: [],
+  domAnchor: {
+    file: "src/App.vue",
+    line: 10,
+    column: 2,
+    matchCount: 1,
+    resolution: "direct",
+  },
+  authoredAt: { file: "src/App.vue", line: 10, column: 2 },
+  editTarget: { file: "src/App.vue", line: 10, column: 2 },
+}
+
+/** A token whose definition sits in a first-party stylesheet we may write. */
+const tokenOrigin: StyleOrigin = {
+  property: "background-color",
+  computedValue: "rgb(247, 247, 247)",
+  winningRule: null,
+  varChain: [
+    {
+      name: "--panel-background",
+      value: "#f7f7f7",
+      definedAt: {
+        selector: ":root",
+        stylesheet: { href: "/src/tokens.css" },
+      },
+    },
+  ],
+}
+
+/**
  * A complete `applied` result. `kind: "applied"` REQUIRES `appliedEditId` and
  * `affectedTargetIds` (`src/editor/core/framework-adapter.ts`), so a bare
  * `{ kind: "applied" } as EditResult` lies to the compiler and then to the code
@@ -240,6 +288,22 @@ const applied = (newHashes?: Record<string, string>): EditResult => ({
   appliedEditId: "edit-1",
   affectedTargetIds: [],
   ...(newHashes ? { newHashes } : {}),
+})
+
+/**
+ * The one refusal that LEAVES the capture in the buffer.
+ *
+ * A dispatched capture that comes back `applied` is settled and dropped from
+ * the buffer, so a Save that runs after it finds nothing to flush and returns
+ * ok before it reaches a single request. `needsChat` is the deterministic
+ * lane's "a person has to look at this": the entry stays, its identity joins
+ * the AI queue, and Save is the thing that dispatches it. Every save test
+ * below is set up through it for that reason.
+ */
+const needsChat = (reason = "bound binding"): EditResult => ({
+  kind: "failed",
+  reason,
+  needsChat: true,
 })
 
 /**
@@ -387,6 +451,33 @@ async function saveAll(): Promise<SaveOutcome | undefined> {
   return outcome
 }
 
+/**
+ * Start a Save and hand back a handle to it, without waiting for it to finish.
+ *
+ * The save tests below take the page away, or answer one of the save's
+ * requests, in the MIDDLE of the run, so they need the promise rather than the
+ * outcome. The start is inside `act` because `handleSaveAll` opens with two
+ * state writes; every later step is settled by the test in its own `act`, which
+ * is what keeps two `act` calls from overlapping (React warns when they do, and
+ * a warning is not a pristine run).
+ */
+async function startSave(): Promise<{
+  settled: Promise<void>
+  outcome: () => SaveOutcome | undefined
+}> {
+  let outcome: SaveOutcome | undefined
+  let settled: Promise<void> | undefined
+  await act(async () => {
+    settled = editing()!
+      .handleSaveAll()
+      .then((result) => {
+        outcome = result
+      })
+    await Promise.resolve()
+  })
+  return { settled: settled!, outcome: () => outcome }
+}
+
 describe("useEditorEditing: the bridge session", () => {
   it("adopts the first document without ending anything (finding U1)", async () => {
     await mount()
@@ -519,11 +610,18 @@ describe("useEditorEditing: the bridge session", () => {
     // `dispatchIterationEdit`'s "this item" branch holds the bridge's draft
     // across a proposal POST. The page goes away while that POST is out, the
     // bridge reconnects, and the new session numbers its first draft
-    // `dom-pending-1` again. Without the generation guard the departed page's
-    // continuation then writes the old row's overwrite into the NEW document
-    // and `releaseBridgeDraft` cancels the new session's identically numbered
-    // draft, which takes the designer's live preview away and blames a write
-    // they never asked for.
+    // `dom-pending-1` again.
+    //
+    // WHAT THIS TEST WITNESSES, honestly. It is a pin on the row lane's
+    // ADAPTER CAPTURE, not on the row lane's two staleness guards. The lane
+    // reads its adapter once, before its first await (Task 7's rule, applied
+    // to the iteration lane in Task 9), so a continuation that outlives its
+    // session holds the DEPARTED adapter and could not reach the arriving one
+    // even with both guards deleted. The guards are asserted one per await in
+    // `src/editor/edit-service/lanes/iteration-lane.test.ts`, where each is
+    // mutation-tested; what is left for this file is the capture itself, and
+    // that is worth pinning: the day someone re-reads the adapter after the
+    // proposal, this test goes red and the two below stop being decoration.
     const { rerender } = await mount()
     const departing = lastFakeAdapter()
     holdProposal = true
@@ -588,6 +686,13 @@ describe("useEditorEditing: the bridge session", () => {
     expect(arriving.applies).toEqual([])
     // And the new session's draft was not cancelled out from under it.
     expect(arriving.resolvedDrafts).toEqual([])
+    // Nor into the departed one, which is where the capture would have sent it.
+    // The proposal is the lane's THIRD await and its guard fires there, before
+    // the lane reaches `adapter.applyEdit` at all, so the departed adapter sees
+    // no write either. If the guard were removed this array would hold the
+    // stale overwrite and the two assertions above would still pass, which is
+    // the whole of the note at the top.
+    expect(departing.applies).toEqual([])
     const stillAsking = editing()?.iterationScopePrompt
     expect(stillAsking && bridgeDraftIdOf(stillAsking)).toBe(REUSED_DRAFT_ID)
   })
@@ -906,6 +1011,270 @@ describe("useEditorEditing: the bridge session", () => {
     })
     // The answer was accepted, so no failure line was written over the line the
     // page change left.
+    expect(editing()?.saveStatus).toBe(statusAfterChange)
+  })
+
+  it("stops a save at the step where the page changed, and keeps the discard line (findings W1, X6)", async () => {
+    const { rerender } = await mount()
+    const departing = lastFakeAdapter()
+    await act(async () => {
+      departing.emitCapture(capture("m1", "hello"))
+    })
+    // The typing-time dispatch, so there is something for Save to flush. Its
+    // apply is parked; Save's own apply is the SECOND one.
+    const typing = await waitForApply()
+    await act(async () => {
+      typing.settle(needsChat())
+      await Promise.resolve()
+    })
+    const save = await startSave()
+    const saveApply = await waitForApply(1)
+    await changeDocument(rerender, "doc-b")
+    await act(async () => {
+      saveApply.settle(applied())
+      await save.settled
+    })
+    expect(save.outcome()?.ok).toBe(false)
+    // The session end's line names what the designer LOST; the save's line
+    // only says the save stopped, which the page changing already showed.
+    expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+    // Nothing was written into the page that replaced it.
+    expect(lastFakeAdapter().applies).toEqual([])
+    // AND THE SAVE STOPPED AT THIS STEP, not at a later one. These two are
+    // what fail when the bundle step's answer is not read: the run carries on,
+    // tells the departed bridge its previews are confirmed, then resolves a
+    // destination stylesheet, writes every scoped-CSS mutation left, drops the
+    // previews and reloads the page in front of the designer, all for a
+    // document that has gone. The outcome and the status line cannot see any
+    // of that on their own, because `run` withholds the body's value once the
+    // session has ended whatever the body did on its way there.
+    expect(departing.settledOverrides).toEqual([])
+    expect(departing.clearedOverrides).toBe(0)
+  })
+
+  it("gives up on a save-time hand-off that never answers (finding N6)", async () => {
+    // The save dialog shows no close control while a save is in flight, and the
+    // server can hold a chat submission for a concurrency slot for as long as
+    // the project's other turns take. Without a deadline the designer is left
+    // in front of a modal they cannot dismiss over a save that never answers.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const escalateToChat = vi.fn(() => new Promise<boolean>(() => {}))
+      await mount({ escalateToChat })
+      await act(async () => {
+        lastFakeAdapter().emitCapture(capture("m1", "hello"))
+      })
+      const typing = await waitForApply()
+      await act(async () => {
+        typing.settle(needsChat())
+        await Promise.resolve()
+      })
+      const save = await startSave()
+      const saveApply = await waitForApply(1)
+      await act(async () => {
+        saveApply.settle(needsChat("the bundle needs a person"))
+        await Promise.resolve()
+      })
+      expect(escalateToChat).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(HANDOFF_TIMEOUT_MS + 1_000)
+        await save.settled
+      })
+      expect(save.outcome()?.ok).toBe(false)
+      expect(editing()?.saveStatus).toBe(SAVE_HANDOFF_TIMEOUT_STATUS)
+      // The dialog can only leave the "asking" panel when this is cleared, and
+      // `saving` is what keeps the dialog up at all.
+      expect(editing()?.saving).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("stops counting an identity the save has escalated (finding M6)", async () => {
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    await act(async () => {
+      lastFakeAdapter().emitCapture(capture("m1", "hello"))
+    })
+    const typing = await waitForApply()
+    await act(async () => {
+      typing.settle(needsChat())
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.aiQueueCount).toBe(1))
+    const save = await startSave()
+    const saveApply = await waitForApply(1)
+    await act(async () => {
+      saveApply.settle(needsChat("the bundle needs a person"))
+      await save.settled
+    })
+    expect(save.outcome()?.ok).toBe(true)
+    // Chat owns these edits now. An identity left in the queue makes the
+    // capture scheduler skip the next inline edit on that same element, and
+    // keeps the unload warning up over a queue that is empty in fact.
+    expect(editing()?.aiQueueCount).toBe(0)
+  })
+
+  it("queues the save's question behind an open scope dialog (findings P1, Q3)", async () => {
+    // A failed save reports on the status line and through `lastSaveFailure`.
+    // It raises no dialog of its own, so the question already on screen is
+    // untouched: the scope prompt the designer is answering stays up, and no
+    // row appears in the deterministic dialog behind it.
+    await mount()
+    const adapter = lastFakeAdapter()
+    await act(async () => {
+      adapter.emitCapture(capture("m1", "hello"))
+    })
+    const typing = await waitForApply()
+    await act(async () => {
+      typing.settle(needsChat())
+      await Promise.resolve()
+    })
+    await act(async () => {
+      adapter.emitSelection(loopSelection)
+      adapter.emitAwaiting(loopDraft("dom-pending-9"))
+    })
+    await waitFor(() => expect(editing()?.iterationScopePrompt).not.toBeNull())
+    const asking = editing()!.iterationScopePrompt
+    const save = await startSave()
+    const saveApply = await waitForApply(1)
+    await act(async () => {
+      saveApply.fail("the applicator refused the bundle")
+      await save.settled
+    })
+    expect(save.outcome()?.ok).toBe(false)
+    expect(editing()?.iterationScopePrompt).toBe(asking)
+    expect(editing()?.disambiguationPrompt).toBeNull()
+  })
+
+  it("counts and cancels a question queued behind the open scope dialog", async () => {
+    // The carry-forward from Task 6's review. A queued request is an edit the
+    // bridge is still holding, and it is INVISIBLE: nothing has opened a dialog
+    // for it. A teardown that forgot it would leave the bridge holding a draft
+    // nobody can answer, and would under-report what the designer lost.
+    const { rerender } = await mount()
+    const adapter = lastFakeAdapter()
+    await act(async () => {
+      adapter.emitSelection(loopSelection)
+      adapter.emitAwaiting(loopDraft("dom-pending-1"))
+    })
+    await waitFor(() => expect(editing()?.iterationScopePrompt).not.toBeNull())
+    await act(async () => {
+      adapter.emitAwaiting(heldDraft("dom-pending-2"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.saveStatus).toBe(DEFERRED_PARK_STATUS))
+    // Held, not shown: the scope dialog owns the modal.
+    expect(editing()?.disambiguationPrompt).toBeNull()
+    await act(async () => {
+      rerender(<Harness enabled={false} />)
+      await Promise.resolve()
+    })
+    expect(editing()?.saveStatus).toBe(
+      "The page connection was reset; 2 pending edits were discarded.",
+    )
+    expect(adapter.resolvedDrafts).toEqual([
+      { pendingId: "dom-pending-1", choice: "cancel" },
+      { pendingId: "dom-pending-2", choice: "cancel" },
+    ])
+  })
+
+  it("still says what an enabled flip discarded after a remount (finding R3)", async () => {
+    // R3: `hookUnmountingRef` latches true on a cleanup and used never to be
+    // reset, so StrictMode's mount / unmount / mount on ONE instance left it
+    // true. A later `enabled` flip then took the UNMOUNT arm, which is the
+    // silent one, and the designer lost held edits with nothing said about it.
+    //
+    // The effect body resets the flag, so this is a pin on that line rather
+    // than a red test. StrictMode is what stages the remount honestly: it runs
+    // the whole effect cycle twice on the same hook instance.
+    const { rerender } = render(
+      <StrictMode>
+        <Harness />
+      </StrictMode>,
+    )
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    const adapter = lastFakeAdapter()
+    await act(async () => {
+      adapter.emitAwaiting(heldDraft("dom-pending-1"))
+    })
+    await waitFor(() =>
+      expect(editing()?.disambiguationPrompt?.pendingId).toBe("dom-pending-1"),
+    )
+    await act(async () => {
+      rerender(
+        <StrictMode>
+          <Harness enabled={false} />
+        </StrictMode>,
+      )
+      await Promise.resolve()
+    })
+    // "teardown", which SAYS what it discarded, not "unmount", which does not.
+    expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+    expect(adapter.resolvedDrafts).toEqual([
+      { pendingId: "dom-pending-1", choice: "cancel" },
+    ])
+  })
+
+  it("keeps the scoped style lane's failure off the next page (finding W5)", async () => {
+    // W5: this lane and the token lane below had no session discipline at all.
+    // Both write the status bar after an await, and this one resolves its
+    // destination stylesheet through a second await before that. A page
+    // replaced in either window makes the report describe a document nobody is
+    // looking at, over a status line that belongs to the page in front of them.
+    const { rerender } = await mount()
+    await act(async () => {
+      lastFakeAdapter().emitSelection(styleSelection)
+    })
+    await waitFor(() =>
+      expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+    )
+    let done: Promise<void> | undefined
+    await act(async () => {
+      done = editing()!.handleScopedStyleEdit(["bg-red-500"])
+      await Promise.resolve()
+    })
+    const write = await waitForApply()
+    // The write carries the session's lifetime, so ending the session cancels
+    // it rather than leaving it to answer into a page that has gone.
+    expect(write.signal).toBeDefined()
+    await changeDocument(rerender, "doc-b")
+    expect(write.signal?.aborted).toBe(true)
+    const statusAfterChange = editing()?.saveStatus
+    await act(async () => {
+      // An abort arrives as an ordinary failure, which is exactly the shape
+      // that used to be reported as "Scoped style edit failed".
+      write.fail("edit request cancelled")
+      await done
+    })
+    expect(editing()?.saveStatus).toBe(statusAfterChange)
+  })
+
+  it("keeps the token lane's failure off the next page (finding W5)", async () => {
+    const { rerender } = await mount()
+    await act(async () => {
+      lastFakeAdapter().emitSelection(styleSelection)
+    })
+    await waitFor(() =>
+      expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+    )
+    let done: Promise<void> | undefined
+    await act(async () => {
+      done = editing()!.handleTokenStyleEdit("background-color", tokenOrigin, [
+        "bg-red-500",
+      ])
+      await Promise.resolve()
+    })
+    const write = await waitForApply()
+    expect(write.edit.kind).toBe("token-value")
+    expect(write.signal).toBeDefined()
+    await changeDocument(rerender, "doc-b")
+    expect(write.signal?.aborted).toBe(true)
+    const statusAfterChange = editing()?.saveStatus
+    await act(async () => {
+      write.fail("edit request cancelled")
+      await done
+    })
     expect(editing()?.saveStatus).toBe(statusAfterChange)
   })
 })

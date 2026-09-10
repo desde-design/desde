@@ -75,6 +75,28 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   documentId: string | null = null
   disposed = false
   readonly applies: RecordedApply[] = []
+  /**
+   * How many times the shell asked this adapter to drop its live previews.
+   *
+   * A save does it at the very end, once every write has landed, so it is the
+   * cheapest proof available here that a save ran to COMPLETION rather than
+   * stopping at the step where the page changed. Nothing else the tail of a
+   * save does is visible from outside the hook: the buffer it empties has
+   * already been retired by the page change, and the reload it asks for goes
+   * to the iframe rather than to an adapter.
+   */
+  clearedOverrides = 0
+  /**
+   * Every live preview this adapter was told the outcome of, in order.
+   *
+   * The save resolves each mutation in the bundle the moment its write lands,
+   * which is BEFORE it resolves a destination stylesheet for the scoped-CSS
+   * flush. It is therefore the one observable that sits between the save's
+   * first await and its second, and the only way a test can tell "the save
+   * stopped at the first step" from "the save carried on and was stopped at
+   * the second".
+   */
+  readonly settledOverrides: { id: string; outcome: string }[] = []
   readonly resolvedDrafts: { pendingId: string; choice: string }[] = []
   readonly structure: OutlineNode[] = []
 
@@ -229,10 +251,18 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   exitInsertPlacement(): void {}
   applyPropOverride(): void {}
   applyAttrOverride(): void {}
-  clearPropOverrides(): void {}
-  clearAttrOverrides(): void {}
-  clearClassOverrides(): void {}
-  resolveOverride(): void {}
+  clearPropOverrides(): void {
+    this.clearedOverrides += 1
+  }
+  clearAttrOverrides(): void {
+    this.clearedOverrides += 1
+  }
+  clearClassOverrides(): void {
+    this.clearedOverrides += 1
+  }
+  resolveOverride(id: string, outcome: string): void {
+    this.settledOverrides.push({ id, outcome })
+  }
   supportsRenderedValueRead(): boolean {
     return false
   }

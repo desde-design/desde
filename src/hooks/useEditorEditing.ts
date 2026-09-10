@@ -3271,73 +3271,80 @@ export function useEditorEditing({
    */
   const handleScopedStyleEdit = useCallback(
     async (nextClasses: string[]) => {
+      // The adapter this edit is being written through, read ONCE, before the
+      // lane's first await. Read again afterwards it would be whichever adapter
+      // is attached by then, which is the one this edit is not about.
       const adapter = adapterRef.current
       const selection = useEditorStore.getState().editorSelection
       if (!adapter || !selection) return
-      // The session this edit is being made in, captured at dispatch, exactly
-      // as the class lane captures it. Read after an await it would be
-      // whichever session is live by then, which is the one this edit is not
-      // about. See `session.isCurrent` and `ApplyEditOpts.signal`.
-      const generation = session.generation
-      const sessionSignal = session.signal
-      // This lane has an await before it writes anything: resolving where a
-      // rule may go can ask the DOCUMENT (`GET_STYLESHEET_TARGETS`), and a page
-      // replaced in that window makes the answer describe another app's
-      // stylesheets.
-      const destination = await resolveStyleDestination()
-      if (!session.isCurrent(generation)) return
-      if (!destination.ok) {
-        setSaveStatus(destination.reason)
-        return
-      }
-      const built = buildPageScopedCssOverrideEdit(
-        selection,
-        nextClasses,
-        destination.opts,
-      )
-      if (built.kind === "noop") return
-      if (built.kind === "refused") {
-        setSaveStatus(built.reason)
-        return
-      }
-      const edit = built.edit
-      try {
-        const result = await adapter.applyEdit(
-          edit,
-          { signal: sessionSignal },
-        )
-        // Keep the external-edit hash guard in sync with our own write, like
-        // the other immediate applyEdit paths — else the next save trips the
-        // conflict guard against this change. Recorded BEFORE the session
-        // check, and for the same reason the text and class lanes do it there:
-        // the hashes are disk truth, not session state, and skipping them
-        // leaves the next save comparing against a hash this write invalidated.
-        if (result.kind === "applied" && result.newHashes) {
-          fileHashesRef.current = {
-            ...fileHashesRef.current,
-            ...result.newHashes,
-          }
-        }
-        // The page this edit was made on is gone. Say nothing: the status bar
-        // is now describing a different page, and an aborted request arrives
-        // here as a failure that is not one.
-        if (!session.isCurrent(generation)) return
-        if (result.kind === "failed") {
-          setSaveStatus(`Scoped style edit failed: ${result.reason}`)
+      // THE SESSION, as a run rather than as a captured number. Every await
+      // below is a `ctx.step`, and a step whose session has ended answers
+      // `stale` instead of handing back a value, so the lines after it do not
+      // run at all. See `EditSession.run`.
+      await session.run(async (ctx) => {
+        // This lane has an await before it writes anything: resolving where a
+        // rule may go can ask the DOCUMENT (`GET_STYLESHEET_TARGETS`), and a
+        // page replaced in that window makes the answer describe another app's
+        // stylesheets.
+        const resolved = await ctx.step(resolveStyleDestination())
+        if (resolved.stale) return
+        const destination = resolved.value
+        if (!destination.ok) {
+          setSaveStatus(destination.reason)
           return
         }
-        // Blast radius, AFTER the write and only when it is bigger than one.
-        // The count comes from the same `resolveDomAnchor` call that produced
-        // the anchor, so it describes the rule that was actually written —
-        // and it is a lower bound (the rendered page, not every route), which
-        // the copy says out loud.
-        if (built.notice) setSaveStatus(built.notice)
-      } catch (err) {
-        // Same rule for the throw path: a departed page's error is not news
-        // about the page in front of the designer now.
-        if (!session.isCurrent(generation)) return
-        setSaveStatus(`Scoped style edit threw: ${(err as Error).message}`)
-      }
+        const built = buildPageScopedCssOverrideEdit(
+          selection,
+          nextClasses,
+          destination.opts,
+        )
+        if (built.kind === "noop") return
+        if (built.kind === "refused") {
+          setSaveStatus(built.reason)
+          return
+        }
+        const edit = built.edit
+        try {
+          // The hashes come off the promise itself, BEFORE staleness is
+          // decided, the way both mutation lanes do it: they are disk truth,
+          // not session state, and dropping them leaves the next save
+          // comparing against a hash this write invalidated.
+          const write = adapter
+            .applyEdit(edit, { signal: ctx.signal })
+            .then((outcome) => {
+              if (outcome.kind === "applied" && outcome.newHashes) {
+                fileHashesRef.current = {
+                  ...fileHashesRef.current,
+                  ...outcome.newHashes,
+                }
+              }
+              return outcome
+            })
+          // The page this edit was made on may be gone. Then nothing below
+          // runs: the status bar is describing a different page, and an
+          // aborted request arrives here as a failure that is not one.
+          const written = await ctx.step(write)
+          if (written.stale) return
+          const result = written.value
+          if (result.kind === "failed") {
+            setSaveStatus(`Scoped style edit failed: ${result.reason}`)
+            return
+          }
+          // Blast radius, AFTER the write and only when it is bigger than one.
+          // The count comes from the same `resolveDomAnchor` call that produced
+          // the anchor, so it describes the rule that was actually written, and
+          // it is a lower bound (the rendered page, not every route), which the
+          // copy says out loud.
+          if (built.notice) setSaveStatus(built.notice)
+        } catch (err) {
+          // Same rule for the throw path: a departed page's error is not news
+          // about the page in front of the designer now. `ctx.step` turns a
+          // throw from a departed session into a stale answer, so this covers
+          // only a throw from the synchronous code between the steps.
+          if (!ctx.current) return
+          setSaveStatus(`Scoped style edit threw: ${(err as Error).message}`)
+        }
+      })
     },
     [resolveStyleDestination, session],
   )
@@ -3364,14 +3371,11 @@ export function useEditorEditing({
    */
   const handleTokenStyleEdit = useCallback(
     async (property: string, origin: StyleOrigin, nextClasses: string[]) => {
+      // The adapter this edit is being written through, read ONCE, before the
+      // lane's one await.
       const adapter = adapterRef.current
       const selection = useEditorStore.getState().editorSelection
       if (!adapter || !selection) return
-      // The session this edit is being made in, captured at dispatch, exactly
-      // as the class lane captures it. Everything between here and the write is
-      // synchronous, so this lane's only await is the write itself.
-      const generation = session.generation
-      const sessionSignal = session.signal
       // The ROOT of the var chain is what you'd actually patch — the last hop
       // is the concrete value (`#f7f7f7`), earlier hops are `var(...)` aliases.
       const root = origin.varChain[origin.varChain.length - 1]
@@ -3441,63 +3445,73 @@ export function useEditorEditing({
         newValue,
         selector: root.definedAt.selector,
       }
-      try {
-        const result = await adapter.applyEdit(
-          edit,
-          { signal: sessionSignal },
-        )
-        // Keep the external-edit hash guard in sync with our own write, like
-        // the other immediate applyEdit paths, so the next save doesn't trip
-        // the conflict guard against this change. Disk truth first, then the
-        // session check, the same order every other lane uses.
-        if (result.kind === "applied" && result.newHashes) {
-          fileHashesRef.current = {
-            ...fileHashesRef.current,
-            ...result.newHashes,
+      // THE SESSION, as a run. The write is this lane's one await, so it is
+      // one `ctx.step`: a session that ended while it was out answers `stale`
+      // and everything after it is skipped.
+      await session.run(async (ctx) => {
+        try {
+          // Keep the external-edit hash guard in sync with our own write, like
+          // the other immediate applyEdit paths, so the next save doesn't trip
+          // the conflict guard against this change. Disk truth first, then the
+          // session check, the same order every other lane uses.
+          const write = adapter
+            .applyEdit(edit, { signal: ctx.signal })
+            .then((outcome) => {
+              if (outcome.kind === "applied" && outcome.newHashes) {
+                fileHashesRef.current = {
+                  ...fileHashesRef.current,
+                  ...outcome.newHashes,
+                }
+              }
+              return outcome
+            })
+          // The page this token edit was made on may be gone. Nothing below is
+          // meaningful for the page that replaced it: the verification reads the
+          // NEW document for a value written into the old one's stylesheet, and
+          // the status bar is describing something else now.
+          const written = await ctx.step(write)
+          if (written.stale) return
+          const result = written.value
+          if (result.kind === "failed") {
+            setSaveStatus(`Token edit failed: ${result.reason}`)
+            return
           }
+          // Cascade verification: confirm the patched token actually wins the
+          // cascade for this element/property. Diagnostic-only, like every
+          // cascade/value verification since the final-review C1 fix — and here
+          // there was never anything to gate anyway: a token-value edit
+          // registers no live preview override (this lane doesn't call
+          // `adapter.setElementClasses` / `resolveOverride` at all). Surfaces
+          // the same "didn't take effect, X wins the cascade" toast the class
+          // lane produces when a competing declaration still beats the token
+          // post-write.
+          verifyEditRef.current({
+            editId: edit.id,
+            selector: selection.selector,
+            expectedValue: newValue,
+            editKind: "token",
+            styleProperty: property,
+            cascadeOwner: { kind: "token", token: root.name },
+            // THE VALUE DIMENSION (codex R4) — ownership alone false-passes a
+            // REPEAT token edit: the element still resolves THROUGH `root.name`
+            // whatever that token is now set to, so the chain-contains-our-token
+            // test is unchanged by #ef4444 → #3b82f6 (or by a write that never
+            // landed). `newValue` is the literal this edit wrote to the token's
+            // definition site, and the walker reads that same definition back as
+            // `varChain[].value` — so the oracle can also require the definition
+            // to carry it. A chained definition (`var(...)`) or an
+            // un-canonicalizable value declines back to ownership-only.
+            expectedDeclarationValue: newValue,
+          })
+        } catch (err) {
+          // Same rule for the throw path: a departed page's error is not news
+          // about the page in front of the designer now. `ctx.step` turns a
+          // throw from a departed session into a stale answer, so this covers
+          // only a throw from the synchronous code beside it.
+          if (!ctx.current) return
+          setSaveStatus(`Token edit threw: ${(err as Error).message}`)
         }
-        // The page this token edit was made on is gone. Nothing below is
-        // meaningful for the page that replaced it: the verification reads the
-        // NEW document for a value written into the old one's stylesheet, and
-        // the status bar is describing something else now.
-        if (!session.isCurrent(generation)) return
-        if (result.kind === "failed") {
-          setSaveStatus(`Token edit failed: ${result.reason}`)
-          return
-        }
-        // Cascade verification: confirm the patched token actually wins the
-        // cascade for this element/property. Diagnostic-only, like every
-        // cascade/value verification since the final-review C1 fix — and here
-        // there was never anything to gate anyway: a token-value edit
-        // registers no live preview override (this lane doesn't call
-        // `adapter.setElementClasses` / `resolveOverride` at all). Surfaces
-        // the same "didn't take effect, X wins the cascade" toast the class
-        // lane produces when a competing declaration still beats the token
-        // post-write.
-        verifyEditRef.current({
-          editId: edit.id,
-          selector: selection.selector,
-          expectedValue: newValue,
-          editKind: "token",
-          styleProperty: property,
-          cascadeOwner: { kind: "token", token: root.name },
-          // THE VALUE DIMENSION (codex R4) — ownership alone false-passes a
-          // REPEAT token edit: the element still resolves THROUGH `root.name`
-          // whatever that token is now set to, so the chain-contains-our-token
-          // test is unchanged by #ef4444 → #3b82f6 (or by a write that never
-          // landed). `newValue` is the literal this edit wrote to the token's
-          // definition site, and the walker reads that same definition back as
-          // `varChain[].value` — so the oracle can also require the definition
-          // to carry it. A chained definition (`var(...)`) or an
-          // un-canonicalizable value declines back to ownership-only.
-          expectedDeclarationValue: newValue,
-        })
-      } catch (err) {
-        // Same rule for the throw path: a departed page's error is not news
-        // about the page in front of the designer now.
-        if (!session.isCurrent(generation)) return
-        setSaveStatus(`Token edit threw: ${(err as Error).message}`)
-      }
+      })
     },
     [session],
   )
@@ -4301,22 +4315,6 @@ export function useEditorEditing({
     saveStartedRef.current = false
     const adapter = adapterRef.current
     if (!adapter) return { ok: true } // nothing to do, trivially ok
-    // THE SESSION THIS SAVE BELONGS TO, captured once at the top.
-    //
-    // A save is several requests in a row, and the page can be replaced between
-    // any two of them: the AI-queue flush runs an LLM on the server and takes
-    // as long as that takes, and the scoped-CSS flush is one request per
-    // mutation. Everything after the boundary would act on the wrong document.
-    // It resolves a stylesheet against the NEW page, writes the departed page's
-    // scoped-CSS mutations into it, clears the new page's preview overrides,
-    // and reloads it.
-    //
-    // So: the signal goes to every request whose transport takes one, and every
-    // await is followed by a staleness check that stops the save where it is.
-    // The lanes' own `session.isCurrent` guards cover a single edit; this
-    // covers the multi-request run.
-    const generation = session.generation
-    const sessionSignal = session.signal
     /**
      * Stop the save because the document went away. Touches no overrides, no
      * mutations, and reloads nothing: the buffer still holds whatever was not
@@ -4325,6 +4323,10 @@ export function useEditorEditing({
      * The in-flight LLM snapshot IS cleared, because it is the save dialog's
      * own "asking AI to interpret these N edits" panel and leaving it up would
      * describe a request that is over.
+     *
+     * Called ONCE, from below the run. A step inside the run that comes back
+     * stale returns `null` rather than reporting, so the report is written in
+     * one place whichever of the four awaits the page change landed in.
      */
     const stopForPageChange = (): { ok: false; reason: string } => {
       setSavePendingLLMInput(null)
@@ -4445,388 +4447,414 @@ export function useEditorEditing({
       directMutations: directMutations.length,
       scopedOverrides: scopedOverrideMutations.length,
     })
-    try {
-      // Buffered structural + prop edits no longer exist: every
-      // direct-manipulation edit dispatches to the working tree the
-      // moment it's made (branch mode). This flush is now solely the
-      // AI-queue drain — the fuzzy DOM mutations the deterministic lane
-      // refused mid-edit, applied here via the llm-patch bundle.
-      // Dispatch DOM mutation log as a single llm-patch bundle.
-      if (directMutations.length > 0) {
-        const selection = useEditorStore.getState().editorSelection
-        const baseHashes = { ...fileHashesRef.current }
-        // Eagerly snapshot the input the LLM would see (capped at 10
-        // entries, mirroring the server's truncation). The dialog
-        // renders this WHILE the request is in flight so the designer
-        // sees "Asking AI to interpret these N edits" instead of a
-        // blank spinner. If the server's fast-path handles the bundle
-        // (no LLM call), the dialog clears this on response.
-        //
-        // This is the commit/flush path — it dispatches with
-        // `llmFallback: 'patch'` (below) to APPLY queued fuzzy edits via
-        // the LLM, so the progress snapshot is wanted here (unlike the
-        // typing-time path, which queues silently).
-        setSavePendingLLMInput(
-          directMutations.slice(0, 10).map((m) => ({
-            id: m.id,
-            kind: m.kind,
-            sourceLoc: m.sourceLoc,
-            target: m.target,
-            before: m.before.length > 200 ? m.before.slice(0, 200) + '…' : m.before,
-            after: m.after.length > 200 ? m.after.slice(0, 200) + '…' : m.after,
-          })),
-        )
-        // Phase E1 — normalize the panel's "this instance" default on
-        // any callsite-scope mutation the designer didn't explicitly
-        // toggle. The panel surfaces the toggle (default: this-instance)
-        // for any non-class callsite mutation with a known callsiteLoc;
-        // here we make the saved disambiguationChoice match the UI's
-        // visual default. Without this step, an unticked toggle falls
-        // through with disambiguationChoice=undefined and the prompt
-        // has no clean routing rule.
-        const normalizedMutations: Mutation[] = directMutations.map((m) => {
-          if (
-            m.disambiguationChoice === undefined &&
-            m.scope === "callsite" &&
-            m.callsiteLoc !== null &&
-            m.kind !== "class"
-          ) {
-            return { ...m, disambiguationChoice: "this-instance" }
-          }
-          return m
-        })
-        // Reset the streaming buffer on dispatch. Tokens accumulate into
-        // a ref (cheap per-token) and the throttled state push (below)
-        // is what triggers re-renders in the dialog.
-        saveStreamingTextRef.current = ''
-        setSaveStreamingText('')
-        let streamFlushTimer: ReturnType<typeof setTimeout> | null = null
-        const flushStreamSoon = () => {
-          if (streamFlushTimer !== null) return
-          // ~33ms cadence = 30fps, smooth enough for live text rendering
-          // without re-rendering the whole dialog per token.
-          streamFlushTimer = setTimeout(() => {
-            streamFlushTimer = null
-            setSaveStreamingText(saveStreamingTextRef.current)
-          }, 33)
-        }
-        const result = await adapter.applyEdit(
-          {
-            kind: "llm-patch",
-            id: makeEditId(),
-            target: selection ?? {
-              targetId: "llm-patch-bundle",
-              selector: "llm-patch-bundle",
-              ancestry: [],
-            },
-            mutations: normalizedMutations,
-            // Commit/flush path: APPLY via the LLM lane (parallel per-file
-            // server-side), not escalate. This is where queued fuzzy edits
-            // actually get written to the worktree.
-            llmFallback: "patch" as const,
-            ...(Object.keys(baseHashes).length > 0 ? { baseHashes } : {}),
-          },
-          {
-            onLLMStreamStart: () => {
-              // Reset on start so a previous save's tail doesn't
-              // contaminate the new run. (We also reset above on
-              // dispatch, but the start event arrives only AFTER the
-              // server confirmed the LLM actually fires — i.e. the
-              // fast-path was bypassed.)
-              saveStreamingTextRef.current = ''
-              setSaveStreamingText('')
-            },
-            onLLMStreamDelta: (delta) => {
-              saveStreamingTextRef.current += delta
-              flushStreamSoon()
-            },
-            // The session's lifetime. Ending it aborts this request, which
-            // settles as an ordinary failed result; the check below is what
-            // decides what happens next, before the result is even read.
-            signal: sessionSignal,
-          },
-        )
-        // The throttled timer is this call's own, so it is cancelled whichever
-        // way the flush ends. Cancelled BEFORE the staleness check, or a stale
-        // save would leave a timeout writing into the dialog behind it.
-        if (streamFlushTimer !== null) {
-          clearTimeout(streamFlushTimer)
-          streamFlushTimer = null
-        }
-        // THE HASHES FIRST, whatever happens to the save. They are disk truth,
-        // not session state: this write landed on files that are the same files
-        // whichever page is on screen now, and dropping the new hashes leaves
-        // the shell's stale-target guard holding pre-write ones. The next save
-        // of the same file then 409s against Desde's own change. Same order as
-        // the four single-edit lanes.
-        if (result.kind === "applied" && result.newHashes) {
-          fileHashesRef.current = {
-            ...fileHashesRef.current,
-            ...result.newHashes,
-          }
-        }
-        // THE PAGE. Checked before the rest of the result is read: an abort
-        // arrives here as `failed`, and reporting "Save failed at DOM mutations:
-        // edit request cancelled" would blame the write for the page going away.
-        if (!session.isCurrent(generation)) {
-          return stopForPageChange()
-        }
-        // Final flush so the last tokens land in state even if the
-        // throttled timer hadn't fired yet.
-        setSaveStreamingText(saveStreamingTextRef.current)
-        if (result.kind === "failed") {
-          // `'chat'` fallback mode: the deterministic lane couldn't apply
-          // the bundle, so the server returned `needsChat`. Hand it to
-          // the chat agent and clear the dispatched mutations from the
-          // buffer instead of surfacing a save error.
-          if (result.needsChat && escalateToChatRef.current) {
-            // A refused hand-off submitted nothing, whether the client guard
-            // refused it (a chat is already streaming) or the server refused
-            // the POST. Dropping the bundle here and returning ok:true
-            // reported a successful Save for edits that were never written and
-            // no longer existed anywhere.
-            //
-            // BOUNDED, like the iteration lane's two hand-offs. This await sits
-            // behind the save dialog, which shows no close control while a save
-            // is in flight, and the server can hold a submission for a
-            // concurrency slot for as long as the project's other turns take.
-            // Without a bound the designer is left in front of a modal they
-            // cannot dismiss, over a save that may never answer.
-            const handOff = escalateToChatRef.current
-            const prompt = buildEditEscalationPrompt(normalizedMutations)
-            // The session's own signal goes in alongside the deadline's, the
-            // way the iteration lane's hand-offs pass theirs. Without it the
-            // helper aborts only on the timeout: a page changed while this POST
-            // is out would still let the turn be ACCEPTED, and an accepted turn
-            // edits files for the page that left. The stale check below cannot
-            // retract a turn that has already been taken.
-            const outcome = await settleHandOff(
-              (signal) => handOff(prompt, { signal }),
-              { signal: sessionSignal },
-            )
-            // The hand-off can hold for as long as the project's other turns
-            // take, which is easily long enough for the page to be replaced.
-            // Both arms below write `mutations`, so neither may run for a
-            // document that is gone.
-            if (!session.isCurrent(generation)) {
-              return stopForPageChange()
+    // THE SESSION THIS SAVE BELONGS TO, as one run.
+    //
+    // A save is several requests in a row, and the page can be replaced between
+    // any two of them: the AI-queue flush runs an LLM on the server and takes
+    // as long as that takes, and the scoped-CSS flush is one request per
+    // mutation. Everything after the boundary would act on the wrong document.
+    // It resolves a stylesheet against the NEW page, writes the departed page's
+    // scoped-CSS mutations into it, clears the departed page's preview
+    // overrides, and reloads the page that replaced it.
+    //
+    // So every await below is a `ctx.step`, which does not hand back a value
+    // once the session has ended, and `ctx.signal` goes to every request whose
+    // transport takes one. The lanes' own runs cover a single edit; this one
+    // covers the multi-request run. `null` is this body's way of saying "the
+    // page changed"; the caller below does the reporting.
+    const run = await session.run(async (
+      ctx,
+    ): Promise<{ ok: true } | { ok: false; reason: string } | null> => {
+      try {
+        // Buffered structural + prop edits no longer exist: every
+        // direct-manipulation edit dispatches to the working tree the
+        // moment it's made (branch mode). This flush is now solely the
+        // AI-queue drain — the fuzzy DOM mutations the deterministic lane
+        // refused mid-edit, applied here via the llm-patch bundle.
+        // Dispatch DOM mutation log as a single llm-patch bundle.
+        if (directMutations.length > 0) {
+          const selection = useEditorStore.getState().editorSelection
+          const baseHashes = { ...fileHashesRef.current }
+          // Eagerly snapshot the input the LLM would see (capped at 10
+          // entries, mirroring the server's truncation). The dialog
+          // renders this WHILE the request is in flight so the designer
+          // sees "Asking AI to interpret these N edits" instead of a
+          // blank spinner. If the server's fast-path handles the bundle
+          // (no LLM call), the dialog clears this on response.
+          //
+          // This is the commit/flush path — it dispatches with
+          // `llmFallback: 'patch'` (below) to APPLY queued fuzzy edits via
+          // the LLM, so the progress snapshot is wanted here (unlike the
+          // typing-time path, which queues silently).
+          setSavePendingLLMInput(
+            directMutations.slice(0, 10).map((m) => ({
+              id: m.id,
+              kind: m.kind,
+              sourceLoc: m.sourceLoc,
+              target: m.target,
+              before: m.before.length > 200 ? m.before.slice(0, 200) + '…' : m.before,
+              after: m.after.length > 200 ? m.after.slice(0, 200) + '…' : m.after,
+            })),
+          )
+          // Phase E1 — normalize the panel's "this instance" default on
+          // any callsite-scope mutation the designer didn't explicitly
+          // toggle. The panel surfaces the toggle (default: this-instance)
+          // for any non-class callsite mutation with a known callsiteLoc;
+          // here we make the saved disambiguationChoice match the UI's
+          // visual default. Without this step, an unticked toggle falls
+          // through with disambiguationChoice=undefined and the prompt
+          // has no clean routing rule.
+          const normalizedMutations: Mutation[] = directMutations.map((m) => {
+            if (
+              m.disambiguationChoice === undefined &&
+              m.scope === "callsite" &&
+              m.callsiteLoc !== null &&
+              m.kind !== "class"
+            ) {
+              return { ...m, disambiguationChoice: "this-instance" }
             }
-            if (outcome === "timed-out") {
-              // Neither accepted nor refused: the POST is aborted and the
-              // mutations stay in the buffer, so this is a failed save with
-              // everything still there to retry.
-              const reason = SAVE_HANDOFF_TIMEOUT_STATUS
+            return m
+          })
+          // Reset the streaming buffer on dispatch. Tokens accumulate into
+          // a ref (cheap per-token) and the throttled state push (below)
+          // is what triggers re-renders in the dialog.
+          saveStreamingTextRef.current = ''
+          setSaveStreamingText('')
+          let streamFlushTimer: ReturnType<typeof setTimeout> | null = null
+          const flushStreamSoon = () => {
+            if (streamFlushTimer !== null) return
+            // ~33ms cadence = 30fps, smooth enough for live text rendering
+            // without re-rendering the whole dialog per token.
+            streamFlushTimer = setTimeout(() => {
+              streamFlushTimer = null
+              setSaveStreamingText(saveStreamingTextRef.current)
+            }, 33)
+          }
+          // THE HASHES COME OFF THE PROMISE ITSELF, before staleness is decided.
+          // They are disk truth, not session state: this write landed on files
+          // that are the same files whichever page is on screen now, and dropping
+          // the new hashes leaves the shell's stale-target guard holding pre-write
+          // ones. The next save of the same file then 409s against Desde's own
+          // change (finding X5). Same order as the four single-edit lanes.
+          const write = adapter.applyEdit(
+            {
+              kind: "llm-patch",
+              id: makeEditId(),
+              target: selection ?? {
+                targetId: "llm-patch-bundle",
+                selector: "llm-patch-bundle",
+                ancestry: [],
+              },
+              mutations: normalizedMutations,
+              // Commit/flush path: APPLY via the LLM lane (parallel per-file
+              // server-side), not escalate. This is where queued fuzzy edits
+              // actually get written to the worktree.
+              llmFallback: "patch" as const,
+              ...(Object.keys(baseHashes).length > 0 ? { baseHashes } : {}),
+            },
+            {
+              onLLMStreamStart: () => {
+                // Reset on start so a previous save's tail doesn't
+                // contaminate the new run. (We also reset above on
+                // dispatch, but the start event arrives only AFTER the
+                // server confirmed the LLM actually fires — i.e. the
+                // fast-path was bypassed.)
+                saveStreamingTextRef.current = ''
+                setSaveStreamingText('')
+              },
+              onLLMStreamDelta: (delta) => {
+                saveStreamingTextRef.current += delta
+                flushStreamSoon()
+              },
+              // The session's lifetime. Ending it aborts this request, which
+              // settles as an ordinary failed result; the step below is what
+              // decides what happens next, before the result is even read.
+              signal: ctx.signal,
+            },
+          ).then((outcome) => {
+            if (outcome.kind === "applied" && outcome.newHashes) {
+              fileHashesRef.current = {
+                ...fileHashesRef.current,
+                ...outcome.newHashes,
+              }
+            }
+            return outcome
+          })
+          // THE PAGE. Answered before the rest of the result is read: an abort
+          // arrives here as `failed`, and reporting "Save failed at DOM mutations:
+          // edit request cancelled" would blame the write for the page going away.
+          const bundle = await ctx.step(write)
+          // The throttled timer is this call's own, so it is cancelled whichever
+          // way the flush ends. Cancelled BEFORE the staleness answer is read, or
+          // a stale save would leave a timeout writing into the dialog behind it.
+          if (streamFlushTimer !== null) {
+            clearTimeout(streamFlushTimer)
+            streamFlushTimer = null
+          }
+          if (bundle.stale) return null
+          const result = bundle.value
+          // Final flush so the last tokens land in state even if the
+          // throttled timer hadn't fired yet.
+          setSaveStreamingText(saveStreamingTextRef.current)
+          if (result.kind === "failed") {
+            // `'chat'` fallback mode: the deterministic lane couldn't apply
+            // the bundle, so the server returned `needsChat`. Hand it to
+            // the chat agent and clear the dispatched mutations from the
+            // buffer instead of surfacing a save error.
+            if (result.needsChat && escalateToChatRef.current) {
+              // A refused hand-off submitted nothing, whether the client guard
+              // refused it (a chat is already streaming) or the server refused
+              // the POST. Dropping the bundle here and returning ok:true
+              // reported a successful Save for edits that were never written and
+              // no longer existed anywhere.
+              //
+              // BOUNDED, like the iteration lane's two hand-offs. This await sits
+              // behind the save dialog, which shows no close control while a save
+              // is in flight, and the server can hold a submission for a
+              // concurrency slot for as long as the project's other turns take.
+              // Without a bound the designer is left in front of a modal they
+              // cannot dismiss, over a save that may never answer.
+              const handOff = escalateToChatRef.current
+              const prompt = buildEditEscalationPrompt(normalizedMutations)
+              // The session's own signal goes in alongside the deadline's, the
+              // way the iteration lane's hand-offs pass theirs. Without it the
+              // helper aborts only on the timeout: a page changed while this POST
+              // is out would still let the turn be ACCEPTED, and an accepted turn
+              // edits files for the page that left. The step below cannot retract
+              // a turn that has already been taken.
+              //
+              // The hand-off can hold for as long as the project's other turns
+              // take, which is easily long enough for the page to be replaced.
+              // Both arms below write `mutations`, so neither may run for a
+              // document that is gone.
+              const settled = await ctx.step(
+                settleHandOff((signal) => handOff(prompt, { signal }), {
+                  signal: ctx.signal,
+                }),
+              )
+              if (settled.stale) return null
+              const outcome = settled.value
+              if (outcome === "timed-out") {
+                // Neither accepted nor refused: the POST is aborted and the
+                // mutations stay in the buffer, so this is a failed save with
+                // everything still there to retry.
+                const reason = SAVE_HANDOFF_TIMEOUT_STATUS
+                setSavePendingLLMInput(null)
+                setSaveStatus(reason)
+                return { ok: false, reason }
+              }
+              const aftermath = afterEscalation(
+                outcome === "accepted",
+                normalizedMutations.length === 1
+                  ? "This edit"
+                  : `These ${normalizedMutations.length} edits`,
+              )
               setSavePendingLLMInput(null)
+              if (aftermath.buffer === "keep") {
+                setSaveStatus(aftermath.status)
+                return { ok: false, reason: aftermath.status }
+              }
+              const escalatedIds = new Set(normalizedMutations.map((m) => m.id))
+              session.updateMutations((prev) =>
+                prev.filter((m) => !escalatedIds.has(m.id)),
+              )
+              // The identities go with the mutations. Chat owns these edits now,
+              // and an identity left in the queue makes the capture scheduler
+              // skip the next inline text edit on that same element, then keeps
+              // the unload warning up over a queue that is empty in fact.
+              if (pruneAiQueue(queuedForAiRef.current, normalizedMutations)) {
+                setAiQueueCount(queuedForAiRef.current.size)
+              }
+              return { ok: true }
+            }
+            // Phase E3 — if the route returned 409 + conflicts, surface
+            // them in the panel with reload / force-overwrite recovery.
+            // Mutations stay in the buffer so the designer can re-save
+            // after choosing.
+            if (result.conflicts && result.conflicts.length > 0) {
+              setConflict({
+                files: result.conflicts,
+                pendingMutations: directMutations.slice(),
+              })
+              const reason = `External-edit conflict on ${result.conflicts.length} file(s): choose a recovery option.`
               setSaveStatus(reason)
               return { ok: false, reason }
             }
-            const aftermath = afterEscalation(
-              outcome === "accepted",
-              normalizedMutations.length === 1
-                ? "This edit"
-                : `These ${normalizedMutations.length} edits`,
-            )
+            const reason = `Save failed at DOM mutations: ${result.reason}`
+            setSaveStatus(reason)
             setSavePendingLLMInput(null)
-            if (aftermath.buffer === "keep") {
-              setSaveStatus(aftermath.status)
-              return { ok: false, reason: aftermath.status }
-            }
-            const escalatedIds = new Set(normalizedMutations.map((m) => m.id))
-            session.updateMutations((prev) =>
-              prev.filter((m) => !escalatedIds.has(m.id)),
-            )
-            // The identities go with the mutations. Chat owns these edits now,
-            // and an identity left in the queue makes the capture scheduler
-            // skip the next inline text edit on that same element, then keeps
-            // the unload warning up over a queue that is empty in fact.
-            if (pruneAiQueue(queuedForAiRef.current, normalizedMutations)) {
-              setAiQueueCount(queuedForAiRef.current.size)
-            }
-            return { ok: true }
+            return { ok: false, reason }
           }
-          // Phase E3 — if the route returned 409 + conflicts, surface
-          // them in the panel with reload / force-overwrite recovery.
-          // Mutations stay in the buffer so the designer can re-save
-          // after choosing.
-          if (result.conflicts && result.conflicts.length > 0) {
-            setConflict({
-              files: result.conflicts,
-              pendingMutations: directMutations.slice(),
-            })
-            const reason = `External-edit conflict on ${result.conflicts.length} file(s): choose a recovery option.`
+          // (The new hashes were recorded above, before the staleness check, so a
+          // save the page change stops still leaves them on record.)
+          // Capture the LLM trace if the server invoked it. Absent on the
+          // fast-path; presence is what the dialog uses to decide between
+          // "Saved" (deterministic) and "AI made the changes" (LLM) framing.
+          if (result.kind === "applied" && result.llmTrace) {
+            setSaveLastLLMTrace(result.llmTrace)
+          }
+          // Clear the in-flight LLM input regardless of which path ran —
+          // success means the dialog should move from "Asking AI…" to the
+          // outcome view (either the trace, or just "Saved" for fast-path).
+          setSavePendingLLMInput(null)
+          const directIds = new Set(normalizedMutations.map((m) => m.id))
+          session.updateMutations((prev) => prev.filter((m) => !directIds.has(m.id)))
+          // WS3 (codex round-9): the flush just landed every mutation in this
+          // bundle — release their preview overrides so the bridge stops
+          // re-asserting/reporting them. (The failure paths above deliberately
+          // do NOT resolve: on conflict/hard-failure the mutations stay
+          // buffered for re-save and the preview legitimately rides; on
+          // needsChat escalation chat lands the edit later and HMR shows
+          // truth — the store's give-up timeout bounds the assertion either
+          // way.)
+          for (const m of normalizedMutations) {
+            resolveOverrideSettled(adapter, m.id, "confirmed")
+          }
+          // The queued fuzzy edits in this bundle were just applied, so they
+          // leave the AI queue with them and the Commit badge resets.
+          if (pruneAiQueue(queuedForAiRef.current, normalizedMutations)) {
+            setAiQueueCount(queuedForAiRef.current.size)
+          }
+        }
+
+        // 3. Dispatch each ancestor-resolution class mutation as its own
+        //    scoped-css-override edit. Sequential (not parallel): later
+        //    edits may upsert additional rules into the same style block
+        //    a previous edit just wrote, and the applicator is idempotent
+        //    PER (file, scopeClass, deepSelector) but the file is shared.
+        //    Failures stop the loop; succeeded edits stay.
+        //
+        // Track the EXPLICIT ids of mutations whose applyEdit succeeded
+        // so the cleanup filter never confuses skipped mutations
+        // (malformed sourceLoc, empty class diff) with saved ones —
+        // slicing by a counter would silently remove the wrong ids.
+        const scopedOverrideSavedIds: string[] = []
+        // Resolving a destination stylesheet can ask the DOCUMENT
+        // (`GET_STYLESHEET_TARGETS`), so a page replaced in that window makes the
+        // answer describe a different app's stylesheets. Nothing may be written
+        // against it.
+        const resolvedFlush = await ctx.step(resolveStyleDestination())
+        if (resolvedFlush.stale) return null
+        const flushDestination = resolvedFlush.value
+        if (!flushDestination.ok && scopedOverrideMutations.length > 0) {
+          setSaveStatus(`Save failed: ${flushDestination.reason}`)
+          return { ok: false, reason: flushDestination.reason }
+        }
+        const flushOpts = flushDestination.ok ? flushDestination.opts : {}
+        /** Widest blast radius across this flush, reported once at the end. */
+        let widestRadius: number | undefined
+        for (const m of scopedOverrideMutations) {
+          // Shared with the branch-mode class dispatch so the Tailwind-
+          // resolution + deep-selector logic stays single-sourced. Framework-aware
+          // (Vue → scoped-css-override; React → jsx-style). Null = no sourceLoc /
+          // no class diff → skip (matches the prior inline guards).
+          const edit = buildStyleEdit(m, flushOpts)
+          if (!edit) continue
+          if (
+            m.anchorMatchCount !== undefined &&
+            m.anchorMatchCount > (widestRadius ?? 1)
+          ) {
+            widestRadius = m.anchorMatchCount
+          }
+          if (isUnsupportedStyleBuild(edit)) {
+            // Surface loudly rather than skip — the change can't be expressed on
+            // this substrate (e.g. an inline-only React app + a shadow utility).
+            const reason = `Save failed: ${edit.unsupported}`
             setSaveStatus(reason)
             return { ok: false, reason }
           }
-          const reason = `Save failed at DOM mutations: ${result.reason}`
-          setSaveStatus(reason)
-          setSavePendingLLMInput(null)
-          return { ok: false, reason }
+          // Same rule as the bundle above, and the same reason for answering
+          // before the result is read: an abort is a `failed` result, and the
+          // page going away is not a failure of this write.
+          const scoped = await ctx.step(
+            adapter.applyEdit(edit, { signal: ctx.signal }),
+          )
+          if (scoped.stale) return null
+          const result = scoped.value
+          if (result.kind === "failed") {
+            const reason = `Save failed at scoped-css-override ${scopedOverrideSavedIds.length + 1}: ${result.reason}`
+            setSaveStatus(reason)
+            return { ok: false, reason }
+          }
+          scopedOverrideSavedIds.push(m.id)
         }
-        // (The new hashes were recorded above, before the staleness check, so a
-        // save the page change stops still leaves them on record.)
-        // Capture the LLM trace if the server invoked it. Absent on the
-        // fast-path; presence is what the dialog uses to decide between
-        // "Saved" (deterministic) and "AI made the changes" (LLM) framing.
-        if (result.kind === "applied" && result.llmTrace) {
-          setSaveLastLLMTrace(result.llmTrace)
+        if (scopedOverrideSavedIds.length > 0) {
+          const savedIds = new Set(scopedOverrideSavedIds)
+          session.updateMutations((prev) => prev.filter((m) => !savedIds.has(m.id)))
+          // "N > 1 must say N" (§ 9g.8 item 4). One rule can cover several
+          // elements — on React that is the normal shape for a first-party
+          // component, whose internal root stamp is shared by every instance —
+          // and the number was already in hand.
+          const radiusNote = blastRadiusNotice(widestRadius)
+          if (radiusNote) setSaveStatus(radiusNote)
         }
-        // Clear the in-flight LLM input regardless of which path ran —
-        // success means the dialog should move from "Asking AI…" to the
-        // outcome view (either the trace, or just "Saved" for fast-path).
-        setSavePendingLLMInput(null)
-        const directIds = new Set(normalizedMutations.map((m) => m.id))
-        session.updateMutations((prev) => prev.filter((m) => !directIds.has(m.id)))
-        // WS3 (codex round-9): the flush just landed every mutation in this
-        // bundle — release their preview overrides so the bridge stops
-        // re-asserting/reporting them. (The failure paths above deliberately
-        // do NOT resolve: on conflict/hard-failure the mutations stay
-        // buffered for re-save and the preview legitimately rides; on
-        // needsChat escalation chat lands the edit later and HMR shows
-        // truth — the store's give-up timeout bounds the assertion either
-        // way.)
-        for (const m of normalizedMutations) {
-          resolveOverrideSettled(adapter, m.id, "confirmed")
-        }
-        // The queued fuzzy edits in this bundle were just applied, so they
-        // leave the AI queue with them and the Commit badge resets.
-        if (pruneAiQueue(queuedForAiRef.current, normalizedMutations)) {
-          setAiQueueCount(queuedForAiRef.current.size)
-        }
-      }
 
-      // 3. Dispatch each ancestor-resolution class mutation as its own
-      //    scoped-css-override edit. Sequential (not parallel): later
-      //    edits may upsert additional rules into the same style block
-      //    a previous edit just wrote, and the applicator is idempotent
-      //    PER (file, scopeClass, deepSelector) but the file is shared.
-      //    Failures stop the loop; succeeded edits stay.
-      //
-      // Track the EXPLICIT ids of mutations whose applyEdit succeeded
-      // so the cleanup filter never confuses skipped mutations
-      // (malformed sourceLoc, empty class diff) with saved ones —
-      // slicing by a counter would silently remove the wrong ids.
-      const scopedOverrideSavedIds: string[] = []
-      const flushDestination = await resolveStyleDestination()
-      // Resolving a destination stylesheet can ask the DOCUMENT
-      // (`GET_STYLESHEET_TARGETS`), so a page replaced in that window makes the
-      // answer describe a different app's stylesheets. Nothing may be written
-      // against it.
-      if (!session.isCurrent(generation)) {
-        return stopForPageChange()
-      }
-      if (!flushDestination.ok && scopedOverrideMutations.length > 0) {
-        setSaveStatus(`Save failed: ${flushDestination.reason}`)
-        return { ok: false, reason: flushDestination.reason }
-      }
-      const flushOpts = flushDestination.ok ? flushDestination.opts : {}
-      /** Widest blast radius across this flush, reported once at the end. */
-      let widestRadius: number | undefined
-      for (const m of scopedOverrideMutations) {
-        // Shared with the branch-mode class dispatch so the Tailwind-
-        // resolution + deep-selector logic stays single-sourced. Framework-aware
-        // (Vue → scoped-css-override; React → jsx-style). Null = no sourceLoc /
-        // no class diff → skip (matches the prior inline guards).
-        const edit = buildStyleEdit(m, flushOpts)
-        if (!edit) continue
-        if (
-          m.anchorMatchCount !== undefined &&
-          m.anchorMatchCount > (widestRadius ?? 1)
-        ) {
-          widestRadius = m.anchorMatchCount
+        // Clear bridge overrides. Files are now the source of truth; any
+        // HMR/reload from the substrate will reflect them.
+        adapter.clearPropOverrides()
+        adapter.clearAttrOverrides()
+        // After a successful save the bridge's preview state diverges
+        // from the on-disk state — Vue's HMR may or may not pick up
+        // every change cleanly, and the bridge previously mutated DOM
+        // that Vue doesn't own. A hard reload re-syncs.
+        //
+        // Vite HMR sometimes misses editor file writes — suspected
+        // causes: race between fs.writeFile and chokidar, a stale HMR
+        // WebSocket left over from a long-lived dev-server session, manual
+        // textContent mutation pre-empting Vue's diff. Designers were
+        // seeing "the save did nothing" — the file WAS written, but the
+        // iframe kept showing the pre-edit render until manual refresh.
+        //
+        // Backstop via the bridge's RELOAD_PROTOTYPE message — runs
+        // `window.location.reload()` inside the iframe, which preserves
+        // the live SPA URL. A previous version did `iframe.src =
+        // iframe.src` from the parent, which bounces to the start route
+        // because the src ATTRIBUTE doesn't track SPA navigation.
+        const anyApplied =
+          directMutations.length > 0 || scopedOverrideSavedIds.length > 0
+        if (anyApplied) {
+          requestPrototypeReload(iframeRef.current, "save-success")
         }
-        if (isUnsupportedStyleBuild(edit)) {
-          // Surface loudly rather than skip — the change can't be expressed on
-          // this substrate (e.g. an inline-only React app + a shadow utility).
-          const reason = `Save failed: ${edit.unsupported}`
-          setSaveStatus(reason)
-          return { ok: false, reason }
-        }
-        const result = await adapter.applyEdit(
-          edit,
-          { signal: sessionSignal },
-        )
-        // Same rule as the bundle above, and the same reason for checking
-        // before the result is read: an abort is a `failed` result, and the
-        // page going away is not a failure of this write.
-        if (!session.isCurrent(generation)) {
-          return stopForPageChange()
-        }
-        if (result.kind === "failed") {
-          const reason = `Save failed at scoped-css-override ${scopedOverrideSavedIds.length + 1}: ${result.reason}`
-          setSaveStatus(reason)
-          return { ok: false, reason }
-        }
-        scopedOverrideSavedIds.push(m.id)
-      }
-      if (scopedOverrideSavedIds.length > 0) {
-        const savedIds = new Set(scopedOverrideSavedIds)
-        session.updateMutations((prev) => prev.filter((m) => !savedIds.has(m.id)))
-        // "N > 1 must say N" (§ 9g.8 item 4). One rule can cover several
-        // elements — on React that is the normal shape for a first-party
-        // component, whose internal root stamp is shared by every instance —
-        // and the number was already in hand.
-        const radiusNote = blastRadiusNotice(widestRadius)
-        if (radiusNote) setSaveStatus(radiusNote)
-      }
 
-      // Clear bridge overrides. Files are now the source of truth; any
-      // HMR/reload from the substrate will reflect them.
-      adapter.clearPropOverrides()
-      adapter.clearAttrOverrides()
-      // After a successful save the bridge's preview state diverges
-      // from the on-disk state — Vue's HMR may or may not pick up
-      // every change cleanly, and the bridge previously mutated DOM
-      // that Vue doesn't own. A hard reload re-syncs.
-      //
-      // Vite HMR sometimes misses editor file writes — suspected
-      // causes: race between fs.writeFile and chokidar, a stale HMR
-      // WebSocket left over from a long-lived dev-server session, manual
-      // textContent mutation pre-empting Vue's diff. Designers were
-      // seeing "the save did nothing" — the file WAS written, but the
-      // iframe kept showing the pre-edit render until manual refresh.
-      //
-      // Backstop via the bridge's RELOAD_PROTOTYPE message — runs
-      // `window.location.reload()` inside the iframe, which preserves
-      // the live SPA URL. A previous version did `iframe.src =
-      // iframe.src` from the parent, which bounces to the start route
-      // because the src ATTRIBUTE doesn't track SPA navigation.
-      const anyApplied =
-        directMutations.length > 0 || scopedOverrideSavedIds.length > 0
-      if (anyApplied) {
-        requestPrototypeReload(iframeRef.current, "save-success")
+        const elapsed = Math.round(performance.now() - saveStart)
+        const summary = [
+          directMutations.length > 0 && `${directMutations.length} DOM mutation(s)`,
+          scopedOverrideSavedIds.length > 0 &&
+            `${scopedOverrideSavedIds.length} scoped CSS override(s)`,
+        ]
+          .filter(Boolean)
+          .join(", ")
+        setSaveStatus(`Saved ${summary}.`)
+        console.info("[Editor] save-success", {
+          elapsed_ms: elapsed,
+          mutations: directMutations.length,
+          scopedOverrides: scopedOverrideSavedIds.length,
+        })
+      } catch (err) {
+        saveOk = false
+        const reason = `Save threw: ${(err as Error).message}`
+        setSaveStatus(reason)
+        saveThrowReason = reason
+        console.warn("[Editor] save-threw", err)
+      } finally {
+        setSaving(false)
       }
-
-      const elapsed = Math.round(performance.now() - saveStart)
-      const summary = [
-        directMutations.length > 0 && `${directMutations.length} DOM mutation(s)`,
-        scopedOverrideSavedIds.length > 0 &&
-          `${scopedOverrideSavedIds.length} scoped CSS override(s)`,
-      ]
-        .filter(Boolean)
-        .join(", ")
-      setSaveStatus(`Saved ${summary}.`)
-      console.info("[Editor] save-success", {
-        elapsed_ms: elapsed,
-        mutations: directMutations.length,
-        scopedOverrides: scopedOverrideSavedIds.length,
-      })
-    } catch (err) {
-      saveOk = false
-      const reason = `Save threw: ${(err as Error).message}`
-      setSaveStatus(reason)
-      saveThrowReason = reason
-      console.warn("[Editor] save-threw", err)
-    } finally {
-      setSaving(false)
-    }
-    if (!saveOk) {
-      // saveThrowReason is set only when the catch block ran. Any earlier
-      // failure path returned its own typed reason above (the function
-      // doesn't reach this point on those branches). Defensive fallback
-      // for completeness.
-      return { ok: false, reason: saveThrowReason ?? "Save failed." }
-    }
-    return { ok: true }
+      if (!saveOk) {
+        // saveThrowReason is set only when the catch block ran. Any earlier
+        // failure path returned its own typed reason above (the function
+        // doesn't reach this point on those branches). Defensive fallback
+        // for completeness.
+        return { ok: false, reason: saveThrowReason ?? "Save failed." }
+      }
+      return { ok: true }
+    })
+    // ONE report for the page change, whichever await it landed in. A step that
+    // came back stale returned `null` above; a session that ended after the
+    // last step is caught by `run`'s own final answer, which withholds the
+    // value the same way. Either way the save stopped and nothing further was
+    // applied, which is the one sentence both of them mean.
+    if (run.stale || run.value === null) return stopForPageChange()
+    return run.value
     // `buildStyleEdit` (called in the body) is a stable top-level import —
     // no dep entry needed. This deps array previously named the unrelated
     // `buildScopedCssOverrideEdit` callback (stale from before
