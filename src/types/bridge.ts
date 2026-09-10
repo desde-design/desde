@@ -1159,7 +1159,8 @@ export type ShellToBridgeMessage =
   | { type: "CLEAR_SELECTION" }
   /**
    * The shell says which elements it now holds; the page selects and
-   * highlights exactly that set (BRIDGE_VERSION 2026-09-10g-commit-selection+).
+   * highlights exactly that set (BRIDGE_VERSION 2026-09-10g-commit-selection+;
+   * `documentId` required since 2026-09-10h-commit-names-page).
    *
    * The inspects (`INSPECT_SELECTOR`, `INSPECT_MANY`, `INSPECT_PARENT`) used
    * to select as a side effect of answering, before the shell had seen the
@@ -1177,8 +1178,18 @@ export type ShellToBridgeMessage =
    *
    * It carries no `requestId` and gets no reply. The shell already holds the
    * inspection it is committing.
+   *
+   * `documentId` names the page the commit is FOR, and a bridge running a
+   * different document drops it. The shell posts through the iframe's
+   * `contentWindow`, which survives a navigation, so a commit meant for the
+   * page that answered can be delivered to the page that replaced it. It is
+   * required rather than optional because a commit with no page named is a
+   * commit that could land anywhere.
    */
-  | { type: "COMMIT_SELECTION"; payload: { selectors: string[] } }
+  | {
+      type: "COMMIT_SELECTION"
+      payload: { selectors: string[]; documentId: string }
+    }
   | { type: "PING" }
   /**
    * Non-committal hover preview. Unlike `HIGHLIGHT_COMPONENT`, this does NOT

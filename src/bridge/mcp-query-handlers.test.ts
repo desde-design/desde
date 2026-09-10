@@ -400,10 +400,20 @@ describe("mcp-query-handlers: an inspect reads, and only a commit selects", () =
     expect(selectedElement).toBeNull()
   })
 
+  /**
+   * Every commit in this block names THIS document, because that is what the
+   * shell sends. The rows that prove a foreign commit is dropped pass their
+   * own id.
+   */
+  function commit(
+    selectors: unknown,
+    documentId: unknown = TEST_DOCUMENT_ID,
+  ): boolean {
+    return query({ type: "COMMIT_SELECTION", payload: { selectors, documentId } })
+  }
+
   it("COMMIT_SELECTION selects and highlights the one element it names", () => {
-    expect(
-      query({ type: "COMMIT_SELECTION", payload: { selectors: ["#save"] } }),
-    ).toBe(true)
+    expect(commit(["#save"])).toBe(true)
 
     expect(selectCalls).toEqual([document.getElementById("save")])
     expect(selectedElement).toBe(document.getElementById("save"))
@@ -413,34 +423,28 @@ describe("mcp-query-handlers: an inspect reads, and only a commit selects", () =
     // There is one selection overlay, and the shell pins the first resolved
     // element as its primary. So a set commits its primary, exactly as the
     // multi-select read used to pin it.
-    query({
-      type: "COMMIT_SELECTION",
-      payload: { selectors: ["#save", "#cancel"] },
-    })
+    commit(["#save", "#cancel"])
 
     expect(selectCalls).toEqual([document.getElementById("save")])
   })
 
   it("COMMIT_SELECTION skips a selector that does not resolve", () => {
-    query({
-      type: "COMMIT_SELECTION",
-      payload: { selectors: ["#gone", "#cancel"] },
-    })
+    commit(["#gone", "#cancel"])
 
     expect(selectCalls).toEqual([document.getElementById("cancel")])
   })
 
   it("an empty COMMIT_SELECTION clears the selection", () => {
-    query({ type: "COMMIT_SELECTION", payload: { selectors: ["#save"] } })
-    query({ type: "COMMIT_SELECTION", payload: { selectors: [] } })
+    commit(["#save"])
+    commit([])
 
     expect(clearCalls).toBe(1)
     expect(selectedElement).toBeNull()
   })
 
   it("a COMMIT_SELECTION that resolves nothing clears rather than leaving another element drawn", () => {
-    query({ type: "COMMIT_SELECTION", payload: { selectors: ["#save"] } })
-    query({ type: "COMMIT_SELECTION", payload: { selectors: ["#gone"] } })
+    commit(["#save"])
+    commit(["#gone"])
 
     expect(clearCalls).toBe(1)
     expect(selectedElement).toBeNull()
@@ -450,16 +454,63 @@ describe("mcp-query-handlers: an inspect reads, and only a commit selects", () =
     // The shell already holds the inspection it committed. A reply would be an
     // unsolicited ELEMENT_INSPECTED, which the shell installs unconditionally,
     // so the two would trade selections for no reason.
-    query({ type: "COMMIT_SELECTION", payload: { selectors: ["#save"] } })
-    query({ type: "COMMIT_SELECTION", payload: { selectors: [] } })
+    commit(["#save"])
+    commit([])
 
     expect(sent).toEqual([])
   })
 
-  it("COMMIT_SELECTION with no usable payload clears", () => {
-    query({ type: "COMMIT_SELECTION" })
+  it("a COMMIT_SELECTION with no usable selectors clears", () => {
+    // `payloadOf` answers `{}` for a message with no payload at all, so a
+    // missing `selectors` takes the same branch an empty one does rather than
+    // throwing out of the listener.
+    commit(undefined)
 
     expect(selectCalls).toEqual([])
     expect(clearCalls).toBe(1)
+  })
+
+  it("a COMMIT_SELECTION for another document changes nothing", () => {
+    // The shell posts through the iframe's `contentWindow`, which is the same
+    // object across a navigation. So a commit for the page that answered can
+    // be delivered here, to the page that replaced it: document A's reply is
+    // accepted in the instant before B's BRIDGE_READY is processed, and the
+    // commit for A arrives at B.
+    commit(["#save"])
+    selectCalls = []
+    clearCalls = 0
+
+    expect(commit(["#cancel"], "doc-somewhere-else")).toBe(true)
+
+    expect(selectCalls).toEqual([])
+    expect(clearCalls).toBe(0)
+    expect(selectedElement).toBe(document.getElementById("save"))
+    expect(sent).toEqual([])
+  })
+
+  it("a COMMIT_SELECTION that names no document at all is dropped", () => {
+    // Required, not optional. A commit with no page named is a commit that
+    // could land anywhere, so the page it lands on refuses it.
+    expect(query({ type: "COMMIT_SELECTION" })).toBe(true)
+    expect(query({ type: "COMMIT_SELECTION", payload: { selectors: ["#save"] } })).toBe(true)
+
+    expect(selectCalls).toEqual([])
+    expect(clearCalls).toBe(0)
+    expect(selectedElement).toBeNull()
+  })
+
+  it("a COMMIT_SELECTION for the element already selected does not redraw it", () => {
+    // Every accepted selection change is echoed now, the designer's own click
+    // included, and the page had already selected that element before it
+    // reported it. Re-running the select would tear the overlay down and put
+    // it back for no change, which reads as a flicker on every click.
+    commit(["#save"])
+    expect(selectCalls).toEqual([document.getElementById("save")])
+
+    commit(["#save"])
+
+    expect(selectCalls).toEqual([document.getElementById("save")])
+    expect(clearCalls).toBe(0)
+    expect(selectedElement).toBe(document.getElementById("save"))
   })
 })

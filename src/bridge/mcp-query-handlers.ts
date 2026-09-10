@@ -18,7 +18,9 @@
  * nothing, because the shell already has the inspection it is committing. It
  * lives here rather than in the main switch so that every write to the
  * inspector's selection from a shell message sits in one file beside the
- * reads it replaced.
+ * reads it replaced. It is also the one message here that names the document
+ * it is FOR rather than the document it came from, and a commit for another
+ * document is dropped: see the case body.
  *
  * `handleMcpQuery` is a single dispatcher the main postMessage switch calls
  * BEFORE its own switch — returns `true` when it owned `data.type` (so the
@@ -139,8 +141,24 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
        * and an unsolicited `ELEMENT_INSPECTED` would be installed by the
        * shell unconditionally, so a reply here would be two sides echoing one
        * selection back and forth.
+       *
+       * THE COMMIT NAMES THE PAGE IT IS FOR, and a commit for another page is
+       * dropped here. The shell sends through the iframe's `contentWindow`,
+       * which is the same object across a navigation, so a commit posted for
+       * document A can be delivered to document B. That happens when A's
+       * reply is accepted in the instant before B's `BRIDGE_READY` is
+       * processed: the shell still believes A is on screen, so it accepts and
+       * commits, and B would apply a selection from a page that is gone.
+       * Dropping is silent and answers nothing, exactly like a commit whose
+       * selectors resolve to nothing on this page.
+       *
+       * `bridgeDocumentId` is read at HANDLE time, not at module load: it is
+       * a live binding that `configureBridgeRuntime` fills in, and a copy
+       * taken when this module was evaluated would be the empty string.
        */
-      const committed = payloadOf(data).selectors
+      const commitPayload = payloadOf(data)
+      if (commitPayload.documentId !== bridgeDocumentId) return true
+      const committed = commitPayload.selectors
       let primary: Element | null = null
       if (Array.isArray(committed)) {
         for (const sel of committed) {
@@ -157,7 +175,16 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
         }
       }
       if (primary) {
-        inspector.setSelectedElement(primary)
+        // THE ECHO HAS TO BE FREE. Every accepted selection change is
+        // committed now, including the designer's own click, which the page
+        // had already selected before it reported it. Re-running
+        // `setSelectedElement` on the element that is already selected would
+        // tear down and redraw the overlay for no change at all, which the
+        // designer sees as a flicker on every click. So a commit that names
+        // what is already drawn does nothing.
+        if (inspector.getSelectedElement() !== primary) {
+          inspector.setSelectedElement(primary)
+        }
       } else {
         inspector.clearSelectedOnly()
       }
