@@ -19,6 +19,9 @@ import { createOverridePreview } from "./override-preview"
 
 const sent: { type: string; payload?: unknown }[] = []
 
+/** The document id the runtime is configured with for these tests. */
+const TEST_DOCUMENT_ID = "doc-under-test"
+
 /** Inspector stub: DOM-edit mode only suspends/restores it. */
 const inspector = {
   isActive: () => false,
@@ -62,6 +65,7 @@ beforeEach(() => {
     sendToShell: (msg: { type: string; payload?: unknown }) => void sent.push(msg),
     inspectElement: () => ({}) as never,
     attributeElement: () => undefined,
+    documentId: TEST_DOCUMENT_ID,
   })
 })
 
@@ -138,5 +142,23 @@ describe("dom-edit-mode — a typed edit is never silently dropped", () => {
     mode.exit()
 
     expect(captured()).toHaveLength(0)
+  })
+
+  it("stamps every mutation message with the document it came from", () => {
+    // The shell cannot tell a capture from the departed page apart from one made
+    // in the page in front of the designer: both arrive as postMessages on one
+    // channel, and the shell stamped them with whichever session was live when
+    // they were READ. The window is small and the outcome is a write into the
+    // wrong file, so the page says who it is.
+    const mode = createDomEditMode(inspector, overridePreview, adapter)
+    const el = mountEditable("Before")
+    mode.enter({})
+
+    el.textContent = "After"
+    el.dispatchEvent(new Event("input", { bubbles: true }))
+    vi.advanceTimersByTime(500)
+
+    const message = captured()[0] as { payload: { documentId?: string } }
+    expect(message.payload.documentId).toBe(TEST_DOCUMENT_ID)
   })
 })

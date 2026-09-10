@@ -15,7 +15,7 @@
 import type { FrameworkRuntimeAdapter } from "./leaf-prop-attribution"
 import type { InspectorOverlayManager } from "./inspector-overlay"
 import type { OverridePreview } from "./override-preview"
-import { sendToShell } from "./bridge-runtime"
+import { bridgeDocumentId, sendToShell } from "./bridge-runtime"
 import { resolveDomAnchor } from "./element-attribution"
 import { classifyMutationScope } from "./mutation-scope"
 import { generateSelector } from "./selector-engine"
@@ -780,6 +780,7 @@ export function createDomEditMode(
         id: mutation.id,
         reason,
         selector: mutation.selector,
+        documentId: bridgeDocumentId,
       },
     })
   }
@@ -838,13 +839,17 @@ export function createDomEditMode(
           pendingId,
           draft: draftWithoutInstance,
           candidates,
+          documentId: bridgeDocumentId,
         },
       })
       return
     }
 
     registerMutationOverride(el, mutation, previewOps)
-    sendToShell({ type: "MUTATION_CAPTURED", payload: mutation })
+    sendToShell({
+      type: "MUTATION_CAPTURED",
+      payload: { ...mutation, documentId: bridgeDocumentId },
+    })
   }
 
   /**
@@ -890,7 +895,10 @@ export function createDomEditMode(
       mutation = { ...mutation, disambiguationChoice: "this-instance" }
     }
     registerMutationOverride(el, mutation, previewOps)
-    sendToShell({ type: "MUTATION_CAPTURED", payload: mutation })
+    sendToShell({
+      type: "MUTATION_CAPTURED",
+      payload: { ...mutation, documentId: bridgeDocumentId },
+    })
   }
 
   /**
@@ -1037,7 +1045,10 @@ export function createDomEditMode(
     // this branch registers and emits, and the shell's dispatch lane resolves
     // that id once (confirmed / failed / threw).
     registerMutationOverride(pending.el, mutation, pending.previewOps)
-    sendToShell({ type: "MUTATION_CAPTURED", payload: mutation })
+    sendToShell({
+      type: "MUTATION_CAPTURED",
+      payload: { ...mutation, documentId: bridgeDocumentId },
+    })
   }
 
   return {

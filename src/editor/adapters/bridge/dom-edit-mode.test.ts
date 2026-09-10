@@ -47,7 +47,7 @@ function emitBridgeReady(
   setup: MockIframeSetup,
   // A version the shell accepts, with the document id every accepted bridge
   // reports (round 16 X3).
-  version = '2026-09-09c-guard-origin',
+  version = '2026-09-10a-capture-document-id',
   documentId = 'doc-a',
 ): void {
   const event = new Event('message') as MessageEvent
@@ -77,6 +77,7 @@ function emitFromBridge(
 function makeBridgeMutation(overrides: Partial<BridgeMutation> = {}): BridgeMutation {
   return {
     id: 'm-1',
+    documentId: 'doc-a',
     kind: 'text',
     sourceLoc: 'src/components/Card.vue:12:4',
     resolutionKind: 'direct',
@@ -144,10 +145,12 @@ describe('BridgeFrameworkAdapter — DOM-edit-mode (Phase A)', () => {
     adapter.onMutationAwaitingDisambiguation(listener)
 
     const draftMutation = makeBridgeMutation()
-    const { instancePath: _ip, ...draft } = draftMutation
+    const { instancePath: _ip, documentId: _docId, ...draft } = draftMutation
     void _ip
+    void _docId
     const pending: BridgePendingMutation = {
       pendingId: 'pending-1',
+      documentId: 'doc-a',
       draft,
       candidates: [
         { instancePath: 'App>List>Item[0]', selector: '[data-i="0"]', origin: false },
@@ -174,6 +177,7 @@ describe('BridgeFrameworkAdapter — DOM-edit-mode (Phase A)', () => {
         id: 'f-1',
         reason: 'No data-desde-src ancestor — cannot map this edit to source.',
         selector: 'div.unanchored',
+        documentId: 'doc-a',
       },
     })
 

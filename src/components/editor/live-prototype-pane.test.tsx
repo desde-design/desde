@@ -81,7 +81,7 @@ const PROTOTYPE_URL = "https://prototype.example.com/dashboard"
  * bridge (round 16 X3), so every handshake fixture carries both a version at or
  * above it and a `documentId`; a ready without one is refused.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-09c-guard-origin"
+const CURRENT_BRIDGE_VERSION = "2026-09-10a-capture-document-id"
 
 let activeMockSetup: MockIframeSetup | null = null
 
@@ -842,6 +842,10 @@ describe("inspection-time drift detection (2026-07-30 widening)", () => {
 describe("class-edit lane — release-then-verify sequencing", () => {
   const CLASS_MUTATION = {
     id: "dom-mut-1",
+    // Every message the bridge sends names the page it was made in, and the
+    // shell drops one from a page it is no longer connected to. These captures
+    // are made on doc-a unless a test spreads another id over this.
+    documentId: "doc-a",
     kind: "class" as const,
     sourceLoc: "src/components/Card.vue:9:4",
     sourceVersion: "abc123",
@@ -1068,7 +1072,10 @@ describe("class-edit lane — release-then-verify sequencing", () => {
     // The designer edits the same element on the new page: a second write,
     // which now owns the marker.
     await act(async () => {
-      emitFromBridge({ type: "MUTATION_CAPTURED", payload: CLASS_MUTATION })
+      emitFromBridge({
+        type: "MUTATION_CAPTURED",
+        payload: { ...CLASS_MUTATION, documentId: "doc-b" },
+      })
     })
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000)
@@ -1085,7 +1092,10 @@ describe("class-edit lane — release-then-verify sequencing", () => {
     // that is genuinely out. Before the fix the answer above had unlocked it,
     // and this started a third write alongside the second.
     await act(async () => {
-      emitFromBridge({ type: "MUTATION_CAPTURED", payload: CLASS_MUTATION })
+      emitFromBridge({
+        type: "MUTATION_CAPTURED",
+        payload: { ...CLASS_MUTATION, documentId: "doc-b" },
+      })
     })
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000)
@@ -1160,7 +1170,7 @@ describe("bridge session boundary", () => {
     await act(async () => {
       emitFromBridge({
         type: "MUTATION_AWAITING_DISAMBIGUATION",
-        payload: HELD_PROMPT,
+        payload: { ...HELD_PROMPT, documentId },
       })
     })
     await waitFor(() => {
@@ -1357,6 +1367,7 @@ describe("bridge session boundary", () => {
     // read 1 and 2 and cannot be confused.
     const BUFFERED_CLASS_CAPTURE = {
       id: "dom-mut-buffered",
+      documentId: "doc-a",
       kind: "class" as const,
       sourceLoc: "src/components/Card.vue:9:4",
       sourceVersion: "abc123",
@@ -1393,7 +1404,7 @@ describe("bridge session boundary", () => {
       await act(async () => {
         emitFromBridge({
           type: "MUTATION_AWAITING_DISAMBIGUATION",
-          payload: HELD_PROMPT,
+          payload: { ...HELD_PROMPT, documentId: "doc-a" },
         })
       })
       await waitFor(() => {
@@ -1621,6 +1632,7 @@ describe("bridge session boundary", () => {
           type: "MUTATION_CAPTURED",
           payload: {
             id: "dom-mut-hash-1",
+            documentId: "doc-a",
             kind: "text",
             sourceLoc: "src/components/Card.vue:12:4",
             sourceVersion: "abc123",
@@ -1666,6 +1678,7 @@ describe("bridge session boundary", () => {
           type: "MUTATION_CAPTURED",
           payload: {
             id: "dom-mut-hash-2",
+            documentId: "doc-b",
             kind: "text",
             sourceLoc: "src/components/Card.vue:20:4",
             sourceVersion: "hash-after-write",
@@ -1734,6 +1747,7 @@ describe("bridge session boundary", () => {
           type: "MUTATION_CAPTURED",
           payload: {
             id: "dom-mut-handoff-1",
+            documentId: "doc-a",
             kind: "text",
             sourceLoc: "src/components/Card.vue:12:4",
             sourceVersion: "abc123",
@@ -1822,6 +1836,7 @@ describe("bridge session boundary", () => {
           type: "MUTATION_CAPTURED",
           payload: {
             id: "dom-mut-save-1",
+            documentId: "doc-a",
             kind: "text",
             sourceLoc: "src/components/Card.vue:12:4",
             sourceVersion: "abc123",

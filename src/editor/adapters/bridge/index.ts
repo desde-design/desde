@@ -65,8 +65,12 @@ import {
  * follows a `load`. There is no installed base of older bridges (the repo's own
  * rule: rename and break freely), so an id-less bridge is refused here rather
  * than guessed at.
+ *
+ * Raised again for the id on every MUTATION message (round 15 RULING). The
+ * handshake id alone cannot say which page a capture was made in, so a bridge
+ * that stamps only the handshake is refused the same way.
  */
-const REQUIRED_BRIDGE_VERSION = '2026-09-09a-document-id'
+const REQUIRED_BRIDGE_VERSION = '2026-09-10a-capture-document-id'
 
 /**
  * Phase 6 feature gate. Bridges below this version don't know about
@@ -1414,7 +1418,33 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     }
   }
 
+  /**
+   * Is this message from the document the shell handshaked with?
+   *
+   * The bridge and the shell talk on one channel and a message outlives the
+   * page that sent it by however long the queue is. A capture from the page
+   * that just went away used to be delivered and stamped with the session that
+   * had replaced it, which is a write aimed at a file the new page may not even
+   * render (recorded as a known limit in round 15).
+   */
+  private fromCurrentDocument(documentId: string | undefined): boolean {
+    if (this.lastBridgeDocumentId === null) return false
+    return documentId === this.lastBridgeDocumentId
+  }
+
+  /** One line per dropped message, naming both ids so the gap is readable. */
+  private warnForeignDocument(type: string, documentId: string | undefined): void {
+    console.warn(
+      `[BridgeFrameworkAdapter] dropped ${type} from document ${documentId ?? '(none)'}; ` +
+        `the page on screen is ${this.lastBridgeDocumentId ?? '(none)'}`,
+    )
+  }
+
   private handleMutationCaptured(payload: BridgeMutation): void {
+    if (!this.fromCurrentDocument(payload.documentId)) {
+      this.warnForeignDocument('MUTATION_CAPTURED', payload.documentId)
+      return
+    }
     const mutation = bridgeMutationToCore(payload)
     for (const listener of this.mutationCapturedListeners) {
       try {
@@ -1429,6 +1459,10 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
   }
 
   private handleMutationAwaiting(payload: BridgePendingMutation): void {
+    if (!this.fromCurrentDocument(payload.documentId)) {
+      this.warnForeignDocument('MUTATION_AWAITING_DISAMBIGUATION', payload.documentId)
+      return
+    }
     const pending: PendingMutation = {
       pendingId: payload.pendingId,
       draft: bridgeMutationDraftToCore(payload.draft),
@@ -1454,7 +1488,12 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     id: string
     reason: string
     selector: string
+    documentId: string
   }): void {
+    if (!this.fromCurrentDocument(payload.documentId)) {
+      this.warnForeignDocument('MUTATION_RESOLUTION_FAILED', payload.documentId)
+      return
+    }
     for (const listener of this.resolutionFailedListeners) {
       try {
         listener({ id: payload.id, reason: payload.reason, selector: payload.selector })

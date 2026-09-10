@@ -109,7 +109,7 @@ import { createOverridePreview } from "./override-preview"
   // the viewer's `html-inject`). Keep it a single-use literal;
   // bridge-bundle-version.test.ts fails if that stops holding.
   ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__ =
-    "2026-09-09c-guard-origin"
+    "2026-09-10a-capture-document-id"
   const BRIDGE_VERSION = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__ as string
 
@@ -1157,7 +1157,12 @@ import { createOverridePreview } from "./override-preview"
   function init(): void {
     // Inject the IIFE-bound deps the extracted manager modules import (see
     // ./bridge-runtime). Must run before any manager is constructed/used.
-    configureBridgeRuntime({ sendToShell, inspectElement, attributeElement })
+    configureBridgeRuntime({
+      sendToShell,
+      inspectElement,
+      attributeElement,
+      documentId: DOCUMENT_ID,
+    })
     // WS3 override store + chain bookkeeping + prop/attr/class live-preview
     // (default timing options — 300ms re-assert / 5s unverified / 20s
     // give-up — see override-store.ts).

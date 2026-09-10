@@ -877,4 +877,35 @@ describe("useEditorEditing: the bridge session", () => {
     })
     expect(adapter.applies).toHaveLength(1)
   })
+
+  it("buffers a capture made in the document that is on screen", async () => {
+    // The end-to-end half of the round-15 RULING. The adapter is what tells a
+    // capture from the departed page apart from one made in the page in front
+    // of the designer, by the id the bridge stamps on it. What the hook owes
+    // the contract is the other half: a capture that DOES come from the page on
+    // screen is buffered against the session that is live now, and the answer
+    // to it is honoured rather than thrown away as stale.
+    const { rerender } = await mount()
+    const departing = lastFakeAdapter()
+    await changeDocument(rerender, "doc-b")
+    const arriving = lastFakeAdapter()
+    expect(arriving).not.toBe(departing)
+    expect(arriving.bridgeDocumentId).toBe("doc-b")
+    const statusAfterChange = editing()?.saveStatus
+
+    await act(async () => {
+      arriving.emitCapture(capture("m2", "hello"))
+    })
+    const pending = await waitForApply()
+    // Buffered under the live session: its request was not born cancelled.
+    expect(pending.signal?.aborted).toBe(false)
+
+    await act(async () => {
+      pending.settle(applied({ "src/App.vue": "v2" }))
+      await Promise.resolve()
+    })
+    // The answer was accepted, so no failure line was written over the line the
+    // page change left.
+    expect(editing()?.saveStatus).toBe(statusAfterChange)
+  })
 })

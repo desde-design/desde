@@ -214,6 +214,7 @@ describe("bridgeMutationToCore", () => {
   ): BridgeMutation {
     return {
       id: "m-1",
+      documentId: "doc-a",
       kind: "class",
       sourceLoc: "src/App.vue:14:7",
       anchorMatchCount: 1,
