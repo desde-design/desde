@@ -784,6 +784,80 @@ export function useEditorEditing({
       },
     )
 
+    /**
+     * MOVE THE SESSION BOUNDARY ONTO `documentId`.
+     *
+     * THE DOCUMENT BOUNDARY, and the only place it moves. A document that is
+     * not the one this session adopted means the page was replaced, and
+     * everything the previous page's session was holding ends here, before the
+     * new document is adopted, so a continuation that resumes afterwards sees
+     * the session it belongs to as over.
+     *
+     * Nothing is cancelled with the bridge: those drafts died with the document
+     * that issued them, and the instance that would receive the cancel is a
+     * different one that numbers its own drafts from `dom-pending-1`.
+     *
+     * Every bridge the shell accepts reports its document id, so the ids decide
+     * this on their own; a bridge that reports none is refused at the handshake
+     * instead (`REQUIRED_BRIDGE_VERSION`).
+     *
+     * SYNCHRONOUS, and that is the point. It used to live inside the
+     * handshake's `.then`, which is a PING round trip away from the moment the
+     * adapter adopted the new id. In that gap the new page's own capture
+     * passed the adapter's document gate, was buffered under the OLD session,
+     * and was then retired by the boundary when the round trip finally
+     * answered. The designer was told an edit they had just made on the page in
+     * front of them was discarded. Called from the document-changed listener in
+     * the same event turn as the adapter's adoption, there is no gap to lose an
+     * edit in.
+     *
+     * Calling it twice for the same id costs nothing: the end is skipped
+     * because the id has not changed, `start` answers with a resume plan
+     * instead, and re-arming a debounce that is already armed re-debounces it.
+     */
+    const enterDocument = (documentId: string | null) => {
+      if (shouldEndSessionOnHandshake(session.documentId, documentId)) {
+        // Through `endBridgeSession`, not through the end inside
+        // `session.start`: the buffers, the dialog rows and the held drafts
+        // are still this hook's, and they are half of what a document
+        // change discards. The end forgets the document, so the `start`
+        // below adopts the new one and does not end a second time.
+        endBridgeSessionRef.current?.({
+          reason: "reconnect",
+          cancelWithBridge: false,
+        })
+      }
+      // `bridgeDocumentId` is `string | null` and `start` takes the same,
+      // so there is no `?? ""` here: an empty string would be ADOPTED as a
+      // real document and the next handshake would read as a change.
+      const { resumed } = session.start(documentId, (mutation) =>
+        mutationResumeEligibleRef.current(mutation),
+      )
+      // THE SAME DOCUMENT, ANSWERING AGAIN, which is what a non-null
+      // `resumed` says. It is either the page's own second handshake or an
+      // adapter that detached and came back with the page still on screen.
+      // A plain teardown keeps the buffered edits but cancels the debounce
+      // timers that would have written them, so the entries would sit in
+      // the buffer with nothing left to write them. Re-arm them here, which
+      // is what the designer's next keystroke would have done anyway.
+      //
+      // The lists ON `resumed` ARE the answer: the session holds both
+      // lanes' markers, so `resume` already skipped every entry being
+      // written right now, which is the rule that keeps a second timer off
+      // an in-flight identity. All that is left is arming them.
+      if (resumed) {
+        for (const edit of resumed.propEdits) {
+          scheduleBranchPropDispatchRef.current?.(
+            edit.target.selector,
+            edit.propName,
+          )
+        }
+        for (const mutation of resumed.mutations) {
+          scheduleBranchMutationDispatchRef.current?.(mutation)
+        }
+      }
+    }
+
     const runHandshake = () => {
       if (cancelled) return
       setStatus({ kind: "connecting" })
@@ -797,62 +871,13 @@ export function useEditorEditing({
         .init({ iframe, origin })
         .then(() => {
           if (cancelled) return
-          // THE DOCUMENT BOUNDARY. A handshake that reports a different
-          // document than the one this attachment adopted means the page was
-          // replaced, and everything the previous page's session was holding
-          // ends here — before the new document is adopted, so a continuation
-          // that resumes afterwards sees the session it belongs to as over.
-          //
-          // Nothing is cancelled with the bridge: those drafts died with the
-          // document that issued them, and the instance that would receive the
-          // cancel is a different one that numbers its own drafts from
-          // `dom-pending-1`.
-          //
-          // Every bridge the shell accepts reports its document id, so the ids
-          // decide this on their own; a bridge that reports none is refused at
-          // the handshake instead (`REQUIRED_BRIDGE_VERSION`).
-          const documentToken = adapter.bridgeDocumentId
-          if (shouldEndSessionOnHandshake(session.documentId, documentToken)) {
-            // Through `endBridgeSession`, not through the end inside
-            // `session.start`: the buffers, the dialog rows and the held drafts
-            // are still this hook's, and they are half of what a document
-            // change discards. The end forgets the document, so the `start`
-            // below adopts the new one and does not end a second time.
-            endBridgeSessionRef.current?.({
-              reason: "reconnect",
-              cancelWithBridge: false,
-            })
-          }
-          // `bridgeDocumentId` is `string | null` and `start` takes the same,
-          // so there is no `?? ""` here: an empty string would be ADOPTED as a
-          // real document and the next handshake would read as a change.
-          const { resumed } = session.start(documentToken, (mutation) =>
-            mutationResumeEligibleRef.current(mutation),
-          )
+          // The handshake's own answer, through the same one boundary. When an
+          // unsolicited ready got here first this finds the SAME document and
+          // only re-arms; when the handshake is the first news of the page (an
+          // iframe `load` with no ready of its own, or the very first
+          // attachment) this is where the boundary moves.
+          enterDocument(adapter.bridgeDocumentId)
           setStatus({ kind: "ready" })
-          // THE SAME DOCUMENT, ANSWERING AGAIN, which is what a non-null
-          // `resumed` says. It is either the page's own second handshake or an
-          // adapter that detached and came back with the page still on screen.
-          // A plain teardown keeps the buffered edits but cancels the debounce
-          // timers that would have written them, so the entries would sit in
-          // the buffer with nothing left to write them. Re-arm them here, which
-          // is what the designer's next keystroke would have done anyway.
-          //
-          // The lists ON `resumed` ARE the answer: the session holds both
-          // lanes' markers, so `resume` already skipped every entry being
-          // written right now, which is the rule that keeps a second timer off
-          // an in-flight identity. All that is left is arming them.
-          if (resumed) {
-            for (const edit of resumed.propEdits) {
-              scheduleBranchPropDispatchRef.current?.(
-                edit.target.selector,
-                edit.propName,
-              )
-            }
-            for (const mutation of resumed.mutations) {
-              scheduleBranchMutationDispatchRef.current?.(mutation)
-            }
-          }
           if (!adapterReadyAnnounced) {
             adapterReadyAnnounced = true
             adapterRef.current = adapter
@@ -906,8 +931,8 @@ export function useEditorEditing({
      * subresource finishes after the bridge announced itself, and ending the
      * session there discarded the designer's in-progress edits on a page that
      * was still right in front of them. The handshake carries the document's
-     * id, so the boundary is decided where that id is read, in the `.then`
-     * above.
+     * id, so the boundary is decided where that id is read, which is
+     * `enterDocument` above.
      */
     const onIframeLoad = () => {
       runHandshake()
@@ -924,12 +949,23 @@ export function useEditorEditing({
      * that session and retired the capture, so the designer was told an edit
      * they had just made on the page in front of them was discarded.
      *
-     * The same handshake path runs here, so the boundary is still decided in
-     * one place. The `load` event that follows finds the same document and is
-     * a duplicate: `start` answers it with a resume plan, and re-arming a
-     * debounce that is already armed just re-debounces it.
+     * THE BOUNDARY MOVES FIRST, IN THIS EVENT TURN. The adapter adopted the
+     * new id before it called this listener, so `bridgeDocumentId` is already
+     * the new document here, and `enterDocument` is synchronous. A capture the
+     * new page posts right behind its own ready therefore lands in the buffer
+     * with the NEW session's generation on it.
+     *
+     * Handshaking as well is not redundant. It is what verifies the bridge's
+     * version and re-arms whatever the boundary kept, and its `.then` runs
+     * `enterDocument` again with the id the handshake reports. That second call
+     * finds the same document, so it ends nothing.
+     *
+     * The `load` event that follows is a third call for that same document, and
+     * costs the same nothing.
      */
     const onDocumentChanged = () => {
+      if (cancelled) return
+      enterDocument(adapter.bridgeDocumentId)
       runHandshake()
     }
 

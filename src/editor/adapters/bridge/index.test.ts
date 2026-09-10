@@ -1592,7 +1592,17 @@ describe("BridgeFrameworkAdapter reports a new document's own ready", () => {
 
   it("tells the listener once when a new document announces itself", async () => {
     const seen: string[] = []
-    adapter.onDocumentChanged((documentId) => seen.push(documentId))
+    // What the getter read DURING each call, not after the fact. The shell's
+    // listener moves the session boundary onto `adapter.bridgeDocumentId`
+    // synchronously, in this very call, so "the id moved first" has to hold
+    // while the listener is on the stack. Asserting it afterwards would pass
+    // for an adapter that adopted the id on the line below the notify, and the
+    // shell would then start its new session on the DEPARTED document.
+    const readDuringCall: (string | null)[] = []
+    adapter.onDocumentChanged((documentId) => {
+      seen.push(documentId)
+      readDuringCall.push(adapter.bridgeDocumentId)
+    })
 
     await handshake("doc-a")
     // Nothing yet: that ready was one this adapter asked for.
@@ -1603,6 +1613,7 @@ describe("BridgeFrameworkAdapter reports a new document's own ready", () => {
       payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
     })
     expect(seen).toEqual(["doc-b"])
+    expect(readDuringCall).toEqual(["doc-b"])
     // The id moved with it, so a listener that re-handshakes reads the new
     // document rather than the one that went away.
     expect(adapter.bridgeDocumentId).toBe("doc-b")

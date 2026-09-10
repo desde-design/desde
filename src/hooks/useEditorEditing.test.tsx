@@ -556,6 +556,57 @@ describe("useEditorEditing: the bridge session", () => {
     expect(bundle.mutations.map((m) => m.id)).toEqual(["m2"])
   })
 
+  it("keeps a capture posted in the SAME turn as the new page's ready (round-2 item 1)", async () => {
+    // THE TIGHTEST VERSION OF THE WINDOW ABOVE, and the one the earlier fix
+    // did not close. The bridge posts its READY and its first capture back to
+    // back, so both are in the shell's queue before anything the shell does in
+    // between can finish. The document-changed listener used to answer the
+    // ready with a PING round trip and move the session boundary in that round
+    // trip's `.then`; the capture arrived first and was buffered under the
+    // DEPARTED session, and the boundary then retired it as discarded.
+    //
+    // No yield between the two emits below. That is the whole test: if the
+    // boundary is not synchronous with the adapter adopting the id, there is
+    // nowhere for it to run before the capture lands.
+    await mount()
+    const adapter = lastFakeAdapter()
+    // One buffered edit on the departing page, so the discard line has
+    // something to name and its COUNT is the assertion.
+    await act(async () => {
+      adapter.emitCapture(capture("m1", "hello"))
+    })
+    await waitForApply()
+    FakeBridgeAdapter.nextDocumentIds = ["doc-b"]
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      // Same act, same microtask, no await between. The adapter has adopted
+      // doc-b (its own contract, pinned in `adapters/bridge/index.test.ts`),
+      // so this capture passes its document gate and reaches the shell.
+      adapter.emitCapture(capture("m2", "world"))
+      await Promise.resolve()
+    })
+    // The session is on doc-b, and the capture that arrived after the ready
+    // belongs to it. The hook returns no document id, so the observable form
+    // of "the boundary already moved" is the COUNT on the discard line: one,
+    // the departed page's own edit, not two.
+    await waitFor(() => expect(editing()?.saveStatus).toBe(DISCARDED_ONE))
+    // And the late `load` handshake, which finds the same document and must
+    // not re-count anything.
+    const iframe = screen.getByTitle("Prototype")
+    await act(async () => {
+      iframe.dispatchEvent(new Event("load"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+    // The buffer's shadow: m2 is a live entry on the NEW session and reaches
+    // the adapter as its own write. Before the fix it was retired at the
+    // boundary and this apply never happened.
+    const second = await waitForApply(1)
+    const bundle = second.edit as unknown as { mutations: Mutation[] }
+    expect(bundle.mutations.map((m) => m.id)).toEqual(["m2"])
+  })
+
   it("dispatches a captured mutation while the page stays (control)", async () => {
     // The control row. Every test below takes the page away mid-flight; this
     // one proves the same setup reaches the adapter when nothing happens to it.
