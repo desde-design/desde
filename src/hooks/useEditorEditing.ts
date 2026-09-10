@@ -753,6 +753,30 @@ export function useEditorEditing({
     }
   }, [])
 
+  /**
+   * WHICH SELECTION A LOOKUP WAS ASKED FOR, as a number.
+   *
+   * The selection listener starts two independent lookups per click (the
+   * attribution prefetch and the component's manifest) and installs what they
+   * answer. Both used to be correlated by SELECTOR TEXT: if the selector the
+   * answer was asked for still matched the selector on screen, the answer was
+   * installed. Selector text is not an identity. Page A's `#panel` and page
+   * B's `#panel` are the same eight characters and a different element, so the
+   * departed page's manifest could become the controls the inspector offers
+   * for the arriving page's element, and the schema the next prop edit is
+   * written against.
+   *
+   * Every selection callback takes the next number, deselection included, and
+   * so does a document boundary that moves. An answer may only be installed
+   * while the number it captured is still the current one.
+   *
+   * A ref rather than a `let` inside the effect: the effect re-attaches for
+   * `enabled`, the prototype url and the manifest source, and a counter that
+   * restarted at zero there would let a continuation from the previous
+   * attachment match a selection in the new one.
+   */
+  const selectionSeqRef = useRef(0)
+
   // Adapter lifecycle. Attached when `enabled` flips true and an iframe
   // is present; disposed on disable, unmount, or url change. Selection
   // wiring + manifest lookup mirror what `<LivePrototypePane>` does so
@@ -783,6 +807,11 @@ export function useEditorEditing({
     const unsubSelection = adapter.onSelectionChange(
       async (selection: Selection | null) => {
         if (cancelled) return
+        // THE LOCK, taken before anything can suspend. Deselection included:
+        // a selector cleared and then clicked again is a NEW selection, and
+        // without a number here the first click's answer would still match
+        // the second click's selector.
+        const seq = ++selectionSeqRef.current
         setEditorSelection(selection)
         // Phase 3 Stage A: warm the manifest cache for this selection's
         // component chain so `attribute()` resolves synchronously at edit
@@ -799,30 +828,39 @@ export function useEditorEditing({
         if (selection?.attributionContext) {
           const attributionContext = selection.attributionContext
           const driftRequestSelector = selection.selector
-          void attributionLookup
-            .prefetch(
-              attributionContext.componentChain.map((entry) => ({
-                name: entry.name,
-                importPath: entry.importPath,
-              })),
-            )
-            .then(() => {
-              // Staleness guard — SAME shape as the manifest branch below
-              // (`cancelled` + comparing against the selector captured
-              // when THIS selection arrived). Two independent awaits can
-              // now interleave across selections in this callback (this
-              // prefetch chain and the `manifestSource.getComponent` await
-              // further down); reusing `latestSelector` — which the
-              // synchronous part of this function always advances to the
-              // newest selection before either await suspends — is what
-              // keeps a superseded selection's stale `attributionContext`
-              // from ever reaching `attribute()`/`detectDrift`.
-              // Named scenario this guards: selection A's prefetch is still
-              // pending when selection B arrives and supersedes it, then A's
-              // prefetch finally settles — A must not run detection at that
-              // point (pinned by the "supersedes a still-pending prefetch"
-              // test in live-prototype-pane.test.tsx).
-              if (cancelled || latestSelector !== driftRequestSelector) return
+          // Its OWN run, not the same one as the manifest lookup below. The
+          // two lookups are deliberately concurrent. The panel must not wait
+          // for drift detection to warm its cache, and one run per await is
+          // what keeps them that way. Both are started in this same turn, so
+          // both capture the same session generation and the same `seq`.
+          void session
+            .run(async (ctx) => {
+              const warmed = await ctx.step(
+                attributionLookup.prefetch(
+                  attributionContext.componentChain.map((entry) => ({
+                    name: entry.name,
+                    importPath: entry.importPath,
+                  })),
+                ),
+              )
+              // WHICH LOCK IS LOAD-BEARING. `warmed.stale` is the session: the
+              // page this drift signal describes was replaced, and a signal
+              // reported now names another page's component. `seq` is the
+              // selection: a page can stay put while the designer clicks
+              // something else, and it is the only one of the two that moves
+              // then. The selector comparison after them is neither. It costs
+              // one string compare and it is kept as a third lock, but a
+              // selector is not an identity: two pages can both have `#panel`,
+              // and one page can have `#panel` selected twice with a
+              // deselection between.
+              // Named scenario the selection lock covers: selection A's
+              // prefetch is still pending when selection B arrives and
+              // supersedes it, then A's prefetch finally settles. A must not
+              // run detection at that point (pinned by the "supersedes a
+              // still-pending prefetch" test in live-prototype-pane.test.tsx).
+              if (warmed.stale) return
+              if (cancelled || seq !== selectionSeqRef.current) return
+              if (latestSelector !== driftRequestSelector) return
               try {
                 const attributionResult = attribute(attributionContext, attributionLookup)
                 reportDriftForAttribution(attributionContext, attributionResult)
@@ -844,24 +882,38 @@ export function useEditorEditing({
           setEditorManifest(null)
           return
         }
-        let manifest: Awaited<
-          ReturnType<ComponentManifestSource["getComponent"]>
-        > = null
-        try {
-          manifest = await manifestSource.getComponent(componentName)
-        } catch (err) {
-          if (!cancelled && latestSelector === requestSelector) {
+        // The manifest decides which controls the inspector offers and which
+        // schema a prop edit is written against, so an answer from another
+        // page or another element is not a stale label: it is the wrong
+        // contract for the element in front of the designer.
+        await session.run(async (ctx) => {
+          let manifest: Awaited<
+            ReturnType<ComponentManifestSource["getComponent"]>
+          > = null
+          try {
+            const found = await ctx.step(manifestSource.getComponent(componentName))
+            // The session, then the selection, then the selector. Same order
+            // and same reasoning as the prefetch above: the first two are the
+            // locks, and the selector is a cheap third.
+            if (found.stale) return
+            manifest = found.value
+          } catch (err) {
+            // `ctx.step` only rethrows while the session is current, so this
+            // is a real failure on the page that asked for it.
+            if (cancelled || seq !== selectionSeqRef.current) return
+            if (latestSelector !== requestSelector) return
             console.warn(
               `[Editor] manifest lookup for ${componentName} failed:`,
               err,
             )
             setEditorManifest(null)
+            return
           }
-          return
-        }
-        if (cancelled) return
-        if (latestSelector !== requestSelector) return
-        setEditorManifest(manifest)
+          if (cancelled) return
+          if (seq !== selectionSeqRef.current) return
+          if (latestSelector !== requestSelector) return
+          setEditorManifest(manifest)
+        })
       },
     )
 
@@ -897,6 +949,21 @@ export function useEditorEditing({
      * instead, and re-arming a debounce that is already armed re-debounces it.
      */
     const enterDocument = (documentId: string | null) => {
+      // THE PAGE UNDERNEATH THE SELECTION CHANGED. Every lookup still out was
+      // asked on the page that is leaving, so none of their answers may be
+      // installed, whatever selector they carry.
+      //
+      // Compared against the session's own document rather than only inside
+      // the end below, because the end does not always run: a session whose
+      // document was forgotten (a page that announced itself and then never
+      // handshaked) adopts the next one without ending anything, so the
+      // generation does not move and this is the only lock left. Repeat calls
+      // for the SAME document do not bump: one page change completes up to
+      // three handshakes, and a bump per handshake would drop a lookup for a
+      // selection made on the page that is still there.
+      if (session.documentId !== documentId) {
+        selectionSeqRef.current += 1
+      }
       if (shouldEndSessionOnHandshake(session.documentId, documentId)) {
         // Through `endBridgeSession`, not through the end inside
         // `session.start`: the buffers, the dialog rows and the held drafts

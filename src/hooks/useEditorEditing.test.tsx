@@ -17,6 +17,8 @@ import { StrictMode, type ReactElement, useRef } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { toast } from "sonner"
 import type {
+  ComponentManifest,
+  ComponentManifestSource,
   EditResult,
   Mutation,
   PendingMutation,
@@ -83,14 +85,32 @@ function Harness({
   enabled = true,
   prototypeUrl = PROTOTYPE_URL,
   escalateToChat,
+  manifestSource,
 }: {
   enabled?: boolean
   prototypeUrl?: string
   escalateToChat?: (prompt: string, options?: { signal?: AbortSignal }) => Promise<boolean>
+  /**
+   * The manifest source the selection listener looks a component up in.
+   *
+   * Undefined for every row that does not care, which is what the hook's own
+   * default is built for: an EMPTY composite, so a lookup answers null and no
+   * manifest is ever installed. A row that wants to hold a lookup open passes
+   * {@link ParkedManifestSource}. It has to be the SAME instance across a
+   * rerender: the source is a dependency of the adapter effect, so a fresh
+   * object per render would detach and re-attach the adapter on every one.
+   */
+  manifestSource?: ComponentManifestSource
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   captureEditing(
-    useEditorEditing({ iframeRef, prototypeUrl, enabled, escalateToChat }),
+    useEditorEditing({
+      iframeRef,
+      prototypeUrl,
+      enabled,
+      escalateToChat,
+      manifestSource,
+    }),
   )
   return <iframe ref={iframeRef} title="Prototype" src={prototypeUrl} />
 }
@@ -323,6 +343,73 @@ const needsChat = (reason = "bound binding"): EditResult => ({
   reason,
   needsChat: true,
 })
+
+/**
+ * A manifest source whose lookups park until the test answers them.
+ *
+ * The selection listener asks it for the selected component's manifest, and
+ * the question these rows exist for is what happens when that answer arrives
+ * after the selection it was asked for is gone. Parking is the only way to put
+ * another selection, or a whole other page, inside that await. Same shape as
+ * the parked `applyEdit` and `getStructure` on the fake adapter: one entry per
+ * call, each holding its own `settle`.
+ *
+ * ONE instance per test, held in a `const` and passed to every render: the
+ * source is a dependency of the hook's adapter effect, so a new object would
+ * re-attach the adapter instead of leaving the page alone.
+ */
+class ParkedManifestSource implements ComponentManifestSource {
+  readonly id = "parked"
+  readonly framework = "vue3"
+  readonly designSystem = "test-ds"
+  /** Every lookup asked for, in order, each still to be answered. */
+  readonly lookups: {
+    name: string
+    settle: (manifest: ComponentManifest | null) => void
+  }[] = []
+
+  async listComponents(): Promise<ComponentManifest[]> {
+    return []
+  }
+
+  getComponent(componentName: string): Promise<ComponentManifest | null> {
+    return new Promise<ComponentManifest | null>((resolve) => {
+      this.lookups.push({ name: componentName, settle: resolve })
+    })
+  }
+}
+
+/** A manifest a parked lookup can be answered with. */
+const manifestNamed = (name: string): ComponentManifest => ({
+  id: `parked:${name}`,
+  name,
+  framework: "vue3",
+  designSystem: "test-ds",
+  props: [],
+})
+
+/**
+ * A selection of `selector` that renders `componentName`.
+ *
+ * No `attributionContext`, so the prefetch chain in the listener stays out of
+ * these rows: the manifest lookup is the await they are about, and a second
+ * parked await would only make the ordering harder to read.
+ */
+const componentSelection = (
+  selector: string,
+  componentName: string,
+): Selection => ({
+  targetId: `t-${componentName}`,
+  selector,
+  ancestry: [],
+  componentName,
+  authoredAt: { file: "src/App.vue", line: 10, column: 2 },
+  editTarget: { file: "src/App.vue", line: 10, column: 2 },
+})
+
+/** The manifest the inspector is currently offering controls for. */
+const installedManifest = (): ComponentManifest | null =>
+  useEditorStore.getState().editorManifest
 
 /**
  * The hook's observable surface, and it is SMALLER than you want.
@@ -2115,5 +2202,159 @@ describe("useEditorEditing: the bridge session", () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  /**
+   * THE SELECTION LISTENER'S OWN CONTINUATIONS, for the three rows below.
+   *
+   * Clicking an element starts a manifest lookup, and what comes back decides
+   * which controls the inspector offers and which schema a prop edit is
+   * written against. The lookup used to be correlated by SELECTOR TEXT alone:
+   * if the selector the answer was asked for still matched the selector on
+   * screen, the answer was installed. `#panel` on one page and `#panel` on the
+   * next are the same string and a different element, so the departed page's
+   * manifest could become the controls for the arriving page's element.
+   */
+
+  it("cannot install a manifest that answers after the page it was asked on went away", async () => {
+    // Page A's `#panel` and page B's `#panel` are the same eight characters.
+    const source = new ParkedManifestSource()
+    render(<Harness manifestSource={source} />)
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    const adapter = lastFakeAdapter()
+
+    // Page A: the designer clicks `#panel`, and the lookup for its component
+    // is still out.
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "OldCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(1))
+    expect(source.lookups[0]!.name).toBe("OldCard")
+
+    // The page is replaced, on the same adapter: an in-iframe navigation,
+    // which is the case a rerender would not stage.
+    FakeBridgeAdapter.nextDocumentIds = ["doc-b"]
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+
+    // Page B has its own `#panel`, and its own component behind it.
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "NewCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(2))
+    await act(async () => {
+      source.lookups[1]!.settle(manifestNamed("NewCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(installedManifest()?.name).toBe("NewCard"))
+
+    // And now page A's lookup answers.
+    await act(async () => {
+      source.lookups[0]!.settle(manifestNamed("OldCard"))
+      await Promise.resolve()
+    })
+    expect(installedManifest()?.name).toBe("NewCard")
+  })
+
+  it("cannot install a manifest for a selection another selection replaced", async () => {
+    // One page, two elements. The answer for the first arrives after the
+    // designer has moved on to the second.
+    const source = new ParkedManifestSource()
+    render(<Harness manifestSource={source} />)
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    const adapter = lastFakeAdapter()
+
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#a", "CardA"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(1))
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#b", "CardB"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(2))
+    await act(async () => {
+      source.lookups[1]!.settle(manifestNamed("CardB"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(installedManifest()?.name).toBe("CardB"))
+
+    // `#a`'s lookup answers last. `#b` is what is selected, and `#b` is what
+    // the inspector must still be describing.
+    await act(async () => {
+      source.lookups[0]!.settle(manifestNamed("CardA"))
+      await Promise.resolve()
+    })
+    expect(installedManifest()?.name).toBe("CardB")
+  })
+
+  it("cannot install a manifest from before a page the session never adopted", async () => {
+    // THE ROW THE SEQUENCE IS THE ONLY LOCK FOR, and the reason
+    // `enterDocument` bumps it.
+    //
+    // The other two rows have a second lock behind the sequence: the session
+    // generation moves when a page is replaced, and the selector on screen
+    // differs. This one has neither.
+    //
+    // A page announces itself and then never handshakes (off-origin, a 500,
+    // the five-second timeout). The session ends there and FORGETS its
+    // document, which is what stops every continuation from the page before
+    // it. The page that failed is not on screen, so the page that is still
+    // there goes on emitting selections, and one of those starts a lookup.
+    // When a page finally does arrive, the session had no document to compare
+    // against, so it adopts the new one WITHOUT ending anything: the
+    // generation does not move. Same selector, same live session, and only the
+    // sequence knows the page underneath changed.
+    const source = new ParkedManifestSource()
+    render(<Harness manifestSource={source} />)
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    const adapter = lastFakeAdapter()
+
+    FakeBridgeAdapter.nextHandshakeError = "the page never answered"
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("error"))
+
+    // The page still on screen announces its `#panel`.
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "OldCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(1))
+
+    // A page arrives and handshakes. The session had no document, so nothing
+    // ends here.
+    FakeBridgeAdapter.nextDocumentIds = ["doc-c"]
+    await act(async () => {
+      adapter.emitReady("doc-c")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+
+    // Its own `#panel`, and its own component.
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "NewCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(2))
+    await act(async () => {
+      source.lookups[1]!.settle(manifestNamed("NewCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(installedManifest()?.name).toBe("NewCard"))
+
+    await act(async () => {
+      source.lookups[0]!.settle(manifestNamed("OldCard"))
+      await Promise.resolve()
+    })
+    expect(installedManifest()?.name).toBe("NewCard")
   })
 })
