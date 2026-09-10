@@ -1,5 +1,5 @@
 /**
- * Colocated test for `composeRefusalReason` (src/hooks/iteration-fallback.ts).
+ * Colocated test for `composeRefusalReason` (src/editor/edit-service/iteration-fallback.ts).
  *
  * The most specific reason should win: when the AI fallback lane never ran
  * (`kind: 'unavailable'`), the user needs the deterministic resolver's

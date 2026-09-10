@@ -22,12 +22,25 @@ export let sendToShell: SendToShell = () => {}
 export let inspectElement: InspectElement = () => ({})
 export let attributeElement: AttributeElement = () => undefined
 
+/**
+ * Which document this bridge instance is running in.
+ *
+ * Minted once per document in the IIFE and handed here so the modules that
+ * send mutation messages can stamp them. The shell needs it on the message and
+ * not only on the handshake: a capture posted just before an unload is
+ * processed AFTER the next document's handshake, and the shell was stamping it
+ * with whichever session was live when it read the message.
+ */
+export let bridgeDocumentId = ""
+
 export function configureBridgeRuntime(deps: {
   sendToShell: SendToShell
   inspectElement: InspectElement
   attributeElement: AttributeElement
+  documentId: string
 }): void {
   sendToShell = deps.sendToShell
   inspectElement = deps.inspectElement
   attributeElement = deps.attributeElement
+  bridgeDocumentId = deps.documentId
 }

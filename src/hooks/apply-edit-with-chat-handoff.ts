@@ -16,6 +16,7 @@
  */
 import type { EditResult, StructuralEdit } from "@/editor/core"
 import type { BridgeFrameworkAdapter } from "@/editor/adapters/bridge"
+import type { LaneSession, SessionRunContext } from "@/editor/session/lane-session"
 import {
   buildStructuralEditHandoffPrompt,
   describeMoveDestination,
@@ -158,35 +159,113 @@ export function describeStructuralEditForHandoff(
 
 export interface ApplyEditWithChatHandoffOptions {
   /**
-   * Has the bridge session this edit was dispatched under ended?
+   * The bridge session this edit belongs to.
    *
-   * Consulted ONCE, after the apply and before the hand-off. The apply itself
-   * is never in question: it is already running against the adapter the caller
-   * handed over, and abandoning it half-way would leave a write in an unknown
-   * state. The hand-off is different. It starts a chat turn that says "make
-   * this edit happen" about an element on a page that is gone, and the turn
-   * then edits files for a document nobody is looking at.
+   * Given here rather than assembled by the caller out of a captured
+   * generation and a captured signal. The helper enters the session BEFORE the
+   * apply, so the lifetime it guards against is the one the edit was dispatched
+   * under. A caller that captured it itself had to get two things right at
+   * every call site, and eleven call sites is how one of them ends up reading
+   * the session after the round trip instead of before it.
    *
-   * The caller's own guard cannot cover this: it runs on the RESULT, so by the
-   * time it says "stale" the chat turn has already been started.
+   * The session does three jobs. Its generation says whether the page the edit
+   * was made on is still the page on screen, which is what decides whether a
+   * chat turn may be started at all. Its signal is handed to the APPLY, so a
+   * write does not outlive the document it was for. And its signal is handed to
+   * the HAND-OFF, so a submission already on its way is cancelled rather than
+   * merely unwatched.
    *
    * Absent means "no session to speak of", which is how the pure tests and any
    * caller without a bridge session call it.
    */
-  isStale?: () => boolean
-  /**
-   * The bridge session's lifetime, as a signal, captured at dispatch.
-   *
-   * Three jobs, and they are different from `isStale`'s. It is read once here,
-   * alongside `isStale`, so a session that ended without the generation being
-   * the thing the caller tracks still stops the hand-off. It is HANDED TO the
-   * hand-off transport, so the submission itself is cancelled rather than
-   * merely unwatched: a hand-off POST already on its way would otherwise start
-   * a chat turn for a page that is gone, and the agent would edit files for it.
-   * And it is handed to the APPLY, so the edit request is cancelled too rather
-   * than left writing for a document that has been replaced.
-   */
-  signal?: AbortSignal
+  session?: LaneSession
+}
+
+/** A chat submission, as the shell offers it. */
+type HandOff = (prompt: string, options?: { signal?: AbortSignal }) => Promise<boolean>
+
+type ApplyOutcome = { result: EditResult; handoff: ChatHandoffOutcome }
+
+/**
+ * The answer for an edit whose page went away before the helper finished.
+ *
+ * `started: false` is the load-bearing half: whatever else happened, no chat
+ * turn is running for a document nobody is looking at. The deterministic
+ * result is still reported, because the caller is the one that decides whether
+ * to say anything about it.
+ */
+function stopped(result: EditResult): ApplyOutcome {
+  return {
+    result,
+    handoff:
+      result.kind === "failed"
+        ? { attempted: false, started: false, originalReason: result.reason }
+        : { attempted: false, started: false },
+  }
+}
+
+/**
+ * The refusal reported when the apply threw INTO a departed session.
+ *
+ * `run` swallows that throw, for the same reason the status is dropped: the
+ * surface that would have shown the error is describing another page. There is
+ * then no deterministic result to report, and this stands in for one. Every
+ * caller drops the answer, so this string is not shown to anyone; it exists so
+ * the return type does not have to grow a null the pure callers would have to
+ * narrow away.
+ */
+const PAGE_CHANGED_REASON = "The page changed before this edit finished."
+
+/**
+ * Everything after the deterministic apply: decide whether a hand-off is
+ * possible, and if so make it.
+ *
+ * `ctx` is absent for a caller without a session, and then there is no
+ * lifetime to consult and no signal to hand over.
+ */
+async function handOffRefusal(
+  edit: StructuralEdit,
+  initial: EditResult,
+  handOff: HandOff | undefined,
+  ctx: SessionRunContext | undefined,
+): Promise<ApplyOutcome> {
+  // No staleness check of its own. This is only reached through a `ctx.step`
+  // that has already said the page is the same one, which is the window the
+  // caller's own guard could not cover: the caller runs on the RESULT, so by
+  // the time it says "stale" the chat turn has already been started.
+  if (initial.kind !== "failed") {
+    return { result: initial, handoff: { attempted: false, started: false } }
+  }
+  // A policy refusal is not something the agent can read its way out of, and
+  // the hand-off tells the agent to make the edit happen. Report it as a
+  // plain failure instead.
+  if (isPolicyRefusal(initial.reason)) return stopped(initial)
+  const described = describeStructuralEditForHandoff(edit, initial.reason)
+  if (!described || !handOff) return stopped(initial)
+  const prompt = buildStructuralEditHandoffPrompt(described)
+  // The signal goes WITH the submission, not just around the wait for it. A
+  // session that ends while the POST is in flight must cancel the turn, not
+  // leave it to start and edit files for the page that has gone.
+  const submission = handOff(prompt, ctx ? { signal: ctx.signal } : undefined)
+  if (!ctx) {
+    return { result: initial, handoff: { attempted: true, started: await submission, originalReason: initial.reason } }
+  }
+  const submitted = await ctx.step(submission)
+  // The session ended while the POST was out. The signal aborted it, so no turn
+  // is running, and this is the SAME answer a page change gives at any other
+  // await: one shape, so a caller cannot have to tell them apart.
+  //
+  // No test can witness this line on its own, and that is worth saying rather
+  // than hiding: the run's own final check produces the identical answer for a
+  // session that ended here, because the apply's result is what both report. It
+  // stays because every await inside a `session.run` body goes through
+  // `ctx.step` in this codebase, and work added after the hand-off would
+  // otherwise be the one await without a guard.
+  if (submitted.stale) return stopped(initial)
+  return {
+    result: initial,
+    handoff: { attempted: true, started: submitted.value, originalReason: initial.reason },
+  }
 }
 
 export async function applyEditWithChatHandoff(
@@ -196,48 +275,37 @@ export async function applyEditWithChatHandoff(
   // a chat turn, and the server can refuse it after the client-side guard has
   // already said yes. A synchronous `true` here was a promise the transport
   // had not made, and every caller cleared its buffer on it.
-  handOff:
-    | ((prompt: string, options?: { signal?: AbortSignal }) => Promise<boolean>)
-    | undefined,
+  handOff: HandOff | undefined,
   options: ApplyEditWithChatHandoffOptions = {},
-): Promise<{ result: EditResult; handoff: ChatHandoffOutcome }> {
-  // The signal goes to the APPLY as well as to the hand-off. The apply is the
-  // write, and a write that outlives its session is the one that can collide
-  // with the new document's write for the same element: the shell's in-flight
-  // markers were emptied when the session ended, so nothing else is holding
-  // that door. Aborting settles it as `failed`, which is the outcome the
-  // callers already treat as "nothing landed".
-  const initial = await adapter.applyEdit(
-    edit,
-    options.signal ? { signal: options.signal } : undefined,
-  )
-  if (initial.kind !== "failed") {
-    return { result: initial, handoff: { attempted: false, started: false } }
+): Promise<ApplyOutcome> {
+  const session = options.session
+  if (!session) {
+    return handOffRefusal(edit, await adapter.applyEdit(edit), handOff, undefined)
   }
-  // The page this edit was made on is no longer the page on screen. Report the
-  // refusal to a caller that will itself drop it, and start nothing. Both facts
-  // are read HERE, after the apply: read before it, either would still say
-  // "current" for a session that ends while the apply is out, which is the
-  // whole window this closes.
-  if (options.isStale?.() || options.signal?.aborted === true) {
-    return { result: initial, handoff: { attempted: false, started: false, originalReason: initial.reason } }
-  }
-  // A policy refusal is not something the agent can read its way out of, and
-  // the hand-off tells the agent to make the edit happen. Report it as a
-  // plain failure instead.
-  if (isPolicyRefusal(initial.reason)) {
-    return { result: initial, handoff: { attempted: false, started: false, originalReason: initial.reason } }
-  }
-  const described = describeStructuralEditForHandoff(edit, initial.reason)
-  if (!described || !handOff) {
-    return { result: initial, handoff: { attempted: false, started: false, originalReason: initial.reason } }
-  }
-  // The signal goes WITH the submission, not just around the wait for it. A
-  // session that ends while the POST is in flight must cancel the turn, not
-  // leave it to start and edit files for the page that has gone.
-  const started = await handOff(
-    buildStructuralEditHandoffPrompt(described),
-    options.signal ? { signal: options.signal } : undefined,
-  )
-  return { result: initial, handoff: { attempted: true, started, originalReason: initial.reason } }
+  /**
+   * The apply's own answer, kept off the step's.
+   *
+   * `ctx.step` withholds a value once the page has gone, and the caller still
+   * has to be told what the write did. Taking it off the promise rather than
+   * off the step means the order cannot be got wrong by a later edit.
+   */
+  let written: EditResult | null = null
+  const run = await session.run(async (ctx): Promise<ApplyOutcome | null> => {
+    // The signal goes to the APPLY as well as to the hand-off. The apply is the
+    // write, and a write that outlives its session is the one that can collide
+    // with the new document's write for the same element: the shell's in-flight
+    // markers were emptied when the session ended, so nothing else is holding
+    // that door. Aborting settles it as `failed`, which is the outcome the
+    // callers already treat as "nothing landed".
+    const applying = adapter.applyEdit(edit, { signal: ctx.signal }).then((result) => {
+      written = result
+      return result
+    })
+    const applied = await ctx.step(applying)
+    if (applied.stale) return null
+    return handOffRefusal(edit, applied.value, handOff, ctx)
+  })
+  if (!run.stale && run.value !== null) return run.value
+  // ONE report for the page change, whichever await it landed in.
+  return stopped(written ?? { kind: "failed", reason: PAGE_CHANGED_REASON })
 }

@@ -10,15 +10,15 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { BridgeFrameworkAdapter } from "./index"
-import type { AdapterTarget, Selection } from "../../core"
-import type { InspectionData } from "@/types/bridge"
+import type { AdapterTarget, Mutation, PendingMutation, Selection } from "../../core"
+import type { BridgeMutation, InspectionData } from "@/types/bridge"
 
 /**
  * A version the shell accepts, with the document id every accepted bridge
  * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
  * so a handshake fixture has to carry both.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-09c-guard-origin"
+const CURRENT_BRIDGE_VERSION = "2026-09-10a-capture-document-id"
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -1418,5 +1418,257 @@ describe("BridgeFrameworkAdapter — applyEdit carries the caller's abort signal
       expect(result.reason).toBe("edit request cancelled")
       expect(result.needsChat).toBeUndefined()
     }
+  })
+})
+
+/**
+ * A message outlives the page that sent it by however long the queue is. The
+ * departed page's capture used to be delivered and stamped with the session
+ * that had replaced it, which is a write aimed at a file the new page may not
+ * even render (round 15 RULING). The id on the message is what closes it.
+ */
+describe("BridgeFrameworkAdapter — a message names the document it came from", () => {
+  let adapter: BridgeFrameworkAdapter
+  let setup: MockIframeSetup
+  /** Every line the adapter warned, so a drop can be asserted on. */
+  const warnings: string[] = []
+  let restoreWarn: () => void
+
+  /** A wire-shape mutation from `documentId`. */
+  function wireMutation(documentId: string): BridgeMutation {
+    return {
+      id: "m-1",
+      kind: "text",
+      sourceLoc: "src/components/Card.vue:12:4",
+      resolutionKind: "direct",
+      scope: "definition",
+      callsiteLoc: null,
+      instancePath: "App>HomePage>Card",
+      selector: "[data-testid=\"card-title\"]",
+      before: "Hello",
+      after: "Hi",
+      documentId,
+    }
+  }
+
+  /** Init the adapter and answer with a handshake from `documentId`. */
+  async function handshake(documentId: string): Promise<void> {
+    const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId },
+    })
+    await initPromise
+  }
+
+  beforeEach(() => {
+    adapter = new BridgeFrameworkAdapter()
+    setup = makeMockIframe()
+    warnings.length = 0
+    // The drop writes one line naming both ids. Silenced so a passing run is
+    // quiet, and asserted on below.
+    const spy = vi
+      .spyOn(console, "warn")
+      .mockImplementation((...args: unknown[]) => {
+        warnings.push(args.map((arg) => String(arg)).join(" "))
+      })
+    restoreWarn = () => spy.mockRestore()
+  })
+
+  afterEach(async () => {
+    restoreWarn()
+    await adapter.dispose()
+  })
+
+  it("drops a mutation message from a document that is no longer the one on screen", async () => {
+    const captured: Mutation[] = []
+    adapter.onMutationCaptured((m) => captured.push(m))
+
+    await handshake("doc-a")
+    emitFromBridge(setup.contentWindow, {
+      type: "MUTATION_CAPTURED",
+      payload: wireMutation("doc-a"),
+    })
+    expect(captured).toHaveLength(1)
+
+    await handshake("doc-b")
+    emitFromBridge(setup.contentWindow, {
+      type: "MUTATION_CAPTURED",
+      payload: wireMutation("doc-a"),
+    })
+    expect(captured).toHaveLength(1)
+    // The drop is not silent: one line names the message's document and the one
+    // on screen.
+    expect(warnings.some((line) => line.includes("doc-a") && line.includes("doc-b"))).toBe(true)
+  })
+
+  it("delivers a message whose document is the accepted one", async () => {
+    // The mirror of the case above: same two handshakes, and a capture from the
+    // page that is actually on screen still lands.
+    const captured: Mutation[] = []
+    adapter.onMutationCaptured((m) => captured.push(m))
+
+    await handshake("doc-a")
+    await handshake("doc-b")
+    emitFromBridge(setup.contentWindow, {
+      type: "MUTATION_CAPTURED",
+      payload: wireMutation("doc-b"),
+    })
+
+    expect(captured).toHaveLength(1)
+    expect(captured[0]!.id).toBe("m-1")
+  })
+
+  it("drops a held draft and a resolution failure from the departed document too", async () => {
+    // All three mutation messages ride the same channel, so all three carry the
+    // id and all three are filtered. A held draft that survived would open a
+    // dialog about an element the new page does not have.
+    const pending: PendingMutation[] = []
+    const failures: { id: string }[] = []
+    adapter.onMutationAwaitingDisambiguation((p) => pending.push(p))
+    adapter.onResolutionFailed((f) => failures.push(f))
+
+    await handshake("doc-a")
+    await handshake("doc-b")
+
+    const { instancePath: _instancePath, documentId: _documentId, ...draft } =
+      wireMutation("doc-a")
+    void _instancePath
+    void _documentId
+    emitFromBridge(setup.contentWindow, {
+      type: "MUTATION_AWAITING_DISAMBIGUATION",
+      payload: {
+        pendingId: "pending-1",
+        draft,
+        candidates: [
+          { instancePath: "0", selector: "#one", origin: true },
+        ],
+        documentId: "doc-a",
+      },
+    })
+    emitFromBridge(setup.contentWindow, {
+      type: "MUTATION_RESOLUTION_FAILED",
+      payload: {
+        id: "f-1",
+        reason: "No source-location ancestor.",
+        selector: "div.unanchored",
+        documentId: "doc-a",
+      },
+    })
+
+    expect(pending).toEqual([])
+    expect(failures).toEqual([])
+  })
+})
+
+describe("BridgeFrameworkAdapter reports a new document's own ready", () => {
+  /**
+   * The bridge sends BRIDGE_READY as soon as its script runs, which is before
+   * the iframe's `load` event. The adapter adopts the new id there, so a
+   * capture made in the window between the two passes its document gate. The
+   * shell needs to hear about the change at the ready, or it stamps that
+   * capture with the departed page's session and then retires it at `load`.
+   */
+  let adapter: BridgeFrameworkAdapter
+  let setup: MockIframeSetup
+
+  async function handshake(documentId: string): Promise<void> {
+    const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId },
+    })
+    await initPromise
+  }
+
+  beforeEach(() => {
+    adapter = new BridgeFrameworkAdapter()
+    setup = makeMockIframe()
+  })
+
+  afterEach(async () => {
+    await adapter.dispose()
+  })
+
+  it("tells the listener once when a new document announces itself", async () => {
+    const seen: string[] = []
+    // What the getter read DURING each call, not after the fact. The shell's
+    // listener moves the session boundary onto `adapter.bridgeDocumentId`
+    // synchronously, in this very call, so "the id moved first" has to hold
+    // while the listener is on the stack. Asserting it afterwards would pass
+    // for an adapter that adopted the id on the line below the notify, and the
+    // shell would then start its new session on the DEPARTED document.
+    const readDuringCall: (string | null)[] = []
+    adapter.onDocumentChanged((documentId) => {
+      seen.push(documentId)
+      readDuringCall.push(adapter.bridgeDocumentId)
+    })
+
+    await handshake("doc-a")
+    // Nothing yet: that ready was one this adapter asked for.
+    expect(seen).toEqual([])
+
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
+    })
+    expect(seen).toEqual(["doc-b"])
+    expect(readDuringCall).toEqual(["doc-b"])
+    // The id moved with it, so a listener that re-handshakes reads the new
+    // document rather than the one that went away.
+    expect(adapter.bridgeDocumentId).toBe("doc-b")
+  })
+
+  it("says nothing when the SAME document announces itself again", async () => {
+    // A page whose bridge re-emits its ready, which is the shape a PING
+    // answers. Nothing changed, so there is no boundary to report.
+    const seen: string[] = []
+    adapter.onDocumentChanged((documentId) => seen.push(documentId))
+
+    await handshake("doc-a")
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+    })
+    expect(seen).toEqual([])
+  })
+
+  it("says nothing for the ready that resolves a handshake it asked for", async () => {
+    // The other half of "once". A handshake reports its document through
+    // `init()` resolving, and the shell re-handshakes there; announcing the
+    // change as well would run two handshakes for one ready.
+    const seen: string[] = []
+    adapter.onDocumentChanged((documentId) => seen.push(documentId))
+
+    await handshake("doc-a")
+    await handshake("doc-b")
+    expect(seen).toEqual([])
+    expect(adapter.bridgeDocumentId).toBe("doc-b")
+  })
+
+  it("stops telling a listener that unsubscribed", async () => {
+    const seen: string[] = []
+    const unsubscribe = adapter.onDocumentChanged((id) => seen.push(id))
+    await handshake("doc-a")
+    unsubscribe()
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-b" },
+    })
+    expect(seen).toEqual([])
+  })
+
+  it("says nothing for a ready the version gate refused", async () => {
+    // A bridge the shell will not talk to must not be able to move the
+    // document, and so must not be able to end the live session either.
+    const seen: string[] = []
+    adapter.onDocumentChanged((id) => seen.push(id))
+    await handshake("doc-a")
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: "2020-01-01a", documentId: "doc-b" },
+    })
+    expect(seen).toEqual([])
+    expect(adapter.bridgeDocumentId).toBe("doc-a")
   })
 })

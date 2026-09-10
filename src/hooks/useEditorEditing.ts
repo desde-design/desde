@@ -1,7 +1,15 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import type { RefObject } from "react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react"
+import type { RefObject, SetStateAction } from "react"
 import type {
   ComponentManifestSource,
   DisambiguationChoice,
@@ -55,18 +63,16 @@ import { editorFetch } from "@/lib/editor-fetch"
 import { useEditorStore } from "@/stores/editor-only"
 import { useAppStore } from "@/stores"
 import { useEditVerification } from "./useEditVerification"
-import type { IterationEditKind } from "./iteration-fallback"
+import type { IterationEditKind } from "@/editor/edit-service/iteration-fallback"
 import {
   logIterationScopeChoice,
   requestIterationProposal,
-} from "./iteration-fallback"
+} from "@/editor/edit-service/iteration-fallback"
 import { applyEditWithChatHandoff } from "./apply-edit-with-chat-handoff"
 import type { ChatHandoffOutcome } from "./apply-edit-with-chat-handoff"
 import {
   afterEscalation,
   buildEditEscalationPrompt,
-  buildPropEditEscalationPrompt,
-  buildRowScopedEditHandoffPrompt,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
   coalesceCapturedMutation,
@@ -82,22 +88,19 @@ import {
   buildStyleEdit,
   isUnsupportedStyleBuild,
   type StyleEditDestinationOptions,
-} from "./style-edit-builders"
+} from "@/editor/edit-service/style-edit-builders"
 import { useIframeStylesheetTargets } from "./useIframeStylesheetTargets"
 import {
   isOverrideStylesheetRefusal,
   resolveOverrideStylesheet,
 } from "@/components/editor/resolve-override-stylesheet"
-import { makeEditId } from "./make-edit-id"
+import { makeEditId } from "@/editor/edit-service/make-edit-id"
 import { describeEditOutcome } from "./edit-outcome"
-import { reconcileDispatchedValue } from "./dispatch-reconcile"
-import { cascadeTargetForStyleEdit } from "./cascade-target-for-style-edit"
 import { handleResolutionFailure } from "./resolution-failure-notice"
 import { offeredDisambiguationChoices } from "./disambiguation-choices"
 import { routeAwaitingDisambiguation } from "./disambiguation-route"
 import { notifySingleChoiceDisambiguation } from "./single-choice-disambiguation-notice"
 import { notifyOverridePreviewFailure } from "./override-preview-notice"
-import type { ManifestValue } from "@/editor/core/manifest"
 import type { IterationScope } from "@/components/editor/iteration-scope-dialog"
 import {
   collectVueFiles,
@@ -117,44 +120,45 @@ import {
 } from "./layers-density-storage"
 import {
   bridgeDraftIdOf,
-  decideAfterVerify,
   DEFERRED_PARK_STATUS,
-  dequeueModal,
-  describeRowScopedEdit,
-  dropModalRequestsForDraft,
-  enqueueModal,
   NOT_CONNECTED_STATUS,
-  errorMessage,
-  handOffFailureStatus,
-  hasUndispatchedWork,
-  isStaleGeneration,
-  isStaleVerify,
-  isSupersededHandshake,
-  mayClearInFlightMarker,
   iterationRouteFor,
   parkedReason,
-  promptCollision,
-  PROMPT_BUSY_STATUS,
-  retireForeignEntries,
-  retiresBufferedEntries,
-  iterationTemplateLocation,
   MALFORMED_ITERATION_STATUS,
-  resumePlan,
   sameBridgeDraft,
   SAVE_HANDOFF_TIMEOUT_STATUS,
   SAVE_PAGE_CHANGED_STATUS,
-  sessionEndPlan,
   settleHandOff,
-  shouldEndSessionOnHandshake,
   structuralRouteFor,
-  thisRowOperationAllowed,
-  thisRowTemplateLocation,
-  verifyKeyFor,
-  type BridgeSessionEndReason,
-  type ModalKind,
-  type ModalRequest,
   type PendingIterationEdit,
 } from "./pending-iteration-edit"
+import {
+  hasUndispatchedWork,
+  isSupersededHandshake,
+  shouldEndSessionOnHandshake,
+  type BridgeSessionEndReason,
+} from "@/editor/session/session-state"
+import type { ModalRequest as SessionModalRequest } from "@/editor/session/modal-queue"
+import {
+  EditSession,
+  type SessionEndResult,
+} from "@/editor/session/edit-session"
+
+/** The one dialog request shape this hook raises, bound to its prompt type. */
+type ModalRequest = SessionModalRequest<PendingIterationEdit>
+import {
+  dispatchPropEdit,
+  propEditKey,
+} from "@/editor/edit-service/lanes/prop-lane"
+import {
+  dispatchClassMutation,
+  dispatchTextMutation,
+  type TextLaneDeps,
+} from "@/editor/edit-service/lanes/text-lane"
+import {
+  dispatchIteration,
+  interceptIteration,
+} from "@/editor/edit-service/lanes/iteration-lane"
 import { verifyIterationLoop } from "./iteration-verify"
 import { parkedSaveRefusal, saveGate } from "./save-gate"
 
@@ -165,26 +169,6 @@ import { parkedSaveRefusal, saveGate } from "./save-gate"
  * re-render the whole panel) for no reason.
  */
 const EMPTY_CONDITIONAL_GROUPS: Map<string, FileConditionalGroups> = new Map()
-
-/**
- * Narrow a {@link PropEdit}'s value to the string|number|boolean shape the
- * escalation prompt expects. The wire protocol's PropEdit body (per
- * {@link validateEditRequest}) only accepts these three primitive kinds —
- * arrays / objects / null get rejected at the server boundary. So in
- * practice this is just a type-narrowing assertion; the fallback
- * stringifies defensively in case a future PropEdit variant slips through.
- */
-function normalizeManifestValueForEscalation(
-  value: ManifestValue,
-): string | number | boolean {
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return value
-  }
-  // ManifestValue widens to null / array / object for non-prop edits.
-  // PropEdits don't carry these — fall back to a labeled string so the
-  // prompt is still readable if the validator drifts.
-  return String(value)
-}
 
 /**
  * `adapter.resolveOverride`, plus the shell-side "the preview shim is gone" edge
@@ -267,18 +251,6 @@ interface UseEditorEditingOptions {
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>
 }
-
-/**
- * Buffer key for one element's one prop. Module scope, so every closure that
- * builds a key gets the SAME function identity: `endBridgeSession` reads it
- * with an empty dependency list, and a per-render arrow there would be a
- * dependency the callback silently never updates for.
- *
- * The NUL separator is deliberate: a selector can contain anything a CSS
- * selector can, and a printable separator could be part of one.
- */
-const propEditKey = (selector: string, propName: string): string =>
-  `${selector}\u0000${propName}`
 
 /**
  * Editor editing state + handlers, decoupled from the iframe owner.
@@ -433,6 +405,20 @@ export function useEditorEditing({
   const escalateToChatRef = useRef(escalateToChat)
   escalateToChatRef.current = escalateToChat
 
+  /**
+   * The chat submission, as one stable function.
+   *
+   * Through the REF, not the captured prop: the iteration lane hands off after
+   * an HTTP round trip that can take fifteen seconds, and the prop can be
+   * replaced in that window. A shell with no chat resolves false, which is the
+   * refusal the lane already treats "there is nowhere to send this" as.
+   */
+  const handOffToChat = useCallback(
+    (prompt: string, options?: { signal?: AbortSignal }): Promise<boolean> =>
+      escalateToChatRef.current?.(prompt, options) ?? Promise.resolve(false),
+    [],
+  )
+
   // Fuzzy-edit queue. When a typing-time dispatch comes back `needsChat`
   // (deterministic lane can't apply it), the mutation is NOT escalated
   // mid-edit — it stays in the buffer and its identity is recorded here
@@ -580,71 +566,106 @@ export function useEditorEditing({
   }, [])
 
   /**
-   * True whenever no adapter is attached: the hook is disabled, unmounted, or
-   * between attachments. An in-flight iteration verify that resolves in that
-   * window must NOT open a dialog or start an agent turn; the UI that
-   * authorized the edit is gone. Paired with `adapterAbortRef`, which stops the
-   * request itself rather than only ignoring its answer.
+   * The one status line the whole hook writes to.
+   *
+   * Declared HERE, above the session, rather than next to `saving` where the
+   * rest of the save state lives. The session is built during the first render
+   * and its `onModalOpened` writes this line, so the setter has to exist by
+   * then; a state hook further down the file has not run yet at that point.
+   *
+   * THE LINE CARRIES A SEQUENCE, and `seq` is half of what this state is.
+   * The line is prose in a string, and React bails out of a state write that
+   * sets the identical string. Every consumer that has to react to a NEW
+   * notice was therefore keyed on the text alone, and could not tell "nothing
+   * was written" from "the same sentence was written again". The toast in
+   * `banner-toasts.tsx` is the one that hurt: change the page twice with a
+   * draft held each time, and the second discard notice never appeared,
+   * because it was word for word the first one.
+   *
+   * A counter, not a timestamp: two writes in one millisecond are two writes.
+   * It moves on EVERY dispatch, including one that lands on the text already
+   * there and one that clears the line to null.
+   *
+   * `useReducer` rather than a `useState` plus a wrapper, for one reason that
+   * is not style: `setSaveStatus` is read by about twenty callbacks in this
+   * file, and a reducer's dispatch is stable BY THE LINT RULE, exactly as a
+   * `useState` setter is. A `useCallback` wrapper is not, and every one of
+   * those callbacks would have had to name it in its dependency array to keep
+   * the lint bar at zero.
+   *
+   * The action IS a `SetStateAction`, so the call signature is unchanged: a
+   * string, null to clear it, or the updater form. Nothing else in the file
+   * has to know the sequence exists.
    */
-  const disposedRef = useRef(true)
+  const [saveStatusState, setSaveStatus] = useReducer(
+    (
+      current: { text: string | null; seq: number },
+      message: SetStateAction<string | null>,
+    ) => ({
+      text: typeof message === "function" ? message(current.text) : message,
+      seq: current.seq + 1,
+    }),
+    { text: null, seq: 0 },
+  )
+  const saveStatus = saveStatusState.text
+  const saveStatusSeq = saveStatusState.seq
   /**
-   * The current bridge session's lifetime, as a signal.
+   * THE bridge session. One document in the iframe, as an object.
    *
-   * Every request the iteration lane makes while holding a bridge draft races
-   * against it: the loop verify, the row proposal, and the chat hand-off. A
-   * teardown aborts it, so those stop where they are instead of answering into
-   * a session that has ended. Renewed on each attach, and by the conflict
-   * reload, which ends the drafts' session without detaching the adapter.
+   * `useMemo` with no dependencies rather than `useRef`, because the session is
+   * created once per hook instance and never replaced: attaching, ending and
+   * reconnecting are transitions ON it, not new ones.
+   *
+   * Seventeen refs used to hold what it holds, spread across this file. The
+   * map from each old name to its replacement is in
+   * `src/editor/session/README.md`; it is not repeated here, because a test in
+   * `src/editor/session/edit-session.test.ts` reads THIS file and fails on any
+   * of those names, and documentation that names them would be the thing that
+   * fails it.
+   *
+   * The buffers, the dialog rows, the open question and the held drafts are
+   * on it too, read through {@link sessionState} below.
    */
-  const adapterAbortRef = useRef<AbortController | null>(null)
+  const session = useMemo(
+    () =>
+      new EditSession<PendingIterationEdit>({
+        promptDraftId: bridgeDraftIdOf,
+        propEditKey: (edit) => propEditKey(edit.target.selector, edit.propName),
+        mutationKey: mutationIdentity,
+        onModalOpened: (request) => {
+          if (request.kind === "disambiguation" && request.reason !== undefined) {
+            setSaveStatus(request.reason)
+          }
+        },
+      }),
+    [],
+  )
+
   /**
-   * Which bridge session a continuation belongs to.
+   * What the session is holding, as React sees it.
    *
-   * Bumped on every adapter attach, every teardown, and the conflict reload.
-   * `disposedRef` says the surface is gone RIGHT NOW; this says the surface an
-   * await started under is not the one that came back. The two differ in the
-   * case that matters: teardown, reconnect, and a continuation resuming into a
-   * live adapter that is not its own. The bridge restarts its draft ids at
-   * `dom-pending-1` on reconnect, so that continuation's ids now name someone
-   * else's drafts. See `isStaleGeneration` for what it must then do (nothing).
+   * `useSyncExternalStore` rather than four `useState`s plus four "always
+   * latest" mirror refs. The mirrors existed because the async lanes have to
+   * read the CURRENT buffer from inside a `setTimeout`, and a state value
+   * captured at render is half a second old by then. Two authorities for one
+   * array is how a retirement and a coalesce could disagree; there is one now,
+   * and React reads it rather than owning it.
+   *
+   * Only the three fields something RENDERS from are named below. The prop
+   * buffer has no render-time reader at all: every lane that touches it runs
+   * inside a callback, and a callback reads `session.getSnapshot().propEdits`
+   * so it sees the buffer as it is at that moment rather than as it was when
+   * the callback was built.
    */
-  const adapterGenerationRef = useRef(0)
-  /**
-   * WHICH DOCUMENT this attachment last handshaked with, or null before the
-   * first handshake of an attachment completes.
-   *
-   * The document in the iframe is what a bridge session is about, and the shell
-   * learns a new one is there from the HANDSHAKE, not from the iframe's `load`
-   * event. The two are different moments: the bridge announces itself when its
-   * script runs, so a page with a slow image fires `load` afterwards — on a
-   * document the shell is already connected to and the designer may already
-   * have edited. Ending the session there threw that edit away and left the
-   * live bridge holding a draft nothing would ever cancel.
-   *
-   * The value is the bridge's own per-document id, which every bridge the shell
-   * accepts reports (`REQUIRED_BRIDGE_VERSION`). See
-   * `shouldEndSessionOnHandshake` for the decision it feeds.
-   *
-   * It SURVIVES a plain teardown, so a re-attach can tell that the document is
-   * the one the buffered edits were made against and re-arm their dispatches
-   * (`resumePlan`). It is cleared only where the document is genuinely no longer
-   * known: a failed handshake, and the attach that follows a document change.
-   */
-  const sessionDocumentRef = useRef<string | null>(null)
-  /**
-   * Monotonic id for iteration verifies, PER TARGET. Each intercept takes the
-   * next one for its own key and records it as that key's latest; only a key's
-   * latest answer may open the dialog or hand off. See `isStaleVerify` for what
-   * went wrong without the sequence, and `verifyKeyFor` for why one global
-   * counter was wrong: it let an edit on one element declare an unrelated
-   * edit's answer stale, which released that edit's bridge draft and told the
-   * designer a newer edit had replaced it. Nothing had.
-   *
-   * One small entry per distinct element edited in a session; nothing removes
-   * them, because a key's latest sequence has to outlive its own verify (the
-   * hand-off branch re-checks staleness after an awaited POST).
-   */
-  const verifySeqByKeyRef = useRef<Map<string, number>>(new Map())
+  const sessionState = useSyncExternalStore(
+    session.subscribe,
+    session.getSnapshot,
+    session.getSnapshot,
+  )
+  /** The captured DOM mutations, for Save and for the flush's own filters. */
+  const mutations = sessionState.mutations
+  /** The open scope question, rendered by `IterationScopeDialog`. */
+  const iterationScopePrompt = sessionState.scopePrompt
 
   /**
    * True only once React has begun unmounting this hook.
@@ -692,27 +713,22 @@ export function useEditorEditing({
   // wiring + manifest lookup mirror what `<LivePrototypePane>` does so
   // the project-route inline mode behaves identically to /compose.
   useEffect(() => {
-    // React runs the PREVIOUS cleanup before this body, so on any
-    // disable/re-attach the flag is already true here. It is cleared only
-    // once an attachment actually follows, never on an early return.
-    disposedRef.current = true
     if (!enabled) return
     const iframe = iframeRef.current
     if (!iframe) return
-    disposedRef.current = false
     // A new session starts here. Anything still in flight from the previous
     // one is now stale, whatever it does next.
-    adapterGenerationRef.current += 1
-    adapterAbortRef.current = new AbortController()
-    // NOTE: `sessionDocumentRef` is deliberately NOT cleared here. The session
-    // that was running ended in the previous cleanup, and the reason it ended
-    // decided whether the document is still the same one: a plain `teardown`
-    // detaches the adapter with the page still on screen and keeps the id, so
-    // this attachment's first handshake can recognise the page and re-arm the
+    //
+    // `attach` deliberately leaves the DOCUMENT id alone. The session that was
+    // running ended in the previous cleanup, and the reason it ended decided
+    // whether the document is still the same one: a plain `teardown` detaches
+    // the adapter with the page still on screen and keeps the id, so this
+    // attachment's first handshake can recognise the page and re-arm the
     // buffered edits made against it (`resumePlan`). Every reason that IS a
-    // document change clears the id in `endBridgeSession`, and so does a failed
+    // document change forgets the id inside `session.end`, and so does a failed
     // handshake, so the first-handshake-ends-nothing case is still covered
     // wherever it is true.
+    session.attach()
 
     const adapter = new BridgeFrameworkAdapter()
     let cancelled = false
@@ -804,6 +820,80 @@ export function useEditorEditing({
       },
     )
 
+    /**
+     * MOVE THE SESSION BOUNDARY ONTO `documentId`.
+     *
+     * THE DOCUMENT BOUNDARY, and the only place it moves. A document that is
+     * not the one this session adopted means the page was replaced, and
+     * everything the previous page's session was holding ends here, before the
+     * new document is adopted, so a continuation that resumes afterwards sees
+     * the session it belongs to as over.
+     *
+     * Nothing is cancelled with the bridge: those drafts died with the document
+     * that issued them, and the instance that would receive the cancel is a
+     * different one that numbers its own drafts from `dom-pending-1`.
+     *
+     * Every bridge the shell accepts reports its document id, so the ids decide
+     * this on their own; a bridge that reports none is refused at the handshake
+     * instead (`REQUIRED_BRIDGE_VERSION`).
+     *
+     * SYNCHRONOUS, and that is the point. It used to live inside the
+     * handshake's `.then`, which is a PING round trip away from the moment the
+     * adapter adopted the new id. In that gap the new page's own capture
+     * passed the adapter's document gate, was buffered under the OLD session,
+     * and was then retired by the boundary when the round trip finally
+     * answered. The designer was told an edit they had just made on the page in
+     * front of them was discarded. Called from the document-changed listener in
+     * the same event turn as the adapter's adoption, there is no gap to lose an
+     * edit in.
+     *
+     * Calling it twice for the same id costs nothing: the end is skipped
+     * because the id has not changed, `start` answers with a resume plan
+     * instead, and re-arming a debounce that is already armed re-debounces it.
+     */
+    const enterDocument = (documentId: string | null) => {
+      if (shouldEndSessionOnHandshake(session.documentId, documentId)) {
+        // Through `endBridgeSession`, not through the end inside
+        // `session.start`: the buffers, the dialog rows and the held drafts
+        // are still this hook's, and they are half of what a document
+        // change discards. The end forgets the document, so the `start`
+        // below adopts the new one and does not end a second time.
+        endBridgeSessionRef.current?.({
+          reason: "reconnect",
+          cancelWithBridge: false,
+        })
+      }
+      // `bridgeDocumentId` is `string | null` and `start` takes the same,
+      // so there is no `?? ""` here: an empty string would be ADOPTED as a
+      // real document and the next handshake would read as a change.
+      const { resumed } = session.start(documentId, (mutation) =>
+        mutationResumeEligibleRef.current(mutation),
+      )
+      // THE SAME DOCUMENT, ANSWERING AGAIN, which is what a non-null
+      // `resumed` says. It is either the page's own second handshake or an
+      // adapter that detached and came back with the page still on screen.
+      // A plain teardown keeps the buffered edits but cancels the debounce
+      // timers that would have written them, so the entries would sit in
+      // the buffer with nothing left to write them. Re-arm them here, which
+      // is what the designer's next keystroke would have done anyway.
+      //
+      // The lists ON `resumed` ARE the answer: the session holds both
+      // lanes' markers, so `resume` already skipped every entry being
+      // written right now, which is the rule that keeps a second timer off
+      // an in-flight identity. All that is left is arming them.
+      if (resumed) {
+        for (const edit of resumed.propEdits) {
+          scheduleBranchPropDispatchRef.current?.(
+            edit.target.selector,
+            edit.propName,
+          )
+        }
+        for (const mutation of resumed.mutations) {
+          scheduleBranchMutationDispatchRef.current?.(mutation)
+        }
+      }
+    }
+
     const runHandshake = () => {
       if (cancelled) return
       setStatus({ kind: "connecting" })
@@ -817,40 +907,13 @@ export function useEditorEditing({
         .init({ iframe, origin })
         .then(() => {
           if (cancelled) return
-          // THE DOCUMENT BOUNDARY. A handshake that reports a different
-          // document than the one this attachment adopted means the page was
-          // replaced, and everything the previous page's session was holding
-          // ends here — before the new document is adopted, so a continuation
-          // that resumes afterwards sees the session it belongs to as over.
-          //
-          // Nothing is cancelled with the bridge: those drafts died with the
-          // document that issued them, and the instance that would receive the
-          // cancel is a different one that numbers its own drafts from
-          // `dom-pending-1`.
-          //
-          // Every bridge the shell accepts reports its document id, so the ids
-          // decide this on their own; a bridge that reports none is refused at
-          // the handshake instead (`REQUIRED_BRIDGE_VERSION`).
-          const documentToken = adapter.bridgeDocumentId
-          const previousToken = sessionDocumentRef.current
-          if (shouldEndSessionOnHandshake(previousToken, documentToken)) {
-            endBridgeSessionRef.current?.({
-              reason: "reconnect",
-              cancelWithBridge: false,
-            })
-          }
-          sessionDocumentRef.current = documentToken
+          // The handshake's own answer, through the same one boundary. When an
+          // unsolicited ready got here first this finds the SAME document and
+          // only re-arms; when the handshake is the first news of the page (an
+          // iframe `load` with no ready of its own, or the very first
+          // attachment) this is where the boundary moves.
+          enterDocument(adapter.bridgeDocumentId)
           setStatus({ kind: "ready" })
-          // THE SAME DOCUMENT, ANSWERING AGAIN. This is either the page's own
-          // second handshake or an adapter that detached and came back with the
-          // page still on screen. A plain teardown keeps the buffered edits but
-          // cancels the debounce timers that would have written them, so the
-          // entries would sit in the buffer with nothing left to write them.
-          // Re-arm them here, which is what the designer's next keystroke would
-          // have done anyway.
-          if (previousToken !== null && previousToken === documentToken) {
-            resumeBufferedDispatchesRef.current?.()
-          }
           if (!adapterReadyAnnounced) {
             adapterReadyAnnounced = true
             adapterRef.current = adapter
@@ -885,13 +948,13 @@ export function useEditorEditing({
           //
           // So the session ends here, the same way a reconnect ends one, and
           // nothing is handed back to the bridge: there is no bridge to hear
-          // it. The document token goes with it, so the next handshake that
-          // does complete is the first of a fresh session and ends nothing.
+          // it. `reconnect` forgets the document as well as retiring the
+          // buffers, so the next handshake that does complete is the first of a
+          // fresh session and ends nothing.
           endBridgeSessionRef.current?.({
             reason: "reconnect",
             cancelWithBridge: false,
           })
-          sessionDocumentRef.current = null
           setStatus({ kind: "error", message })
         })
     }
@@ -904,13 +967,45 @@ export function useEditorEditing({
      * subresource finishes after the bridge announced itself, and ending the
      * session there discarded the designer's in-progress edits on a page that
      * was still right in front of them. The handshake carries the document's
-     * id, so the boundary is decided where that id is read, in the `.then`
-     * above.
+     * id, so the boundary is decided where that id is read, which is
+     * `enterDocument` above.
      */
     const onIframeLoad = () => {
       runHandshake()
     }
 
+    /**
+     * The NEW document announced itself, and `load` has not fired yet.
+     *
+     * The bridge sends its READY as soon as its script runs, and the adapter
+     * adopts the new document id there. Until this listener existed the shell
+     * did not start the new session until the iframe's `load` event, and a
+     * capture made in between passed the adapter's document gate and was then
+     * stamped with the OLD session's generation. The handshake at `load` ended
+     * that session and retired the capture, so the designer was told an edit
+     * they had just made on the page in front of them was discarded.
+     *
+     * THE BOUNDARY MOVES FIRST, IN THIS EVENT TURN. The adapter adopted the
+     * new id before it called this listener, so `bridgeDocumentId` is already
+     * the new document here, and `enterDocument` is synchronous. A capture the
+     * new page posts right behind its own ready therefore lands in the buffer
+     * with the NEW session's generation on it.
+     *
+     * Handshaking as well is not redundant. It is what verifies the bridge's
+     * version and re-arms whatever the boundary kept, and its `.then` runs
+     * `enterDocument` again with the id the handshake reports. That second call
+     * finds the same document, so it ends nothing.
+     *
+     * The `load` event that follows is a third call for that same document, and
+     * costs the same nothing.
+     */
+    const onDocumentChanged = () => {
+      if (cancelled) return
+      enterDocument(adapter.bridgeDocumentId)
+      runHandshake()
+    }
+
+    const unsubDocumentChanged = adapter.onDocumentChanged(onDocumentChanged)
     iframe.addEventListener("load", onIframeLoad)
     runHandshake()
 
@@ -926,7 +1021,6 @@ export function useEditorEditing({
       // hear it, which is why this is ordered BEFORE `dispose()`. Via a ref
       // because the callback is defined far below this effect; see its
       // declaration.
-      disposedRef.current = true
       // WHICH REASON. `unmount` when React is taking the hook away. Otherwise
       // the effect is re-running for one of its dependencies, and the one that
       // means the DOCUMENT is being replaced is `prototypeUrl`: the iframe is
@@ -946,6 +1040,7 @@ export function useEditorEditing({
         cancelWithBridge: true,
       })
       iframe.removeEventListener("load", onIframeLoad)
+      unsubDocumentChanged()
       treeUpdateUnsubRef.current?.()
       treeUpdateUnsubRef.current = null
       unsubSelection()
@@ -973,6 +1068,7 @@ export function useEditorEditing({
       setComponentEditState(null)
     }
   }, [
+    session,
     enabled,
     iframeRef,
     prototypeUrl,
@@ -1000,7 +1096,7 @@ export function useEditorEditing({
    * finished with it. Only the report is dropped.
    */
   const reportEditOutcome = useCallback((kindLabel: string) => {
-    const generation = adapterGenerationRef.current
+    const generation = session.generation
     return ({
       result,
       handoff,
@@ -1008,12 +1104,12 @@ export function useEditorEditing({
       result: EditResult
       handoff: ChatHandoffOutcome
     }): void => {
-      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
+      if (!session.isCurrent(generation)) return
       const outcome = describeEditOutcome(kindLabel, result, handoff)
       // Success carries a null message, so a successful edit says nothing.
       if (outcome.message) setSaveStatus(outcome.message)
     }
-  }, [])
+  }, [session])
 
   /**
    * THE dispatch for a structural edit: apply it, hand a refusal to chat, then
@@ -1027,9 +1123,10 @@ export function useEditorEditing({
    * the caller's guard only ran on the result the turn had already been started
    * for.
    *
-   * So the session is captured ONCE, here, and read twice: by `isStale` before
-   * the hand-off, and by the continuation before the status. Capturing it in
-   * two places would be capturing it at two moments.
+   * So the session is handed over whole. The helper captures it on entry and
+   * guards the hand-off with it; the continuation below reads it again before
+   * the status. Capturing a generation here and a signal there would be
+   * capturing one session at two moments.
    */
   const applyEditThenReport = useCallback(
     (
@@ -1037,17 +1134,14 @@ export function useEditorEditing({
       adapter: Pick<BridgeFrameworkAdapter, "applyEdit">,
       kindLabel: string,
     ): void => {
-      const generation = adapterGenerationRef.current
-      // Captured with the generation, not read at hand-off time. Read then, it
-      // would be the NEXT session's live controller, and this edit's hand-off
-      // would run on past the reload it should have been cancelled by.
-      const signal = adapterAbortRef.current?.signal
+      // The session itself, not a generation and a signal captured here. The
+      // helper enters it before the apply, which is the moment that has to be
+      // captured, and it reads both facts off the one run.
       void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current, {
-        isStale: () => isStaleGeneration(generation, adapterGenerationRef.current),
-        ...(signal ? { signal } : {}),
+        session,
       }).then(reportEditOutcome(kindLabel))
     },
-    [reportEditOutcome],
+    [reportEditOutcome, session],
   )
 
   /**
@@ -1843,13 +1937,13 @@ export function useEditorEditing({
     applyEditThenReport(edit, adapter, "Detach")
   }, [applyEditThenReport])
 
-  // Prop edits accumulate here. The bridge gets an APPLY_PROP_OVERRIDE /
-  // APPLY_ATTR_OVERRIDE for each so the iframe shows the change live; a
-  // debounced per-(selector,propName) dispatch then writes each to the
-  // working tree (see `dispatchBranchPropEdit` below), mirroring the
-  // text path — the buffer is the always-latest source the dispatch
-  // reads.
-  const [pendingPropEdits, setPendingPropEdits] = useState<PropEdit[]>([])
+  // Prop edits accumulate on the SESSION (`session.getSnapshot().propEdits`).
+  // The bridge gets an APPLY_PROP_OVERRIDE / APPLY_ATTR_OVERRIDE for each so
+  // the iframe shows the change live; a debounced per-(selector,propName)
+  // dispatch then writes each to the working tree (see
+  // `dispatchBranchPropEdit` below), mirroring the text path. The buffer is
+  // the always-latest source the dispatch reads, which is why it is the
+  // session's one authority and not a state plus a mirror of it.
   // Tracks which buffered edits target a fallthrough attribute rather
   // than a typed prop, so revert can re-issue the right override.
   // The PropEdit.target only carries SelectionTarget (no live props
@@ -1868,18 +1962,14 @@ export function useEditorEditing({
   const pendingPropRenderSitesRef = useRef<Map<string, RenderSite>>(new Map())
 
   // ── Branch-mode prop dispatch (mirrors the dom-text path) ───────────────
-  // Always-latest mirror of `pendingPropEdits` so the debounced dispatch
-  // reads the freshest buffered value from inside a setTimeout callback.
-  const pendingPropEditsRef = useRef<PropEdit[]>([])
-  pendingPropEditsRef.current = pendingPropEdits
-  // Per-(selector,propName) debounce timers + in-flight set, same shape as the
-  // dom-text dispatch. Key built by `propEditKey`.
-  const branchPropDispatchTimers = useRef<
-    Map<string, ReturnType<typeof setTimeout>>
-  >(new Map())
-  const branchPropInFlight = useRef<Set<string>>(new Set())
-  /** One-shot stale-target recovery guard, keyed like branchPropInFlight.
-   *  Cleared on a successful dispatch; prevents 409→refresh→409 loops. */
+  // The debounce timers and the in-flight markers are the SESSION's, under the
+  // `"prop"` lane: `dispatchPropEdit` schedules and marks through it, so a
+  // timer or a marker cannot outlive the page it belongs to. Key built by
+  // `propEditKey`.
+  /** One-shot stale-target recovery guard, keyed like the in-flight markers.
+   *  Cleared on a successful dispatch; prevents 409→refresh→409 loops. It stays
+   *  the hook's because a retired buffer entry has to forget its key here, and
+   *  the lane never sees a session end. */
   const staleRetriedRef = useRef<Set<string>>(new Set())
   /**
    * Override ids whose dispatch is currently awaiting the server. The
@@ -1903,22 +1993,23 @@ export function useEditorEditing({
   const scheduleBranchPropDispatch = useCallback(
     (selector: string, propName: string) => {
       const key = propEditKey(selector, propName)
-      if (branchPropInFlight.current.has(key)) return
-      const existing = branchPropDispatchTimers.current.get(key)
-      if (existing) clearTimeout(existing)
+      if (session.isInFlight("prop", key)) return
       // The session this buffered edit belongs to, captured NOW rather than
       // read inside the callback half a second later. Read there it would be
       // whatever session is live when the timer fires, so a timer that outlived
       // a page reload would write the old page's edit under the new page's
-      // session and pass every guard on the way.
-      const scheduledGeneration = adapterGenerationRef.current
-      const timer = setTimeout(() => {
-        branchPropDispatchTimers.current.delete(key)
-        dispatchBranchPropEditRef.current?.(key, scheduledGeneration)
-      }, BRANCH_PROP_DISPATCH_DEBOUNCE_MS)
-      branchPropDispatchTimers.current.set(key, timer)
+      // session and pass every guard on the way. `session.schedule` refuses to
+      // run the callback at all once the generation has moved.
+      const generation = session.generation
+      session.schedule(
+        "prop",
+        key,
+        generation,
+        () => dispatchBranchPropEditRef.current?.(key, generation),
+        BRANCH_PROP_DISPATCH_DEBOUNCE_MS,
+      )
     },
-    [],
+    [session],
   )
 
   // Set to true whenever a chat-applied edit writes to the working tree on
@@ -1953,44 +2044,16 @@ export function useEditorEditing({
   // carries enough state to (a) route to today's path on "all-rows" without
   // re-collecting inputs, and (b) build an iteration-data intent on
   // "this-row." Adding a new edit kind = adding a variant.
-  const [iterationScopePrompt, setIterationScopePrompt] =
-    useState<PendingIterationEdit | null>(null)
-  /**
-   * The open prompt as a ref, for the late completions that have to know
-   * whether the dialog currently open holds the bridge draft they are about to
-   * dispose of.
-   *
-   * `releaseBridgeDraftUnlessShared` reads that fact through
-   * `setIterationScopePrompt`'s updater, which works only while React
-   * evaluates the updater eagerly, and that is an optimization rather than a
-   * guarantee. A PARK also sets state, and setting state inside another
-   * setState updater is not safe at all, so the park path reads the ref.
-   */
-  const iterationScopePromptRef = useRef<PendingIterationEdit | null>(null)
-  iterationScopePromptRef.current = iterationScopePrompt
-  /**
-   * Which dialog is on screen, if either. THE modal owner.
-   *
-   * The Editor raises two dialogs about edits — the scope prompt and the
-   * deterministic mutation dialog — from four independent places, and until
-   * round 10 they could stack in either order: the mutation dialog opens itself
-   * the moment `pendingDisambiguations` is non-empty, and the scope prompt
-   * opens itself the moment `iterationScopePrompt` is set, and neither state
-   * knew about the other. Every raise now goes through {@link requestModal},
-   * which reads this, and every close through {@link releaseModal}, which
-   * clears it and opens whatever is next.
-   */
-  const modalOwnerRef = useRef<ModalKind | null>(null)
-  /**
-   * The dialogs owed to the designer while one is already open, oldest first.
-   *
-   * This is the round-9 deferred-park queue, widened: a park was only ever one
-   * of the two things that can be owed, and holding only parks meant the OTHER
-   * dialog had nowhere to wait and opened on top instead. A queued request is
-   * unsaved work with nothing on screen to mention it, so `hasUndispatchedWork`
-   * and the Save gate both count it.
-   */
-  const modalQueueRef = useRef<ModalRequest[]>([])
+  // The open one is `sessionState.scopePrompt`, read above as
+  // `iterationScopePrompt`. It is the session's because the modal OWNER and
+  // the queue behind it are, and until round 10 those three could disagree:
+  // the mutation dialog opened itself the moment its rows were non-empty, the
+  // scope prompt opened itself the moment its state was set, and neither knew
+  // about the other. Every raise now goes through `session.requestModal` and
+  // every close through `session.releaseModal`, which is one object deciding
+  // both. A queued request is unsaved work with nothing on screen to mention
+  // it, so `hasUndispatchedWork` and the Save gate both count
+  // `session.queuedCount`.
   /**
    * How to end the bridge session, for the adapter effect and its iframe `load`
    * handler to call.
@@ -2014,14 +2077,32 @@ export function useEditorEditing({
    */
   const sessionEndStatusRef = useRef<string | null>(null)
   /**
-   * How to re-arm the buffered edits' debounced writes, for the handshake that
-   * finds the same document still there.
+   * The two schedulers, for the handshake that finds the same document still
+   * there and has to re-arm what a session end cancelled.
    *
-   * A ref for the same reason as `endBridgeSessionRef`: the adapter effect is
-   * defined above the callback, and both dispatch lanes it schedules are
-   * defined below it.
+   * Refs for the same reason as `endBridgeSessionRef`: the adapter effect is
+   * defined above both callbacks.
    */
-  const resumeBufferedDispatchesRef = useRef<(() => void) | null>(null)
+  const scheduleBranchPropDispatchRef = useRef<
+    ((selector: string, propName: string) => void) | null
+  >(null)
+  const scheduleBranchMutationDispatchRef = useRef<
+    ((mutation: Mutation) => void) | null
+  >(null)
+  /**
+   * Which buffered captures a re-arm may still write, for `session.start`.
+   *
+   * `EditSession.resume` takes this predicate because the answer is the
+   * capture scheduler's, not the session's: a mutation that would not have
+   * armed a timer when it was captured (a `class` capture with no source
+   * location, an identity parked for the AI queue, one being written right
+   * now) must not get one on a re-attach either. Passed as a ref for the same
+   * reason as the two schedulers above: the adapter effect is defined above the
+   * callback that decides it.
+   */
+  const mutationResumeEligibleRef = useRef<(mutation: Mutation) => boolean>(
+    () => true,
+  )
   // Per-edit-kind remembered scope. Cleared on hook unmount; not persisted
   // across reloads (v1 — the dialog's "Remember for this session" checkbox).
   const iterationScopeMemoryRef = useRef<
@@ -2067,12 +2148,12 @@ export function useEditorEditing({
         // The session this edit was captured in. The buffer outlives the
         // document, and this is the only thing on the entry that says which
         // document it describes. See `retireForeignEntries`.
-        generation: adapterGenerationRef.current,
+        generation: session.generation,
       }
       if (renderSite) {
         pendingPropRenderSitesRef.current.set(edit.id, renderSite)
       }
-      setPendingPropEdits((prev) => {
+      session.updatePropEdits((prev) => {
         // Last-write-wins per (selector, propName). Multiple debounced
         // edits on the same prop collapse to one buffered entry.
         const filtered = prev.filter(
@@ -2105,7 +2186,7 @@ export function useEditorEditing({
       // source write + HMR is the truthful render.
       scheduleBranchPropDispatch(selection.selector, propName)
     },
-    [scheduleBranchPropDispatch],
+    [scheduleBranchPropDispatch, session],
   )
 
   const handlePropEdit = useCallback((
@@ -2355,17 +2436,34 @@ export function useEditorEditing({
       // dispatch directly to disk, surface failures via setSaveStatus, and
       // rely on the inspector's refetch-on-success to keep the OTHER
       // branch's byte ranges from going stale.
-      try {
-        const result = await adapter.applyEdit(edit)
-        if (result.kind === "failed") {
-          setSaveStatus(`Conditional text edit failed: ${result.reason}`)
-          return
+      //
+      // THE SESSION, as a run, the same shape the token lane uses. The byte
+      // range in this edit was read off ONE document's source, and the status
+      // line below is written after the write returns. A page replaced in that
+      // window makes the report describe a document nobody is looking at, over
+      // the line that says what the page change discarded.
+      await session.run(async (ctx) => {
+        try {
+          const written = await ctx.step(
+            adapter.applyEdit(edit, { signal: ctx.signal }),
+          )
+          if (written.stale) return
+          const result = written.value
+          if (result.kind === "failed") {
+            setSaveStatus(`Conditional text edit failed: ${result.reason}`)
+            return
+          }
+        } catch (err) {
+          // `ctx.step` turns a throw from a departed session into a stale
+          // answer, so this covers only a throw from the synchronous code
+          // beside it. A departed page's error is not news about the page in
+          // front of the designer now.
+          if (!ctx.current) return
+          setSaveStatus(`Conditional text edit threw: ${(err as Error).message}`)
         }
-      } catch (err) {
-        setSaveStatus(`Conditional text edit threw: ${(err as Error).message}`)
-      }
+      })
     },
-    [],
+    [session],
   )
 
   const handleClassesEdit = useCallback((classes: string[]) => {
@@ -2426,32 +2524,21 @@ export function useEditorEditing({
   // Three facts about one draft id, kept together because every rule below
   // reads more than one of them.
 
-  /**
-   * The bridge's own `PendingMutation` for a draft we routed to the iteration
-   * dialog, keyed by draft id.
-   *
-   * Routing to that dialog takes the pending OUT of `pendingDisambiguations`
-   * before it is ever added, which is right while the iteration lane can still
-   * land the edit. When it cannot — chat refused the hand-off, the proposal
-   * failed, the write failed — the honest fallback is the deterministic
-   * question that path replaced ("this instance" / "all instances"), and that
-   * dialog needs the real payload. Kept rather than reconstructed: the
-   * candidate list is the bridge's answer about the live DOM, and a
-   * reconstruction would have to invent it.
-   */
-  const bridgeDraftsByPendingIdRef = useRef<Map<string, PendingMutation>>(new Map())
-
-  /**
-   * The NEWEST pending edit per draft id.
-   *
-   * An in-page typing session rebuilds the pending object on every keystroke
-   * round trip, and each one starts an async verify plus (on a no-loop answer)
-   * an awaited hand-off. While an older one is awaiting, a newer one can take
-   * over the same draft. The older completion must not release a draft the
-   * newer one is using, and object identity is the only thing that separates
-   * them: they share the draft id by construction.
-   */
-  const latestPendingByDraftRef = useRef<Map<string, PendingIterationEdit>>(new Map())
+  // Both of them are the session's now: `session.holdDraft` / `getDraft` /
+  // `releaseDraft` for the bridge's own `PendingMutation` per draft id, and
+  // `session.claimPending` / `latestPendingFor` for the newest pending edit
+  // per draft id.
+  //
+  // The first is kept rather than reconstructed because routing a draft to the
+  // iteration dialog takes it OUT of the deterministic dialog's rows before it
+  // is ever added, and when the iteration lane cannot land the edit the honest
+  // fallback is the question that path replaced. That dialog needs the real
+  // candidate list, which is the bridge's answer about the live DOM.
+  //
+  // The second exists because an in-page typing session rebuilds the pending
+  // object on every keystroke round trip, and a newer one can take over the
+  // same draft while an older one is still awaiting. Object identity is the
+  // only thing that separates them: they share the draft id by construction.
 
   // A prompt that arrived from the BRIDGE (in-page typing) means the bridge
   // is still holding a draft mutation keyed by `bridgePendingId`. Every exit
@@ -2459,20 +2546,20 @@ export function useEditorEditing({
   // it, or the orphaned draft blocks Save behind `handleSaveAll`'s gate.
   // Harmless for prompts that never came from the bridge:
   // `resolveDisambiguation` no-ops on an unknown id.
-  const releaseBridgeDraft = useCallback((pending: PendingIterationEdit | null) => {
-    if (!pending) return
-    const draftId = bridgeDraftIdOf(pending)
-    if (!draftId) return
-    adapterRef.current?.resolveMutationDisambiguation(draftId, "cancel")
-    bridgeDraftsByPendingIdRef.current.delete(draftId)
-    latestPendingByDraftRef.current.delete(draftId)
-    // A dialog still waiting to ask about this draft has nothing left to ask
-    // about: the bridge has been told to drop it, so answering the question
-    // would resolve an id the bridge no longer knows. The round-9 flush made
-    // the same check by looking the payload up again at park time; the queue
-    // holds the payload itself now, so the release is what has to say so.
-    modalQueueRef.current = dropModalRequestsForDraft(modalQueueRef.current, draftId)
-  }, [])
+  const releaseBridgeDraft = useCallback(
+    (pending: PendingIterationEdit | null) => {
+      if (!pending) return
+      const draftId = bridgeDraftIdOf(pending)
+      if (!draftId) return
+      // The bridge is told here, because the adapter is this hook's. The
+      // bookkeeping is the session's, and `releaseDraft` also drops any queued
+      // question about this draft: the bridge has been told to forget it, so
+      // answering that question would resolve an id it no longer knows.
+      adapterRef.current?.resolveMutationDisambiguation(draftId, "cancel")
+      session.releaseDraft(draftId)
+    },
+    [session],
+  )
 
   /**
    * Release this pending's bridge draft, unless something LIVE still needs it.
@@ -2486,105 +2573,39 @@ export function useEditorEditing({
   const releaseBridgeDraftUnlessShared = useCallback(
     (pending: PendingIterationEdit) => {
       const draftId = bridgeDraftIdOf(pending)
-      if (draftId && latestPendingByDraftRef.current.get(draftId) !== pending) return
-      setIterationScopePrompt((current) => {
-        if (!current || !sameBridgeDraft(current, pending)) releaseBridgeDraft(pending)
-        return current
-      })
+      if (draftId && session.latestPendingFor(draftId) !== pending) return
+      // Read, not a `setState` updater. The open prompt used to be read
+      // through one because that was the only always-current view of it, and
+      // the comment on that ref said outright that releasing a bridge draft
+      // from inside an updater is a side effect in a place React may run
+      // twice. The snapshot is current by construction, so the read is plain.
+      const open = session.getSnapshot().scopePrompt
+      if (!open || !sameBridgeDraft(open, pending)) releaseBridgeDraft(pending)
     },
-    [releaseBridgeDraft],
-  )
-
-  /**
-   * Show the deterministic disambiguation dialog for a bridge draft, and say
-   * why in the status bar when there is a why.
-   *
-   * The ONE write into `pendingDisambiguations` in the whole hook. Nothing
-   * calls it directly: the bridge's delivery route and every failure exit go
-   * through {@link requestModal}, which decides whether any dialog may open
-   * right now, and this runs from {@link openModal} once that decision says so.
-   *
-   * The dialog owns the draft from here: its confirm and its cancel both
-   * resolve it with the bridge, so nothing else may park or release it. Both
-   * maps are cleared for that reason.
-   *
-   * `reason` is absent for the bridge's ordinary route, which is not a park:
-   * nothing failed, so there is nothing to explain and the status bar is left
-   * as it was.
-   */
-  const openDisambiguationDialog = useCallback(
-    (held: PendingMutation, reason?: string) => {
-      bridgeDraftsByPendingIdRef.current.delete(held.pendingId)
-      latestPendingByDraftRef.current.delete(held.pendingId)
-      setPendingDisambiguations((prev) =>
-        prev.some((existing) => existing.pendingId === held.pendingId) ? prev : [...prev, held],
-      )
-      if (reason !== undefined) setSaveStatus(reason)
-    },
-    [],
-  )
-
-  /**
-   * Put one of the two dialogs on screen and record that it owns the modal.
-   *
-   * The only place either dialog's open state is written outside a keystroke
-   * replacing the question it is already asking. Both halves of the ownership
-   * (the state the dialog renders from, and the owner marker the next raise
-   * reads) are set together here, so they cannot come apart.
-   */
-  const openModal = useCallback(
-    (request: ModalRequest) => {
-      if (request.kind === "scope") {
-        modalOwnerRef.current = "scope"
-        // The ref before the state, and both here: a second completion in the
-        // same tick reads the ref, and React has not re-rendered yet.
-        iterationScopePromptRef.current = request.pending
-        setIterationScopePrompt(request.pending)
-        return
-      }
-      modalOwnerRef.current = "disambiguation"
-      openDisambiguationDialog(request.mutation, request.reason)
-    },
-    [openDisambiguationDialog],
+    [releaseBridgeDraft, session],
   )
 
   /**
    * Ask for a dialog. THE way either one is raised.
    *
-   * Returns true when it opened now, false when it is waiting behind the dialog
-   * already on screen. A false answer is not a failure: the request is held
-   * with its payload and opens when the current question is answered. The
+   * Returns true when it opened now, false when it is waiting behind the
+   * dialog already on screen. A false answer is not a failure: the request is
+   * held with its payload and opens when the current question is answered. The
    * caller's only job then is to say so in the status bar, because a queued
    * request has no dialog of its own to be seen in yet.
+   *
+   * A thin forward to the session, kept as a named callback because a dozen
+   * call sites and three dependency arrays name it. The decision itself, and
+   * the opening that follows a true answer, are `EditSession.requestModal`:
+   * putting a dialog on screen writes the owner, the queue and the state the
+   * dialog renders from together, so they cannot come apart. The park status
+   * line a disambiguation request carries is written by the session's
+   * `onModalOpened`, which is the hook's one status channel.
    */
   const requestModal = useCallback(
-    (request: ModalRequest): boolean => {
-      const decision = enqueueModal(modalQueueRef.current, request, modalOwnerRef.current)
-      if ("open" in decision) {
-        openModal(decision.open)
-        return true
-      }
-      modalQueueRef.current = decision.deferred
-      return false
-    },
-    [openModal],
+    (request: ModalRequest): boolean => session.requestModal(request),
+    [session],
   )
-
-  /**
-   * The open dialog has closed. Give the modal up and ask the next question.
-   *
-   * Every close calls this: the scope prompt's single close path, and the
-   * mutation dialog's confirm and cancel once the last row leaves it. A close
-   * that forgot it would strand every waiting request with no dialog anywhere
-   * that mentions them, which is what the round-9 flush existed to prevent for
-   * parks alone.
-   */
-  const releaseModal = useCallback(() => {
-    modalOwnerRef.current = null
-    const { next, queue } = dequeueModal(modalQueueRef.current)
-    modalQueueRef.current = queue
-    if (next) openModal(next)
-  }, [openModal])
 
   /**
    * The shell is refusing a draft the bridge is holding. Ask the deterministic
@@ -2629,12 +2650,12 @@ export function useEditorEditing({
     (pending: PendingIterationEdit, reason: string): boolean => {
       const draftId = bridgeDraftIdOf(pending)
       if (!draftId) return false
-      const held = bridgeDraftsByPendingIdRef.current.get(draftId)
+      const held = session.getDraft(draftId)
       if (!held) return false
       parkHeldOrDefer(held, reason)
       return true
     },
-    [parkHeldOrDefer],
+    [parkHeldOrDefer, session],
   )
 
   /**
@@ -2646,14 +2667,14 @@ export function useEditorEditing({
    * release strands an edit the bridge is still holding, with no dialog
    * anywhere that mentions it.
    *
-   * The ref is cleared HERE rather than at the next render, because React has
-   * not re-rendered at this point and the late completions read the ref.
+   * One call. `session.releaseModal` clears the scope prompt itself when a
+   * SCOPE dialog was the one that just closed, and a prompt is only ever
+   * non-null while the scope dialog owns the modal, so there is no second case
+   * for an explicit `setScopePrompt(null)` to cover.
    */
   const closeIterationPrompt = useCallback(() => {
-    iterationScopePromptRef.current = null
-    setIterationScopePrompt(null)
-    releaseModal()
-  }, [releaseModal])
+    session.releaseModal()
+  }, [session])
 
   /**
    * The terminal step for an iteration edit that will NOT be applied: park the
@@ -2694,289 +2715,52 @@ export function useEditorEditing({
   const releaseOrParkUnlessShared = useCallback(
     (pending: PendingIterationEdit, message: string): void => {
       const draftId = bridgeDraftIdOf(pending)
-      if (draftId && latestPendingByDraftRef.current.get(draftId) !== pending) return
-      const open = iterationScopePromptRef.current
+      if (draftId && session.latestPendingFor(draftId) !== pending) return
+      const open = session.getSnapshot().scopePrompt
       if (open && sameBridgeDraft(open, pending)) return
       releaseOrPark(pending, message)
     },
-    [releaseOrPark],
+    [releaseOrPark, session],
   )
 
   /**
-   * Drive a pending iteration edit through the chosen scope. Used by
-   * both the dialog confirm path AND the remembered-scope fast path
-   * (when the user already picked "this row"/"all rows" for this edit
-   * kind earlier in the session). On "all-rows" we run today's
-   * applicator; on "this-row" we POST to the LLM fallback and buffer
-   * the resulting full-file rewrite as an OverwriteEdit.
+   * Drive a pending iteration edit through the chosen scope. Used by both the
+   * dialog confirm path AND the remembered-scope fast path (when the user
+   * already picked "this row" or "all rows" for this edit kind earlier in the
+   * session).
    *
-   * Every await in the "this-row" lane is followed by the same generation
-   * check. The lane holds a bridge draft across a hand-off POST, a proposal
-   * POST and a file write, and a teardown anywhere in there ends the session
-   * the draft belonged to. See `isStaleGeneration`.
+   * The dispatch itself is `dispatchIteration` in
+   * `src/editor/edit-service/lanes/iteration-lane.ts`, which is a function of
+   * the session and takes no refs: every await in it goes through `ctx.step`,
+   * so an answer that arrives after the page changed is never read. What is
+   * left here is the wiring, and the adapter instance it captures.
    */
   const dispatchIterationEdit = useCallback(
     async (pending: PendingIterationEdit, scope: IterationScope) => {
-      // The session this dispatch belongs to, captured before the first await.
-      // The signal is captured with it, deliberately: read at request time it
-      // could be the NEXT session's live controller, and this lane's requests
-      // would then run on past the teardown they should have been cancelled by.
-      const generation = adapterGenerationRef.current
-      const adapterSignal = adapterAbortRef.current?.signal
-      const staleSession = (): boolean =>
-        isStaleGeneration(generation, adapterGenerationRef.current)
-      if (scope === "all-rows") {
-        // Today's behavior — route back to the legacy handler with the
-        // same arguments. Each variant has a tiny re-entry point.
-        if (pending.editKind === "delete") {
-          dispatchDeleteEdit(pending.node, "definition")
-        } else if (pending.editKind === "prop") {
-          // Codex P1 #4: the legacy prop handler reads
-          // `useEditorStore.getState().editorSelection`, which may
-          // have drifted between dialog-open and dialog-confirm.
-          // Buffer the prop edit directly against the captured
-          // selection here instead of re-entering handlePropEdit.
-          dispatchAllRowsPropEdit(pending.selection, pending.propName, pending.value)
-        } else if (pending.editKind === "move") {
-          legacyHandleLayerMoveRef.current?.(pending.payload)
-        } else if (pending.editKind === "dom-text") {
-          // The intercept short-circuited handleEditTextField before
-          // adapter.setElementText was called, so the bridge hasn't
-          // mutated yet. Re-enter the dom-text dispatch now that the
-          // user confirmed "all rows" — the bridge mutates one DOM
-          // element for preview and captureDirectMutationPinned emits
-          // MUTATION_CAPTURED. Save-time, applySlotTextEdit rewrites
-          // the template literal which Vue re-renders to every row.
-          const adapter = adapterRef.current
-          if (adapter) {
-            if (pending.bridgePendingId) {
-              // The bridge already captured this edit and is holding it. Let it
-              // through as the shared-template rewrite. Re-typing via
-              // setElementText here would emit a SECOND mutation for the same
-              // keystroke and leave the first pending forever.
-              adapter.resolveMutationDisambiguation(
-                pending.bridgePendingId,
-                "all-instances",
-              )
-              // Resolved, so nothing may park or re-release it later.
-              bridgeDraftsByPendingIdRef.current.delete(pending.bridgePendingId)
-              latestPendingByDraftRef.current.delete(pending.bridgePendingId)
-            } else {
-              const targetSelector =
-                pending.field.selector ?? pending.selection.selector
-              adapter.setElementText(
-                targetSelector,
-                pending.value,
-                pending.field.textNodeIndex,
-              )
-            }
-          }
-        }
-        return
-      }
-
-      // The designer picked the narrower scope, so the bridge's draft — which
-      // is the SHARED-template edit — must never reach the edit route. It is
-      // released once this lane has actually WRITTEN the row edit, and parked
-      // in the deterministic dialog if it cannot (see `parkOrDefer`).
-      //
-      // It used to be cancelled here, before the request ran. Cancelling does
-      // not restore the typed text: `releaseUnownedPreview` returns early when
-      // there are no `previewOps`, and the in-page contentEditable path
-      // (`inspector.setCaptureTextMutation`) supplies none, because the
-      // designer typed into the DOM directly. So a failed proposal or a failed
-      // write left neither a source edit nor anything to retry, with the page
-      // still showing text that reached no file.
-      const failThisRow = (message: string) => {
-        // Reached from four places, three of them after an await. A park takes
-        // the draft out of the maps and puts a row in the deterministic dialog,
-        // so doing it for an ended session strands the NEW session's draft
-        // behind a question about an edit that no longer exists.
-        if (staleSession()) return
-        // `parkedReason` rather than a literal: it is the same status three
-        // exits now show, and it ends the refusal with a full stop first
-        // because these reasons come from three places (our own literals, an
-        // applicator's refusal text, a server's 400 body) and not all of them
-        // end in punctuation.
-        const parked = parkOrDefer(pending, parkedReason(message))
-        if (!parked) setSaveStatus(message)
-      }
-
-      // "this-row" → deterministic iteration-data edit, LLM fallback behind it.
-      // Build the payload that the prompt builder expects (one shape per
-      // operation).
-      // The VERIFIED loop's position when there is one, not the click's. See
-      // `thisRowTemplateLocation`.
-      const templateLocation = thisRowTemplateLocation(pending)
-      if (!templateLocation) {
-        failThisRow("Iteration edit refused: no source location on the selection.")
-        return
-      }
-      // Where the CLICK landed, which is the loop root only when the element
-      // the designer touched is itself the loop element.
-      const fieldLocation = iterationTemplateLocation(pending)
-      // A `remove` or a `reorder` dispatched for an element NESTED inside the
-      // row is not the edit the designer asked for. The row lane speaks in
-      // whole data entries, so it would delete the entire item they clicked
-      // inside, or reorder the rows using a `destIndex` counted among that
-      // element's own siblings. `patch` and `patch-text` name a field and are
-      // unaffected; see `thisRowOperationAllowed`.
-      if (!thisRowOperationAllowed(pending)) {
-        const loopLocation = pending.loopLocation
-        // `thisRowOperationAllowed` fails closed, so it also returns false when
-        // a position is MISSING, and the row-scoped hand-off needs both to say
-        // which element inside which loop. In practice a verified pending
-        // always carries one (a `loop` verdict without a position is an error
-        // now), so this is the defensive arm: park the edit and say so rather
-        // than dispatch a row operation on half the information.
-        if (!loopLocation || !fieldLocation) {
-          failThisRow("Iteration edit refused: no source location on the selection.")
-          return
-        }
-        const handOff = escalateToChatRef.current
-        const prompt = buildRowScopedEditHandoffPrompt(
-          describeRowScopedEdit(pending, loopLocation, fieldLocation),
-        )
-        // Bounded for the reason the other hand-off is: a thrown or unanswered
-        // POST is a refusal, and the park below keeps the edit answerable. The
-        // signal handed to `run` is the deadline's: an unanswered submission is
-        // cancelled, not merely stopped being waited for. The session's own
-        // signal goes in alongside it, so a teardown cancels the submission
-        // too.
-        const outcome = await settleHandOff(
-          (signal) => (handOff ? handOff(prompt, { signal }) : Promise.resolve(false)),
-          adapterSignal ? { signal: adapterSignal } : {},
-        )
-        // The session ended while the POST was in flight: the teardown gave the
-        // draft back and the id names the next session's draft now, so neither
-        // the release below nor the park may run.
-        if (staleSession()) return
-        if (outcome === "accepted") {
-          // Chat owns the edit from here, so a held draft (in-page typing) goes.
-          releaseBridgeDraft(pending)
-          return
-        }
-        const failure = handOffFailureStatus(outcome)
-        if (!parkOrDefer(pending, failure.parked)) {
-          setSaveStatus(failure.released)
-        }
-        return
-      }
-      const pageSourceFile = useAppStore.getState().currentSourceFile
-      let payload
-      let description: string
-      if (pending.editKind === "delete") {
-        payload = { operation: "remove" as const }
-        description = `Remove row ${JSON.stringify(pending.iterationContext.key)} from the iteration data`
-      } else if (pending.editKind === "prop") {
-        payload = {
-          operation: "patch" as const,
-          updates: { [pending.propName]: serializePropValue(pending.value) },
-        }
-        description = `Patch row ${JSON.stringify(pending.iterationContext.key)}: set ${pending.propName}`
-      } else if (pending.editKind === "move") {
-        payload = {
-          operation: "reorder" as const,
-          toIndex: pending.payload.destIndex,
-        }
-        description = `Reorder row ${JSON.stringify(pending.iterationContext.key)} to index ${pending.payload.destIndex}`
-      } else if (pending.editKind === "dom-text") {
-        // The client deliberately does NOT name the property here. It knows the
-        // new string; it does not know which field of the row rendered it,
-        // because that answer lives in the source file. `patch-text` carries
-        // the value alone and the SERVER derives the key with the
-        // interpolation extractor (Vue or JSX, one shared refusal set).
-        //
-        // The predecessor to this line refused outright, on the correct
-        // reasoning that guessing a key would let the static endpoint write a
-        // literal `"Text (2)": "new"` into the data array. That reasoning
-        // stands; the fix was to stop guessing, not to keep refusing.
-        payload = { operation: "patch-text" as const, value: pending.value }
-        description = `Set the text of row ${JSON.stringify(pending.iterationContext.key)}`
-      } else {
-        return
-      }
-
-      setSaveStatus(null)
-      try {
-        const result = await requestIterationProposal({
-          editKind: pending.editKind,
-          templateLocation,
-          // The session's signal: a teardown cancels the proposal rather than
-          // leaving the server to compute a rewrite for a page that is gone.
-          ...(adapterSignal ? { signal: adapterSignal } : {}),
-          // The clicked element's OWN position, when the verify moved
-          // `templateLocation` up to the loop root. The data resolver needs
-          // the loop; the text-field extractor needs the field. Sending only
-          // one made a nested `<span>{item.email}</span>` patch `name`.
-          ...(fieldLocation && fieldLocation !== templateLocation
-            ? { fieldLocation }
-            : {}),
-          iterationContext: pending.iterationContext,
-          pageSourceFile,
-          payload,
-          description,
-        })
-        // The whole rest of this lane belongs to a session that has ended: the
-        // proposal was computed for source the page no longer shows, the draft
-        // went back to the bridge at teardown, and `adapterRef.current` below
-        // is a DIFFERENT adapter. Applying here writes the old overwrite into
-        // the new session.
-        if (staleSession()) return
-        if (!result.ok) {
-          failThisRow(`Iteration edit refused: ${result.reason}`)
-          return
-        }
-        const id = makeEditId()
-        const overwrite: StructuralEdit = {
-          kind: "overwrite",
-          id,
-          target: {
-            targetId: result.proposal.file,
-            selector: result.proposal.file,
-          },
-          file: result.proposal.file,
-          newSource: result.proposal.newSource,
-          baseHash: result.proposal.baseHash,
-        }
-        // Immediate dispatch: the proposal is a deterministic full-file
-        // rewrite; write it to the working tree so Vite HMR reflects it.
-        const adapter = adapterRef.current
-        if (!adapter) {
-          failThisRow("Editor adapter not ready. Try again in a moment.")
-          return
-        }
-        const applied = await adapter.applyEdit(
-          overwrite,
-          adapterSignal ? { signal: adapterSignal } : undefined,
-        )
-        // The write itself spans a teardown window. `releaseBridgeDraft` below
-        // reads `adapterRef.current`, which is the NEXT adapter by now, and
-        // this pending's draft id is the id that adapter just issued to the
-        // designer's current edit. Cancelling it would take their live preview
-        // away and blame this row's write for it.
-        if (staleSession()) return
-        if (applied.kind === "failed") {
-          failThisRow(
-            `Iteration edit failed for ${result.proposal.file}: ${applied.reason}`,
-          )
-          return
-        }
-        // WRITTEN. Only now is the bridge's shared-template draft safe to drop:
-        // the row edit is on disk and HMR will render it.
-        releaseBridgeDraft(pending)
-        setSaveStatus(
-          `Iteration applied to ${result.proposal.file}: ${
-            result.proposal.explanation ?? description
-          }`,
-        )
-      } catch (err) {
-        failThisRow(`Iteration edit threw: ${errorMessage(err)}`)
-      }
+      await dispatchIteration(pending, scope, {
+        session,
+        handOff: handOffToChat,
+        // Read ONCE, here, before the lane's first await: an adapter that
+        // replaces this one mid-flight belongs to another session, and the
+        // lane must not write through it.
+        adapter: adapterRef.current,
+        parkOrDefer,
+        releaseDraft: releaseBridgeDraft,
+        setStatus: setSaveStatus,
+        requestProposal: requestIterationProposal,
+        pageSourceFile: () => useAppStore.getState().currentSourceFile,
+        // The three "all rows" re-entries. Each one re-enters an existing
+        // handler with the values CAPTURED on the pending edit, never with
+        // whatever the live selection has drifted to.
+        applyAllRowsDelete: (row) => dispatchDeleteEdit(row.node, "definition"),
+        applyAllRowsProp: (row) =>
+          dispatchAllRowsPropEdit(row.selection, row.propName, row.value),
+        applyAllRowsMove: (row) => legacyHandleLayerMoveRef.current?.(row.payload),
+      })
     },
-    // legacyHandle*Ref are stable refs; dispatchDeleteEdit is stable. The deps
-    // are intentionally minimal so the function identity stays stable.
-    // (The directive below is what actually suppresses the warning — this
+    // legacyHandleLayerMoveRef is a stable ref; dispatchDeleteEdit is stable.
+    // The deps are intentionally minimal so the function identity stays stable.
+    // (The directive below is what actually suppresses the warning - this
     // comment claimed to "suppress" it for a long time while doing nothing.)
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatchDeleteEdit],
@@ -3018,13 +2802,65 @@ export function useEditorEditing({
   )
 
   const cancelIterationScope = useCallback(() => {
-    // The ref rather than the state updater: `closeIterationPrompt` clears the
-    // ref synchronously, so reading it first is the same value the updater saw,
-    // and releasing a bridge draft from inside a `setState` updater was always
-    // a side effect in a place React may run twice.
-    releaseBridgeDraft(iterationScopePromptRef.current)
+    // The snapshot rather than the rendered value: this runs from a dialog
+    // callback, and the release below has to be about the prompt that is on
+    // screen at this instant. `closeIterationPrompt` clears it on the next
+    // line, so the read has to come first.
+    releaseBridgeDraft(session.getSnapshot().scopePrompt)
     closeIterationPrompt()
-  }, [releaseBridgeDraft, closeIterationPrompt])
+  }, [releaseBridgeDraft, closeIterationPrompt, session])
+
+  /**
+   * Everything ending a session means OUTSIDE the session object: the bridge
+   * cancels, the per-entry side tables, and the one status line.
+   *
+   * The plan says what was discarded and how many; this does the parts of it
+   * that need the adapter and React.
+   */
+  const applySessionEnd = useCallback(
+    (
+      plan: SessionEndResult,
+      { cancelWithBridge }: { cancelWithBridge: boolean },
+    ) => {
+      for (const entry of plan.retiredPropEdits) {
+        // The per-entry side tables keyed by edit id. Left behind they leak,
+        // and `attrEditIdsRef` decides how a later revert re-issues the
+        // override, so a stale id there is a wrong answer, not just waste.
+        attrEditIdsRef.current.delete(entry.id)
+        pendingPropRenderSitesRef.current.delete(entry.id)
+        inFlightOverrideIdsRef.current.delete(entry.id)
+        staleRetriedRef.current.delete(
+          propEditKey(entry.target.selector, entry.propName),
+        )
+      }
+      for (const mutation of plan.retiredMutations) {
+        inFlightOverrideIdsRef.current.delete(mutation.id)
+      }
+      // The AI queue holds IDENTITIES, not entries, and an identity left behind
+      // makes the capture scheduler skip the next inline edit on that element
+      // and keeps the unload warning up over a queue that is empty in fact.
+      if (
+        plan.retiredMutations.length > 0 &&
+        pruneAiQueue(queuedForAiRef.current, plan.retiredMutations)
+      ) {
+        setAiQueueCount(queuedForAiRef.current.size)
+      }
+      if (cancelWithBridge) {
+        const adapter = adapterRef.current
+        for (const draftId of plan.cancelDraftIds) {
+          adapter?.resolveMutationDisambiguation(draftId, "cancel")
+        }
+      }
+      if (plan.status) setSaveStatus(plan.status)
+      // Remembered so a save stopping for the same page change does not replace
+      // it: that line names what the designer LOST, and the save's own line
+      // only says the save stopped, which they can already see. Written on
+      // EVERY end, null included, so a session end that said nothing cannot
+      // leave an older end's line looking like its own.
+      sessionEndStatusRef.current = plan.status
+    },
+    [],
+  )
 
   /**
    * END THE BRIDGE SESSION. The one place a session ends, for all three of the
@@ -3073,152 +2909,46 @@ export function useEditorEditing({
       reason: BridgeSessionEndReason
       cancelWithBridge: boolean
     }) => {
-      // FIRST, before anything is cleared: every continuation still awaiting
-      // belongs to the session that is ending, and the clearing below is what
-      // it would otherwise resume into.
-      adapterGenerationRef.current += 1
-      adapterAbortRef.current?.abort()
-      // Renewed rather than left aborted. `teardown` is followed by an attach
-      // that would replace it anyway, and the other two reasons keep the
-      // adapter, so the next edit needs a live controller. A continuation that
-      // captured the old signal keeps the old signal.
-      adapterAbortRef.current = new AbortController()
-      // THE BUFFERS. Cancelling a debounce timer stops the write from being
-      // attempted; it does nothing about the entry the timer was going to
-      // write. Those entries stay in the two buffers, and the buffers are read
-      // by things that run under the NEXT document: the next Save and the next
-      // Apply-with-AI take the whole `mutations` array, and a prop typed just
-      // before the boundary sits in `pendingPropEdits`, which has no
-      // save-time flush at all. Either way the departed page's source is what
-      // gets written, or the write fails stale-target trying.
+      // THE SESSION'S END, and the whole of it. The generation moves, every
+      // request it holds is aborted, its controller is renewed for the next
+      // edit, its own timers are cancelled, and the document is forgotten when
+      // the reason is a document change. That order matters: every
+      // continuation still awaiting belongs to the session that is ending, and
+      // the clearing is what it would otherwise resume into.
       //
-      // So the buffers are partitioned on the session each entry was captured
-      // in, and everything the departed document left behind is discarded here
-      // and COUNTED, which is the honest outcome: applying one page's buffered
-      // edit to a different page is the hazard, and a silent drop would leave
-      // the designer looking for an edit nothing will ever make.
-      //
-      // The generation was bumped a few lines up, so "the new one" is the
-      // session about to run, and every entry from the session that just ended
-      // is foreign to it.
-      //
-      // ONLY FOR A DOCUMENT CHANGE, which is `reload` and `reconnect`
-      // (`retiresBufferedEntries`). A `teardown` detaches the adapter and
-      // leaves the SAME page on screen with its previews still showing, so
-      // retiring there would throw the designer's buffered edits away on an
-      // `enabled: true → false → true` flip over a page that never went
-      // anywhere. `unmount` needs nothing: React drops the buffers with the
-      // hook. Everything else below is cleared for every reason, because it is
-      // bound to the adapter rather than to the document.
-      const liveGeneration = adapterGenerationRef.current
-      const noneRetired = { retired: [] as never[] }
-      const retireBuffers = retiresBufferedEntries(reason)
-      // THE DOCUMENT ITSELF, forgotten for exactly the reasons that retire the
-      // buffers. `reload` and `reconnect` mean the page is being replaced, so
-      // the next handshake is the first of a fresh session and ends nothing. A
-      // `teardown` keeps the id, because the page is still on screen and the
-      // buffered edits it kept belong to it: the re-attach's handshake compares
-      // against this id and re-arms them (`resumeBufferedDispatches`).
-      if (retireBuffers) sessionDocumentRef.current = null
-      const propPartition = retireBuffers
-        ? retireForeignEntries(pendingPropEditsRef.current, liveGeneration)
-        : { kept: pendingPropEditsRef.current, ...noneRetired }
-      const mutationPartition = retireBuffers
-        ? retireForeignEntries(mutationsRef.current, liveGeneration)
-        : { kept: mutationsRef.current, ...noneRetired }
-      const plan = sessionEndPlan({
-        openPrompt: iterationScopePromptRef.current,
-        queued: modalQueueRef.current,
-        rows: pendingDisambiguationsRef.current,
-        heldDraftIds: [...bridgeDraftsByPendingIdRef.current.keys()],
-        retiredBuffered: propPartition.retired.length + mutationPartition.retired.length,
-        reason,
-      })
-      if (propPartition.retired.length > 0) {
-        const retiredIds = new Set(propPartition.retired.map((e) => e.id))
-        for (const entry of propPartition.retired) {
-          // The per-entry side tables keyed by edit id. Left behind they leak,
-          // and `attrEditIdsRef` decides how a later revert re-issues the
-          // override, so a stale id there is a wrong answer, not just waste.
-          attrEditIdsRef.current.delete(entry.id)
-          pendingPropRenderSitesRef.current.delete(entry.id)
-          inFlightOverrideIdsRef.current.delete(entry.id)
-          staleRetriedRef.current.delete(
-            propEditKey(entry.target.selector, entry.propName),
-          )
-        }
-        // The mirror first, so a continuation that reads the buffer before
-        // React re-renders sees the retirement too. Then the state, as a
-        // filter rather than a replacement, so an update queued in this same
-        // tick is not thrown away with it.
-        pendingPropEditsRef.current = propPartition.kept
-        setPendingPropEdits((prev) => prev.filter((e) => !retiredIds.has(e.id)))
-      }
-      if (mutationPartition.retired.length > 0) {
-        const retiredIds = new Set(mutationPartition.retired.map((m) => m.id))
-        for (const mutation of mutationPartition.retired) {
-          inFlightOverrideIdsRef.current.delete(mutation.id)
-        }
-        // The AI queue holds IDENTITIES, not entries, and an identity left
-        // behind makes the capture scheduler skip the next inline edit on that
-        // element and keeps the unload warning up over a queue that is empty
-        // in fact.
-        if (pruneAiQueue(queuedForAiRef.current, mutationPartition.retired)) {
-          setAiQueueCount(queuedForAiRef.current.size)
-        }
-        mutationsRef.current = mutationPartition.kept
-        setMutations((prev) => prev.filter((m) => !retiredIds.has(m.id)))
-      }
-      iterationScopePromptRef.current = null
-      setIterationScopePrompt(null)
-      modalQueueRef.current = []
-      // The modal goes with the questions. Leaving the owner set would wedge
-      // every later question behind a dialog that is no longer on screen.
-      modalOwnerRef.current = null
-      if (pendingDisambiguationsRef.current.length > 0) setPendingDisambiguations([])
-      bridgeDraftsByPendingIdRef.current.clear()
-      latestPendingByDraftRef.current.clear()
-      // The lanes' in-flight markers are per identity and shared across
-      // sessions, so they die with the session that set them. Each lane's
-      // `finally` refuses to delete a marker once the generation has moved (it
-      // would be deleting the NEXT session's), which is only safe because this
-      // clears them. Both sets: the prop lane's, and the one the text and class
-      // lanes share.
-      branchPropInFlight.current.clear()
-      branchTextInFlight.current.clear()
-      // Every debounced write this session had armed, cancelled. A debounce
-      // callback is a plain `setTimeout` and knows nothing about sessions: left
-      // running, it fires after the new document has attached, reads the LIVE
-      // adapter and the live buffer, and writes the previous page's edit into
-      // the page in front of the designer now. The dispatches also capture the
-      // generation at SCHEDULE time and refuse a stale one, so this is the first
-      // of two locks on the same door: this one stops the write from being
-      // attempted, that one stops it from landing if a timer ever escapes.
-      //
-      // Both maps, and that is all of them: the prop lane has its own
-      // (`branchPropDispatchTimers`), and the text and class lanes share one
-      // (`branchTextDispatchTimers`, keyed by a mutation identity that carries
-      // the kind, so the two never collide).
-      for (const timer of branchPropDispatchTimers.current.values()) clearTimeout(timer)
-      branchPropDispatchTimers.current.clear()
-      for (const timer of branchTextDispatchTimers.current.values()) clearTimeout(timer)
-      branchTextDispatchTimers.current.clear()
-      if (cancelWithBridge) {
-        const adapter = adapterRef.current
-        for (const draftId of plan.cancelDraftIds) {
-          adapter?.resolveMutationDisambiguation(draftId, "cancel")
-        }
-      }
-      const endStatus = reason === "unmount" ? null : plan.status
-      if (endStatus) setSaveStatus(endStatus)
-      // Remembered so a save stopping for the same page change does not replace
-      // it: that line names what the designer LOST, and the save's own line only
-      // says the save stopped, which they can already see. Written on EVERY end,
-      // null included, so a session end that said nothing cannot leave an older
-      // end's line looking like its own.
-      sessionEndStatusRef.current = endStatus
+      // The plan it hands back is what the designer sees. THE BUFFERS are the
+      // half of it that is easy to miss. Cancelling a debounce timer stops the
+      // write from being attempted; it does nothing about the entry the timer
+      // was going to write, and the buffers are read by things that run under
+      // the NEXT document. So the session partitions them on the generation
+      // each entry was captured in, discards everything the departed document
+      // left behind, and COUNTS it: applying one page's buffered edit to a
+      // different page is the hazard, and a silent drop would leave the
+      // designer looking for an edit nothing will ever make. That partition is
+      // only for a DOCUMENT CHANGE (`retiresBufferedEntries`); a `teardown`
+      // leaves the same page on screen with its previews showing, and
+      // `unmount` needs nothing because React drops the hook.
+      const plan = session.end(reason)
+      // Both lanes' markers and both lanes' armed writes went with
+      // `session.end` above. The markers are per identity and shared across
+      // sessions, so they die with the session that set them: each lane's
+      // `finally` refuses to give a marker up once the generation has moved (it
+      // would be giving up the NEXT session's), which is only safe because the
+      // end clears them. The timers matter for the same reason from the other
+      // side: a debounce callback is a plain `setTimeout` that knows nothing
+      // about sessions, so left running it fires after the new document has
+      // attached and writes the previous page's edit into the page in front of
+      // the designer now. Cancelling is the first of two locks on that door;
+      // the dispatches capturing the generation at SCHEDULE time is the second.
+      applySessionEnd(
+        // `unmount` is the one reason that says nothing: there is no status
+        // bar left on an unmounting hook to say it in. The count is the
+        // session's either way; this decides only whether it is spoken.
+        reason === "unmount" ? { ...plan, status: null } : plan,
+        { cancelWithBridge },
+      )
     },
-    [],
+    [applySessionEnd, session],
   )
   // Assigned during render, like the other always-latest mirrors in this hook,
   // so the adapter effect's cleanup and its `load` handler always call the
@@ -3231,245 +2961,37 @@ export function useEditorEditing({
    * (the caller must not run the legacy path); the decision lands
    * asynchronously.
    *
-   * The verify step exists because the bridge's classification comes from
-   * DOM stamps, and N usages of one component look exactly like N loop rows.
-   * The 2026-09-08 incident: four hand-written cards, "all items" chosen,
-   * the component's root deleted by an AI rewrite of the wrong function.
-   * When source has no loop at the position, the question "this item or all
-   * items" has no right answer, so the edit goes to chat with the evidence
-   * and the agent asks a better one.
+   * The funnel itself is `interceptIteration` in
+   * `src/editor/edit-service/lanes/iteration-lane.ts`. It runs inside
+   * `session.run`, so the `gone()` closure this callback used to build out of
+   * three refs is the run context now, and the verify and the hand-off both
+   * race the session's own signal.
    */
   const interceptIterationEdit = useCallback(
     (pending: PendingIterationEdit): boolean => {
-      const location = iterationTemplateLocation(pending)
-      if (!location) {
-        releaseBridgeDraft(pending)
-        setSaveStatus("This edit has no source location, so it cannot be applied.")
-        return true
-      }
-      // Claim the latest slot FOR THIS TARGET. Responses are not ordered, so
-      // this is what tells a late answer that newer keystrokes on the same
-      // element have replaced it. Scoped by key so an edit somewhere else on
-      // the page cannot make this one stale.
-      const verifyKey = verifyKeyFor(pending)
-      const seq = (verifySeqByKeyRef.current.get(verifyKey) ?? 0) + 1
-      verifySeqByKeyRef.current.set(verifyKey, seq)
-      const latestSeqForKey = (): number =>
-        verifySeqByKeyRef.current.get(verifyKey) ?? seq
-      // Claim the DRAFT too. A newer intercept for the same in-page typing
-      // session shares the draft id and differs only by object identity, so
-      // this is what lets an older completion tell that the draft it is about
-      // to release is no longer its own to release.
-      const claimedDraftId = bridgeDraftIdOf(pending)
-      if (claimedDraftId) latestPendingByDraftRef.current.set(claimedDraftId, pending)
-      // Claim the SESSION. Every continuation below is guarded on it, and the
-      // requests race against its signal.
-      const generation = adapterGenerationRef.current
-      const adapterSignal = adapterAbortRef.current?.signal
-      // The window between "this verify started" and "this verify answered"
-      // is one in which the surface can go away. All three facts are read at
-      // resolve time, not captured now.
-      const gone = (): boolean =>
-        isStaleGeneration(generation, adapterGenerationRef.current) ||
-        disposedRef.current ||
-        adapterSignal?.aborted === true
-      void verifyIterationLoop({
-        file: location.file,
-        line: location.line,
-        column: location.column,
-        ...(adapterSignal ? { signal: adapterSignal } : {}),
-      }).then(
-        async (outcome) => {
-          if (gone()) {
-            // NOTHING. Not even a release: the teardown that ended this session
-            // handed every held draft back already, and the next adapter starts
-            // its draft ids at `dom-pending-1` again, so cancelling "this"
-            // draft id now would cancel the new session's first edit. No status
-            // either, since the panel that would show it is gone too.
-            return
-          }
-          if (isStaleVerify(seq, latestSeqForKey())) {
-            // Release THIS draft only, and only when nothing live is still
-            // using it: neither a newer intercept nor the prompt currently
-            // open. A stale result and the survivor can describe one in-page
-            // typing session, because the pending object is rebuilt on every
-            // keystroke round trip, so they are different objects sharing a
-            // `bridgePendingId`. Cancelling here cancels theirs.
-            releaseBridgeDraftUnlessShared(pending)
-            setSaveStatus("A newer edit replaced this one.")
-            return
-          }
-          const action = decideAfterVerify({
-            outcome,
-            pending,
-            location,
-            remembered: iterationScopeMemoryRef.current[pending.editKind],
-          })
-          if (action.kind === "release-and-status") {
-            // Park, do not cancel. The loop check failing says nothing about
-            // what the designer typed, and cancelling a dom-text draft loses
-            // it with no record anywhere. See `releaseOrPark`.
-            releaseOrPark(pending, action.message)
-            return
-          }
-          if (action.kind === "hand-off") {
-            const handOff = escalateToChatRef.current
-            // AWAIT the hand-off before letting the draft go. The transport
-            // can refuse after the client-side guard accepted (an HTTP error,
-            // a dropped fetch), and releasing first meant the bridge had
-            // already dropped the live preview by the time we learned nothing
-            // was sent.
-            //
-            // BOUNDED, because the draft is held for the whole await: the page
-            // is showing a change that has reached no file and the designer
-            // cannot resolve it meanwhile. A late answer after the timeout
-            // resolves into a promise nobody holds, so it cannot release a
-            // draft this branch has already parked. The deadline also ABORTS
-            // the submission, so a turn accepted after the park cannot edit
-            // the same element behind the deterministic dialog.
-            //
-            // The session's own signal goes in as well, so a teardown cancels
-            // the submission rather than leaving a turn to be accepted for a
-            // page that is gone. See `settleHandOff`.
-            const outcome = await settleHandOff(
-              (signal) =>
-                handOff ? handOff(action.prompt, { signal }) : Promise.resolve(false),
-              adapterSignal ? { signal: adapterSignal } : {},
-            )
-            // The session ending outranks everything: no release, for the
-            // reason the verify's own arm gives.
-            if (gone()) return
-            // Staleness next, and it decides the release. While this POST was
-            // in flight a newer intercept can have taken over the same draft
-            // (the user kept typing); releasing here would cancel THEIR draft,
-            // and the newer one is the one the user can still see.
-            if (isStaleVerify(seq, latestSeqForKey())) {
-              releaseBridgeDraftUnlessShared(pending)
-              return
-            }
-            if (outcome === "accepted") {
-              // Chat owns the edit from here, so the shared-template draft goes.
-              releaseBridgeDraft(pending)
-              return
-            }
-            // Refused or unanswered, and NOTHING was sent. Cancelling the draft
-            // here would throw away what the designer typed with no record of
-            // it in any file and no way to retry, so park it in the
-            // deterministic dialog instead: "this instance" or "all instances"
-            // is a worse question than the agent would have asked, but it is
-            // answerable.
-            const failure = handOffFailureStatus(outcome)
-            const parked = parkOrDefer(pending, failure.parked)
-            if (!parked) {
-              releaseBridgeDraft(pending)
-              setSaveStatus(failure.released)
-            }
-            return
-          }
-          // Carry the verified loop's position onto the pending edit. Both
-          // remaining exits dispatch or open a dialog that dispatches, and
-          // "this item" aims at the loop element, which is not necessarily
-          // the element that was clicked. Unconditional: both remaining
-          // actions carry a position, because a `loop` verdict requires one.
-          const verified: PendingIterationEdit = {
-            ...pending,
-            loopLocation: action.loopLocation,
-          }
-          if (action.kind === "remembered") {
-            logIterationScopeChoice({
-              editKind: pending.editKind,
-              scope: action.scope,
-              iterationContext: pending.iterationContext,
-              remembered: true,
-            })
-            void dispatchIterationEdit(verified, action.scope)
-            return
-          }
-          // An open prompt is never REPLACED. Two verifies can be in flight at
-          // once (verify is an HTTP round trip) and the sequence that decides
-          // staleness is per target, so two edits on two different elements
-          // both arrive here legitimately. Overwriting cancelled the first
-          // one's bridge draft, or made a delete or a move disappear with
-          // nothing said. See `promptCollision`.
-          //
-          // The ref is written here as well as at render time: two completions
-          // can land in the same tick, before React re-renders, and the second
-          // has to see the first one's prompt.
-          const collision = promptCollision(iterationScopePromptRef.current, verified)
-          if (collision === "open-incoming") {
-            if (modalOwnerRef.current === "scope") {
-              // The scope dialog is open AND `promptCollision` said to open the
-              // incoming one, so by construction it is the same in-page typing
-              // session with newer text. Replace the question in place: it is
-              // the same question, and going through `requestModal` would queue
-              // an edit behind its own dialog.
-              iterationScopePromptRef.current = verified
-              setIterationScopePrompt(verified)
-              return
-            }
-            // Nothing open, or the MUTATION dialog is. That second case is the
-            // round-10 defect: this arm used to open the scope prompt on top of
-            // it, because it only ever asked about another scope prompt.
-            if (!requestModal({ kind: "scope", pending: verified })) {
-              setSaveStatus(DEFERRED_PARK_STATUS)
-            }
-            return
-          }
-          if (collision === "keep-open-park-incoming") {
-            // Typed in the page: the text survives in the mutation
-            // disambiguation dialog, which asks a blunter question than this
-            // one but is answerable and holds the same draft.
-            //
-            // DEFERRED, not asked now. Opening the mutation dialog fills
-            // `pendingDisambiguations`, and it would land on top of the scope
-            // dialog the designer is being asked to answer. This arm is only
-            // ever reached with that prompt open, so `parkOrDefer` always
-            // queues here; `releaseModal` opens it when the prompt closes. It
-            // goes through the choke point rather than queueing directly so
-            // this arm and the failure exits cannot drift apart.
-            if (
-              !parkOrDefer(
-                verified,
-                parkedReason("Another edit is waiting for a scope choice"),
-              )
-            ) {
-              // `promptCollision` only returns this arm for an edit with a
-              // draft id, but the bridge's payload for it can have gone
-              // (released by a stale completion) between then and here. Then
-              // there is nothing to hold, which is the same situation the
-              // drop-incoming arm below reports.
-              setSaveStatus(PROMPT_BUSY_STATUS)
-            }
-            return
-          }
-          setSaveStatus(PROMPT_BUSY_STATUS)
-        },
-      ).catch((err) => {
-        // A throw inside the `.then` body above (not an `outcome.kind ===
-        // "error"` result, an actual exception) must still release the
-        // draft and surface a status, or it leaves the bridge blocked with
-        // nothing shown. `UnlessShared`, because this is a late completion
-        // like any other: a newer intercept may already own the draft.
-        //
-        // The hand-off's own failures never arrive here; that branch catches
-        // them itself, so this message is only ever about the loop check.
-        if (gone()) {
-          // Nothing to park it in, no status to show, and no draft of ours left
-          // to release: the teardown released it, and the id belongs to the
-          // next session now. See the verify's own arm.
-          return
-        }
-        releaseOrParkUnlessShared(
-          pending,
-          `Could not check the source for a loop: ${errorMessage(err)}`,
-        )
+      // Not awaited: the caller needs its answer now, and the lane reports
+      // everything it decides through the callbacks below.
+      void interceptIteration(pending, {
+        session,
+        verify: verifyIterationLoop,
+        handOff: handOffToChat,
+        rememberedScope: (kind) => iterationScopeMemoryRef.current[kind],
+        releaseDraft: releaseBridgeDraft,
+        releaseDraftUnlessShared: releaseBridgeDraftUnlessShared,
+        parkOrDefer,
+        releaseOrPark,
+        releaseOrParkUnlessShared,
+        dispatch: dispatchIterationEdit,
+        setStatus: setSaveStatus,
+        logScopeChoice: logIterationScopeChoice,
       })
       return true
     },
     [
+      session,
       dispatchIterationEdit,
+      handOffToChat,
       parkOrDefer,
-      requestModal,
       releaseBridgeDraft,
       releaseBridgeDraftUnlessShared,
       releaseOrPark,
@@ -3512,27 +3034,25 @@ export function useEditorEditing({
   // The bridge stays in inspector mode in compose; shell-initiated text /
   // class edits route through `captureDirectMutation` and surface here.
   // No DOM-edit-mode toggle — editor mode itself implies editability.
-  const [mutations, setMutations] = useState<Mutation[]>([])
-  const [pendingDisambiguations, setPendingDisambiguations] = useState<
-    PendingMutation[]
-  >([])
+  // The captured mutations are `sessionState.mutations`, read as `mutations`
+  // above. The disambiguation dialog's rows are `sessionState.rows`.
   /**
    * The oldest unresolved v-for disambiguation, surfaced by
    * `MutationDisambiguationDialog`. Fix for "stuck disambiguation blocks
-   * Save forever": before this, anything landing in
-   * `pendingDisambiguations` (multiple origin candidates, or
-   * `scope === "definition"` per the honesty-rule comment in
-   * `onMutationAwaitingDisambiguation` below) had no UI to resolve it, so
-   * `handleSaveAll`'s gate refused Save indefinitely. Resolving the head
-   * entry surfaces the next one automatically (queue semantics fall out of
-   * deriving from the array head rather than tracking a separate index).
+   * Save forever": before this, anything landing in the dialog's rows
+   * (multiple origin candidates, or `scope === "definition"` per the
+   * honesty-rule comment in `onMutationAwaitingDisambiguation` below) had no
+   * UI to resolve it, so `handleSaveAll`'s gate refused Save indefinitely.
+   * Resolving the head entry surfaces the next one automatically (queue
+   * semantics fall out of deriving from the array head rather than tracking a
+   * separate index).
    */
-  const disambiguationPrompt = pendingDisambiguations[0] ?? null
+  const disambiguationPrompt = sessionState.rows[0] ?? null
   /**
    * Designer picked a scope for `disambiguationPrompt`. Forwards to the
    * adapter (which promotes the pending item to a `Mutation` and emits
    * `onMutationCaptured`) then drops it from the queue — nothing else
-   * removes a resolved entry from `pendingDisambiguations`.
+   * removes a resolved entry from the dialog's rows.
    *
    * WHERE THE PREVIEW OVERRIDE IS RELEASED on this path (Phase 3 live finding
    * 2): the promoted mutation carries the draft's own id, and the bridge now
@@ -3550,7 +3070,10 @@ export function useEditorEditing({
    */
   const confirmDisambiguation = useCallback(
     (choice: DisambiguationChoice) => {
-      const prompt = pendingDisambiguations[0]
+      // The HEAD ROW off the snapshot, which is what the dialog is asking
+      // about at this instant. Read here rather than closed over, so this
+      // callback does not have to be rebuilt every time a row lands.
+      const prompt = session.getSnapshot().rows[0]
       if (!prompt) return
       // KEEP the row when there is no adapter. Answering this dialog is a
       // message to the bridge, and an optional-chained call on a disposed
@@ -3564,20 +3087,20 @@ export function useEditorEditing({
         return
       }
       adapter.resolveMutationDisambiguation(prompt.pendingId, choice)
-      const remaining = pendingDisambiguations.filter(
-        (p) => p.pendingId !== prompt.pendingId,
+      session.updateRows((prev) =>
+        prev.filter((p) => p.pendingId !== prompt.pendingId),
       )
-      setPendingDisambiguations(remaining)
       // A close, so the modal goes back to whatever is waiting. Only once the
       // last row leaves: the dialog is still on screen while another row is
       // behind this one, and it stays the owner until it isn't.
-      if (remaining.length === 0) releaseModal()
+      if (session.getSnapshot().rows.length === 0) session.releaseModal()
     },
-    [pendingDisambiguations, releaseModal],
+    [session],
   )
   /** Designer discarded `disambiguationPrompt` — no edit is written. */
   const cancelDisambiguation = useCallback(() => {
-    const prompt = pendingDisambiguations[0]
+    // Same head-row read as the confirm above, and for the same reason.
+    const prompt = session.getSnapshot().rows[0]
     if (!prompt) return
     // Same refusal as the confirm above, and for the same reason: a discard is
     // a message to the bridge too. Nothing is settled here either, because the
@@ -3595,26 +3118,13 @@ export function useEditorEditing({
     // stays the shim's: the live run left the swatch on the discarded
     // `bg-amber-500` while the badge had reverted to `rgb(249,250,251)`.
     useEditorStore.getState().notePreviewSettled()
-    const remaining = pendingDisambiguations.filter(
-      (p) => p.pendingId !== prompt.pendingId,
+    session.updateRows((prev) =>
+      prev.filter((p) => p.pendingId !== prompt.pendingId),
     )
-    setPendingDisambiguations(remaining)
     // Same close rule as the confirm above.
-    if (remaining.length === 0) releaseModal()
-  }, [pendingDisambiguations, releaseModal])
-  // Ref mirror of `pendingDisambiguations`, kept in sync on every render
-  // (assignment, not an effect — always current by the time any event handler
-  // reads it). Lets the `beforeunload` guard below register its listener once
-  // at mount and read live state at fire-time instead of re-registering on
-  // every state change, and lets the adapter teardown see the rows on screen
-  // without depending on the state and re-running.
-  //
-  // The ROWS, not just their count: teardown has to hand each row's draft back
-  // to the bridge, and a count cannot say which.
-  const pendingDisambiguationsRef = useRef<readonly PendingMutation[]>([])
-  pendingDisambiguationsRef.current = pendingDisambiguations
+    if (session.getSnapshot().rows.length === 0) session.releaseModal()
+  }, [session])
   const [saving, setSaving] = useState(false)
-  const [saveStatus, setSaveStatus] = useState<string | null>(null)
   /**
    * Why the last STARTED save ended badly, or null if it did not.
    *
@@ -3681,22 +3191,23 @@ export function useEditorEditing({
   // would silently discard: mutations queued for the AI lane
   // (`queuedForAiRef` — only flushed by `handleSaveAll`'s LLM dispatch, not
   // by any autosave), unresolved v-for disambiguations
-  // (`pendingDisambiguations` — the designer hasn't picked a target yet, so
-  // nothing has been written), and dialogs waiting behind the open one
-  // (`modalQueueRef` — the bridge is holding those drafts and no dialog
-  // mentions them yet, which makes them the easiest of the three to lose).
+  // (the disambiguation dialog's rows, where the designer has not picked a
+  // target yet so nothing has been written), and dialogs waiting behind the
+  // open one (`session.queuedCount`, where the bridge is holding the drafts
+  // and no dialog mentions them yet, which makes them the easiest of the
+  // three to lose).
   // The rule itself is `hasUndispatchedWork`, a pure function, so it can be
-  // read and tested without a listener. Registers once at mount and reads the
-  // refs at fire-time rather than re-registering per state change — simpler
-  // and race-free since all three are updated synchronously during render or
-  // by the code that changes them, before any unload can occur.
+  // read and tested without a listener. Registers once at mount and reads all
+  // three at fire-time rather than re-registering per state change: the
+  // session's snapshot is current by construction, so there is nothing to
+  // re-subscribe to.
   useEffect(() => {
     if (typeof window === "undefined") return
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       const undispatched = hasUndispatchedWork({
         aiQueue: queuedForAiRef.current.size,
-        parked: pendingDisambiguationsRef.current.length,
-        deferred: modalQueueRef.current.length,
+        parked: session.getSnapshot().rows.length,
+        deferred: session.queuedCount,
       })
       if (!undispatched) return
       event.preventDefault()
@@ -3704,32 +3215,7 @@ export function useEditorEditing({
     }
     window.addEventListener("beforeunload", handleBeforeUnload)
     return () => window.removeEventListener("beforeunload", handleBeforeUnload)
-  }, [])
-
-  // Always-latest mirror of `mutations` so the branch-mode debounced
-  // dispatch (below) reads the freshest captured state from inside a
-  // setTimeout callback.
-  const mutationsRef = useRef<Mutation[]>([])
-  mutationsRef.current = mutations
-
-  // Per-mutation-identity debounce timers for branch-mode dom-text
-  // immediate-dispatch. Every keystroke in the inspector TEXT input
-  // fires a fresh MUTATION_CAPTURED for the same identity (the buffer
-  // dedup logic above merges them, keeping the original `before` and
-  // the latest `after`). We restart the 500ms timer on each capture so
-  // dispatch only runs after the designer stops typing — no per-
-  // keystroke LLM-lane spam, and the Commit (N) badge enables on its
-  // own as soon as the write lands (uncommitted) on the working tree.
-  const branchTextDispatchTimers = useRef<
-    Map<string, ReturnType<typeof setTimeout>>
-  >(new Map())
-  // Identities with an in-flight dispatch. Used to serialize per-
-  // identity so two same-identity dispatches can't race and complete
-  // out of order. Codex P0 fix (2026-05-26): without this, fast typing
-  // during a 5-95s LLM-lane round-trip could trigger a second dispatch
-  // that completes out of order, with the older request's stale `after`
-  // overwriting the user's newer value.
-  const branchTextInFlight = useRef<Set<string>>(new Set())
+  }, [session])
 
   /**
    * WS1 follow-through (codex round-8): after OUR OWN successful write to
@@ -3759,10 +3245,7 @@ export function useEditorEditing({
         const adapter = adapterRef.current
         const current = useEditorStore.getState().editorSelection
         if (!adapter || !current || current.selector !== selector) return
-        if (
-          branchPropInFlight.current.size > 0 ||
-          branchTextInFlight.current.size > 0
-        ) {
+        if (session.hasInFlight("prop") || session.hasInFlight("text")) {
           if (i + 1 < delays.length) attempt(i + 1)
           return
         }
@@ -3780,611 +3263,62 @@ export function useEditorEditing({
       void timer
     }
     attempt(0)
-  }, [])
+  }, [session])
   const BRANCH_TEXT_DISPATCH_DEBOUNCE_MS = 500
   // Prop edits debounce on the same cadence (a slider/number drag fires many
   // intermediate values; we auto-commit only after the designer settles).
   const BRANCH_PROP_DISPATCH_DEBOUNCE_MS = 500
 
   /**
-   * Branch-mode immediate-dispatch for dom-text inspector edits.
-   *
-   * Every direct DOM mutation (`text`, `class`, etc.) lands in the
-   * `mutations` buffer for display, but this schedules the actual write:
-   * we build a single-mutation llm-patch (same shape `handleSaveAll`
-   * ships) and call `adapter.applyEdit`; the server's deterministic-first
-   * pipeline handles `applySlotTextEdit` → `inferAttrFromTextEdit` → LLM
-   * lane, exactly as on a full Save. The write lands directly in the
-   * user's working tree as an uncommitted change — same immediate-dispatch
-   * pattern as structural moves and chat-driven prop edits — so the
-   * top-bar Commit affordance (an ordinary `git add -A && git commit`)
-   * picks it up without the designer needing to trigger anything else.
-   *
-   * `scheduledGeneration` is the bridge session the caller decided to write in.
-   * For a debounced call that is the session that was live when the designer
-   * stopped typing, half a second earlier; it defaults to the session that is
-   * live now for callers with no wait to span. Every guard in here reads it,
-   * not the session of the moment.
-   */
-  const dispatchBranchTextMutation = useCallback(
-    async (identityKey: string, scheduledGeneration?: number) => {
-      const generation = scheduledGeneration ?? adapterGenerationRef.current
-      // The page this write was for is gone. Write nothing: the mutation stays
-      // in the buffer, and the next keystroke re-arms the debounce under the
-      // session that is on screen.
-      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-      // This session's lifetime, as a signal, captured WITH the generation.
-      // Read at request time it could be the next session's live controller,
-      // and the write would then run on past the reload that should have
-      // cancelled it. See `ApplyEditOpts.signal`.
-      const sessionSignal = adapterAbortRef.current?.signal
-      const adapter = adapterRef.current
-      if (!adapter) return
-      // Per-identity serialization. A second dispatch for the same
-      // identity while one is in flight would create out-of-order
-      // completion risk (older response overwriting newer value). The
-      // in-flight one will re-check the buffer when it returns and
-      // re-fire if intervening keystrokes left work behind, so we just
-      // short-circuit here.
-      if (branchTextInFlight.current.has(identityKey)) return
-      // Latest captured state for this identity — `after` may have
-      // advanced since the timer was scheduled.
-      const current = mutationsRef.current.find(
-        (m) => mutationIdentity(m) === identityKey,
-      )
-      if (!current) return
-      // Snapshot the `after` we're about to dispatch. After the round-
-      // trip we compare against the buffer's current `after` to detect
-      // whether the user typed more during the in-flight call.
-      const dispatchedAfter = current.after
-      // Match handleSaveAll's Phase-E1 normalization: callsite-scope
-      // mutations the designer didn't explicitly toggle default to
-      // "this-instance" so the prompt has a clean routing rule
-      // instead of an undefined disambiguationChoice falling through.
-      const normalized: Mutation =
-        current.disambiguationChoice === undefined &&
-        current.scope === "callsite" &&
-        current.callsiteLoc !== null &&
-        current.kind !== "class"
-          ? { ...current, disambiguationChoice: "this-instance" }
-          : current
-      const baseHashes = { ...fileHashesRef.current }
-      const selection = useEditorStore.getState().editorSelection
-      const edit = {
-        kind: "llm-patch" as const,
-        id: makeEditId(),
-        target: selection ?? {
-          targetId: "llm-patch-bundle",
-          selector: "llm-patch-bundle",
-          ancestry: [],
-        },
-        mutations: [normalized],
-        // Typing-time: probe the deterministic lane only. A fuzzy edit
-        // comes back `needsChat` and gets QUEUED (below) rather than
-        // running the LLM mid-edit — the queue is applied at commit.
-        llmFallback: "chat" as const,
-        ...(Object.keys(baseHashes).length > 0 ? { baseHashes } : {}),
-      }
-      branchTextInFlight.current.add(identityKey)
-      inFlightOverrideIdsRef.current.add(normalized.id)
-      try {
-        const result = await adapter.applyEdit(
-          edit,
-          sessionSignal ? { signal: sessionSignal } : undefined,
-        )
-        // Disk truth, not session state: the files are what they are whoever
-        // is looking at them, so this is recorded before the session check
-        // below. Skipping it would leave the external-edit guard comparing
-        // against a hash this very write invalidated.
-        if (result.kind === "applied" && result.newHashes) {
-          fileHashesRef.current = {
-            ...fileHashesRef.current,
-            ...result.newHashes,
-          }
-        }
-        // The page this answer is about is gone. Do NOTHING with it. The
-        // override id, the verification and the status all name a document
-        // that has been replaced, and the bridge restarts its mutation ids on
-        // the new one, so resolving "this" override would retire an override
-        // the designer can still see. The `finally` below leaves the marker
-        // alone for the same reason; `endBridgeSession` has already cleared it.
-        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-        if (result.kind === "failed") {
-          // `'chat'` mode: the deterministic lane couldn't apply this edit.
-          // Don't interrupt the user mid-type — QUEUE it. Keep the mutation
-          // in the buffer, record its identity so the capture scheduler
-          // stops re-dispatching on every keystroke (the buffer's `after`
-          // still updates as they type), and let it apply at commit via
-          // `handleSaveAll`'s `llmFallback: 'patch'` dispatch.
-          if (result.needsChat) {
-            queuedForAiRef.current.add(identityKey)
-            setAiQueueCount(queuedForAiRef.current.size)
-            return
-          }
-          // Leave the mutation in the buffer so the user can still
-          // retry via Commit's `beforeCommit → handleSaveAll` flush
-          // (or via the future "Retry with AI" affordance). Same
-          // degradation contract as a failed structural edit anywhere
-          // else in branch mode.
-          setSaveStatus(`Inline text edit failed: ${result.reason}`)
-          // WS3: the write never landed — revert the optimistic preview.
-          // (needsChat above deliberately does NOT resolve: the edit is
-          // queued for the AI lane and the preview legitimately stays.)
-          resolveOverrideSettled(adapter, normalized.id, "failed", result.reason)
-          return
-        }
-        // Tier-2 verification: the source write landed in the worktree and HMR
-        // will re-render. Confirm the edited text actually shows up in the live
-        // DOM (catches values overridden by a binding, gated by v-if, etc.).
-        // Best-effort and fire-and-forget — never blocks the edit flow.
-        verifyEditRef.current(
-          {
-            editId: edit.id,
-            selector: current.selector,
-            expectedValue: dispatchedAfter,
-            editKind: "dom-text",
-            // Join key for the Activity-row badge, when set. Branch mode
-            // never auto-commits, so no adapter sets this today — see the
-            // `commitSha` doc on `EditResult` in core/framework-adapter.ts.
-            commitSha:
-              result.kind === "applied" ? result.commitSha : undefined,
-            // Verification settles 0.85-3s later; by then a newer keystroke
-            // has typically re-dispatched (or is in flight) and this
-            // snapshot's `dispatchedAfter` is stale. Read the LIVE buffer
-            // lazily at verification-complete time rather than snapshotting
-            // now — a "fail" against a value nobody's typing anymore isn't
-            // worth a toast (the outcome/store bookkeeping still records it).
-            isSuperseded: () => {
-              const m = mutationsRef.current.find(
-                (m) => mutationIdentity(m) === identityKey,
-              )
-              return !!m && !Object.is(m.after, dispatchedAfter)
-            },
-          },
-          // WS3 release gate: 'verified' → the post-HMR DOM renders the value
-          // from source, release the override. 'didnt-take' → the write
-          // landed but rendering doesn't show it (bound/shadowed) — release
-          // WITHOUT reverting ('ineffective'; post-HMR DOM is the truth, the
-          // verification hook's own warning toast explains). 'skipped'
-          // (older bridge, no read support) → the write landed; release
-          // rather than leave the override fighting HMR.
-          (outcome) => {
-            resolveOverrideSettled(
-              adapter,
-              normalized.id,
-              outcome === "didnt-take" ? "ineffective" : "confirmed",
-            )
-          },
-        )
-        // Refresh the (still-open) selection's stamps so the next edit from
-        // it doesn't false-409 against its own predecessor's write.
-        if (result.kind === "applied" && result.newHashes) {
-          scheduleSelectionStampRefresh(Object.keys(result.newHashes))
-        }
-        // Reconcile the buffer with the dispatched state — see
-        // dispatch-reconcile.ts for the shared settle/advance decision:
-        //   - "settled": the entry's `after` still matches what we
-        //     dispatched, no keystrokes arrived during the in-flight call
-        //     → drop the entry; the next keystroke will create a fresh
-        //     one against the now-on-disk source.
-        //   - "advanced": the entry's `after` moved (user typed more),
-        //     keep the entry but rebase `before` to the dispatched
-        //     `after`, because that's what's now in source. Without
-        //     rebasing, the next dispatch would send the ORIGINAL
-        //     `before` to the LLM and fail to locate it (file already has
-        //     the post-dispatch text).
-        let needsRefire = false
-        setMutations((prev) => {
-          const idx = prev.findIndex(
-            (m) => mutationIdentity(m) === identityKey,
-          )
-          const entry = idx === -1 ? undefined : prev[idx]
-          const decision = reconcileDispatchedValue(
-            idx !== -1,
-            dispatchedAfter,
-            entry?.after,
-          )
-          if (decision === "no-entry" || !entry) return prev
-          if (decision === "settled") {
-            return prev.filter((m) => mutationIdentity(m) !== identityKey)
-          }
-          needsRefire = true
-          const updated = [...prev]
-          // Rebase `before` to what's now in source AND the stale-target
-          // stamp to this write's hash (codex round-15) — the re-fired
-          // dispatch must not 409 against our own write. Full hash is fine:
-          // the guard prefix-compares.
-          const file = entry.sourceLoc ? entry.sourceLoc.slice(0, entry.sourceLoc.lastIndexOf(":", entry.sourceLoc.lastIndexOf(":") - 1)) : null
-          const freshHash =
-            result.kind === "applied" && result.newHashes && file
-              ? result.newHashes[file]
-              : undefined
-          updated[idx] = {
-            ...entry,
-            before: dispatchedAfter,
-            ...(freshHash ? { sourceVersion: freshHash } : {}),
-          }
-          return updated
-        })
-        // If the user typed during the in-flight call, the
-        // onMutationCaptured handler skipped scheduling a timer (because
-        // we were in-flight). Kick one off now so the post-dispatch
-        // typing actually dispatches. Use the standard debounce so a
-        // continued burst still settles before firing.
-        if (needsRefire) {
-          const timers = branchTextDispatchTimers.current
-          const existing = timers.get(identityKey)
-          if (existing) clearTimeout(existing)
-          const timer = setTimeout(() => {
-            timers.delete(identityKey)
-            // In THIS dispatch's session: the re-fire is the rest of the text
-            // the designer was typing on the page this dispatch wrote for.
-            void dispatchBranchTextMutationRef.current?.(identityKey, generation)
-          }, BRANCH_TEXT_DISPATCH_DEBOUNCE_MS)
-          timers.set(identityKey, timer)
-        }
-      } catch (err) {
-        setSaveStatus(
-          `Inline text edit threw: ${(err as Error).message}`,
-        )
-        resolveOverrideSettled(adapter, normalized.id, "failed", (err as Error).message)
-      } finally {
-        inFlightOverrideIdsRef.current.delete(normalized.id)
-        // Only while this dispatch still owns the marker, exactly as the prop
-        // lane does. Once the session has ended, `endBridgeSession` emptied the
-        // set and any key in it was put there by a dispatch that started
-        // afterwards; deleting it would let a second write for that identity
-        // run alongside the first, which is the out-of-order overwrite the set
-        // exists to prevent.
-        if (mayClearInFlightMarker(generation, adapterGenerationRef.current)) {
-          branchTextInFlight.current.delete(identityKey)
-        }
-      }
-    },
-    [scheduleSelectionStampRefresh],
-  )
-
-  // Self-reference for the re-fire path inside `dispatchBranchText-
-  // Mutation`'s success branch. A direct call would close over the
-  // initial useCallback identity (stable since deps are []); using a
-  // ref keeps it consistent if we ever broaden the deps and lets the
-  // cleanup effect tear it down without leaving a dangling reference.
-  const dispatchBranchTextMutationRef = useRef<
-    typeof dispatchBranchTextMutation | null
-  >(null)
-  dispatchBranchTextMutationRef.current = dispatchBranchTextMutation
-
-  /**
    * Branch-mode dispatch for a buffered prop/attr edit, keyed by
-   * `propEditKey(selector, propName)`. Mirrors `dispatchBranchTextMutation`:
-   * reads the freshest buffered value, dispatches it to the working tree via
-   * `adapter.applyEdit` (the server's deterministic-first pipeline handles the
-   * bound-binding LLM fallback internally), reconciles the buffer, and re-fires
-   * if the value advanced during the in-flight round-trip. The DOM override set
-   * at edit time is the instant preview; HMR re-renders the truthful source.
-   * Serialized per identity so two same-key dispatches can't complete out of
-   * order (same race the text path's in-flight set guards).
+   * `propEditKey(selector, propName)`.
+   *
+   * The dispatch itself is `dispatchPropEdit` in
+   * `src/editor/edit-service/lanes/prop-lane.ts`, which is a function of the
+   * session and takes no refs. What is left here is the wiring: the adapter
+   * instance, the shell-side side tables keyed by edit id, and the four
+   * callbacks that write to React state.
    *
    * `scheduledGeneration` is the bridge session the caller decided to write in,
    * which for a debounced call is the session that was live when the designer
    * typed, half a second before this runs. It defaults to the session that is
    * live now, for the immediate callers who have no wait to span.
    */
-  const dispatchBranchPropEdit = useCallback(async (
-    key: string,
-    scheduledGeneration?: number,
-  ) => {
-    // The session this dispatch belongs to. Every guard below reads it, and
-    // the marker this dispatch is about to set is keyed on the element and the
-    // prop, NOT on the session, so a dispatch that outlives its session would
-    // otherwise delete a marker a new dispatch for the same element set after
-    // the page reloaded, and two writes for one identity could then run at
-    // once. See `mayClearInFlightMarker`, which the `finally` consults, and
-    // `endBridgeSession`, which empties the set.
-    const generation = scheduledGeneration ?? adapterGenerationRef.current
-    // The page this write was for is gone. Write nothing: the buffered entry
-    // stays, and the designer's next keystroke re-arms the debounce under the
-    // session that is actually on screen.
-    if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-    const adapter = adapterRef.current
-    if (!adapter) return
-    if (branchPropInFlight.current.has(key)) return
-    const current = pendingPropEditsRef.current.find(
-      (e) => propEditKey(e.target.selector, e.propName) === key,
-    )
-    if (!current) return
-    const dispatchedValue = current.value
-    // This session's lifetime, as a signal, captured with everything else this
-    // dispatch decides now. It goes to the WRITE below, so a reload cancels the
-    // request instead of leaving it running against a page that is gone, and to
-    // the chat hand-off, so a turn this dispatch starts is cancelled rather
-    // than merely unwatched.
-    const sessionSignal = adapterAbortRef.current?.signal
-    branchPropInFlight.current.add(key)
-    inFlightOverrideIdsRef.current.add(current.id)
-    // The prop request is a plain synchronous POST — when the deterministic
-    // lane refuses, the server runs the AI mini-turn INSIDE this request
-    // (up to ~90s) with no streaming signal. The client can't know the
-    // fallback engaged, but a prop dispatch outlasting a couple of seconds
-    // is a reliable tell — surface it so the wait isn't silent.
-    const askingAiTimer = setTimeout(() => {
-      if (branchPropInFlight.current.has(key)) {
-        setSaveStatus(`Asking AI to apply "${current.propName}"…`)
-      }
-    }, 2_000)
-    try {
-      const result = await adapter.applyEdit(
-        current,
-        sessionSignal ? { signal: sessionSignal } : undefined,
-      )
-      // Disk truth, not session state, so it is recorded whoever is looking at
-      // the files. Same order and the same reason as the text and class lanes.
-      // Skipping it would leave the external-edit guard comparing against a
-      // hash this very write invalidated.
-      if (result.kind === "applied" && result.newHashes) {
-        fileHashesRef.current = {
-          ...fileHashesRef.current,
-          ...result.newHashes,
-        }
-      }
-      // THE PAGE THIS ANSWER IS ABOUT IS GONE. Do nothing with it, and that
-      // means nothing at all: no buffer filter, no timer replaced, no status.
-      // The request can be out for ~90 seconds (the server runs its AI
-      // mini-turn inside the POST), and a document replaced inside that window
-      // took this dispatch's entry with it. A SUCCESS is the case that used to
-      // slip through here: the reconcile below would clear the live debounce
-      // and re-arm it under this dispatch's dead session, so the replacement
-      // document's edit on the same prop stayed buffered and was never
-      // written. The `finally` leaves the marker alone for the same reason.
-      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-      if (result.kind === "failed") {
-        // `'chat'` fallback mode: the deterministic applicator refused
-        // (bound-binding / v-model / dynamic-vbind) AND the source-aware
-        // LLM lane refused too, so the server returned `needsChat`. Route
-        // the edit to the chat agent (which has multi-file tool access)
-        // instead of leaving it stuck in the buffer, and drop the entry.
-        // Mirrors the inline text path at ~line 2311.
-        if (result.needsChat && escalateToChatRef.current) {
-          const editTarget = current.target.editTarget
-          const editTargetLocation = editTarget
-            ? `${editTarget.file}:${editTarget.line}`
-            : null
-          // The hand-off can be REFUSED, either by the client guard (a chat
-          // is already streaming) or by the server answering the POST with an
-          // error. Awaited, so the second kind is known here too. Clearing the
-          // buffer on a refusal loses the value: nothing was submitted,
-          // nothing is on disk, and the optimistic override reverts later with
-          // no explanation.
-          const accepted = await escalateToChatRef.current(
-            buildPropEditEscalationPrompt({
-              propName: current.propName,
-              // Pass the raw value (string | number | boolean) so the
-              // prompt renders unquoted for non-string literals — the
-              // agent must not write `:max="42"` as `:max="\"42\""`.
-              newValue: normalizeManifestValueForEscalation(current.value),
-              componentName: current.target.componentName,
-              editTargetLocation,
-              selector: current.target.selector,
-            }),
-            // The submission races the session: a reload cancels it rather
-            // than leaving a turn on its way to a page nobody is looking at.
-            sessionSignal ? { signal: sessionSignal } : undefined,
-          )
-          // The session ended while the submission was out. Touch nothing: the
-          // entry this would keep or drop was retired with the page it was
-          // typed on, and the status bar is describing a different page now.
-          if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-          const aftermath = afterEscalation(
-            accepted,
-            `The "${current.propName}" edit`,
-          )
-          if (aftermath.buffer === "keep") {
-            setSaveStatus(aftermath.status)
-            return
-          }
-          setPendingPropEdits((prev) => prev.filter((e) => e.id !== current.id))
-          attrEditIdsRef.current.delete(current.id)
-          pendingPropRenderSitesRef.current.delete(current.id)
-          return
-        }
-        // The source write genuinely failed (not a needsChat refusal). Keep
-        // the entry buffered so it stays consistent with the live preview
-        // override (still showing the attempted value) and `hasUnsavedChanges`
-        // stays true — the value is NOT on disk. There is no save-time flush to
-        // retry it (branch mode has no buffer flush; git Commit records the
-        // working tree, it doesn't re-run dispatch); editing the field again
-        // re-arms the debounced dispatch, which is the retry path.
-        // Stale-target auto-recovery (follow-up to WS1): a 409 means the
-        // file moved under the buffered entry's captured stamps — usually
-        // our own just-landed write. Re-capture coordinates+hash from the
-        // post-HMR DOM once, rebase the entry, and re-fire before
-        // surfacing failure. One shot per key: a second 409 surfaces.
-        if (/stale target/i.test(result.reason) && !staleRetriedRef.current.has(key)) {
-          staleRetriedRef.current.add(key)
-          const refreshed = await adapter
-            .selectBySelector(current.target.selector)
-            .catch(() => null)
-          // The session ended while the re-select was out. `refreshed` then
-          // describes a document this dispatch never wrote against, and the
-          // re-entry below would run under a marker this dispatch no longer
-          // owns. Report nothing: the buffered entry stays, and the next
-          // keystroke on it re-arms the debounce under the live session.
-          if (!mayClearInFlightMarker(generation, adapterGenerationRef.current)) return
-          if (refreshed?.editTarget) {
-            setPendingPropEdits((prev) => {
-              const idx = prev.findIndex(
-                (e) => propEditKey(e.target.selector, e.propName) === key,
-              )
-              if (idx === -1) return prev
-              const updated = [...prev]
-              updated[idx] = { ...updated[idx], target: refreshed }
-              return updated
-            })
-            const existing = branchPropDispatchTimers.current.get(key)
-            if (existing) clearTimeout(existing)
-            const timer = setTimeout(() => {
-              branchPropDispatchTimers.current.delete(key)
-              // Same guard again, at the other end of the debounce. The retry
-              // re-enters through the live ref and reads the live adapter, so a
-              // session that ended during the wait would have it rebasing the
-              // previous document's stamps onto the current one.
-              if (!mayClearInFlightMarker(generation, adapterGenerationRef.current)) return
-              // Re-entered in THIS dispatch's session, not in whichever one is
-              // live when the timer fires.
-              dispatchBranchPropEditRef.current?.(key, generation)
-            }, BRANCH_PROP_DISPATCH_DEBOUNCE_MS)
-            branchPropDispatchTimers.current.set(key, timer)
-            return
-          }
-        }
-        setSaveStatus(`Inline prop edit failed: ${result.reason}`)
-        // WS3: the write never landed — revert the preview poke. (The
-        // needsChat escalation above does NOT resolve: chat will land the
-        // edit; the preview rides until then or until the store times out.)
-        resolveOverrideSettled(adapter, current.id, "failed", result.reason)
-        return
-      }
-      if (result.kind === "applied" && result.fallbackUsed) {
-        const notes = result.notes
-        const truncatedNotes =
-          notes && notes.length > 140 ? notes.slice(0, 140) + "…" : notes
-        setSaveStatus(
-          `Edited via AI fallback${truncatedNotes ? `: ${truncatedNotes}` : ""}`,
-        )
-      }
-      staleRetriedRef.current.delete(key)
-      // RELEASE-THEN-VERIFY (final-review C1, same shape as the style lane
-      // below). The write landed — release the preview override immediately,
-      // as this lane did before verification was wired here, then verify
-      // diagnostically. Holding the preview until the read-back confirms
-      // means the read-back is partly measuring our own optimistic override
-      // (`APPLY_PROP_OVERRIDE` / `APPLY_ATTR_OVERRIDE`), which is what
-      // `confirmStableMs` has to fight; releasing first lets the post-HMR DOM
-      // be the only thing under the microscope. Exactly ONE resolve per
-      // override id: every failure branch above returns.
-      resolveOverrideSettled(adapter, current.id, "confirmed")
-      // Verify the prop's value actually rendered (diagnostic only — the
-      // override is already released). The oracle needs a manifest dom-hint
-      // (captured at buffer time from `attribute()`'s `renders` — see
-      // `dispatchAllRowsPropEdit`) to know WHERE the value surfaces; without
-      // one `deriveExpectation` declines and nothing is reported.
-      const renderSite = pendingPropRenderSitesRef.current.get(current.id)
-      // Boolean-attribute exclusion: Vue's `patchAttr` renders a *special*
-      // boolean HTML attribute (disabled/checked/readonly/selected/…) as
-      // `attr=""` when true and removes it entirely when false. The
-      // bridge's READ_RENDERED_VALUE only special-cases `checked`/`value`;
-      // every other attribute name falls through to plain `getAttribute`,
-      // so reading it back would compare `""` against `String(true)` →
-      // `"true"` and never match — a CORRECT edit would be reported as
-      // "didn't take effect." A false failure is worse than no signal, so
-      // decline the oracle for this exact combination (same as no hint at
-      // all) rather than try to model boolean-attribute semantics with a
-      // "matches any of" expectation. Numbers are unaffected — Vue
-      // stringifies `4` to `"4"`, which matches — so gate specifically on
-      // `typeof === 'boolean'`, not "non-string".
-      const isBooleanAttributeHint =
-        typeof dispatchedValue === "boolean" && renderSite?.field === "attribute"
-      verifyEditRef.current({
-        editId: current.id,
-        selector: current.target.selector,
-        expectedValue: String(dispatchedValue ?? ""),
-        editKind: "prop",
-        propName: current.propName,
-        domField: isBooleanAttributeHint ? undefined : renderSite?.field,
-        attribute: isBooleanAttributeHint ? undefined : renderSite?.attribute,
-        // Verification settles 0.85-3s later; by then a newer keystroke/
-        // drag has typically re-dispatched (or is in flight) and this
-        // snapshot's `dispatchedValue` is stale. Read the LIVE buffer
-        // lazily at verification-complete time — mirrors the dom-text
-        // lane's `isSuperseded` against its own mutations buffer.
-        isSuperseded: () => {
-          const stillBuffered = pendingPropEditsRef.current.find(
-            (e) => propEditKey(e.target.selector, e.propName) === key,
-          )
-          return !!stillBuffered && !Object.is(stillBuffered.value, dispatchedValue)
+  const dispatchBranchPropEdit = useCallback(
+    async (key: string, scheduledGeneration?: number) => {
+      const adapter = adapterRef.current
+      if (!adapter) return
+      await dispatchPropEdit(key, scheduledGeneration ?? session.generation, {
+        session,
+        adapter,
+        escalateToChat: escalateToChatRef.current,
+        setStatus: setSaveStatus,
+        recordHashes: (hashes) => {
+          fileHashesRef.current = { ...fileHashesRef.current, ...hashes }
         },
+        // Through the REF, not the captured instance: this is the shell-side
+        // "the preview shim is gone" edge, and the throw path can reach it
+        // after the adapter has been torn down.
+        resolveOverride: (id, outcome, reason) =>
+          resolveOverrideSettledOptional(adapterRef.current, id, outcome, reason),
+        verifyEdit: (request) => verifyEditRef.current(request),
+        refreshSelectionStamps: scheduleSelectionStampRefresh,
+        forgetEditId: (id) => {
+          attrEditIdsRef.current.delete(id)
+          pendingPropRenderSitesRef.current.delete(id)
+          inFlightOverrideIdsRef.current.delete(id)
+        },
+        setOverrideInFlight: (id, inFlight) => {
+          if (inFlight) inFlightOverrideIdsRef.current.add(id)
+          else inFlightOverrideIdsRef.current.delete(id)
+        },
+        renderSiteFor: (id) => pendingPropRenderSitesRef.current.get(id),
+        staleRetried: staleRetriedRef.current,
+        debounceMs: BRANCH_PROP_DISPATCH_DEBOUNCE_MS,
       })
-      // Refresh the (still-open) selection's stamps so the next edit from
-      // it doesn't false-409 against its own predecessor's write.
-      scheduleSelectionStampRefresh(
-        result.kind === "applied" && result.newHashes
-          ? Object.keys(result.newHashes)
-          : [current.target.editTarget?.file].filter((f): f is string => !!f),
-      )
-      // Reconcile (see dispatch-reconcile.ts for the shared decision):
-      // "settled" — the buffered value still matches what we dispatched,
-      // the worktree now holds it — drop the entry. "advanced" — it moved
-      // (the designer kept dragging), keep it and re-fire. Prop
-      // applicators re-parse source each call, so no `before`-rebase is
-      // needed (unlike the text path) — only the stale-target stamp.
-      let needsRefire = false
-      setPendingPropEdits((prev) => {
-        const idx = prev.findIndex(
-          (e) => propEditKey(e.target.selector, e.propName) === key,
-        )
-        const decision = reconcileDispatchedValue(
-          idx !== -1,
-          dispatchedValue,
-          idx === -1 ? undefined : prev[idx].value,
-        )
-        if (decision === "no-entry") return prev
-        if (decision === "settled") {
-          attrEditIdsRef.current.delete(prev[idx].id)
-          pendingPropRenderSitesRef.current.delete(prev[idx].id)
-          return prev.filter((_, i) => i !== idx)
-        }
-        needsRefire = true
-        // Rebase the kept entry's stale-target stamp to THIS write's hash
-        // (codex round-15): the re-fire dispatches this entry, and without
-        // the rebase its pre-write fileHash 409s against our own write.
-        // Coordinates stay valid — the prop splice never moves the
-        // element's start tag.
-        const freshHash =
-          result.kind === "applied" && result.newHashes
-            ? result.newHashes[prev[idx].target.editTarget?.file ?? ""]
-            : undefined
-        if (!freshHash || !prev[idx].target.editTarget) return prev
-        const updated = [...prev]
-        updated[idx] = {
-          ...updated[idx],
-          target: {
-            ...updated[idx].target,
-            editTarget: { ...updated[idx].target.editTarget!, fileHash: freshHash },
-          },
-        }
-        return updated
-      })
-      if (needsRefire) {
-        const existing = branchPropDispatchTimers.current.get(key)
-        if (existing) clearTimeout(existing)
-        const timer = setTimeout(() => {
-          branchPropDispatchTimers.current.delete(key)
-          // In THIS dispatch's session: the re-fire is the rest of the edit the
-          // designer was making on the page this dispatch wrote for.
-          dispatchBranchPropEditRef.current?.(key, generation)
-        }, BRANCH_PROP_DISPATCH_DEBOUNCE_MS)
-        branchPropDispatchTimers.current.set(key, timer)
-      }
-    } catch (err) {
-      setSaveStatus(`Inline prop edit threw: ${(err as Error).message}`)
-      resolveOverrideSettledOptional(
-        adapterRef.current,
-        current.id,
-        "failed",
-        (err as Error).message,
-      )
-    } finally {
-      clearTimeout(askingAiTimer)
-      inFlightOverrideIdsRef.current.delete(current.id)
-      // Only when this dispatch still owns the marker. Once the session has
-      // ended, `endBridgeSession` has emptied the set and any key in it was put
-      // there by a dispatch that started afterwards; deleting it would let a
-      // second write for that identity run alongside the first.
-      if (mayClearInFlightMarker(generation, adapterGenerationRef.current)) {
-        branchPropInFlight.current.delete(key)
-      }
-    }
-  }, [scheduleSelectionStampRefresh])
+    },
+    [scheduleSelectionStampRefresh, session],
+  )
   dispatchBranchPropEditRef.current = dispatchBranchPropEdit
 
   /**
@@ -4450,75 +3384,82 @@ export function useEditorEditing({
    */
   const handleScopedStyleEdit = useCallback(
     async (nextClasses: string[]) => {
+      // The adapter this edit is being written through, read ONCE, before the
+      // lane's first await. Read again afterwards it would be whichever adapter
+      // is attached by then, which is the one this edit is not about.
       const adapter = adapterRef.current
       const selection = useEditorStore.getState().editorSelection
       if (!adapter || !selection) return
-      // The session this edit is being made in, captured at dispatch, exactly
-      // as the class lane captures it. Read after an await it would be
-      // whichever session is live by then, which is the one this edit is not
-      // about. See `isStaleGeneration` and `ApplyEditOpts.signal`.
-      const generation = adapterGenerationRef.current
-      const sessionSignal = adapterAbortRef.current?.signal
-      // This lane has an await before it writes anything: resolving where a
-      // rule may go can ask the DOCUMENT (`GET_STYLESHEET_TARGETS`), and a page
-      // replaced in that window makes the answer describe another app's
-      // stylesheets.
-      const destination = await resolveStyleDestination()
-      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-      if (!destination.ok) {
-        setSaveStatus(destination.reason)
-        return
-      }
-      const built = buildPageScopedCssOverrideEdit(
-        selection,
-        nextClasses,
-        destination.opts,
-      )
-      if (built.kind === "noop") return
-      if (built.kind === "refused") {
-        setSaveStatus(built.reason)
-        return
-      }
-      const edit = built.edit
-      try {
-        const result = await adapter.applyEdit(
-          edit,
-          sessionSignal ? { signal: sessionSignal } : undefined,
-        )
-        // Keep the external-edit hash guard in sync with our own write, like
-        // the other immediate applyEdit paths — else the next save trips the
-        // conflict guard against this change. Recorded BEFORE the session
-        // check, and for the same reason the text and class lanes do it there:
-        // the hashes are disk truth, not session state, and skipping them
-        // leaves the next save comparing against a hash this write invalidated.
-        if (result.kind === "applied" && result.newHashes) {
-          fileHashesRef.current = {
-            ...fileHashesRef.current,
-            ...result.newHashes,
-          }
-        }
-        // The page this edit was made on is gone. Say nothing: the status bar
-        // is now describing a different page, and an aborted request arrives
-        // here as a failure that is not one.
-        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-        if (result.kind === "failed") {
-          setSaveStatus(`Scoped style edit failed: ${result.reason}`)
+      // THE SESSION, as a run rather than as a captured number. Every await
+      // below is a `ctx.step`, and a step whose session has ended answers
+      // `stale` instead of handing back a value, so the lines after it do not
+      // run at all. See `EditSession.run`.
+      await session.run(async (ctx) => {
+        // This lane has an await before it writes anything: resolving where a
+        // rule may go can ask the DOCUMENT (`GET_STYLESHEET_TARGETS`), and a
+        // page replaced in that window makes the answer describe another app's
+        // stylesheets.
+        const resolved = await ctx.step(resolveStyleDestination())
+        if (resolved.stale) return
+        const destination = resolved.value
+        if (!destination.ok) {
+          setSaveStatus(destination.reason)
           return
         }
-        // Blast radius, AFTER the write and only when it is bigger than one.
-        // The count comes from the same `resolveDomAnchor` call that produced
-        // the anchor, so it describes the rule that was actually written —
-        // and it is a lower bound (the rendered page, not every route), which
-        // the copy says out loud.
-        if (built.notice) setSaveStatus(built.notice)
-      } catch (err) {
-        // Same rule for the throw path: a departed page's error is not news
-        // about the page in front of the designer now.
-        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-        setSaveStatus(`Scoped style edit threw: ${(err as Error).message}`)
-      }
+        const built = buildPageScopedCssOverrideEdit(
+          selection,
+          nextClasses,
+          destination.opts,
+        )
+        if (built.kind === "noop") return
+        if (built.kind === "refused") {
+          setSaveStatus(built.reason)
+          return
+        }
+        const edit = built.edit
+        try {
+          // The hashes come off the promise itself, BEFORE staleness is
+          // decided, the way both mutation lanes do it: they are disk truth,
+          // not session state, and dropping them leaves the next save
+          // comparing against a hash this write invalidated.
+          const write = adapter
+            .applyEdit(edit, { signal: ctx.signal })
+            .then((outcome) => {
+              if (outcome.kind === "applied" && outcome.newHashes) {
+                fileHashesRef.current = {
+                  ...fileHashesRef.current,
+                  ...outcome.newHashes,
+                }
+              }
+              return outcome
+            })
+          // The page this edit was made on may be gone. Then nothing below
+          // runs: the status bar is describing a different page, and an
+          // aborted request arrives here as a failure that is not one.
+          const written = await ctx.step(write)
+          if (written.stale) return
+          const result = written.value
+          if (result.kind === "failed") {
+            setSaveStatus(`Scoped style edit failed: ${result.reason}`)
+            return
+          }
+          // Blast radius, AFTER the write and only when it is bigger than one.
+          // The count comes from the same `resolveDomAnchor` call that produced
+          // the anchor, so it describes the rule that was actually written, and
+          // it is a lower bound (the rendered page, not every route), which the
+          // copy says out loud.
+          if (built.notice) setSaveStatus(built.notice)
+        } catch (err) {
+          // Same rule for the throw path: a departed page's error is not news
+          // about the page in front of the designer now. `ctx.step` turns a
+          // throw from a departed session into a stale answer, so this covers
+          // only a throw from the synchronous code between the steps.
+          if (!ctx.current) return
+          setSaveStatus(`Scoped style edit threw: ${(err as Error).message}`)
+        }
+      })
     },
-    [resolveStyleDestination],
+    [resolveStyleDestination, session],
   )
 
   /**
@@ -4543,14 +3484,11 @@ export function useEditorEditing({
    */
   const handleTokenStyleEdit = useCallback(
     async (property: string, origin: StyleOrigin, nextClasses: string[]) => {
+      // The adapter this edit is being written through, read ONCE, before the
+      // lane's one await.
       const adapter = adapterRef.current
       const selection = useEditorStore.getState().editorSelection
       if (!adapter || !selection) return
-      // The session this edit is being made in, captured at dispatch, exactly
-      // as the class lane captures it. Everything between here and the write is
-      // synchronous, so this lane's only await is the write itself.
-      const generation = adapterGenerationRef.current
-      const sessionSignal = adapterAbortRef.current?.signal
       // The ROOT of the var chain is what you'd actually patch — the last hop
       // is the concrete value (`#f7f7f7`), earlier hops are `var(...)` aliases.
       const root = origin.varChain[origin.varChain.length - 1]
@@ -4620,291 +3558,174 @@ export function useEditorEditing({
         newValue,
         selector: root.definedAt.selector,
       }
-      try {
-        const result = await adapter.applyEdit(
-          edit,
-          sessionSignal ? { signal: sessionSignal } : undefined,
-        )
-        // Keep the external-edit hash guard in sync with our own write, like
-        // the other immediate applyEdit paths, so the next save doesn't trip
-        // the conflict guard against this change. Disk truth first, then the
-        // session check, the same order every other lane uses.
-        if (result.kind === "applied" && result.newHashes) {
-          fileHashesRef.current = {
-            ...fileHashesRef.current,
-            ...result.newHashes,
+      // THE SESSION, as a run. The write is this lane's one await, so it is
+      // one `ctx.step`: a session that ended while it was out answers `stale`
+      // and everything after it is skipped.
+      await session.run(async (ctx) => {
+        try {
+          // Keep the external-edit hash guard in sync with our own write, like
+          // the other immediate applyEdit paths, so the next save doesn't trip
+          // the conflict guard against this change. Disk truth first, then the
+          // session check, the same order every other lane uses.
+          const write = adapter
+            .applyEdit(edit, { signal: ctx.signal })
+            .then((outcome) => {
+              if (outcome.kind === "applied" && outcome.newHashes) {
+                fileHashesRef.current = {
+                  ...fileHashesRef.current,
+                  ...outcome.newHashes,
+                }
+              }
+              return outcome
+            })
+          // The page this token edit was made on may be gone. Nothing below is
+          // meaningful for the page that replaced it: the verification reads the
+          // NEW document for a value written into the old one's stylesheet, and
+          // the status bar is describing something else now.
+          const written = await ctx.step(write)
+          if (written.stale) return
+          const result = written.value
+          if (result.kind === "failed") {
+            setSaveStatus(`Token edit failed: ${result.reason}`)
+            return
           }
+          // Cascade verification: confirm the patched token actually wins the
+          // cascade for this element/property. Diagnostic-only, like every
+          // cascade/value verification since the final-review C1 fix — and here
+          // there was never anything to gate anyway: a token-value edit
+          // registers no live preview override (this lane doesn't call
+          // `adapter.setElementClasses` / `resolveOverride` at all). Surfaces
+          // the same "didn't take effect, X wins the cascade" toast the class
+          // lane produces when a competing declaration still beats the token
+          // post-write.
+          verifyEditRef.current({
+            editId: edit.id,
+            selector: selection.selector,
+            expectedValue: newValue,
+            editKind: "token",
+            styleProperty: property,
+            cascadeOwner: { kind: "token", token: root.name },
+            // THE VALUE DIMENSION (codex R4) — ownership alone false-passes a
+            // REPEAT token edit: the element still resolves THROUGH `root.name`
+            // whatever that token is now set to, so the chain-contains-our-token
+            // test is unchanged by #ef4444 → #3b82f6 (or by a write that never
+            // landed). `newValue` is the literal this edit wrote to the token's
+            // definition site, and the walker reads that same definition back as
+            // `varChain[].value` — so the oracle can also require the definition
+            // to carry it. A chained definition (`var(...)`) or an
+            // un-canonicalizable value declines back to ownership-only.
+            expectedDeclarationValue: newValue,
+          })
+        } catch (err) {
+          // Same rule for the throw path: a departed page's error is not news
+          // about the page in front of the designer now. `ctx.step` turns a
+          // throw from a departed session into a stale answer, so this covers
+          // only a throw from the synchronous code beside it.
+          if (!ctx.current) return
+          setSaveStatus(`Token edit threw: ${(err as Error).message}`)
         }
-        // The page this token edit was made on is gone. Nothing below is
-        // meaningful for the page that replaced it: the verification reads the
-        // NEW document for a value written into the old one's stylesheet, and
-        // the status bar is describing something else now.
-        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-        if (result.kind === "failed") {
-          setSaveStatus(`Token edit failed: ${result.reason}`)
-          return
-        }
-        // Cascade verification: confirm the patched token actually wins the
-        // cascade for this element/property. Diagnostic-only, like every
-        // cascade/value verification since the final-review C1 fix — and here
-        // there was never anything to gate anyway: a token-value edit
-        // registers no live preview override (this lane doesn't call
-        // `adapter.setElementClasses` / `resolveOverride` at all). Surfaces
-        // the same "didn't take effect, X wins the cascade" toast the class
-        // lane produces when a competing declaration still beats the token
-        // post-write.
-        verifyEditRef.current({
-          editId: edit.id,
-          selector: selection.selector,
-          expectedValue: newValue,
-          editKind: "token",
-          styleProperty: property,
-          cascadeOwner: { kind: "token", token: root.name },
-          // THE VALUE DIMENSION (codex R4) — ownership alone false-passes a
-          // REPEAT token edit: the element still resolves THROUGH `root.name`
-          // whatever that token is now set to, so the chain-contains-our-token
-          // test is unchanged by #ef4444 → #3b82f6 (or by a write that never
-          // landed). `newValue` is the literal this edit wrote to the token's
-          // definition site, and the walker reads that same definition back as
-          // `varChain[].value` — so the oracle can also require the definition
-          // to carry it. A chained definition (`var(...)`) or an
-          // un-canonicalizable value declines back to ownership-only.
-          expectedDeclarationValue: newValue,
-        })
-      } catch (err) {
-        // Same rule for the throw path: a departed page's error is not news
-        // about the page in front of the designer now.
-        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-        setSaveStatus(`Token edit threw: ${(err as Error).message}`)
-      }
+      })
     },
-    [],
+    [session],
   )
 
   /**
-   * Branch-mode dispatch for a `class` mutation, keyed by
-   * `mutationIdentity`. Unlike text/attr/style (llm-patch), class edits go
-   * through the scoped-css-override applicator (injects a CSS rule rather than
-   * rewriting source). Reuses the dom-text timers/in-flight maps — keys carry
-   * `kind`, so class and text identities never collide.
+   * The wiring both mutation lanes take.
+   *
+   * One builder rather than two copies: the text lane and the class lane share
+   * their markers, their timers and every side table they touch, so a dep list
+   * that drifted between them would be two answers to one question. The adapter
+   * is a parameter rather than a dep, because each dispatch captures the
+   * instance it is writing through before its first await.
+   */
+  const buildMutationLaneDeps = useCallback(
+    (adapter: FrameworkAdapter): TextLaneDeps => ({
+      session,
+      adapter,
+      mutationKey: mutationIdentity,
+      setStatus: setSaveStatus,
+      recordHashes: (hashes) => {
+        fileHashesRef.current = { ...fileHashesRef.current, ...hashes }
+      },
+      baseHashes: () => ({ ...fileHashesRef.current }),
+      // Through the CAPTURED adapter, which is what both lanes did before the
+      // move: the preview being resolved is the one this dispatch poked, and
+      // an adapter that has since been replaced is not holding it.
+      resolveOverride: (id, outcome, reason) =>
+        resolveOverrideSettled(adapter, id, outcome, reason),
+      verifyEdit: (request, onOutcome) => verifyEditRef.current(request, onOutcome),
+      refreshSelectionStamps: scheduleSelectionStampRefresh,
+      queueForAi: (identityKey) => {
+        queuedForAiRef.current.add(identityKey)
+        setAiQueueCount(queuedForAiRef.current.size)
+      },
+      forgetEditId: (id) => {
+        inFlightOverrideIdsRef.current.delete(id)
+      },
+      resolveStyleDestination,
+      selection: () => useEditorStore.getState().editorSelection,
+      setOverrideInFlight: (id, inFlight) => {
+        if (inFlight) inFlightOverrideIdsRef.current.add(id)
+        else inFlightOverrideIdsRef.current.delete(id)
+      },
+      debounceMs: BRANCH_TEXT_DISPATCH_DEBOUNCE_MS,
+    }),
+    [resolveStyleDestination, scheduleSelectionStampRefresh, session],
+  )
+
+  /**
+   * Branch-mode immediate-dispatch for a buffered dom-text capture.
+   *
+   * The dispatch itself is `dispatchTextMutation` in
+   * `src/editor/edit-service/lanes/text-lane.ts`, which is a function of the
+   * session and takes no refs. What is left here is the wiring above and the
+   * adapter instance.
+   *
+   * `scheduledGeneration` is the bridge session the caller decided to write in,
+   * which for a debounced call is the session that was live when the designer
+   * stopped typing, half a second before this runs. It defaults to the session
+   * that is live now, for the callers with no wait to span.
+   */
+  const dispatchBranchTextMutation = useCallback(
+    async (identityKey: string, scheduledGeneration?: number) => {
+      const adapter = adapterRef.current
+      if (!adapter) return
+      await dispatchTextMutation(
+        identityKey,
+        scheduledGeneration ?? session.generation,
+        buildMutationLaneDeps(adapter),
+      )
+    },
+    [buildMutationLaneDeps, session],
+  )
+  // Self-reference for the scheduler and the adapter effect's cleanup, both of
+  // which are defined away from this callback.
+  const dispatchBranchTextMutationRef = useRef<
+    typeof dispatchBranchTextMutation | null
+  >(null)
+  dispatchBranchTextMutationRef.current = dispatchBranchTextMutation
+
+  /**
+   * Branch-mode dispatch for a buffered `class` capture, keyed by
+   * `mutationIdentity`.
+   *
+   * The dispatch is `dispatchClassMutation`, the text lane's sibling in
+   * `src/editor/edit-service/lanes/text-lane.ts`. It rides the SAME lane on the
+   * session, which is what the shared `"text"` lane id says: one marker set and
+   * one timer map, keyed by an identity that carries the mutation's kind, so a
+   * class and a text edit on one element never collide.
    */
   const dispatchBranchClassMutation = useCallback(
     async (identityKey: string, scheduledGeneration?: number) => {
-      // Same rule as the text lane it shares its timers and markers with: the
-      // session is the one the caller decided to write in, and a debounced call
-      // decided that half a second ago.
-      const generation = scheduledGeneration ?? adapterGenerationRef.current
-      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-      // Captured with the generation, for the same reason the text lane
-      // captures it there: read at request time it would be the next session's
-      // controller. See `ApplyEditOpts.signal`.
-      const sessionSignal = adapterAbortRef.current?.signal
       const adapter = adapterRef.current
       if (!adapter) return
-      if (branchTextInFlight.current.has(identityKey)) return
-      const current = mutationsRef.current.find(
-        (m) => mutationIdentity(m) === identityKey,
+      await dispatchClassMutation(
+        identityKey,
+        scheduledGeneration ?? session.generation,
+        buildMutationLaneDeps(adapter),
       )
-      if (!current) return
-      const dispatchedAfter = current.after
-      // This lane has an await BEFORE it takes its marker: resolving where a
-      // style rule may be written can ask the document (`GET_STYLESHEET_TARGETS`).
-      // A page replaced in that window makes both the answer and the override id
-      // below name a document that is gone.
-      const destination = await resolveStyleDestination()
-      if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-      if (!destination.ok) {
-        setSaveStatus(`Inline style edit failed: ${destination.reason}`)
-        resolveOverrideSettled(adapter, current.id, "failed", destination.reason)
-        return
-      }
-      const edit = buildStyleEdit(current, destination.opts)
-      if (!edit) return
-      if (isUnsupportedStyleBuild(edit)) {
-        setSaveStatus(`Inline style edit failed: ${edit.unsupported}`)
-        // WS3: the applicator can't express this edit at all — the write
-        // never landed, so revert the live class/inline-style preview the
-        // bridge is holding under `current.id` (same id the OverrideStore
-        // registered when SET_ELEMENT_CLASSES fired). Mirrors the prop/text
-        // lanes' "the write genuinely failed" resolve call.
-        resolveOverrideSettled(adapter, current.id, "failed", edit.unsupported)
-        return
-      }
-      branchTextInFlight.current.add(identityKey)
-      inFlightOverrideIdsRef.current.add(current.id)
-      try {
-        const result = await adapter.applyEdit(
-          edit,
-          sessionSignal ? { signal: sessionSignal } : undefined,
-        )
-        // Disk truth first, then the session check — same order and the same
-        // reasons as the text lane above.
-        if (result.kind === "applied" && result.newHashes) {
-          fileHashesRef.current = {
-            ...fileHashesRef.current,
-            ...result.newHashes,
-          }
-        }
-        if (isStaleGeneration(generation, adapterGenerationRef.current)) return
-        if (result.kind === "failed") {
-          setSaveStatus(`Inline class edit failed: ${result.reason}`)
-          // WS3: the write never landed — revert the preview. Resolve by
-          // `current.id` (the captured Mutation's id / OverrideStore
-          // registration key), NOT `edit.id` (the scoped-css-override /
-          // jsx-style dispatch id, which is unrelated to the bridge-side
-          // override entry) — same distinction the text lane draws between
-          // `normalized.id` and the llm-patch `edit.id`.
-          resolveOverrideSettled(adapter, current.id, "failed", result.reason)
-          return
-        }
-        // RELEASE-THEN-VERIFY (final-review C1). The write landed — release
-        // the preview override NOW, exactly as this lane did before cascade
-        // verification existed, and run verification purely diagnostically
-        // afterwards.
-        //
-        // Why the two goals can't be combined: the live class preview stamps
-        // its declarations inline with `!important`
-        // (`src/bridge/override-preview.ts` `applyClassOverride`), and inline
-        // `!important` outranks everything. Holding the preview until the
-        // cascade is verified means the cascade walk is measuring OUR OWN
-        // shim — `evaluateCascadeOutcome` then reports `inline style
-        // !important` as the winner on 100% of SUCCESSFUL edits, and the
-        // React inline lane can never observe the failure it exists to
-        // detect. Measuring cascade ownership requires that our preview is
-        // already gone; keeping the preview until verified requires the
-        // opposite. Releasing first is the only shape that measures reality.
-        //
-        // Resolving terminally also fires the bridge's `classOv` retire hook,
-        // which strips the inline shim (`dom-edit-mode.ts`) — so by the time
-        // verification's first read lands (settle 250ms, then polling) the
-        // element carries the real cascade again.
-        //
-        // What we keep: the DIAGNOSIS. A lost cascade still toasts, naming the
-        // rule that actually won instead of the misleading `hmr-stale` "HMR
-        // did not apply the change". What we give up: verify-before-release.
-        // Restoring it needs a bridge-side `inline.fromPreview` flag so the
-        // evaluator can discount our own shim — the documented follow-up (see
-        // tasks/editor-edit-verification.md); this branch does not change
-        // the bridge.
-        //
-        // Exactly ONE resolve per override id on every path: the failure
-        // branches above all `return`, and verification's callback no longer
-        // resolves anything.
-        resolveOverrideSettled(adapter, current.id, "confirmed")
-        // No derivable owner/property (edit kind we don't recognize, or no
-        // class/declaration resolved to CSS) → nothing to diagnose; the
-        // release above already happened.
-        const cascadeTarget = cascadeTargetForStyleEdit(edit)
-        if (cascadeTarget) {
-          verifyEditRef.current({
-            // P2-1 (codex review round 5, 2026-08-20): `editId` here MUST be
-            // `edit.id`, not `current.id`. `buildStyleEdit` mints `edit.id`
-            // fresh (`makeEditId()`) — it is the id `adapter.applyEdit(edit)`
-            // actually dispatches, and `build-edit-request.ts`'s single
-            // choke point sends THAT id as the ledger row's `correlationId`.
-            // The Activity panel's verification pill joins on
-            // `row.correlationId === verificationByEditId`'s key
-            // (`activity-verification-join.ts`) — so the id recorded here
-            // must be the SAME `edit.id`, or the join can never match and
-            // this lane's verification silently never shows up. `current.id`
-            // is the right id for `resolveOverrideSettled` two lines up (the
-            // OverrideStore's own registration key from `SET_ELEMENT_CLASSES`
-            // — a different id, for a different purpose) but the wrong one
-            // here. Every other lane already gets this right: the dom-text
-            // lane keys on its own freshly-minted `edit.id` while resolving
-            // the preview on `normalized.id`, and the token-value lane's
-            // `edit` IS what it dispatches, so there's nothing to confuse.
-            editId: edit.id,
-            selector: current.selector,
-            // The RESOLVED CSS value for the representative property — not
-            // the raw className string, which produced labels like
-            // `background-color = "rounded bg-red-500"` in the Checks strip
-            // and the toast (final-review M10).
-            expectedValue: cascadeTarget.value,
-            // EVERY property this edit sets, shorthands expanded, each carrying
-            // its own expected value (Phase 2). Two things this closes:
-            //  - the single-representative-property false pass — apply `border`
-            //    to an element already carrying `border-width: 0 !important`
-            //    inline and the sampled `border-style` wins while the border
-            //    stays invisible;
-            //  - the shorthand/longhand blind spot — CSSOM reports `''` for a
-            //    shorthand a rule didn't declare, so a library rule declaring
-            //    `padding-left` was never a candidate in the walk for `padding`.
-            // The per-property value closes THE VALUE DIMENSION (codex P1 for
-            // `pt-src`, P2 for `inline`): ownership/presence alone false-passes a
-            // REPEAT edit of a property our own declaration already owns (pick
-            // red, then pick blue — the same rule still wins, so the first poll
-            // reports `won` while the DOM may still show red). `pt-src` and
-            // `inline` author the declaration verbatim; the `classes` owner
-            // passes values too and the evaluator declines per property wherever
-            // the winning utility routes through a `var()` our literal could
-            // never match.
-            styleProperties: cascadeTarget.properties,
-            // `cascadeTargetForStyleEdit` only ever returns pt-src / inline /
-            // classes owners (the Vue/React styling lanes) — `token-value`
-            // isn't reachable through `buildStyleEdit`, so this is always
-            // the style kind, never token.
-            editKind: "style",
-            styleProperty: cascadeTarget.property,
-            cascadeOwner: cascadeTarget.owner,
-            isSuperseded: () => {
-              const m = mutationsRef.current.find(
-                (m) => mutationIdentity(m) === identityKey,
-              )
-              return !!m && !Object.is(m.after, dispatchedAfter)
-            },
-          })
-        }
-        // Reconcile (see dispatch-reconcile.ts for the shared decision):
-        // "settled" — drop the entry; "advanced" — keep it and re-fire.
-        // No rebase needed here (unlike text/prop): the class lane has no
-        // stale-target stamp to refresh.
-        let needsRefire = false
-        setMutations((prev) => {
-          const idx = prev.findIndex(
-            (m) => mutationIdentity(m) === identityKey,
-          )
-          const decision = reconcileDispatchedValue(
-            idx !== -1,
-            dispatchedAfter,
-            idx === -1 ? undefined : prev[idx].after,
-          )
-          if (decision === "no-entry") return prev
-          if (decision === "settled") {
-            return prev.filter((m) => mutationIdentity(m) !== identityKey)
-          }
-          needsRefire = true
-          return prev
-        })
-        if (needsRefire) {
-          const timers = branchTextDispatchTimers.current
-          const existing = timers.get(identityKey)
-          if (existing) clearTimeout(existing)
-          const timer = setTimeout(() => {
-            timers.delete(identityKey)
-            // In THIS dispatch's session, like the text lane's re-fire.
-            void dispatchBranchClassMutationRef.current?.(identityKey, generation)
-          }, BRANCH_TEXT_DISPATCH_DEBOUNCE_MS)
-          timers.set(identityKey, timer)
-        }
-      } catch (err) {
-        setSaveStatus(`Inline class edit threw: ${(err as Error).message}`)
-        // WS3: same as the prop/text lanes' catch — revert the preview
-        // rather than leave it lying with no dispatch outcome recorded.
-        resolveOverrideSettled(adapter, current.id, "failed", (err as Error).message)
-      } finally {
-        inFlightOverrideIdsRef.current.delete(current.id)
-        // Only while this dispatch still owns the marker — the same rule as
-        // the text lane it shares this set with, and the prop lane before it.
-        if (mayClearInFlightMarker(generation, adapterGenerationRef.current)) {
-          branchTextInFlight.current.delete(identityKey)
-        }
-      }
     },
-    // `buildStyleEdit` is a stable top-level import (see
-    // style-edit-builders.ts), not a hook value — no dep entry needed.
-    // `resolveStyleDestination` IS one, and it is stable.
-    [resolveStyleDestination],
+    [buildMutationLaneDeps, session],
   )
   const dispatchBranchClassMutationRef = useRef<
     typeof dispatchBranchClassMutation | null
@@ -4914,95 +3735,69 @@ export function useEditorEditing({
   /**
    * Arm (or re-arm) the debounced write for one buffered mutation.
    *
-   * The two lanes share one timer map, keyed by an identity that carries the
-   * mutation's kind, so `class` and `text` on the same element cannot collide.
-   * Which lane a mutation takes is its kind's business and nothing else's: the
-   * class lane writes a scoped-CSS rule, everything else rides the llm-patch
-   * lane.
+   * Both dispatches are ONE lane on the session, the `"text"` one, keyed by an
+   * identity that carries the mutation's kind so `class` and `text` on the same
+   * element cannot collide. Which dispatch a mutation takes is its kind's
+   * business and nothing else's: a `class` capture is written as a CSS rule,
+   * everything else rides the llm-patch lane.
    *
    * The generation is captured HERE, at schedule time, not read inside the
    * callback half a second later — read there it would be whichever session is
    * live when the timer fires, so a timer that outlived a page change would
    * write the previous page's edit under the new page's session.
    */
-  const scheduleBranchMutationDispatch = useCallback((m: Mutation) => {
-    const key = mutationIdentity(m)
-    const timers = branchTextDispatchTimers.current
-    const existing = timers.get(key)
-    if (existing) clearTimeout(existing)
-    const scheduledGeneration = adapterGenerationRef.current
-    const isClass = m.kind === "class"
-    const timer = setTimeout(() => {
-      timers.delete(key)
-      if (isClass) {
-        void dispatchBranchClassMutationRef.current?.(key, scheduledGeneration)
-      } else {
-        void dispatchBranchTextMutationRef.current?.(key, scheduledGeneration)
-      }
-    }, BRANCH_TEXT_DISPATCH_DEBOUNCE_MS)
-    timers.set(key, timer)
-  }, [])
+  const scheduleBranchMutationDispatch = useCallback(
+    (m: Mutation) => {
+      const key = mutationIdentity(m)
+      const generation = session.generation
+      const isClass = m.kind === "class"
+      session.schedule(
+        "text",
+        key,
+        generation,
+        () => {
+          if (isClass) void dispatchBranchClassMutationRef.current?.(key, generation)
+          else void dispatchBranchTextMutationRef.current?.(key, generation)
+        },
+        BRANCH_TEXT_DISPATCH_DEBOUNCE_MS,
+      )
+    },
+    [session],
+  )
 
   /**
-   * Re-arm every buffered edit whose debounced write was cancelled by a session
-   * end that KEPT it.
+   * May a re-arm still write this captured mutation?
    *
-   * Called from the handshake when the document that answers is the one the
-   * previous session was on (round 16 X2). A plain teardown keeps both buffers
-   * — the page never went anywhere — but cancels every debounce timer, so a
-   * prop typed inside the debounce window before the detach kept its preview
-   * and its buffered entry with nothing left to write it. The prop buffer has
-   * no save-time flush at all, so without this the edit is simply never made.
-   *
-   * Entries currently being written are skipped: their own dispatch re-fires if
-   * the buffer moved under it, and a second timer for the same identity is the
-   * parallel-write race the in-flight markers exist to stop. That is
-   * {@link resumePlan}, which is where the rule is tested.
+   * Exactly the two questions the capture scheduler asks, in the same order:
+   * a mutation that would not have armed a timer when it was captured must not
+   * get one now either (a `class` capture with no source location, an identity
+   * parked for the AI queue). Named because `session.start` takes it too, and
+   * a session whose `resume` answered "everything" would be a different
+   * answer to the same question.
    */
-  const resumeBufferedDispatches = useCallback(() => {
-    const propEntries = pendingPropEditsRef.current.map((entry) => ({
-      key: propEditKey(entry.target.selector, entry.propName),
-      selector: entry.target.selector,
-      propName: entry.propName,
-    }))
-    for (const entry of resumePlan(propEntries, branchPropInFlight.current)) {
-      scheduleBranchPropDispatch(entry.selector, entry.propName)
-    }
-    // Exactly the two questions the capture scheduler asks, in the same order:
-    // a mutation that would not have armed a timer when it was captured must
-    // not get one now either (a `class` capture with no source location, an
-    // identity parked for the AI queue).
-    const mutationEntries = mutationsRef.current
-      .filter(
-        (m) =>
-          shouldProbeTextMutation(m, {
-            inFlight: branchTextInFlight.current,
-            queued: queuedForAiRef.current,
-          }) || shouldProbeClassMutation(m, { inFlight: branchTextInFlight.current }),
-      )
-      .map((m) => ({ key: mutationIdentity(m), mutation: m }))
-    for (const entry of resumePlan(mutationEntries, branchTextInFlight.current)) {
-      scheduleBranchMutationDispatch(entry.mutation)
-    }
-  }, [scheduleBranchPropDispatch, scheduleBranchMutationDispatch])
+  const isMutationResumeEligible = useCallback(
+    (m: Mutation): boolean =>
+      shouldProbeTextMutation(m, {
+        inFlight: session.inFlightKeys("text"),
+        queued: queuedForAiRef.current,
+      }) ||
+      shouldProbeClassMutation(m, { inFlight: session.inFlightKeys("text") }),
+    [session],
+  )
+
   // Assigned during render, like the hook's other always-latest mirrors, so the
-  // adapter effect's handshake always calls the current one.
-  resumeBufferedDispatchesRef.current = resumeBufferedDispatches
+  // adapter effect's handshake always re-arms through the current schedulers.
+  scheduleBranchPropDispatchRef.current = scheduleBranchPropDispatch
+  scheduleBranchMutationDispatchRef.current = scheduleBranchMutationDispatch
+  mutationResumeEligibleRef.current = isMutationResumeEligible
 
   useEffect(() => {
     const adapter = adapterRef.current
     if (!adapter) return
-    // Capture the timers Map at effect-mount so the cleanup uses the
-    // same instance the effect's setTimeout calls populated (satisfies
-    // the lint rule about ref.current potentially changing between
-    // mount and cleanup, even though useRef preserves identity here).
-    const timers = branchTextDispatchTimers.current
-    // Same local-capture for the in-flight set (added with the Codex
-    // P0 #1 fix so the dispatch can detect stale-race conditions).
-    const inFlight = branchTextInFlight.current
-    // Same captures for the prop auto-commit timers/in-flight set.
-    const propTimers = branchPropDispatchTimers.current
-    const propInFlight = branchPropInFlight.current
+    // The lane's markers, as a live read-only view. The two `shouldProbe`
+    // predicates below take a set, and they have to see the marker a dispatch
+    // took a moment ago rather than a copy from effect-mount time.
+    const inFlight = session.inFlightKeys("text")
     const unsubCaptured = adapter.onMutationCaptured((m) => {
       // THE tag, for both buffers' sake: the bridge knows nothing about
       // sessions, so the shell stamps the capture with the document it came
@@ -5010,10 +3805,10 @@ export function useEditorEditing({
       // live session's number and `coalesceCapturedMutation` takes the
       // incoming fields, so a re-edited entry belongs to the session that
       // re-edited it. See `retireForeignEntries`.
-      const tagged: Mutation = { ...m, generation: adapterGenerationRef.current }
+      const tagged: Mutation = { ...m, generation: session.generation }
       // Coalesce by identity, preserving the first `before` (see
       // coalesceCapturedMutation). "Edit a field repeatedly" → one entry.
-      setMutations((prev) => coalesceCapturedMutation(prev, tagged))
+      session.updateMutations((prev) => coalesceCapturedMutation(prev, tagged))
       // Branch mode: kick off (or reset) a debounced immediate-dispatch
       // so every edit writes straight to the working tree as an
       // uncommitted change — there is no separate Save step.
@@ -5176,7 +3971,7 @@ export function useEditorEditing({
         // this edit (chat refuses the hand-off, the proposal or the write
         // fails), and the honest fallback is the deterministic dialog this
         // route skipped, which needs the real candidate list.
-        bridgeDraftsByPendingIdRef.current.set(p.pendingId, p)
+        session.holdDraft(p.pendingId, p)
         iterationEdit.intercept(iterationEdit.args)
         return
       }
@@ -5271,23 +4066,24 @@ export function useEditorEditing({
       // out), so also resolve the id through the buffers to its dispatch
       // key and check the key-level in-flight sets (codex).
       if (inFlightOverrideIdsRef.current.has(p.id)) return
-      const pendingProp = pendingPropEditsRef.current.find((e) => e.id === p.id)
+      const pendingProp = session.getSnapshot().propEdits.find((e) => e.id === p.id)
       if (
         pendingProp &&
-        branchPropInFlight.current.has(
+        session.isInFlight(
+          "prop",
           propEditKey(pendingProp.target.selector, pendingProp.propName),
         )
       ) {
         return
       }
-      const bufferedMutation = mutationsRef.current.find((m) => m.id === p.id)
+      const bufferedMutation = session.getSnapshot().mutations.find((m) => m.id === p.id)
       if (
         bufferedMutation &&
-        branchTextInFlight.current.has(mutationIdentity(bufferedMutation))
+        session.isInFlight("text", mutationIdentity(bufferedMutation))
       ) {
         return
       }
-      const queued = mutationsRef.current.some(
+      const queued = session.getSnapshot().mutations.some(
         (m) => m.id === p.id && queuedForAiRef.current.has(mutationIdentity(m)),
       )
       if (!queued) {
@@ -5304,26 +4100,28 @@ export function useEditorEditing({
       unsubOverrideReverted()
       unsubOverrideUnverified()
       unsubResize()
-      // Cancel any in-flight debounced branch-mode text dispatches; the
-      // adapter is going away (new mount or unmount), so firing the
-      // timer afterwards would call into a stale adapter ref.
-      for (const t of timers.values()) {
-        clearTimeout(t)
-      }
-      timers.clear()
-      // Drop the in-flight identity set too — once the adapter is gone,
-      // any pending dispatch will short-circuit on the `adapter` null
-      // check, but a stale identity in the set would block future
-      // dispatches when a new adapter mounts.
-      inFlight.clear()
       dispatchBranchTextMutationRef.current = null
-      // Same teardown for the prop auto-commit timers/in-flight set, using the
-      // captured locals (not ref.current, which may have changed by cleanup).
-      for (const t of propTimers.values()) {
-        clearTimeout(t)
-      }
-      propTimers.clear()
-      propInFlight.clear()
+      // Both lanes back to rest. The adapter is going away (a new mount or an
+      // unmount), so a debounce that fired afterwards would call into an
+      // adapter that is gone, and a marker left behind would block the first
+      // dispatch for that identity once a new adapter attaches. One call per
+      // lane, and neither touches the other.
+      //
+      // WHEN THIS RUNS, said correctly. React runs the previous cleanup before
+      // it re-runs an effect whose dependencies changed, so the cleanup at the
+      // teardown-time `adapterReadyMarker` bump is the PREVIOUS run's, and it
+      // does run. An earlier version of this comment claimed it did not.
+      //
+      // Nothing depends on it being skipped. W2 and X2 do not need timers to
+      // survive a detach: `session.end()` cancels every timer and clears both
+      // lanes whatever its reason, and what re-arms the kept entries is the
+      // next handshake's resume plan, not a timer left running. So on the
+      // teardown path these two calls are a no-op after the end that already
+      // happened. Where they matter is the other path: this effect re-running
+      // on one of its own dependencies while the session stays live, with no
+      // `end()` before it, which is the case the note below is about.
+      session.resetLane("prop")
+      session.resetLane("text")
     }
     // `handleDragMove` / `handleInsertAtPoint` / `handleResize` are listed so a
     // future edit that makes one reactive cannot silently strand a stale
@@ -5338,12 +4136,13 @@ export function useEditorEditing({
     //
     // And re-running is NOT free — an earlier version of this comment claimed
     // "the cleanup just unsubscribes, so re-running is safe" and that is wrong.
-    // The cleanup below also `clearTimeout`s every pending debounced dispatch
-    // and `.clear()`s both in-flight guard sets (the Codex P0 #1 out-of-order
+    // The cleanup below also takes BOTH lanes back to rest, which cancels every
+    // armed debounced write and drops every in-flight marker (the out-of-order
     // overwrite guard). Re-running mid-edit therefore DROPS debounced edits and
-    // reopens the race those sets exist to close. If you make anything in this
-    // dep list reactive, make the cleanup re-entrant-safe first.
+    // reopens the race those markers exist to close. If you make anything in
+    // this dep list reactive, make the cleanup re-entrant-safe first.
   }, [
+    session,
     adapterReadyMarker,
     scheduleBranchMutationDispatch,
     handleDragMove,
@@ -5389,24 +4188,23 @@ export function useEditorEditing({
 
   const handleReloadAfterConflict = useCallback(() => {
     setConflict(null)
-    setMutations([])
     fileHashesRef.current = {}
     // Cleared BEFORE the session ends, not after: ending it says how many held
     // edits the reload threw away, and that sentence is the last word here.
     setSaveStatus(null)
     // A reload ends the drafts' session as surely as a teardown does, without
-    // detaching the adapter — the bridge comes back a fresh instance numbering
+    // detaching the adapter: the bridge comes back a fresh instance numbering
     // its drafts from `dom-pending-1` again. So it goes through the same one
-    // function: the generation moves, every in-flight continuation stops where
-    // it is, and the prompt, the queue, the dialog rows and the maps are all
-    // emptied together.
+    // function, and it clears NOTHING of its own first. The captured mutations
+    // used to be emptied by hand on the line above this one, which took them
+    // out of the buffer before the end could count them, so the reload was the
+    // one end that threw work away without saying how much (findings S2, T4).
     //
-    // Nothing is handed back to the bridge. The reload below destroys the state
-    // those ids name, and the instance that would receive a cancel is not the
-    // one that issued them. This is the one asymmetry with a teardown, and it
-    // is now said out loud rather than being the difference between two code
-    // paths that looked alike.
-    endBridgeSessionRef.current?.({ reason: "reload", cancelWithBridge: false })
+    // `cancelWithBridge` is true, for the same reason the detach passes true:
+    // the bridge is still there. The reload below is REQUESTED THROUGH it, so
+    // it is listening when the cancels go out, and a draft handed back is a
+    // preview reverted rather than one left on screen belonging to nothing.
+    endBridgeSessionRef.current?.({ reason: "reload", cancelWithBridge: true })
     adapterRef.current?.clearPropOverrides()
     adapterRef.current?.clearAttrOverrides()
     adapterRef.current?.clearClassOverrides()
@@ -5532,9 +4330,9 @@ export function useEditorEditing({
           // Same tag as the designer's own prop edits: the agent's proposal is
           // about the document on screen when it arrived, and it sits in the
           // same buffer. See `retireForeignEntries`.
-          generation: adapterGenerationRef.current,
+          generation: session.generation,
         }
-        setPendingPropEdits((prev) => {
+        session.updatePropEdits((prev) => {
           // Last-write-wins per (selector, propName) — mirrors
           // handlePropEdit so multiple agent proposals on the same
           // prop collapse to the latest value.
@@ -5622,20 +4420,37 @@ export function useEditorEditing({
         setSaveStatus(reason)
         return { ok: false, reason }
       }
+      // THE ONE WRITE IN THIS HOOK THAT SITS OUTSIDE THE SESSION, deliberately.
+      // Every other lane's write is a page-bound source edit, and a page change
+      // is the honest reason to abandon it. This one is the agent's file
+      // rewrite answering a chat turn: the caller is the chat runtime waiting
+      // for an answer, not the iframe, so the write has to complete and report
+      // whatever the page does. Cancelling it on the session's signal would
+      // half-answer the agent, and returning `stale` would leave the turn with
+      // no answer at all.
+      //
+      // The generation is captured BEFORE the await, so the status lines below
+      // can still be guarded: a departed page's "Agent applied…" must not land
+      // over the line saying what the page change discarded.
+      const generation = session.generation
       const result = await adapter.applyEdit(overwrite)
       if (result.kind === "failed") {
-        setSaveStatus(
-          `Agent proposal failed (${verb}) for ${proposal.file}: ${result.reason}`,
-        )
+        if (session.isCurrent(generation)) {
+          setSaveStatus(
+            `Agent proposal failed (${verb}) for ${proposal.file}: ${result.reason}`,
+          )
+        }
         return { ok: false, reason: result.reason }
       }
       chatTurnDirtyRef.current = true
-      setSaveStatus(
-        `Agent applied (${verb}) ${proposal.file}.`,
-      )
+      if (session.isCurrent(generation)) {
+        setSaveStatus(
+          `Agent applied (${verb}) ${proposal.file}.`,
+        )
+      }
       return { ok: true }
     },
-    [scheduleBranchPropDispatch],
+    [scheduleBranchPropDispatch, session],
   )
 
   const runSaveAll = useCallback(async (): Promise<
@@ -5644,22 +4459,6 @@ export function useEditorEditing({
     saveStartedRef.current = false
     const adapter = adapterRef.current
     if (!adapter) return { ok: true } // nothing to do, trivially ok
-    // THE SESSION THIS SAVE BELONGS TO, captured once at the top.
-    //
-    // A save is several requests in a row, and the page can be replaced between
-    // any two of them: the AI-queue flush runs an LLM on the server and takes
-    // as long as that takes, and the scoped-CSS flush is one request per
-    // mutation. Everything after the boundary would act on the wrong document.
-    // It resolves a stylesheet against the NEW page, writes the departed page's
-    // scoped-CSS mutations into it, clears the new page's preview overrides,
-    // and reloads it.
-    //
-    // So: the signal goes to every request whose transport takes one, and every
-    // await is followed by a staleness check that stops the save where it is.
-    // The lanes' own `isStaleGeneration` guards cover a single edit; this
-    // covers the multi-request run.
-    const generation = adapterGenerationRef.current
-    const sessionSignal = adapterAbortRef.current?.signal
     /**
      * Stop the save because the document went away. Touches no overrides, no
      * mutations, and reloads nothing: the buffer still holds whatever was not
@@ -5668,6 +4467,10 @@ export function useEditorEditing({
      * The in-flight LLM snapshot IS cleared, because it is the save dialog's
      * own "asking AI to interpret these N edits" panel and leaving it up would
      * describe a request that is over.
+     *
+     * Called ONCE, from below the run. A step inside the run that comes back
+     * stale returns `null` rather than reporting, so the report is written in
+     * one place whichever of the four awaits the page change landed in.
      */
     const stopForPageChange = (): { ok: false; reason: string } => {
       setSavePendingLLMInput(null)
@@ -5741,27 +4544,27 @@ export function useEditorEditing({
       //
       // In practice this should rarely be hit: `MutationDisambiguationDialog`
       // (driven by `disambiguationPrompt`) now opens automatically the
-      // moment an item lands in `pendingDisambiguations`, at capture time —
-      // well before the designer ever reaches Save. This gate is
+      // moment an item lands in the dialog's rows, at capture time, well
+      // before the designer ever reaches Save. This gate is
       // belt-and-braces for the gap between capture and the dialog
       // mounting (or a dialog dismissed via Escape without an explicit
       // choice, which — same as its Cancel button — discards rather than
       // resolves).
-      // Read the ALWAYS-CURRENT ref, not the closed-over state. `handleSaveAll`
-      // does not depend on `pendingDisambiguations` (depending on it would
-      // rebuild the callback every time one lands), so the captured value can
-      // be stale — and a stale 0 here would return `{ ok: true }` and show
-      // "saved!" with nothing written, which is the exact failure this guard
-      // exists to prevent. `pendingDisambiguationsRef` is assigned on
-      // every render for precisely this read-at-fire-time case.
+      // Read the SESSION, not a closed-over value. `handleSaveAll` does not
+      // depend on the dialog's rows (depending on them would rebuild the
+      // callback every time one lands), so a captured value could be stale.
+      // A stale 0 here would return `{ ok: true }` and show "saved!" with
+      // nothing written, which is the exact failure this guard exists to
+      // prevent. The snapshot is current at the moment it is read, which is
+      // precisely this read-at-fire-time case.
       // Both counts, because only one dialog is on screen at a time: an edit
       // whose question is still queued is exactly as unwritable as the one
       // being asked about, and it appears in no other count.
-      const pendingDisambiguationCount =
-        pendingDisambiguationsRef.current.length + modalQueueRef.current.length
+      const parkedRows = session.getSnapshot().rows.length
+      const pendingDisambiguationCount = parkedRows + session.queuedCount
       const gate = saveGate({
-        pendingDisambiguations: pendingDisambiguationsRef.current.length,
-        queuedModalRequests: modalQueueRef.current.length,
+        pendingDisambiguations: parkedRows,
+        queuedModalRequests: session.queuedCount,
         mutations: directMutations.length,
         scoped: scopedOverrideMutations.length,
       })
@@ -5788,388 +4591,433 @@ export function useEditorEditing({
       directMutations: directMutations.length,
       scopedOverrides: scopedOverrideMutations.length,
     })
-    try {
-      // Buffered structural + prop edits no longer exist: every
-      // direct-manipulation edit dispatches to the working tree the
-      // moment it's made (branch mode). This flush is now solely the
-      // AI-queue drain — the fuzzy DOM mutations the deterministic lane
-      // refused mid-edit, applied here via the llm-patch bundle.
-      // Dispatch DOM mutation log as a single llm-patch bundle.
-      if (directMutations.length > 0) {
-        const selection = useEditorStore.getState().editorSelection
-        const baseHashes = { ...fileHashesRef.current }
-        // Eagerly snapshot the input the LLM would see (capped at 10
-        // entries, mirroring the server's truncation). The dialog
-        // renders this WHILE the request is in flight so the designer
-        // sees "Asking AI to interpret these N edits" instead of a
-        // blank spinner. If the server's fast-path handles the bundle
-        // (no LLM call), the dialog clears this on response.
-        //
-        // This is the commit/flush path — it dispatches with
-        // `llmFallback: 'patch'` (below) to APPLY queued fuzzy edits via
-        // the LLM, so the progress snapshot is wanted here (unlike the
-        // typing-time path, which queues silently).
-        setSavePendingLLMInput(
-          directMutations.slice(0, 10).map((m) => ({
-            id: m.id,
-            kind: m.kind,
-            sourceLoc: m.sourceLoc,
-            target: m.target,
-            before: m.before.length > 200 ? m.before.slice(0, 200) + '…' : m.before,
-            after: m.after.length > 200 ? m.after.slice(0, 200) + '…' : m.after,
-          })),
-        )
-        // Phase E1 — normalize the panel's "this instance" default on
-        // any callsite-scope mutation the designer didn't explicitly
-        // toggle. The panel surfaces the toggle (default: this-instance)
-        // for any non-class callsite mutation with a known callsiteLoc;
-        // here we make the saved disambiguationChoice match the UI's
-        // visual default. Without this step, an unticked toggle falls
-        // through with disambiguationChoice=undefined and the prompt
-        // has no clean routing rule.
-        const normalizedMutations: Mutation[] = directMutations.map((m) => {
-          if (
-            m.disambiguationChoice === undefined &&
-            m.scope === "callsite" &&
-            m.callsiteLoc !== null &&
-            m.kind !== "class"
-          ) {
-            return { ...m, disambiguationChoice: "this-instance" }
-          }
-          return m
-        })
-        // Reset the streaming buffer on dispatch. Tokens accumulate into
-        // a ref (cheap per-token) and the throttled state push (below)
-        // is what triggers re-renders in the dialog.
-        saveStreamingTextRef.current = ''
-        setSaveStreamingText('')
-        let streamFlushTimer: ReturnType<typeof setTimeout> | null = null
-        const flushStreamSoon = () => {
-          if (streamFlushTimer !== null) return
-          // ~33ms cadence = 30fps, smooth enough for live text rendering
-          // without re-rendering the whole dialog per token.
-          streamFlushTimer = setTimeout(() => {
-            streamFlushTimer = null
-            setSaveStreamingText(saveStreamingTextRef.current)
-          }, 33)
-        }
-        const result = await adapter.applyEdit(
-          {
-            kind: "llm-patch",
-            id: makeEditId(),
-            target: selection ?? {
-              targetId: "llm-patch-bundle",
-              selector: "llm-patch-bundle",
-              ancestry: [],
-            },
-            mutations: normalizedMutations,
-            // Commit/flush path: APPLY via the LLM lane (parallel per-file
-            // server-side), not escalate. This is where queued fuzzy edits
-            // actually get written to the worktree.
-            llmFallback: "patch" as const,
-            ...(Object.keys(baseHashes).length > 0 ? { baseHashes } : {}),
-          },
-          {
-            onLLMStreamStart: () => {
-              // Reset on start so a previous save's tail doesn't
-              // contaminate the new run. (We also reset above on
-              // dispatch, but the start event arrives only AFTER the
-              // server confirmed the LLM actually fires — i.e. the
-              // fast-path was bypassed.)
-              saveStreamingTextRef.current = ''
-              setSaveStreamingText('')
-            },
-            onLLMStreamDelta: (delta) => {
-              saveStreamingTextRef.current += delta
-              flushStreamSoon()
-            },
-            // The session's lifetime. Ending it aborts this request, which
-            // settles as an ordinary failed result; the check below is what
-            // decides what happens next, before the result is even read.
-            ...(sessionSignal ? { signal: sessionSignal } : {}),
-          },
-        )
-        // The throttled timer is this call's own, so it is cancelled whichever
-        // way the flush ends. Cancelled BEFORE the staleness check, or a stale
-        // save would leave a timeout writing into the dialog behind it.
-        if (streamFlushTimer !== null) {
-          clearTimeout(streamFlushTimer)
-          streamFlushTimer = null
-        }
-        // THE HASHES FIRST, whatever happens to the save. They are disk truth,
-        // not session state: this write landed on files that are the same files
-        // whichever page is on screen now, and dropping the new hashes leaves
-        // the shell's stale-target guard holding pre-write ones. The next save
-        // of the same file then 409s against Desde's own change. Same order as
-        // the four single-edit lanes.
-        if (result.kind === "applied" && result.newHashes) {
-          fileHashesRef.current = {
-            ...fileHashesRef.current,
-            ...result.newHashes,
-          }
-        }
-        // THE PAGE. Checked before the rest of the result is read: an abort
-        // arrives here as `failed`, and reporting "Save failed at DOM mutations:
-        // edit request cancelled" would blame the write for the page going away.
-        if (isStaleGeneration(generation, adapterGenerationRef.current)) {
-          return stopForPageChange()
-        }
-        // Final flush so the last tokens land in state even if the
-        // throttled timer hadn't fired yet.
-        setSaveStreamingText(saveStreamingTextRef.current)
-        if (result.kind === "failed") {
-          // `'chat'` fallback mode: the deterministic lane couldn't apply
-          // the bundle, so the server returned `needsChat`. Hand it to
-          // the chat agent and clear the dispatched mutations from the
-          // buffer instead of surfacing a save error.
-          if (result.needsChat && escalateToChatRef.current) {
-            // A refused hand-off submitted nothing, whether the client guard
-            // refused it (a chat is already streaming) or the server refused
-            // the POST. Dropping the bundle here and returning ok:true
-            // reported a successful Save for edits that were never written and
-            // no longer existed anywhere.
-            //
-            // BOUNDED, like the iteration lane's two hand-offs. This await sits
-            // behind the save dialog, which shows no close control while a save
-            // is in flight, and the server can hold a submission for a
-            // concurrency slot for as long as the project's other turns take.
-            // Without a bound the designer is left in front of a modal they
-            // cannot dismiss, over a save that may never answer.
-            const handOff = escalateToChatRef.current
-            const prompt = buildEditEscalationPrompt(normalizedMutations)
-            // The session's own signal goes in alongside the deadline's, the
-            // way the iteration lane's hand-offs pass theirs. Without it the
-            // helper aborts only on the timeout: a page changed while this POST
-            // is out would still let the turn be ACCEPTED, and an accepted turn
-            // edits files for the page that left. The stale check below cannot
-            // retract a turn that has already been taken.
-            const outcome = await settleHandOff(
-              (signal) => handOff(prompt, { signal }),
-              sessionSignal ? { signal: sessionSignal } : {},
-            )
-            // The hand-off can hold for as long as the project's other turns
-            // take, which is easily long enough for the page to be replaced.
-            // Both arms below write `mutations`, so neither may run for a
-            // document that is gone.
-            if (isStaleGeneration(generation, adapterGenerationRef.current)) {
-              return stopForPageChange()
+    // THE SESSION THIS SAVE BELONGS TO, as one run.
+    //
+    // A save is several requests in a row, and the page can be replaced between
+    // any two of them: the AI-queue flush runs an LLM on the server and takes
+    // as long as that takes, and the scoped-CSS flush is one request per
+    // mutation. Everything after the boundary would act on the wrong document.
+    // It resolves a stylesheet against the NEW page, writes the departed page's
+    // scoped-CSS mutations into it, clears the departed page's preview
+    // overrides, and reloads the page that replaced it.
+    //
+    // So every await below is a `ctx.step`, which does not hand back a value
+    // once the session has ended, and `ctx.signal` goes to every request whose
+    // transport takes one. The lanes' own runs cover a single edit; this one
+    // covers the multi-request run. `null` is this body's way of saying "the
+    // page changed"; the caller below does the reporting.
+    const run = await session.run(async (
+      ctx,
+    ): Promise<{ ok: true } | { ok: false; reason: string } | null> => {
+      try {
+        // Buffered structural + prop edits no longer exist: every
+        // direct-manipulation edit dispatches to the working tree the
+        // moment it's made (branch mode). This flush is now solely the
+        // AI-queue drain — the fuzzy DOM mutations the deterministic lane
+        // refused mid-edit, applied here via the llm-patch bundle.
+        // Dispatch DOM mutation log as a single llm-patch bundle.
+        if (directMutations.length > 0) {
+          const selection = useEditorStore.getState().editorSelection
+          const baseHashes = { ...fileHashesRef.current }
+          // Eagerly snapshot the input the LLM would see (capped at 10
+          // entries, mirroring the server's truncation). The dialog
+          // renders this WHILE the request is in flight so the designer
+          // sees "Asking AI to interpret these N edits" instead of a
+          // blank spinner. If the server's fast-path handles the bundle
+          // (no LLM call), the dialog clears this on response.
+          //
+          // This is the commit/flush path — it dispatches with
+          // `llmFallback: 'patch'` (below) to APPLY queued fuzzy edits via
+          // the LLM, so the progress snapshot is wanted here (unlike the
+          // typing-time path, which queues silently).
+          setSavePendingLLMInput(
+            directMutations.slice(0, 10).map((m) => ({
+              id: m.id,
+              kind: m.kind,
+              sourceLoc: m.sourceLoc,
+              target: m.target,
+              before: m.before.length > 200 ? m.before.slice(0, 200) + '…' : m.before,
+              after: m.after.length > 200 ? m.after.slice(0, 200) + '…' : m.after,
+            })),
+          )
+          // Phase E1 — normalize the panel's "this instance" default on
+          // any callsite-scope mutation the designer didn't explicitly
+          // toggle. The panel surfaces the toggle (default: this-instance)
+          // for any non-class callsite mutation with a known callsiteLoc;
+          // here we make the saved disambiguationChoice match the UI's
+          // visual default. Without this step, an unticked toggle falls
+          // through with disambiguationChoice=undefined and the prompt
+          // has no clean routing rule.
+          const normalizedMutations: Mutation[] = directMutations.map((m) => {
+            if (
+              m.disambiguationChoice === undefined &&
+              m.scope === "callsite" &&
+              m.callsiteLoc !== null &&
+              m.kind !== "class"
+            ) {
+              return { ...m, disambiguationChoice: "this-instance" }
             }
-            if (outcome === "timed-out") {
-              // Neither accepted nor refused: the POST is aborted and the
-              // mutations stay in the buffer, so this is a failed save with
-              // everything still there to retry.
-              const reason = SAVE_HANDOFF_TIMEOUT_STATUS
+            return m
+          })
+          // Reset the streaming buffer on dispatch. Tokens accumulate into
+          // a ref (cheap per-token) and the throttled state push (below)
+          // is what triggers re-renders in the dialog.
+          saveStreamingTextRef.current = ''
+          setSaveStreamingText('')
+          let streamFlushTimer: ReturnType<typeof setTimeout> | null = null
+          const flushStreamSoon = () => {
+            if (streamFlushTimer !== null) return
+            // ~33ms cadence = 30fps, smooth enough for live text rendering
+            // without re-rendering the whole dialog per token.
+            streamFlushTimer = setTimeout(() => {
+              streamFlushTimer = null
+              // THE PAGE, again, and at fire time. The session can end in the
+              // 33 ms between arming this and its callback, and the buffer it
+              // would push is the departed save's.
+              if (!ctx.current) return
+              setSaveStreamingText(saveStreamingTextRef.current)
+            }, 33)
+          }
+          // THE HASHES COME OFF THE PROMISE ITSELF, before staleness is decided.
+          // They are disk truth, not session state: this write landed on files
+          // that are the same files whichever page is on screen now, and dropping
+          // the new hashes leaves the shell's stale-target guard holding pre-write
+          // ones. The next save of the same file then 409s against Desde's own
+          // change (finding X5). Same order as the four single-edit lanes.
+          const write = adapter.applyEdit(
+            {
+              kind: "llm-patch",
+              id: makeEditId(),
+              target: selection ?? {
+                targetId: "llm-patch-bundle",
+                selector: "llm-patch-bundle",
+                ancestry: [],
+              },
+              mutations: normalizedMutations,
+              // Commit/flush path: APPLY via the LLM lane (parallel per-file
+              // server-side), not escalate. This is where queued fuzzy edits
+              // actually get written to the worktree.
+              llmFallback: "patch" as const,
+              ...(Object.keys(baseHashes).length > 0 ? { baseHashes } : {}),
+            },
+            {
+              // BOTH ANSWER THE PAGE FIRST. The stream buffer is one ref
+              // shared by every save, and this request keeps streaming for as
+              // long as the server takes, which can be past the page change
+              // that ended this save's session. A chunk that lands afterwards
+              // used to append to that ref and render the departed save's text
+              // inside the NEXT save's dialog.
+              onLLMStreamStart: () => {
+                if (!ctx.current) return
+                // Reset on start so a previous save's tail doesn't
+                // contaminate the new run. (We also reset above on
+                // dispatch, but the start event arrives only AFTER the
+                // server confirmed the LLM actually fires — i.e. the
+                // fast-path was bypassed.)
+                saveStreamingTextRef.current = ''
+                setSaveStreamingText('')
+              },
+              onLLMStreamDelta: (delta) => {
+                if (!ctx.current) return
+                saveStreamingTextRef.current += delta
+                flushStreamSoon()
+              },
+              // The session's lifetime. Ending it aborts this request, which
+              // settles as an ordinary failed result; the step below is what
+              // decides what happens next, before the result is even read.
+              signal: ctx.signal,
+            },
+          ).then((outcome) => {
+            if (outcome.kind === "applied" && outcome.newHashes) {
+              fileHashesRef.current = {
+                ...fileHashesRef.current,
+                ...outcome.newHashes,
+              }
+            }
+            return outcome
+          })
+          // THE PAGE. Answered before the rest of the result is read: an abort
+          // arrives here as `failed`, and reporting "Save failed at DOM mutations:
+          // edit request cancelled" would blame the write for the page going away.
+          const bundle = await ctx.step(write)
+          // The throttled timer is this call's own, so it is cancelled whichever
+          // way the flush ends. Cancelled BEFORE the staleness answer is read, or
+          // a stale save would leave a timeout writing into the dialog behind it.
+          if (streamFlushTimer !== null) {
+            clearTimeout(streamFlushTimer)
+            streamFlushTimer = null
+          }
+          if (bundle.stale) return null
+          const result = bundle.value
+          // Final flush so the last tokens land in state even if the
+          // throttled timer hadn't fired yet.
+          setSaveStreamingText(saveStreamingTextRef.current)
+          if (result.kind === "failed") {
+            // `'chat'` fallback mode: the deterministic lane couldn't apply
+            // the bundle, so the server returned `needsChat`. Hand it to
+            // the chat agent and clear the dispatched mutations from the
+            // buffer instead of surfacing a save error.
+            if (result.needsChat && escalateToChatRef.current) {
+              // A refused hand-off submitted nothing, whether the client guard
+              // refused it (a chat is already streaming) or the server refused
+              // the POST. Dropping the bundle here and returning ok:true
+              // reported a successful Save for edits that were never written and
+              // no longer existed anywhere.
+              //
+              // BOUNDED, like the iteration lane's two hand-offs. This await sits
+              // behind the save dialog, which shows no close control while a save
+              // is in flight, and the server can hold a submission for a
+              // concurrency slot for as long as the project's other turns take.
+              // Without a bound the designer is left in front of a modal they
+              // cannot dismiss, over a save that may never answer.
+              const handOff = escalateToChatRef.current
+              const prompt = buildEditEscalationPrompt(normalizedMutations)
+              // The session's own signal goes in alongside the deadline's, the
+              // way the iteration lane's hand-offs pass theirs. Without it the
+              // helper aborts only on the timeout: a page changed while this POST
+              // is out would still let the turn be ACCEPTED, and an accepted turn
+              // edits files for the page that left. The step below cannot retract
+              // a turn that has already been taken.
+              //
+              // The hand-off can hold for as long as the project's other turns
+              // take, which is easily long enough for the page to be replaced.
+              // Both arms below write `mutations`, so neither may run for a
+              // document that is gone.
+              const settled = await ctx.step(
+                settleHandOff((signal) => handOff(prompt, { signal }), {
+                  signal: ctx.signal,
+                }),
+              )
+              if (settled.stale) return null
+              const outcome = settled.value
+              if (outcome === "timed-out") {
+                // Neither accepted nor refused: the POST is aborted and the
+                // mutations stay in the buffer, so this is a failed save with
+                // everything still there to retry.
+                const reason = SAVE_HANDOFF_TIMEOUT_STATUS
+                setSavePendingLLMInput(null)
+                setSaveStatus(reason)
+                return { ok: false, reason }
+              }
+              const aftermath = afterEscalation(
+                outcome === "accepted",
+                normalizedMutations.length === 1
+                  ? "This edit"
+                  : `These ${normalizedMutations.length} edits`,
+              )
               setSavePendingLLMInput(null)
+              if (aftermath.buffer === "keep") {
+                setSaveStatus(aftermath.status)
+                return { ok: false, reason: aftermath.status }
+              }
+              const escalatedIds = new Set(normalizedMutations.map((m) => m.id))
+              session.updateMutations((prev) =>
+                prev.filter((m) => !escalatedIds.has(m.id)),
+              )
+              // The identities go with the mutations. Chat owns these edits now,
+              // and an identity left in the queue makes the capture scheduler
+              // skip the next inline text edit on that same element, then keeps
+              // the unload warning up over a queue that is empty in fact.
+              if (pruneAiQueue(queuedForAiRef.current, normalizedMutations)) {
+                setAiQueueCount(queuedForAiRef.current.size)
+              }
+              return { ok: true }
+            }
+            // Phase E3 — if the route returned 409 + conflicts, surface
+            // them in the panel with reload / force-overwrite recovery.
+            // Mutations stay in the buffer so the designer can re-save
+            // after choosing.
+            if (result.conflicts && result.conflicts.length > 0) {
+              setConflict({
+                files: result.conflicts,
+                pendingMutations: directMutations.slice(),
+              })
+              const reason = `External-edit conflict on ${result.conflicts.length} file(s): choose a recovery option.`
               setSaveStatus(reason)
               return { ok: false, reason }
             }
-            const aftermath = afterEscalation(
-              outcome === "accepted",
-              normalizedMutations.length === 1
-                ? "This edit"
-                : `These ${normalizedMutations.length} edits`,
-            )
+            const reason = `Save failed at DOM mutations: ${result.reason}`
+            setSaveStatus(reason)
             setSavePendingLLMInput(null)
-            if (aftermath.buffer === "keep") {
-              setSaveStatus(aftermath.status)
-              return { ok: false, reason: aftermath.status }
-            }
-            const escalatedIds = new Set(normalizedMutations.map((m) => m.id))
-            setMutations((prev) =>
-              prev.filter((m) => !escalatedIds.has(m.id)),
-            )
-            // The identities go with the mutations. Chat owns these edits now,
-            // and an identity left in the queue makes the capture scheduler
-            // skip the next inline text edit on that same element, then keeps
-            // the unload warning up over a queue that is empty in fact.
-            if (pruneAiQueue(queuedForAiRef.current, normalizedMutations)) {
-              setAiQueueCount(queuedForAiRef.current.size)
-            }
-            return { ok: true }
+            return { ok: false, reason }
           }
-          // Phase E3 — if the route returned 409 + conflicts, surface
-          // them in the panel with reload / force-overwrite recovery.
-          // Mutations stay in the buffer so the designer can re-save
-          // after choosing.
-          if (result.conflicts && result.conflicts.length > 0) {
-            setConflict({
-              files: result.conflicts,
-              pendingMutations: directMutations.slice(),
-            })
-            const reason = `External-edit conflict on ${result.conflicts.length} file(s): choose a recovery option.`
+          // (The new hashes were recorded above, before the staleness check, so a
+          // save the page change stops still leaves them on record.)
+          // Capture the LLM trace if the server invoked it. Absent on the
+          // fast-path; presence is what the dialog uses to decide between
+          // "Saved" (deterministic) and "AI made the changes" (LLM) framing.
+          if (result.kind === "applied" && result.llmTrace) {
+            setSaveLastLLMTrace(result.llmTrace)
+          }
+          // Clear the in-flight LLM input regardless of which path ran —
+          // success means the dialog should move from "Asking AI…" to the
+          // outcome view (either the trace, or just "Saved" for fast-path).
+          setSavePendingLLMInput(null)
+          const directIds = new Set(normalizedMutations.map((m) => m.id))
+          session.updateMutations((prev) => prev.filter((m) => !directIds.has(m.id)))
+          // WS3 (codex round-9): the flush just landed every mutation in this
+          // bundle — release their preview overrides so the bridge stops
+          // re-asserting/reporting them. (The failure paths above deliberately
+          // do NOT resolve: on conflict/hard-failure the mutations stay
+          // buffered for re-save and the preview legitimately rides; on
+          // needsChat escalation chat lands the edit later and HMR shows
+          // truth — the store's give-up timeout bounds the assertion either
+          // way.)
+          for (const m of normalizedMutations) {
+            resolveOverrideSettled(adapter, m.id, "confirmed")
+          }
+          // The queued fuzzy edits in this bundle were just applied, so they
+          // leave the AI queue with them and the Commit badge resets.
+          if (pruneAiQueue(queuedForAiRef.current, normalizedMutations)) {
+            setAiQueueCount(queuedForAiRef.current.size)
+          }
+        }
+
+        // 3. Dispatch each ancestor-resolution class mutation as its own
+        //    scoped-css-override edit. Sequential (not parallel): later
+        //    edits may upsert additional rules into the same style block
+        //    a previous edit just wrote, and the applicator is idempotent
+        //    PER (file, scopeClass, deepSelector) but the file is shared.
+        //    Failures stop the loop; succeeded edits stay.
+        //
+        // Track the EXPLICIT ids of mutations whose applyEdit succeeded
+        // so the cleanup filter never confuses skipped mutations
+        // (malformed sourceLoc, empty class diff) with saved ones —
+        // slicing by a counter would silently remove the wrong ids.
+        const scopedOverrideSavedIds: string[] = []
+        // Resolving a destination stylesheet can ask the DOCUMENT
+        // (`GET_STYLESHEET_TARGETS`), so a page replaced in that window makes the
+        // answer describe a different app's stylesheets. Nothing may be written
+        // against it.
+        const resolvedFlush = await ctx.step(resolveStyleDestination())
+        if (resolvedFlush.stale) return null
+        const flushDestination = resolvedFlush.value
+        if (!flushDestination.ok && scopedOverrideMutations.length > 0) {
+          setSaveStatus(`Save failed: ${flushDestination.reason}`)
+          return { ok: false, reason: flushDestination.reason }
+        }
+        const flushOpts = flushDestination.ok ? flushDestination.opts : {}
+        /** Widest blast radius across this flush, reported once at the end. */
+        let widestRadius: number | undefined
+        for (const m of scopedOverrideMutations) {
+          // Shared with the branch-mode class dispatch so the Tailwind-
+          // resolution + deep-selector logic stays single-sourced. Framework-aware
+          // (Vue → scoped-css-override; React → jsx-style). Null = no sourceLoc /
+          // no class diff → skip (matches the prior inline guards).
+          const edit = buildStyleEdit(m, flushOpts)
+          if (!edit) continue
+          if (
+            m.anchorMatchCount !== undefined &&
+            m.anchorMatchCount > (widestRadius ?? 1)
+          ) {
+            widestRadius = m.anchorMatchCount
+          }
+          if (isUnsupportedStyleBuild(edit)) {
+            // Surface loudly rather than skip — the change can't be expressed on
+            // this substrate (e.g. an inline-only React app + a shadow utility).
+            const reason = `Save failed: ${edit.unsupported}`
             setSaveStatus(reason)
             return { ok: false, reason }
           }
-          const reason = `Save failed at DOM mutations: ${result.reason}`
-          setSaveStatus(reason)
-          setSavePendingLLMInput(null)
-          return { ok: false, reason }
+          // Same rule as the bundle above, and the same reason for answering
+          // before the result is read: an abort is a `failed` result, and the
+          // page going away is not a failure of this write.
+          const scoped = await ctx.step(
+            adapter.applyEdit(edit, { signal: ctx.signal }),
+          )
+          if (scoped.stale) return null
+          const result = scoped.value
+          if (result.kind === "failed") {
+            const reason = `Save failed at scoped-css-override ${scopedOverrideSavedIds.length + 1}: ${result.reason}`
+            setSaveStatus(reason)
+            return { ok: false, reason }
+          }
+          scopedOverrideSavedIds.push(m.id)
         }
-        // (The new hashes were recorded above, before the staleness check, so a
-        // save the page change stops still leaves them on record.)
-        // Capture the LLM trace if the server invoked it. Absent on the
-        // fast-path; presence is what the dialog uses to decide between
-        // "Saved" (deterministic) and "AI made the changes" (LLM) framing.
-        if (result.kind === "applied" && result.llmTrace) {
-          setSaveLastLLMTrace(result.llmTrace)
+        if (scopedOverrideSavedIds.length > 0) {
+          const savedIds = new Set(scopedOverrideSavedIds)
+          session.updateMutations((prev) => prev.filter((m) => !savedIds.has(m.id)))
+          // "N > 1 must say N" (§ 9g.8 item 4). One rule can cover several
+          // elements — on React that is the normal shape for a first-party
+          // component, whose internal root stamp is shared by every instance —
+          // and the number was already in hand.
+          const radiusNote = blastRadiusNotice(widestRadius)
+          if (radiusNote) setSaveStatus(radiusNote)
         }
-        // Clear the in-flight LLM input regardless of which path ran —
-        // success means the dialog should move from "Asking AI…" to the
-        // outcome view (either the trace, or just "Saved" for fast-path).
-        setSavePendingLLMInput(null)
-        const directIds = new Set(normalizedMutations.map((m) => m.id))
-        setMutations((prev) => prev.filter((m) => !directIds.has(m.id)))
-        // WS3 (codex round-9): the flush just landed every mutation in this
-        // bundle — release their preview overrides so the bridge stops
-        // re-asserting/reporting them. (The failure paths above deliberately
-        // do NOT resolve: on conflict/hard-failure the mutations stay
-        // buffered for re-save and the preview legitimately rides; on
-        // needsChat escalation chat lands the edit later and HMR shows
-        // truth — the store's give-up timeout bounds the assertion either
-        // way.)
-        for (const m of normalizedMutations) {
-          resolveOverrideSettled(adapter, m.id, "confirmed")
-        }
-        // The queued fuzzy edits in this bundle were just applied, so they
-        // leave the AI queue with them and the Commit badge resets.
-        if (pruneAiQueue(queuedForAiRef.current, normalizedMutations)) {
-          setAiQueueCount(queuedForAiRef.current.size)
-        }
-      }
 
-      // 3. Dispatch each ancestor-resolution class mutation as its own
-      //    scoped-css-override edit. Sequential (not parallel): later
-      //    edits may upsert additional rules into the same style block
-      //    a previous edit just wrote, and the applicator is idempotent
-      //    PER (file, scopeClass, deepSelector) but the file is shared.
-      //    Failures stop the loop; succeeded edits stay.
-      //
-      // Track the EXPLICIT ids of mutations whose applyEdit succeeded
-      // so the cleanup filter never confuses skipped mutations
-      // (malformed sourceLoc, empty class diff) with saved ones —
-      // slicing by a counter would silently remove the wrong ids.
-      const scopedOverrideSavedIds: string[] = []
-      const flushDestination = await resolveStyleDestination()
-      // Resolving a destination stylesheet can ask the DOCUMENT
-      // (`GET_STYLESHEET_TARGETS`), so a page replaced in that window makes the
-      // answer describe a different app's stylesheets. Nothing may be written
-      // against it.
-      if (isStaleGeneration(generation, adapterGenerationRef.current)) {
-        return stopForPageChange()
-      }
-      if (!flushDestination.ok && scopedOverrideMutations.length > 0) {
-        setSaveStatus(`Save failed: ${flushDestination.reason}`)
-        return { ok: false, reason: flushDestination.reason }
-      }
-      const flushOpts = flushDestination.ok ? flushDestination.opts : {}
-      /** Widest blast radius across this flush, reported once at the end. */
-      let widestRadius: number | undefined
-      for (const m of scopedOverrideMutations) {
-        // Shared with the branch-mode class dispatch so the Tailwind-
-        // resolution + deep-selector logic stays single-sourced. Framework-aware
-        // (Vue → scoped-css-override; React → jsx-style). Null = no sourceLoc /
-        // no class diff → skip (matches the prior inline guards).
-        const edit = buildStyleEdit(m, flushOpts)
-        if (!edit) continue
-        if (
-          m.anchorMatchCount !== undefined &&
-          m.anchorMatchCount > (widestRadius ?? 1)
-        ) {
-          widestRadius = m.anchorMatchCount
+        // Clear bridge overrides. Files are now the source of truth; any
+        // HMR/reload from the substrate will reflect them.
+        adapter.clearPropOverrides()
+        adapter.clearAttrOverrides()
+        // After a successful save the bridge's preview state diverges
+        // from the on-disk state — Vue's HMR may or may not pick up
+        // every change cleanly, and the bridge previously mutated DOM
+        // that Vue doesn't own. A hard reload re-syncs.
+        //
+        // Vite HMR sometimes misses editor file writes — suspected
+        // causes: race between fs.writeFile and chokidar, a stale HMR
+        // WebSocket left over from a long-lived dev-server session, manual
+        // textContent mutation pre-empting Vue's diff. Designers were
+        // seeing "the save did nothing" — the file WAS written, but the
+        // iframe kept showing the pre-edit render until manual refresh.
+        //
+        // Backstop via the bridge's RELOAD_PROTOTYPE message — runs
+        // `window.location.reload()` inside the iframe, which preserves
+        // the live SPA URL. A previous version did `iframe.src =
+        // iframe.src` from the parent, which bounces to the start route
+        // because the src ATTRIBUTE doesn't track SPA navigation.
+        const anyApplied =
+          directMutations.length > 0 || scopedOverrideSavedIds.length > 0
+        if (anyApplied) {
+          requestPrototypeReload(iframeRef.current, "save-success")
         }
-        if (isUnsupportedStyleBuild(edit)) {
-          // Surface loudly rather than skip — the change can't be expressed on
-          // this substrate (e.g. an inline-only React app + a shadow utility).
-          const reason = `Save failed: ${edit.unsupported}`
-          setSaveStatus(reason)
-          return { ok: false, reason }
-        }
-        const result = await adapter.applyEdit(
-          edit,
-          sessionSignal ? { signal: sessionSignal } : undefined,
-        )
-        // Same rule as the bundle above, and the same reason for checking
-        // before the result is read: an abort is a `failed` result, and the
-        // page going away is not a failure of this write.
-        if (isStaleGeneration(generation, adapterGenerationRef.current)) {
-          return stopForPageChange()
-        }
-        if (result.kind === "failed") {
-          const reason = `Save failed at scoped-css-override ${scopedOverrideSavedIds.length + 1}: ${result.reason}`
-          setSaveStatus(reason)
-          return { ok: false, reason }
-        }
-        scopedOverrideSavedIds.push(m.id)
-      }
-      if (scopedOverrideSavedIds.length > 0) {
-        const savedIds = new Set(scopedOverrideSavedIds)
-        setMutations((prev) => prev.filter((m) => !savedIds.has(m.id)))
-        // "N > 1 must say N" (§ 9g.8 item 4). One rule can cover several
-        // elements — on React that is the normal shape for a first-party
-        // component, whose internal root stamp is shared by every instance —
-        // and the number was already in hand.
-        const radiusNote = blastRadiusNotice(widestRadius)
-        if (radiusNote) setSaveStatus(radiusNote)
-      }
 
-      // Clear bridge overrides. Files are now the source of truth; any
-      // HMR/reload from the substrate will reflect them.
-      adapter.clearPropOverrides()
-      adapter.clearAttrOverrides()
-      // After a successful save the bridge's preview state diverges
-      // from the on-disk state — Vue's HMR may or may not pick up
-      // every change cleanly, and the bridge previously mutated DOM
-      // that Vue doesn't own. A hard reload re-syncs.
-      //
-      // Vite HMR sometimes misses editor file writes — suspected
-      // causes: race between fs.writeFile and chokidar, a stale HMR
-      // WebSocket left over from a long-lived dev-server session, manual
-      // textContent mutation pre-empting Vue's diff. Designers were
-      // seeing "the save did nothing" — the file WAS written, but the
-      // iframe kept showing the pre-edit render until manual refresh.
-      //
-      // Backstop via the bridge's RELOAD_PROTOTYPE message — runs
-      // `window.location.reload()` inside the iframe, which preserves
-      // the live SPA URL. A previous version did `iframe.src =
-      // iframe.src` from the parent, which bounces to the start route
-      // because the src ATTRIBUTE doesn't track SPA navigation.
-      const anyApplied =
-        directMutations.length > 0 || scopedOverrideSavedIds.length > 0
-      if (anyApplied) {
-        requestPrototypeReload(iframeRef.current, "save-success")
+        const elapsed = Math.round(performance.now() - saveStart)
+        const summary = [
+          directMutations.length > 0 && `${directMutations.length} DOM mutation(s)`,
+          scopedOverrideSavedIds.length > 0 &&
+            `${scopedOverrideSavedIds.length} scoped CSS override(s)`,
+        ]
+          .filter(Boolean)
+          .join(", ")
+        setSaveStatus(`Saved ${summary}.`)
+        console.info("[Editor] save-success", {
+          elapsed_ms: elapsed,
+          mutations: directMutations.length,
+          scopedOverrides: scopedOverrideSavedIds.length,
+        })
+      } catch (err) {
+        // Same rule as the two style lanes: a departed page's error is not news
+        // about the page in front of the designer now. `ctx.step` turns a throw
+        // from a departed session into a stale answer, so this covers only a
+        // throw from the synchronous code between the steps. `null` is the
+        // body's word for "the page changed", and the `finally` below still
+        // clears `saving` on the way out.
+        if (!ctx.current) return null
+        saveOk = false
+        const reason = `Save threw: ${(err as Error).message}`
+        setSaveStatus(reason)
+        saveThrowReason = reason
+        console.warn("[Editor] save-threw", err)
+      } finally {
+        setSaving(false)
       }
-
-      const elapsed = Math.round(performance.now() - saveStart)
-      const summary = [
-        directMutations.length > 0 && `${directMutations.length} DOM mutation(s)`,
-        scopedOverrideSavedIds.length > 0 &&
-          `${scopedOverrideSavedIds.length} scoped CSS override(s)`,
-      ]
-        .filter(Boolean)
-        .join(", ")
-      setSaveStatus(`Saved ${summary}.`)
-      console.info("[Editor] save-success", {
-        elapsed_ms: elapsed,
-        mutations: directMutations.length,
-        scopedOverrides: scopedOverrideSavedIds.length,
-      })
-    } catch (err) {
-      saveOk = false
-      const reason = `Save threw: ${(err as Error).message}`
-      setSaveStatus(reason)
-      saveThrowReason = reason
-      console.warn("[Editor] save-threw", err)
-    } finally {
-      setSaving(false)
-    }
-    if (!saveOk) {
-      // saveThrowReason is set only when the catch block ran. Any earlier
-      // failure path returned its own typed reason above (the function
-      // doesn't reach this point on those branches). Defensive fallback
-      // for completeness.
-      return { ok: false, reason: saveThrowReason ?? "Save failed." }
-    }
-    return { ok: true }
+      if (!saveOk) {
+        // saveThrowReason is set only when the catch block ran. Any earlier
+        // failure path returned its own typed reason above (the function
+        // doesn't reach this point on those branches). Defensive fallback
+        // for completeness.
+        return { ok: false, reason: saveThrowReason ?? "Save failed." }
+      }
+      return { ok: true }
+    })
+    // ONE report for the page change, whichever await it landed in. A step that
+    // came back stale returned `null` above; a session that ended after the
+    // last step is caught by `run`'s own final answer, which withholds the
+    // value the same way. Either way the save stopped and nothing further was
+    // applied, which is the one sentence both of them mean.
+    if (run.stale || run.value === null) return stopForPageChange()
+    return run.value
     // `buildStyleEdit` (called in the body) is a stable top-level import —
     // no dep entry needed. This deps array previously named the unrelated
     // `buildScopedCssOverrideEdit` callback (stale from before
@@ -6178,7 +5026,7 @@ export function useEditorEditing({
     // `resolveStyleDestination` IS a hook value and IS read in the body (the
     // flush needs a destination stylesheet before it can build a React
     // override), so it is named — it is stable, so this costs nothing.
-  }, [iframeRef, mutations, resolveStyleDestination])
+  }, [iframeRef, mutations, resolveStyleDestination, session])
 
   /**
    * `runSaveAll` plus the one fact the save dialog needs and cannot read off
@@ -6267,6 +5115,14 @@ export function useEditorEditing({
     saving,
     saveStatus,
     /**
+     * How many times {@link saveStatus} has been written, the same text
+     * included. A consumer that has to react to a NEW notice rather than to a
+     * DIFFERENT one reads this alongside the text: see the toast effect in
+     * `banner-toasts.tsx`, which without it swallowed a repeat of the very
+     * sentence that names what the designer lost.
+     */
+    saveStatusSeq,
+    /**
      * Why the last started save failed, or null. The save dialog's failure
      * signal: structured, so it cannot be confused with another lane's prose
      * on the shared `saveStatus` channel.
@@ -6314,17 +5170,6 @@ export function useEditorEditing({
      */
     invalidateAttributionManifest,
   }
-}
-
-/**
- * Coerce a PropControlValue (string | number | boolean) into the JSON
- * payload value the iteration-data prompt expects. Identity for the
- * three primitive types; future PropControlValue expansions land here.
- */
-function serializePropValue(
-  v: PropControlValue,
-): string | number | boolean {
-  return v
 }
 
 /**

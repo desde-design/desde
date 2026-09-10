@@ -770,7 +770,18 @@ export type BridgeToShellMessage =
     }
   | {
       type: "MUTATION_RESOLUTION_FAILED"
-      payload: { id: string; reason: string; selector: string }
+      payload: {
+        id: string
+        reason: string
+        selector: string
+        /**
+         * Which document this message was produced in. Required: the shell
+         * drops a message from a document that is no longer the one it
+         * handshaked with, and an absent id cannot be told apart from the
+         * current one.
+         */
+        documentId: string
+      }
     }
   // The live-preview half of a buffered prop/attr edit reporting whether it
   // landed. `ok: false` means the iframe shows NOTHING for this edit — the
@@ -1136,6 +1147,12 @@ export type BridgeMessage = BridgeToShellMessage | ShellToBridgeMessage
  */
 export interface BridgeMutation {
   id: string
+  /**
+   * Which document this message was produced in. Required: the shell drops a
+   * message from a document that is no longer the one it handshaked with, and
+   * an absent id cannot be told apart from the current one.
+   */
+  documentId: string
   kind: "text" | "attr" | "class" | "style"
   sourceLoc: string | null
   /**
@@ -1171,7 +1188,18 @@ export interface BridgeMutation {
 /** Wire-format pending (awaiting-disambiguation) mutation. */
 export interface BridgePendingMutation {
   pendingId: string
-  draft: Omit<BridgeMutation, "instancePath">
+  /**
+   * Which document this message was produced in. Required: the shell drops a
+   * message from a document that is no longer the one it handshaked with, and
+   * an absent id cannot be told apart from the current one.
+   */
+  documentId: string
+  /**
+   * The id lives on the envelope above, not in here: this draft is the shape
+   * the shell hands back to the disambiguation UI, and one message carries one
+   * document.
+   */
+  draft: Omit<BridgeMutation, "instancePath" | "documentId">
   /**
    * V-for siblings sharing one `data-desde-src`, in document order. Exactly
    * one entry has `origin: true` — the one the designer actually edited.
