@@ -6,7 +6,7 @@
  * through the injected `sendToShell`. Class body verbatim; the TABLE_EDGE_*
  * tuning consts and TableEdgeBandHit type co-moved.
  */
-import { sendToShell } from "./bridge-runtime"
+import { bridgeDocumentId, sendToShell } from "./bridge-runtime"
 import { generateSelector } from "./selector-engine"
 import { hasBridgeOwnAttr, isBridgeOwnElement } from "./selector-helpers"
 import type { SelectModeOverlay } from "./bridge-types"
@@ -205,7 +205,14 @@ export class TableEdgeOverlayManager implements SelectModeOverlay {
       // eslint-disable-next-line no-console
       console.log("[table-edge] sending TABLE_EDGE_CONTEXT_MENU", payload)
     }
-    sendToShell({ type: "TABLE_EDGE_CONTEXT_MENU", payload })
+    // The document is stamped on the payload, read at SEND time: the shell's
+    // menu hook is handed `payload` alone, and an open band menu whose page
+    // has been replaced would hand the departed page's selectors to a
+    // write-capable chat turn.
+    sendToShell({
+      type: "TABLE_EDGE_CONTEXT_MENU",
+      payload: { ...payload, documentId: bridgeDocumentId },
+    })
     this.hideBand()
   }
 

@@ -1809,6 +1809,99 @@ describe("useEditorEditing: the bridge session", () => {
     }
   })
 
+  it("does not install a selection read that settles after the page changed (codex C-D)", async () => {
+    // The read is PARKED across the boundary, which is the shape the finding
+    // names: `selectBySelector` used to apply its reply to the adapter's own
+    // selection and notify the shell INSIDE the awaited request, before the
+    // calling lane's `ctx.step` could say the answer was stale. The adapter
+    // now drops a reply from a departed document; this row is the hook's half
+    // of it, and it is the only place a settle can be put on the far side of
+    // a page change.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    FakeBridgeAdapter.parkSelectBySelector = true
+    try {
+      const { rerender } = await mount()
+      const departed = lastFakeAdapter()
+      await act(async () => {
+        departed.emitSelection(styleSelection)
+      })
+      await waitFor(() =>
+        expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+      )
+      await act(async () => {
+        departed.emitCapture(capture("m1", "hello"))
+      })
+      const typing = await waitForApply()
+      await act(async () => {
+        // The write lands and names the selected element's file, which arms
+        // the refresh.
+        typing.settle(applied({ "src/App.vue": "hash-2" }))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      // Let the first retry fire. It parks.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300)
+      })
+      expect(departed.parkedSelectReads).toHaveLength(1)
+
+      await changeDocument(rerender, "doc-b")
+      const arrived = lastFakeAdapter()
+      expect(arrived).not.toBe(departed)
+
+      // The departed page finally answers, with its own element.
+      await act(async () => {
+        departed.parkedSelectReads[0]!.settle(styleSelection)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      // Nothing was installed. The store is where the boundary left it, and
+      // the retry chain did not carry on onto the page that arrived.
+      expect(useEditorStore.getState().editorSelection).toBeNull()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      expect(arrived.selectBySelectorCalls).toEqual([])
+      expect(departed.selectBySelectorCalls).toEqual(["#panel"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("a late selection from the departed page cannot become what an edit aims at", async () => {
+    // The hand-off case. `editorSelection.editTarget` is the file, line and
+    // column an edit writes to, so a selection installed from the page that
+    // left would aim the next edit at the departed page's file.
+    const { rerender } = await mount()
+    const departed = lastFakeAdapter()
+    await act(async () => {
+      departed.emitSelection(styleSelection)
+    })
+    await waitFor(() =>
+      expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+    )
+
+    await changeDocument(rerender, "doc-b")
+    const arrived = lastFakeAdapter()
+
+    // The departed page announces its element again, after the boundary.
+    await act(async () => {
+      departed.emitSelection(styleSelection)
+      await Promise.resolve()
+    })
+    expect(useEditorStore.getState().editorSelection).toBeNull()
+
+    // And an edit attempted now aims at nothing, rather than at
+    // `src/App.vue:10:2` on a page nobody is looking at.
+    await act(async () => {
+      editing()!.handlePropEdit("label", "Renamed")
+      await Promise.resolve()
+    })
+    expect(arrived.applies).toEqual([])
+    expect(departed.applies).toHaveLength(0)
+  })
+
   it("re-selects once on its own page and stops when the stamp has moved", async () => {
     // The control for the test above, on a page that never changed: the
     // refresh has to still happen, and it has to stop as soon as the file hash

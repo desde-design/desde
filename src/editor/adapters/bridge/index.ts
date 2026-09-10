@@ -76,7 +76,7 @@ import {
  * arrive with no id, which reads as "not the current document" here and would
  * drop them all — so it is refused at the handshake instead of half-working.
  */
-const REQUIRED_BRIDGE_VERSION = '2026-09-10b-stamp-every-write'
+const REQUIRED_BRIDGE_VERSION = '2026-09-10c-selection-document-id'
 
 /**
  * Phase 6 feature gate. Bridges below this version don't know about
@@ -1289,6 +1289,22 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    * `RESIZE_COMMITTED`, `PROP_OVERRIDE_RESULT`, `ATTR_OVERRIDE_RESULT`,
    * `OVERRIDE_REVERTED`, `OVERRIDE_UNVERIFIED`.
    *
+   * `ELEMENT_INSPECTED` and `ELEMENTS_INSPECTED` are in that family too, and
+   * they are the reason it is not only about writes. They SET THE SELECTION,
+   * and the selection's `editTarget` is the file, line and column every later
+   * edit writes to, so a reply from the page that has just been replaced would
+   * aim the next edit at the departed page's file. Their id sits on the
+   * message rather than in the payload, because one of them answers with
+   * `payload: null` and the other with an array, and neither can carry a
+   * field. A foreign one is dropped BEFORE the selection is applied and before
+   * a pending request is resolved with it; the parked request still settles,
+   * with `null` (or the empty list), which is what an unresolved selector
+   * already answers.
+   *
+   * A document change settles the rest of them: see
+   * `discardSelectionFromDepartedDocument`, called from `handleBridgeReady` on
+   * both the unsolicited path and the handshake path.
+   *
    * The rest are unstamped on purpose, and each group has its own reason:
    *
    * - `BRIDGE_READY` IS the id. It is where the shell learns which document it
@@ -1298,27 +1314,27 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    *   page-background messages other consumers read. None of them writes
    *   anything. The worst a stale one does is clear a selection or ask for a
    *   tree refresh, and the new page corrects both on its own.
-   * - Replies correlated by a requestId the SHELL minted: `ELEMENTS_INSPECTED`,
+   * - Replies correlated by a requestId the SHELL minted:
    *   `ELEMENT_INSPECTION_UNRESOLVED`, `STRUCTURE_CAPTURED`,
    *   `RENDERED_VALUE_READ`, `MEASUREMENTS_READ`, `STYLE_PROVENANCE_RESULT`.
    *   The id already pairs an answer with its own question, each of them reads
    *   rather than writes, and every pending request is rejected on `dispose()`
    *   and bounded by its own timeout, so a missing reply cannot strand one.
+   *   `ELEMENT_INSPECTION_UNRESOLVED` is the closest call of the five, since it
+   *   settles the same pending request the selection replies do. It settles it
+   *   with `null`, which is exactly what a foreign reply is made to do, so
+   *   stamping it would change nothing.
    * - `DOM_EDIT_MODE_EXITED` has no requestId, but it resolves ONE shell-issued
    *   exit that carries its own timeout. A stale one resolves that exit early;
    *   it writes nothing.
    *
-   * `ELEMENT_INSPECTED` without a requestId is the honest edge, and it is not
-   * claimed to be safe by the paragraph above. It SETS the selection, and the
-   * selection is what a later edit aims at, so a stale one would aim at an
-   * element the page on screen may not have. The bridge emits it from two
-   * sources. First, when the user clicks inside the iframe. The user can only
-   * click the page they are looking at, so the queue window is real but the
-   * input that fills it is not. Second, when the shell sends HIGHLIGHT_COMPONENT,
-   * which is a shell-initiated round trip. The reply can arrive after the next
-   * document's handshake, with no click involved. The first reason supports
-   * leaving this message unstamped. The second does not. Stamping ELEMENT_INSPECTED
-   * is a named follow-up.
+   * Two message types the shell does NOT route here are stamped anyway, for
+   * consumers that read the same stream with their own listeners:
+   * `TABLE_EDGE_CONTEXT_MENU` and `ELEMENT_CONTEXT_MENU`. Their menus submit a
+   * chat instruction built from the page's own selectors, so an open menu that
+   * outlives its page is a write aimed at the wrong one. `useTableEdgeMenu`
+   * and `useElementContextMenu` do the checking; the id is on their payloads
+   * because those hooks are handed the payload alone.
    */
   private handleMessage(event: MessageEvent): void {
     if (!this.currentTarget) return
@@ -1337,6 +1353,18 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         this.handleBridgeReady(message.payload?.version, message.payload?.documentId)
         break
       case 'ELEMENT_INSPECTED':
+        if (!this.fromCurrentDocument(message.documentId)) {
+          this.warnForeignDocument('ELEMENT_INSPECTED', message.documentId)
+          // A reply the shell is WAITING on still has to settle, or the lane
+          // that asked stays parked for good. Null, not a rejection: null is
+          // already what an unresolved selector answers with
+          // (`ELEMENT_INSPECTION_UNRESOLVED` resolves the same way), so every
+          // caller keeps the handling it has and no new failure path appears.
+          if (message.requestId) {
+            this.resolveRequest(message.requestId, null)
+          }
+          break
+        }
         if (message.requestId) {
           this.resolveRequest(message.requestId, message.payload)
         } else {
@@ -1347,6 +1375,16 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         // Phase 6 multi-select response. Always paired with an
         // INSPECT_MANY requestId — the bridge doesn't currently emit
         // ELEMENTS_INSPECTED unsolicited.
+        if (!this.fromCurrentDocument(message.documentId)) {
+          this.warnForeignDocument('ELEMENTS_INSPECTED', message.documentId)
+          // The empty list is this reply's null: `selectMany` already treats
+          // "no resolved selectors" as a clear rather than as "keep what you
+          // had", so the parked caller settles down the path it already has.
+          if (message.requestId) {
+            this.resolveManyRequest(message.requestId, [])
+          }
+          break
+        }
         if (message.requestId) {
           this.resolveManyRequest(message.requestId, message.payload ?? [])
         }
@@ -1747,12 +1785,60 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     // refusing to talk to must not be able to move the document id and so end
     // the live session.
     this.lastBridgeDocumentId = documentId
+    // A DOCUMENT REPLACEMENT, which is narrower than "the id moved". A first
+    // handshake moves it from null, and so does the first handshake after a
+    // `dispose()` with the same page still on screen (an attach the shell
+    // re-runs for an unrelated dependency). Neither replaced the page, and
+    // clearing the selection there would take the designer's selection away
+    // for no reason.
+    if (previousDocumentId !== null && documentId !== previousDocumentId) {
+      this.discardSelectionFromDepartedDocument()
+    }
     if (this.bridgeReadyResolve) {
       this.bridgeReadyResolve()
     }
     if (unsolicited && documentId !== previousDocumentId) {
       this.notifyDocumentChanged(documentId)
     }
+  }
+
+  /**
+   * The page was replaced, so everything the selection path was holding for
+   * the departed page goes now.
+   *
+   * Two things happen here, and both are about the same fact: an edit aims at
+   * the selection's `editTarget`, which is a file, a line and a column in the
+   * departed page's source.
+   *
+   * First, every parked selection request settles. `dispose()` REJECTS its
+   * pending requests, because there is no adapter left to answer them; here
+   * there is one, and the page it is talking to simply cannot answer the old
+   * page's question. So these settle the way an unresolved selector settles:
+   * `null` for a single read, the empty list for a multi read. A caller that
+   * handles "the selector did not resolve" already handles this, and nothing
+   * has to learn a new rejection.
+   *
+   * Second, the current selection clears and the listeners hear it, down the
+   * same path `ELEMENT_DESELECTED` takes. The shell's own listener writes
+   * `editorSelection`, so the shell cannot be left aiming at an element that
+   * went away with the page.
+   *
+   * This does not fight the hook's own document boundary. `useEditorEditing`
+   * clears `editorSelection` only when its effect tears down; on a document
+   * change it moves the session and leaves the selection to the adapter, so
+   * this is the one writer, not the second one.
+   */
+  private discardSelectionFromDepartedDocument(): void {
+    for (const pending of this.pendingRequests.values()) {
+      pending.resolve(null)
+    }
+    this.pendingRequests.clear()
+    for (const pending of this.pendingManyRequests.values()) {
+      pending.resolve([])
+    }
+    this.pendingManyRequests.clear()
+    this.currentSelection = null
+    this.notifySelectionListeners()
   }
 
   private notifyDocumentChanged(documentId: string): void {

@@ -47,7 +47,7 @@ function emitBridgeReady(
   setup: MockIframeSetup,
   // A version the shell accepts, with the document id every accepted bridge
   // reports (round 16 X3).
-  version = '2026-09-10b-stamp-every-write',
+  version = '2026-09-10c-selection-document-id',
   documentId = 'doc-a',
 ): void {
   const event = new Event('message') as MessageEvent

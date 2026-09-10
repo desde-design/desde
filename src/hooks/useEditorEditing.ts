@@ -610,6 +610,22 @@ export function useEditorEditing({
   const saveStatus = saveStatusState.text
   const saveStatusSeq = saveStatusState.seq
   /**
+   * The document the shell is connected to right now, as a value the shell can
+   * render from.
+   *
+   * `session.documentId` holds the same id, but the session is a mutable
+   * object and nothing re-renders when it moves. Surfaces that have to REACT
+   * to the page being replaced need a value, and two do: the element
+   * right-click menu and the table-edge band menu both stay open across a page
+   * change otherwise, and both submit a chat instruction built from the page's
+   * own selectors.
+   *
+   * Written in `enterDocument`, which is the one place the boundary moves, so
+   * this follows both the unsolicited-ready path and the handshake path. Null
+   * between an adapter detaching and the next handshake completing.
+   */
+  const [bridgeDocumentId, setBridgeDocumentId] = useState<string | null>(null)
+  /**
    * THE bridge session. One document in the iframe, as an object.
    *
    * `useMemo` with no dependencies rather than `useRef`, because the session is
@@ -866,6 +882,10 @@ export function useEditorEditing({
       // `bridgeDocumentId` is `string | null` and `start` takes the same,
       // so there is no `?? ""` here: an empty string would be ADOPTED as a
       // real document and the next handshake would read as a change.
+      // AFTER the end above and before the resume below, so a surface that
+      // renders off this id sees the new page exactly once, at the same moment
+      // the session adopts it.
+      setBridgeDocumentId(documentId)
       const { resumed } = session.start(documentId, (mutation) =>
         mutationResumeEligibleRef.current(mutation),
       )
@@ -1060,6 +1080,9 @@ export function useEditorEditing({
       setLayersError(false)
       setEditorSelection(null)
       setEditorManifest(null)
+      // No adapter, so no document. A menu still open when the adapter goes
+      // closes, which is what a detach should do to it anyway.
+      setBridgeDocumentId(null)
       // Clear component-edit state alongside the rest of the hook's
       // session-scoped state. Without this, leaving compose mode and
       // re-entering would leave the "Editing <Component>" banner up
@@ -1154,11 +1177,21 @@ export function useEditorEditing({
     async (selectors: readonly string[]): Promise<Selection[]> => {
       const adapter = adapterRef.current
       if (!adapter) return []
-      const selections = await adapter.selectMany(selectors)
+      // Through the session, like every other lane: the read is a round trip
+      // to the page, and the page can be replaced while it is out. The adapter
+      // drops a reply from a departed document on its own, so what this guard
+      // adds is the STORE write. Without it a reply that settled just before
+      // the boundary would still be written to `editorSelectionMany` after it,
+      // and the chat header would name elements from the page that left.
+      const outcome = await session.run(async (ctx) =>
+        ctx.step(adapter.selectMany(selectors)),
+      )
+      if (outcome.stale || outcome.value.stale) return []
+      const selections = outcome.value.value
       useEditorStore.getState().setEditorSelectionMany(selections)
       return selections
     },
-    [],
+    [session],
   )
 
   /**
@@ -5103,6 +5136,7 @@ export function useEditorEditing({
   return {
     setEditorActive,
     status,
+    bridgeDocumentId,
     editorSelection,
     editorManifest,
     layersRoots,

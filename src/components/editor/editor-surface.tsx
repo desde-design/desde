@@ -189,17 +189,6 @@ export function EditorSurface({
     setOpenFile(null)
     setView("editor")
   }, [])
-  // Wire the bridge's ELEMENT_CONTEXT_MENU → open the menu. Mounted at
-  // the surface level so the menu's anchor coordinates translate
-  // through the iframe's bounding rect (same pattern as table-edge).
-  const elementContextMenu = useElementContextMenu({
-    iframeRef,
-    // Only listen when the prototype is the foreground view — in
-    // file-editor mode the iframe is hidden and CM6 has its own
-    // contextmenu inside the editor area.
-    active: view === "editor",
-  })
-
   // Escalate-to-chat bridge. A direct-manipulation edit the deterministic
   // lane can't apply (`'chat'` fallback mode → `needsChat`) is handed to
   // the chat agent instead of the in-modal LLM lane. `editing` is created
@@ -274,6 +263,21 @@ export function EditorSurface({
     enabled: true,
     manifestSource,
     escalateToChat: handleEditEscalation,
+  })
+  // Wire the bridge's ELEMENT_CONTEXT_MENU → open the menu. Mounted at
+  // the surface level so the menu's anchor coordinates translate
+  // through the iframe's bounding rect (same pattern as table-edge).
+  //
+  // BELOW `editing`, because it needs `editing.bridgeDocumentId`: a menu that
+  // outlived its page would hand the departed page's element to "Open in
+  // editor" or to a chat turn.
+  const elementContextMenu = useElementContextMenu({
+    iframeRef,
+    // Only listen when the prototype is the foreground view — in
+    // file-editor mode the iframe is hidden and CM6 has its own
+    // contextmenu inside the editor area.
+    active: view === "editor",
+    documentId: editing.bridgeDocumentId,
   })
   // Subscribe directly to the multi-select slice so the chat header
   // updates live; `useEditorEditing` only tracks the primary
@@ -959,6 +963,9 @@ export function EditorSurface({
     // Row/column bands are a Select-mode affordance — never draw them
     // while the user is navigating the prototype or placing comments.
     active: toolMode === "select",
+    // The page the band was drawn on. An open menu whose page has been
+    // replaced dismisses itself, and its actions refuse.
+    documentId: editing.bridgeDocumentId,
   })
 
   const showRightRail = view === "editor" && !chromeHidden

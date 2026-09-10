@@ -57,7 +57,11 @@ const INSPECTION: InspectionData = {
 
 const controller: UseElementContextMenuReturn = {
   menu: {
-    payload: { inspection: INSPECTION, menuAnchor: { x: 5, y: 5 } },
+    payload: {
+      inspection: INSPECTION,
+      menuAnchor: { x: 5, y: 5 },
+      documentId: "doc-a",
+    },
     shellAnchor: { x: 5, y: 5 },
   },
   dismiss: vi.fn(),

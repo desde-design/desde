@@ -33,6 +33,22 @@ export interface UseElementContextMenuOptions {
    * prototype in that case).
    */
   active: boolean
+  /**
+   * The document the shell has handshaked with, or null when no page is
+   * connected. `useEditorEditing` publishes it as `bridgeDocumentId`.
+   *
+   * Same two jobs as in `useTableEdgeMenu`, and the same reason for taking the
+   * shell's value rather than `adapter.bridgeDocumentId`: the adapter's
+   * `onDocumentChanged` fires only for an UNSOLICITED ready, so a page the
+   * shell handshaked with itself would move the id with no event and leave a
+   * menu open over it. `enterDocument` writes this on both paths.
+   *
+   * There is no `runAction` here to refuse at the last moment, the way the
+   * band menu has one. This menu's actions live in the component that reads
+   * `menu`, so closing the menu in the same render the id moves in is the
+   * whole refusal: there is nothing left for the component to act on.
+   */
+  documentId: string | null
 }
 
 export interface UseElementContextMenuReturn {
@@ -43,7 +59,7 @@ export interface UseElementContextMenuReturn {
 export function useElementContextMenu(
   opts: UseElementContextMenuOptions,
 ): UseElementContextMenuReturn {
-  const { iframeRef, active } = opts
+  const { iframeRef, active, documentId } = opts
   const [menu, setMenu] = useState<ElementContextMenuState | null>(null)
   const iframeRefRef = useRef(iframeRef)
   useEffect(() => {
@@ -53,12 +69,29 @@ export function useElementContextMenu(
   useEffect(() => {
     activeRef.current = active
   }, [active])
+  // The listener is bound once, so the id it compares against is read through
+  // a ref, for the same reason `active` is and synced the same way. An effect
+  // rather than a write during render: a message is delivered from the event
+  // loop, which is after the commit that ran the effect.
+  const documentIdRef = useRef(documentId)
+  useEffect(() => {
+    documentIdRef.current = documentId
+  }, [documentId])
 
   // Leaving foreground dismisses any open menu (mirrors useTableEdgeMenu).
   const [wasActive, setWasActive] = useState(active)
   if (wasActive !== active) {
     setWasActive(active)
     if (!active && menu) setMenu(null)
+  }
+
+  // The page changing dismisses any open menu. It names an element in a
+  // document that has gone, and "Open in editor" would open the departed
+  // page's file. Previous-value pattern, like `active` above.
+  const [lastDocumentId, setLastDocumentId] = useState(documentId)
+  if (lastDocumentId !== documentId) {
+    setLastDocumentId(documentId)
+    if (menu) setMenu(null)
   }
 
   useEffect(() => {
@@ -86,6 +119,13 @@ export function useElementContextMenu(
       if (!activeRef.current) return
       const payload = data.payload
       if (!payload) return
+      // From the page on screen, or not at all. A right-click posted just
+      // before a navigation is read after it. Null means no page is
+      // connected, so there is nothing this could be from.
+      const currentDocumentId = documentIdRef.current
+      if (currentDocumentId === null || payload.documentId !== currentDocumentId) {
+        return
+      }
       const iframe = currentIframeRef.current
       if (!iframe) return
       const rect = iframe.getBoundingClientRect()

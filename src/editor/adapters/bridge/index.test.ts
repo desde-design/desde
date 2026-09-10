@@ -18,7 +18,7 @@ import type { BridgeMutation, InspectionData } from "@/types/bridge"
  * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
  * so a handshake fixture has to carry both.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-10b-stamp-every-write"
+const CURRENT_BRIDGE_VERSION = "2026-09-10c-selection-document-id"
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -40,21 +40,44 @@ function makeMockIframe(): MockIframeSetup {
   return { iframe, contentWindow, postMessages }
 }
 
+/**
+ * The document the last handshake emitted through this helper reported.
+ *
+ * Selection replies name their document now, and the adapter drops one whose
+ * id is not the page it handshaked with. Defaulting to the page the test just
+ * connected to keeps the older fixtures about whatever they were about; a test
+ * that wants a message from ANOTHER document passes `documentId` itself and
+ * the spread below wins.
+ */
+let emittedDocumentId = "doc-a"
+
 /** Dispatch a MessageEvent on window with `source` pointed at the mock content window. */
 function emitFromBridge(
   contentWindow: { postMessage: ReturnType<typeof vi.fn> },
   message: Record<string, unknown>,
 ): void {
+  if (message.type === "BRIDGE_READY") {
+    const readyId = (message.payload as { documentId?: string } | undefined)
+      ?.documentId
+    if (typeof readyId === "string" && readyId.length > 0) {
+      emittedDocumentId = readyId
+    }
+  }
   const event = new Event("message") as MessageEvent
   // jsdom's MessageEvent doesn't let us pass `source` via the constructor in a
   // type-safe way, so we patch the dispatched event directly. The adapter
   // reads `event.source` and `event.data` only; this is the minimum surface.
   Object.defineProperty(event, "data", {
-    value: { source: "desde-bridge", ...message },
+    value: { source: "desde-bridge", documentId: emittedDocumentId, ...message },
   })
   Object.defineProperty(event, "source", { value: contentWindow })
   window.dispatchEvent(event)
 }
+
+// The default above is per-test state, so it is reset like any other.
+beforeEach(() => {
+  emittedDocumentId = "doc-a"
+})
 
 function makeInspectionData(overrides: Partial<InspectionData> = {}): InspectionData {
   return {
@@ -1900,4 +1923,152 @@ describe("BridgeFrameworkAdapter — every page-originated write names its docum
       expect(seen).toHaveLength(1)
     })
   }
+})
+
+/**
+ * The selection replies name their page, and a page change clears what they
+ * left behind.
+ *
+ * `ELEMENT_INSPECTED` and `ELEMENTS_INSPECTED` SET THE SELECTION, and the
+ * selection's `editTarget` is the file, line and column every later edit
+ * writes to. A reply from the page that has just been replaced therefore aims
+ * the next edit at the departed page's file, and it does that inside the
+ * awaited request, before the calling lane's own session check can say the
+ * answer is stale.
+ */
+describe("BridgeFrameworkAdapter — a selection cannot outlive its page", () => {
+  let adapter: BridgeFrameworkAdapter
+  let setup: MockIframeSetup
+
+  beforeEach(async () => {
+    adapter = new BridgeFrameworkAdapter()
+    setup = makeMockIframe()
+    const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+    })
+    await initPromise
+    setup.postMessages.length = 0
+  })
+
+  afterEach(async () => {
+    await adapter.dispose()
+  })
+
+  /** The requestId the adapter minted for the one message of this type. */
+  function requestIdOf(type: string): string {
+    const sent = setup.postMessages.find(
+      (m) => (m as { type: string }).type === type,
+    ) as { requestId: string } | undefined
+    if (!sent) throw new Error(`no ${type} was sent`)
+    return sent.requestId
+  }
+
+  /** An unsolicited handshake from another page, i.e. the page being replaced. */
+  function replacePage(documentId: string): void {
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId },
+    })
+  }
+
+  it("settles selectBySelector with null when the reply names another document", async () => {
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    const promise = adapter.selectBySelector("#panel")
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData(),
+      requestId: requestIdOf("INSPECT_SELECTOR"),
+      documentId: "doc-x",
+    })
+
+    // Null, not a rejection: an unresolved selector already answers null, so
+    // the caller keeps the handling it has.
+    await expect(promise).resolves.toBeNull()
+    // And the selection itself never moved, which is the whole point: no
+    // listener ran, so nothing shell-side is aiming at the departed page.
+    expect(seen).toEqual([])
+  })
+
+  it("ignores an unsolicited ELEMENT_INSPECTED from another document", async () => {
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData(),
+      documentId: "doc-x",
+    })
+
+    expect(seen).toEqual([])
+    expect(await adapter.selectParent()).toBeNull()
+  })
+
+  it("settles selectMany with an empty list when the reply names another document", async () => {
+    const promise = adapter.selectMany(["#a", "#b"])
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENTS_INSPECTED",
+      payload: [makeInspectionData(), makeInspectionData()],
+      requestId: requestIdOf("INSPECT_MANY"),
+      documentId: "doc-x",
+    })
+
+    await expect(promise).resolves.toEqual([])
+  })
+
+  it("settles a parked selectBySelector and clears the selection when the page is replaced", async () => {
+    // A real selection on the page that is about to go, so the clear has
+    // something to clear. Without it the deselect below would be
+    // indistinguishable from nothing happening.
+    const established = adapter.selectBySelector("#panel")
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData(),
+      requestId: requestIdOf("INSPECT_SELECTOR"),
+    })
+    expect(await established).not.toBeNull()
+    setup.postMessages.length = 0
+
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    // The second read is still out when the page changes.
+    const parked = adapter.selectBySelector("#panel")
+    replacePage("doc-b")
+
+    await expect(parked).resolves.toBeNull()
+    // The deselect the shell's own listener writes through, so `editorSelection`
+    // cannot outlive the page.
+    expect(seen).toEqual([null])
+  })
+
+  it("settles a parked selectMany with an empty list when the page is replaced", async () => {
+    const parked = adapter.selectMany(["#a"])
+    replacePage("doc-b")
+    await expect(parked).resolves.toEqual([])
+  })
+
+  it("does not clear the selection on the FIRST handshake of a page", async () => {
+    // The control. `previousDocumentId` is null before any handshake, and on a
+    // re-attach with the same page still on screen; treating that as a
+    // replacement would take the designer's selection away for no reason.
+    const fresh = new BridgeFrameworkAdapter()
+    const freshSetup = makeMockIframe()
+    const seen: (Selection | null)[] = []
+    fresh.onSelectionChange((s) => seen.push(s))
+    try {
+      const initPromise = fresh.init({ iframe: freshSetup.iframe, origin: "*" })
+      emitFromBridge(freshSetup.contentWindow, {
+        type: "BRIDGE_READY",
+        payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-first" },
+      })
+      await initPromise
+      expect(seen).toEqual([])
+    } finally {
+      await fresh.dispose()
+    }
+  })
 })

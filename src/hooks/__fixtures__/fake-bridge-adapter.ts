@@ -80,6 +80,7 @@ export function resetFakeAdapters(): void {
   // A static that is not reset here leaks into the next test, and this one
   // decides whether verification runs at all.
   FakeBridgeAdapter.verificationEnabled = false
+  FakeBridgeAdapter.parkSelectBySelector = false
 }
 
 /**
@@ -109,6 +110,13 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
    * back off.
    */
   static verificationEnabled = false
+  /**
+   * Hold every `selectBySelector` open until the test settles it.
+   *
+   * OFF by default: every test written before this one expects the read to
+   * answer at once. `resetFakeAdapters` turns it back off.
+   */
+  static parkSelectBySelector = false
 
   readonly framework: FrameworkId = "vue3"
 
@@ -330,8 +338,26 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
    * unchanged and the second comes back re-stamped had no way to be written.
    */
   readonly selectBySelectorAnswers: (Selection | null)[] = []
+  /**
+   * Selection reads parked until the test answers them, when
+   * {@link FakeBridgeAdapter.parkSelectBySelector} is on.
+   *
+   * Parking is the only way to put a page change INSIDE one of these reads,
+   * which is where the question lives: the real adapter used to apply the
+   * reply to its own selection before the calling lane could ask whether the
+   * page was still there.
+   */
+  readonly parkedSelectReads: {
+    selector: string
+    settle: (selection: Selection | null) => void
+  }[] = []
   async selectBySelector(selector: string): Promise<Selection | null> {
     this.selectBySelectorCalls.push(selector)
+    if (FakeBridgeAdapter.parkSelectBySelector) {
+      return new Promise<Selection | null>((resolve) => {
+        this.parkedSelectReads.push({ selector, settle: resolve })
+      })
+    }
     if (this.selectBySelectorAnswers.length > 0) {
       return this.selectBySelectorAnswers.shift() ?? null
     }
