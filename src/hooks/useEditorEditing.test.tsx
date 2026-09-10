@@ -568,7 +568,14 @@ describe("useEditorEditing: the bridge session", () => {
     expect(pending.signal?.aborted).toBe(true)
   })
 
-  it("does nothing with an answer that arrives after the page changed (finding V2)", async () => {
+  it("does nothing with an answer that arrives after the page changed (pin for finding V2: the retired entry is already gone; the failure arm is the signal)", async () => {
+    // A PIN, not the guard's proof. The page change retires the departed
+    // document's buffered entry before this answer lands, so the reconcile
+    // below finds nothing to act on and these assertions hold whether or not
+    // the lane narrows `stale` first. Kept because it is the success half of
+    // the boundary and a regression that DID write into the new document would
+    // still be caught here. The test below it, which settles the same apply as
+    // a failure, is the one that fails without `ctx.step`.
     const { rerender } = await mount()
     await act(async () => {
       lastFakeAdapter().emitCapture(capture("m1", "hello"))
@@ -1286,6 +1293,58 @@ describe("useEditorEditing: the bridge session", () => {
       await done
     })
     expect(editing()?.saveStatus).toBe(statusAfterChange)
+  })
+
+  it("keeps the text-branch lane's failure off the next page", async () => {
+    // The lane the migration's task list missed. It is a page-bound source
+    // write like the two above: the byte range in its edit was read off ONE
+    // document's source, and it wrote the status bar after the apply returned
+    // with no session between the two.
+    //
+    // Reachable from the harness because the hook returns the handler, which is
+    // also how the inspector reaches it (`onEditTextBranch` in
+    // `inspector-panel.tsx`). The selection only has to carry an `editTarget`,
+    // which `styleSelection` does.
+    const { rerender } = await mount()
+    await act(async () => {
+      lastFakeAdapter().emitSelection(styleSelection)
+    })
+    await waitFor(() =>
+      expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+    )
+    let done: Promise<void> | undefined
+    await act(async () => {
+      done = editing()!.handleEditTextBranch(
+        {
+          kind: "consequent",
+          valueKind: "literal",
+          value: "Yes",
+          byteStart: 120,
+          byteEnd: 125,
+        },
+        "No",
+      )
+      await Promise.resolve()
+    })
+    const write = await waitForApply()
+    expect(write.edit.kind).toBe("text-branch")
+    // The write carries the session's lifetime, so ending the session cancels
+    // it rather than leaving it to answer into a page that has gone.
+    expect(write.signal).toBeDefined()
+    await changeDocument(rerender, "doc-b")
+    expect(write.signal?.aborted).toBe(true)
+    // The line the designer is actually reading once the page changed. It is
+    // whatever the session end wrote, and the departed page's answer must not
+    // replace it.
+    const statusAfterChange = editing()?.saveStatus ?? null
+    await act(async () => {
+      // An abort arrives as an ordinary failure, which is exactly the shape
+      // that used to be reported as "Conditional text edit failed".
+      write.fail("edit request cancelled")
+      await done
+    })
+    expect(editing()?.saveStatus).toBe(statusAfterChange)
+    expect(editing()?.saveStatus ?? "").not.toContain("Conditional text edit failed")
   })
 
   it("keeps the token lane's failure off the next page (finding W5)", async () => {

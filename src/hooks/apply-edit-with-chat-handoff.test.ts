@@ -106,7 +106,7 @@ describe("applyEditWithChatHandoff", () => {
     expect(r.handoff).toMatchObject({ attempted: false, started: false })
   })
 
-  it("does not submit a hand-off once the session has moved", async () => {
+  it("does not submit a hand-off once the session has moved (finding T2)", async () => {
     // The apply is held open across a page change. This is the window the
     // caller's own guard cannot cover: it runs on the RESULT, so by the time it
     // says "stale" the chat turn has already been started. The helper enters

@@ -529,6 +529,14 @@ export class EditSession<Prompt> implements LaneSession {
     // buffers. A teardown keeps it, because the page is still on screen and
     // the buffered edits it kept belong to it.
     if (retire) this.document = null
+    // What the two partitions actually come out as, said plainly. The
+    // generation moved on the first line of this method, so when `retire` is
+    // true every buffered entry is stamped with an OLDER generation and
+    // `retireForeignEntries` retires all of them: `kept` is always empty on
+    // this branch, and the `kept` assignments below are always `[]`. The
+    // partition is not there to save entries from a retiring reason. It is
+    // there so the OTHER branch (a plain teardown, which keeps the page) can
+    // hand the buffers back unchanged through the same two names.
     const propPartition = retire
       ? retireForeignEntries(this.propEdits, this.currentGeneration)
       : { kept: [...this.propEdits], retired: [] as PropEdit[] }

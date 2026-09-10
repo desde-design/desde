@@ -230,6 +230,13 @@ export async function dispatchTextMutation(
         // bridge with no read support): the write landed, so release rather
         // than leave the override fighting HMR.
         (outcome) => {
+          // The session, checked HERE and not only at the step above.
+          // `verifyEdit` settles 0.85 to 3 seconds after the write and knows
+          // nothing about sessions, so this callback can fire long after the
+          // page it was measuring went away. The bridge restarts its mutation
+          // ids on a new document, so a late "confirmed" would retire the NEW
+          // document's preview shim under an id that means something else now.
+          if (!ctx.current) return
           deps.resolveOverride(
             normalized.id,
             outcome === "didnt-take" ? "ineffective" : "confirmed",

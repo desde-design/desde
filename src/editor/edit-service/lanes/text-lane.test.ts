@@ -171,6 +171,45 @@ describe("dispatchTextMutation", () => {
     expect(deps.resolveOverride).not.toHaveBeenCalled()
   })
 
+  it("does not retire the next document's preview when verification settles late", async () => {
+    // `verifyEdit` settles 0.85 to 3 seconds after the write and has no notion
+    // of a session. The bridge restarts its mutation ids on a new document, so
+    // a late "confirmed" resolving `normalized.id` would retire a preview shim
+    // that now belongs to a completely different edit on the page in front of
+    // the designer.
+    let onOutcome: ((outcome: "verified" | "didnt-take" | "skipped") => void) | undefined
+    const { session, deps } = harness(Promise.resolve(applied()))
+    deps.verifyEdit = vi.fn((_input, cb) => {
+      onOutcome = cb as typeof onOutcome
+    })
+    const m = textMutation("m1")
+    session.updateMutations(() => [m])
+    await dispatchTextMutation(mutationIdentity(m), session.generation, deps)
+    expect(onOutcome).toBeDefined()
+    // The page goes away between the write and the verification settling.
+    session.end("reconnect")
+    onOutcome!("verified")
+    expect(deps.resolveOverride).not.toHaveBeenCalled()
+  })
+
+  it("resolves the preview when verification settles inside its own session (control)", async () => {
+    // The control for the test above: the same callback, invoked while the
+    // session it was created in is still the live one, DOES resolve. Without
+    // this row the guard could be a `return` that never lets anything through.
+    let onOutcome: ((outcome: "verified" | "didnt-take" | "skipped") => void) | undefined
+    const { session, deps } = harness(Promise.resolve(applied()))
+    deps.verifyEdit = vi.fn((_input, cb) => {
+      onOutcome = cb as typeof onOutcome
+    })
+    const m = textMutation("m1")
+    session.updateMutations(() => [m])
+    await dispatchTextMutation(mutationIdentity(m), session.generation, deps)
+    onOutcome!("verified")
+    expect(deps.resolveOverride).toHaveBeenCalledWith("m1", "confirmed")
+    onOutcome!("didnt-take")
+    expect(deps.resolveOverride).toHaveBeenCalledWith("m1", "ineffective")
+  })
+
   it("keeps the entry and re-arms the write when the text advanced", async () => {
     // The re-fire is the only proof `session.schedule` is wired, and the rebase
     // is what stops the second write looking for a `before` that is no longer
@@ -250,6 +289,67 @@ describe("dispatchClassMutation", () => {
       "failed",
       "no stylesheet the editor may write to",
     )
+  })
+
+  it("settles the class entry and resolves confirmed", async () => {
+    // The class lane's post-write half had no direct test at all: every case
+    // above stops before or at `applyEdit`. This is the ordinary success, end
+    // to end.
+    const { session, deps } = harness(Promise.resolve(applied()))
+    const m = classMutation("m1")
+    const identity = mutationIdentity(m)
+    session.updateMutations(() => [m])
+    await dispatchClassMutation(identity, session.generation, deps)
+    // Nothing was typed during the round trip, so the entry is settled and
+    // dropped: the next keystroke makes a fresh one against the on-disk source.
+    expect(session.getSnapshot().mutations).toEqual([])
+    // RELEASE-THEN-VERIFY. The preview is resolved by the CAPTURE's id, which
+    // is the id the override store registered under, and verification runs
+    // afterwards purely as a diagnosis.
+    expect(deps.resolveOverride).toHaveBeenCalledWith("m1", "confirmed")
+    expect(deps.verifyEdit).toHaveBeenCalledTimes(1)
+    // The side table keyed by the settled entry's id goes with the entry.
+    expect(deps.forgetEditId).toHaveBeenCalledWith("m1")
+    // And the marker is given back, so the next class edit on this element is
+    // not blocked by the one that finished.
+    expect(session.isInFlight("text", identity)).toBe(false)
+  })
+
+  it("keeps the entry and re-arms when the value advanced", async () => {
+    // The re-fire is the only proof `session.schedule` is wired on this lane.
+    //
+    // Note what is NOT asserted, because this lane genuinely does not do it:
+    // the text lane rebases the kept entry's `before` to the dispatched value
+    // and refreshes its `sourceVersion`. The class lane writes a CSS rule
+    // rather than a source-line rewrite, so it carries no stale-target stamp
+    // to refresh and leaves the entry exactly as it found it.
+    vi.useFakeTimers()
+    try {
+      const pending = deferred<EditResult>()
+      const { session, deps, applyEdit } = harness(pending.promise)
+      const m = classMutation("m1")
+      const identity = mutationIdentity(m)
+      session.updateMutations(() => [m])
+      const running = dispatchClassMutation(identity, session.generation, deps)
+      // Two microtask turns, not one: this lane awaits its style destination
+      // before it ever reaches `applyEdit`.
+      await Promise.resolve()
+      await Promise.resolve()
+      // The designer kept changing classes while the write was out.
+      session.updateMutations((prev) => prev.map((x) => ({ ...x, after: "p-8" })))
+      pending.resolve(applied())
+      await running
+      const kept = session.getSnapshot().mutations[0]
+      expect(kept).toBeDefined()
+      expect(kept.after).toBe("p-8")
+      expect(kept.before).toBe("p-2")
+      expect(deps.forgetEditId).not.toHaveBeenCalled()
+      expect(applyEdit).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(600)
+      expect(applyEdit).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("reverts the preview when the applicator cannot express the edit", async () => {

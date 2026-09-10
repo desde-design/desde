@@ -2342,17 +2342,34 @@ export function useEditorEditing({
       // dispatch directly to disk, surface failures via setSaveStatus, and
       // rely on the inspector's refetch-on-success to keep the OTHER
       // branch's byte ranges from going stale.
-      try {
-        const result = await adapter.applyEdit(edit)
-        if (result.kind === "failed") {
-          setSaveStatus(`Conditional text edit failed: ${result.reason}`)
-          return
+      //
+      // THE SESSION, as a run, the same shape the token lane uses. The byte
+      // range in this edit was read off ONE document's source, and the status
+      // line below is written after the write returns. A page replaced in that
+      // window makes the report describe a document nobody is looking at, over
+      // the line that says what the page change discarded.
+      await session.run(async (ctx) => {
+        try {
+          const written = await ctx.step(
+            adapter.applyEdit(edit, { signal: ctx.signal }),
+          )
+          if (written.stale) return
+          const result = written.value
+          if (result.kind === "failed") {
+            setSaveStatus(`Conditional text edit failed: ${result.reason}`)
+            return
+          }
+        } catch (err) {
+          // `ctx.step` turns a throw from a departed session into a stale
+          // answer, so this covers only a throw from the synchronous code
+          // beside it. A departed page's error is not news about the page in
+          // front of the designer now.
+          if (!ctx.current) return
+          setSaveStatus(`Conditional text edit threw: ${(err as Error).message}`)
         }
-      } catch (err) {
-        setSaveStatus(`Conditional text edit threw: ${(err as Error).message}`)
-      }
+      })
     },
-    [],
+    [session],
   )
 
   const handleClassesEdit = useCallback((classes: string[]) => {
@@ -3995,6 +4012,13 @@ export function useEditorEditing({
       // adapter that is gone, and a marker left behind would block the first
       // dispatch for that identity once a new adapter attaches. One call per
       // lane, and neither touches the other.
+      //
+      // This cleanup never runs for the teardown-time `adapterReadyMarker`
+      // bump. That render's body returns early at `if (!adapter) return` above,
+      // so no subscription is registered and there is nothing to clean up.
+      // The early return is load-bearing: were this cleanup to run then, it
+      // would clear the markers and the armed timers that W2/X2 exist to keep,
+      // and the buffered edits held over a plain detach would never re-arm.
       session.resetLane("prop")
       session.resetLane("text")
     }
@@ -4295,17 +4319,34 @@ export function useEditorEditing({
         setSaveStatus(reason)
         return { ok: false, reason }
       }
+      // THE ONE WRITE IN THIS HOOK THAT SITS OUTSIDE THE SESSION, deliberately.
+      // Every other lane's write is a page-bound source edit, and a page change
+      // is the honest reason to abandon it. This one is the agent's file
+      // rewrite answering a chat turn: the caller is the chat runtime waiting
+      // for an answer, not the iframe, so the write has to complete and report
+      // whatever the page does. Cancelling it on the session's signal would
+      // half-answer the agent, and returning `stale` would leave the turn with
+      // no answer at all.
+      //
+      // The generation is captured BEFORE the await, so the status lines below
+      // can still be guarded: a departed page's "Agent applied…" must not land
+      // over the line saying what the page change discarded.
+      const generation = session.generation
       const result = await adapter.applyEdit(overwrite)
       if (result.kind === "failed") {
-        setSaveStatus(
-          `Agent proposal failed (${verb}) for ${proposal.file}: ${result.reason}`,
-        )
+        if (session.isCurrent(generation)) {
+          setSaveStatus(
+            `Agent proposal failed (${verb}) for ${proposal.file}: ${result.reason}`,
+          )
+        }
         return { ok: false, reason: result.reason }
       }
       chatTurnDirtyRef.current = true
-      setSaveStatus(
-        `Agent applied (${verb}) ${proposal.file}.`,
-      )
+      if (session.isCurrent(generation)) {
+        setSaveStatus(
+          `Agent applied (${verb}) ${proposal.file}.`,
+        )
+      }
       return { ok: true }
     },
     [scheduleBranchPropDispatch, session],

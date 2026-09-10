@@ -138,7 +138,13 @@ export async function dispatchPropEdit(
     session.markInFlight("prop", key)
     deps.setOverrideInFlight?.(current.id, true)
     const askingAiTimer = setTimeout(() => {
-      if (session.isInFlight("prop", key)) {
+      // Both checks, and they answer different questions. `isInFlight` says a
+      // write for this identity is still out; `ctx.current` says the page it
+      // was written for is still on screen. The marker set is keyed on the
+      // element and the prop, not on the session, so the NEXT session's
+      // dispatch can take the same key and this timer would then write its
+      // status line for someone else's write.
+      if (ctx.current && session.isInFlight("prop", key)) {
         deps.setStatus(`Asking AI to apply "${current.propName}"…`)
       }
     }, ASKING_AI_NOTICE_MS)
