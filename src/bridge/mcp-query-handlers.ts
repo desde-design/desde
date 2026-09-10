@@ -499,7 +499,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
         const node = buildOutline(child, 0)
         if (node) roots.push(node)
       }
-      sendToShell({ type: "STRUCTURE_CAPTURED", payload: { roots }, requestId: reqId } as Record<string, unknown>)
+      sendToShell({ type: "STRUCTURE_CAPTURED", payload: { roots }, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
       return true
     }
     case "CAPTURE_ELEMENT_SCREENSHOT": {

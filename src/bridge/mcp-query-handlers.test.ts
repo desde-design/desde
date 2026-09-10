@@ -164,6 +164,18 @@ describe("mcp-query-handlers — every selection reply names its document", () =
     expect((reply!.payload as { selector?: unknown }).selector).toBe("#save")
   })
 
+  it("stamps the GET_STRUCTURE reply, which is a tree rather than one element", () => {
+    // The Layers tree is the one reply here that is not a selection, and it
+    // needed the stamp for the same reason: every row carries the source
+    // coordinates a Layers delete writes to.
+    query({ type: "GET_STRUCTURE", requestId: "req-8" })
+
+    const reply = sent.find((m) => m.type === "STRUCTURE_CAPTURED")
+    expect(reply).toBeDefined()
+    expect(reply!.documentId).toBe(TEST_DOCUMENT_ID)
+    expect((reply!.payload as { roots?: unknown[] }).roots?.length).toBeGreaterThan(0)
+  })
+
   it("stamps the INSPECT_PARENT reply", () => {
     parentTarget = document.getElementById("card")
     query({

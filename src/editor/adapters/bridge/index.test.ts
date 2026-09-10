@@ -18,7 +18,7 @@ import type { BridgeMutation, InspectionData } from "@/types/bridge"
  * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
  * so a handshake fixture has to carry both.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-10c-selection-document-id"
+const CURRENT_BRIDGE_VERSION = "2026-09-10d-structure-document-id"
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -563,6 +563,44 @@ describe("BridgeFrameworkAdapter — selection ops", () => {
     expect(roots[0].selector).toBe("#card-1")
     expect(roots[0].packageName).toBe("@acme/design-system")
     expect(roots[0].children?.[0].name).toBe("UiButton")
+  })
+
+  it("drops a STRUCTURE_CAPTURED from another document and settles the read (read continuation)", async () => {
+    // The Layers tree is a READ, and its reply outlives the page that built
+    // it exactly as an inspection does. Every row carries `authoredAt` and
+    // `editTarget`, which is where a Layers delete writes, so a tree from the
+    // departed page would point Delete at a file the page on screen may not
+    // render. The requestId cannot tell them apart: it pairs an answer with a
+    // question, not with a page.
+    const promise = adapter.getStructure()
+    const sent = setup.postMessages.find(
+      (m) => (m as { type: string }).type === "GET_STRUCTURE",
+    ) as { type: string; requestId: string }
+    const rejection = expect(promise).rejects.toThrow(/another document/)
+    emitFromBridge(setup.contentWindow, {
+      type: "STRUCTURE_CAPTURED",
+      payload: { roots: [{ id: "n1", name: "Departed", type: "component", x: 0, y: 0, width: 10, height: 10, selector: "#departed" }] },
+      requestId: sent.requestId,
+      documentId: "doc-b",
+    })
+    // Settled, not left dangling: the caller takes the path it already has for
+    // a reply that never came, instead of waiting out the whole bounded wait.
+    await rejection
+  })
+
+  it("accepts a STRUCTURE_CAPTURED stamped with the document on screen", async () => {
+    const promise = adapter.getStructure()
+    const sent = setup.postMessages.find(
+      (m) => (m as { type: string }).type === "GET_STRUCTURE",
+    ) as { type: string; requestId: string }
+    emitFromBridge(setup.contentWindow, {
+      type: "STRUCTURE_CAPTURED",
+      payload: { roots: [{ id: "n1", name: "OnScreen", type: "component", x: 0, y: 0, width: 10, height: 10, selector: "#on-screen" }] },
+      requestId: sent.requestId,
+      documentId: "doc-a",
+    })
+    const roots = await promise
+    expect(roots.map((r) => r.name)).toEqual(["OnScreen"])
   })
 
   it("getStructure rejects pending requests on dispose", async () => {

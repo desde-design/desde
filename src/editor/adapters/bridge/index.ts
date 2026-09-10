@@ -76,7 +76,7 @@ import {
  * arrive with no id, which reads as "not the current document" here and would
  * drop them all — so it is refused at the handshake instead of half-working.
  */
-const REQUIRED_BRIDGE_VERSION = '2026-09-10c-selection-document-id'
+const REQUIRED_BRIDGE_VERSION = '2026-09-10d-structure-document-id'
 
 /**
  * Phase 6 feature gate. Bridges below this version don't know about
@@ -1419,6 +1419,21 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         break
       case 'STRUCTURE_CAPTURED':
         if (message.requestId) {
+          if (!this.fromCurrentDocument(message.documentId)) {
+            this.warnForeignDocument('STRUCTURE_CAPTURED', message.documentId)
+            // Settled, not dropped on the floor. The caller has one path for a
+            // structure reply that never came (the bounded wait below rejects
+            // the same way), and reusing it keeps the Layers panel off a
+            // ten-second stall for an answer that is already here and already
+            // unusable.
+            this.rejectStructureRequest(
+              message.requestId,
+              new Error(
+                'BridgeFrameworkAdapter.getStructure: reply came from another document',
+              ),
+            )
+            break
+          }
           this.resolveStructureRequest(message.requestId, message.payload.roots)
         }
         break
@@ -1888,6 +1903,14 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     if (!pending) return
     this.pendingRequests.delete(requestId)
     pending.resolve(payload)
+  }
+
+  /** Fail one structure read, leaving nothing pending behind it. */
+  private rejectStructureRequest(requestId: string, err: Error): void {
+    const pending = this.pendingStructureRequests.get(requestId)
+    if (!pending) return
+    this.pendingStructureRequests.delete(requestId)
+    pending.reject(err)
   }
 
   private resolveStructureRequest(requestId: string, roots: OutlineNode[]): void {

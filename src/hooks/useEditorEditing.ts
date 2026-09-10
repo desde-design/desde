@@ -507,64 +507,6 @@ export function useEditorEditing({
   // next refresh and never set while a newer refresh is in flight.
   const [layersError, setLayersError] = useState(false)
 
-  const refreshLayers = useCallback(async () => {
-    const adapter = adapterRef.current
-    if (!adapter) return
-    const generation = ++layersGenerationRef.current
-    setLayersRefreshing(true)
-    setLayersError(false)
-    // Retry a bounded number of times. The first fetch fires right after the
-    // handshake, concurrently with the iframe finishing its reload — that one
-    // GET_STRUCTURE can be dropped (now surfaced as a timeout rather than a
-    // hang). A static prototype emits no follow-up onTreeUpdate to retrigger
-    // us, so without a retry a single dropped reply leaves the panel stuck on
-    // "Loading layers…". Bail immediately if a newer refresh superseded us.
-    const MAX_ATTEMPTS = 3
-    try {
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        try {
-          const roots = await adapter.getStructure()
-          if (generation !== layersGenerationRef.current) return
-          // Synthesize <template v-if>/v-for group rows (WS2 follow-up):
-          // those wrappers render no DOM, so the DOM walk above can never
-          // surface them. Best-effort — a fetch failure or a substrate
-          // with zero .vue files just leaves the tree as the DOM walk saw
-          // it. See mergeConditionalGroups for the merge semantics.
-          //
-          // The file list comes from the RAW tree, here, before anything is
-          // filtered or merged. That is what keeps it complete: the density
-          // filter can only ever remove nodes, so deriving the fetch list
-          // from a filtered tree could shrink it, and a file dropped from
-          // the list gets no group rows at all. The MERGE runs in the
-          // `layersRoots` memo, on the raw tree, BEFORE the filter.
-          const vueFiles = collectVueFiles(roots)
-          const groups =
-            vueFiles.size === 0
-              ? EMPTY_CONDITIONAL_GROUPS
-              : await fetchConditionalGroupsForFiles([...vueFiles])
-          if (generation !== layersGenerationRef.current) return
-          setLayersRawRoots(roots)
-          setLayersGroups(groups)
-          return
-        } catch (err) {
-          if (generation !== layersGenerationRef.current) return
-          if (attempt === MAX_ATTEMPTS) {
-            console.warn(
-              `[Editor] getStructure failed after ${MAX_ATTEMPTS} attempts:`,
-              err,
-            )
-            setLayersError(true)
-            return
-          }
-        }
-      }
-    } finally {
-      if (generation === layersGenerationRef.current) {
-        setLayersRefreshing(false)
-      }
-    }
-  }, [])
-
   /**
    * The one status line the whole hook writes to.
    *
@@ -656,6 +598,93 @@ export function useEditorEditing({
       }),
     [],
   )
+
+  /**
+   * Re-read the Layers ("Structure") tree from the page.
+   *
+   * UNDER THE SESSION, which is why it is declared here rather than up with
+   * the rest of the Layers state: it needs `session`, and a hook declared
+   * above it could not name it.
+   *
+   * It is a READ, and the reads were still unguarded when every write lane
+   * had been covered. Two awaits, and the page can be replaced across either
+   * of them: the structure round trip to the bridge, and the
+   * conditional-groups fetch to the CLI. What comes back is the DEPARTED page's tree, and every row in it
+   * carries `authoredAt` and `editTarget` - where a Layers right-click Delete
+   * writes. Installing it points Delete at a file the page on screen may not
+   * even render.
+   *
+   * `layersGenerationRef` does not cover that on its own. It answers "did a
+   * newer refresh start", and in the window between the page changing and the
+   * new page's handshake there is no newer refresh yet. Both checks stay: the
+   * generation is about a newer READ, the session is about a newer PAGE.
+   */
+  const refreshLayers = useCallback(async () => {
+    const adapter = adapterRef.current
+    if (!adapter) return
+    const generation = ++layersGenerationRef.current
+    setLayersRefreshing(true)
+    setLayersError(false)
+    // Retry a bounded number of times. The first fetch fires right after the
+    // handshake, concurrently with the iframe finishing its reload — that one
+    // GET_STRUCTURE can be dropped (now surfaced as a timeout rather than a
+    // hang). A static prototype emits no follow-up onTreeUpdate to retrigger
+    // us, so without a retry a single dropped reply leaves the panel stuck on
+    // "Loading layers…". Bail immediately if a newer refresh superseded us.
+    const MAX_ATTEMPTS = 3
+    try {
+      await session.run(async (ctx) => {
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          try {
+            const read = await ctx.step(adapter.getStructure())
+            if (read.stale) return
+            if (generation !== layersGenerationRef.current) return
+            const roots = read.value
+            // Synthesize <template v-if>/v-for group rows (WS2 follow-up):
+            // those wrappers render no DOM, so the DOM walk above can never
+            // surface them. Best-effort — a fetch failure or a substrate
+            // with zero .vue files just leaves the tree as the DOM walk saw
+            // it. See mergeConditionalGroups for the merge semantics.
+            //
+            // The file list comes from the RAW tree, here, before anything is
+            // filtered or merged. That is what keeps it complete: the density
+            // filter can only ever remove nodes, so deriving the fetch list
+            // from a filtered tree could shrink it, and a file dropped from
+            // the list gets no group rows at all. The MERGE runs in the
+            // `layersRoots` memo, on the raw tree, BEFORE the filter.
+            const vueFiles = collectVueFiles(roots)
+            if (vueFiles.size === 0) {
+              setLayersRawRoots(roots)
+              setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
+              return
+            }
+            const groups = await ctx.step(
+              fetchConditionalGroupsForFiles([...vueFiles]),
+            )
+            if (groups.stale) return
+            if (generation !== layersGenerationRef.current) return
+            setLayersRawRoots(roots)
+            setLayersGroups(groups.value)
+            return
+          } catch (err) {
+            if (generation !== layersGenerationRef.current) return
+            if (attempt === MAX_ATTEMPTS) {
+              console.warn(
+                `[Editor] getStructure failed after ${MAX_ATTEMPTS} attempts:`,
+                err,
+              )
+              setLayersError(true)
+              return
+            }
+          }
+        }
+      })
+    } finally {
+      if (generation === layersGenerationRef.current) {
+        setLayersRefreshing(false)
+      }
+    }
+  }, [session])
 
   /**
    * What the session is holding, as React sees it.
@@ -878,6 +907,19 @@ export function useEditorEditing({
           reason: "reconnect",
           cancelWithBridge: false,
         })
+        // THE LAYERS TREE BELONGS TO THE PAGE THAT JUST LEFT. Every row in it
+        // carries the source coordinates a right-click Delete writes to, so
+        // leaving it up offers the designer rows that aim at another page's
+        // files. Cleared here, synchronously with the boundary, for the same
+        // reason the buffers are: the gap between the page changing and the
+        // new page's handshake is where the old tree would still be clickable.
+        //
+        // The new page's tree is asked for after ITS handshake, in the one
+        // place below that issues that request.
+        setLayersRawRoots(null)
+        setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
+        setLayersError(false)
+        layersRequestedFor = undefined
       }
       // `bridgeDocumentId` is `string | null` and `start` takes the same,
       // so there is no `?? ""` here: an empty string would be ADOPTED as a
@@ -914,6 +956,18 @@ export function useEditorEditing({
       }
     }
 
+    /**
+     * Has the Layers tree been asked for since the last document boundary?
+     *
+     * `undefined` until the first request, and reset to it by
+     * `enterDocument` whenever the page is replaced. Three calls can arrive
+     * for ONE page (the unsolicited ready, the handshake it triggers, and the
+     * `load` that follows), and each of them completes a handshake, so
+     * without this the shell would ask the same page for its tree three
+     * times.
+     */
+    let layersRequestedFor: string | null | undefined
+
     const runHandshake = () => {
       if (cancelled) return
       setStatus({ kind: "connecting" })
@@ -938,7 +992,6 @@ export function useEditorEditing({
             adapterReadyAnnounced = true
             adapterRef.current = adapter
             setAdapterReadyMarker((n) => n + 1)
-            void refreshLayers()
             treeUpdateUnsubRef.current = adapter.onTreeUpdate(() => {
               void refreshLayers()
               recordHmrTreeUpdate()
@@ -951,6 +1004,22 @@ export function useEditorEditing({
             // desiredActive state), and shell-initiated text/class edits
             // route through `captureDirectMutation` in the bridge — no
             // DOM-edit-mode active state required.
+          }
+          // THE ONE PLACE A NEW PAGE'S TREE IS ASKED FOR (a tree update and
+          // the panel's own retry button call `refreshLayers` too). It runs
+          // from the handshake path, which is the first moment the shell knows
+          // the new page is really there, and it runs ONCE per page: the
+          // unsolicited ready, its handshake and the `load` that follows all
+          // land here for the same document, and `layersRequestedFor` is what
+          // tells the second and third apart from the first.
+          //
+          // After the `adapterReadyAnnounced` block above, deliberately:
+          // `refreshLayers` reads `adapterRef.current`, and that is where the
+          // adapter is published. Asking before it would return at once and
+          // leave the panel on "Loading layers…" with nothing on the way.
+          if (layersRequestedFor !== adapter.bridgeDocumentId) {
+            layersRequestedFor = adapter.bridgeDocumentId
+            void refreshLayers()
           }
         })
         .catch((err) => {

@@ -22,7 +22,7 @@ import type {
   PendingMutation,
   Selection,
 } from "@/editor/core"
-import type { StyleOrigin } from "@/types/bridge"
+import type { OutlineNode, StyleOrigin } from "@/types/bridge"
 import { useEditorEditing } from "./useEditorEditing"
 import { useEditorStore } from "@/stores/editor-only"
 import {
@@ -1911,6 +1911,147 @@ describe("useEditorEditing: the bridge session", () => {
     })
     expect(arrived.applies).toEqual([])
     expect(departed.applies).toHaveLength(0)
+  })
+
+  /**
+   * The Layers ("Structure") tree, for the two rows below.
+   *
+   * Not a `.vue` file: `collectVueFiles` finds nothing in it, so the refresh
+   * makes no second round trip for conditional groups. These rows are about
+   * the structure read itself.
+   */
+  const outlineNode = (id: string, file: string): OutlineNode => ({
+    id,
+    name: id,
+    type: "component",
+    x: 0,
+    y: 0,
+    width: 200,
+    height: 100,
+    selector: `#${id}`,
+    componentFile: file,
+    authoredAt: { file, line: 1, column: 0 },
+    editTarget: { file, line: 1, column: 0 },
+  })
+
+  it("cannot install a Layers tree that answers after the page it describes went away (read continuation)", async () => {
+    // THE READ SIDE OF THE BOUNDARY. Every write lane goes through the
+    // session. The Layers refresh is a READ, and it did not: its
+    // `getStructure()` can still be out when the page is replaced, and what it
+    // answers with is the DEPARTED page's tree. Every row in that tree carries
+    // `authoredAt` and `editTarget`, which is where a Layers right-click
+    // Delete writes, so installing it offers the designer rows that aim at
+    // another page's files.
+    //
+    // THE NEW PAGE NEVER HANDSHAKES HERE, and that is what makes this the
+    // session's case rather than the refresh counter's. `layersGenerationRef`
+    // asks "did a newer refresh start". A newer refresh starts at the new
+    // page's handshake, so while that handshake is still out (or, as here,
+    // never completes at all) the counter says the departed page's read is
+    // still the current one. The session says otherwise.
+    FakeBridgeAdapter.parkGetStructure = true
+    const pageA = outlineNode("page-a-root", "src/PageA.tsx")
+    const pageAAgain = outlineNode("page-a-root-again", "src/PageA.tsx")
+
+    await mount()
+    const adapter = lastFakeAdapter()
+    // The first refresh fires right behind the handshake, and it answers on
+    // its own page: the control half of this row.
+    await waitFor(() => expect(adapter.structureReads).toHaveLength(1))
+    await act(async () => {
+      adapter.structureReads[0]!.settle([pageA])
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()!.layersRawRoots).toHaveLength(1))
+
+    // A second read, still out when the page goes.
+    await act(async () => {
+      void editing()!.refreshLayers()
+      await Promise.resolve()
+    })
+    expect(adapter.structureReads).toHaveLength(2)
+
+    // The page is replaced and the new one never answers: off-origin, a 500,
+    // or the handshake timeout. The session ends either way, and there is no
+    // new page to refresh for.
+    FakeBridgeAdapter.nextHandshakeError = "the page never answered"
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("error"))
+    // The tree page A had legitimately installed went with the page.
+    expect(editing()!.layersRawRoots).toBeNull()
+
+    // And now page A's late answer arrives.
+    await act(async () => {
+      adapter.structureReads[1]!.settle([pageAAgain])
+      await Promise.resolve()
+    })
+    expect(editing()!.layersRawRoots).toBeNull()
+    expect(editing()!.layersRoots).toBeNull()
+  })
+
+  it("asks the new page for its own Layers tree, once, and a delete aims there", async () => {
+    // The other half. Clearing the departed page's tree is only right if the
+    // page that replaced it gets asked for its own, and the refresh used to
+    // run for the FIRST adapter only: a document change on the same adapter
+    // left the panel with whatever the tree update happened to bring.
+    //
+    // ONCE is half the assertion. One page change produces up to three
+    // completed handshakes (the unsolicited ready, the handshake it triggers,
+    // and the `load` event that follows), and each of them reaches the place
+    // that issues this request.
+    FakeBridgeAdapter.parkGetStructure = true
+    const pageA = outlineNode("page-a-root", "src/PageA.tsx")
+    const pageB = outlineNode("page-b-root", "src/PageB.tsx")
+
+    await mount()
+    const adapter = lastFakeAdapter()
+    await waitFor(() => expect(adapter.structureReads).toHaveLength(1))
+    await act(async () => {
+      adapter.structureReads[0]!.settle([pageA])
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()!.layersRawRoots).toHaveLength(1))
+
+    FakeBridgeAdapter.nextDocumentIds = ["doc-b"]
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    // Page A's tree is gone, and page B has been asked for its own.
+    expect(editing()!.layersRawRoots).toBeNull()
+    await waitFor(() => expect(adapter.structureReads).toHaveLength(2))
+
+    // The `load` event for that same document is a duplicate handshake and
+    // must not ask again.
+    const iframe = screen.getByTitle("Prototype")
+    await act(async () => {
+      iframe.dispatchEvent(new Event("load"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    expect(adapter.structureReads).toHaveLength(2)
+
+    await act(async () => {
+      adapter.structureReads[1]!.settle([pageB])
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()!.layersRawRoots).toHaveLength(1))
+    expect(editing()!.layersRawRoots![0]!.id).toBe("page-b-root")
+
+    // And the delete the panel can dispatch now aims at page B's file.
+    await act(async () => {
+      editing()!.handleLayerDelete(editing()!.layersRoots![0]!)
+      await Promise.resolve()
+    })
+    expect(adapter.applies).toHaveLength(1)
+    const dispatched = adapter.applies[0]!.edit as {
+      target: { editTarget?: { file: string } }
+    }
+    expect(dispatched.target.editTarget?.file).toBe("src/PageB.tsx")
   })
 
   it("re-selects once on its own page and stops when the stamp has moved", async () => {

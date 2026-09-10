@@ -751,7 +751,20 @@ export type BridgeToShellMessage =
       documentId: string
     }
   | { type: "ELEMENT_DESELECTED" }
-  | { type: "STRUCTURE_CAPTURED"; payload: { roots: OutlineNode[] }; requestId: string }
+  | {
+      type: "STRUCTURE_CAPTURED"
+      payload: { roots: OutlineNode[] }
+      requestId: string
+      /**
+       * The document this tree was walked in. Required, and read by the
+       * adapter before the roots reach the shell: every row carries the
+       * source coordinates a Layers delete writes to, so a tree from the page
+       * that just left would aim an edit at another page's files. The
+       * requestId cannot tell them apart - it pairs an answer with a
+       * question, not with a page.
+       */
+      documentId: string
+    }
   | { type: "ELEMENT_SCREENSHOT_CAPTURED"; payload: { png: string; width: number; height: number }; requestId: string }
   | { type: "PAGE_TOKENS_CAPTURED"; payload: { tokens: Record<string, { kind: string; value: string }> }; requestId: string }
   | { type: "ESCAPE_PRESSED" }

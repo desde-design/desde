@@ -81,6 +81,7 @@ export function resetFakeAdapters(): void {
   // decides whether verification runs at all.
   FakeBridgeAdapter.verificationEnabled = false
   FakeBridgeAdapter.parkSelectBySelector = false
+  FakeBridgeAdapter.parkGetStructure = false
 }
 
 /**
@@ -117,6 +118,15 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
    * answer at once. `resetFakeAdapters` turns it back off.
    */
   static parkSelectBySelector = false
+  /**
+   * Hold every `getStructure` open until the test settles it.
+   *
+   * OFF by default: every test written before this one expects the Layers
+   * read to answer at once. It is parkable for the same reason `applyEdit`
+   * is: the question is what happens when the page is replaced while the read
+   * is still out. `resetFakeAdapters` turns it back off.
+   */
+  static parkGetStructure = false
 
   readonly framework: FrameworkId = "vue3"
 
@@ -317,8 +327,19 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
     return () => {}
   }
   async getStructure(): Promise<OutlineNode[]> {
-    return this.structure
+    if (!FakeBridgeAdapter.parkGetStructure) return this.structure
+    return new Promise<OutlineNode[]>((resolve) => {
+      this.structureReads.push({ settle: resolve })
+    })
   }
+  /**
+   * Every parked Layers read, in order, each with the answer still to give.
+   *
+   * One entry per `getStructure` call while {@link FakeBridgeAdapter.parkGetStructure}
+   * is on. A test settles them out of order on purpose: the departed page's
+   * tree arriving after the new page's is the whole point.
+   */
+  readonly structureReads: { settle: (roots: OutlineNode[]) => void }[] = []
   /**
    * Every selector this adapter was asked to re-select, in order.
    *
