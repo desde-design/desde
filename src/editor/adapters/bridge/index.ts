@@ -1279,7 +1279,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
   }
 
   /**
-   * The one place a bridge message becomes shell state.
+   * Where this adapter acts on bridge messages to update shell state.
    *
    * Every message the page originates that leads to a WRITE or an override
    * change carries `documentId`, and is dropped here when that id is not the
@@ -1311,11 +1311,14 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    * `ELEMENT_INSPECTED` without a requestId is the honest edge, and it is not
    * claimed to be safe by the paragraph above. It SETS the selection, and the
    * selection is what a later edit aims at, so a stale one would aim at an
-   * element the page on screen may not have. It is left unstamped because it is
-   * emitted only from a click inside the iframe, and the user can only click
-   * the page they are looking at — the queue window is real but the input that
-   * fills it is not. Stamping it is a follow-up, not a claim that it cannot
-   * matter.
+   * element the page on screen may not have. The bridge emits it from two
+   * sources. First, when the user clicks inside the iframe. The user can only
+   * click the page they are looking at, so the queue window is real but the
+   * input that fills it is not. Second, when the shell sends HIGHLIGHT_COMPONENT,
+   * which is a shell-initiated round trip. The reply can arrive after the next
+   * document's handshake, with no click involved. The first reason supports
+   * leaving this message unstamped. The second does not. Stamping ELEMENT_INSPECTED
+   * is a named follow-up.
    */
   private handleMessage(event: MessageEvent): void {
     if (!this.currentTarget) return
