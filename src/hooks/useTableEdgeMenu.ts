@@ -15,7 +15,7 @@
  * editor surface, not the global store.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { RefObject } from "react"
 import type { TableEdgeContextMenuPayload } from "@/types/bridge"
 import { buildTableEdgeInstruction, type TableEdgeAction } from "@/lib/table-edge-instruction"
@@ -106,13 +106,29 @@ export function useTableEdgeMenu(
     submitChatRef.current = submitChat
   }, [submitChat])
 
-  // The live document id, for `runAction` below. It has to be a ref and not
-  // the closed-over `documentId`: the menu component holds the `runAction` it
-  // was given when the menu opened, and a callback rebuilt on the page change
-  // is not the one it is holding. Both halves of that stale closure name the
-  // OLD page, so comparing them to each other always agrees.
+  // The live document id, read by both the listener below and `runAction`
+  // further down. Neither can use the closed-over `documentId` prop.
+  //
+  // For `runAction`: the menu component holds the `runAction` it was given
+  // when the menu opened, and a callback rebuilt on the page change is not
+  // the one it is holding. Both halves of that stale closure name the OLD
+  // page, so comparing them to each other always agrees.
+  //
+  // For the listener: it is rebuilt on a page change too (`documentId` is
+  // in its effect's deps below), but a rebuild through `useEffect` runs on
+  // a LATER macrotask, while the dismissal a few lines up commits during
+  // render, one step earlier. A page-change event delivered in that gap
+  // would still match the OLD listener's closed-over `documentId` and
+  // reopen the menu the dismissal just closed. That is why this ref is
+  // synced in a LAYOUT effect, not a passive one: React runs a layout
+  // effect synchronously, right after the commit, in the same turn. That is
+  // before the event loop can hand control to a queued `message` event. A
+  // plain assignment here, during render, would close the same gap, but
+  // React's rules forbid writing to a ref during render (a discarded,
+  // uncommitted render must not have side effects); the layout effect is
+  // the sanctioned way to get the same synchronous timing.
   const documentIdRef = useRef(documentId)
-  useEffect(() => {
+  useLayoutEffect(() => {
     documentIdRef.current = documentId
   }, [documentId])
 
@@ -146,9 +162,11 @@ export function useTableEdgeMenu(
       const raw = data.payload as TableEdgeContextMenuPayload
       // From the page on screen, or not at all. A right-click posted just
       // before a navigation is read after it, and the menu it would open
-      // names rows in a document that has gone. `documentId` being null means
-      // no page is connected, so there is nothing this could be from.
-      if (documentId === null || raw?.documentId !== documentId) return
+      // names rows in a document that has gone. Read through the ref, not
+      // the closed-over `documentId` prop. See the comment at the ref.
+      // Null means no page is connected, so there is nothing this could be
+      // from.
+      if (documentIdRef.current === null || raw?.documentId !== documentIdRef.current) return
       const iframe = iframeRef.current
       if (!iframe) return
       const rect = iframe.getBoundingClientRect()
@@ -171,7 +189,9 @@ export function useTableEdgeMenu(
     }
     window.addEventListener("message", handle)
     return () => window.removeEventListener("message", handle)
-  }, [iframeRef, active, documentId])
+    // `documentId` is read through `documentIdRef`, not closed over, so it is
+    // not a dependency here. That is the whole point of the ref.
+  }, [iframeRef, active])
 
   const dismiss = useCallback(() => setMenu(null), [])
 

@@ -14,7 +14,7 @@
  * editor or canvas is overlaid).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { RefObject } from "react"
 import type { ElementContextMenuPayload } from "@/types/bridge"
 import { isBridgeMessage, originOf } from "./bridge-message-guard"
@@ -69,12 +69,23 @@ export function useElementContextMenu(
   useEffect(() => {
     activeRef.current = active
   }, [active])
-  // The listener is bound once, so the id it compares against is read through
-  // a ref, for the same reason `active` is and synced the same way. An effect
-  // rather than a write during render: a message is delivered from the event
-  // loop, which is after the commit that ran the effect.
+  // The listener is bound once, so the id it compares against is read
+  // through a ref. The ref is synced in a LAYOUT effect, not a passive one.
+  // Here is why that matters. The dismissal below also runs during render,
+  // and its result commits synchronously. A `useEffect` callback is
+  // scheduled onto a LATER macrotask, so a page-change event delivered in
+  // the gap between that commit and the macrotask would still match the
+  // ref's stale value and reopen the menu the dismissal just closed. A
+  // layout effect has no such gap: React runs it synchronously, right
+  // after the commit, in the same turn. That is before the browser (or
+  // Node's event loop, in tests) can hand control to a queued `message`
+  // event. A
+  // plain assignment here, during render, would close the gap the same
+  // way, but React's rules forbid writing to a ref during render (a
+  // discarded, uncommitted render must not have side effects); the layout
+  // effect is the sanctioned way to get the same synchronous timing.
   const documentIdRef = useRef(documentId)
-  useEffect(() => {
+  useLayoutEffect(() => {
     documentIdRef.current = documentId
   }, [documentId])
 

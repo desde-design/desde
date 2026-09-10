@@ -25,9 +25,11 @@ const sent: { type: string; payload?: unknown; documentId?: unknown }[] = []
 
 let selectedElement: Element | null = null
 let editorMode = false
+let pointTarget: Element | null = null
+let parentTarget: Element | null = null
 
 /**
- * Only the four members `handleMcpQuery` reaches on its inspector. The real
+ * Only the six members `handleMcpQuery` reaches on its inspector. The real
  * manager builds a shadow root and binds document listeners, none of which
  * this dispatcher touches.
  */
@@ -38,6 +40,8 @@ function fakeInspector(): InspectorOverlayManager {
       selectedElement = el
     },
     isEditorMode: () => editorMode,
+    selectAtPoint: () => pointTarget,
+    findParentComponent: () => parentTarget,
   } as unknown as InspectorOverlayManager
 }
 
@@ -49,6 +53,8 @@ beforeEach(() => {
   sent.length = 0
   selectedElement = null
   editorMode = false
+  pointTarget = null
+  parentTarget = null
   document.body.innerHTML = `
     <div id="card">
       <button id="save">Save</button>
@@ -142,5 +148,33 @@ describe("mcp-query-handlers — every selection reply names its document", () =
     expect(reply).toBeDefined()
     expect(reply!.payload).toBeNull()
     expect(reply!.documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the INSPECT_POINT reply", () => {
+    pointTarget = document.getElementById("save")
+    query({
+      type: "INSPECT_POINT",
+      payload: { x: 5, y: 5 },
+      requestId: "req-6",
+    })
+
+    const reply = sent.find((m) => m.type === "ELEMENT_INSPECTED")
+    expect(reply).toBeDefined()
+    expect(reply!.documentId).toBe(TEST_DOCUMENT_ID)
+    expect((reply!.payload as { selector?: unknown }).selector).toBe("#save")
+  })
+
+  it("stamps the INSPECT_PARENT reply", () => {
+    parentTarget = document.getElementById("card")
+    query({
+      type: "INSPECT_PARENT",
+      payload: { selector: "#save" },
+      requestId: "req-7",
+    })
+
+    const reply = sent.find((m) => m.type === "ELEMENT_INSPECTED")
+    expect(reply).toBeDefined()
+    expect(reply!.documentId).toBe(TEST_DOCUMENT_ID)
+    expect((reply!.payload as { selector?: unknown }).selector).toBe("#card")
   })
 })

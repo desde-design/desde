@@ -7,7 +7,10 @@
 
 import { describe, expect, it, vi } from "vitest"
 import { act, renderHook } from "@testing-library/react"
+import { createRoot } from "react-dom/client"
+import { useLayoutEffect, useState } from "react"
 import { useTableEdgeMenu } from "./useTableEdgeMenu"
+import type { TableEdgeMenuState } from "./useTableEdgeMenu"
 import type { TableEdgeContextMenuPayload } from "@/types/bridge"
 
 const DOCUMENT_ID = "doc-a"
@@ -123,6 +126,103 @@ describe("useTableEdgeMenu — the menu belongs to one page", () => {
     rerender({ documentId: "doc-b" })
 
     expect(result.current.menu).toBeNull()
+  })
+
+  /**
+   * Same race as `useElementContextMenu`'s version of this test, and the
+   * same bug this guards against: syncing `documentIdRef` in a PASSIVE
+   * effect (`useEffect`) instead of a LAYOUT one. A passive effect is
+   * scheduled onto a later macrotask, separate from the commit that clears
+   * `menu`, so a `message` event delivered in the gap would still match the
+   * ref's stale value and reopen the menu. `useLayoutEffect` has no such
+   * gap: React runs it synchronously, right after the commit.
+   *
+   * This cannot be built with `renderHook` / `act()` either, for the same
+   * reason as the other hook: `act()` collapses a render and its passive
+   * effects into one atomic flush, so there is never a moment where one has
+   * happened and the other has not. It is reproduced by driving a real
+   * `ReactDOMClient` root directly (bypassing `act()`, so updates take
+   * their normal, unforced timing) and waiting for exactly one of React's
+   * OWN macrotasks in between. In this Node/jsdom environment React's
+   * Scheduler schedules that work with `setImmediate` (checked ahead of
+   * `MessageChannel` in `scheduler`'s own fallback chain, and Node always
+   * has `setImmediate`), so the wait here uses `setImmediate` too. A
+   * `setTimeout(fn, 0)` wait lands in a different phase of Node's event
+   * loop and is not reliably ordered against it. React logs a "not wrapped
+   * in act" warning for driving updates this way on purpose; it is
+   * expected and silenced below.
+   */
+  it("does not reopen the menu for a departed-document event delivered after the commit but before the ref's own effect flush", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    const { ref, contentWindow } = makeIframeRef()
+    const container = document.createElement("div")
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    const macrotask = () => new Promise<void>((resolve) => setImmediate(resolve))
+
+    // `state` (rather than plain outer variables reassigned from inside
+    // `Harness`) is required by this repo's render-purity lint rules: a
+    // component may not reassign or mutate a value declared outside it
+    // during render, only from inside an effect. `state` is written from a
+    // `useLayoutEffect` in `Harness` for the same reason `documentIdRef`
+    // itself now is: a passive effect here would reintroduce exactly the
+    // lag this test is trying to measure around, on the OBSERVATION side
+    // instead of the fix's side.
+    const state: {
+      setDocumentId: ((id: string) => void) | null
+      latestMenu: TableEdgeMenuState | null | undefined
+    } = { setDocumentId: null, latestMenu: undefined }
+    function Harness() {
+      const [documentId, setId] = useState<string | null>(DOCUMENT_ID)
+      const { menu } = useTableEdgeMenu({
+        iframeRef: ref,
+        submitChat: vi.fn(),
+        active: true,
+        documentId,
+      })
+      useLayoutEffect(() => {
+        state.setDocumentId = setId
+        state.latestMenu = menu
+      }, [setId, menu])
+      return null
+    }
+
+    try {
+      root.render(<Harness />)
+      // The mount effect (which binds the listener) needs its own
+      // macrotask, separate from the render that set `setDocumentId`, so
+      // this re-sends the open event on each tick until it lands, rather
+      // than guessing a fixed tick count for how many the environment
+      // needs to settle.
+      for (let tick = 0; tick < 50 && state.latestMenu == null; tick++) {
+        emit(contentWindow)
+        await macrotask()
+      }
+      expect(state.latestMenu).not.toBeNull() // the open committed
+
+      // Change the document the way `enterDocument` really does: an
+      // ordinary state setter call, not a forced-synchronous API.
+      state.setDocumentId!("doc-b")
+      await macrotask() // exactly the commit that clears `menu`, nothing more
+      expect(state.latestMenu).toBeNull()
+
+      // The departed page's event, delivered right after that commit and
+      // before a PASSIVE ref-sync effect would have had its macrotask yet.
+      emit(contentWindow)
+
+      // A few more ticks so a wrongly-reopened menu (the bug) has time to
+      // commit and show up in `state.latestMenu` before the final
+      // assertion.
+      await macrotask()
+      await macrotask()
+      await macrotask()
+
+      expect(state.latestMenu).toBeNull()
+    } finally {
+      root.unmount()
+      document.body.removeChild(container)
+      errorSpy.mockRestore()
+    }
   })
 
   it("refuses an action chosen after the page was replaced", () => {

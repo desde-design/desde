@@ -1321,9 +1321,18 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    *   rather than writes, and every pending request is rejected on `dispose()`
    *   and bounded by its own timeout, so a missing reply cannot strand one.
    *   `ELEMENT_INSPECTION_UNRESOLVED` is the closest call of the five, since it
-   *   settles the same pending request the selection replies do. It settles it
-   *   with `null`, which is exactly what a foreign reply is made to do, so
-   *   stamping it would change nothing.
+   *   settles the same pending request the selection replies do. It is left
+   *   unstamped because of how its requestId is minted, not because settling
+   *   with `null` makes the id irrelevant. `requestCounter` only increases for
+   *   the life of this adapter instance, so a reply naming an id from the
+   *   departed document can only name one minted BEFORE the document changed.
+   *   By the time that reply arrives, `discardSelectionFromDepartedDocument`
+   *   has already cleared `pendingRequests`, so `resolveRequest` looks up that
+   *   id, finds nothing, and does nothing. This is the assumption that would
+   *   stop holding if the id scheme ever changed: an id scheme that reuses
+   *   values, or that is not scoped to one adapter instance, could hand a
+   *   departed page's reply an id that still resolves to a live request, and
+   *   this case would need the same stamp the selection replies carry.
    * - `DOM_EDIT_MODE_EXITED` has no requestId, but it resolves ONE shell-issued
    *   exit that carries its own timeout. A stale one resolves that exit early;
    *   it writes nothing.
