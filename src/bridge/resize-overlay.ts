@@ -16,7 +16,12 @@
  * pin-to-right-edge loop, the live inline-width preview, and the commit.
  */
 
-import { attributeElement, inspectElement, sendToShell } from "./bridge-runtime"
+import {
+  attributeElement,
+  bridgeDocumentId,
+  inspectElement,
+  sendToShell,
+} from "./bridge-runtime"
 import type { SelectModeOverlay } from "./bridge-types"
 import { PointerDragGesture } from "./pointer-drag-gesture"
 import { quantizeWidthClass } from "./resize-quantize"
@@ -211,6 +216,9 @@ export class ResizeOverlayManager implements SelectModeOverlay {
         selector,
         editTarget: attr.editTarget,
         widthClass: quantizeWidthClass(finalWidth, parentPx),
+        // Read at SEND time: `bridgeDocumentId` is a live binding filled in by
+        // `configureBridgeRuntime` during init.
+        documentId: bridgeDocumentId,
       },
     })
   }

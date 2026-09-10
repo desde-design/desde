@@ -22,7 +22,12 @@
  * payload) is covered by bridge-smoke.
  */
 
-import { sendToShell, attributeElement, inspectElement } from "./bridge-runtime"
+import {
+  attributeElement,
+  bridgeDocumentId,
+  inspectElement,
+  sendToShell,
+} from "./bridge-runtime"
 import type { SelectModeOverlay } from "./bridge-types"
 import { PointerDragGesture } from "./pointer-drag-gesture"
 import {
@@ -164,6 +169,9 @@ export class DragMoveOverlayManager implements SelectModeOverlay {
         // intercept.
         sourceIsIterated: !!sourceAttr.iteration,
         destIsIterated: !!destAttr.iteration,
+        // Read at SEND time, not at module load: `bridgeDocumentId` is a live
+        // binding that `configureBridgeRuntime` fills in during init.
+        documentId: bridgeDocumentId,
       },
     })
   }

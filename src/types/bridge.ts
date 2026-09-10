@@ -800,6 +800,13 @@ export type BridgeToShellMessage =
         ok: boolean
         reason?: string
         kind?: PreviewFailureKind
+        /**
+         * Which document this message was produced in. Required, same rule as
+         * the mutation family: the shell drops a message from a document that
+         * is no longer the one it handshaked with, and an absent id cannot be
+         * told apart from the current one.
+         */
+        documentId: string
       }
     }
   | {
@@ -810,6 +817,13 @@ export type BridgeToShellMessage =
         ok: boolean
         reason?: string
         kind?: PreviewFailureKind
+        /**
+         * Which document this message was produced in. Required, same rule as
+         * the mutation family: the shell drops a message from a document that
+         * is no longer the one it handshaked with, and an absent id cannot be
+         * told apart from the current one.
+         */
+        documentId: string
       }
     }
   // ── Override-store closed loop (WS3, tasks/edit-pipeline-rearchitecture.md) ──
@@ -823,11 +837,34 @@ export type BridgeToShellMessage =
   // OVERRIDE_UNVERIFIED instead — not a failure, just an unconfirmed write.
   | {
       type: "OVERRIDE_REVERTED"
-      payload: { id: string; kind: string; selector: string; reason: string }
+      payload: {
+        id: string
+        kind: string
+        selector: string
+        reason: string
+        /**
+         * Which document this message was produced in. Required, same rule as
+         * the mutation family: the shell drops a message from a document that
+         * is no longer the one it handshaked with, and an absent id cannot be
+         * told apart from the current one.
+         */
+        documentId: string
+      }
     }
   | {
       type: "OVERRIDE_UNVERIFIED"
-      payload: { id: string; kind: string; selector: string }
+      payload: {
+        id: string
+        kind: string
+        selector: string
+        /**
+         * Which document this message was produced in. Required, same rule as
+         * the mutation family: the shell drops a message from a document that
+         * is no longer the one it handshaked with, and an absent id cannot be
+         * told apart from the current one.
+         */
+        documentId: string
+      }
     }
   // ── Table-edge menu (BRIDGE_VERSION 2026-05-17b+) ───────────────────
   | { type: "TABLE_EDGE_CONTEXT_MENU"; payload: TableEdgeContextMenuPayload }
@@ -883,6 +920,13 @@ export interface DragMoveCommittedPayload {
   /** True when the DESTINATION container is v-for/map-rendered — same refusal
    *  (dropping into one row would rewrite the loop template for every row). */
   destIsIterated: boolean
+  /**
+   * Which document this message was produced in. Required, same rule as the
+   * mutation family: the shell drops a message from a document that is no
+   * longer the one it handshaked with, and an absent id cannot be told apart
+   * from the current one.
+   */
+  documentId: string
 }
 
 /**
@@ -895,6 +939,13 @@ export interface InsertAtPointPayload {
   destIndex: number
   /** True when the resolved container is v-for/map-rendered — shell refuses. */
   parentIsIterated: boolean
+  /**
+   * Which document this message was produced in. Required, same rule as the
+   * mutation family: the shell drops a message from a document that is no
+   * longer the one it handshaked with, and an absent id cannot be told apart
+   * from the current one.
+   */
+  documentId: string
 }
 
 /**
@@ -906,6 +957,13 @@ export interface ResizeCommittedPayload {
   selector: string
   editTarget: { file: string; line: number; column: number }
   widthClass: string
+  /**
+   * Which document this message was produced in. Required, same rule as the
+   * mutation family: the shell drops a message from a document that is no
+   * longer the one it handshaked with, and an absent id cannot be told apart
+   * from the current one.
+   */
+  documentId: string
 }
 
 /**

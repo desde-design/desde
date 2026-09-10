@@ -14,7 +14,12 @@
  * pattern. One-shot: a successful placement (or Escape) exits the mode.
  */
 
-import { attributeElement, inspectElement, sendToShell } from "./bridge-runtime"
+import {
+  attributeElement,
+  bridgeDocumentId,
+  inspectElement,
+  sendToShell,
+} from "./bridge-runtime"
 import type { SelectModeOverlay } from "./bridge-types"
 import { renderDropIndicator, resolveDropTarget } from "./drop-resolver"
 
@@ -136,6 +141,9 @@ export class InsertPlacementOverlayManager implements SelectModeOverlay {
             destIndex: drop.index,
             // Refuse inserting into a v-for/map row (would add to every row).
             parentIsIterated: !!attr.iteration,
+            // Read at SEND time: `bridgeDocumentId` is a live binding filled in
+            // by `configureBridgeRuntime` during init.
+            documentId: bridgeDocumentId,
           },
         })
       }

@@ -18,7 +18,7 @@ import type { BridgeMutation, InspectionData } from "@/types/bridge"
  * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
  * so a handshake fixture has to carry both.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-10a-capture-document-id"
+const CURRENT_BRIDGE_VERSION = "2026-09-10b-stamp-every-write"
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -792,6 +792,7 @@ describe("BridgeFrameworkAdapter — incoming events", () => {
         ok: false,
         reason: "The prototype exposes no component instance for this element.",
         kind: "no-component-instance",
+        documentId: "doc-a",
       },
     })
 
@@ -811,7 +812,12 @@ describe("BridgeFrameworkAdapter — incoming events", () => {
 
     emitFromBridge(setup.contentWindow, {
       type: "ATTR_OVERRIDE_RESULT",
-      payload: { selector: "#input", attrName: "placeholder", ok: false },
+      payload: {
+        selector: "#input",
+        attrName: "placeholder",
+        ok: false,
+        documentId: "doc-a",
+      },
     })
 
     // No `reason` OR `cause` key at all when the bridge didn't send them — the
@@ -837,6 +843,7 @@ describe("BridgeFrameworkAdapter — incoming events", () => {
         ok: false,
         reason: "Live prop and attribute preview needs Vue instance data.",
         kind: "unsupported-substrate",
+        documentId: "doc-a",
       },
     })
 
@@ -855,11 +862,21 @@ describe("BridgeFrameworkAdapter — incoming events", () => {
 
     emitFromBridge(setup.contentWindow, {
       type: "PROP_OVERRIDE_RESULT",
-      payload: { selector: "#btn", propName: "appearance", ok: true },
+      payload: {
+        selector: "#btn",
+        propName: "appearance",
+        ok: true,
+        documentId: "doc-a",
+      },
     })
     emitFromBridge(setup.contentWindow, {
       type: "ATTR_OVERRIDE_RESULT",
-      payload: { selector: "#input", attrName: "placeholder", ok: true },
+      payload: {
+        selector: "#input",
+        attrName: "placeholder",
+        ok: true,
+        documentId: "doc-a",
+      },
     })
 
     // Every keystroke of a slider drag produces one of these; waking shell
@@ -874,7 +891,15 @@ describe("BridgeFrameworkAdapter — incoming events", () => {
 
     emitFromBridge(setup.contentWindow, {
       type: "PROP_OVERRIDE_RESULT",
-      payload: { selector: "#btn", propName: "appearance", ok: false },
+      payload: {
+        selector: "#btn",
+        propName: "appearance",
+        ok: false,
+        // Stamped with the handshaked document on purpose: without it the
+        // adapter would drop the message as foreign and this test would pass
+        // for the wrong reason, proving nothing about `unsubscribe`.
+        documentId: "doc-a",
+      },
     })
 
     expect(listener).not.toHaveBeenCalled()
@@ -1671,4 +1696,208 @@ describe("BridgeFrameworkAdapter reports a new document's own ready", () => {
     expect(seen).toEqual([])
     expect(adapter.bridgeDocumentId).toBe("doc-a")
   })
+})
+
+/**
+ * The same rule as the mutation family, applied to every OTHER message the
+ * page originates that leads to a write or an override change: the three
+ * direct-manipulation commits, and the four override events.
+ *
+ * None of these could land wrong bytes today — each one re-enters a path that
+ * checks the live session again before anything is written. That is defence in
+ * depth, not the reason to stamp them. The reason is that "a page-originated
+ * write names its page" has to be a rule with no exceptions, or the next
+ * message added to this family inherits the exception instead of the rule.
+ */
+describe("BridgeFrameworkAdapter — every page-originated write names its document", () => {
+  let adapter: BridgeFrameworkAdapter
+  let setup: MockIframeSetup
+  const warnings: string[] = []
+  let restoreWarn: () => void
+
+  async function handshake(documentId: string): Promise<void> {
+    const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId },
+    })
+    await initPromise
+  }
+
+  /** Handshake doc-a, then doc-b: doc-a is now the departed page. */
+  async function handshakeTwice(): Promise<void> {
+    await handshake("doc-a")
+    await handshake("doc-b")
+  }
+
+  const loc = { file: "src/App.vue", line: 3, column: 2 }
+
+  function dragMovePayload(documentId: string) {
+    return {
+      sourceSelector: "#card",
+      sourceEditTarget: loc,
+      destParentSelector: "#list",
+      destParentEditTarget: loc,
+      destIndex: 1,
+      sourceIsIterated: false,
+      destIsIterated: false,
+      documentId,
+    }
+  }
+
+  function insertPayload(documentId: string) {
+    return {
+      parentSelector: "#list",
+      parentEditTarget: loc,
+      destIndex: 0,
+      parentIsIterated: false,
+      documentId,
+    }
+  }
+
+  function resizePayload(documentId: string) {
+    return {
+      selector: "#card",
+      editTarget: loc,
+      widthClass: "w-1/2",
+      documentId,
+    }
+  }
+
+  function propResultPayload(documentId: string) {
+    return {
+      selector: "#btn",
+      propName: "appearance",
+      ok: false,
+      reason: "The prototype exposes no component instance for this element.",
+      kind: "no-component-instance",
+      documentId,
+    }
+  }
+
+  function attrResultPayload(documentId: string) {
+    return {
+      selector: "#input",
+      attrName: "placeholder",
+      ok: false,
+      documentId,
+    }
+  }
+
+  function revertedPayload(documentId: string) {
+    return {
+      id: "o-1",
+      kind: "text",
+      selector: "#title",
+      reason: "Edit failed",
+      documentId,
+    }
+  }
+
+  function unverifiedPayload(documentId: string) {
+    return { id: "o-1", kind: "text", selector: "#title", documentId }
+  }
+
+  beforeEach(() => {
+    adapter = new BridgeFrameworkAdapter()
+    setup = makeMockIframe()
+    warnings.length = 0
+    const spy = vi
+      .spyOn(console, "warn")
+      .mockImplementation((...args: unknown[]) => {
+        warnings.push(args.map((arg) => String(arg)).join(" "))
+      })
+    restoreWarn = () => spy.mockRestore()
+  })
+
+  afterEach(async () => {
+    restoreWarn()
+    await adapter.dispose()
+  })
+
+  /**
+   * One table, seven rows: the type, how to subscribe to it, and the payload
+   * builder. Written as a table rather than fourteen hand-built cases because
+   * the whole point of the change is that these seven behave identically — a
+   * hand-built case per type is where an accidental exception hides.
+   */
+  const cases: {
+    type: string
+    subscribe: (a: BridgeFrameworkAdapter, seen: unknown[]) => void
+    payload: (documentId: string) => Record<string, unknown>
+  }[] = [
+    {
+      type: "DRAG_MOVE_COMMITTED",
+      subscribe: (a, seen) => void a.onDragMoveCommitted((m) => seen.push(m)),
+      payload: dragMovePayload,
+    },
+    {
+      type: "INSERT_AT_POINT",
+      subscribe: (a, seen) => void a.onInsertAtPoint((m) => seen.push(m)),
+      payload: insertPayload,
+    },
+    {
+      type: "RESIZE_COMMITTED",
+      subscribe: (a, seen) => void a.onResizeCommitted((m) => seen.push(m)),
+      payload: resizePayload,
+    },
+    {
+      type: "PROP_OVERRIDE_RESULT",
+      subscribe: (a, seen) => void a.onOverridePreviewFailed((m) => seen.push(m)),
+      payload: propResultPayload,
+    },
+    {
+      type: "ATTR_OVERRIDE_RESULT",
+      subscribe: (a, seen) => void a.onOverridePreviewFailed((m) => seen.push(m)),
+      payload: attrResultPayload,
+    },
+    {
+      type: "OVERRIDE_REVERTED",
+      subscribe: (a, seen) => void a.onOverrideReverted((m) => seen.push(m)),
+      payload: revertedPayload,
+    },
+    {
+      type: "OVERRIDE_UNVERIFIED",
+      subscribe: (a, seen) => void a.onOverrideUnverified((m) => seen.push(m)),
+      payload: unverifiedPayload,
+    },
+  ]
+
+  for (const testCase of cases) {
+    it(`${testCase.type} from another document is dropped`, async () => {
+      const seen: unknown[] = []
+      testCase.subscribe(adapter, seen)
+      await handshakeTwice()
+
+      emitFromBridge(setup.contentWindow, {
+        type: testCase.type,
+        payload: testCase.payload("doc-a"),
+      })
+
+      expect(seen).toEqual([])
+      // Not a silent drop: one line names the message's document and the one
+      // on screen, exactly as the mutation family already does.
+      expect(
+        warnings.some(
+          (line) =>
+            line.includes(testCase.type) &&
+            line.includes("doc-a") &&
+            line.includes("doc-b"),
+        ),
+      ).toBe(true)
+    })
+
+    it(`${testCase.type} from the current document still lands`, async () => {
+      const seen: unknown[] = []
+      testCase.subscribe(adapter, seen)
+      await handshakeTwice()
+
+      emitFromBridge(setup.contentWindow, {
+        type: testCase.type,
+        payload: testCase.payload("doc-b"),
+      })
+
+      expect(seen).toHaveLength(1)
+    })
+  }
 })

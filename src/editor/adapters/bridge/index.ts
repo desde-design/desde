@@ -69,8 +69,14 @@ import {
  * Raised again for the id on every MUTATION message (round 15 RULING). The
  * handshake id alone cannot say which page a capture was made in, so a bridge
  * that stamps only the handshake is refused the same way.
+ *
+ * Raised a third time for the id on every OTHER page-originated write or
+ * override change: the three direct-manipulation commits and the four override
+ * events. A bridge that stamps only the mutation family would have those seven
+ * arrive with no id, which reads as "not the current document" here and would
+ * drop them all — so it is refused at the handshake instead of half-working.
  */
-const REQUIRED_BRIDGE_VERSION = '2026-09-10a-capture-document-id'
+const REQUIRED_BRIDGE_VERSION = '2026-09-10b-stamp-every-write'
 
 /**
  * Phase 6 feature gate. Bridges below this version don't know about
@@ -1272,6 +1278,45 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     this.bridgeReadyReject = null
   }
 
+  /**
+   * The one place a bridge message becomes shell state.
+   *
+   * Every message the page originates that leads to a WRITE or an override
+   * change carries `documentId`, and is dropped here when that id is not the
+   * document the shell handshaked with. Ten types are in that family today:
+   * `MUTATION_CAPTURED`, `MUTATION_AWAITING_DISAMBIGUATION`,
+   * `MUTATION_RESOLUTION_FAILED`, `DRAG_MOVE_COMMITTED`, `INSERT_AT_POINT`,
+   * `RESIZE_COMMITTED`, `PROP_OVERRIDE_RESULT`, `ATTR_OVERRIDE_RESULT`,
+   * `OVERRIDE_REVERTED`, `OVERRIDE_UNVERIFIED`.
+   *
+   * The rest are unstamped on purpose, and each group has its own reason:
+   *
+   * - `BRIDGE_READY` IS the id. It is where the shell learns which document it
+   *   is talking to, so it cannot be filtered by it.
+   * - Pure UI and liveness events: `ELEMENT_DESELECTED`, `ESCAPE_PRESSED`,
+   *   `ROUTE_CHANGED`, `DOM_MUTATED`, plus the context-menu, hover and
+   *   page-background messages other consumers read. None of them writes
+   *   anything. The worst a stale one does is clear a selection or ask for a
+   *   tree refresh, and the new page corrects both on its own.
+   * - Replies correlated by a requestId the SHELL minted: `ELEMENTS_INSPECTED`,
+   *   `ELEMENT_INSPECTION_UNRESOLVED`, `STRUCTURE_CAPTURED`,
+   *   `RENDERED_VALUE_READ`, `MEASUREMENTS_READ`, `STYLE_PROVENANCE_RESULT`.
+   *   The id already pairs an answer with its own question, each of them reads
+   *   rather than writes, and every pending request is rejected on `dispose()`
+   *   and bounded by its own timeout, so a missing reply cannot strand one.
+   * - `DOM_EDIT_MODE_EXITED` has no requestId, but it resolves ONE shell-issued
+   *   exit that carries its own timeout. A stale one resolves that exit early;
+   *   it writes nothing.
+   *
+   * `ELEMENT_INSPECTED` without a requestId is the honest edge, and it is not
+   * claimed to be safe by the paragraph above. It SETS the selection, and the
+   * selection is what a later edit aims at, so a stale one would aim at an
+   * element the page on screen may not have. It is left unstamped because it is
+   * emitted only from a click inside the iframe, and the user can only click
+   * the page they are looking at — the queue window is real but the input that
+   * fills it is not. Stamping it is a follow-up, not a claim that it cannot
+   * matter.
+   */
   private handleMessage(event: MessageEvent): void {
     if (!this.currentTarget) return
     if (event.source !== this.currentTarget.iframe.contentWindow) return
@@ -1371,6 +1416,10 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         this.handleMutationCaptured(message.payload)
         break
       case 'DRAG_MOVE_COMMITTED':
+        if (!this.fromCurrentDocument(message.payload.documentId)) {
+          this.warnForeignDocument('DRAG_MOVE_COMMITTED', message.payload.documentId)
+          break
+        }
         for (const listener of this.dragMoveListeners) {
           try {
             listener(message.payload)
@@ -1380,6 +1429,10 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         }
         break
       case 'INSERT_AT_POINT':
+        if (!this.fromCurrentDocument(message.payload.documentId)) {
+          this.warnForeignDocument('INSERT_AT_POINT', message.payload.documentId)
+          break
+        }
         for (const listener of this.insertAtPointListeners) {
           try {
             listener(message.payload)
@@ -1389,6 +1442,10 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         }
         break
       case 'RESIZE_COMMITTED':
+        if (!this.fromCurrentDocument(message.payload.documentId)) {
+          this.warnForeignDocument('RESIZE_COMMITTED', message.payload.documentId)
+          break
+        }
         for (const listener of this.resizeListeners) {
           try {
             listener(message.payload)
@@ -1404,6 +1461,15 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         this.handleResolutionFailed(message.payload)
         break
       case 'PROP_OVERRIDE_RESULT':
+        // Dropped before `handleOverridePreviewResult`, which flattens the two
+        // shapes into one and no longer has the id to filter on. Nothing is
+        // stranded by the drop: neither RESULT message resolves a pending
+        // request — they only wake failure listeners — so there is no promise
+        // waiting on the answer the departed page just gave.
+        if (!this.fromCurrentDocument(message.payload.documentId)) {
+          this.warnForeignDocument('PROP_OVERRIDE_RESULT', message.payload.documentId)
+          break
+        }
         this.handleOverridePreviewResult('prop', {
           selector: message.payload.selector,
           name: message.payload.propName,
@@ -1413,6 +1479,11 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         })
         break
       case 'ATTR_OVERRIDE_RESULT':
+        // Same rule and the same reason as the prop half above.
+        if (!this.fromCurrentDocument(message.payload.documentId)) {
+          this.warnForeignDocument('ATTR_OVERRIDE_RESULT', message.payload.documentId)
+          break
+        }
         this.handleOverridePreviewResult('attr', {
           selector: message.payload.selector,
           name: message.payload.attrName,
@@ -1422,9 +1493,17 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         })
         break
       case 'OVERRIDE_REVERTED':
+        if (!this.fromCurrentDocument(message.payload.documentId)) {
+          this.warnForeignDocument('OVERRIDE_REVERTED', message.payload.documentId)
+          break
+        }
         this.handleOverrideReverted(message.payload)
         break
       case 'OVERRIDE_UNVERIFIED':
+        if (!this.fromCurrentDocument(message.payload.documentId)) {
+          this.warnForeignDocument('OVERRIDE_UNVERIFIED', message.payload.documentId)
+          break
+        }
         this.handleOverrideUnverified(message.payload)
         break
       default:
