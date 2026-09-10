@@ -16,7 +16,7 @@
  * exactly like SpacingSection's per-side overrides.
  */
 
-import { applyClassMutation, type ClassMutation } from "./tailwind-classes"
+import { applyClassMutation, type ClassMutation } from "@/editor/tailwind/tailwind-classes"
 
 export type JustifyValue = "start" | "center" | "end"
 export type AlignValue = "start" | "center" | "end"

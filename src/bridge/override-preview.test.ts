@@ -29,6 +29,9 @@ import { afterEach, describe, expect, it } from "vitest"
 import { createOverridePreview } from "./override-preview"
 import { configureBridgeRuntime } from "./bridge-runtime"
 
+/** The document id the runtime is configured with for these tests. */
+const TEST_DOCUMENT_ID = "doc-under-test"
+
 function el(inlineStyle = ""): HTMLElement {
   const node = document.createElement("div")
   if (inlineStyle) node.setAttribute("style", inlineStyle)
@@ -45,6 +48,7 @@ function captureSends(): Record<string, unknown>[] {
     },
     inspectElement: () => ({}),
     attributeElement: () => undefined,
+    documentId: TEST_DOCUMENT_ID,
   })
   return sent
 }
@@ -56,6 +60,7 @@ afterEach(() => {
     sendToShell: () => {},
     inspectElement: () => ({}),
     attributeElement: () => undefined,
+    documentId: "",
   })
   document.body.innerHTML = ""
 })
@@ -476,5 +481,44 @@ describe("override-preview — prop/attr poke results", () => {
     // …and no OVERRIDE_* traffic was generated for an override that never existed.
     expect(sent.filter((m) => String(m.type).startsWith("OVERRIDE_"))).toEqual([])
     expect(propResult(sent).ok).toBe(false)
+  })
+})
+
+/**
+ * Both RESULT messages name the document they were produced in, on the same
+ * rule as the mutation family: a message outlives its page by however long the
+ * message queue is, and the shell decides what to do with it by that id alone.
+ */
+describe("override-preview — the document id on the poke results", () => {
+  it("stamps PROP_OVERRIDE_RESULT", () => {
+    const sent = captureSends()
+    const preview = createOverridePreview()
+    const node = el()
+    node.id = "btn"
+
+    preview.handleApplyPropOverride({
+      selector: "#btn",
+      propName: "appearance",
+      value: "danger",
+    })
+
+    const message = sent.find((m) => m.type === "PROP_OVERRIDE_RESULT")
+    expect(message?.payload).toMatchObject({ documentId: TEST_DOCUMENT_ID })
+  })
+
+  it("stamps ATTR_OVERRIDE_RESULT", () => {
+    const sent = captureSends()
+    const preview = createOverridePreview()
+    const node = el()
+    node.id = "input"
+
+    preview.handleApplyAttrOverride({
+      selector: "#input",
+      attrName: "placeholder",
+      value: "Search",
+    })
+
+    const message = sent.find((m) => m.type === "ATTR_OVERRIDE_RESULT")
+    expect(message?.payload).toMatchObject({ documentId: TEST_DOCUMENT_ID })
   })
 })

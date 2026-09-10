@@ -24,7 +24,7 @@ import {
   withArbitraryOption,
   type ClassMutation,
   type TypographyValue,
-} from "./tailwind-classes"
+} from "@/editor/tailwind/tailwind-classes"
 import { inferTypography } from "./infer-from-computed"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { SectionHeader, fieldRowClass, stackedLabelClass } from "./section-header"

@@ -15,7 +15,7 @@
  * editor surface, not the global store.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { RefObject } from "react"
 import type { TableEdgeContextMenuPayload } from "@/types/bridge"
 import { buildTableEdgeInstruction, type TableEdgeAction } from "@/lib/table-edge-instruction"
@@ -45,6 +45,23 @@ export interface UseTableEdgeMenuOptions {
    * user is just navigating the prototype.
    */
   active: boolean
+  /**
+   * The document the shell has handshaked with, or null when no page is
+   * connected. `useEditorEditing` publishes it as `bridgeDocumentId`.
+   *
+   * This hook does not go through the adapter's message dispatch, so the
+   * adapter's own foreign-message drop does not cover it. Two things are done
+   * with the id here. A band menu event from another document is ignored, and
+   * an open menu is dismissed the moment this value moves.
+   *
+   * Why the shell's value and not `adapter.bridgeDocumentId`: the adapter
+   * announces a change through `onDocumentChanged` only for an UNSOLICITED
+   * ready. A page that the shell handshaked with itself (an iframe `load` with
+   * no ready of its own, or a re-attach) moves the id with no such event, so a
+   * menu would survive it. `useEditorEditing` writes this value in
+   * `enterDocument`, which is on both paths.
+   */
+  documentId: string | null
 }
 
 export interface UseTableEdgeMenuReturn {
@@ -58,8 +75,18 @@ export interface UseTableEdgeMenuReturn {
 export function useTableEdgeMenu(
   opts: UseTableEdgeMenuOptions,
 ): UseTableEdgeMenuReturn {
-  const { iframeRef, submitChat, active } = opts
+  const { iframeRef, submitChat, active, documentId } = opts
   const [menu, setMenu] = useState<TableEdgeMenuState | null>(null)
+
+  // The page changing dismisses any open band menu. The band it belongs to is
+  // gone with the document that drew it, and its selectors name elements
+  // nobody can see. Done during render via the previous-value pattern, the
+  // same way `active` is handled below, so there is no extra commit.
+  const [lastDocumentId, setLastDocumentId] = useState(documentId)
+  if (lastDocumentId !== documentId) {
+    setLastDocumentId(documentId)
+    if (menu) setMenu(null)
+  }
 
   // Leaving Select mode dismisses any open band menu — it belongs to a
   // band that no longer draws. Done during render via the previous-value
@@ -78,6 +105,32 @@ export function useTableEdgeMenu(
   useEffect(() => {
     submitChatRef.current = submitChat
   }, [submitChat])
+
+  // The live document id, read by both the listener below and `runAction`
+  // further down. Neither can use the closed-over `documentId` prop.
+  //
+  // For `runAction`: the menu component holds the `runAction` it was given
+  // when the menu opened, and a callback rebuilt on the page change is not
+  // the one it is holding. Both halves of that stale closure name the OLD
+  // page, so comparing them to each other always agrees.
+  //
+  // For the listener: it is rebuilt on a page change too (`documentId` is
+  // in its effect's deps below), but a rebuild through `useEffect` runs on
+  // a LATER macrotask, while the dismissal a few lines up commits during
+  // render, one step earlier. A page-change event delivered in that gap
+  // would still match the OLD listener's closed-over `documentId` and
+  // reopen the menu the dismissal just closed. That is why this ref is
+  // synced in a LAYOUT effect, not a passive one: React runs a layout
+  // effect synchronously, right after the commit, in the same turn. That is
+  // before the event loop can hand control to a queued `message` event. A
+  // plain assignment here, during render, would close the same gap, but
+  // React's rules forbid writing to a ref during render (a discarded,
+  // uncommitted render must not have side effects); the layout effect is
+  // the sanctioned way to get the same synchronous timing.
+  const documentIdRef = useRef(documentId)
+  useLayoutEffect(() => {
+    documentIdRef.current = documentId
+  }, [documentId])
 
   // Listen for the band's context-menu event and translate it into shell
   // menu state. Activation of the band overlay itself is owned by the
@@ -107,6 +160,13 @@ export function useTableEdgeMenu(
       if (data.type !== "TABLE_EDGE_CONTEXT_MENU") return
       if (!active) return
       const raw = data.payload as TableEdgeContextMenuPayload
+      // From the page on screen, or not at all. A right-click posted just
+      // before a navigation is read after it, and the menu it would open
+      // names rows in a document that has gone. Read through the ref, not
+      // the closed-over `documentId` prop. See the comment at the ref.
+      // Null means no page is connected, so there is nothing this could be
+      // from.
+      if (documentIdRef.current === null || raw?.documentId !== documentIdRef.current) return
       const iframe = iframeRef.current
       if (!iframe) return
       const rect = iframe.getBoundingClientRect()
@@ -129,6 +189,8 @@ export function useTableEdgeMenu(
     }
     window.addEventListener("message", handle)
     return () => window.removeEventListener("message", handle)
+    // `documentId` is read through `documentIdRef`, not closed over, so it is
+    // not a dependency here. That is the whole point of the ref.
   }, [iframeRef, active])
 
   const dismiss = useCallback(() => setMenu(null), [])
@@ -137,6 +199,15 @@ export function useTableEdgeMenu(
     (action: TableEdgeAction) => {
       const current = menu
       if (!current) return
+      // The last gate, and not a duplicate of the dismissal above. The
+      // dismissal runs on the next render; a click handled in the same event
+      // turn as the page change would otherwise submit an instruction built
+      // from the departed page's selectors, and that instruction reaches a
+      // chat turn that can write files.
+      if (current.payload.documentId !== documentIdRef.current) {
+        setMenu(null)
+        return
+      }
       const instruction = buildTableEdgeInstruction(action, current.payload)
       setMenu(null)
       void submitChatRef.current(instruction)

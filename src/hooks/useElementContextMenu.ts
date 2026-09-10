@@ -14,7 +14,7 @@
  * editor or canvas is overlaid).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { RefObject } from "react"
 import type { ElementContextMenuPayload } from "@/types/bridge"
 import { isBridgeMessage, originOf } from "./bridge-message-guard"
@@ -33,6 +33,22 @@ export interface UseElementContextMenuOptions {
    * prototype in that case).
    */
   active: boolean
+  /**
+   * The document the shell has handshaked with, or null when no page is
+   * connected. `useEditorEditing` publishes it as `bridgeDocumentId`.
+   *
+   * Same two jobs as in `useTableEdgeMenu`, and the same reason for taking the
+   * shell's value rather than `adapter.bridgeDocumentId`: the adapter's
+   * `onDocumentChanged` fires only for an UNSOLICITED ready, so a page the
+   * shell handshaked with itself would move the id with no event and leave a
+   * menu open over it. `enterDocument` writes this on both paths.
+   *
+   * There is no `runAction` here to refuse at the last moment, the way the
+   * band menu has one. This menu's actions live in the component that reads
+   * `menu`, so closing the menu in the same render the id moves in is the
+   * whole refusal: there is nothing left for the component to act on.
+   */
+  documentId: string | null
 }
 
 export interface UseElementContextMenuReturn {
@@ -43,7 +59,7 @@ export interface UseElementContextMenuReturn {
 export function useElementContextMenu(
   opts: UseElementContextMenuOptions,
 ): UseElementContextMenuReturn {
-  const { iframeRef, active } = opts
+  const { iframeRef, active, documentId } = opts
   const [menu, setMenu] = useState<ElementContextMenuState | null>(null)
   const iframeRefRef = useRef(iframeRef)
   useEffect(() => {
@@ -53,12 +69,40 @@ export function useElementContextMenu(
   useEffect(() => {
     activeRef.current = active
   }, [active])
+  // The listener is bound once, so the id it compares against is read
+  // through a ref. The ref is synced in a LAYOUT effect, not a passive one.
+  // Here is why that matters. The dismissal below also runs during render,
+  // and its result commits synchronously. A `useEffect` callback is
+  // scheduled onto a LATER macrotask, so a page-change event delivered in
+  // the gap between that commit and the macrotask would still match the
+  // ref's stale value and reopen the menu the dismissal just closed. A
+  // layout effect has no such gap: React runs it synchronously, right
+  // after the commit, in the same turn. That is before the browser (or
+  // Node's event loop, in tests) can hand control to a queued `message`
+  // event. A
+  // plain assignment here, during render, would close the gap the same
+  // way, but React's rules forbid writing to a ref during render (a
+  // discarded, uncommitted render must not have side effects); the layout
+  // effect is the sanctioned way to get the same synchronous timing.
+  const documentIdRef = useRef(documentId)
+  useLayoutEffect(() => {
+    documentIdRef.current = documentId
+  }, [documentId])
 
   // Leaving foreground dismisses any open menu (mirrors useTableEdgeMenu).
   const [wasActive, setWasActive] = useState(active)
   if (wasActive !== active) {
     setWasActive(active)
     if (!active && menu) setMenu(null)
+  }
+
+  // The page changing dismisses any open menu. It names an element in a
+  // document that has gone, and "Open in editor" would open the departed
+  // page's file. Previous-value pattern, like `active` above.
+  const [lastDocumentId, setLastDocumentId] = useState(documentId)
+  if (lastDocumentId !== documentId) {
+    setLastDocumentId(documentId)
+    if (menu) setMenu(null)
   }
 
   useEffect(() => {
@@ -86,6 +130,13 @@ export function useElementContextMenu(
       if (!activeRef.current) return
       const payload = data.payload
       if (!payload) return
+      // From the page on screen, or not at all. A right-click posted just
+      // before a navigation is read after it. Null means no page is
+      // connected, so there is nothing this could be from.
+      const currentDocumentId = documentIdRef.current
+      if (currentDocumentId === null || payload.documentId !== currentDocumentId) {
+        return
+      }
       const iframe = currentIframeRef.current
       if (!iframe) return
       const rect = iframe.getBoundingClientRect()

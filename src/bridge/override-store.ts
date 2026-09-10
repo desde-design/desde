@@ -30,12 +30,19 @@
  * re-assert loop, and the shell events.
  *
  * Events emitted (bridge → shell):
- *   { type: 'OVERRIDE_REVERTED',   payload: { id, kind, selector, reason } }
- *   { type: 'OVERRIDE_UNVERIFIED', payload: { id, kind, selector } }
+ *   { type: 'OVERRIDE_REVERTED',   payload: { id, kind, selector, reason,
+ *                                              documentId } }
+ *   { type: 'OVERRIDE_UNVERIFIED', payload: { id, kind, selector, documentId } }
+ *
+ * `documentId` names the document the event was produced in, so the shell can
+ * drop one that outlived its page. It is read from the bridge runtime at send
+ * time rather than injected here — see the send sites.
  *
  * Shell → bridge resolution arrives via `resolve()` (wired to the
  * RESOLVE_OVERRIDE message in comment-bridge.ts).
  */
+
+import { bridgeDocumentId } from './bridge-runtime'
 
 export type OverrideKind = 'text' | 'prop' | 'attr' | 'class'
 
@@ -148,6 +155,11 @@ export class OverrideStore {
           kind: entry.kind,
           selector: entry.selector,
           reason: reason ?? 'Edit failed',
+          // The one thing the store does NOT take as a constructor option. The
+          // document id belongs to the bridge instance, not to a store, and
+          // reading the live binding at SEND time is what keeps a store built
+          // before `configureBridgeRuntime` ran correct.
+          documentId: bridgeDocumentId,
         },
       })
     }
@@ -190,7 +202,13 @@ export class OverrideStore {
       entry.state = 'unverified'
       this.sendToShell({
         type: 'OVERRIDE_UNVERIFIED',
-        payload: { id: entry.id, kind: entry.kind, selector: entry.selector },
+        payload: {
+          id: entry.id,
+          kind: entry.kind,
+          selector: entry.selector,
+          // Same live binding, read at send time (see OVERRIDE_REVERTED above).
+          documentId: bridgeDocumentId,
+        },
       })
     }
 

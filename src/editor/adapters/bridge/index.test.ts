@@ -18,7 +18,7 @@ import type { BridgeMutation, InspectionData } from "@/types/bridge"
  * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
  * so a handshake fixture has to carry both.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-10a-capture-document-id"
+const CURRENT_BRIDGE_VERSION = "2026-09-10c-selection-document-id"
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -40,21 +40,44 @@ function makeMockIframe(): MockIframeSetup {
   return { iframe, contentWindow, postMessages }
 }
 
+/**
+ * The document the last handshake emitted through this helper reported.
+ *
+ * Selection replies name their document now, and the adapter drops one whose
+ * id is not the page it handshaked with. Defaulting to the page the test just
+ * connected to keeps the older fixtures about whatever they were about; a test
+ * that wants a message from ANOTHER document passes `documentId` itself and
+ * the spread below wins.
+ */
+let emittedDocumentId = "doc-a"
+
 /** Dispatch a MessageEvent on window with `source` pointed at the mock content window. */
 function emitFromBridge(
   contentWindow: { postMessage: ReturnType<typeof vi.fn> },
   message: Record<string, unknown>,
 ): void {
+  if (message.type === "BRIDGE_READY") {
+    const readyId = (message.payload as { documentId?: string } | undefined)
+      ?.documentId
+    if (typeof readyId === "string" && readyId.length > 0) {
+      emittedDocumentId = readyId
+    }
+  }
   const event = new Event("message") as MessageEvent
   // jsdom's MessageEvent doesn't let us pass `source` via the constructor in a
   // type-safe way, so we patch the dispatched event directly. The adapter
   // reads `event.source` and `event.data` only; this is the minimum surface.
   Object.defineProperty(event, "data", {
-    value: { source: "desde-bridge", ...message },
+    value: { source: "desde-bridge", documentId: emittedDocumentId, ...message },
   })
   Object.defineProperty(event, "source", { value: contentWindow })
   window.dispatchEvent(event)
 }
+
+// The default above is per-test state, so it is reset like any other.
+beforeEach(() => {
+  emittedDocumentId = "doc-a"
+})
 
 function makeInspectionData(overrides: Partial<InspectionData> = {}): InspectionData {
   return {
@@ -792,6 +815,7 @@ describe("BridgeFrameworkAdapter — incoming events", () => {
         ok: false,
         reason: "The prototype exposes no component instance for this element.",
         kind: "no-component-instance",
+        documentId: "doc-a",
       },
     })
 
@@ -811,7 +835,12 @@ describe("BridgeFrameworkAdapter — incoming events", () => {
 
     emitFromBridge(setup.contentWindow, {
       type: "ATTR_OVERRIDE_RESULT",
-      payload: { selector: "#input", attrName: "placeholder", ok: false },
+      payload: {
+        selector: "#input",
+        attrName: "placeholder",
+        ok: false,
+        documentId: "doc-a",
+      },
     })
 
     // No `reason` OR `cause` key at all when the bridge didn't send them — the
@@ -837,6 +866,7 @@ describe("BridgeFrameworkAdapter — incoming events", () => {
         ok: false,
         reason: "Live prop and attribute preview needs Vue instance data.",
         kind: "unsupported-substrate",
+        documentId: "doc-a",
       },
     })
 
@@ -855,11 +885,21 @@ describe("BridgeFrameworkAdapter — incoming events", () => {
 
     emitFromBridge(setup.contentWindow, {
       type: "PROP_OVERRIDE_RESULT",
-      payload: { selector: "#btn", propName: "appearance", ok: true },
+      payload: {
+        selector: "#btn",
+        propName: "appearance",
+        ok: true,
+        documentId: "doc-a",
+      },
     })
     emitFromBridge(setup.contentWindow, {
       type: "ATTR_OVERRIDE_RESULT",
-      payload: { selector: "#input", attrName: "placeholder", ok: true },
+      payload: {
+        selector: "#input",
+        attrName: "placeholder",
+        ok: true,
+        documentId: "doc-a",
+      },
     })
 
     // Every keystroke of a slider drag produces one of these; waking shell
@@ -874,7 +914,15 @@ describe("BridgeFrameworkAdapter — incoming events", () => {
 
     emitFromBridge(setup.contentWindow, {
       type: "PROP_OVERRIDE_RESULT",
-      payload: { selector: "#btn", propName: "appearance", ok: false },
+      payload: {
+        selector: "#btn",
+        propName: "appearance",
+        ok: false,
+        // Stamped with the handshaked document on purpose: without it the
+        // adapter would drop the message as foreign and this test would pass
+        // for the wrong reason, proving nothing about `unsubscribe`.
+        documentId: "doc-a",
+      },
     })
 
     expect(listener).not.toHaveBeenCalled()
@@ -1670,5 +1718,357 @@ describe("BridgeFrameworkAdapter reports a new document's own ready", () => {
     })
     expect(seen).toEqual([])
     expect(adapter.bridgeDocumentId).toBe("doc-a")
+  })
+})
+
+/**
+ * The same rule as the mutation family, applied to every OTHER message the
+ * page originates that leads to a write or an override change: the three
+ * direct-manipulation commits, and the four override events.
+ *
+ * None of these could land wrong bytes today — each one re-enters a path that
+ * checks the live session again before anything is written. That is defence in
+ * depth, not the reason to stamp them. The reason is that "a page-originated
+ * write names its page" has to be a rule with no exceptions, or the next
+ * message added to this family inherits the exception instead of the rule.
+ */
+describe("BridgeFrameworkAdapter — every page-originated write names its document", () => {
+  let adapter: BridgeFrameworkAdapter
+  let setup: MockIframeSetup
+  const warnings: string[] = []
+  let restoreWarn: () => void
+
+  async function handshake(documentId: string): Promise<void> {
+    const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId },
+    })
+    await initPromise
+  }
+
+  /** Handshake doc-a, then doc-b: doc-a is now the departed page. */
+  async function handshakeTwice(): Promise<void> {
+    await handshake("doc-a")
+    await handshake("doc-b")
+  }
+
+  const loc = { file: "src/App.vue", line: 3, column: 2 }
+
+  function dragMovePayload(documentId: string) {
+    return {
+      sourceSelector: "#card",
+      sourceEditTarget: loc,
+      destParentSelector: "#list",
+      destParentEditTarget: loc,
+      destIndex: 1,
+      sourceIsIterated: false,
+      destIsIterated: false,
+      documentId,
+    }
+  }
+
+  function insertPayload(documentId: string) {
+    return {
+      parentSelector: "#list",
+      parentEditTarget: loc,
+      destIndex: 0,
+      parentIsIterated: false,
+      documentId,
+    }
+  }
+
+  function resizePayload(documentId: string) {
+    return {
+      selector: "#card",
+      editTarget: loc,
+      widthClass: "w-1/2",
+      documentId,
+    }
+  }
+
+  function propResultPayload(documentId: string) {
+    return {
+      selector: "#btn",
+      propName: "appearance",
+      ok: false,
+      reason: "The prototype exposes no component instance for this element.",
+      kind: "no-component-instance",
+      documentId,
+    }
+  }
+
+  function attrResultPayload(documentId: string) {
+    return {
+      selector: "#input",
+      attrName: "placeholder",
+      ok: false,
+      documentId,
+    }
+  }
+
+  function revertedPayload(documentId: string) {
+    return {
+      id: "o-1",
+      kind: "text",
+      selector: "#title",
+      reason: "Edit failed",
+      documentId,
+    }
+  }
+
+  function unverifiedPayload(documentId: string) {
+    return { id: "o-1", kind: "text", selector: "#title", documentId }
+  }
+
+  beforeEach(() => {
+    adapter = new BridgeFrameworkAdapter()
+    setup = makeMockIframe()
+    warnings.length = 0
+    const spy = vi
+      .spyOn(console, "warn")
+      .mockImplementation((...args: unknown[]) => {
+        warnings.push(args.map((arg) => String(arg)).join(" "))
+      })
+    restoreWarn = () => spy.mockRestore()
+  })
+
+  afterEach(async () => {
+    restoreWarn()
+    await adapter.dispose()
+  })
+
+  /**
+   * One table, seven rows: the type, how to subscribe to it, and the payload
+   * builder. Written as a table rather than fourteen hand-built cases because
+   * the whole point of the change is that these seven behave identically — a
+   * hand-built case per type is where an accidental exception hides.
+   */
+  const cases: {
+    type: string
+    subscribe: (a: BridgeFrameworkAdapter, seen: unknown[]) => void
+    payload: (documentId: string) => Record<string, unknown>
+  }[] = [
+    {
+      type: "DRAG_MOVE_COMMITTED",
+      subscribe: (a, seen) => void a.onDragMoveCommitted((m) => seen.push(m)),
+      payload: dragMovePayload,
+    },
+    {
+      type: "INSERT_AT_POINT",
+      subscribe: (a, seen) => void a.onInsertAtPoint((m) => seen.push(m)),
+      payload: insertPayload,
+    },
+    {
+      type: "RESIZE_COMMITTED",
+      subscribe: (a, seen) => void a.onResizeCommitted((m) => seen.push(m)),
+      payload: resizePayload,
+    },
+    {
+      type: "PROP_OVERRIDE_RESULT",
+      subscribe: (a, seen) => void a.onOverridePreviewFailed((m) => seen.push(m)),
+      payload: propResultPayload,
+    },
+    {
+      type: "ATTR_OVERRIDE_RESULT",
+      subscribe: (a, seen) => void a.onOverridePreviewFailed((m) => seen.push(m)),
+      payload: attrResultPayload,
+    },
+    {
+      type: "OVERRIDE_REVERTED",
+      subscribe: (a, seen) => void a.onOverrideReverted((m) => seen.push(m)),
+      payload: revertedPayload,
+    },
+    {
+      type: "OVERRIDE_UNVERIFIED",
+      subscribe: (a, seen) => void a.onOverrideUnverified((m) => seen.push(m)),
+      payload: unverifiedPayload,
+    },
+  ]
+
+  for (const testCase of cases) {
+    it(`${testCase.type} from another document is dropped`, async () => {
+      const seen: unknown[] = []
+      testCase.subscribe(adapter, seen)
+      await handshakeTwice()
+
+      emitFromBridge(setup.contentWindow, {
+        type: testCase.type,
+        payload: testCase.payload("doc-a"),
+      })
+
+      expect(seen).toEqual([])
+      // Not a silent drop: one line names the message's document and the one
+      // on screen, exactly as the mutation family already does.
+      expect(
+        warnings.some(
+          (line) =>
+            line.includes(testCase.type) &&
+            line.includes("doc-a") &&
+            line.includes("doc-b"),
+        ),
+      ).toBe(true)
+    })
+
+    it(`${testCase.type} from the current document still lands`, async () => {
+      const seen: unknown[] = []
+      testCase.subscribe(adapter, seen)
+      await handshakeTwice()
+
+      emitFromBridge(setup.contentWindow, {
+        type: testCase.type,
+        payload: testCase.payload("doc-b"),
+      })
+
+      expect(seen).toHaveLength(1)
+    })
+  }
+})
+
+/**
+ * The selection replies name their page, and a page change clears what they
+ * left behind.
+ *
+ * `ELEMENT_INSPECTED` and `ELEMENTS_INSPECTED` SET THE SELECTION, and the
+ * selection's `editTarget` is the file, line and column every later edit
+ * writes to. A reply from the page that has just been replaced therefore aims
+ * the next edit at the departed page's file, and it does that inside the
+ * awaited request, before the calling lane's own session check can say the
+ * answer is stale.
+ */
+describe("BridgeFrameworkAdapter — a selection cannot outlive its page", () => {
+  let adapter: BridgeFrameworkAdapter
+  let setup: MockIframeSetup
+
+  beforeEach(async () => {
+    adapter = new BridgeFrameworkAdapter()
+    setup = makeMockIframe()
+    const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+    })
+    await initPromise
+    setup.postMessages.length = 0
+  })
+
+  afterEach(async () => {
+    await adapter.dispose()
+  })
+
+  /** The requestId the adapter minted for the one message of this type. */
+  function requestIdOf(type: string): string {
+    const sent = setup.postMessages.find(
+      (m) => (m as { type: string }).type === type,
+    ) as { requestId: string } | undefined
+    if (!sent) throw new Error(`no ${type} was sent`)
+    return sent.requestId
+  }
+
+  /** An unsolicited handshake from another page, i.e. the page being replaced. */
+  function replacePage(documentId: string): void {
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId },
+    })
+  }
+
+  it("settles selectBySelector with null when the reply names another document", async () => {
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    const promise = adapter.selectBySelector("#panel")
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData(),
+      requestId: requestIdOf("INSPECT_SELECTOR"),
+      documentId: "doc-x",
+    })
+
+    // Null, not a rejection: an unresolved selector already answers null, so
+    // the caller keeps the handling it has.
+    await expect(promise).resolves.toBeNull()
+    // And the selection itself never moved, which is the whole point: no
+    // listener ran, so nothing shell-side is aiming at the departed page.
+    expect(seen).toEqual([])
+  })
+
+  it("ignores an unsolicited ELEMENT_INSPECTED from another document", async () => {
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData(),
+      documentId: "doc-x",
+    })
+
+    expect(seen).toEqual([])
+    expect(await adapter.selectParent()).toBeNull()
+  })
+
+  it("settles selectMany with an empty list when the reply names another document", async () => {
+    const promise = adapter.selectMany(["#a", "#b"])
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENTS_INSPECTED",
+      payload: [makeInspectionData(), makeInspectionData()],
+      requestId: requestIdOf("INSPECT_MANY"),
+      documentId: "doc-x",
+    })
+
+    await expect(promise).resolves.toEqual([])
+  })
+
+  it("settles a parked selectBySelector and clears the selection when the page is replaced", async () => {
+    // A real selection on the page that is about to go, so the clear has
+    // something to clear. Without it the deselect below would be
+    // indistinguishable from nothing happening.
+    const established = adapter.selectBySelector("#panel")
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData(),
+      requestId: requestIdOf("INSPECT_SELECTOR"),
+    })
+    expect(await established).not.toBeNull()
+    setup.postMessages.length = 0
+
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    // The second read is still out when the page changes.
+    const parked = adapter.selectBySelector("#panel")
+    replacePage("doc-b")
+
+    await expect(parked).resolves.toBeNull()
+    // The deselect the shell's own listener writes through, so `editorSelection`
+    // cannot outlive the page.
+    expect(seen).toEqual([null])
+  })
+
+  it("settles a parked selectMany with an empty list when the page is replaced", async () => {
+    const parked = adapter.selectMany(["#a"])
+    replacePage("doc-b")
+    await expect(parked).resolves.toEqual([])
+  })
+
+  it("does not clear the selection on the FIRST handshake of a page", async () => {
+    // The control. `previousDocumentId` is null before any handshake, and on a
+    // re-attach with the same page still on screen; treating that as a
+    // replacement would take the designer's selection away for no reason.
+    const fresh = new BridgeFrameworkAdapter()
+    const freshSetup = makeMockIframe()
+    const seen: (Selection | null)[] = []
+    fresh.onSelectionChange((s) => seen.push(s))
+    try {
+      const initPromise = fresh.init({ iframe: freshSetup.iframe, origin: "*" })
+      emitFromBridge(freshSetup.contentWindow, {
+        type: "BRIDGE_READY",
+        payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-first" },
+      })
+      await initPromise
+      expect(seen).toEqual([])
+    } finally {
+      await fresh.dispose()
+    }
   })
 })

@@ -346,6 +346,11 @@ export async function dispatchPropEdit(
             .propEdits.find((e) => propEditKey(e.target.selector, e.propName) === key)
           return !!stillBuffered && !Object.is(stillBuffered.value, dispatchedValue)
         },
+        // THE SESSION, read at verification-complete time. Verification reads
+        // the DOM seconds after the write, and a page replaced in that window
+        // makes the read a measurement of another document. `current` reports
+        // the live session then, so the hook can decline to warn about it.
+        current: () => ctx.current,
       })
       // Refresh the (still-open) selection's stamps so the next edit from it
       // doesn't false-409 against its own predecessor's write.

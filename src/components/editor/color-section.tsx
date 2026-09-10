@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
   applyClassMutation,
-} from "./tailwind-classes"
+} from "@/editor/tailwind/tailwind-classes"
 import {
   type ColorProperty,
   type ColorValue,
@@ -17,7 +17,7 @@ import {
   TAILWIND_COLOR_HEX,
   TAILWIND_COLOR_SHADES,
   TAILWIND_SPECIAL_COLORS,
-} from "./tailwind-colors"
+} from "@/editor/tailwind/tailwind-colors"
 import { inferColor } from "./infer-from-computed"
 import { useDesignTokens } from "@/hooks/useDesignTokens"
 import type { DesignToken } from "@/editor/edit-service/design-tokens-source"

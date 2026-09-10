@@ -17,6 +17,7 @@ function payload(
     cellFingerprints: ["Ada", "ada@x.com"],
     cellCount: 2,
     menuAnchor: { x: 10, y: 20, bandRect: { top: 0, left: 0, width: 10, height: 2 } },
+    documentId: "doc-a",
     ...overrides,
   }
 }

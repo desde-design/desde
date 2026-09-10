@@ -727,7 +727,29 @@ export type BridgeToShellMessage =
    */
   | { type: "PAGE_BACKGROUND_CHANGED"; payload: { color: string } }
   | { type: "DOM_MUTATED" }
-  | { type: "ELEMENT_INSPECTED"; payload: InspectionData; requestId?: string }
+  /**
+   * An element was inspected, and the shell SETS ITS SELECTION from it.
+   *
+   * `documentId` sits on the MESSAGE, not inside `payload`, and that is
+   * forced: this message is also sent with `payload: null` (no match) and its
+   * sibling `ELEMENTS_INSPECTED` sends an array, so neither payload can carry
+   * a field. Same rule either way, and the same rule as the mutation family:
+   * the shell drops a message from a document that is no longer the one it
+   * handshaked with, and an absent id cannot be told apart from the current
+   * one.
+   *
+   * Why this one is stamped even though a reply already carries a requestId:
+   * the selection is what every later edit aims at (its `editTarget` is the
+   * file, line and column an edit writes to). A reply from the page that has
+   * just been replaced would install the departed page's selection, and the
+   * next edit would write the departed page's file.
+   */
+  | {
+      type: "ELEMENT_INSPECTED"
+      payload: InspectionData
+      requestId?: string
+      documentId: string
+    }
   | { type: "ELEMENT_DESELECTED" }
   | { type: "STRUCTURE_CAPTURED"; payload: { roots: OutlineNode[] }; requestId: string }
   | { type: "ELEMENT_SCREENSHOT_CAPTURED"; payload: { png: string; width: number; height: number }; requestId: string }
@@ -744,7 +766,17 @@ export type BridgeToShellMessage =
         | { targetId: string; reason: "ambiguous"; candidates: InspectionData[] }
       requestId?: string
     }
-  | { type: "ELEMENTS_INSPECTED"; payload: InspectionData[]; requestId?: string }
+  /**
+   * The multi-select reply. `documentId` is on the message for the reason
+   * given on `ELEMENT_INSPECTED`: the payload is an array and cannot carry a
+   * field, and this reply sets the selection too.
+   */
+  | {
+      type: "ELEMENTS_INSPECTED"
+      payload: InspectionData[]
+      requestId?: string
+      documentId: string
+    }
   | {
       type: "SIBLINGS_INSPECTED"
       payload: { siblings: InspectionData[]; selectedIndex: number }
@@ -800,6 +832,13 @@ export type BridgeToShellMessage =
         ok: boolean
         reason?: string
         kind?: PreviewFailureKind
+        /**
+         * Which document this message was produced in. Required, same rule as
+         * the mutation family: the shell drops a message from a document that
+         * is no longer the one it handshaked with, and an absent id cannot be
+         * told apart from the current one.
+         */
+        documentId: string
       }
     }
   | {
@@ -810,6 +849,13 @@ export type BridgeToShellMessage =
         ok: boolean
         reason?: string
         kind?: PreviewFailureKind
+        /**
+         * Which document this message was produced in. Required, same rule as
+         * the mutation family: the shell drops a message from a document that
+         * is no longer the one it handshaked with, and an absent id cannot be
+         * told apart from the current one.
+         */
+        documentId: string
       }
     }
   // ── Override-store closed loop (WS3, tasks/edit-pipeline-rearchitecture.md) ──
@@ -823,11 +869,34 @@ export type BridgeToShellMessage =
   // OVERRIDE_UNVERIFIED instead — not a failure, just an unconfirmed write.
   | {
       type: "OVERRIDE_REVERTED"
-      payload: { id: string; kind: string; selector: string; reason: string }
+      payload: {
+        id: string
+        kind: string
+        selector: string
+        reason: string
+        /**
+         * Which document this message was produced in. Required, same rule as
+         * the mutation family: the shell drops a message from a document that
+         * is no longer the one it handshaked with, and an absent id cannot be
+         * told apart from the current one.
+         */
+        documentId: string
+      }
     }
   | {
       type: "OVERRIDE_UNVERIFIED"
-      payload: { id: string; kind: string; selector: string }
+      payload: {
+        id: string
+        kind: string
+        selector: string
+        /**
+         * Which document this message was produced in. Required, same rule as
+         * the mutation family: the shell drops a message from a document that
+         * is no longer the one it handshaked with, and an absent id cannot be
+         * told apart from the current one.
+         */
+        documentId: string
+      }
     }
   // ── Table-edge menu (BRIDGE_VERSION 2026-05-17b+) ───────────────────
   | { type: "TABLE_EDGE_CONTEXT_MENU"; payload: TableEdgeContextMenuPayload }
@@ -861,6 +930,16 @@ export type BridgeToShellMessage =
 export interface ElementContextMenuPayload {
   inspection: InspectionData
   menuAnchor: { x: number; y: number }
+  /**
+   * Which document this menu was opened in. Required, same rule as the
+   * mutation family: the shell ignores a menu event from a document that is
+   * no longer the one it handshaked with, and an absent id cannot be told
+   * apart from the current one.
+   *
+   * This one is on the PAYLOAD rather than the message, because the payload
+   * is a plain object and the hook that reads it receives the payload alone.
+   */
+  documentId: string
 }
 
 /**
@@ -883,6 +962,13 @@ export interface DragMoveCommittedPayload {
   /** True when the DESTINATION container is v-for/map-rendered — same refusal
    *  (dropping into one row would rewrite the loop template for every row). */
   destIsIterated: boolean
+  /**
+   * Which document this message was produced in. Required, same rule as the
+   * mutation family: the shell drops a message from a document that is no
+   * longer the one it handshaked with, and an absent id cannot be told apart
+   * from the current one.
+   */
+  documentId: string
 }
 
 /**
@@ -895,6 +981,13 @@ export interface InsertAtPointPayload {
   destIndex: number
   /** True when the resolved container is v-for/map-rendered — shell refuses. */
   parentIsIterated: boolean
+  /**
+   * Which document this message was produced in. Required, same rule as the
+   * mutation family: the shell drops a message from a document that is no
+   * longer the one it handshaked with, and an absent id cannot be told apart
+   * from the current one.
+   */
+  documentId: string
 }
 
 /**
@@ -906,6 +999,13 @@ export interface ResizeCommittedPayload {
   selector: string
   editTarget: { file: string; line: number; column: number }
   widthClass: string
+  /**
+   * Which document this message was produced in. Required, same rule as the
+   * mutation family: the shell drops a message from a document that is no
+   * longer the one it handshaked with, and an absent id cannot be told apart
+   * from the current one.
+   */
+  documentId: string
 }
 
 /**
@@ -944,6 +1044,12 @@ export interface TableEdgeContextMenuPayload {
     y: number
     bandRect: { top: number; left: number; width: number; height: number }
   }
+  /**
+   * Which document this band menu was opened in. Required, same rule as
+   * `ElementContextMenuPayload`: an open menu whose page has been replaced
+   * would hand the departed page's selectors to a write-capable chat turn.
+   */
+  documentId: string
 }
 
 // Shell → Bridge messages

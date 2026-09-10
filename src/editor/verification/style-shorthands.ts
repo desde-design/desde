@@ -15,7 +15,7 @@
  *
  * **Deliberately bounded, not a general CSS shorthand database.** The map covers
  * exactly the shorthands the inspector's own resolver can emit
- * (`src/components/editor/tailwind-declarations.ts`): `padding` / `margin` /
+ * (`src/editor/tailwind/tailwind-declarations.ts`): `padding` / `margin` /
  * `gap` (spacing), `border-width` / `border-style` / `border-color` (borders),
  * and `border-radius`. Everything else — including a shorthand we decline to
  * expand for one of the reasons below — passes through untouched, which degrades
@@ -28,7 +28,7 @@
  * property and therefore serializes as `''` per longhand — the same reason
  * `shorthandValueIsExpandable` refuses our own `var()` shorthands below. The
  * caller gates on the cascade owner accordingly
- * (`src/hooks/cascade-target-for-style-edit.ts`); this module is never handed a
+ * (`src/editor/edit-service/cascade-target-for-style-edit.ts`); this module is never handed a
  * `classes`-owner declaration map.
  *
  * No React, no DOM, no design-system knowledge — plain CSS structure over a

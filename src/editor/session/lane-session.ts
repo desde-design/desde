@@ -7,7 +7,22 @@
  * would have to name a Prompt type it never touches, and would be able to open
  * dialogs, which is the hook's job.
  */
-export type LaneId = "prop" | "text"
+
+/**
+ * Every lane the session serializes and arms timers for.
+ *
+ * One array rather than a hand-written union, because the class has to
+ * ENUMERATE these (cancel every timer, clear every marker) and a union cannot
+ * be looped over. A lane added to the union alone would be missed by those
+ * loops and its timers would outlive the page, which is finding C6.
+ *
+ * `selection` is the stamp refresh that re-reads the selected element after
+ * our own write. It arms timers and reads the other two lanes' markers; it
+ * takes no marker of its own.
+ */
+export const LANE_IDS = ["prop", "text", "selection"] as const
+
+export type LaneId = (typeof LANE_IDS)[number]
 
 /** Awaited work, plus whether the session it started in is still the live one. */
 export type SessionRunResult<T> = { stale: true } | { stale: false; value: T }
@@ -35,6 +50,16 @@ export interface SessionRunContext {
   step<T>(work: Promise<T>): Promise<SessionRunResult<T>>
 }
 
+/**
+ * One key namespace per lane, and it is flat.
+ *
+ * `key` is not scoped any further than the `lane` it is passed with. Two
+ * callers that pass the same `lane` and the same `key` string share one
+ * marker and one timer, whether they meant to or not. This interface does
+ * not police that: it is on each caller's own key function (for example
+ * `mutationIdentity`, which folds a mutation's kind into the string) to keep
+ * its keys distinct from whatever else uses that lane.
+ */
 export interface LaneSession {
   readonly generation: number
   readonly signal: AbortSignal

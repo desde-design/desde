@@ -15,6 +15,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react"
 import { StrictMode, type ReactElement, useRef } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { toast } from "sonner"
 import type {
   EditResult,
   Mutation,
@@ -29,7 +30,7 @@ import {
   DEFERRED_PARK_STATUS,
   HANDOFF_TIMEOUT_MS,
   SAVE_HANDOFF_TIMEOUT_STATUS,
-} from "./pending-iteration-edit"
+} from "@/editor/edit-service/pending-iteration-edit"
 import {
   FakeBridgeAdapter,
   lastFakeAdapter,
@@ -111,6 +112,23 @@ const capture = (id: string, after: string): Mutation => ({
   // test that emits two of them would be measuring the coalescer rather than
   // whatever it meant to measure. One id, one on-screen field, one entry.
   instancePath: id,
+})
+
+/**
+ * A `class` capture: the OTHER dispatch on the same lane.
+ *
+ * Same shape `text-lane.test.ts` gives `dispatchClassMutation`: a class list
+ * before and after, rather than a text value. Plus the two fields the capture
+ * scheduler gates a class capture on (`shouldProbeClassMutation`: a `sourceLoc`
+ * and a `direct` or `ancestor` resolution) and the `anchorMatchCount` the style
+ * builder refuses a zero of. The buffer identity carries the mutation's kind,
+ * so this and {@link capture} on one id are two entries, not one.
+ */
+const classCapture = (id: string, after: string): Mutation => ({
+  ...capture(id, after),
+  kind: "class",
+  before: "p-2",
+  anchorMatchCount: 1,
 })
 
 /**
@@ -332,6 +350,12 @@ const needsChat = (reason = "bound binding"): EditResult => ({
 
 beforeEach(() => {
   resetFakeAdapters()
+  // The toast mocks are module-level, so their call records outlive a test.
+  // One row below asserts that NOTHING warned, and a warning from any earlier
+  // test in the file would have failed it for the wrong reason. Cleared here
+  // rather than in that one test, so the next row that makes the same
+  // assertion inherits the guarantee instead of rediscovering the need for it.
+  vi.mocked(toast.warning).mockClear()
   FakeBridgeAdapter.nextDocumentIds = ["doc-a"]
   FakeBridgeAdapter.nextHandshakeError = null
   captured = null
@@ -663,6 +687,96 @@ describe("useEditorEditing: the bridge session", () => {
     await waitForApply()
     await changeDocument(rerender, "doc-b")
     expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+  })
+
+  it("writes a class capture as a style rule and releases its preview (control)", async () => {
+    // The class lane's control row, and until now the harness had none: every
+    // test in this file drove the text lane. The two are one lane on the
+    // session and two dispatches in the code, and the class one is the
+    // asymmetric half. It awaits a destination BEFORE it can build its edit,
+    // and it claims its in-flight marker across that await rather than testing
+    // for one in front of it.
+    //
+    // What this row pins is the whole round trip on a page that never
+    // changes: the capture is buffered, the debounce arms, the destination is
+    // resolved, the write reaches the adapter as a `scoped-css-override` (not
+    // the text lane's llm-patch), and the live class preview the bridge is
+    // holding is released under the CAPTURE's id.
+    await mount()
+    const adapter = lastFakeAdapter()
+    await act(async () => {
+      adapter.emitCapture(classCapture("c1", "p-2 p-4"))
+    })
+    const write = await waitForApply()
+    // A CSS rule, not a source rewrite. This is the one assertion that tells
+    // the two dispatches apart from outside the hook.
+    expect(write.edit.kind).toBe("scoped-css-override")
+    if (write.edit.kind !== "scoped-css-override") throw new Error("unreachable")
+    // The rule head, parsed from the capture's own `sourceLoc`
+    // ("src/App.vue:10:2"), not the destination the rule is written into.
+    expect(write.edit.anchor).toMatchObject({
+      file: "src/App.vue",
+      line: 10,
+      column: 2,
+    })
+    // The added class ("p-4") resolved to a real CSS declaration, not an
+    // empty rule body.
+    expect(Object.keys(write.edit.declarations ?? {}).length).toBeGreaterThan(0)
+    // The session's lifetime rides along, so a page change can cancel it.
+    expect(write.signal).toBeDefined()
+    await act(async () => {
+      write.settle(applied({ "src/App.vue": "v2" }))
+      await Promise.resolve()
+    })
+    // Release-then-verify: the write landed, so the preview is released at
+    // once. Under `c1`, the capture's own id, which is what the bridge
+    // registered the override as. Resolving the dispatch's edit id instead
+    // would be a silent no-op and the inline `!important` shim would outlive
+    // the edit.
+    await waitFor(() =>
+      expect(adapter.settledOverrides).toEqual([
+        { id: "c1", outcome: "confirmed" },
+      ]),
+    )
+    expect(editing()?.saveStatus).toBeNull()
+  })
+
+  it("retires a class capture the page change caught in flight (finding V1, the class lane)", async () => {
+    // V1 for the OTHER dispatch. The row above it covers the text lane; this
+    // is the same boundary against the class lane, which has its own `ctx.step`
+    // calls and its own resolve to get wrong.
+    //
+    // The write is out when the page is replaced. Three things follow: the
+    // departed page's buffered entry is retired and COUNTED, so the designer
+    // is told what was lost; the request is cancelled; and the answer, when it
+    // arrives, does nothing at all. That last part is what `ctx.step` buys.
+    // Without it the lane would run its release on the departed adapter, and
+    // the bridge restarts its mutation ids on a new document, so "confirmed"
+    // for `c1` would retire whatever the NEW page is calling `c1`.
+    const { rerender } = await mount()
+    const departed = lastFakeAdapter()
+    await act(async () => {
+      departed.emitCapture(classCapture("c1", "p-2 p-4"))
+    })
+    const write = await waitForApply()
+    expect(write.edit.kind).toBe("scoped-css-override")
+    await changeDocument(rerender, "doc-b")
+    // One entry, one line, and it says how many.
+    expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+    expect(write.signal?.aborted).toBe(true)
+    const arriving = lastFakeAdapter()
+    expect(arriving).not.toBe(departed)
+    // The departed page's write answers now, on the far side of the boundary.
+    await act(async () => {
+      write.settle(applied({ "src/App.vue": "v2" }))
+      await Promise.resolve()
+    })
+    // Nothing it says lands anywhere: not the status line the designer is
+    // reading, not the departed page's previews, and not the new page at all.
+    expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+    expect(departed.settledOverrides).toEqual([])
+    expect(arriving.settledOverrides).toEqual([])
+    expect(arriving.applies).toEqual([])
   })
 
   it("keeps the buffer over a plain detach and re-attach (findings W2, X2)", async () => {
@@ -1575,5 +1689,290 @@ describe("useEditorEditing: the bridge session", () => {
       await done
     })
     expect(editing()?.saveStatus).toBe(statusAfterChange)
+  })
+
+  it("does not warn about a token edit whose page went away before verification settled (finding C5)", async () => {
+    // The write LANDS, and the page changes while the verification that
+    // follows it is still reading. That read is taken against the document
+    // that replaced this one, whose stylesheets never carried this token, so
+    // it reports a cascade loss. Warning the designer about it would be
+    // telling them an edit failed on a page they are no longer looking at.
+    //
+    // Verification is off on this fixture by default, because the hook opts
+    // out on an adapter that cannot read and every other test here relies on
+    // that. This one turns it on.
+    FakeBridgeAdapter.verificationEnabled = true
+    const { rerender } = await mount()
+    // The adapter this edit is written through, held by hand: `changeDocument`
+    // builds a NEW one, and the parked cascade read belongs to this one.
+    const adapter = lastFakeAdapter()
+    await act(async () => {
+      adapter.emitSelection(styleSelection)
+    })
+    await waitFor(() =>
+      expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+    )
+    let done: Promise<void> | undefined
+    await act(async () => {
+      done = editing()!.handleTokenStyleEdit("background-color", tokenOrigin, [
+        "bg-red-500",
+      ])
+      await Promise.resolve()
+    })
+    const write = await waitForApply()
+    expect(write.edit.kind).toBe("token-value")
+    const editId = write.edit.id
+    await act(async () => {
+      write.settle(applied())
+      await done
+    })
+    // The verification is now running. Its first cascade read parks, which is
+    // what puts the page change inside the window rather than racing it.
+    await waitFor(() => expect(adapter.provenanceReads.length).toBeGreaterThan(0), {
+      timeout: 5000,
+    })
+    await changeDocument(rerender, "doc-b")
+    // The read answers now, and it answers that some other rule owns the
+    // property: the token this edit patched is nowhere in the chain.
+    adapter.settleProvenance({
+      "background-color": {
+        property: "background-color",
+        computedValue: "rgb(255, 255, 255)",
+        winningRule: {
+          selector: ".other-page-card",
+          stylesheet: { href: "/src/other.css" },
+          declaration: "background-color: #ffffff",
+          specificity: [0, 1, 0],
+        },
+        varChain: [],
+      },
+    })
+    const recordFor = () =>
+      useEditorStore.getState().verifications.find((v) => v.editId === editId)
+    await waitFor(() => expect(recordFor()?.phase).toBe("done"), { timeout: 15000 })
+    // The verification really did fail. The Checks tab keeps saying so: what
+    // the session guard suppresses is the interruption, not the record.
+    expect(recordFor()?.result?.status).toBe("fail")
+    expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
+  }, 30000)
+  it("does not re-select on the page that replaced the one it was scheduled for (finding C6)", async () => {
+    // After our own write lands, the open selection still carries the
+    // pre-write stamp, so the shell re-reads it from the post-HMR DOM. Those
+    // retries used to be bare `setTimeout` calls that read the adapter when
+    // they fired. A refresh armed on one page could therefore run after the
+    // page had been replaced and re-select the SAME selector on the new one,
+    // rebuilding the inspector around another document's element.
+    //
+    // The selection is emitted again on the new page on purpose. The effect
+    // cleanup clears it, and with no live selection carrying that selector the
+    // old code returns early, so the bug could not be staged at all.
+    //
+    // `shouldAdvanceTime` is required, not a preference: `waitFor` only drives
+    // a fake clock itself when a global `jest` exists, and under Vitest it
+    // does not, so a frozen clock hangs every wait in this file forever.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { rerender } = await mount()
+      const departed = lastFakeAdapter()
+      await act(async () => {
+        departed.emitSelection(styleSelection)
+      })
+      await waitFor(() =>
+        expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+      )
+      await act(async () => {
+        departed.emitCapture(capture("m1", "hello"))
+      })
+      const typing = await waitForApply()
+      await act(async () => {
+        // The write lands and names the selected element's file, which is what
+        // arms the refresh.
+        typing.settle(applied({ "src/App.vue": "hash-2" }))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      const armedAt = Date.now()
+      await changeDocument(rerender, "doc-b")
+      // Nothing has fired YET, and this line owes nothing to the clock: the
+      // first retry is 300 ms out and the boundary is the only thing that has
+      // happened. Without it, a run in which the retry had already fired
+      // before the page change would still satisfy the assertions at the end,
+      // because those count calls made after the boundary and this one is the
+      // proof there were none before it.
+      expect(departed.selectBySelectorCalls).toEqual([])
+      const arrived = lastFakeAdapter()
+      expect(arrived).not.toBe(departed)
+      await act(async () => {
+        arrived.emitSelection(styleSelection)
+        await Promise.resolve()
+      })
+      // The control. It says the page change really did land inside the first
+      // retry's window; without it a slow step here would let the retry fire
+      // before the boundary and the assertions below would prove nothing.
+      expect(Date.now() - armedAt).toBeLessThan(300)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      expect(arrived.selectBySelectorCalls).toEqual([])
+      expect(departed.selectBySelectorCalls).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("does not install a selection read that settles after the page changed (codex C-D)", async () => {
+    // The read is PARKED across the boundary, which is the shape the finding
+    // names: `selectBySelector` used to apply its reply to the adapter's own
+    // selection and notify the shell INSIDE the awaited request, before the
+    // calling lane's `ctx.step` could say the answer was stale. The adapter
+    // now drops a reply from a departed document; this row is the hook's half
+    // of it, and it is the only place a settle can be put on the far side of
+    // a page change.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    FakeBridgeAdapter.parkSelectBySelector = true
+    try {
+      const { rerender } = await mount()
+      const departed = lastFakeAdapter()
+      await act(async () => {
+        departed.emitSelection(styleSelection)
+      })
+      await waitFor(() =>
+        expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+      )
+      await act(async () => {
+        departed.emitCapture(capture("m1", "hello"))
+      })
+      const typing = await waitForApply()
+      await act(async () => {
+        // The write lands and names the selected element's file, which arms
+        // the refresh.
+        typing.settle(applied({ "src/App.vue": "hash-2" }))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      // Let the first retry fire. It parks.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300)
+      })
+      expect(departed.parkedSelectReads).toHaveLength(1)
+
+      await changeDocument(rerender, "doc-b")
+      const arrived = lastFakeAdapter()
+      expect(arrived).not.toBe(departed)
+
+      // The departed page finally answers, with its own element.
+      await act(async () => {
+        departed.parkedSelectReads[0]!.settle(styleSelection)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      // Nothing was installed. The store is where the boundary left it, and
+      // the retry chain did not carry on onto the page that arrived.
+      expect(useEditorStore.getState().editorSelection).toBeNull()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      expect(arrived.selectBySelectorCalls).toEqual([])
+      expect(departed.selectBySelectorCalls).toEqual(["#panel"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("a late selection from the departed page cannot become what an edit aims at", async () => {
+    // The hand-off case. `editorSelection.editTarget` is the file, line and
+    // column an edit writes to, so a selection installed from the page that
+    // left would aim the next edit at the departed page's file.
+    const { rerender } = await mount()
+    const departed = lastFakeAdapter()
+    await act(async () => {
+      departed.emitSelection(styleSelection)
+    })
+    await waitFor(() =>
+      expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+    )
+
+    await changeDocument(rerender, "doc-b")
+    const arrived = lastFakeAdapter()
+
+    // The departed page announces its element again, after the boundary.
+    await act(async () => {
+      departed.emitSelection(styleSelection)
+      await Promise.resolve()
+    })
+    expect(useEditorStore.getState().editorSelection).toBeNull()
+
+    // And an edit attempted now aims at nothing, rather than at
+    // `src/App.vue:10:2` on a page nobody is looking at.
+    await act(async () => {
+      editing()!.handlePropEdit("label", "Renamed")
+      await Promise.resolve()
+    })
+    expect(arrived.applies).toEqual([])
+    expect(departed.applies).toHaveLength(0)
+  })
+
+  it("re-selects once on its own page and stops when the stamp has moved", async () => {
+    // The control for the test above, on a page that never changed: the
+    // refresh has to still happen, and it has to stop as soon as the file hash
+    // it reads back differs from the one the selection was carrying.
+    //
+    // THE SELECTION CARRIES A HASH, and that is the point of this row rather
+    // than an incidental detail. The shared `styleSelection` has none, so
+    // `priorHash` is undefined and `freshHash !== priorHash` is true of every
+    // truthy hash: the chain would stop on the first answer whatever it said,
+    // and a comparison that had been reduced to "is there a hash at all" would
+    // pass this test. So the selection is stamped `hash-1` here, the first
+    // read answers `hash-1` (unchanged, so the chain must go on) and the
+    // second answers `hash-2` (re-stamped, so it must stop). Two reads: one
+    // for each side of the comparison.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      await mount()
+      const adapter = lastFakeAdapter()
+      // Local to this test. The shared fixture stays hash-free, because every
+      // other row here is about something else.
+      const stampedSelection: Selection = {
+        ...styleSelection,
+        editTarget: { ...styleSelection.editTarget!, fileHash: "hash-1" },
+      }
+      const reStamped = (fileHash: string): Selection => ({
+        ...stampedSelection,
+        editTarget: { ...stampedSelection.editTarget!, fileHash },
+      })
+      // What the two re-reads answer, in order: the same stamp, then a moved
+      // one.
+      adapter.selectBySelectorAnswers.push(reStamped("hash-1"), reStamped("hash-2"))
+      await act(async () => {
+        adapter.emitSelection(stampedSelection)
+      })
+      await waitFor(() =>
+        expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+      )
+      await act(async () => {
+        adapter.emitCapture(capture("m1", "hello"))
+      })
+      const typing = await waitForApply()
+      await act(async () => {
+        typing.settle(applied({ "src/App.vue": "hash-2" }))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300)
+      })
+      // The first read, and its answer carries the hash the selection already
+      // had, so the chain is not finished.
+      expect(adapter.selectBySelectorCalls).toEqual(["#panel"])
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      // The second read fired at 800 ms and answered a MOVED stamp, so the
+      // chain stopped there: no third read at 1600 ms.
+      expect(adapter.selectBySelectorCalls).toEqual(["#panel", "#panel"])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

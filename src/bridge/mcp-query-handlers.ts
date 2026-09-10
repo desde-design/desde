@@ -15,7 +15,7 @@
  * caller returns early) or `false` when the message isn't one of these query
  * types (so the caller's own switch runs as before).
  */
-import { sendToShell, inspectElement, attributeElement } from "./bridge-runtime"
+import { sendToShell, inspectElement, attributeElement, bridgeDocumentId } from "./bridge-runtime"
 import type { InspectorOverlayManager } from "./inspector-overlay"
 import {
   detectOutlineComponent,
@@ -56,13 +56,13 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
       if (currentEl) {
         try {
           const inspData = inspectElement(currentEl)
-          sendToShell({ type: "ELEMENT_INSPECTED", payload: inspData, requestId: reqId } as Record<string, unknown>)
+          sendToShell({ type: "ELEMENT_INSPECTED", payload: inspData, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
         } catch (err) {
           console.warn("[Desde MCP] get current inspection failed:", err)
-          sendToShell({ type: "ELEMENT_INSPECTED", payload: null, requestId: reqId } as Record<string, unknown>)
+          sendToShell({ type: "ELEMENT_INSPECTED", payload: null, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
         }
       } else {
-        sendToShell({ type: "ELEMENT_INSPECTED", payload: null, requestId: reqId } as Record<string, unknown>)
+        sendToShell({ type: "ELEMENT_INSPECTED", payload: null, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
       }
       return true
     }
@@ -80,6 +80,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           type: "ELEMENTS_INSPECTED",
           payload: [],
           requestId: reqId,
+          documentId: bridgeDocumentId,
         } as Record<string, unknown>)
         return true
       }
@@ -111,6 +112,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
         type: "ELEMENTS_INSPECTED",
         payload: resolved,
         requestId: reqId,
+        documentId: bridgeDocumentId,
       } as Record<string, unknown>)
       return true
     }
@@ -132,7 +134,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
             requestId: reqId,
           } as Record<string, unknown>)
         } else {
-          sendToShell({ type: "ELEMENT_INSPECTED", payload: null, requestId: reqId } as Record<string, unknown>)
+          sendToShell({ type: "ELEMENT_INSPECTED", payload: null, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
         }
       }
       if (!selectorValue) {
@@ -165,7 +167,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           if (useTieredResolution) {
             inspector.setSelectedElement(sole)
           }
-          sendToShell({ type: "ELEMENT_INSPECTED", payload: inspData, requestId: reqId } as Record<string, unknown>)
+          sendToShell({ type: "ELEMENT_INSPECTED", payload: inspData, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
         } catch (err) {
           console.warn("[Desde MCP] inspect selector failed:", err)
           emitNotFound(selectorValue, "not-found")
@@ -186,10 +188,10 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
         // Legacy: pick the first match (matches existing pre-bump behavior).
         try {
           const inspData = inspectElement(matches[0])
-          sendToShell({ type: "ELEMENT_INSPECTED", payload: inspData, requestId: reqId } as Record<string, unknown>)
+          sendToShell({ type: "ELEMENT_INSPECTED", payload: inspData, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
         } catch (err) {
           console.warn("[Desde MCP] inspect selector failed:", err)
-          sendToShell({ type: "ELEMENT_INSPECTED", payload: null, requestId: reqId } as Record<string, unknown>)
+          sendToShell({ type: "ELEMENT_INSPECTED", payload: null, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
         }
       }
       return true
@@ -367,7 +369,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
       const target = inspector.selectAtPoint(point.x, point.y)
       if (target) {
         try {
-          sendToShell({ type: "ELEMENT_INSPECTED", payload: inspectElement(target), requestId: reqId } as Record<string, unknown>)
+          sendToShell({ type: "ELEMENT_INSPECTED", payload: inspectElement(target), requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
         } catch (err) {
           console.warn("[Desde Inspector] inspect point failed:", err)
           sendToShell({
@@ -408,7 +410,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
       }
       try {
         inspector.setSelectedElement(parentEl)
-        sendToShell({ type: "ELEMENT_INSPECTED", payload: inspectElement(parentEl), requestId: reqId } as Record<string, unknown>)
+        sendToShell({ type: "ELEMENT_INSPECTED", payload: inspectElement(parentEl), requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
       } catch (err) {
         console.warn("[Desde Inspector] inspect parent failed:", err)
         sendToShell({

@@ -25,7 +25,7 @@ import {
   isUnsupportedStyleBuild,
   type StyleEditDestinationOptions as StyleEditOpts,
 } from "@/editor/edit-service/style-edit-builders"
-import { cascadeTargetForStyleEdit } from "@/hooks/cascade-target-for-style-edit"
+import { cascadeTargetForStyleEdit } from "@/editor/edit-service/cascade-target-for-style-edit"
 import { reconcileDispatchedValue } from "@/editor/edit-service/dispatch-reconcile"
 import { makeEditId } from "@/editor/edit-service/make-edit-id"
 
@@ -223,6 +223,11 @@ export async function dispatchTextMutation(
               .mutations.find((x) => deps.mutationKey(x) === identityKey)
             return !!m && !Object.is(m.after, dispatchedAfter)
           },
+          // THE SESSION, read at verification-complete time. The callback
+          // below carries the same guard, and it is the second lock rather
+          // than the only one: this one stops the hook toasting about a page
+          // the designer has already left.
+          current: () => ctx.current,
         },
         // The release gate. "verified": the post-HMR DOM renders the value
         // from source, so release. "didnt-take": the write landed but the
@@ -433,6 +438,10 @@ export async function dispatchClassMutation(
               .mutations.find((x) => deps.mutationKey(x) === identityKey)
             return !!m && !Object.is(m.after, dispatchedAfter)
           },
+          // THE SESSION, read at verification-complete time. This lane has no
+          // outcome callback to carry the guard, so without it a cascade read
+          // taken against the NEXT document could warn about this one.
+          current: () => ctx.current,
         })
       }
       // Reconcile: "settled" drops the entry, "advanced" keeps it and re-fires.

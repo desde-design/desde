@@ -53,7 +53,7 @@ function emitFromBridge(
  * bridge (round 16 X3), so every bridge that can handshake at all is well past
  * the style-provenance threshold.
  */
-const CURRENT_BRIDGE_VERSION = '2026-09-10a-capture-document-id'
+const CURRENT_BRIDGE_VERSION = '2026-09-10c-selection-document-id'
 
 /** Boot the adapter through the real handshake so `lastBridgeVersion` is set. */
 async function adapterWithVersion(

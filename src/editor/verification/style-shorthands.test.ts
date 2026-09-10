@@ -118,7 +118,7 @@ describe('expandStyleDeclarations', () => {
     // pins the map to itself and passes unchanged when a new emission appears. It
     // lives next to the resolver instead, driving real classes through
     // `resolveTailwindClass`:
-    // `src/components/editor/tailwind-declarations.test.ts` § "cascade-oracle
+    // `src/editor/tailwind/tailwind-declarations.test.ts` § "cascade-oracle
     // drift gate".
     const seen = new Set<string>()
     for (const [shorthand, longhands] of Object.entries(EXPANDABLE_SHORTHANDS)) {

@@ -8,7 +8,7 @@
  * HOVER_TARGET_CHANGED / etc. through the injected `sendToShell`. Class body
  * verbatim; INSPECTOR_OVERLAY_STYLES co-moved.
  */
-import { sendToShell, inspectElement, attributeElement } from "./bridge-runtime"
+import { sendToShell, inspectElement, attributeElement, bridgeDocumentId } from "./bridge-runtime"
 import { generateSelector } from "./selector-engine"
 import { isBridgeOwnElement } from "./selector-helpers"
 import { detectFrameworkComponent, detectDirectComponent, buildVue3ComponentTree } from "./framework-component-detection"
@@ -636,13 +636,21 @@ export class InspectorOverlayManager implements SelectModeOverlay {
     const clickName = this.resolveComponentName(el)
     this.showOverlay(el, "selection", clickName)
     try {
-      sendToShell({ type: "ELEMENT_INSPECTED", payload: inspectElement(el) })
+      // Read at SEND time, not at module load: `bridgeDocumentId` is a live
+      // binding filled in by `configureBridgeRuntime`, and a copy taken when
+      // this module was evaluated would be the empty string.
+      sendToShell({
+        type: "ELEMENT_INSPECTED",
+        payload: inspectElement(el),
+        documentId: bridgeDocumentId,
+      })
     } catch (err) {
       console.error("[Desde Inspector] inspectElement failed:", err)
       // Send minimal data so the panel still shows something
       const rect = el.getBoundingClientRect()
       sendToShell({
         type: "ELEMENT_INSPECTED",
+        documentId: bridgeDocumentId,
         payload: {
           tagName: el.tagName.toLowerCase(),
           id: el.id || "",
@@ -712,12 +720,19 @@ export class InspectorOverlayManager implements SelectModeOverlay {
       console.error("[Desde Inspector] inspectElement failed:", err)
       return
     }
-    sendToShell({ type: "ELEMENT_INSPECTED", payload: inspection })
+    sendToShell({
+      type: "ELEMENT_INSPECTED",
+      payload: inspection,
+      documentId: bridgeDocumentId,
+    })
     sendToShell({
       type: "ELEMENT_CONTEXT_MENU",
       payload: {
         inspection,
         menuAnchor: { x: e.clientX, y: e.clientY },
+        // On the payload here, not on the message: the shell hook that opens
+        // this menu is handed `payload` alone.
+        documentId: bridgeDocumentId,
       },
     })
   }

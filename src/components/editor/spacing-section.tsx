@@ -27,7 +27,7 @@ import {
   type ClassMutation,
   type ResolvedSpacingSides,
   type SpacingSide,
-} from "./tailwind-classes"
+} from "@/editor/tailwind/tailwind-classes"
 import {
   inferGapAllAxes,
   inferSpacingAllSides,

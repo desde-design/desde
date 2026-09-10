@@ -13,7 +13,7 @@ import { toast } from "sonner"
 import { LivePrototypePane } from "./live-prototype-pane"
 import { useEditorEditing } from "@/hooks/useEditorEditing"
 import { useEditorStore } from "@/stores/editor-only"
-import { SAVE_PAGE_CHANGED_STATUS } from "@/hooks/pending-iteration-edit"
+import { SAVE_PAGE_CHANGED_STATUS } from "@/editor/edit-service/pending-iteration-edit"
 import type { ComponentManifest, ComponentManifestSource } from "@/editor/core"
 
 // Bridge-connection status is now a bottom-right toast, not a pane banner.
@@ -81,12 +81,13 @@ const PROTOTYPE_URL = "https://prototype.example.com/dashboard"
  * bridge (round 16 X3), so every handshake fixture carries both a version at or
  * above it and a `documentId`; a ready without one is refused.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-10a-capture-document-id"
+const CURRENT_BRIDGE_VERSION = "2026-09-10c-selection-document-id"
 
 let activeMockSetup: MockIframeSetup | null = null
 
 beforeEach(() => {
   activeMockSetup = installContentWindowMock()
+  emittedDocumentId = "doc-a"
   useEditorStore.getState().resetEditor()
 })
 
@@ -115,12 +116,30 @@ function uninstallContentWindowMock(): void {
   delete (HTMLIFrameElement.prototype as unknown as { contentWindow?: unknown }).contentWindow
 }
 
+/**
+ * The document the last handshake emitted through this helper reported.
+ *
+ * Selection replies name their document now, and the adapter drops one whose
+ * id is not the page it handshaked with. Defaulting to the page the test just
+ * connected to keeps these fixtures about whatever they were about; a test
+ * that wants a message from ANOTHER document passes `documentId` itself and
+ * the spread below wins.
+ */
+let emittedDocumentId = "doc-a"
+
 function emitFromBridge(message: Record<string, unknown>): void {
   const setup = activeMockSetup
   if (!setup) throw new Error("no active mock setup")
+  if (message.type === "BRIDGE_READY") {
+    const readyId = (message.payload as { documentId?: string } | undefined)
+      ?.documentId
+    if (typeof readyId === "string" && readyId.length > 0) {
+      emittedDocumentId = readyId
+    }
+  }
   const event = new Event("message") as MessageEvent
   Object.defineProperty(event, "data", {
-    value: { source: "desde-bridge", ...message },
+    value: { source: "desde-bridge", documentId: emittedDocumentId, ...message },
   })
   Object.defineProperty(event, "source", { value: setup.contentWindow })
   window.dispatchEvent(event)

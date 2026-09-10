@@ -2,7 +2,8 @@
  * Unit tests for the text-editable-leaf predicate that gates double-click-to-
  * edit + the Phase 0 hover cursor cue.
  */
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { configureBridgeRuntime } from "./bridge-runtime"
 import {
   buildInspectTag,
   InspectorOverlayManager,
@@ -320,5 +321,100 @@ describe("overlay tracks the element across scroll", () => {
     await flushFrames()
 
     expect(shadowOf(mgr).querySelector(".pt-inspect-overlay")).toBeNull()
+  })
+})
+
+/**
+ * The two messages this overlay posts that decide what a later edit aims at.
+ *
+ * A click posts `ELEMENT_INSPECTED`, which SETS the shell's selection, and the
+ * selection's `editTarget` is the file, line and column an edit writes to. A
+ * right-click posts that plus `ELEMENT_CONTEXT_MENU`, whose menu submits a
+ * chat instruction built from this page's selectors. Both have to name the
+ * page they came from, or the shell cannot tell an answer from the page on
+ * screen from an answer from the page that just left.
+ *
+ * jsdom has no hit-testing, so `elementFromPoint` is stubbed with the element
+ * a cursor would really be over.
+ */
+describe("inspector-overlay — the selection messages name their document", () => {
+  const TEST_DOCUMENT_ID = "doc-under-test"
+  const sent: { type: string; payload?: unknown; documentId?: unknown }[] = []
+  const managers: InspectorOverlayManager[] = []
+
+  beforeEach(() => {
+    sent.length = 0
+    document.body.innerHTML = `<button id="save">Save</button>`
+    configureBridgeRuntime({
+      sendToShell: (message: { type: string; payload?: unknown }) =>
+        void sent.push(message),
+      inspectElement: (node: Element) => ({ selector: `#${node.id}` }),
+      attributeElement: () => undefined,
+      documentId: TEST_DOCUMENT_ID,
+    })
+  })
+
+  afterEach(() => {
+    for (const m of managers) m.deactivate()
+    managers.length = 0
+    document.body.innerHTML = ""
+    configureBridgeRuntime({
+      sendToShell: () => {},
+      inspectElement: () => ({}),
+      attributeElement: () => undefined,
+      documentId: "",
+    })
+  })
+
+  function activeManager(editorMode: boolean): InspectorOverlayManager {
+    const m = new InspectorOverlayManager()
+    managers.push(m)
+    m.setEditorMode(editorMode)
+    m.activate()
+    return m
+  }
+
+  function pointAt(node: Element): void {
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: () => node,
+    })
+  }
+
+  function dispatch(type: string, node: Element): void {
+    node.dispatchEvent(
+      new MouseEvent(type, { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }),
+    )
+  }
+
+  it("stamps ELEMENT_INSPECTED on a click", () => {
+    const target = document.getElementById("save")!
+    pointAt(target)
+    activeManager(false)
+
+    dispatch("click", target)
+
+    const inspected = sent.find((m) => m.type === "ELEMENT_INSPECTED")
+    expect(inspected).toBeDefined()
+    expect(inspected!.documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps ELEMENT_INSPECTED and ELEMENT_CONTEXT_MENU on a right-click", () => {
+    const target = document.getElementById("save")!
+    pointAt(target)
+    activeManager(true)
+
+    dispatch("contextmenu", target)
+
+    const inspected = sent.find((m) => m.type === "ELEMENT_INSPECTED")
+    expect(inspected).toBeDefined()
+    expect(inspected!.documentId).toBe(TEST_DOCUMENT_ID)
+    const menu = sent.find((m) => m.type === "ELEMENT_CONTEXT_MENU")
+    expect(menu).toBeDefined()
+    // On the PAYLOAD for this one: the shell hook that opens the menu is
+    // handed `payload` alone.
+    expect((menu!.payload as { documentId?: unknown }).documentId).toBe(
+      TEST_DOCUMENT_ID,
+    )
   })
 })

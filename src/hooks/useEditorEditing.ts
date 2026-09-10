@@ -56,7 +56,7 @@ import type {
 } from "@/components/editor/layers-panel"
 import { applyClassMutation } from "@/components/editor/align-size"
 import type { PropControlValue } from "@/components/editor/prop-control"
-import { resolveTailwindClasses } from "@/components/editor/tailwind-declarations"
+import { resolveTailwindClasses } from "@/editor/tailwind/tailwind-declarations"
 import { resolveTokenScopeFile } from "@/components/editor/resolve-token-source-file"
 import type { EditableTextField, OutlineNode, StyleOrigin } from "@/types/bridge"
 import { editorFetch } from "@/lib/editor-fetch"
@@ -131,7 +131,7 @@ import {
   settleHandOff,
   structuralRouteFor,
   type PendingIterationEdit,
-} from "./pending-iteration-edit"
+} from "@/editor/edit-service/pending-iteration-edit"
 import {
   hasUndispatchedWork,
   isSupersededHandshake,
@@ -159,7 +159,7 @@ import {
   dispatchIteration,
   interceptIteration,
 } from "@/editor/edit-service/lanes/iteration-lane"
-import { verifyIterationLoop } from "./iteration-verify"
+import { verifyIterationLoop } from "@/editor/edit-service/iteration-verify"
 import { parkedSaveRefusal, saveGate } from "./save-gate"
 
 /**
@@ -610,6 +610,22 @@ export function useEditorEditing({
   const saveStatus = saveStatusState.text
   const saveStatusSeq = saveStatusState.seq
   /**
+   * The document the shell is connected to right now, as a value the shell can
+   * render from.
+   *
+   * `session.documentId` holds the same id, but the session is a mutable
+   * object and nothing re-renders when it moves. Surfaces that have to REACT
+   * to the page being replaced need a value, and two do: the element
+   * right-click menu and the table-edge band menu both stay open across a page
+   * change otherwise, and both submit a chat instruction built from the page's
+   * own selectors.
+   *
+   * Written in `enterDocument`, which is the one place the boundary moves, so
+   * this follows both the unsolicited-ready path and the handshake path. Null
+   * between an adapter detaching and the next handshake completing.
+   */
+  const [bridgeDocumentId, setBridgeDocumentId] = useState<string | null>(null)
+  /**
    * THE bridge session. One document in the iframe, as an object.
    *
    * `useMemo` with no dependencies rather than `useRef`, because the session is
@@ -866,6 +882,10 @@ export function useEditorEditing({
       // `bridgeDocumentId` is `string | null` and `start` takes the same,
       // so there is no `?? ""` here: an empty string would be ADOPTED as a
       // real document and the next handshake would read as a change.
+      // AFTER the end above and before the resume below, so a surface that
+      // renders off this id sees the new page exactly once, at the same moment
+      // the session adopts it.
+      setBridgeDocumentId(documentId)
       const { resumed } = session.start(documentId, (mutation) =>
         mutationResumeEligibleRef.current(mutation),
       )
@@ -1060,6 +1080,9 @@ export function useEditorEditing({
       setLayersError(false)
       setEditorSelection(null)
       setEditorManifest(null)
+      // No adapter, so no document. A menu still open when the adapter goes
+      // closes, which is what a detach should do to it anyway.
+      setBridgeDocumentId(null)
       // Clear component-edit state alongside the rest of the hook's
       // session-scoped state. Without this, leaving compose mode and
       // re-entering would leave the "Editing <Component>" banner up
@@ -1154,11 +1177,21 @@ export function useEditorEditing({
     async (selectors: readonly string[]): Promise<Selection[]> => {
       const adapter = adapterRef.current
       if (!adapter) return []
-      const selections = await adapter.selectMany(selectors)
+      // Through the session, like every other lane: the read is a round trip
+      // to the page, and the page can be replaced while it is out. The adapter
+      // drops a reply from a departed document on its own, so what this guard
+      // adds is the STORE write. Without it a reply that settled just before
+      // the boundary would still be written to `editorSelectionMany` after it,
+      // and the chat header would name elements from the page that left.
+      const outcome = await session.run(async (ctx) =>
+        ctx.step(adapter.selectMany(selectors)),
+      )
+      if (outcome.stale || outcome.value.stale) return []
+      const selections = outcome.value.value
       useEditorStore.getState().setEditorSelectionMany(selections)
       return selections
     },
-    [],
+    [session],
   )
 
   /**
@@ -3232,37 +3265,60 @@ export function useEditorEditing({
    * the refreshed stamp differs from the pre-write one. If HMR never
    * lands within the window, we stop — degraded to today's behavior
    * (409 → reselect), never worse.
+   *
+   * The retries are the session's own, on the `selection` lane, so the
+   * session cancels them at `end()`. They used to be bare `setTimeout` calls
+   * that read the adapter when they fired, and a refresh armed for one page
+   * could then run after that page had gone and re-select the same selector
+   * on the next one (finding C6). The adapter and the generation are both
+   * taken once, here, for the same reason.
    */
   const scheduleSelectionStampRefresh = useCallback((changedFiles: string[]) => {
     const selection = useEditorStore.getState().editorSelection
     const file = selection?.editTarget?.file
     if (!selection || !file || !changedFiles.includes(file)) return
+    const adapter = adapterRef.current
+    if (!adapter) return
+    const generation = session.generation
     const selector = selection.selector
     const priorHash = selection.editTarget?.fileHash
     const delays = [300, 800, 1600]
-    const attempt = (i: number): void => {
-      const timer = setTimeout(async () => {
-        const adapter = adapterRef.current
-        const current = useEditorStore.getState().editorSelection
-        if (!adapter || !current || current.selector !== selector) return
-        if (session.hasInFlight("prop") || session.hasInFlight("text")) {
-          if (i + 1 < delays.length) attempt(i + 1)
-          return
-        }
-        try {
-          const refreshed = await adapter.selectBySelector(selector)
-          const freshHash = refreshed?.editTarget?.fileHash
-          if (freshHash && freshHash !== priorHash) return // re-stamped
-        } catch {
-          // Iframe mid-render — next attempt retries.
-        }
-        if (i + 1 < delays.length) attempt(i + 1)
-      }, delays[i])
-      // Fire-and-forget by design; timers die with the page. Void to make
-      // the intent explicit to the linter.
-      void timer
+    // `arm` is a declaration so `attempt` can name it, and `attempt` is a
+    // const so it keeps the null check on `adapter` above (a hoisted
+    // declaration could be called before that check, so TypeScript drops the
+    // narrowing inside one). The key is the selector: a second refresh for the
+    // same selection replaces the pending retry instead of stacking one on it.
+    function arm(i: number): void {
+      session.schedule(
+        "selection",
+        selector,
+        generation,
+        () => void attempt(i),
+        delays[i],
+      )
     }
-    attempt(0)
+    const attempt = async (i: number): Promise<void> => {
+      const current = useEditorStore.getState().editorSelection
+      if (!current || current.selector !== selector) return
+      if (session.hasInFlight("prop") || session.hasInFlight("text")) {
+        if (i + 1 < delays.length) arm(i + 1)
+        return
+      }
+      try {
+        const outcome = await session.run(async (ctx) =>
+          ctx.step(adapter.selectBySelector(selector)),
+        )
+        // The page went away while the read was out. No retry: every later
+        // one would be reading the document that replaced this one.
+        if (outcome.stale || outcome.value.stale) return
+        const freshHash = outcome.value.value?.editTarget?.fileHash
+        if (freshHash && freshHash !== priorHash) return // re-stamped
+      } catch {
+        // Iframe mid-render. The next attempt retries.
+      }
+      if (i + 1 < delays.length) arm(i + 1)
+    }
+    arm(0)
   }, [session])
   const BRANCH_TEXT_DISPATCH_DEBOUNCE_MS = 500
   // Prop edits debounce on the same cadence (a slider/number drag fires many
@@ -3615,6 +3671,11 @@ export function useEditorEditing({
             // to carry it. A chained definition (`var(...)`) or an
             // un-canonicalizable value declines back to ownership-only.
             expectedDeclarationValue: newValue,
+            // THE SESSION, read at verification-complete time. This lane had
+            // no session predicate at all: the cascade walk runs seconds after
+            // the write, and a page replaced in that window would be measured
+            // for a token this document's stylesheet never carried.
+            current: () => ctx.current,
           })
         } catch (err) {
           // Same rule for the throw path: a departed page's error is not news
@@ -4101,11 +4162,13 @@ export function useEditorEditing({
       unsubOverrideUnverified()
       unsubResize()
       dispatchBranchTextMutationRef.current = null
-      // Both lanes back to rest. The adapter is going away (a new mount or an
+      // Every lane back to rest. The adapter is going away (a new mount or an
       // unmount), so a debounce that fired afterwards would call into an
       // adapter that is gone, and a marker left behind would block the first
       // dispatch for that identity once a new adapter attaches. One call per
-      // lane, and neither touches the other.
+      // lane, and none of them touches another. `selection` is here for the
+      // first of those two reasons only: it holds no marker, and its retries
+      // captured the adapter that is going away.
       //
       // WHEN THIS RUNS, said correctly. React runs the previous cleanup before
       // it re-runs an effect whose dependencies changed, so the cleanup at the
@@ -4122,6 +4185,7 @@ export function useEditorEditing({
       // `end()` before it, which is the case the note below is about.
       session.resetLane("prop")
       session.resetLane("text")
+      session.resetLane("selection")
     }
     // `handleDragMove` / `handleInsertAtPoint` / `handleResize` are listed so a
     // future edit that makes one reactive cannot silently strand a stale
@@ -4136,10 +4200,15 @@ export function useEditorEditing({
     //
     // And re-running is NOT free — an earlier version of this comment claimed
     // "the cleanup just unsubscribes, so re-running is safe" and that is wrong.
-    // The cleanup below also takes BOTH lanes back to rest, which cancels every
+    // The cleanup below also takes EVERY lane back to rest, which cancels every
     // armed debounced write and drops every in-flight marker (the out-of-order
     // overwrite guard). Re-running mid-edit therefore DROPS debounced edits and
-    // reopens the race those markers exist to close. If you make anything in
+    // reopens the race those markers exist to close. The `selection` lane
+    // holds no marker and no debounced write, so what it loses is different:
+    // a re-run without a document change drops its pending stamp refresh
+    // (`scheduleSelectionStampRefresh` above). That is not a lost edit. It
+    // just degrades to today's fallback: a false 409 on the next dispatch
+    // from that selection, until the user reselects. If you make anything in
     // this dep list reactive, make the cleanup re-entrant-safe first.
   }, [
     session,
@@ -5072,6 +5141,7 @@ export function useEditorEditing({
   return {
     setEditorActive,
     status,
+    bridgeDocumentId,
     editorSelection,
     editorManifest,
     layersRoots,

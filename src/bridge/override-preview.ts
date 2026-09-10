@@ -31,7 +31,7 @@
  * the previous mutable IIFE-scope ref (`clearClassOverrideForFn`) that let
  * a sibling top-level function reach into init()-local state.
  */
-import { sendToShell } from "./bridge-runtime"
+import { bridgeDocumentId, sendToShell } from "./bridge-runtime"
 import { OverrideStore } from "./override-store"
 import { getVueInstanceRootElement } from "./framework-component-detection"
 import type { ResolveOverridePayload, ApplyPropOverridePayload } from "./bridge-types"
@@ -839,6 +839,9 @@ export function createOverridePreview(): OverridePreview {
         propName,
         ok: result.ok,
         ...(result.ok ? {} : { kind: result.kind, reason: result.reason }),
+        // Read at SEND time: `bridgeDocumentId` is a live binding filled in by
+        // `configureBridgeRuntime` during init.
+        documentId: bridgeDocumentId,
       },
     })
   }
@@ -955,6 +958,9 @@ export function createOverridePreview(): OverridePreview {
         attrName: payload.attrName,
         ok: result.ok,
         ...(result.ok ? {} : { kind: result.kind, reason: result.reason }),
+        // Read at SEND time: `bridgeDocumentId` is a live binding filled in by
+        // `configureBridgeRuntime` during init.
+        documentId: bridgeDocumentId,
       },
     })
   }

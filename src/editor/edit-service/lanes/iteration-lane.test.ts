@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
 import type { EditResult, PendingMutation } from "@/editor/core"
-import type { IterationVerifyOutcome } from "@/hooks/iteration-verify"
+import type { IterationVerifyOutcome } from "@/editor/edit-service/iteration-verify"
 import {
   bridgeDraftIdOf,
   type PendingIterationEdit,
-} from "@/hooks/pending-iteration-edit"
+} from "@/editor/edit-service/pending-iteration-edit"
 import { EditSession } from "@/editor/session/edit-session"
 import {
   dispatchIteration,

@@ -25,7 +25,7 @@ import {
 import {
   resolveTailwindClass,
   resolveTailwindClasses,
-} from "@/components/editor/tailwind-declarations"
+} from "@/editor/tailwind/tailwind-declarations"
 import { makeEditId } from "./make-edit-id"
 
 /**

@@ -109,7 +109,7 @@ import { createOverridePreview } from "./override-preview"
   // the viewer's `html-inject`). Keep it a single-use literal;
   // bridge-bundle-version.test.ts fails if that stops holding.
   ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__ =
-    "2026-09-10a-capture-document-id"
+    "2026-09-10c-selection-document-id"
   const BRIDGE_VERSION = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__ as string
 
@@ -1460,7 +1460,14 @@ import { createOverridePreview } from "./override-preview"
             if (target) {
               inspector.highlightElement(target)
               try {
-                sendToShell({ type: "ELEMENT_INSPECTED", payload: inspectElement(target) })
+                // Stamped like every other selection reply: this one is the
+                // answer to a SHELL-initiated round trip, so it can arrive
+                // after the next document's handshake with no click involved.
+                sendToShell({
+                  type: "ELEMENT_INSPECTED",
+                  payload: inspectElement(target),
+                  documentId: DOCUMENT_ID,
+                })
               } catch (err) {
                 console.warn("[Desde Inspector] re-inspect failed:", err)
               }

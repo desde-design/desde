@@ -120,7 +120,7 @@ export interface CascadePropertyExpectation {
  * longhands (`expandStyleDeclarations`); the `classes` owner carries the
  * utility's authored property set unexpanded, because a Tailwind shorthand
  * routing through a custom property does not answer for its own longhands. The
- * owner gate lives in `src/hooks/cascade-target-for-style-edit.ts`.
+ * owner gate lives in `src/editor/edit-service/cascade-target-for-style-edit.ts`.
  *
  * Verifying one representative property was a documented v1 approximation with
  * two false-pass shapes, both of which a per-property competitor produces:

@@ -20,7 +20,7 @@ import {
   type ClassMutation,
   type ResolvedBorderRadiusCorners,
   type ResolvedBorderWidthSides,
-} from "./tailwind-classes"
+} from "@/editor/tailwind/tailwind-classes"
 import {
   inferBorder,
   inferBorderRadiusCorners,

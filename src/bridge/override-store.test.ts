@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { configureBridgeRuntime } from './bridge-runtime'
 import { OverrideStore } from './override-store'
 
 interface Box {
@@ -173,5 +174,64 @@ describe('OverrideStore', () => {
   it('resolving an unknown id is a no-op', () => {
     expect(() => store.resolve('nope', 'failed')).not.toThrow()
     expect(sent).toEqual([])
+  })
+})
+
+/**
+ * Every message the page originates that leads to a write or an override
+ * change names the document it came from, so the shell can drop one that
+ * outlived its page (round 15 RULING, widened to the override family).
+ *
+ * The store is otherwise deliberately generic, and the document id is the one
+ * thing it does NOT take as a constructor option: it is a property of the
+ * bridge instance, not of a particular store, and reading it at send time from
+ * the runtime binding is what keeps a store built before `init()` correct.
+ */
+describe('OverrideStore — the document id on its two events', () => {
+  const DOCUMENT_ID = 'doc-under-test'
+  let sent: Array<{ type: string; payload?: unknown }>
+  let store: OverrideStore
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    sent = []
+    configureBridgeRuntime({
+      sendToShell: () => {},
+      inspectElement: () => ({}),
+      attributeElement: () => undefined,
+      documentId: DOCUMENT_ID,
+    })
+    store = new OverrideStore({
+      sendToShell: (m) => sent.push(m),
+      reassertIntervalMs: 100,
+      unverifiedAfterMs: 1_000,
+      giveUpAfterMs: 5_000,
+    })
+  })
+
+  afterEach(() => {
+    store.releaseAll()
+    vi.useRealTimers()
+    configureBridgeRuntime({
+      sendToShell: () => {},
+      inspectElement: () => ({}),
+      attributeElement: () => undefined,
+      documentId: '',
+    })
+  })
+
+  it('stamps OVERRIDE_REVERTED', () => {
+    const box: Box = { value: 'after' }
+    store.register(makeHandle(box))
+    store.resolve('edit-1', 'failed', 'Stale target')
+    expect(sent[0]?.payload).toMatchObject({ documentId: DOCUMENT_ID })
+  })
+
+  it('stamps OVERRIDE_UNVERIFIED', () => {
+    const box: Box = { value: 'after' }
+    store.register(makeHandle(box))
+    vi.advanceTimersByTime(1_200)
+    const unverified = sent.find((m) => m.type === 'OVERRIDE_UNVERIFIED')
+    expect(unverified?.payload).toMatchObject({ documentId: DOCUMENT_ID })
   })
 })

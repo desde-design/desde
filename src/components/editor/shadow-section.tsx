@@ -7,7 +7,7 @@ import {
   setShadow,
   SHADOWS,
   type ClassMutation,
-} from "./tailwind-classes"
+} from "@/editor/tailwind/tailwind-classes"
 import { inferShadow } from "./infer-from-computed"
 import { SectionHeader, fieldLabelClass, fieldRowClass } from "./section-header"
 import {

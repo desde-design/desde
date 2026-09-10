@@ -35,6 +35,9 @@ import { useEditorStore } from "@/stores/editor-only"
  *
  * Best-effort throughout: a missing adapter or a reader error degrades to a
  * silent skip — verification must never break the edit flow.
+ *
+ * Session note: a verification that finishes after the page it read has gone
+ * reports skipped; the callback's own `ctx.current` guard is the second lock.
  */
 
 /** Delay before the first DOM read (let the file write + HMR begin). */
@@ -79,6 +82,26 @@ function outcomeFromStatus(status: VerificationResult["status"]): VerificationOu
  */
 export interface VerifyEditInput extends ExpectationInput {
   isSuperseded?: () => boolean
+  /**
+   * Is the bridge session this edit was made in still the live one? Read
+   * lazily, at verification-complete time, exactly like `isSuperseded`.
+   *
+   * The two answer different questions. `isSuperseded` means "a newer value
+   * for this same edit is on its way", and the page is unchanged. `current`
+   * means "the page this verification read has been replaced": the reader was
+   * pointed at a document that no longer exists, so the reading is about some
+   * other app's DOM. Every production caller passes
+   * `current: () => ctx.current` from its `session.run` context. It stays
+   * optional so a pure caller with no session can omit it, and an absent
+   * predicate reads as "still current".
+   *
+   * When it reports false the store record is still written (the Checks tab
+   * has to stay truthful about what ran), the toast is skipped, and the
+   * outcome delivered is `"skipped"` rather than the real one, so a caller
+   * resolving a live preview override does not resolve it against the wrong
+   * page.
+   */
+  current?: () => boolean
 }
 
 export interface UseEditVerificationResult {
@@ -101,7 +124,7 @@ export function useEditVerification(
 ): UseEditVerificationResult {
   const verifyEdit = useCallback(
     (input: VerifyEditInput, onOutcome?: (outcome: VerificationOutcome) => void) => {
-      const { isSuperseded, ...expectationInput } = input
+      const { isSuperseded, current, ...expectationInput } = input
       // Deliver the coarse outcome AT MOST ONCE, and never let a throwing
       // callback escape (M7). Callers may use `onOutcome` to resolve a bridge
       // override, where a second delivery is a double-resolve and a missing
@@ -167,9 +190,29 @@ export function useEditVerification(
             // SECOND time with a synthetic `skipped`. `deliver`'s once-only
             // guard already makes that harmless for the caller; isolating the
             // store write + toast keeps it from double-recording too.
+            //
+            // THE SESSION, read once and used for both decisions below. A
+            // verification settles 0.85 to 3 seconds after the write, so the
+            // page it was reading can be gone by now: the reader answered
+            // about whatever document replaced it. Such a reading is not
+            // evidence about this edit, so it neither warns the designer nor
+            // resolves the caller's preview override under an id the new
+            // document has already reused. The store record is still written,
+            // because the Checks tab is a log of what ran.
+            //
+            // Read inside its own guard: `current` is the CALLER's function,
+            // and a throw from it here would escape `complete`, which M7 says
+            // must not happen. An unusable answer reads as "still current",
+            // which is exactly what a caller with no predicate at all gets.
+            let stillCurrent = true
+            try {
+              stillCurrent = current?.() !== false
+            } catch {
+              // The caller's predicate is broken; it does not get to decide.
+            }
             try {
               useEditorStore.getState().completeVerification(editId, result)
-              if (result.status === "fail" && !isSuperseded?.()) {
+              if (result.status === "fail" && stillCurrent && !isSuperseded?.()) {
                 toast.warning("Edit didn't take effect", {
                   description: result.detail,
                 })
@@ -177,7 +220,7 @@ export function useEditVerification(
             } catch {
               // Surfacing failed; the outcome below still gets delivered.
             }
-            deliver(outcomeFromStatus(result.status))
+            deliver(stillCurrent ? outcomeFromStatus(result.status) : "skipped")
           },
         },
         {

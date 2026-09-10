@@ -149,7 +149,7 @@
      without dragging the geometry with it.
 
      NOT to be confused with `FONT_SIZE_VALUES` in
-     `src/components/editor/tailwind-declarations.ts`. That table is Tailwind's
+     `src/editor/tailwind/tailwind-declarations.ts`. That table is Tailwind's
      STOCK ramp, and it is how the editor interprets a class in the CUSTOMER's
      prototype. It must keep saying `sm = 0.875rem` no matter what we set here;
      changing it would make the cascade panel lie about someone else's app. */
