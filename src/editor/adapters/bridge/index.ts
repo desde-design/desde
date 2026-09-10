@@ -83,7 +83,7 @@ import {
  * bridge that does not stamp them would have every one of its answers read as
  * "not the current document" and dropped.
  */
-const REQUIRED_BRIDGE_VERSION = '2026-09-10e-unresolved-document-id'
+const REQUIRED_BRIDGE_VERSION = '2026-09-10f-deselect-document-id'
 
 /**
  * Phase 6 feature gate. Bridges below this version don't know about
@@ -167,30 +167,30 @@ interface BridgeEnvelope {
 }
 
 /**
- * The sequence behind every request id this module mints.
- *
- * It lives on the MODULE, not on the adapter instance, and that is the whole
- * point. Every attachment of the adapter effect constructs a fresh
- * `BridgeFrameworkAdapter`, so a counter held on the instance restarts at zero
- * each time and the departed page's adapter and the new one both mint `req-1`.
- * The departed page can still be answering while the new adapter is waiting,
- * and a reply carrying a repeated id settles a request it never answered.
- *
- * Nothing reads the number back. No parser anywhere splits an id or reads its
- * numeric part, so the only property that has to hold is that a value is never
- * handed out twice for the life of the page, which a shared counter gives.
- */
-let nextRequestSeq = 0
-
-/**
- * One id, unique across every adapter instance in this page.
+ * One id, unique across every adapter instance AND every evaluation of this
+ * module.
  *
  * The prefix names the lane it belongs to and is there to be read in a log; it
  * is not correlation. Correlation is the whole string, matched exactly against
- * the pending map the request was parked in.
+ * the pending map the request was parked in. Nothing reads the id back apart
+ * from that exact match, so the only property that has to hold is that a value
+ * is never handed out twice while the page is up.
+ *
+ * There is no counter behind it, and that is the point. A counter has to live
+ * somewhere, and both places it could live restart while the page stays up. On
+ * the INSTANCE it restarts every time the adapter effect re-attaches, which is
+ * once per page change, so the departed page's adapter and the new one both
+ * mint `req-1` and a late reply settles a request it never answered. In MODULE
+ * scope it restarts on a Fast Refresh, which re-evaluates the module without
+ * reloading the page, and the same collision comes back with nothing on screen
+ * to explain it. A UUID has no sequence to restart.
+ *
+ * `crypto.randomUUID` is available everywhere this runs. The shell is served
+ * from 127.0.0.1, which is a secure context, and the test runtime is jsdom on
+ * Node, which has it too. The Editor CLI never constructs this adapter.
  */
 function mintRequestId(prefix: string): string {
-  return `${prefix}-${++nextRequestSeq}`
+  return `${prefix}-${crypto.randomUUID()}`
 }
 
 export class BridgeFrameworkAdapter implements FrameworkAdapter {
@@ -269,6 +269,31 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    * `bridgeDocumentId` and `shouldEndSessionOnHandshake`.
    */
   private lastBridgeDocumentId: string | null = null
+  /**
+   * Which selection is current, as a number that only ever goes up.
+   *
+   * Beside `lastBridgeDocumentId` because the two answer different questions
+   * about the same reply. The document id answers WHICH PAGE: a reply from a
+   * page that has been replaced describes a file the designer is no longer
+   * looking at. The epoch answers WHICH CLICK: the page can stay exactly where
+   * it is while the designer clicks something else, and a read that was
+   * already out then describes an element that is no longer selected.
+   * Installing that answer puts the older element back on screen, and the next
+   * edit is aimed at it.
+   *
+   * Every selection change bumps it. The bump lives inside
+   * `notifySelectionListeners` because that is the one call every change
+   * already makes: an install from a reply, an unsolicited click, a deselect,
+   * `clearSelection`, the multi-select install, and the discard a departed
+   * page triggers. A sixth site added later gets the bump for free, which a
+   * counter bumped at each call site by hand would not give.
+   *
+   * `selectBySelector`, `selectMany` and `selectParent` read it before they
+   * send and compare it when the reply lands. A reply whose epoch has moved is
+   * not applied, and settles the way an unresolved selector already settles:
+   * null for a single read, the empty list for a multi read.
+   */
+  private selectionEpoch = 0
   private readonly documentChangedListeners = new Set<(documentId: string) => void>()
   private readonly mutationCapturedListeners = new Set<MutationCapturedListener>()
   private readonly dragMoveListeners = new Set<(move: DragMoveRequest) => void>()
@@ -438,10 +463,19 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
   }
 
   async selectBySelector(selector: string): Promise<Selection | null> {
+    // Read BEFORE the request goes out, so everything that happens while it is
+    // out is on the far side of this number.
+    const epoch = this.selectionEpoch
     const data = await this.request({
       type: 'INSPECT_SELECTOR',
       payload: { selector },
     })
+    if (this.selectionEpoch !== epoch) {
+      // A newer selection or a deselection happened while this read was out.
+      // The answer is about an element the designer has already moved off, so
+      // it is not installed and it settles as null.
+      return null
+    }
     return this.applySelectionFromInspection(data)
   }
 
@@ -466,6 +500,10 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
       )
     }
     const requestId = mintRequestId('many')
+    // Read BEFORE the request goes out, for the reason `selectBySelector`
+    // gives: the designer can click a single element while a multi read is
+    // out, and the primary this install pins would replace that click.
+    const epoch = this.selectionEpoch
     const promise = new Promise<InspectionData[]>((resolve, reject) => {
       // Bounded wait. Bridge that handshakes the right version but
       // somehow drops INSPECT_MANY (network glitch, message-channel
@@ -496,6 +534,12 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
       requestId,
     } as ShellToBridgeMessage)
     const items = await promise
+    if (this.selectionEpoch !== epoch) {
+      // The empty list is this read's null: the caller already treats "no
+      // resolved selectors" as a clear rather than as "keep what you had", so
+      // nothing has to learn a new answer.
+      return []
+    }
     const selections = items.map((d) => inspectionDataToSelection(d))
     // Pin the FIRST resolved selection as the primary so the existing
     // inspector path stays coherent. The shell mirrors the full list
@@ -511,10 +555,16 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
   async selectParent(): Promise<Selection | null> {
     const current = this.currentSelection
     if (!current) return null
+    // The same lock, for the same reason, and here it is sharper still: this
+    // reply is the parent of the selection that was current when the request
+    // went out. Once the designer has clicked elsewhere, that parent is not
+    // the parent of anything on screen.
+    const epoch = this.selectionEpoch
     const data = await this.request({
       type: 'INSPECT_PARENT',
       payload: { selector: current.selector },
     })
+    if (this.selectionEpoch !== epoch) return null
     return this.applySelectionFromInspection(data)
   }
 
@@ -1322,6 +1372,14 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    * `RESIZE_COMMITTED`, `PROP_OVERRIDE_RESULT`, `ATTR_OVERRIDE_RESULT`,
    * `OVERRIDE_REVERTED`, `OVERRIDE_UNVERIFIED`.
    *
+   * `ELEMENT_DESELECTED` is stamped, and checked here. It used to sit with the
+   * pure UI events below, on the argument that clearing a selection writes
+   * nothing. That argument missed what the clear costs: it moves the selection
+   * epoch, so a deselect from the page that has just left cancels a read the
+   * page on screen has out, and takes away the selection the designer is
+   * looking at right now. The new page does not correct that on its own,
+   * because the new page never sent it.
+   *
    * `ELEMENT_INSPECTED` and `ELEMENTS_INSPECTED` are in that family too, and
    * they are the reason it is not only about writes. They SET THE SELECTION,
    * and the selection's `editTarget` is the file, line and column every later
@@ -1342,11 +1400,11 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    *
    * - `BRIDGE_READY` IS the id. It is where the shell learns which document it
    *   is talking to, so it cannot be filtered by it.
-   * - Pure UI and liveness events: `ELEMENT_DESELECTED`, `ESCAPE_PRESSED`,
-   *   `ROUTE_CHANGED`, `DOM_MUTATED`, plus the context-menu, hover and
-   *   page-background messages other consumers read. None of them writes
-   *   anything. The worst a stale one does is clear a selection or ask for a
-   *   tree refresh, and the new page corrects both on its own.
+   * - Pure UI and liveness events: `ESCAPE_PRESSED`, `ROUTE_CHANGED`,
+   *   `DOM_MUTATED`, plus the context-menu, hover and page-background messages
+   *   other consumers read. None of them writes anything. The worst a stale
+   *   one does is ask for a tree refresh, and the new page corrects that on
+   *   its own.
    * - `ELEMENT_INSPECTION_UNRESOLVED` is stamped, and checked here. It settles
    *   the same pending request the selection replies do, so a stale one clears
    *   a read the page on screen is still waiting on. It used to be left
@@ -1443,6 +1501,13 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         }
         break
       case 'ELEMENT_DESELECTED':
+        if (!this.fromCurrentDocument(message.documentId)) {
+          this.warnForeignDocument('ELEMENT_DESELECTED', message.documentId)
+          // Dropped before `currentSelection` is touched. Nothing is stranded
+          // by dropping it: this message settles no request, and the page on
+          // screen deselects through its own.
+          break
+        }
         this.currentSelection = null
         this.notifySelectionListeners()
         break
@@ -1984,7 +2049,19 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     return selection
   }
 
+  /**
+   * Announce the selection, and move the epoch with it.
+   *
+   * The bump is FIRST, so a listener that starts a read of its own captures
+   * the number this change produced rather than the one it replaced.
+   *
+   * It lives here rather than at the six sites that change the selection
+   * because every one of them ends in this call, and a seventh that forgot to
+   * bump would be a silent hole: the read it raced would install an answer the
+   * designer had already clicked past, with nothing on screen to explain it.
+   */
   private notifySelectionListeners(): void {
+    this.selectionEpoch += 1
     for (const listener of this.selectionListeners) {
       listener(this.currentSelection)
     }

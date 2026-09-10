@@ -247,13 +247,53 @@ describe("useEditVerification — session gating on current", () => {
     expect(toast.warning).not.toHaveBeenCalled()
     expect(onOutcome).toHaveBeenCalledTimes(1)
     expect(onOutcome).toHaveBeenCalledWith("skipped")
-    // The Checks tab stays truthful: the verification DID run and DID fail,
-    // and the log of what ran is not the place to hide that.
+    // The Checks tab still gets a record, and the record says what is true:
+    // the check ran and could not finish on the page it was about. The old
+    // shape stored the page-derived `fail` here, so the tab claimed this edit
+    // did not take effect on the evidence of the NEXT page's DOM.
     const record = useEditorStore
       .getState()
       .verifications.find((v) => v.editId === "e1")
     expect(record?.phase).toBe("done")
-    expect(record?.result).toEqual(failResult)
+    expect(record?.result?.status).toBe("skipped")
+    expect(record?.result?.detail).toBe(
+      "The page changed before the check finished.",
+    )
+    // And nothing that describes a failure came along for the ride.
+    expect(record?.result?.failedAt).toBeUndefined()
+    expect(record?.result?.cause).toBeUndefined()
+    expect(record?.result?.observedValue).toBeUndefined()
+    expect(record?.result?.escalatable).toBe(false)
+    // The parts that are about the edit rather than about the reading are
+    // carried over, so the row still names what was asked for.
+    expect(record?.result?.editId).toBe(failResult.editId)
+    expect(record?.result?.expectedValue).toBe(failResult.expectedValue)
+  })
+
+  it("pass + current() === false: the record is skipped too, not a pass", async () => {
+    // A pass read off the wrong document is no more evidence than a fail. The
+    // outcome row above already covers `onOutcome`; this is the store record,
+    // which is the only place a wrong verdict would persist.
+    const passResult = baseResult({ status: "pass", detail: "matched" })
+    resolveWith(passResult)
+    const adapter = makeAdapter()
+    const { result: hookResult } = renderHook(() => useEditVerification(() => adapter))
+
+    await act(async () => {
+      hookResult.current.verifyEdit({
+        editId: "e1",
+        selector: "#submit",
+        expectedValue: "Submit",
+        editKind: "dom-text",
+        current: () => false,
+      })
+      await Promise.resolve()
+    })
+
+    const record = useEditorStore
+      .getState()
+      .verifications.find((v) => v.editId === "e1")
+    expect(record?.result?.status).toBe("skipped")
   })
 
   it("fail + current() === true: toast fires and the real outcome is delivered (control)", async () => {
@@ -282,6 +322,12 @@ describe("useEditVerification — session gating on current", () => {
 
     expect(toast.warning).toHaveBeenCalledTimes(1)
     expect(onOutcome).toHaveBeenCalledWith("didnt-take")
+    // The record is the reading itself, untouched. Without this the skip
+    // above could be a hook that rewrites every record.
+    const record = useEditorStore
+      .getState()
+      .verifications.find((v) => v.editId === "e1")
+    expect(record?.result).toEqual(failResult)
   })
 
   it("current() throws: the predicate does not get to decide, so it behaves like current() === true", async () => {

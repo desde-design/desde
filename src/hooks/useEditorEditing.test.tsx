@@ -1868,9 +1868,14 @@ describe("useEditorEditing: the bridge session", () => {
     const recordFor = () =>
       useEditorStore.getState().verifications.find((v) => v.editId === editId)
     await waitFor(() => expect(recordFor()?.phase).toBe("done"), { timeout: 15000 })
-    // The verification really did fail. The Checks tab keeps saying so: what
-    // the session guard suppresses is the interruption, not the record.
-    expect(recordFor()?.result?.status).toBe("fail")
+    // The Checks tab gets a record, and the record says what is true: the
+    // check ran and could not finish on the page it was about. It used to
+    // store the `fail` the reader came back with, which made the tab claim
+    // this edit did not take effect on the evidence of the NEXT page's DOM.
+    expect(recordFor()?.result?.status).toBe("skipped")
+    expect(recordFor()?.result?.detail).toBe(
+      "The page changed before the check finished.",
+    )
     expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
   }, 30000)
   it("does not re-select on the page that replaced the one it was scheduled for (finding C6)", async () => {
@@ -2519,6 +2524,141 @@ describe("useEditorEditing: the bridge session", () => {
     await waitFor(() => expect(adapter.structureReads).toHaveLength(2))
     expect(editing()!.layersRawRoots).toBeNull()
     expect(editing()!.layersRoots).toBeNull()
+  })
+
+  it("a multi-select nothing overtook reaches the store, even though the adapter announces first", async () => {
+    // THE ORDER IS THE ROW. The real adapter installs the primary selection
+    // and tells the shell's selection listener BEFORE `selectMany` resolves,
+    // so by the time the hook's continuation runs, that listener has already
+    // moved the hook's own selection sequence. A hook-side sequence check
+    // therefore rejected its OWN read: the multi-selection never reached the
+    // store and the chat header never named the elements the designer picked.
+    // Ordering for an adapter-driven selection change belongs to the adapter's
+    // epoch now; the hook's sequence stays for the hook's own continuations,
+    // where the adapter cannot see the click.
+    FakeBridgeAdapter.parkSelectMany = true
+    await mount()
+    const adapter = lastFakeAdapter()
+
+    const picked = [
+      componentSelection("#row-1", "RowA"),
+      componentSelection("#row-2", "RowB"),
+    ]
+    let resolved: Selection[] | null = null
+    await act(async () => {
+      void editing()!
+        .handleSelectMany(["#row-1", "#row-2"])
+        .then((r) => {
+          resolved = r
+        })
+      await Promise.resolve()
+    })
+    expect(adapter.parkedSelectManyReads).toHaveLength(1)
+
+    await act(async () => {
+      adapter.parkedSelectManyReads[0]!.settle(picked)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(resolved).not.toBeNull()
+    expect(resolved!.map((sel) => sel.selector)).toEqual(["#row-1", "#row-2"])
+    expect(
+      useEditorStore.getState().editorSelectionMany.map((sel) => sel.selector),
+    ).toEqual(["#row-1", "#row-2"])
+    // The primary the single-selection inspectors read.
+    expect(useEditorStore.getState().editorSelection?.selector).toBe("#row-1")
+  })
+
+  it("a multi-select the page resolved none of still clears what was selected", async () => {
+    // The control for the empty-list branch. `handleSelectMany` writes nothing
+    // to the store for an empty list, so this row is what says the clear
+    // still happens: the adapter announces the empty answer with null, and
+    // the selection listener empties both store fields. Without it, the
+    // branch that protects the designer's click could quietly have turned
+    // "none of these selectors exist" into "keep what you had".
+    FakeBridgeAdapter.parkSelectMany = true
+    await mount()
+    const adapter = lastFakeAdapter()
+
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "OldCard"))
+      await Promise.resolve()
+    })
+    expect(useEditorStore.getState().editorSelection?.selector).toBe("#panel")
+
+    await act(async () => {
+      void editing()!.handleSelectMany(["#gone-1", "#gone-2"])
+      await Promise.resolve()
+    })
+    expect(adapter.parkedSelectManyReads).toHaveLength(1)
+
+    await act(async () => {
+      adapter.parkedSelectManyReads[0]!.settle([])
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(useEditorStore.getState().editorSelection).toBeNull()
+    expect(useEditorStore.getState().editorSelectionMany).toEqual([])
+  })
+
+  it("a parked selection read cannot put back the element the designer clicked away from", async () => {
+    // The same parked stamp refresh as the page-change row above, with the
+    // page left exactly where it is. Only the CLICK moves, so the document
+    // check has nothing to see and the adapter's selection epoch is the only
+    // lock. This is the shape a fixture that never announced its own installs
+    // could not stage at all: the read's answer has to reach the adapter the
+    // way the bridge's reply does before anything can refuse it.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    FakeBridgeAdapter.parkSelectBySelector = true
+    try {
+      await mount()
+      const adapter = lastFakeAdapter()
+      await act(async () => {
+        adapter.emitSelection(styleSelection)
+      })
+      await waitFor(() =>
+        expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+      )
+      await act(async () => {
+        adapter.emitCapture(capture("m1", "hello"))
+      })
+      const typing = await waitForApply()
+      await act(async () => {
+        // The write lands and names the selected element's file, which arms
+        // the refresh.
+        typing.settle(applied({ "src/App.vue": "hash-2" }))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      // Let the first retry fire. It parks.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300)
+      })
+      expect(adapter.parkedSelectReads).toHaveLength(1)
+
+      // The designer clicks something else, on the page that never moved.
+      const theLaterClick = componentSelection("#header", "Header")
+      await act(async () => {
+        adapter.emitSelection(theLaterClick)
+        await Promise.resolve()
+      })
+      expect(useEditorStore.getState().editorSelection?.selector).toBe("#header")
+
+      // And the refresh finally answers, with the element it was asked for.
+      await act(async () => {
+        adapter.parkedSelectReads[0]!.settle(styleSelection)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      // The click stands. Nothing put `#panel` back, so the next edit still
+      // aims at what the designer is looking at.
+      expect(useEditorStore.getState().editorSelection?.selector).toBe("#header")
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("cannot install a multi-select that answers after the designer clicked something else", async () => {

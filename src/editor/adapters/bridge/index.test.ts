@@ -18,7 +18,7 @@ import type { BridgeMutation, InspectionData } from "@/types/bridge"
  * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
  * so a handshake fixture has to carry both.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-10e-unresolved-document-id"
+const CURRENT_BRIDGE_VERSION = "2026-09-10f-deselect-document-id"
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -2207,5 +2207,267 @@ describe("BridgeFrameworkAdapter — request ids across adapter instances", () =
     }
 
     expect(new Set(ids).size).toBe(ids.length)
+  })
+})
+
+/**
+ * The document id answers "which page". This block is about the other
+ * question: "which click".
+ *
+ * A page can stay exactly where it is while the designer clicks something
+ * else. A selection read that was already out then answers about an element
+ * the designer has moved off, and installing that answer puts the older
+ * element back on screen and aims the next edit at it. The document check
+ * cannot see any of that, because nothing about the page changed.
+ *
+ * The adapter's answer is a selection epoch: one counter that every selection
+ * change bumps. A read captures it before it sends and compares it when the
+ * reply lands.
+ */
+describe("BridgeFrameworkAdapter: a selection cannot outlive the click it answers", () => {
+  let adapter: BridgeFrameworkAdapter
+  let setup: MockIframeSetup
+
+  beforeEach(async () => {
+    adapter = new BridgeFrameworkAdapter()
+    setup = makeMockIframe()
+    const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+    })
+    await initPromise
+    setup.postMessages.length = 0
+  })
+
+  afterEach(async () => {
+    await adapter.dispose()
+  })
+
+  /** The requestId the adapter minted for the one message of this type. */
+  function requestIdOf(type: string): string {
+    const sent = setup.postMessages.find(
+      (m) => (m as { type: string }).type === type,
+    ) as { requestId: string } | undefined
+    if (!sent) throw new Error(`no ${type} was sent`)
+    return sent.requestId
+  }
+
+  /** The selector the adapter is currently holding, read through a parent ask. */
+  function heldSelector(): string | undefined {
+    setup.postMessages.length = 0
+    void adapter.selectParent().catch(() => {})
+    const sent = setup.postMessages.find(
+      (m) => (m as { type: string }).type === "INSPECT_PARENT",
+    ) as { payload: { selector: string } } | undefined
+    return sent?.payload.selector
+  }
+
+  it("does not install a selection reply the designer has already clicked past", async () => {
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    const parked = adapter.selectBySelector("#panel")
+    const requestId = requestIdOf("INSPECT_SELECTOR")
+
+    // The designer clicks something else, on the SAME page.
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#header" }),
+    })
+    expect(seen.map((s) => s?.selector)).toEqual(["#header"])
+
+    // And only then does the read answer, with the element it was asked for.
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#panel" }),
+      requestId,
+    })
+
+    // Null, not a rejection: an unresolved selector already answers null, so
+    // the caller keeps the handling it has.
+    await expect(parked).resolves.toBeNull()
+    // Nobody was told a second time, and the click is still what the adapter
+    // is holding.
+    expect(seen.map((s) => s?.selector)).toEqual(["#header"])
+    expect(heldSelector()).toBe("#header")
+  })
+
+  it("installs a selection reply that no click overtook (control)", async () => {
+    // Without this row the epoch could be a `return null` that never lets any
+    // reply through, and the row above would pass on an adapter whose reads
+    // all answer nothing.
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    const read = adapter.selectBySelector("#panel")
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#panel" }),
+      requestId: requestIdOf("INSPECT_SELECTOR"),
+    })
+
+    expect((await read)?.selector).toBe("#panel")
+    expect(seen.map((s) => s?.selector)).toEqual(["#panel"])
+    expect(heldSelector()).toBe("#panel")
+  })
+
+  it("selectMany installs the first selection and notifies exactly once", async () => {
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    const promise = adapter.selectMany(["#row-1", "#row-2"])
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENTS_INSPECTED",
+      payload: [
+        makeInspectionData({ selector: "#row-1" }),
+        makeInspectionData({ selector: "#row-2" }),
+      ],
+      requestId: requestIdOf("INSPECT_MANY"),
+    })
+
+    const selections = await promise
+    expect(selections.map((s) => s.selector)).toEqual(["#row-1", "#row-2"])
+    // One notify, carrying the primary the shell pins its single-selection
+    // inspectors to.
+    expect(seen.map((s) => s?.selector)).toEqual(["#row-1"])
+  })
+
+  it("does not install a selectMany reply the designer has already clicked past", async () => {
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    const promise = adapter.selectMany(["#row-1", "#row-2"])
+    const requestId = requestIdOf("INSPECT_MANY")
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#header" }),
+    })
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENTS_INSPECTED",
+      payload: [
+        makeInspectionData({ selector: "#row-1" }),
+        makeInspectionData({ selector: "#row-2" }),
+      ],
+      requestId,
+    })
+
+    // The empty list is this read's null, and the click is untouched.
+    await expect(promise).resolves.toEqual([])
+    expect(seen.map((s) => s?.selector)).toEqual(["#header"])
+    expect(heldSelector()).toBe("#header")
+  })
+
+  it("a deselect while a selection read is out makes the reply resolve null", async () => {
+    const parked = adapter.selectBySelector("#panel")
+    const requestId = requestIdOf("INSPECT_SELECTOR")
+
+    emitFromBridge(setup.contentWindow, { type: "ELEMENT_DESELECTED" })
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#panel" }),
+      requestId,
+    })
+
+    await expect(parked).resolves.toBeNull()
+    // Nothing came back on screen: the designer deselected and it stayed
+    // deselected.
+    expect(heldSelector()).toBeUndefined()
+  })
+
+  it("a clearSelection while a selection read is out makes the reply resolve null", async () => {
+    const parked = adapter.selectBySelector("#panel")
+    const requestId = requestIdOf("INSPECT_SELECTOR")
+
+    await adapter.clearSelection()
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#panel" }),
+      requestId,
+    })
+
+    await expect(parked).resolves.toBeNull()
+    expect(heldSelector()).toBeUndefined()
+  })
+
+  it("drops an ELEMENT_DESELECTED from a page that is no longer on screen", () => {
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#panel" }),
+    })
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    // The departed page's own Escape, arriving after its replacement.
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_DESELECTED",
+      documentId: "doc-x",
+    })
+    expect(seen).toEqual([])
+    expect(heldSelector()).toBe("#panel")
+
+    // The page on screen still gets to deselect.
+    emitFromBridge(setup.contentWindow, { type: "ELEMENT_DESELECTED" })
+    expect(seen).toEqual([null])
+    expect(heldSelector()).toBeUndefined()
+  })
+})
+
+/**
+ * A request id has to survive the MODULE being evaluated again.
+ *
+ * Fast Refresh re-evaluates a module without reloading the page. A counter
+ * held in module scope restarts at zero there, so the ids minted after the
+ * re-evaluation repeat the ids minted before it, and a reply that was still
+ * queued can settle a request it never answered. The document stamp does not
+ * help: the page never changed.
+ */
+describe("BridgeFrameworkAdapter: request ids survive a module re-evaluation", () => {
+  it("a re-evaluated module never repeats an id the first evaluation minted", async () => {
+    const mintFrom = async (
+      Ctor: typeof BridgeFrameworkAdapter,
+    ): Promise<string[]> => {
+      const instance = new Ctor()
+      const s = makeMockIframe()
+      const ids: string[] = []
+      try {
+        const initPromise = instance.init({ iframe: s.iframe, origin: "*" })
+        emitFromBridge(s.contentWindow, {
+          type: "BRIDGE_READY",
+          payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a" },
+        })
+        await initPromise
+        s.postMessages.length = 0
+        void instance.selectBySelector("#panel").catch(() => {})
+        void instance.getStructure().catch(() => {})
+        for (const type of ["INSPECT_SELECTOR", "GET_STRUCTURE"]) {
+          const sent = s.postMessages.find(
+            (m) => (m as { type: string }).type === type,
+          ) as { requestId: string } | undefined
+          if (!sent) throw new Error(`no ${type} was sent`)
+          ids.push(sent.requestId)
+        }
+      } finally {
+        await instance.dispose()
+      }
+      return ids
+    }
+
+    // Two evaluations of the module, each starting from the same fresh state
+    // a Fast Refresh gives it. Comparing against the module this file
+    // imported statically would not prove anything: that one has been minting
+    // ids all through this suite, so a restarted sequence would miss it by
+    // luck rather than by rule.
+    vi.resetModules()
+    const first = await import("./index")
+    vi.resetModules()
+    const second = await import("./index")
+    expect(second.BridgeFrameworkAdapter).not.toBe(first.BridgeFrameworkAdapter)
+
+    const before = await mintFrom(first.BridgeFrameworkAdapter)
+    const after = await mintFrom(second.BridgeFrameworkAdapter)
+
+    expect(new Set([...before, ...after]).size).toBe(before.length + after.length)
   })
 })

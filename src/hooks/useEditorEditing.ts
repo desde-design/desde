@@ -776,6 +776,13 @@ export function useEditorEditing({
    * attachment match a selection in the new one.
    */
   const selectionSeqRef = useRef(0)
+  // WHAT THIS COUNTER IS NOT FOR. It does not order the adapter's own
+  // selection replies. The adapter carries a selection epoch of its own, and
+  // that epoch is what refuses a `selectBySelector` or `selectMany` answer the
+  // designer has already clicked past. This counter is for the continuations
+  // the adapter cannot see: the attribution prefetch and the manifest lookup
+  // are the shell asking a SERVER a question about the element that was
+  // selected, and nothing about their answers passes through the adapter.
 
   // Adapter lifecycle. Attached when `enabled` flips true and an iframe
   // is present; disposed on disable, unmount, or url change. Selection
@@ -1355,22 +1362,38 @@ export function useEditorEditing({
       // the boundary would still be written to `editorSelectionMany` after it,
       // and the chat header would name elements from the page that left.
       //
-      // AND THE SELECTION SEQUENCE BESIDE IT, for the case the session cannot
-      // see. The page can stay exactly where it is while the designer clicks
-      // something else, and this read's answer is then out of date without
-      // any page having gone anywhere. The store write is what makes that
-      // matter: `setEditorSelectionMany` also pins the primary
-      // `editorSelection`, so a late multi-read would replace the single
-      // selection the designer just made, and the next edit would aim at the
-      // element the multi-read named. Same counter, same rule and same
-      // reasoning as the manifest lookup in the selection listener.
-      const seq = selectionSeqRef.current
+      // AND NO SELECTION SEQUENCE HERE. The other case, where the page stays
+      // put and the designer clicks something else, is real, and the lock for
+      // it is the ADAPTER'S selection epoch: it captures the epoch before it
+      // sends and refuses to install a reply whose epoch has moved, so a read
+      // the designer clicked past comes back as the empty list. The hook's own
+      // `selectionSeqRef` cannot do that job here, and trying made it worse:
+      // the adapter installs the primary and notifies the selection listener
+      // BEFORE `selectMany` resolves, that listener bumps the sequence, and
+      // the check then rejected its own read every time.
+      //
+      // Which lock covers what: the adapter's epoch orders every selection
+      // change the ADAPTER can see, which is all of them. `selectionSeqRef`
+      // stays for the hook's OWN continuations, the attribution prefetch and
+      // the manifest lookup, where what arrives late is not a selection reply
+      // at all and the adapter has no view of it.
       const outcome = await session.run(async (ctx) =>
         ctx.step(adapter.selectMany(selectors)),
       )
       if (outcome.stale || outcome.value.stale) return []
-      if (seq !== selectionSeqRef.current) return []
       const selections = outcome.value.value
+      if (selections.length === 0) {
+        // NOTHING IS WRITTEN FOR AN EMPTY LIST, and that is deliberate. An
+        // empty list means one of two things, and the adapter has already
+        // said which. Either the page resolved none of the selectors, and the
+        // adapter cleared its own selection and told the selection listener,
+        // which empties both store fields on its own. Or the read was refused
+        // because the designer clicked something else while it was out, and
+        // that click IS the selection now: `setEditorSelectionMany([])` nulls
+        // the primary, so writing it here would take away the element the
+        // designer just picked.
+        return []
+      }
       useEditorStore.getState().setEditorSelectionMany(selections)
       return selections
     },
