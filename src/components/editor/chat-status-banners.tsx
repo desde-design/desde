@@ -17,7 +17,7 @@
  */
 
 import { useState, type ReactNode } from "react"
-import { Loader2, X } from "lucide-react"
+import { Loader2, TriangleAlert, X } from "lucide-react"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -260,13 +260,26 @@ function RateLimitWarningBanner({
   // the winner was decided by CSS source order rather than by the call. `cn()`
   // merges, which is the only reason the composition below is safe to read at
   // face value.
+  /*
+   * The spinner belongs to the approaching case only. Past the limit the
+   * request did not go through and the turn is over, so a spinning glyph
+   * beside "has been denied" says something is still in flight next to a
+   * sentence saying nothing is. It shipped on both branches because the
+   * copy used to end "Waiting for the limit to clear", which was true of
+   * the old behaviour and stopped being true when the copy became "Try
+   * again in 38 mins".
+   */
+  const Glyph = isRejected ? TriangleAlert : Loader2
   return (
     <Alert
       variant={isRejected ? "destructive" : "warning"}
       className={cn(BANNER_BASE, "flex items-start gap-1.5")}
     >
-      <Loader2
-        className="mt-1 size-2.5 shrink-0 animate-spin"
+      <Glyph
+        className={cn(
+          "mt-1 size-2.5 shrink-0",
+          isRejected ? undefined : "animate-spin",
+        )}
         aria-hidden="true"
       />
       <span>{body}</span>

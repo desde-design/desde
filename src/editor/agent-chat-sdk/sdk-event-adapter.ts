@@ -382,17 +382,37 @@ function* fromRateLimitEvent(
     i.overageStatus === 'allowed_warning' || i.overageStatus === 'rejected'
       ? i.overageStatus
       : null
-  // Emit when EITHER signal is non-allowed. `status === 'allowed'`
-  // + no overage signal is the steady-state — nothing to say.
-  if (baseStatus === null && overageStatus === null) return
-  // The event's primary `status` reflects the more-severe of the
-  // two so the UI's primary banner copy matches user-facing
-  // reality. If both are present, `rejected` outranks
-  // `allowed_warning`; otherwise the non-null one wins.
-  const effectiveStatus: 'allowed_warning' | 'rejected' =
-    baseStatus === 'rejected' || overageStatus === 'rejected'
-      ? 'rejected'
-      : 'allowed_warning'
+  /*
+   * `overageStatus` alone is NOT a signal, and reading it as one shipped a
+   * false "the model request has been denied" banner over a turn that was
+   * running normally (Mo, 2026-09-10).
+   *
+   * Overage is the extra-credit pool a claude.ai subscription can fall back
+   * on once its base limit is gone. An account that never set that pool up
+   * reports `overageStatus: 'rejected'` permanently — the SDK's own
+   * `overageDisabledReason` enumerates why, and `overage_not_provisioned`,
+   * `org_level_disabled` and `member_level_disabled` are all steady states
+   * of an account nothing is wrong with. So `rejected` there means "there is
+   * no fallback pool", not "this request was refused".
+   *
+   * The code used to emit whenever EITHER field was non-allowed, and to
+   * escalate the event's own status to `rejected` if either one was. On any
+   * subscription without extra credits that made every rate-limit event —
+   * including the ones at `status: 'allowed'`, 0% used — render as a denial.
+   *
+   * The base `status` is the only field that says whether the request went
+   * through, so it decides both whether to emit and what to say. Overage is
+   * carried alongside it as a modifier: once the base limit IS under
+   * pressure, whether a fallback exists changes the reader's situation.
+   *
+   * The one case where overage speaks for itself is when the turn is already
+   * drawing on it (`overageInUse` / `isUsingOverage`). Base is spent by
+   * definition then, so overage pressure is the live limit.
+   */
+  const overageInUse = i.overageInUse === true || i.isUsingOverage === true
+  const effectiveStatus: 'allowed_warning' | 'rejected' | null =
+    baseStatus !== null ? baseStatus : overageInUse ? overageStatus : null
+  if (effectiveStatus === null) return
   // Codex finding #4 — clamp utilization to [0, 1]. SDK drift could
   // produce 1.5 or -0.2 and the UI would render "150%" / "-20%".
   let utilization: number | undefined

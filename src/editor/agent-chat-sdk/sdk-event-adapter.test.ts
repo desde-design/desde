@@ -456,7 +456,7 @@ describe('adaptSdkMessageToChatEvents', () => {
     ])
   })
 
-  it('drops rate_limit_event with status="allowed" AND no overage signal (steady-state)', () => {
+  it('drops rate_limit_event with status="allowed" (steady-state)', () => {
     expect(
       collect({
         type: 'rate_limit_event',
@@ -465,15 +465,50 @@ describe('adaptSdkMessageToChatEvents', () => {
     ).toEqual([])
   })
 
-  it('emits when base is allowed but overage is allowed_warning (codex round-1 #2)', () => {
-    // claude.ai tracks base rate limit + overage credit pool
-    // independently. A user can be allowed on base but in overage
-    // warning — we should surface that.
+  it('drops an overage signal while the base limit is allowed and overage is not in use', () => {
+    /*
+     * The regression Mo hit on 2026-09-10: a running turn wearing a
+     * "the model request has been denied" banner.
+     *
+     * `overageStatus: 'rejected'` is the PERMANENT state of any account
+     * with no extra-credit pool set up, which is most of them. It says
+     * there is no fallback, not that anything was refused. Reading it as
+     * a signal in its own right put a denial banner over every single
+     * rate-limit event such an account produced, at 0% utilization.
+     *
+     * Both of these used to emit. Neither may now.
+     */
     expect(
       collect({
         type: 'rate_limit_event',
         rate_limit_info: {
           status: 'allowed',
+          overageStatus: 'rejected',
+          overageDisabledReason: 'overage_not_provisioned',
+        },
+      } as unknown as SDKMessage),
+    ).toEqual([])
+    expect(
+      collect({
+        type: 'rate_limit_event',
+        rate_limit_info: {
+          status: 'allowed',
+          overageStatus: 'allowed_warning',
+          overageResetsAt: 1748200000000,
+        },
+      } as unknown as SDKMessage),
+    ).toEqual([])
+  })
+
+  it('emits an overage signal once the turn is actually drawing on overage', () => {
+    // Base is spent by definition when overage is in use, so overage
+    // pressure IS the live limit and speaks for itself here.
+    expect(
+      collect({
+        type: 'rate_limit_event',
+        rate_limit_info: {
+          status: 'allowed',
+          overageInUse: true,
           overageStatus: 'allowed_warning',
           overageResetsAt: 1748200000000,
         },
@@ -488,24 +523,25 @@ describe('adaptSdkMessageToChatEvents', () => {
     ])
   })
 
-  it('escalates status to "rejected" when overage is rejected even if base is allowed', () => {
-    // The event's primary status reflects the more-severe of the
-    // two so the UI's banner copy matches user-facing reality.
+  it('never lets an overage signal escalate a healthy base status to rejected', () => {
+    // The base status decides what the banner says. Overage rides along
+    // as the "and there are no extra credits available" clause, which is
+    // only true-and-useful once the base limit has actually been reached.
     expect(
       collect({
         type: 'rate_limit_event',
         rate_limit_info: {
-          status: 'allowed',
+          status: 'allowed_warning',
+          utilization: 0.85,
           overageStatus: 'rejected',
-          overageResetsAt: 1748200000000,
         },
       } as unknown as SDKMessage),
     ).toEqual([
       {
         kind: 'rate_limit_warning',
-        status: 'rejected',
+        status: 'allowed_warning',
+        utilization: 0.85,
         overageStatus: 'rejected',
-        overageResetsAt: 1748200000000,
       },
     ])
   })
