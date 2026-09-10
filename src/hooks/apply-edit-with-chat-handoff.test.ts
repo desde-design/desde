@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import type { EditResult, StructuralEdit } from "@/editor/core"
+import { EditSession } from "@/editor/session/edit-session"
 import { EDIT_HANDOFF_MARKER } from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
   applyEditWithChatHandoff,
@@ -28,6 +29,28 @@ function deleteEdit(scope: "definition" | "callsite" = "definition"): Structural
 function adapterReturning(result: EditResult) {
   const calls: StructuralEdit[] = []
   return { applyEdit: async (e: StructuralEdit) => { calls.push(e); return result }, calls }
+}
+
+/**
+ * The real session, not a stub of one.
+ *
+ * The helper's whole guard is the session's lifetime, and a stub would let a
+ * test decide what "the page moved" means. `EditSession` bumps the generation
+ * and aborts the signal in the same statement pair, which is the fact the
+ * helper relies on. It never asks for a scope prompt, so the prompt type is
+ * `never`.
+ */
+/** Let every pending microtask settle, so an await chain reaches its next step. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+function makeSession(): EditSession<never> {
+  return new EditSession<never>({
+    promptDraftId: () => undefined,
+    propEditKey: (edit) => edit.id,
+    mutationKey: (mutation) => mutation.id,
+  })
 }
 
 describe("applyEditWithChatHandoff", () => {
@@ -83,16 +106,50 @@ describe("applyEditWithChatHandoff", () => {
     expect(r.handoff).toMatchObject({ attempted: false, started: false })
   })
 
+  it("does not submit a hand-off once the session has moved", async () => {
+    // The apply is held open across a page change. This is the window the
+    // caller's own guard cannot cover: it runs on the RESULT, so by the time it
+    // says "stale" the chat turn has already been started. The helper enters
+    // the session before the apply, so the answer that arrives after the page
+    // has gone is never acted on.
+    const session = makeSession()
+    const escalateToChat = vi.fn(async () => true)
+    let settle: ((result: EditResult) => void) | undefined
+    const applyEdit = () =>
+      new Promise<EditResult>((resolve) => {
+        settle = resolve
+      })
+    const pending = applyEditWithChatHandoff(
+      deleteEdit(),
+      { applyEdit } as unknown as Parameters<typeof applyEditWithChatHandoff>[1],
+      escalateToChat,
+      { session },
+    )
+    await Promise.resolve()
+    session.end("reconnect")
+    settle?.(refused)
+    const r = await pending
+    expect(escalateToChat).not.toHaveBeenCalled()
+    // The refusal is still reported. The caller decides whether to say
+    // anything about it; nothing was started on its behalf.
+    expect(r.result).toBe(refused)
+    expect(r.handoff).toMatchObject({ attempted: false, started: false })
+  })
+
   it("starts no chat when the bridge session ended while the apply was out", async () => {
     // The apply spans a page reload. The refusal is about an element on a
     // document that is gone; a turn told to "make this edit happen" would edit
     // files for a page nobody is looking at. The refusal is still returned, so
     // the caller can decide for itself whether to say anything.
-    const adapter = adapterReturning(refused)
+    const session = makeSession()
+    const adapter = {
+      applyEdit: async () => {
+        session.end("reconnect")
+        return refused
+      },
+    }
     const handOff = vi.fn(async () => true)
-    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, {
-      isStale: () => true,
-    })
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, { session })
     expect(handOff).not.toHaveBeenCalled()
     expect(r.result).toBe(refused)
     expect(r.handoff).toEqual({
@@ -105,47 +162,46 @@ describe("applyEditWithChatHandoff", () => {
   it("reads the session AFTER the apply, not before it", async () => {
     // The whole point: the session is live at dispatch and ends during the
     // round trip. A check taken at call time would still say "current" here.
-    let ended = false
+    const session = makeSession()
     const adapter = {
       applyEdit: async () => {
-        ended = true
+        session.end("reconnect")
         return refused
       },
     }
     const handOff = vi.fn(async () => true)
-    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, {
-      isStale: () => ended,
-    })
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, { session })
     expect(handOff).not.toHaveBeenCalled()
     expect(r.handoff.attempted).toBe(false)
   })
 
   it("still hands off while the session is current, and asks only once", async () => {
+    const session = makeSession()
     const adapter = adapterReturning(refused)
     const handOff = vi.fn(async () => true)
-    const isStale = vi.fn(() => false)
-    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, { isStale })
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, { session })
     expect(handOff).toHaveBeenCalledTimes(1)
-    expect(isStale).toHaveBeenCalledTimes(1)
     expect(r.handoff).toMatchObject({ attempted: true, started: true })
   })
 
-  it("starts no chat when the session's signal aborted while the apply was out", async () => {
-    // The same window `isStale` closes, seen through the other fact the caller
-    // holds. A caller that tracks the session as a signal rather than as a
-    // generation gets the same protection.
-    const controller = new AbortController()
-    const adapter = {
-      applyEdit: async () => {
-        controller.abort()
-        return refused
-      },
-    }
-    const handOff = vi.fn(async () => true)
-    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, {
-      signal: controller.signal,
-    })
-    expect(handOff).not.toHaveBeenCalled()
+  it("reports a hand-off the page change cancelled as started:false", async () => {
+    // The POST is out when the page goes. The session's signal aborts it, so no
+    // turn is running, and the answer is the same shape a page change gives at
+    // any other await. `started` is what the caller reads to decide whether the
+    // edit is in someone's hands, and it must not say yes even though the
+    // transport answered `true` after the abort.
+    const session = makeSession()
+    const adapter = adapterReturning(refused)
+    let settle: ((accepted: boolean) => void) | undefined
+    const handOff = vi.fn(
+      (_prompt: string) => new Promise<boolean>((resolve) => { settle = resolve }),
+    )
+    const pending = applyEditWithChatHandoff(deleteEdit(), adapter, handOff, { session })
+    await flush()
+    expect(handOff).toHaveBeenCalledTimes(1)
+    session.end("reconnect")
+    settle?.(true)
+    const r = await pending
     expect(r.handoff).toMatchObject({ attempted: false, started: false })
   })
 
@@ -153,14 +209,12 @@ describe("applyEditWithChatHandoff", () => {
     // Not only "stop waiting for it": the POST that starts the turn must be
     // abortable, or a session that ends while it is in flight still leaves a
     // turn on its way to a page that has gone.
-    const controller = new AbortController()
+    const session = makeSession()
     const adapter = adapterReturning(refused)
     const handOff = vi.fn(async (_prompt: string, _options?: { signal?: AbortSignal }) => true)
-    await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, {
-      signal: controller.signal,
-    })
+    await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, { session })
     expect(handOff).toHaveBeenCalledTimes(1)
-    expect(handOff.mock.calls[0][1]?.signal).toBe(controller.signal)
+    expect(handOff.mock.calls[0][1]?.signal).toBe(session.signal)
   })
 
   it("hands the session's signal to the APPLY as well, so the write is cancelled too", async () => {
@@ -168,18 +222,18 @@ describe("applyEditWithChatHandoff", () => {
     // session is the one that can collide with the new document's write for
     // the same element: the shell's in-flight markers were emptied when the
     // session ended, so nothing else is holding that door.
-    const controller = new AbortController()
+    const session = makeSession()
     const applyEdit = vi.fn(async (_edit: unknown, _opts?: { signal?: AbortSignal }) => applied)
     await applyEditWithChatHandoff(
       deleteEdit(),
       { applyEdit } as unknown as Parameters<typeof applyEditWithChatHandoff>[1],
       async () => true,
-      { signal: controller.signal },
+      { session },
     )
-    expect(applyEdit.mock.calls[0][1]?.signal).toBe(controller.signal)
+    expect(applyEdit.mock.calls[0][1]?.signal).toBe(session.signal)
   })
 
-  it("asks the apply for no options at all when there is no session signal", async () => {
+  it("asks the apply for no options at all when there is no session", async () => {
     const applyEdit = vi.fn(async (_edit: unknown, _opts?: { signal?: AbortSignal }) => applied)
     await applyEditWithChatHandoff(
       deleteEdit(),
@@ -189,7 +243,7 @@ describe("applyEditWithChatHandoff", () => {
     expect(applyEdit.mock.calls[0][1]).toBeUndefined()
   })
 
-  it("asks the transport for no options at all when there is no session signal", async () => {
+  it("asks the transport for no options at all when there is no session", async () => {
     // The pure callers pass none, and a transport that reads `options.signal`
     // must see undefined rather than an object claiming a signal it has not got.
     const adapter = adapterReturning(refused)
@@ -198,14 +252,22 @@ describe("applyEditWithChatHandoff", () => {
     expect(handOff.mock.calls[0][1]).toBeUndefined()
   })
 
-  it("never asks about the session for an edit that applied", async () => {
-    // Nothing to hand off, so nothing to guard. Asking would suggest a
-    // successful write could be undone by a reload, which it cannot.
-    const adapter = adapterReturning(applied)
-    const isStale = vi.fn(() => true)
-    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, async () => true, { isStale })
-    expect(isStale).not.toHaveBeenCalled()
+  it("reports an edit that applied even when the page changed under it", async () => {
+    // Nothing to hand off, so nothing to guard, and a write that landed still
+    // landed. Reporting it as a failure would suggest a successful write can be
+    // undone by a reload, which it cannot.
+    const session = makeSession()
+    const adapter = {
+      applyEdit: async () => {
+        session.end("reconnect")
+        return applied
+      },
+    }
+    const handOff = vi.fn(async () => true)
+    const r = await applyEditWithChatHandoff(deleteEdit(), adapter, handOff, { session })
+    expect(handOff).not.toHaveBeenCalled()
     expect(r.result).toBe(applied)
+    expect(r.handoff).toEqual({ attempted: false, started: false })
   })
 })
 

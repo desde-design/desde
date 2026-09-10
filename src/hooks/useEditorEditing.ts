@@ -1025,9 +1025,10 @@ export function useEditorEditing({
    * the caller's guard only ran on the result the turn had already been started
    * for.
    *
-   * So the session is captured ONCE, here, and read twice: by `isStale` before
-   * the hand-off, and by the continuation before the status. Capturing it in
-   * two places would be capturing it at two moments.
+   * So the session is handed over whole. The helper captures it on entry and
+   * guards the hand-off with it; the continuation below reads it again before
+   * the status. Capturing a generation here and a signal there would be
+   * capturing one session at two moments.
    */
   const applyEditThenReport = useCallback(
     (
@@ -1035,14 +1036,11 @@ export function useEditorEditing({
       adapter: Pick<BridgeFrameworkAdapter, "applyEdit">,
       kindLabel: string,
     ): void => {
-      const generation = session.generation
-      // Captured with the generation, not read at hand-off time. Read then, it
-      // would be the NEXT session's live controller, and this edit's hand-off
-      // would run on past the reload it should have been cancelled by.
-      const signal = session.signal
+      // The session itself, not a generation and a signal captured here. The
+      // helper enters it before the apply, which is the moment that has to be
+      // captured, and it reads both facts off the one run.
       void applyEditWithChatHandoff(edit, adapter, escalateToChatRef.current, {
-        isStale: () => !session.isCurrent(generation),
-        signal,
+        session,
       }).then(reportEditOutcome(kindLabel))
     },
     [reportEditOutcome, session],
