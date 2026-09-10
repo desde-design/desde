@@ -750,13 +750,49 @@ export type BridgeToShellMessage =
       requestId?: string
       documentId: string
     }
-  | { type: "ELEMENT_DESELECTED" }
-  | { type: "STRUCTURE_CAPTURED"; payload: { roots: OutlineNode[] }; requestId: string }
+  /**
+   * The page dropped its own selection, and the shell drops its selection
+   * with it.
+   *
+   * `documentId` is required, and on the message rather than in a payload,
+   * because there is no payload to put it in. It was left unstamped for a
+   * while on the argument that clearing a selection writes nothing. What that
+   * missed is what the clear costs on the shell side: it is a selection
+   * change, so it cancels any selection read the page on screen has out, and
+   * it takes away the element the designer is looking at right now. A deselect
+   * from the page that has just been replaced would do both, and the page on
+   * screen never sent it, so nothing corrects it afterwards.
+   */
+  | { type: "ELEMENT_DESELECTED"; documentId: string }
+  | {
+      type: "STRUCTURE_CAPTURED"
+      payload: { roots: OutlineNode[] }
+      requestId: string
+      /**
+       * The document this tree was walked in. Required, and read by the
+       * adapter before the roots reach the shell: every row carries the
+       * source coordinates a Layers delete writes to, so a tree from the page
+       * that just left would aim an edit at another page's files. The
+       * requestId cannot tell them apart - it pairs an answer with a
+       * question, not with a page.
+       */
+      documentId: string
+    }
   | { type: "ELEMENT_SCREENSHOT_CAPTURED"; payload: { png: string; width: number; height: number }; requestId: string }
   | { type: "PAGE_TOKENS_CAPTURED"; payload: { tokens: Record<string, { kind: string; value: string }> }; requestId: string }
   | { type: "ESCAPE_PRESSED" }
   // ── Editor extensions (BRIDGE_VERSION 2026-05-01a+) ────────────
   | { type: "HOVER_TARGET_CHANGED"; payload: HoverTarget | null }
+  /**
+   * The other half of a selection round trip: the page could not resolve what
+   * the shell asked for.
+   *
+   * `documentId` is on the message for the reason `ELEMENT_INSPECTED` carries
+   * it. This reply settles the SAME pending request a selection reply settles,
+   * so one that arrives after the page was replaced clears a read the page on
+   * screen is still waiting on. The requestId cannot tell them apart: it pairs
+   * an answer with a question, not with a page.
+   */
   | {
       type: "ELEMENT_INSPECTION_UNRESOLVED"
       payload:
@@ -765,6 +801,7 @@ export type BridgeToShellMessage =
         | { targetId: string; reason: "metadata-mismatch"; liveCandidate: InspectionData }
         | { targetId: string; reason: "ambiguous"; candidates: InspectionData[] }
       requestId?: string
+      documentId: string
     }
   /**
    * The multi-select reply. `documentId` is on the message for the reason
@@ -1120,6 +1157,39 @@ export type ShellToBridgeMessage =
   | { type: "EXIT_EDITOR_MODE" }
   | { type: "RELOAD_PROTOTYPE"; payload?: { reason?: string } }
   | { type: "CLEAR_SELECTION" }
+  /**
+   * The shell says which elements it now holds; the page selects and
+   * highlights exactly that set (BRIDGE_VERSION 2026-09-10g-commit-selection+;
+   * `documentId` required since 2026-09-10h-commit-names-page).
+   *
+   * The inspects (`INSPECT_SELECTOR`, `INSPECT_MANY`, `INSPECT_PARENT`) used
+   * to select as a side effect of answering, before the shell had seen the
+   * answer. The shell can refuse an answer: the designer clicks something
+   * else while the read is out, and the reply then names an element that is
+   * no longer the newest one. The page was left highlighting an element no
+   * panel agreed with. One message was doing two things, so it is two
+   * messages now, and this is the one that changes the page.
+   *
+   * One selector for a single selection, several for a multi-select (the
+   * first that resolves is drawn, because there is one overlay), and an EMPTY
+   * array to clear. The empty case is the same clear `CLEAR_SELECTION`
+   * performs and runs through the same code; `CLEAR_SELECTION` stays for the
+   * callers that mean only that.
+   *
+   * It carries no `requestId` and gets no reply. The shell already holds the
+   * inspection it is committing.
+   *
+   * `documentId` names the page the commit is FOR, and a bridge running a
+   * different document drops it. The shell posts through the iframe's
+   * `contentWindow`, which survives a navigation, so a commit meant for the
+   * page that answered can be delivered to the page that replaced it. It is
+   * required rather than optional because a commit with no page named is a
+   * commit that could land anywhere.
+   */
+  | {
+      type: "COMMIT_SELECTION"
+      payload: { selectors: string[]; documentId: string }
+    }
   | { type: "PING" }
   /**
    * Non-committal hover preview. Unlike `HIGHLIGHT_COMPONENT`, this does NOT

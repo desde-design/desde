@@ -29,7 +29,19 @@ let pointTarget: Element | null = null
 let parentTarget: Element | null = null
 
 /**
- * Only the six members `handleMcpQuery` reaches on its inspector. The real
+ * Every element the dispatcher told the inspector to select, in order.
+ *
+ * `setSelectedElement` IS the overlay draw: the real manager stores the
+ * element and calls `showOverlay` on it in the same method
+ * (`src/bridge/inspector-overlay.ts`). So an empty list here is the assertion
+ * that nothing was selected AND that no selection chrome was drawn.
+ */
+let selectCalls: Element[] = []
+/** How many times the dispatcher cleared the selection. */
+let clearCalls = 0
+
+/**
+ * Only the seven members `handleMcpQuery` reaches on its inspector. The real
  * manager builds a shadow root and binds document listeners, none of which
  * this dispatcher touches.
  */
@@ -38,6 +50,11 @@ function fakeInspector(): InspectorOverlayManager {
     getSelectedElement: () => selectedElement,
     setSelectedElement: (el: Element) => {
       selectedElement = el
+      selectCalls.push(el)
+    },
+    clearSelectedOnly: () => {
+      selectedElement = null
+      clearCalls += 1
     },
     isEditorMode: () => editorMode,
     selectAtPoint: () => pointTarget,
@@ -52,6 +69,8 @@ function query(data: Record<string, unknown>): boolean {
 beforeEach(() => {
   sent.length = 0
   selectedElement = null
+  selectCalls = []
+  clearCalls = 0
   editorMode = false
   pointTarget = null
   parentTarget = null
@@ -164,6 +183,18 @@ describe("mcp-query-handlers — every selection reply names its document", () =
     expect((reply!.payload as { selector?: unknown }).selector).toBe("#save")
   })
 
+  it("stamps the GET_STRUCTURE reply, which is a tree rather than one element", () => {
+    // The Layers tree is the one reply here that is not a selection, and it
+    // needed the stamp for the same reason: every row carries the source
+    // coordinates a Layers delete writes to.
+    query({ type: "GET_STRUCTURE", requestId: "req-8" })
+
+    const reply = sent.find((m) => m.type === "STRUCTURE_CAPTURED")
+    expect(reply).toBeDefined()
+    expect(reply!.documentId).toBe(TEST_DOCUMENT_ID)
+    expect((reply!.payload as { roots?: unknown[] }).roots?.length).toBeGreaterThan(0)
+  })
+
   it("stamps the INSPECT_PARENT reply", () => {
     parentTarget = document.getElementById("card")
     query({
@@ -176,5 +207,310 @@ describe("mcp-query-handlers — every selection reply names its document", () =
     expect(reply).toBeDefined()
     expect(reply!.documentId).toBe(TEST_DOCUMENT_ID)
     expect((reply!.payload as { selector?: unknown }).selector).toBe("#card")
+  })
+})
+
+/**
+ * `ELEMENT_INSPECTION_UNRESOLVED` is the other half of the same round trip.
+ *
+ * It settles the same pending request the selection replies settle, so a stale
+ * one clears a read the page on screen is still waiting on. There are seven
+ * places that send it, across three query types, and every one of them names
+ * its document now.
+ */
+describe("mcp-query-handlers — every unresolved reply names its document", () => {
+  let warned: unknown[][]
+  let restoreWarn: () => void
+
+  beforeEach(() => {
+    // The three "inspect threw" rows below log through console.warn on
+    // purpose. Captured rather than printed, so the run stays readable.
+    warned = []
+    const original = console.warn
+    console.warn = (...args: unknown[]) => void warned.push(args)
+    restoreWarn = () => {
+      console.warn = original
+    }
+    // The tiered protocol (the one that answers with this message at all) is
+    // editor-only.
+    editorMode = true
+  })
+
+  afterEach(() => {
+    restoreWarn()
+  })
+
+  /** Re-point the runtime's element reader at one that throws. */
+  function makeInspectThrow(): void {
+    configureBridgeRuntime({
+      sendToShell: (message: { type: string; payload?: unknown }) =>
+        void sent.push(message),
+      inspectElement: () => {
+        throw new Error("inspect failed")
+      },
+      attributeElement: () => undefined,
+      documentId: TEST_DOCUMENT_ID,
+    })
+  }
+
+  function unresolved() {
+    const reply = sent.find((m) => m.type === "ELEMENT_INSPECTION_UNRESOLVED")
+    expect(reply).toBeDefined()
+    return reply!
+  }
+
+  it("stamps the INSPECT_SELECTOR no-match reply", () => {
+    query({
+      type: "INSPECT_SELECTOR",
+      payload: { selector: "#nothing" },
+      requestId: "req-1",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+    expect((unresolved().payload as { reason?: unknown }).reason).toBe("not-found")
+  })
+
+  it("stamps the INSPECT_SELECTOR reply for an element the bridge injected", () => {
+    document.body.innerHTML = `<div id="overlay" data-prototype-flow="1"></div>`
+    query({
+      type: "INSPECT_SELECTOR",
+      payload: { selector: "#overlay" },
+      requestId: "req-2",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+    expect((unresolved().payload as { reason?: unknown }).reason).toBe("in-toolbar")
+  })
+
+  it("stamps the INSPECT_SELECTOR ambiguous reply", () => {
+    query({
+      type: "INSPECT_SELECTOR",
+      payload: { selector: "button" },
+      requestId: "req-3",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+    expect((unresolved().payload as { reason?: unknown }).reason).toBe("ambiguous")
+  })
+
+  it("stamps the INSPECT_SELECTOR reply when reading the element throws", () => {
+    makeInspectThrow()
+    query({
+      type: "INSPECT_SELECTOR",
+      payload: { selector: "#save" },
+      requestId: "req-4",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the INSPECT_POINT reply when nothing is under the point", () => {
+    query({ type: "INSPECT_POINT", payload: { x: 5, y: 5 }, requestId: "req-5" })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the INSPECT_POINT reply when reading the element throws", () => {
+    pointTarget = document.getElementById("save")
+    makeInspectThrow()
+    query({ type: "INSPECT_POINT", payload: { x: 5, y: 5 }, requestId: "req-6" })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the INSPECT_PARENT reply when the source element is gone", () => {
+    query({
+      type: "INSPECT_PARENT",
+      payload: { selector: "#gone" },
+      requestId: "req-7",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the INSPECT_PARENT reply when there is no parent component", () => {
+    query({
+      type: "INSPECT_PARENT",
+      payload: { selector: "#save" },
+      requestId: "req-8",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+
+  it("stamps the INSPECT_PARENT reply when reading the parent throws", () => {
+    parentTarget = document.getElementById("card")
+    makeInspectThrow()
+    query({
+      type: "INSPECT_PARENT",
+      payload: { selector: "#save" },
+      requestId: "req-9",
+    })
+    expect(unresolved().documentId).toBe(TEST_DOCUMENT_ID)
+  })
+})
+
+/**
+ * An inspect READS. Only a commit changes what the page has selected.
+ *
+ * The bridge used to select and draw the overlay while it handled
+ * `INSPECT_SELECTOR`, `INSPECT_MANY` and `INSPECT_PARENT`, before the shell
+ * had seen the answer. The shell can refuse that answer: the designer clicks
+ * something else while the read is out, and the reply then describes an
+ * element that is no longer the newest one. The page was left highlighting an
+ * element no panel in the shell agreed with.
+ *
+ * One message did two things. Now the read only reads, and `COMMIT_SELECTION`
+ * is how the shell says what it holds.
+ */
+describe("mcp-query-handlers: an inspect reads, and only a commit selects", () => {
+  it("INSPECT_SELECTOR does not change the selected element", () => {
+    editorMode = true
+    query({
+      type: "INSPECT_SELECTOR",
+      payload: { selector: "#save" },
+      requestId: "req-pure-1",
+    })
+
+    // The answer still comes back. Only the selection stayed put.
+    const reply = sent.find((m) => m.type === "ELEMENT_INSPECTED")
+    expect((reply!.payload as { selector?: unknown }).selector).toBe("#save")
+    expect(selectCalls).toEqual([])
+    expect(selectedElement).toBeNull()
+  })
+
+  it("INSPECT_MANY does not change the selected element", () => {
+    editorMode = true
+    query({
+      type: "INSPECT_MANY",
+      payload: { selectors: ["#save", "#cancel"] },
+      requestId: "req-pure-2",
+    })
+
+    const reply = sent.find((m) => m.type === "ELEMENTS_INSPECTED")
+    expect((reply!.payload as unknown[]).length).toBe(2)
+    expect(selectCalls).toEqual([])
+    expect(selectedElement).toBeNull()
+  })
+
+  it("INSPECT_PARENT does not change the selected element", () => {
+    editorMode = true
+    parentTarget = document.getElementById("card")
+    query({
+      type: "INSPECT_PARENT",
+      payload: { selector: "#save" },
+      requestId: "req-pure-3",
+    })
+
+    const reply = sent.find((m) => m.type === "ELEMENT_INSPECTED")
+    expect((reply!.payload as { selector?: unknown }).selector).toBe("#card")
+    expect(selectCalls).toEqual([])
+    expect(selectedElement).toBeNull()
+  })
+
+  /**
+   * Every commit in this block names THIS document, because that is what the
+   * shell sends. The rows that prove a foreign commit is dropped pass their
+   * own id.
+   */
+  function commit(
+    selectors: unknown,
+    documentId: unknown = TEST_DOCUMENT_ID,
+  ): boolean {
+    return query({ type: "COMMIT_SELECTION", payload: { selectors, documentId } })
+  }
+
+  it("COMMIT_SELECTION selects and highlights the one element it names", () => {
+    expect(commit(["#save"])).toBe(true)
+
+    expect(selectCalls).toEqual([document.getElementById("save")])
+    expect(selectedElement).toBe(document.getElementById("save"))
+  })
+
+  it("COMMIT_SELECTION of a set highlights the first element it names", () => {
+    // There is one selection overlay, and the shell pins the first resolved
+    // element as its primary. So a set commits its primary, exactly as the
+    // multi-select read used to pin it.
+    commit(["#save", "#cancel"])
+
+    expect(selectCalls).toEqual([document.getElementById("save")])
+  })
+
+  it("COMMIT_SELECTION skips a selector that does not resolve", () => {
+    commit(["#gone", "#cancel"])
+
+    expect(selectCalls).toEqual([document.getElementById("cancel")])
+  })
+
+  it("an empty COMMIT_SELECTION clears the selection", () => {
+    commit(["#save"])
+    commit([])
+
+    expect(clearCalls).toBe(1)
+    expect(selectedElement).toBeNull()
+  })
+
+  it("a COMMIT_SELECTION that resolves nothing clears rather than leaving another element drawn", () => {
+    commit(["#save"])
+    commit(["#gone"])
+
+    expect(clearCalls).toBe(1)
+    expect(selectedElement).toBeNull()
+  })
+
+  it("COMMIT_SELECTION does not reply", () => {
+    // The shell already holds the inspection it committed. A reply would be an
+    // unsolicited ELEMENT_INSPECTED, which the shell installs unconditionally,
+    // so the two would trade selections for no reason.
+    commit(["#save"])
+    commit([])
+
+    expect(sent).toEqual([])
+  })
+
+  it("a COMMIT_SELECTION with no usable selectors clears", () => {
+    // `payloadOf` answers `{}` for a message with no payload at all, so a
+    // missing `selectors` takes the same branch an empty one does rather than
+    // throwing out of the listener.
+    commit(undefined)
+
+    expect(selectCalls).toEqual([])
+    expect(clearCalls).toBe(1)
+  })
+
+  it("a COMMIT_SELECTION for another document changes nothing", () => {
+    // The shell posts through the iframe's `contentWindow`, which is the same
+    // object across a navigation. So a commit for the page that answered can
+    // be delivered here, to the page that replaced it: document A's reply is
+    // accepted in the instant before B's BRIDGE_READY is processed, and the
+    // commit for A arrives at B.
+    commit(["#save"])
+    selectCalls = []
+    clearCalls = 0
+
+    expect(commit(["#cancel"], "doc-somewhere-else")).toBe(true)
+
+    expect(selectCalls).toEqual([])
+    expect(clearCalls).toBe(0)
+    expect(selectedElement).toBe(document.getElementById("save"))
+    expect(sent).toEqual([])
+  })
+
+  it("a COMMIT_SELECTION that names no document at all is dropped", () => {
+    // Required, not optional. A commit with no page named is a commit that
+    // could land anywhere, so the page it lands on refuses it.
+    expect(query({ type: "COMMIT_SELECTION" })).toBe(true)
+    expect(query({ type: "COMMIT_SELECTION", payload: { selectors: ["#save"] } })).toBe(true)
+
+    expect(selectCalls).toEqual([])
+    expect(clearCalls).toBe(0)
+    expect(selectedElement).toBeNull()
+  })
+
+  it("a COMMIT_SELECTION for the element already selected does not redraw it", () => {
+    // Every accepted selection change is echoed now, the designer's own click
+    // included, and the page had already selected that element before it
+    // reported it. Re-running the select would tear the overlay down and put
+    // it back for no change, which reads as a flicker on every click.
+    commit(["#save"])
+    expect(selectCalls).toEqual([document.getElementById("save")])
+
+    commit(["#save"])
+
+    expect(selectCalls).toEqual([document.getElementById("save")])
+    expect(clearCalls).toBe(0)
+    expect(selectedElement).toBe(document.getElementById("save"))
   })
 })

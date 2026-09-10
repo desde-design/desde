@@ -908,7 +908,12 @@ export class InspectorOverlayManager implements SelectModeOverlay {
       this.selectedElement = null
       this.hoveredElement = null
       this.clearOverlay()
-      sendToShell({ type: "ELEMENT_DESELECTED" })
+      // Read at SEND time, not at module load: `bridgeDocumentId` is a live
+      // binding filled in when the bridge configures its runtime. The shell
+      // drops a deselect from a page it is no longer talking to, because that
+      // deselect would take away the selection the designer is looking at now
+      // and cancel a read the page on screen has out.
+      sendToShell({ type: "ELEMENT_DESELECTED", documentId: bridgeDocumentId })
     }
   }
 

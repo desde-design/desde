@@ -17,12 +17,14 @@ import { StrictMode, type ReactElement, useRef } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { toast } from "sonner"
 import type {
+  ComponentManifest,
+  ComponentManifestSource,
   EditResult,
   Mutation,
   PendingMutation,
   Selection,
 } from "@/editor/core"
-import type { StyleOrigin } from "@/types/bridge"
+import type { OutlineNode, StyleOrigin } from "@/types/bridge"
 import { useEditorEditing } from "./useEditorEditing"
 import { useEditorStore } from "@/stores/editor-only"
 import {
@@ -83,14 +85,32 @@ function Harness({
   enabled = true,
   prototypeUrl = PROTOTYPE_URL,
   escalateToChat,
+  manifestSource,
 }: {
   enabled?: boolean
   prototypeUrl?: string
   escalateToChat?: (prompt: string, options?: { signal?: AbortSignal }) => Promise<boolean>
+  /**
+   * The manifest source the selection listener looks a component up in.
+   *
+   * Undefined for every row that does not care, which is what the hook's own
+   * default is built for: an EMPTY composite, so a lookup answers null and no
+   * manifest is ever installed. A row that wants to hold a lookup open passes
+   * {@link ParkedManifestSource}. It has to be the SAME instance across a
+   * rerender: the source is a dependency of the adapter effect, so a fresh
+   * object per render would detach and re-attach the adapter on every one.
+   */
+  manifestSource?: ComponentManifestSource
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   captureEditing(
-    useEditorEditing({ iframeRef, prototypeUrl, enabled, escalateToChat }),
+    useEditorEditing({
+      iframeRef,
+      prototypeUrl,
+      enabled,
+      escalateToChat,
+      manifestSource,
+    }),
   )
   return <iframe ref={iframeRef} title="Prototype" src={prototypeUrl} />
 }
@@ -182,6 +202,22 @@ const REUSED_DRAFT_ID = "dom-pending-1"
  */
 let holdProposal = false
 let heldProposal: ((body: unknown) => void) | null = null
+
+/**
+ * The component-catalog GET, held open when a test asks for it.
+ *
+ * `handleEditComponent` fetches the catalog and then NAVIGATES the iframe, so
+ * this is the await a page change has to land inside. Off by default, and the
+ * default answer is the same empty object every other route gives.
+ */
+let holdCatalog = false
+let heldCatalog: ((body: unknown) => void) | null = null
+
+function answerCatalog(body: unknown): void {
+  const answer = heldCatalog
+  heldCatalog = null
+  answer?.(body)
+}
 
 function answerProposal(body: unknown): void {
   const answer = heldProposal
@@ -325,6 +361,73 @@ const needsChat = (reason = "bound binding"): EditResult => ({
 })
 
 /**
+ * A manifest source whose lookups park until the test answers them.
+ *
+ * The selection listener asks it for the selected component's manifest, and
+ * the question these rows exist for is what happens when that answer arrives
+ * after the selection it was asked for is gone. Parking is the only way to put
+ * another selection, or a whole other page, inside that await. Same shape as
+ * the parked `applyEdit` and `getStructure` on the fake adapter: one entry per
+ * call, each holding its own `settle`.
+ *
+ * ONE instance per test, held in a `const` and passed to every render: the
+ * source is a dependency of the hook's adapter effect, so a new object would
+ * re-attach the adapter instead of leaving the page alone.
+ */
+class ParkedManifestSource implements ComponentManifestSource {
+  readonly id = "parked"
+  readonly framework = "vue3"
+  readonly designSystem = "test-ds"
+  /** Every lookup asked for, in order, each still to be answered. */
+  readonly lookups: {
+    name: string
+    settle: (manifest: ComponentManifest | null) => void
+  }[] = []
+
+  async listComponents(): Promise<ComponentManifest[]> {
+    return []
+  }
+
+  getComponent(componentName: string): Promise<ComponentManifest | null> {
+    return new Promise<ComponentManifest | null>((resolve) => {
+      this.lookups.push({ name: componentName, settle: resolve })
+    })
+  }
+}
+
+/** A manifest a parked lookup can be answered with. */
+const manifestNamed = (name: string): ComponentManifest => ({
+  id: `parked:${name}`,
+  name,
+  framework: "vue3",
+  designSystem: "test-ds",
+  props: [],
+})
+
+/**
+ * A selection of `selector` that renders `componentName`.
+ *
+ * No `attributionContext`, so the prefetch chain in the listener stays out of
+ * these rows: the manifest lookup is the await they are about, and a second
+ * parked await would only make the ordering harder to read.
+ */
+const componentSelection = (
+  selector: string,
+  componentName: string,
+): Selection => ({
+  targetId: `t-${componentName}`,
+  selector,
+  ancestry: [],
+  componentName,
+  authoredAt: { file: "src/App.vue", line: 10, column: 2 },
+  editTarget: { file: "src/App.vue", line: 10, column: 2 },
+})
+
+/** The manifest the inspector is currently offering controls for. */
+const installedManifest = (): ComponentManifest | null =>
+  useEditorStore.getState().editorManifest
+
+/**
  * The hook's observable surface, and it is SMALLER than you want.
  *
  * `useEditorEditing` returns no `mutations` array, no `pendingDisambiguations`
@@ -361,6 +464,8 @@ beforeEach(() => {
   captured = null
   holdProposal = false
   heldProposal = null
+  holdCatalog = false
+  heldCatalog = null
   requests.length = 0
   useEditorStore.getState().resetEditor()
   // Nothing reaches the network. The one route with an answer that changes
@@ -380,6 +485,19 @@ beforeEach(() => {
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         )
+      }
+      if (url.includes("/api/editor/catalog") && holdCatalog) {
+        // Held. The test takes the page away and then answers, which is the
+        // window the component-editor navigation lives in.
+        return new Promise<Response>((resolve) => {
+          heldCatalog = (body: unknown) =>
+            resolve(
+              new Response(JSON.stringify(body), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              }),
+            )
+        })
       }
       if (url.includes("/api/editor/edit-iteration")) {
         if (!holdProposal) {
@@ -1750,9 +1868,14 @@ describe("useEditorEditing: the bridge session", () => {
     const recordFor = () =>
       useEditorStore.getState().verifications.find((v) => v.editId === editId)
     await waitFor(() => expect(recordFor()?.phase).toBe("done"), { timeout: 15000 })
-    // The verification really did fail. The Checks tab keeps saying so: what
-    // the session guard suppresses is the interruption, not the record.
-    expect(recordFor()?.result?.status).toBe("fail")
+    // The Checks tab gets a record, and the record says what is true: the
+    // check ran and could not finish on the page it was about. It used to
+    // store the `fail` the reader came back with, which made the tab claim
+    // this edit did not take effect on the evidence of the NEXT page's DOM.
+    expect(recordFor()?.result?.status).toBe("skipped")
+    expect(recordFor()?.result?.detail).toBe(
+      "The page changed before the check finished.",
+    )
     expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
   }, 30000)
   it("does not re-select on the page that replaced the one it was scheduled for (finding C6)", async () => {
@@ -1913,6 +2036,147 @@ describe("useEditorEditing: the bridge session", () => {
     expect(departed.applies).toHaveLength(0)
   })
 
+  /**
+   * The Layers ("Structure") tree, for the two rows below.
+   *
+   * Not a `.vue` file: `collectVueFiles` finds nothing in it, so the refresh
+   * makes no second round trip for conditional groups. These rows are about
+   * the structure read itself.
+   */
+  const outlineNode = (id: string, file: string): OutlineNode => ({
+    id,
+    name: id,
+    type: "component",
+    x: 0,
+    y: 0,
+    width: 200,
+    height: 100,
+    selector: `#${id}`,
+    componentFile: file,
+    authoredAt: { file, line: 1, column: 0 },
+    editTarget: { file, line: 1, column: 0 },
+  })
+
+  it("cannot install a Layers tree that answers after the page it describes went away (read continuation)", async () => {
+    // THE READ SIDE OF THE BOUNDARY. Every write lane goes through the
+    // session. The Layers refresh is a READ, and it did not: its
+    // `getStructure()` can still be out when the page is replaced, and what it
+    // answers with is the DEPARTED page's tree. Every row in that tree carries
+    // `authoredAt` and `editTarget`, which is where a Layers right-click
+    // Delete writes, so installing it offers the designer rows that aim at
+    // another page's files.
+    //
+    // THE NEW PAGE NEVER HANDSHAKES HERE, and that is what makes this the
+    // session's case rather than the refresh counter's. `layersGenerationRef`
+    // asks "did a newer refresh start". A newer refresh starts at the new
+    // page's handshake, so while that handshake is still out (or, as here,
+    // never completes at all) the counter says the departed page's read is
+    // still the current one. The session says otherwise.
+    FakeBridgeAdapter.parkGetStructure = true
+    const pageA = outlineNode("page-a-root", "src/PageA.tsx")
+    const pageAAgain = outlineNode("page-a-root-again", "src/PageA.tsx")
+
+    await mount()
+    const adapter = lastFakeAdapter()
+    // The first refresh fires right behind the handshake, and it answers on
+    // its own page: the control half of this row.
+    await waitFor(() => expect(adapter.structureReads).toHaveLength(1))
+    await act(async () => {
+      adapter.structureReads[0]!.settle([pageA])
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()!.layersRawRoots).toHaveLength(1))
+
+    // A second read, still out when the page goes.
+    await act(async () => {
+      void editing()!.refreshLayers()
+      await Promise.resolve()
+    })
+    expect(adapter.structureReads).toHaveLength(2)
+
+    // The page is replaced and the new one never answers: off-origin, a 500,
+    // or the handshake timeout. The session ends either way, and there is no
+    // new page to refresh for.
+    FakeBridgeAdapter.nextHandshakeError = "the page never answered"
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("error"))
+    // The tree page A had legitimately installed went with the page.
+    expect(editing()!.layersRawRoots).toBeNull()
+
+    // And now page A's late answer arrives.
+    await act(async () => {
+      adapter.structureReads[1]!.settle([pageAAgain])
+      await Promise.resolve()
+    })
+    expect(editing()!.layersRawRoots).toBeNull()
+    expect(editing()!.layersRoots).toBeNull()
+  })
+
+  it("asks the new page for its own Layers tree, once, and a delete aims there", async () => {
+    // The other half. Clearing the departed page's tree is only right if the
+    // page that replaced it gets asked for its own, and the refresh used to
+    // run for the FIRST adapter only: a document change on the same adapter
+    // left the panel with whatever the tree update happened to bring.
+    //
+    // ONCE is half the assertion. One page change produces up to three
+    // completed handshakes (the unsolicited ready, the handshake it triggers,
+    // and the `load` event that follows), and each of them reaches the place
+    // that issues this request.
+    FakeBridgeAdapter.parkGetStructure = true
+    const pageA = outlineNode("page-a-root", "src/PageA.tsx")
+    const pageB = outlineNode("page-b-root", "src/PageB.tsx")
+
+    await mount()
+    const adapter = lastFakeAdapter()
+    await waitFor(() => expect(adapter.structureReads).toHaveLength(1))
+    await act(async () => {
+      adapter.structureReads[0]!.settle([pageA])
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()!.layersRawRoots).toHaveLength(1))
+
+    FakeBridgeAdapter.nextDocumentIds = ["doc-b"]
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    // Page A's tree is gone, and page B has been asked for its own.
+    expect(editing()!.layersRawRoots).toBeNull()
+    await waitFor(() => expect(adapter.structureReads).toHaveLength(2))
+
+    // The `load` event for that same document is a duplicate handshake and
+    // must not ask again.
+    const iframe = screen.getByTitle("Prototype")
+    await act(async () => {
+      iframe.dispatchEvent(new Event("load"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    expect(adapter.structureReads).toHaveLength(2)
+
+    await act(async () => {
+      adapter.structureReads[1]!.settle([pageB])
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()!.layersRawRoots).toHaveLength(1))
+    expect(editing()!.layersRawRoots![0]!.id).toBe("page-b-root")
+
+    // And the delete the panel can dispatch now aims at page B's file.
+    await act(async () => {
+      editing()!.handleLayerDelete(editing()!.layersRoots![0]!)
+      await Promise.resolve()
+    })
+    expect(adapter.applies).toHaveLength(1)
+    const dispatched = adapter.applies[0]!.edit as {
+      target: { editTarget?: { file: string } }
+    }
+    expect(dispatched.target.editTarget?.file).toBe("src/PageB.tsx")
+  })
+
   it("re-selects once on its own page and stops when the stamp has moved", async () => {
     // The control for the test above, on a page that never changed: the
     // refresh has to still happen, and it has to stop as soon as the file hash
@@ -1974,5 +2238,505 @@ describe("useEditorEditing: the bridge session", () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  /**
+   * THE SELECTION LISTENER'S OWN CONTINUATIONS, for the three rows below.
+   *
+   * Clicking an element starts a manifest lookup, and what comes back decides
+   * which controls the inspector offers and which schema a prop edit is
+   * written against. The lookup used to be correlated by SELECTOR TEXT alone:
+   * if the selector the answer was asked for still matched the selector on
+   * screen, the answer was installed. `#panel` on one page and `#panel` on the
+   * next are the same string and a different element, so the departed page's
+   * manifest could become the controls for the arriving page's element.
+   */
+
+  it("cannot install a manifest that answers after the page it was asked on went away", async () => {
+    // Page A's `#panel` and page B's `#panel` are the same eight characters.
+    const source = new ParkedManifestSource()
+    render(<Harness manifestSource={source} />)
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    const adapter = lastFakeAdapter()
+
+    // Page A: the designer clicks `#panel`, and the lookup for its component
+    // is still out.
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "OldCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(1))
+    expect(source.lookups[0]!.name).toBe("OldCard")
+
+    // The page is replaced, on the same adapter: an in-iframe navigation,
+    // which is the case a rerender would not stage.
+    FakeBridgeAdapter.nextDocumentIds = ["doc-b"]
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+
+    // The page change took the selection with it, and the manifest with the
+    // selection. The adapter discards the departed page's selection and tells
+    // the selection listeners `null` BEFORE it announces the new document, and
+    // the listener's null branch nulls the manifest. So the window this row is
+    // about opens with nothing installed rather than with page A's manifest
+    // still on screen.
+    expect(installedManifest()).toBeNull()
+
+    // Page B has its own `#panel`, and its own component behind it.
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "NewCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(2))
+    await act(async () => {
+      source.lookups[1]!.settle(manifestNamed("NewCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(installedManifest()?.name).toBe("NewCard"))
+
+    // And now page A's lookup answers.
+    await act(async () => {
+      source.lookups[0]!.settle(manifestNamed("OldCard"))
+      await Promise.resolve()
+    })
+    expect(installedManifest()?.name).toBe("NewCard")
+  })
+
+  it("cannot install a manifest for a selection another selection replaced", async () => {
+    // ONE PAGE, ONE SELECTOR, TWO SELECTIONS. The designer clicks `#panel`,
+    // deselects, and clicks `#panel` again, which by then is a different
+    // element behind the same eight characters (an in-page re-render, a table
+    // row swapped, a tab switched). The first click's lookup answers last.
+    //
+    // This row used to click `#a` and then `#b`, and it could not fail: two
+    // selectors differ, so the pre-existing `latestSelector` comparison
+    // rejected the late answer before the sequence was ever consulted. It
+    // asserted a value that was already safe. With one selector the session
+    // has not moved and the selector matches, so `seq` is the only thing
+    // standing between the departed click's answer and the inspector.
+    const source = new ParkedManifestSource()
+    render(<Harness manifestSource={source} />)
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    const adapter = lastFakeAdapter()
+
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "CardA"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(1))
+    expect(source.lookups[0]!.name).toBe("CardA")
+
+    // The deselection. It takes a sequence number of its own, which is what
+    // makes the click after it a new selection rather than the same one.
+    await act(async () => {
+      adapter.emitSelection(null)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(installedManifest()).toBeNull())
+
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "CardB"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(2))
+    expect(source.lookups[1]!.name).toBe("CardB")
+    await act(async () => {
+      source.lookups[1]!.settle(manifestNamed("CardB"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(installedManifest()?.name).toBe("CardB"))
+
+    // The first click's lookup answers last. `CardB` is what is selected, and
+    // `CardB` is what the inspector must still be describing.
+    await act(async () => {
+      source.lookups[0]!.settle(manifestNamed("CardA"))
+      await Promise.resolve()
+    })
+    expect(installedManifest()?.name).toBe("CardB")
+  })
+
+  it("cannot install a manifest from before a page the session never adopted", async () => {
+    // THE ROW THE SEQUENCE IS THE ONLY LOCK FOR. The bump that makes it so is
+    // the DESELECT's, not `enterDocument`'s: the adapter discards the departed
+    // page's selection first, and the selection listener takes a number for
+    // that null exactly as it does for a click. `enterDocument` bumps too, and
+    // it would cover this row on its own, but it is the second bump and not
+    // the one that does the work here.
+    //
+    // The other two rows have a second lock behind the sequence: the session
+    // generation moves when a page is replaced, and the selector on screen
+    // differs. This one has neither.
+    //
+    // A page announces itself and then never handshakes (off-origin, a 500,
+    // the five-second timeout). The session ends there and FORGETS its
+    // document, which is what stops every continuation from the page before
+    // it. The page that failed is not on screen, so the page that is still
+    // there goes on emitting selections, and one of those starts a lookup.
+    // When a page finally does arrive, the session had no document to compare
+    // against, so it adopts the new one WITHOUT ending anything: the
+    // generation does not move. Same selector, same live session, and only the
+    // sequence knows the page underneath changed.
+    const source = new ParkedManifestSource()
+    render(<Harness manifestSource={source} />)
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+    const adapter = lastFakeAdapter()
+
+    FakeBridgeAdapter.nextHandshakeError = "the page never answered"
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("error"))
+
+    // The page still on screen announces its `#panel`.
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "OldCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(1))
+
+    // A page arrives and handshakes. The session had no document, so nothing
+    // ends here.
+    FakeBridgeAdapter.nextDocumentIds = ["doc-c"]
+    await act(async () => {
+      adapter.emitReady("doc-c")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+
+    // Its own `#panel`, and its own component.
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "NewCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(source.lookups).toHaveLength(2))
+    await act(async () => {
+      source.lookups[1]!.settle(manifestNamed("NewCard"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(installedManifest()?.name).toBe("NewCard"))
+
+    await act(async () => {
+      source.lookups[0]!.settle(manifestNamed("OldCard"))
+      await Promise.resolve()
+    })
+    expect(installedManifest()?.name).toBe("NewCard")
+  })
+  it("cannot open the component editor for a page that left while the catalog was out", async () => {
+    // THE READ IS THE CATALOG AND THE CONTINUATION IS A NAVIGATION, which is
+    // why the catalog being repo data rather than page data was not enough on
+    // its own. `handleEditComponent` reads the iframe url BEFORE the fetch,
+    // and past the fetch it does two things with it: it navigates the iframe
+    // to `/__compose/component/...` on that url's origin, and it stores the
+    // url as the `returnUrl` the Exit button goes back to.
+    //
+    // So a page change inside the fetch took the page that ARRIVED and sent
+    // it to the departed page's component route, with a return url aimed at a
+    // page that had already gone. The designer clicked "Edit component" on one
+    // page and got another page's component, then Exit put them somewhere
+    // else again.
+    holdCatalog = true
+    await mount()
+    const adapter = lastFakeAdapter()
+    const iframe = screen.getByTitle("Prototype") as HTMLIFrameElement
+    const srcBefore = iframe.src
+
+    await act(async () => {
+      adapter.emitSelection({
+        ...componentSelection("#panel", "OldCard"),
+        // A first-party file, so the isolation route HAS a usable import spec.
+        // Without one the handler bails before it navigates, and the row would
+        // pass whether the guard was there or not.
+        componentFile: "src/OldCard.vue",
+      })
+      await Promise.resolve()
+    })
+    await act(async () => {
+      void editing()!.handleEditComponent()
+      await Promise.resolve()
+    })
+    expect(
+      requests.filter((request) => request.url.includes("/api/editor/catalog")),
+    ).toHaveLength(1)
+
+    // The page is replaced while the catalog GET is still out.
+    FakeBridgeAdapter.nextDocumentIds = ["doc-b"]
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+
+    // And the catalog answers, with a row that matches the departed page's
+    // selection exactly.
+    await act(async () => {
+      answerCatalog([{ name: "OldCard", file: "src/OldCard.vue" }])
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(iframe.src).toBe(srcBefore)
+    expect(editing()!.componentEditState).toBeNull()
+  })
+
+  it("clears the Layers tree for the conflict reload too, before the reloaded page answers", async () => {
+    // THE END THAT FORGETS ITS DOCUMENT. The clear used to run under
+    // `shouldEndSessionOnHandshake`, which asks whether the session's previous
+    // document differs from this one. It answers false when there IS no
+    // previous document, and `handleReloadAfterConflict` ends the session with
+    // reason "reload", which retires the buffers and forgets the document.
+    //
+    // So the reloaded page's handshake found `previous === null`, skipped the
+    // clear, and left the PRE-RELOAD tree on screen. Every row in it carries
+    // the coordinates a right-click Delete writes to, and it stayed clickable
+    // until the reloaded page answered its own structure read.
+    FakeBridgeAdapter.parkGetStructure = true
+    const pageA = outlineNode("page-a-root", "src/PageA.tsx")
+
+    await mount()
+    const adapter = lastFakeAdapter()
+    await waitFor(() => expect(adapter.structureReads).toHaveLength(1))
+    await act(async () => {
+      adapter.structureReads[0]!.settle([pageA])
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()!.layersRawRoots).toHaveLength(1))
+
+    await act(async () => {
+      editing()!.handleReloadAfterConflict()
+      await Promise.resolve()
+    })
+
+    // The reloaded page announces itself. A reloaded bridge is a fresh
+    // instance with a document id of its own.
+    FakeBridgeAdapter.nextDocumentIds = ["doc-b"]
+    await act(async () => {
+      adapter.emitReady("doc-b")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(editing()?.status.kind).toBe("ready"))
+
+    // Asked for its own tree, and it has not answered yet. That window is the
+    // whole row: the panel must be empty in it, not holding page A's rows.
+    await waitFor(() => expect(adapter.structureReads).toHaveLength(2))
+    expect(editing()!.layersRawRoots).toBeNull()
+    expect(editing()!.layersRoots).toBeNull()
+  })
+
+  it("a multi-select nothing overtook reaches the store, even though the adapter announces first", async () => {
+    // THE ORDER IS THE ROW. The real adapter installs the primary selection
+    // and tells the shell's selection listener BEFORE `selectMany` resolves,
+    // so by the time the hook's continuation runs, that listener has already
+    // moved the hook's own selection sequence. A hook-side sequence check
+    // therefore rejected its OWN read: the multi-selection never reached the
+    // store and the chat header never named the elements the designer picked.
+    // Ordering for an adapter-driven selection change belongs to the adapter's
+    // epoch now; the hook's sequence stays for the hook's own continuations,
+    // where the adapter cannot see the click.
+    FakeBridgeAdapter.parkSelectMany = true
+    await mount()
+    const adapter = lastFakeAdapter()
+
+    const picked = [
+      componentSelection("#row-1", "RowA"),
+      componentSelection("#row-2", "RowB"),
+    ]
+    let resolved: Selection[] | null = null
+    await act(async () => {
+      void editing()!
+        .handleSelectMany(["#row-1", "#row-2"])
+        .then((r) => {
+          resolved = r
+        })
+      await Promise.resolve()
+    })
+    expect(adapter.parkedSelectManyReads).toHaveLength(1)
+
+    await act(async () => {
+      adapter.parkedSelectManyReads[0]!.settle(picked)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(resolved).not.toBeNull()
+    expect(resolved!.map((sel) => sel.selector)).toEqual(["#row-1", "#row-2"])
+    expect(
+      useEditorStore.getState().editorSelectionMany.map((sel) => sel.selector),
+    ).toEqual(["#row-1", "#row-2"])
+    // The primary the single-selection inspectors read.
+    expect(useEditorStore.getState().editorSelection?.selector).toBe("#row-1")
+  })
+
+  it("a multi-select the page resolved none of still clears what was selected", async () => {
+    // The control for the empty-list branch. `handleSelectMany` writes nothing
+    // to the store for an empty list, so this row is what says the clear
+    // still happens: the adapter announces the empty answer with null, and
+    // the selection listener empties both store fields. Without it, the
+    // branch that protects the designer's click could quietly have turned
+    // "none of these selectors exist" into "keep what you had".
+    FakeBridgeAdapter.parkSelectMany = true
+    await mount()
+    const adapter = lastFakeAdapter()
+
+    await act(async () => {
+      adapter.emitSelection(componentSelection("#panel", "OldCard"))
+      await Promise.resolve()
+    })
+    expect(useEditorStore.getState().editorSelection?.selector).toBe("#panel")
+
+    await act(async () => {
+      void editing()!.handleSelectMany(["#gone-1", "#gone-2"])
+      await Promise.resolve()
+    })
+    expect(adapter.parkedSelectManyReads).toHaveLength(1)
+
+    await act(async () => {
+      adapter.parkedSelectManyReads[0]!.settle([])
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(useEditorStore.getState().editorSelection).toBeNull()
+    expect(useEditorStore.getState().editorSelectionMany).toEqual([])
+  })
+
+  it("an empty pin_selections clears the store and the page without a round trip", async () => {
+    // `pin_selections([])` is the documented way for the chat agent to clear
+    // (`src/editor/agent-chat-sdk/system-prompt.ts`). The adapter returns for
+    // an empty input without sending anything and without announcing, so if
+    // the hook does not write the store nothing clears at all. And the PAGE
+    // has to be cleared as well, which is what `clearSelection` is for: it
+    // posts the empty `COMMIT_SELECTION`, the one message that changes what
+    // the iframe has selected.
+    FakeBridgeAdapter.parkSelectMany = true
+    await mount()
+    const adapter = lastFakeAdapter()
+
+    await act(async () => {
+      void editing()!.handleSelectMany(["#row-1", "#row-2"])
+      await Promise.resolve()
+    })
+    await act(async () => {
+      adapter.parkedSelectManyReads[0]!.settle([
+        componentSelection("#row-1", "Card"),
+        componentSelection("#row-2", "Card"),
+      ])
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(
+      useEditorStore.getState().editorSelectionMany.map((sel) => sel.selector),
+    ).toEqual(["#row-1", "#row-2"])
+
+    await act(async () => {
+      void editing()!.handleSelectMany([])
+      await Promise.resolve()
+    })
+
+    // No read went out for it, both store fields are empty, and the page was
+    // told once.
+    expect(adapter.parkedSelectManyReads).toHaveLength(1)
+    expect(adapter.clearSelectionCalls).toBe(1)
+    expect(useEditorStore.getState().editorSelectionMany).toEqual([])
+    expect(useEditorStore.getState().editorSelection).toBeNull()
+  })
+
+  it("a parked selection read cannot put back the element the designer clicked away from", async () => {
+    // The same parked stamp refresh as the page-change row above, with the
+    // page left exactly where it is. Only the CLICK moves, so the document
+    // check has nothing to see and the adapter's selection epoch is the only
+    // lock. This is the shape a fixture that never announced its own installs
+    // could not stage at all: the read's answer has to reach the adapter the
+    // way the bridge's reply does before anything can refuse it.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    FakeBridgeAdapter.parkSelectBySelector = true
+    try {
+      await mount()
+      const adapter = lastFakeAdapter()
+      await act(async () => {
+        adapter.emitSelection(styleSelection)
+      })
+      await waitFor(() =>
+        expect(useEditorStore.getState().editorSelection).not.toBeNull(),
+      )
+      await act(async () => {
+        adapter.emitCapture(capture("m1", "hello"))
+      })
+      const typing = await waitForApply()
+      await act(async () => {
+        // The write lands and names the selected element's file, which arms
+        // the refresh.
+        typing.settle(applied({ "src/App.vue": "hash-2" }))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      // Let the first retry fire. It parks.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300)
+      })
+      expect(adapter.parkedSelectReads).toHaveLength(1)
+
+      // The designer clicks something else, on the page that never moved.
+      const theLaterClick = componentSelection("#header", "Header")
+      await act(async () => {
+        adapter.emitSelection(theLaterClick)
+        await Promise.resolve()
+      })
+      expect(useEditorStore.getState().editorSelection?.selector).toBe("#header")
+
+      // And the refresh finally answers, with the element it was asked for.
+      await act(async () => {
+        adapter.parkedSelectReads[0]!.settle(styleSelection)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      // The click stands. Nothing put `#panel` back, so the next edit still
+      // aims at what the designer is looking at.
+      expect(useEditorStore.getState().editorSelection?.selector).toBe("#header")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("cannot install a multi-select that answers after the designer clicked something else", async () => {
+    // THE PAGE NEVER MOVES HERE, and that is what makes this the sequence's
+    // case rather than the session's. `handleSelectMany` resolves each
+    // selector through the adapter, and the designer can click a single
+    // element while that read is out. The store write is what makes a late
+    // answer harmful: `setEditorSelectionMany` also pins the primary
+    // `editorSelection`, so the multi read would replace the click that
+    // superseded it, and the next edit would aim at the element it named.
+    FakeBridgeAdapter.parkSelectMany = true
+    await mount()
+    const adapter = lastFakeAdapter()
+
+    const fromTheMultiRead = componentSelection("#row-1", "RowA")
+    const theLaterClick = componentSelection("#header", "Header")
+
+    await act(async () => {
+      void editing()!.handleSelectMany(["#row-1", "#row-2"])
+      await Promise.resolve()
+    })
+    expect(adapter.parkedSelectManyReads).toHaveLength(1)
+
+    await act(async () => {
+      adapter.emitSelection(theLaterClick)
+      await Promise.resolve()
+    })
+    expect(useEditorStore.getState().editorSelection?.selector).toBe("#header")
+
+    // And the multi read answers last.
+    await act(async () => {
+      adapter.parkedSelectManyReads[0]!.settle([fromTheMultiRead])
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(useEditorStore.getState().editorSelection?.selector).toBe("#header")
+    expect(useEditorStore.getState().editorSelectionMany).toEqual([])
   })
 })

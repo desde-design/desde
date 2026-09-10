@@ -81,6 +81,8 @@ export function resetFakeAdapters(): void {
   // decides whether verification runs at all.
   FakeBridgeAdapter.verificationEnabled = false
   FakeBridgeAdapter.parkSelectBySelector = false
+  FakeBridgeAdapter.parkSelectMany = false
+  FakeBridgeAdapter.parkGetStructure = false
 }
 
 /**
@@ -117,6 +119,22 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
    * answer at once. `resetFakeAdapters` turns it back off.
    */
   static parkSelectBySelector = false
+  /**
+   * Hold every `selectMany` open until the test settles it.
+   *
+   * OFF by default, and the unparked answer stays the empty list every test
+   * before this one was built against. `resetFakeAdapters` turns it back off.
+   */
+  static parkSelectMany = false
+  /**
+   * Hold every `getStructure` open until the test settles it.
+   *
+   * OFF by default: every test written before this one expects the Layers
+   * read to answer at once. It is parkable for the same reason `applyEdit`
+   * is: the question is what happens when the page is replaced while the read
+   * is still out. `resetFakeAdapters` turns it back off.
+   */
+  static parkGetStructure = false
 
   readonly framework: FrameworkId = "vue3"
 
@@ -156,6 +174,19 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
    * the run forever rather than let it reach a verdict.
    */
   private provenanceAnswer: Record<string, StyleOrigin> | null | undefined
+
+  /**
+   * The real adapter's selection epoch, modelled.
+   *
+   * The document id answers "which page"; this answers "which click". The
+   * page can stay exactly where it is while the designer clicks something
+   * else, and a selection read that was already out then answers about an
+   * element that is no longer selected. The real adapter captures this number
+   * before it sends and refuses to install a reply whose number has moved
+   * (`src/editor/adapters/bridge/index.ts`), so a fixture without it lets a
+   * harness row stage an ordering the product cannot produce.
+   */
+  private selectionEpoch = 0
 
   private readonly selectionListeners = new Set<Listener<Selection | null>>()
   private readonly captureListeners = new Set<Listener<Mutation>>()
@@ -258,6 +289,18 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   }
 
   emitSelection(selection: Selection | null): void {
+    this.notifySelection(selection)
+  }
+
+  /**
+   * Announce a selection change and move the epoch with it, bump first.
+   *
+   * Every selection change in the real adapter ends in one call that does
+   * both, so every one here does too: a click, a deselect, `clearSelection`,
+   * the install a single read makes and the install a multi read makes.
+   */
+  private notifySelection(selection: Selection | null): void {
+    this.selectionEpoch += 1
     for (const listener of this.selectionListeners) listener(selection)
   }
 
@@ -269,13 +312,42 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
    * An UNSOLICITED bridge ready from `documentId`, i.e. the new page
    * announcing itself before the iframe's `load` event.
    *
-   * Same order as the real adapter's `handleBridgeReady`: the id is adopted
-   * first, so a listener that re-handshakes reads the NEW document, and only
-   * then are the listeners told.
+   * Same order as the real adapter's `handleBridgeReady`, in four steps:
+   *
+   * 1. The id is adopted first, so a listener that re-handshakes reads the NEW
+   *    document.
+   * 2. Every parked selection read settles, with `null` for a single read and
+   *    the empty list for a multi read. That is the first half of
+   *    `discardSelectionFromDepartedDocument`: the page it is talking to
+   *    cannot answer the departed page's question, so the read settles the
+   *    way an unresolved selector already settles. BEFORE the listeners, in
+   *    that method and here, because a lane woken by a listener must not find
+   *    a read from the previous page still open.
+   * 3. The selection listeners hear `null`. The real adapter gets there
+   *    through `discardSelectionFromDepartedDocument`, which it calls on a
+   *    document REPLACEMENT (a previous id that is not this one) and before it
+   *    announces the change. A selection belongs to the page it was made on,
+   *    so the shell hears the page go away with the selection already gone.
+   *    Only on a replacement, which is why the null is skipped when there was
+   *    no previous id: a first handshake replaced nothing.
+   * 4. The document-changed listeners hear the new id.
+   *
+   * The order is the point. A fixture that told the document-changed
+   * listeners first let a test believe the shell still held the departed
+   * page's selection at the moment the boundary moved, which the product
+   * never does.
    */
   emitReady(documentId: string): void {
     if (documentId === this.documentId) return
+    const replacedDocument = this.documentId !== null
     this.documentId = documentId
+    if (replacedDocument) {
+      for (const parked of this.parkedSelectReads) parked.discard()
+      this.parkedSelectReads.length = 0
+      for (const parked of this.parkedSelectManyReads) parked.discard()
+      this.parkedSelectManyReads.length = 0
+      this.notifySelection(null)
+    }
     for (const listener of this.documentChangedListeners) listener(documentId)
   }
 
@@ -317,8 +389,19 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
     return () => {}
   }
   async getStructure(): Promise<OutlineNode[]> {
-    return this.structure
+    if (!FakeBridgeAdapter.parkGetStructure) return this.structure
+    return new Promise<OutlineNode[]>((resolve) => {
+      this.structureReads.push({ settle: resolve })
+    })
   }
+  /**
+   * Every parked Layers read, in order, each with the answer still to give.
+   *
+   * One entry per `getStructure` call while {@link FakeBridgeAdapter.parkGetStructure}
+   * is on. A test settles them out of order on purpose: the departed page's
+   * tree arriving after the new page's is the whole point.
+   */
+  readonly structureReads: { settle: (roots: OutlineNode[]) => void }[] = []
   /**
    * Every selector this adapter was asked to re-select, in order.
    *
@@ -349,28 +432,133 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
    */
   readonly parkedSelectReads: {
     selector: string
+    /**
+     * The page answering the question this read asked. Goes through the epoch
+     * and the install, exactly as the real adapter's reply does: an answer the
+     * designer has already clicked past is not installed and settles as null.
+     */
     settle: (selection: Selection | null) => void
+    /**
+     * The page going away under the read. Settles the promise with null and
+     * installs nothing, which is what `discardSelectionFromDepartedDocument`
+     * does with a request the departed page can no longer answer.
+     */
+    discard: () => void
   }[] = []
   async selectBySelector(selector: string): Promise<Selection | null> {
     this.selectBySelectorCalls.push(selector)
+    // RESERVED as the read goes out, like the real adapter's: the next number
+    // is taken here, so a read sent later holds a higher one and supersedes
+    // this one whichever answers first.
+    const epoch = ++this.selectionEpoch
     if (FakeBridgeAdapter.parkSelectBySelector) {
       return new Promise<Selection | null>((resolve) => {
-        this.parkedSelectReads.push({ selector, settle: resolve })
+        this.parkedSelectReads.push({
+          selector,
+          settle: (selection) => resolve(this.installRead(selection, epoch)),
+          discard: () => resolve(null),
+        })
       })
     }
-    if (this.selectBySelectorAnswers.length > 0) {
-      return this.selectBySelectorAnswers.shift() ?? null
-    }
-    return this.selectBySelectorResult
+    const answer =
+      this.selectBySelectorAnswers.length > 0
+        ? (this.selectBySelectorAnswers.shift() ?? null)
+        : this.selectBySelectorResult
+    return this.installRead(answer, epoch)
   }
-  async selectMany(): Promise<Selection[]> {
-    return []
+
+  /**
+   * Apply one selection read's answer the way the real adapter applies it:
+   * refuse it when the epoch has moved, and otherwise install it and tell the
+   * listeners BEFORE the promise resolves.
+   *
+   * The order is the part a fixture gets wrong by omission. The real adapter
+   * notifies inside the awaited call, so the caller's continuation runs with
+   * the listeners already fired; a fixture that only resolved let a harness
+   * row believe the caller ran first.
+   */
+  private installRead(
+    selection: Selection | null,
+    epoch: number,
+  ): Selection | null {
+    if (this.selectionEpoch !== epoch) return null
+    if (!selection) return null
+    this.notifySelection(selection)
+    return selection
+  }
+  /**
+   * Every multi-select read parked until the test answers it, when
+   * {@link FakeBridgeAdapter.parkSelectMany} is on.
+   *
+   * The single-read list above exists so a PAGE CHANGE can be put inside a
+   * read. This one exists so a SELECTION change can: the page stays where it
+   * is, the designer clicks something else, and the multi-read that was
+   * already out answers afterwards.
+   */
+  readonly parkedSelectManyReads: {
+    selectors: readonly string[]
+    /** The page answering, through the epoch and the install. */
+    settle: (selections: Selection[]) => void
+    /** The page going away under the read, installing nothing. */
+    discard: () => void
+  }[] = []
+  async selectMany(selectors: readonly string[]): Promise<Selection[]> {
+    // The real adapter returns here without sending anything and without
+    // announcing, so this does too. A fixture that notified on an empty input
+    // would clear the store by itself, and the hook row that proves
+    // `pin_selections([])` still clears would pass with the hook's branch
+    // deleted.
+    if (selectors.length === 0) return []
+    const epoch = ++this.selectionEpoch
+    if (FakeBridgeAdapter.parkSelectMany) {
+      return new Promise<Selection[]>((resolve) => {
+        this.parkedSelectManyReads.push({
+          selectors,
+          settle: (selections) => resolve(this.installManyRead(selections, epoch)),
+          discard: () => resolve([]),
+        })
+      })
+    }
+    return this.installManyRead([], epoch)
+  }
+
+  /**
+   * The multi read's half of {@link installRead}.
+   *
+   * The empty list is this read's null, and an install pins the FIRST
+   * selection as the primary, which is why a late answer is harmful at all:
+   * it would replace the single selection the designer made after asking.
+   */
+  private installManyRead(
+    selections: Selection[],
+    epoch: number,
+  ): Selection[] {
+    if (this.selectionEpoch !== epoch) return []
+    // An ACCEPTED empty answer still announces, with null. The real adapter
+    // pins `selections[0] ?? null` and notifies either way, because "the page
+    // resolved none of these selectors" is meaningfully different from "keep
+    // what you had". Only the refusal above is silent.
+    this.notifySelection(selections[0] ?? null)
+    return selections
   }
   async selectParent(): Promise<Selection | null> {
     return null
   }
   async setActive(): Promise<void> {}
-  async clearSelection(): Promise<void> {}
+  /**
+   * How many times `clearSelection` was called.
+   *
+   * The harness has no postMessage to watch, so this stands in for the empty
+   * `COMMIT_SELECTION` the real adapter posts. The message itself is asserted
+   * in the adapter suite.
+   */
+  clearSelectionCalls = 0
+  async clearSelection(): Promise<void> {
+    // The real one nulls its selection and tells the listeners, which is a
+    // selection change and moves the epoch.
+    this.clearSelectionCalls += 1
+    this.notifySelection(null)
+  }
   async exitDomEditMode(): Promise<void> {}
   async dispose(): Promise<void> {
     this.disposed = true

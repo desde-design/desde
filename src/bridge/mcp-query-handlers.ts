@@ -10,6 +10,18 @@
  * outline, an element screenshot, and page-level design tokens. Each is a
  * fire-and-respond pair keyed by `requestId`.
  *
+ * ONE MESSAGE HERE IS NOT A QUERY: `COMMIT_SELECTION`. It is the other half
+ * of the selection split. The inspects above READ, and they read only: none
+ * of them touches the inspector's selected element or draws the overlay any
+ * more. `COMMIT_SELECTION` is how the shell says which elements it now holds,
+ * and it is the only message that makes the page select one. It answers
+ * nothing, because the shell already has the inspection it is committing. It
+ * lives here rather than in the main switch so that every write to the
+ * inspector's selection from a shell message sits in one file beside the
+ * reads it replaced. It is also the one message here that names the document
+ * it is FOR rather than the document it came from, and a commit for another
+ * document is dropped: see the case body.
+ *
  * `handleMcpQuery` is a single dispatcher the main postMessage switch calls
  * BEFORE its own switch — returns `true` when it owned `data.type` (so the
  * caller returns early) or `false` when the message isn't one of these query
@@ -70,9 +82,8 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
       // Phase 6 multi-select. Resolves each selector to its
       // InspectionData and emits ELEMENTS_INSPECTED with the list
       // (preserving input order, skipping unresolved selectors).
-      // Pins the FIRST resolved element as the bridge's internal
-      // `selectedElement` so the existing single-selection click
-      // path stays coherent.
+      // It pins nothing: the shell decides whether it accepts this
+      // answer, and says so with COMMIT_SELECTION.
       const reqId = (data as { requestId: string }).requestId
       const selectorsValue = payloadOf(data).selectors
       if (!Array.isArray(selectorsValue) || selectorsValue.length === 0) {
@@ -85,7 +96,6 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
         return true
       }
       const resolved: Record<string, unknown>[] = []
-      let pinned = false
       for (const sel of selectorsValue) {
         if (typeof sel !== "string" || sel.length === 0) continue
         let matches: NodeListOf<Element>
@@ -98,12 +108,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
         const candidate = matches[0]
         if (isBridgeOwnElement(candidate)) continue
         try {
-          const inspData = inspectElement(candidate) as Record<string, unknown>
-          resolved.push(inspData)
-          if (!pinned) {
-            inspector.setSelectedElement(candidate)
-            pinned = true
-          }
+          resolved.push(inspectElement(candidate) as Record<string, unknown>)
         } catch (err) {
           console.warn("[Desde] INSPECT_MANY: inspect failed for", sel, err)
         }
@@ -114,6 +119,75 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
         requestId: reqId,
         documentId: bridgeDocumentId,
       } as Record<string, unknown>)
+      return true
+    }
+    case "COMMIT_SELECTION": {
+      /**
+       * The shell says which elements it holds, and the page draws exactly
+       * that.
+       *
+       * There is ONE selection overlay, and the shell pins the first resolved
+       * element of a multi-select as its primary, so a set commits its
+       * primary. That is what the multi-select read used to pin, moved to the
+       * message that means it.
+       *
+       * An EMPTY list clears, which is the same clear `CLEAR_SELECTION`
+       * performs, through the same `clearSelectedOnly`. A non-empty list that
+       * resolves nothing clears too: the page cannot draw the set the shell
+       * named, and leaving some OTHER element highlighted would be the exact
+       * divergence this message exists to end.
+       *
+       * No reply. The shell already holds the inspection it is committing,
+       * and an unsolicited `ELEMENT_INSPECTED` would be installed by the
+       * shell unconditionally, so a reply here would be two sides echoing one
+       * selection back and forth.
+       *
+       * THE COMMIT NAMES THE PAGE IT IS FOR, and a commit for another page is
+       * dropped here. The shell sends through the iframe's `contentWindow`,
+       * which is the same object across a navigation, so a commit posted for
+       * document A can be delivered to document B. That happens when A's
+       * reply is accepted in the instant before B's `BRIDGE_READY` is
+       * processed: the shell still believes A is on screen, so it accepts and
+       * commits, and B would apply a selection from a page that is gone.
+       * Dropping is silent and answers nothing, exactly like a commit whose
+       * selectors resolve to nothing on this page.
+       *
+       * `bridgeDocumentId` is read at HANDLE time, not at module load: it is
+       * a live binding that `configureBridgeRuntime` fills in, and a copy
+       * taken when this module was evaluated would be the empty string.
+       */
+      const commitPayload = payloadOf(data)
+      if (commitPayload.documentId !== bridgeDocumentId) return true
+      const committed = commitPayload.selectors
+      let primary: Element | null = null
+      if (Array.isArray(committed)) {
+        for (const sel of committed) {
+          if (typeof sel !== "string" || sel.length === 0) continue
+          let match: Element | null
+          try {
+            match = document.querySelector(sel)
+          } catch {
+            continue
+          }
+          if (!match || isBridgeOwnElement(match)) continue
+          primary = match
+          break
+        }
+      }
+      if (primary) {
+        // THE ECHO HAS TO BE FREE. Every accepted selection change is
+        // committed now, including the designer's own click, which the page
+        // had already selected before it reported it. Re-running
+        // `setSelectedElement` on the element that is already selected would
+        // tear down and redraw the overlay for no change at all, which the
+        // designer sees as a flicker on every click. So a commit that names
+        // what is already drawn does nothing.
+        if (inspector.getSelectedElement() !== primary) {
+          inspector.setSelectedElement(primary)
+        }
+      } else {
+        inspector.clearSelectedOnly()
+      }
       return true
     }
     case "INSPECT_SELECTOR": {
@@ -132,6 +206,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
             type: "ELEMENT_INSPECTION_UNRESOLVED",
             payload: { targetId, reason, ...(extras ?? {}) },
             requestId: reqId,
+            documentId: bridgeDocumentId,
           } as Record<string, unknown>)
         } else {
           sendToShell({ type: "ELEMENT_INSPECTED", payload: null, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
@@ -158,15 +233,12 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
         }
         try {
           const inspData = inspectElement(sole)
-          // In editor mode, programmatic selection (e.g., from the
-          // layers panel) must keep the bridge's internal selection
-          // state in sync with editor's. Without this, the next
-          // iframe click on `sole` takes the bridge's
-          // toggle-deselect branch against a stale selectedElement
-          // and the user sees a phantom deselect.
-          if (useTieredResolution) {
-            inspector.setSelectedElement(sole)
-          }
+          // Nothing is selected here. The bridge's own selection is kept in
+          // step with the shell's by COMMIT_SELECTION, which the shell sends
+          // once it has ACCEPTED this answer. It used to be set right here,
+          // and that is the defect this split closes: the shell can refuse
+          // the answer, and the page was left highlighting an element the
+          // shell does not hold.
           sendToShell({ type: "ELEMENT_INSPECTED", payload: inspData, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
         } catch (err) {
           console.warn("[Desde MCP] inspect selector failed:", err)
@@ -183,6 +255,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           type: "ELEMENT_INSPECTION_UNRESOLVED",
           payload: { targetId: selectorValue, reason: "ambiguous", candidates },
           requestId: reqId,
+          documentId: bridgeDocumentId,
         } as Record<string, unknown>)
       } else {
         // Legacy: pick the first match (matches existing pre-bump behavior).
@@ -376,6 +449,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
             type: "ELEMENT_INSPECTION_UNRESOLVED",
             payload: { targetId: "", reason: "not-found" },
             requestId: reqId,
+            documentId: bridgeDocumentId,
           } as Record<string, unknown>)
         }
       } else {
@@ -383,6 +457,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           type: "ELEMENT_INSPECTION_UNRESOLVED",
           payload: { targetId: "", reason: "not-found" },
           requestId: reqId,
+          documentId: bridgeDocumentId,
         } as Record<string, unknown>)
       }
       return true
@@ -396,6 +471,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           type: "ELEMENT_INSPECTION_UNRESOLVED",
           payload: { targetId: inSel, reason: "not-found" },
           requestId: reqId,
+          documentId: bridgeDocumentId,
         } as Record<string, unknown>)
         return true
       }
@@ -405,11 +481,12 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           type: "ELEMENT_INSPECTION_UNRESOLVED",
           payload: { targetId: inSel, reason: "not-found" },
           requestId: reqId,
+          documentId: bridgeDocumentId,
         } as Record<string, unknown>)
         return true
       }
       try {
-        inspector.setSelectedElement(parentEl)
+        // A read, like the other two. The shell commits what it accepts.
         sendToShell({ type: "ELEMENT_INSPECTED", payload: inspectElement(parentEl), requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
       } catch (err) {
         console.warn("[Desde Inspector] inspect parent failed:", err)
@@ -417,6 +494,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
           type: "ELEMENT_INSPECTION_UNRESOLVED",
           payload: { targetId: inSel, reason: "not-found" },
           requestId: reqId,
+          documentId: bridgeDocumentId,
         } as Record<string, unknown>)
       }
       return true
@@ -499,7 +577,7 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
         const node = buildOutline(child, 0)
         if (node) roots.push(node)
       }
-      sendToShell({ type: "STRUCTURE_CAPTURED", payload: { roots }, requestId: reqId } as Record<string, unknown>)
+      sendToShell({ type: "STRUCTURE_CAPTURED", payload: { roots }, requestId: reqId, documentId: bridgeDocumentId } as Record<string, unknown>)
       return true
     }
     case "CAPTURE_ELEMENT_SCREENSHOT": {

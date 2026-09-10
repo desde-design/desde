@@ -227,6 +227,29 @@ describe("dispatchPropEdit", () => {
     }
   })
 
+  it("surfaces the failure when the re-select is refused (the designer clicked past it)", async () => {
+    // The default harness adapter answers null, which is what the real one
+    // answers when its selection epoch refuses the reply. No fresh stamp, no
+    // re-fire, and the failure the designer sees is the write that did not
+    // land.
+    const { session, deps, applyEdit } = harness(
+      Promise.resolve({ kind: "failed", reason: "stale target" } as EditResult),
+    )
+    deps.staleRetried = new Set()
+    session.updatePropEdits(() => [edit("#a", "label", session.generation)])
+    await dispatchPropEdit(propEditKey("#a", "label"), session.generation, deps)
+    expect(deps.adapter.selectBySelector).toHaveBeenCalledTimes(1)
+    expect(applyEdit).toHaveBeenCalledTimes(1)
+    expect(deps.setStatus).toHaveBeenCalledWith(
+      "Inline prop edit failed: stale target",
+    )
+    expect(deps.resolveOverride).toHaveBeenCalledWith(
+      "#a-label",
+      "failed",
+      "stale target",
+    )
+  })
+
   it("keeps the entry when the hand-off was refused", async () => {
     const { session, deps } = harness(Promise.resolve(needsChat("bound binding")))
     deps.escalateToChat = vi.fn(async () => false)

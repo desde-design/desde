@@ -109,7 +109,7 @@ import { createOverridePreview } from "./override-preview"
   // the viewer's `html-inject`). Keep it a single-use literal;
   // bridge-bundle-version.test.ts fails if that stops holding.
   ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__ =
-    "2026-09-10c-selection-document-id"
+    "2026-09-10h-commit-names-page"
   const BRIDGE_VERSION = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__ as string
 
@@ -1390,6 +1390,9 @@ import { createOverridePreview } from "./override-preview"
       // CAPTURE_ELEMENT_SCREENSHOT, GET_PAGE_TOKENS, READ_RENDERED_VALUE,
       // READ_MEASUREMENTS) are dispatched from ./mcp-query-handlers before
       // the switch below — it returns true when it owned `data.type`.
+      // COMMIT_SELECTION rides the same dispatcher and is the one message
+      // there that WRITES rather than queries: it is how the shell moves this
+      // page's selection, and it answers nothing.
       if (handleMcpQuery(data, { inspector })) return
 
       switch (data.type) {

@@ -95,11 +95,14 @@ export interface VerifyEditInput extends ExpectationInput {
    * optional so a pure caller with no session can omit it, and an absent
    * predicate reads as "still current".
    *
-   * When it reports false the store record is still written (the Checks tab
-   * has to stay truthful about what ran), the toast is skipped, and the
-   * outcome delivered is `"skipped"` rather than the real one, so a caller
-   * resolving a live preview override does not resolve it against the wrong
-   * page.
+   * When it reports false the store record is still written, as a `skipped`
+   * one saying the page changed before the check finished. The Checks tab has
+   * to stay truthful about what ran, and the truth is that the check ran and
+   * could not finish on the page it was about; the reading it came back with
+   * is about another page and is not recorded as this edit's verdict. The
+   * toast is skipped, and the outcome delivered is `"skipped"` rather than the
+   * real one, so a caller resolving a live preview override does not resolve
+   * it against the wrong page.
    */
   current?: () => boolean
 }
@@ -210,11 +213,30 @@ export function useEditVerification(
             } catch {
               // The caller's predicate is broken; it does not get to decide.
             }
+            // WHAT GETS RECORDED. When the page is still there, the reading
+            // itself. When it is not, a skip that says so, because the
+            // reading is not about this edit: it describes whatever document
+            // replaced the one the write landed on. Storing the page-derived
+            // `fail` there made the Checks tab claim this edit did not take
+            // effect on the evidence of the next page's DOM, which is a
+            // wrong answer rather than an incomplete one. Only the fields
+            // that are about the EDIT are carried over; `failedAt`, `cause`
+            // and `observedValue` describe the reading and are left off.
+            const recorded: VerificationResult = stillCurrent
+              ? result
+              : {
+                  editId: result.editId,
+                  status: "skipped",
+                  expectedValue: result.expectedValue,
+                  escalatable: false,
+                  detail: "The page changed before the check finished.",
+                  durationMs: result.durationMs,
+                }
             try {
-              useEditorStore.getState().completeVerification(editId, result)
-              if (result.status === "fail" && stillCurrent && !isSuperseded?.()) {
+              useEditorStore.getState().completeVerification(editId, recorded)
+              if (recorded.status === "fail" && stillCurrent && !isSuperseded?.()) {
                 toast.warning("Edit didn't take effect", {
-                  description: result.detail,
+                  description: recorded.detail,
                 })
               }
             } catch {

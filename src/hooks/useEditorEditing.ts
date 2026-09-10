@@ -507,64 +507,6 @@ export function useEditorEditing({
   // next refresh and never set while a newer refresh is in flight.
   const [layersError, setLayersError] = useState(false)
 
-  const refreshLayers = useCallback(async () => {
-    const adapter = adapterRef.current
-    if (!adapter) return
-    const generation = ++layersGenerationRef.current
-    setLayersRefreshing(true)
-    setLayersError(false)
-    // Retry a bounded number of times. The first fetch fires right after the
-    // handshake, concurrently with the iframe finishing its reload — that one
-    // GET_STRUCTURE can be dropped (now surfaced as a timeout rather than a
-    // hang). A static prototype emits no follow-up onTreeUpdate to retrigger
-    // us, so without a retry a single dropped reply leaves the panel stuck on
-    // "Loading layers…". Bail immediately if a newer refresh superseded us.
-    const MAX_ATTEMPTS = 3
-    try {
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        try {
-          const roots = await adapter.getStructure()
-          if (generation !== layersGenerationRef.current) return
-          // Synthesize <template v-if>/v-for group rows (WS2 follow-up):
-          // those wrappers render no DOM, so the DOM walk above can never
-          // surface them. Best-effort — a fetch failure or a substrate
-          // with zero .vue files just leaves the tree as the DOM walk saw
-          // it. See mergeConditionalGroups for the merge semantics.
-          //
-          // The file list comes from the RAW tree, here, before anything is
-          // filtered or merged. That is what keeps it complete: the density
-          // filter can only ever remove nodes, so deriving the fetch list
-          // from a filtered tree could shrink it, and a file dropped from
-          // the list gets no group rows at all. The MERGE runs in the
-          // `layersRoots` memo, on the raw tree, BEFORE the filter.
-          const vueFiles = collectVueFiles(roots)
-          const groups =
-            vueFiles.size === 0
-              ? EMPTY_CONDITIONAL_GROUPS
-              : await fetchConditionalGroupsForFiles([...vueFiles])
-          if (generation !== layersGenerationRef.current) return
-          setLayersRawRoots(roots)
-          setLayersGroups(groups)
-          return
-        } catch (err) {
-          if (generation !== layersGenerationRef.current) return
-          if (attempt === MAX_ATTEMPTS) {
-            console.warn(
-              `[Editor] getStructure failed after ${MAX_ATTEMPTS} attempts:`,
-              err,
-            )
-            setLayersError(true)
-            return
-          }
-        }
-      }
-    } finally {
-      if (generation === layersGenerationRef.current) {
-        setLayersRefreshing(false)
-      }
-    }
-  }, [])
-
   /**
    * The one status line the whole hook writes to.
    *
@@ -658,6 +600,93 @@ export function useEditorEditing({
   )
 
   /**
+   * Re-read the Layers ("Structure") tree from the page.
+   *
+   * UNDER THE SESSION, which is why it is declared here rather than up with
+   * the rest of the Layers state: it needs `session`, and a hook declared
+   * above it could not name it.
+   *
+   * It is a READ, and the reads were still unguarded when every write lane
+   * had been covered. Two awaits, and the page can be replaced across either
+   * of them: the structure round trip to the bridge, and the
+   * conditional-groups fetch to the CLI. What comes back is the DEPARTED
+   * page's tree. Every row in it carries `authoredAt` and `editTarget`, which
+   * is where a Layers right-click Delete writes. Installing it points Delete
+   * at a file the page on screen may not even render.
+   *
+   * `layersGenerationRef` does not cover that on its own. It answers "did a
+   * newer refresh start", and in the window between the page changing and the
+   * new page's handshake there is no newer refresh yet. Both checks stay: the
+   * generation is about a newer READ, the session is about a newer PAGE.
+   */
+  const refreshLayers = useCallback(async () => {
+    const adapter = adapterRef.current
+    if (!adapter) return
+    const generation = ++layersGenerationRef.current
+    setLayersRefreshing(true)
+    setLayersError(false)
+    // Retry a bounded number of times. The first fetch fires right after the
+    // handshake, concurrently with the iframe finishing its reload — that one
+    // GET_STRUCTURE can be dropped (now surfaced as a timeout rather than a
+    // hang). A static prototype emits no follow-up onTreeUpdate to retrigger
+    // us, so without a retry a single dropped reply leaves the panel stuck on
+    // "Loading layers…". Bail immediately if a newer refresh superseded us.
+    const MAX_ATTEMPTS = 3
+    try {
+      await session.run(async (ctx) => {
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          try {
+            const read = await ctx.step(adapter.getStructure())
+            if (read.stale) return
+            if (generation !== layersGenerationRef.current) return
+            const roots = read.value
+            // Synthesize <template v-if>/v-for group rows (WS2 follow-up):
+            // those wrappers render no DOM, so the DOM walk above can never
+            // surface them. Best-effort — a fetch failure or a substrate
+            // with zero .vue files just leaves the tree as the DOM walk saw
+            // it. See mergeConditionalGroups for the merge semantics.
+            //
+            // The file list comes from the RAW tree, here, before anything is
+            // filtered or merged. That is what keeps it complete: the density
+            // filter can only ever remove nodes, so deriving the fetch list
+            // from a filtered tree could shrink it, and a file dropped from
+            // the list gets no group rows at all. The MERGE runs in the
+            // `layersRoots` memo, on the raw tree, BEFORE the filter.
+            const vueFiles = collectVueFiles(roots)
+            if (vueFiles.size === 0) {
+              setLayersRawRoots(roots)
+              setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
+              return
+            }
+            const groups = await ctx.step(
+              fetchConditionalGroupsForFiles([...vueFiles]),
+            )
+            if (groups.stale) return
+            if (generation !== layersGenerationRef.current) return
+            setLayersRawRoots(roots)
+            setLayersGroups(groups.value)
+            return
+          } catch (err) {
+            if (generation !== layersGenerationRef.current) return
+            if (attempt === MAX_ATTEMPTS) {
+              console.warn(
+                `[Editor] getStructure failed after ${MAX_ATTEMPTS} attempts:`,
+                err,
+              )
+              setLayersError(true)
+              return
+            }
+          }
+        }
+      })
+    } finally {
+      if (generation === layersGenerationRef.current) {
+        setLayersRefreshing(false)
+      }
+    }
+  }, [session])
+
+  /**
    * What the session is holding, as React sees it.
    *
    * `useSyncExternalStore` rather than four `useState`s plus four "always
@@ -724,6 +753,37 @@ export function useEditorEditing({
     }
   }, [])
 
+  /**
+   * WHICH SELECTION A LOOKUP WAS ASKED FOR, as a number.
+   *
+   * The selection listener starts two independent lookups per click (the
+   * attribution prefetch and the component's manifest) and installs what they
+   * answer. Both used to be correlated by SELECTOR TEXT: if the selector the
+   * answer was asked for still matched the selector on screen, the answer was
+   * installed. Selector text is not an identity. Page A's `#panel` and page
+   * B's `#panel` are the same eight characters and a different element, so the
+   * departed page's manifest could become the controls the inspector offers
+   * for the arriving page's element, and the schema the next prop edit is
+   * written against.
+   *
+   * Every selection callback takes the next number, deselection included, and
+   * so does a document boundary that moves. An answer may only be installed
+   * while the number it captured is still the current one.
+   *
+   * A ref rather than a `let` inside the effect: the effect re-attaches for
+   * `enabled`, the prototype url and the manifest source, and a counter that
+   * restarted at zero there would let a continuation from the previous
+   * attachment match a selection in the new one.
+   */
+  const selectionSeqRef = useRef(0)
+  // WHAT THIS COUNTER IS NOT FOR. It does not order the adapter's own
+  // selection replies. The adapter carries a selection epoch of its own, and
+  // that epoch is what refuses a `selectBySelector` or `selectMany` answer the
+  // designer has already clicked past. This counter is for the continuations
+  // the adapter cannot see: the attribution prefetch and the manifest lookup
+  // are the shell asking a SERVER a question about the element that was
+  // selected, and nothing about their answers passes through the adapter.
+
   // Adapter lifecycle. Attached when `enabled` flips true and an iframe
   // is present; disposed on disable, unmount, or url change. Selection
   // wiring + manifest lookup mirror what `<LivePrototypePane>` does so
@@ -754,6 +814,11 @@ export function useEditorEditing({
     const unsubSelection = adapter.onSelectionChange(
       async (selection: Selection | null) => {
         if (cancelled) return
+        // THE LOCK, taken before anything can suspend. Deselection included:
+        // a selector cleared and then clicked again is a NEW selection, and
+        // without a number here the first click's answer would still match
+        // the second click's selector.
+        const seq = ++selectionSeqRef.current
         setEditorSelection(selection)
         // Phase 3 Stage A: warm the manifest cache for this selection's
         // component chain so `attribute()` resolves synchronously at edit
@@ -770,30 +835,39 @@ export function useEditorEditing({
         if (selection?.attributionContext) {
           const attributionContext = selection.attributionContext
           const driftRequestSelector = selection.selector
-          void attributionLookup
-            .prefetch(
-              attributionContext.componentChain.map((entry) => ({
-                name: entry.name,
-                importPath: entry.importPath,
-              })),
-            )
-            .then(() => {
-              // Staleness guard — SAME shape as the manifest branch below
-              // (`cancelled` + comparing against the selector captured
-              // when THIS selection arrived). Two independent awaits can
-              // now interleave across selections in this callback (this
-              // prefetch chain and the `manifestSource.getComponent` await
-              // further down); reusing `latestSelector` — which the
-              // synchronous part of this function always advances to the
-              // newest selection before either await suspends — is what
-              // keeps a superseded selection's stale `attributionContext`
-              // from ever reaching `attribute()`/`detectDrift`.
-              // Named scenario this guards: selection A's prefetch is still
-              // pending when selection B arrives and supersedes it, then A's
-              // prefetch finally settles — A must not run detection at that
-              // point (pinned by the "supersedes a still-pending prefetch"
-              // test in live-prototype-pane.test.tsx).
-              if (cancelled || latestSelector !== driftRequestSelector) return
+          // Its OWN run, not the same one as the manifest lookup below. The
+          // two lookups are deliberately concurrent. The panel must not wait
+          // for drift detection to warm its cache, and one run per await is
+          // what keeps them that way. Both are started in this same turn, so
+          // both capture the same session generation and the same `seq`.
+          void session
+            .run(async (ctx) => {
+              const warmed = await ctx.step(
+                attributionLookup.prefetch(
+                  attributionContext.componentChain.map((entry) => ({
+                    name: entry.name,
+                    importPath: entry.importPath,
+                  })),
+                ),
+              )
+              // WHICH LOCK IS LOAD-BEARING. `warmed.stale` is the session: the
+              // page this drift signal describes was replaced, and a signal
+              // reported now names another page's component. `seq` is the
+              // selection: a page can stay put while the designer clicks
+              // something else, and it is the only one of the two that moves
+              // then. The selector comparison after them is neither. It costs
+              // one string compare and it is kept as a third lock, but a
+              // selector is not an identity: two pages can both have `#panel`,
+              // and one page can have `#panel` selected twice with a
+              // deselection between.
+              // Named scenario the selection lock covers: selection A's
+              // prefetch is still pending when selection B arrives and
+              // supersedes it, then A's prefetch finally settles. A must not
+              // run detection at that point (pinned by the "supersedes a
+              // still-pending prefetch" test in live-prototype-pane.test.tsx).
+              if (warmed.stale) return
+              if (cancelled || seq !== selectionSeqRef.current) return
+              if (latestSelector !== driftRequestSelector) return
               try {
                 const attributionResult = attribute(attributionContext, attributionLookup)
                 reportDriftForAttribution(attributionContext, attributionResult)
@@ -815,24 +889,38 @@ export function useEditorEditing({
           setEditorManifest(null)
           return
         }
-        let manifest: Awaited<
-          ReturnType<ComponentManifestSource["getComponent"]>
-        > = null
-        try {
-          manifest = await manifestSource.getComponent(componentName)
-        } catch (err) {
-          if (!cancelled && latestSelector === requestSelector) {
+        // The manifest decides which controls the inspector offers and which
+        // schema a prop edit is written against, so an answer from another
+        // page or another element is not a stale label: it is the wrong
+        // contract for the element in front of the designer.
+        await session.run(async (ctx) => {
+          let manifest: Awaited<
+            ReturnType<ComponentManifestSource["getComponent"]>
+          > = null
+          try {
+            const found = await ctx.step(manifestSource.getComponent(componentName))
+            // The session, then the selection, then the selector. Same order
+            // and same reasoning as the prefetch above: the first two are the
+            // locks, and the selector is a cheap third.
+            if (found.stale) return
+            manifest = found.value
+          } catch (err) {
+            // `ctx.step` only rethrows while the session is current, so this
+            // is a real failure on the page that asked for it.
+            if (cancelled || seq !== selectionSeqRef.current) return
+            if (latestSelector !== requestSelector) return
             console.warn(
               `[Editor] manifest lookup for ${componentName} failed:`,
               err,
             )
             setEditorManifest(null)
+            return
           }
-          return
-        }
-        if (cancelled) return
-        if (latestSelector !== requestSelector) return
-        setEditorManifest(manifest)
+          if (cancelled) return
+          if (seq !== selectionSeqRef.current) return
+          if (latestSelector !== requestSelector) return
+          setEditorManifest(manifest)
+        })
       },
     )
 
@@ -868,6 +956,60 @@ export function useEditorEditing({
      * instead, and re-arming a debounce that is already armed re-debounces it.
      */
     const enterDocument = (documentId: string | null) => {
+      // THE PAGE UNDERNEATH THE SELECTION CHANGED. Every lookup still out was
+      // asked on the page that is leaving, so none of their answers may be
+      // installed, whatever selector they carry.
+      //
+      // Compared against the session's own document rather than only inside
+      // the end below, because the end does not always run: a session whose
+      // document was forgotten (a page that announced itself and then never
+      // handshaked) adopts the next one without ending anything, so the
+      // generation does not move and this is the only lock left. Repeat calls
+      // for the SAME document do not bump: one page change completes up to
+      // three handshakes, and a bump per handshake would drop a lookup for a
+      // selection made on the page that is still there.
+      //
+      // BEHIND the adapter's own deselect, in practice. A page replacement
+      // reaches the shell through `discardSelectionFromDepartedDocument`
+      // first, and that null selection runs the selection listener, which
+      // bumps this counter through the listener's own `++`. So on the
+      // ordinary path the bump here is the second one. It is defence in
+      // depth: it is what holds if that order ever changes, and it is what
+      // holds for a boundary the adapter did not announce a deselect for.
+      if (session.documentId !== documentId) {
+        selectionSeqRef.current += 1
+        // THE LAYERS TREE BELONGS TO THE PAGE THAT JUST LEFT. Every row in it
+        // carries the source coordinates a right-click Delete writes to, so
+        // leaving it up offers the designer rows that aim at another page's
+        // files. Cleared here, synchronously with the boundary, for the same
+        // reason the buffers are: the gap between the page changing and the
+        // new page's handshake is where the old tree would still be clickable.
+        //
+        // UNDER THE ID COMPARISON, not under the end below. The end does not
+        // always run. A session whose document was already forgotten ends
+        // nothing here, and the conflict reload is exactly that case: it ends
+        // the session with reason "reload", which forgets the document, so
+        // the reloaded page's handshake found `previous === null` and left the
+        // PRE-RELOAD tree on screen and clickable until the new page answered.
+        // The comparison is the honest condition for "the page underneath
+        // changed", and it is safe for the two cases that are not a change: a
+        // first handshake clears state that is already empty, and a plain
+        // teardown keeps the id so it does not come here at all.
+        //
+        // The new page's tree is asked for after ITS handshake, in the one
+        // place below that issues that request.
+        setLayersRawRoots(null)
+        setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
+        setLayersError(false)
+        // The reset is belt and braces, and it is worth saying which part is
+        // load-bearing. The one place that issues the request compares
+        // `layersRequestedFor` against the document id, and that comparison
+        // already covers A to B to A on its own: coming back to A finds "B"
+        // on record and asks again. What the reset adds is that the invariant
+        // stops depending on the ids at all. After a boundary, nothing is on
+        // record for any page.
+        layersRequestedFor = undefined
+      }
       if (shouldEndSessionOnHandshake(session.documentId, documentId)) {
         // Through `endBridgeSession`, not through the end inside
         // `session.start`: the buffers, the dialog rows and the held drafts
@@ -914,6 +1056,18 @@ export function useEditorEditing({
       }
     }
 
+    /**
+     * Has the Layers tree been asked for since the last document boundary?
+     *
+     * `undefined` until the first request, and reset to it by
+     * `enterDocument` whenever the page is replaced. Three calls can arrive
+     * for ONE page (the unsolicited ready, the handshake it triggers, and the
+     * `load` that follows), and each of them completes a handshake, so
+     * without this the shell would ask the same page for its tree three
+     * times.
+     */
+    let layersRequestedFor: string | null | undefined
+
     const runHandshake = () => {
       if (cancelled) return
       setStatus({ kind: "connecting" })
@@ -938,7 +1092,6 @@ export function useEditorEditing({
             adapterReadyAnnounced = true
             adapterRef.current = adapter
             setAdapterReadyMarker((n) => n + 1)
-            void refreshLayers()
             treeUpdateUnsubRef.current = adapter.onTreeUpdate(() => {
               void refreshLayers()
               recordHmrTreeUpdate()
@@ -951,6 +1104,22 @@ export function useEditorEditing({
             // desiredActive state), and shell-initiated text/class edits
             // route through `captureDirectMutation` in the bridge — no
             // DOM-edit-mode active state required.
+          }
+          // THE ONE PLACE A NEW PAGE'S TREE IS ASKED FOR (a tree update and
+          // the panel's own retry button call `refreshLayers` too). It runs
+          // from the handshake path, which is the first moment the shell knows
+          // the new page is really there, and it runs ONCE per page: the
+          // unsolicited ready, its handshake and the `load` that follows all
+          // land here for the same document, and `layersRequestedFor` is what
+          // tells the second and third apart from the first.
+          //
+          // After the `adapterReadyAnnounced` block above, deliberately:
+          // `refreshLayers` reads `adapterRef.current`, and that is where the
+          // adapter is published. Asking before it would return at once and
+          // leave the panel on "Loading layers…" with nothing on the way.
+          if (layersRequestedFor !== adapter.bridgeDocumentId) {
+            layersRequestedFor = adapter.bridgeDocumentId
+            void refreshLayers()
           }
         })
         .catch((err) => {
@@ -975,6 +1144,15 @@ export function useEditorEditing({
             reason: "reconnect",
             cancelWithBridge: false,
           })
+          // AND THE LAYERS PANEL IS TOLD, because the boundary above cleared
+          // its tree and nothing is coming to replace it. The one place that
+          // asks a new page for its tree runs in the SUCCESS branch, so a
+          // handshake that fails leaves the panel on "Loading layers…" with
+          // no request out and no way back. `layersError` with a null tree is
+          // the panel's error state, and that state carries a Retry button
+          // (`layers-panel.tsx`), so the designer has something to click when
+          // the page does come back.
+          setLayersError(true)
           setStatus({ kind: "error", message })
         })
     }
@@ -1177,17 +1355,66 @@ export function useEditorEditing({
     async (selectors: readonly string[]): Promise<Selection[]> => {
       const adapter = adapterRef.current
       if (!adapter) return []
+      if (selectors.length === 0) {
+        // AN EMPTY INPUT IS A CLEAR, and it is answered here rather than by
+        // the round trip below. `pin_selections` documents an empty array as
+        // the way to clear (`src/editor/agent-chat-sdk/system-prompt.ts`), and
+        // the adapter's `selectMany` returns early for it without sending
+        // anything, so there is no reply for the empty-list branch further
+        // down to read. That branch is about a read that WAS sent and came
+        // back empty, which means something else entirely.
+        //
+        // THE PAGE IS CLEARED TOO. `clearSelection` sends the empty commit,
+        // which is the one message that changes what the page has selected.
+        // Before that message existed this branch wrote the store and nothing
+        // else, so the panels said nothing was selected while the iframe went
+        // on drawing its overlay. The store write stays as well, because it is
+        // the answer this call owes its caller and it does not depend on a
+        // listener having been registered, and it goes FIRST so that nothing
+        // this branch owes anyone depends on the await coming back.
+        useEditorStore.getState().setEditorSelectionMany([])
+        await adapter.clearSelection()
+        return []
+      }
       // Through the session, like every other lane: the read is a round trip
       // to the page, and the page can be replaced while it is out. The adapter
       // drops a reply from a departed document on its own, so what this guard
       // adds is the STORE write. Without it a reply that settled just before
       // the boundary would still be written to `editorSelectionMany` after it,
       // and the chat header would name elements from the page that left.
+      //
+      // AND NO SELECTION SEQUENCE HERE. The other case, where the page stays
+      // put and the designer clicks something else, is real, and the lock for
+      // it is the ADAPTER'S selection epoch: it captures the epoch before it
+      // sends and refuses to install a reply whose epoch has moved, so a read
+      // the designer clicked past comes back as the empty list. The hook's own
+      // `selectionSeqRef` cannot do that job here, and trying made it worse:
+      // the adapter installs the primary and notifies the selection listener
+      // BEFORE `selectMany` resolves, that listener bumps the sequence, and
+      // the check then rejected its own read every time.
+      //
+      // Which lock covers what: the adapter's epoch orders every selection
+      // change the ADAPTER can see, which is all of them. `selectionSeqRef`
+      // stays for the hook's OWN continuations, the attribution prefetch and
+      // the manifest lookup, where what arrives late is not a selection reply
+      // at all and the adapter has no view of it.
       const outcome = await session.run(async (ctx) =>
         ctx.step(adapter.selectMany(selectors)),
       )
       if (outcome.stale || outcome.value.stale) return []
       const selections = outcome.value.value
+      if (selections.length === 0) {
+        // NOTHING IS WRITTEN FOR AN EMPTY LIST, and that is deliberate. An
+        // empty list means one of two things, and the adapter has already
+        // said which. Either the page resolved none of the selectors, and the
+        // adapter cleared its own selection and told the selection listener,
+        // which empties both store fields on its own. Or the read was refused
+        // because the designer clicked something else while it was out, and
+        // that click IS the selection now: `setEditorSelectionMany([])` nulls
+        // the primary, so writing it here would take away the element the
+        // designer just picked.
+        return []
+      }
       useEditorStore.getState().setEditorSelectionMany(selections)
       return selections
     },
@@ -1439,18 +1666,43 @@ export function useEditorEditing({
     // failure mode than blocking navigation.
     let cellsJson = "[]"
     let catalogEntry: CatalogEntry | undefined
-    try {
-      const res = await editorFetch("/api/editor/catalog", { cache: "no-store" })
-      if (res.ok) {
-        const catalog = (await res.json()) as CatalogEntry[]
+    // UNDER THE SESSION, and the reason is the CONTINUATION rather than the
+    // catalog. The catalog describes the repo, so a page change while it is
+    // out does not make its rows wrong. What runs after it belongs to one
+    // page, twice over: it navigates the iframe to the isolation route, and
+    // it records `returnUrl` from the url read BEFORE this await. A page
+    // change inside the fetch therefore sent the page that ARRIVED to the
+    // departed page's component route, with a return url aimed back at the
+    // page that had already gone.
+    //
+    // The fetch stays non-fatal. A throw or a non-ok response answers `null`
+    // and the navigation happens with empty variants, exactly as before.
+    // `stale` is the new stop, and it says something different: the click
+    // belonged to a page that is not there any more, so there is nothing to
+    // open.
+    const catalog = await session.run(async (ctx) => {
+      try {
+        const res = await ctx.step(
+          editorFetch("/api/editor/catalog", { cache: "no-store" }),
+        )
+        if (res.stale || !res.value.ok) return null
+        const body = await ctx.step(res.value.json())
+        return body.stale ? null : (body.value as CatalogEntry[])
+      } catch {
+        return null
+      }
+    })
+    if (catalog.stale) return
+    if (catalog.value) {
+      try {
         // Match by name first (works for design-system components
         // whose catalog `file` field points at a type declaration,
         // not the importable SFC), fall back to file for first-party
         // components where two SFCs might share a name.
         catalogEntry =
-          catalog.find((e) => e.name === selection.componentName) ??
+          catalog.value.find((e) => e.name === selection.componentName) ??
           (selection.componentFile
-            ? catalog.find((e) => e.file === selection.componentFile)
+            ? catalog.value.find((e) => e.file === selection.componentFile)
             : undefined)
         if (catalogEntry) {
           const cells = buildVariantCells(
@@ -1459,9 +1711,12 @@ export function useEditorEditing({
           )
           cellsJson = JSON.stringify(cells)
         }
+      } catch {
+        // A body that is not the array the route documents. Non-fatal for the
+        // same reason a failed fetch is: open the component with no variants.
+        // The cast above is the only thing that made this reachable, and the
+        // try that used to wrap the whole block covered it, so it is kept.
       }
-    } catch {
-      // Non-fatal — navigate with empty variants.
     }
 
     // Determine the import spec for the substrate plugin:
@@ -1538,7 +1793,7 @@ export function useEditorEditing({
     // navigation specifically — but using `.src` is more explicit
     // about staying on the parent-side API.
     iframe.src = target
-  }, [iframeRef, prototypeUrl])
+  }, [iframeRef, prototypeUrl, session])
 
   const handleExitComponentEdit = useCallback(() => {
     const state = componentEditState
