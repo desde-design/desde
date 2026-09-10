@@ -2603,6 +2603,42 @@ describe("useEditorEditing: the bridge session", () => {
     expect(useEditorStore.getState().editorSelectionMany).toEqual([])
   })
 
+  it("an empty pin_selections clears the selection without a round trip", async () => {
+    // `pin_selections([])` is the documented way for the chat agent to clear
+    // (`src/editor/agent-chat-sdk/system-prompt.ts`). The adapter returns for
+    // an empty input without sending anything and without announcing, so if
+    // the hook does not write the store nothing clears at all.
+    FakeBridgeAdapter.parkSelectMany = true
+    await mount()
+    const adapter = lastFakeAdapter()
+
+    await act(async () => {
+      void editing()!.handleSelectMany(["#row-1", "#row-2"])
+      await Promise.resolve()
+    })
+    await act(async () => {
+      adapter.parkedSelectManyReads[0]!.settle([
+        componentSelection("#row-1", "Card"),
+        componentSelection("#row-2", "Card"),
+      ])
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(
+      useEditorStore.getState().editorSelectionMany.map((sel) => sel.selector),
+    ).toEqual(["#row-1", "#row-2"])
+
+    await act(async () => {
+      void editing()!.handleSelectMany([])
+      await Promise.resolve()
+    })
+
+    // No read went out for it, and both store fields are empty.
+    expect(adapter.parkedSelectManyReads).toHaveLength(1)
+    expect(useEditorStore.getState().editorSelectionMany).toEqual([])
+    expect(useEditorStore.getState().editorSelection).toBeNull()
+  })
+
   it("a parked selection read cannot put back the element the designer clicked away from", async () => {
     // The same parked stamp refresh as the page-change row above, with the
     // page left exactly where it is. Only the CLICK moves, so the document

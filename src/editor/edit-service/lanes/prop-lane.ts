@@ -258,6 +258,15 @@ export async function dispatchPropEdit(
           )
           if (reselect.stale) return
           const refreshed = reselect.value
+          // A NULL ANSWER FALLS THROUGH TO THE SURFACED FAILURE, on purpose.
+          // The adapter refuses a selection reply the designer has already
+          // clicked past (its selection epoch), so `selectBySelector` answers
+          // null here whenever the page moved on under the retry. There is no
+          // fresh stamp to rebase onto in that case, and the edit did NOT
+          // land, so "Inline prop edit failed" below is the honest report.
+          // Degrading to it is the same choice the one-shot guard makes:
+          // where the recovery cannot be trusted, the lane says the write
+          // failed rather than retrying blind.
           if (refreshed?.editTarget) {
             session.updatePropEdits((prev) => {
               const idx = prev.findIndex(

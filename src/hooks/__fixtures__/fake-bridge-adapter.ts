@@ -447,8 +447,10 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   }[] = []
   async selectBySelector(selector: string): Promise<Selection | null> {
     this.selectBySelectorCalls.push(selector)
-    // Captured before the read goes out, like the real adapter's.
-    const epoch = this.selectionEpoch
+    // RESERVED as the read goes out, like the real adapter's: the next number
+    // is taken here, so a read sent later holds a higher one and supersedes
+    // this one whichever answers first.
+    const epoch = ++this.selectionEpoch
     if (FakeBridgeAdapter.parkSelectBySelector) {
       return new Promise<Selection | null>((resolve) => {
         this.parkedSelectReads.push({
@@ -501,7 +503,13 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
     discard: () => void
   }[] = []
   async selectMany(selectors: readonly string[]): Promise<Selection[]> {
-    const epoch = this.selectionEpoch
+    // The real adapter returns here without sending anything and without
+    // announcing, so this does too. A fixture that notified on an empty input
+    // would clear the store by itself, and the hook row that proves
+    // `pin_selections([])` still clears would pass with the hook's branch
+    // deleted.
+    if (selectors.length === 0) return []
+    const epoch = ++this.selectionEpoch
     if (FakeBridgeAdapter.parkSelectMany) {
       return new Promise<Selection[]>((resolve) => {
         this.parkedSelectManyReads.push({

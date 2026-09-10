@@ -1355,6 +1355,23 @@ export function useEditorEditing({
     async (selectors: readonly string[]): Promise<Selection[]> => {
       const adapter = adapterRef.current
       if (!adapter) return []
+      if (selectors.length === 0) {
+        // AN EMPTY INPUT IS A CLEAR, and it is answered here rather than by
+        // the round trip below. `pin_selections` documents an empty array as
+        // the way to clear (`src/editor/agent-chat-sdk/system-prompt.ts`), and
+        // the adapter's `selectMany` returns early for it without sending
+        // anything, so there is no reply for the empty-list branch further
+        // down to read. That branch is about a read that WAS sent and came
+        // back empty, which means something else entirely.
+        //
+        // The store write is the whole clear, and it is what the code before
+        // this branch existed did (`git show 2136401`): the adapter is not
+        // called, because it was not called then either. What that leaves is
+        // the iframe still drawing its overlay, which is a divergence this
+        // branch inherited rather than introduced.
+        useEditorStore.getState().setEditorSelectionMany([])
+        return []
+      }
       // Through the session, like every other lane: the read is a round trip
       // to the page, and the page can be replaced while it is out. The adapter
       // drops a reply from a departed document on its own, so what this guard

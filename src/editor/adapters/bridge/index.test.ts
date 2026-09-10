@@ -2391,6 +2391,165 @@ describe("BridgeFrameworkAdapter: a selection cannot outlive the click it answer
     expect(heldSelector()).toBeUndefined()
   })
 
+  /** Every requestId the adapter minted for messages of this type, in order. */
+  function requestIdsOf(type: string): string[] {
+    return setup.postMessages
+      .filter((m) => (m as { type: string }).type === type)
+      .map((m) => (m as { requestId: string }).requestId)
+  }
+
+  /** The selectors the adapter re-asserted to the bridge, in order. */
+  function reassertedSelectors(): string[] {
+    return setup.postMessages
+      .filter((m) => (m as { type: string }).type === "HIGHLIGHT_COMPONENT")
+      .map((m) => (m as { payload: { selector: string } }).payload.selector)
+  }
+
+  /**
+   * Two reads in flight converge on the LATER one, whichever answers first.
+   *
+   * This is what the reservation buys. If both reads captured the same number,
+   * the first reply to land would install and bump, and the second would be
+   * refused: the winner would be whichever the page happened to answer first,
+   * not the element the shell asked for last.
+   */
+  it("a later read supersedes an earlier one when the earlier answers first", async () => {
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    const readA = adapter.selectBySelector("#a")
+    const readB = adapter.selectBySelector("#b")
+    const [idA, idB] = requestIdsOf("INSPECT_SELECTOR")
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#a" }),
+      requestId: idA,
+    })
+    await expect(readA).resolves.toBeNull()
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#b" }),
+      requestId: idB,
+    })
+    expect((await readB)?.selector).toBe("#b")
+
+    expect(seen.map((s) => s?.selector)).toEqual(["#b"])
+    expect(heldSelector()).toBe("#b")
+  })
+
+  it("a later read supersedes an earlier one when the later answers first", async () => {
+    const seen: (Selection | null)[] = []
+    adapter.onSelectionChange((s) => seen.push(s))
+
+    const readA = adapter.selectBySelector("#a")
+    const readB = adapter.selectBySelector("#b")
+    const [idA, idB] = requestIdsOf("INSPECT_SELECTOR")
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#b" }),
+      requestId: idB,
+    })
+    expect((await readB)?.selector).toBe("#b")
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#a" }),
+      requestId: idA,
+    })
+    await expect(readA).resolves.toBeNull()
+
+    expect(seen.map((s) => s?.selector)).toEqual(["#b"])
+    expect(heldSelector()).toBe("#b")
+  })
+
+  /**
+   * The bridge commits its own selectedElement when it handles the inspect,
+   * before it replies. A refusal therefore leaves the iframe drawing an
+   * element the shell does not hold, and the adapter has to say its truth
+   * again.
+   */
+  it("re-asserts the shell selection to the bridge when a reply is refused", async () => {
+    const parked = adapter.selectBySelector("#panel")
+    const requestId = requestIdOf("INSPECT_SELECTOR")
+
+    // The designer clicks something else, so the shell now holds #header while
+    // the bridge is about to commit to #panel.
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#header" }),
+    })
+    setup.postMessages.length = 0
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#panel" }),
+      requestId,
+    })
+    await expect(parked).resolves.toBeNull()
+
+    expect(reassertedSelectors()).toEqual(["#header"])
+
+    // The bridge answers HIGHLIGHT_COMPONENT with an UNSOLICITED
+    // ELEMENT_INSPECTED. It installs the same element and must not start a
+    // second re-assert, or the two would trade messages forever.
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#header" }),
+    })
+    expect(reassertedSelectors()).toEqual(["#header"])
+    expect(heldSelector()).toBe("#header")
+  })
+
+  it("re-asserts the CLEAR when the shell holds no selection", async () => {
+    const parked = adapter.selectBySelector("#panel")
+    const requestId = requestIdOf("INSPECT_SELECTOR")
+
+    emitFromBridge(setup.contentWindow, { type: "ELEMENT_DESELECTED" })
+    setup.postMessages.length = 0
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#panel" }),
+      requestId,
+    })
+    await expect(parked).resolves.toBeNull()
+
+    expect(
+      setup.postMessages.filter(
+        (m) => (m as { type: string }).type === "CLEAR_SELECTION",
+      ),
+    ).toHaveLength(1)
+    expect(reassertedSelectors()).toEqual([])
+  })
+
+  /**
+   * The re-assert waits for the last read to settle. Its install bumps the
+   * epoch, and a bump while another read is out would refuse that read: the
+   * shell would have asked for an element and silently got nothing.
+   */
+  it("does not re-assert while another selection read is still out", async () => {
+    const readA = adapter.selectBySelector("#a")
+    // Never answered, and the dispose in afterEach rejects it.
+    void adapter.selectBySelector("#b").catch(() => {})
+    const [idA] = requestIdsOf("INSPECT_SELECTOR")
+
+    setup.postMessages.length = 0
+    emitFromBridge(setup.contentWindow, {
+      type: "ELEMENT_INSPECTED",
+      payload: makeInspectionData({ selector: "#a" }),
+      requestId: idA,
+    })
+    await expect(readA).resolves.toBeNull()
+
+    expect(reassertedSelectors()).toEqual([])
+    expect(
+      setup.postMessages.filter(
+        (m) => (m as { type: string }).type === "CLEAR_SELECTION",
+      ),
+    ).toHaveLength(0)
+  })
+
   it("drops an ELEMENT_DESELECTED from a page that is no longer on screen", () => {
     emitFromBridge(setup.contentWindow, {
       type: "ELEMENT_INSPECTED",
