@@ -25,7 +25,7 @@ import {
   isUnsupportedStyleBuild,
   type StyleEditDestinationOptions as StyleEditOpts,
 } from "@/editor/edit-service/style-edit-builders"
-import { cascadeTargetForStyleEdit } from "@/hooks/cascade-target-for-style-edit"
+import { cascadeTargetForStyleEdit } from "@/editor/edit-service/cascade-target-for-style-edit"
 import { reconcileDispatchedValue } from "@/editor/edit-service/dispatch-reconcile"
 import { makeEditId } from "@/editor/edit-service/make-edit-id"
 

@@ -2,7 +2,7 @@
  * The pure lifecycle decisions a bridge session makes: staleness, the
  * handshake boundary, buffer retirement and the end plan.
  *
- * Moved out of `src/hooks/pending-iteration-edit.ts` so `EditSession` can own
+ * Moved out of `src/editor/edit-service/pending-iteration-edit.ts` so `EditSession` can own
  * them without importing React: a `PendingIterationEdit` carries a
  * `LayersMovePayload`, which is a component type, so `sessionEndPlan` is
  * generic over the scope prompt instead and takes an accessor for the one

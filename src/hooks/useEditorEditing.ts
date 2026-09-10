@@ -131,7 +131,7 @@ import {
   settleHandOff,
   structuralRouteFor,
   type PendingIterationEdit,
-} from "./pending-iteration-edit"
+} from "@/editor/edit-service/pending-iteration-edit"
 import {
   hasUndispatchedWork,
   isSupersededHandshake,
@@ -159,7 +159,7 @@ import {
   dispatchIteration,
   interceptIteration,
 } from "@/editor/edit-service/lanes/iteration-lane"
-import { verifyIterationLoop } from "./iteration-verify"
+import { verifyIterationLoop } from "@/editor/edit-service/iteration-verify"
 import { parkedSaveRefusal, saveGate } from "./save-gate"
 
 /**

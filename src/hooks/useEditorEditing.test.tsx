@@ -30,7 +30,7 @@ import {
   DEFERRED_PARK_STATUS,
   HANDOFF_TIMEOUT_MS,
   SAVE_HANDOFF_TIMEOUT_STATUS,
-} from "./pending-iteration-edit"
+} from "@/editor/edit-service/pending-iteration-edit"
 import {
   FakeBridgeAdapter,
   lastFakeAdapter,

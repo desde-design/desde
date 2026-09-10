@@ -4,7 +4,7 @@ import type { SaveLLMTrace } from "@/editor/core"
 import {
   SAVE_HANDOFF_TIMEOUT_STATUS,
   handOffFailureStatus,
-} from "@/hooks/pending-iteration-edit"
+} from "@/editor/edit-service/pending-iteration-edit"
 import { SaveProgressDialog } from "./save-progress-dialog"
 
 function makeTrace(overrides: Partial<SaveLLMTrace> = {}): SaveLLMTrace {

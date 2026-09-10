@@ -13,7 +13,7 @@ import { toast } from "sonner"
 import { LivePrototypePane } from "./live-prototype-pane"
 import { useEditorEditing } from "@/hooks/useEditorEditing"
 import { useEditorStore } from "@/stores/editor-only"
-import { SAVE_PAGE_CHANGED_STATUS } from "@/hooks/pending-iteration-edit"
+import { SAVE_PAGE_CHANGED_STATUS } from "@/editor/edit-service/pending-iteration-edit"
 import type { ComponentManifest, ComponentManifestSource } from "@/editor/core"
 
 // Bridge-connection status is now a bottom-right toast, not a pane banner.

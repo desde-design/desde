@@ -28,7 +28,7 @@
  * property and therefore serializes as `''` per longhand — the same reason
  * `shorthandValueIsExpandable` refuses our own `var()` shorthands below. The
  * caller gates on the cascade owner accordingly
- * (`src/hooks/cascade-target-for-style-edit.ts`); this module is never handed a
+ * (`src/editor/edit-service/cascade-target-for-style-edit.ts`); this module is never handed a
  * `classes`-owner declaration map.
  *
  * No React, no DOM, no design-system knowledge — plain CSS structure over a

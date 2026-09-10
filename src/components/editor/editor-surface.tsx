@@ -37,7 +37,7 @@ import {
 } from "@/components/editor/iteration-scope-dialog"
 import { MutationDisambiguationDialog } from "@/components/editor/mutation-disambiguation-dialog"
 import { useEditorEditing } from "@/hooks/useEditorEditing"
-import { clickedInsideRow, thisRowOperationAllowed } from "@/hooks/pending-iteration-edit"
+import { clickedInsideRow, thisRowOperationAllowed } from "@/editor/edit-service/pending-iteration-edit"
 import { useEditorChat } from "@/hooks/useEditorChat"
 import { useChatSessions } from "@/hooks/useChatSessions"
 import { useShellBridgePoll } from "@/hooks/useShellBridgePoll"

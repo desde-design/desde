@@ -26,7 +26,7 @@ import type { LaneSession } from "@/editor/session/lane-session"
 import type { ModalRequest } from "@/editor/session/modal-queue"
 import type { IterationScope } from "@/components/editor/iteration-scope-dialog"
 import type { IterationEditKind } from "@/editor/edit-service/iteration-fallback"
-import type { verifyIterationLoop } from "@/hooks/iteration-verify"
+import type { verifyIterationLoop } from "@/editor/edit-service/iteration-verify"
 import {
   logIterationScopeChoice,
   requestIterationProposal,
@@ -47,7 +47,7 @@ import {
   thisRowTemplateLocation,
   verifyKeyFor,
   type PendingIterationEdit,
-} from "@/hooks/pending-iteration-edit"
+} from "@/editor/edit-service/pending-iteration-edit"
 import { isStaleVerify } from "@/editor/session/session-state"
 import { buildRowScopedEditHandoffPrompt } from "@/editor/edit-service/build-edit-escalation-prompt"
 import { makeEditId } from "@/editor/edit-service/make-edit-id"
