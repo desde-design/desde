@@ -115,6 +115,23 @@ const capture = (id: string, after: string): Mutation => ({
 })
 
 /**
+ * A `class` capture: the OTHER dispatch on the same lane.
+ *
+ * Same shape `text-lane.test.ts` gives `dispatchClassMutation`: a class list
+ * before and after, rather than a text value. Plus the two fields the capture
+ * scheduler gates a class capture on (`shouldProbeClassMutation`: a `sourceLoc`
+ * and a `direct` or `ancestor` resolution) and the `anchorMatchCount` the style
+ * builder refuses a zero of. The buffer identity carries the mutation's kind,
+ * so this and {@link capture} on one id are two entries, not one.
+ */
+const classCapture = (id: string, after: string): Mutation => ({
+  ...capture(id, after),
+  kind: "class",
+  before: "p-2",
+  anchorMatchCount: 1,
+})
+
+/**
  * A draft the bridge is holding that reaches the two-option dialog.
  *
  * `scope: "callsite"` with TWO origin candidates, which is the one shape that
@@ -333,6 +350,12 @@ const needsChat = (reason = "bound binding"): EditResult => ({
 
 beforeEach(() => {
   resetFakeAdapters()
+  // The toast mocks are module-level, so their call records outlive a test.
+  // One row below asserts that NOTHING warned, and a warning from any earlier
+  // test in the file would have failed it for the wrong reason. Cleared here
+  // rather than in that one test, so the next row that makes the same
+  // assertion inherits the guarantee instead of rediscovering the need for it.
+  vi.mocked(toast.warning).mockClear()
   FakeBridgeAdapter.nextDocumentIds = ["doc-a"]
   FakeBridgeAdapter.nextHandshakeError = null
   captured = null
@@ -664,6 +687,85 @@ describe("useEditorEditing: the bridge session", () => {
     await waitForApply()
     await changeDocument(rerender, "doc-b")
     expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+  })
+
+  it("writes a class capture as a style rule and releases its preview (control)", async () => {
+    // The class lane's control row, and until now the harness had none: every
+    // test in this file drove the text lane. The two are one lane on the
+    // session and two dispatches in the code, and the class one is the
+    // asymmetric half. It awaits a destination BEFORE it can build its edit,
+    // and it claims its in-flight marker across that await rather than testing
+    // for one in front of it.
+    //
+    // What this row pins is the whole round trip on a page that never
+    // changes: the capture is buffered, the debounce arms, the destination is
+    // resolved, the write reaches the adapter as a `scoped-css-override` (not
+    // the text lane's llm-patch), and the live class preview the bridge is
+    // holding is released under the CAPTURE's id.
+    await mount()
+    const adapter = lastFakeAdapter()
+    await act(async () => {
+      adapter.emitCapture(classCapture("c1", "p-2 p-4"))
+    })
+    const write = await waitForApply()
+    // A CSS rule, not a source rewrite. This is the one assertion that tells
+    // the two dispatches apart from outside the hook.
+    expect(write.edit.kind).toBe("scoped-css-override")
+    // The session's lifetime rides along, so a page change can cancel it.
+    expect(write.signal).toBeDefined()
+    await act(async () => {
+      write.settle(applied({ "src/App.vue": "v2" }))
+      await Promise.resolve()
+    })
+    // Release-then-verify: the write landed, so the preview is released at
+    // once. Under `c1`, the capture's own id, which is what the bridge
+    // registered the override as. Resolving the dispatch's edit id instead
+    // would be a silent no-op and the inline `!important` shim would outlive
+    // the edit.
+    await waitFor(() =>
+      expect(adapter.settledOverrides).toEqual([
+        { id: "c1", outcome: "confirmed" },
+      ]),
+    )
+    expect(editing()?.saveStatus).toBeNull()
+  })
+
+  it("retires a class capture the page change caught in flight (finding V1, the class lane)", async () => {
+    // V1 for the OTHER dispatch. The row above it covers the text lane; this
+    // is the same boundary against the class lane, which has its own `ctx.step`
+    // calls and its own resolve to get wrong.
+    //
+    // The write is out when the page is replaced. Three things follow: the
+    // departed page's buffered entry is retired and COUNTED, so the designer
+    // is told what was lost; the request is cancelled; and the answer, when it
+    // arrives, does nothing at all. That last part is what `ctx.step` buys.
+    // Without it the lane would run its release on the departed adapter, and
+    // the bridge restarts its mutation ids on a new document, so "confirmed"
+    // for `c1` would retire whatever the NEW page is calling `c1`.
+    const { rerender } = await mount()
+    const departed = lastFakeAdapter()
+    await act(async () => {
+      departed.emitCapture(classCapture("c1", "p-2 p-4"))
+    })
+    const write = await waitForApply()
+    expect(write.edit.kind).toBe("scoped-css-override")
+    await changeDocument(rerender, "doc-b")
+    // One entry, one line, and it says how many.
+    expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+    expect(write.signal?.aborted).toBe(true)
+    const arriving = lastFakeAdapter()
+    expect(arriving).not.toBe(departed)
+    // The departed page's write answers now, on the far side of the boundary.
+    await act(async () => {
+      write.settle(applied({ "src/App.vue": "v2" }))
+      await Promise.resolve()
+    })
+    // Nothing it says lands anywhere: not the status line the designer is
+    // reading, not the departed page's previews, and not the new page at all.
+    expect(editing()?.saveStatus).toBe(DISCARDED_ONE)
+    expect(departed.settledOverrides).toEqual([])
+    expect(arriving.settledOverrides).toEqual([])
+    expect(arriving.applies).toEqual([])
   })
 
   it("keeps the buffer over a plain detach and re-attach (findings W2, X2)", async () => {
@@ -1680,6 +1782,13 @@ describe("useEditorEditing: the bridge session", () => {
       })
       const armedAt = Date.now()
       await changeDocument(rerender, "doc-b")
+      // Nothing has fired YET, and this line owes nothing to the clock: the
+      // first retry is 300 ms out and the boundary is the only thing that has
+      // happened. Without it, a run in which the retry had already fired
+      // before the page change would still satisfy the assertions at the end,
+      // because those count calls made after the boundary and this one is the
+      // proof there were none before it.
+      expect(departed.selectBySelectorCalls).toEqual([])
       const arrived = lastFakeAdapter()
       expect(arrived).not.toBe(departed)
       await act(async () => {
@@ -1704,22 +1813,35 @@ describe("useEditorEditing: the bridge session", () => {
     // The control for the test above, on a page that never changed: the
     // refresh has to still happen, and it has to stop as soon as the file hash
     // it reads back differs from the one the selection was carrying.
+    //
+    // THE SELECTION CARRIES A HASH, and that is the point of this row rather
+    // than an incidental detail. The shared `styleSelection` has none, so
+    // `priorHash` is undefined and `freshHash !== priorHash` is true of every
+    // truthy hash: the chain would stop on the first answer whatever it said,
+    // and a comparison that had been reduced to "is there a hash at all" would
+    // pass this test. So the selection is stamped `hash-1` here, the first
+    // read answers `hash-1` (unchanged, so the chain must go on) and the
+    // second answers `hash-2` (re-stamped, so it must stop). Two reads: one
+    // for each side of the comparison.
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       await mount()
       const adapter = lastFakeAdapter()
-      // What the re-read answers: the same element, re-stamped by HMR.
-      adapter.selectBySelectorResult = {
+      // Local to this test. The shared fixture stays hash-free, because every
+      // other row here is about something else.
+      const stampedSelection: Selection = {
         ...styleSelection,
-        editTarget: {
-          file: "src/App.vue",
-          line: 10,
-          column: 2,
-          fileHash: "hash-2",
-        },
+        editTarget: { ...styleSelection.editTarget!, fileHash: "hash-1" },
       }
+      const reStamped = (fileHash: string): Selection => ({
+        ...stampedSelection,
+        editTarget: { ...stampedSelection.editTarget!, fileHash },
+      })
+      // What the two re-reads answer, in order: the same stamp, then a moved
+      // one.
+      adapter.selectBySelectorAnswers.push(reStamped("hash-1"), reStamped("hash-2"))
       await act(async () => {
-        adapter.emitSelection(styleSelection)
+        adapter.emitSelection(stampedSelection)
       })
       await waitFor(() =>
         expect(useEditorStore.getState().editorSelection).not.toBeNull(),
@@ -1736,13 +1858,15 @@ describe("useEditorEditing: the bridge session", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(300)
       })
+      // The first read, and its answer carries the hash the selection already
+      // had, so the chain is not finished.
       expect(adapter.selectBySelectorCalls).toEqual(["#panel"])
-      // The stamp moved, so the chain is finished: nothing at 800 ms or
-      // 1600 ms.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2_000)
       })
-      expect(adapter.selectBySelectorCalls).toEqual(["#panel"])
+      // The second read fired at 800 ms and answered a MOVED stamp, so the
+      // chain stopped there: no third read at 1600 ms.
+      expect(adapter.selectBySelectorCalls).toEqual(["#panel", "#panel"])
     } finally {
       vi.useRealTimers()
     }

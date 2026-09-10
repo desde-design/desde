@@ -321,8 +321,20 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   readonly selectBySelectorCalls: string[] = []
   /** What the next `selectBySelector` answers. Null unless a test sets one. */
   selectBySelectorResult: Selection | null = null
+  /**
+   * One answer per call, in order, taken before {@link selectBySelectorResult}.
+   *
+   * The refresh is a CHAIN: it re-reads the stamp, and whether it reads again
+   * is decided by the answer it just got. A single standing answer can only
+   * stage the last link of that, so the case where the first read comes back
+   * unchanged and the second comes back re-stamped had no way to be written.
+   */
+  readonly selectBySelectorAnswers: (Selection | null)[] = []
   async selectBySelector(selector: string): Promise<Selection | null> {
     this.selectBySelectorCalls.push(selector)
+    if (this.selectBySelectorAnswers.length > 0) {
+      return this.selectBySelectorAnswers.shift() ?? null
+    }
     return this.selectBySelectorResult
   }
   async selectMany(): Promise<Selection[]> {
