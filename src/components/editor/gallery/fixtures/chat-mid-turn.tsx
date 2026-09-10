@@ -1,6 +1,7 @@
 "use client"
 
 import type { ReactNode } from "react"
+import { ChatPendingQuestion } from "@/components/editor/chat-pending-question"
 import { EditorChatPanel } from "@/components/editor/editor-chat-panel"
 import type { ChatMessage, UseEditorChatReturn } from "@/hooks/useEditorChat"
 import type { SurfaceEntry, SurfaceRenderContext } from "../types"
@@ -164,6 +165,46 @@ export const CHAT_MID_TURN_SURFACE: SurfaceEntry = {
                 },
               ],
             })}
+          />
+        </PanelFrame>
+      ),
+    },
+    {
+      /**
+       * The `ask_user_question` form in the position it actually occupies:
+       * the panel's footer, between the status banners and the composer.
+       *
+       * It has its own surface entry (`chat-pending-question`) for the card
+       * itself. This state exists because the defect it was moved to fix was
+       * one of PLACEMENT, invisible in a card rendered on its own: the form
+       * used to sit below the whole rail, so the question and its options
+       * came after the box you would type an answer into (Mo, 2026-09-10).
+       * Only the assembled panel shows whether that reads correctly.
+       *
+       * `submitting: true` because the turn IS blocked while the form is up.
+       */
+      id: "chat-mid-turn/pending-question",
+      label: "Agent's question, above the input",
+      render: (ctx) => (
+        <PanelFrame>
+          <EditorChatPanel
+            chat={buildChat(ctx)}
+            pendingQuestion={
+              <ChatPendingQuestion
+                pending={{
+                  question: "Which badge(s) should I remove?",
+                  options: [
+                    "Just the one I clicked, the +12.5% badge in the Total Revenue card",
+                    "All four trend badges in the metric card row",
+                    "Something else, let me describe which ones",
+                  ],
+                  multiSelect: false,
+                  resolve: (r) => ctx.log("resolve", r),
+                }}
+                onAnswer={(selected) => ctx.log("onAnswer", selected)}
+                onDismiss={() => ctx.log("onDismiss")}
+              />
+            }
           />
         </PanelFrame>
       ),

@@ -1142,25 +1142,32 @@ export function EditorSurface({
               onEscalateToChat={handleEditEscalation}
               activeBreakpoint={activeBreakpoint}
               branches={branches}
-            />
-            {/* Phase 3 — ask_user_question inline choice UI. Pinned to
-                the bottom of the right rail (below EditorRightRail so
-                it visually sits near the chat input area). Rendered at
-                the surface level — outside EditorRightRail — so it
-                appears regardless of which chat panel variant (V1 or V2)
-                is active without adding any props to either panel.
-                Null-renders when no question is pending. */}
-            <ChatPendingQuestion
-              pending={pendingQuestion}
-              onAnswer={(selected) => {
-                pendingQuestion?.resolve({ ok: true, output: { selected } })
-              }}
-              onDismiss={() => {
-                pendingQuestion?.resolve({
-                  ok: false,
-                  error: "user dismissed the question",
-                })
-              }}
+              /* The agent's ask_user_question form. Composed here because
+                 the surface owns the pending promise, and slotted by the
+                 chat panel into its footer directly ABOVE the composer.
+
+                 It used to render right here instead, as a sibling after
+                 EditorRightRail, which put it below the whole rail and so
+                 below the text input (Mo, 2026-09-10). The old comment
+                 justified the position as "regardless of which chat panel
+                 variant (V1 or V2) is active"; there is one panel now, so
+                 the reason it was avoiding a prop is gone too.
+
+                 Null-renders when no question is pending. */
+              pendingQuestion={
+                <ChatPendingQuestion
+                  pending={pendingQuestion}
+                  onAnswer={(selected) => {
+                    pendingQuestion?.resolve({ ok: true, output: { selected } })
+                  }}
+                  onDismiss={() => {
+                    pendingQuestion?.resolve({
+                      ok: false,
+                      error: "user dismissed the question",
+                    })
+                  }}
+                />
+              }
             />
           </ResizableRail>
         ) : null}

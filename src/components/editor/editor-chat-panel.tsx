@@ -109,6 +109,22 @@ export interface EditorChatPanelProps {
    * decoupled from catalog fetching + chat-hook state.
    */
   modelPicker?: React.ReactNode
+  /**
+   * The agent's inline `ask_user_question` form, composed by the surface
+   * (which owns the pending promise) and slotted into the footer just
+   * above the input.
+   *
+   * It used to render as a sibling AFTER the whole rail, which put a form
+   * the agent is blocked on BELOW the text input (Mo, 2026-09-10). Reading
+   * order is the reason: the question, then the options, then the box you
+   * could type an answer into instead. Below the input it read as output
+   * from a turn that had already moved on.
+   *
+   * A slot rather than props so the panel stays decoupled from the
+   * bridge-handler state that mints the promise, matching `modelPicker`
+   * and `tabs`. Renders nothing when no question is pending.
+   */
+  pendingQuestion?: React.ReactNode
   className?: string
 }
 
@@ -121,6 +137,7 @@ function EditorChatPanelImpl({
   currentSessionId,
   draftCache,
   modelPicker,
+  pendingQuestion,
   className,
 }: EditorChatPanelProps) {
   const { runtime } = useEditorChatRuntime(chat)
@@ -227,6 +244,10 @@ function EditorChatPanelImpl({
             vendorRateLimitEvents={vendorRateLimitEvents}
           />
           <ResendingSteerRows steers={chat.resendingSteers} />
+
+          {/* The agent's pending question, directly above the input it is
+              an alternative to. Null-renders when nothing is pending. */}
+          {pendingQuestion}
 
           {/* Dropzone wraps the input so dragging an image anywhere over
               the editor attaches it. Paste (⌘V) is handled by the stock

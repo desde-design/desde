@@ -1,9 +1,17 @@
 "use client"
 
 /**
- * Inline UI for the `ask_user_question` SDK tool. Appears in the
- * editor right rail when the agent is waiting for the user to pick
- * among a set of options.
+ * Inline UI for the `ask_user_question` SDK tool. Slotted into the chat
+ * panel's footer, directly above the composer, when the agent is waiting
+ * for the user to pick among a set of options.
+ *
+ * It sat BELOW the input until 2026-09-10, as a sibling after the whole
+ * right rail. A form the agent is blocked on has to come before the box
+ * you could answer it in instead; underneath it, it read as leftover
+ * output from a turn that had moved on. The container styling changed
+ * with the position: it was a full-bleed strip with a top rule, which is
+ * what a pinned bottom bar looks like, and is now a card matching the
+ * composer it stands on, so the two read as one block.
  *
  * Single-select: clicking an option immediately calls `onAnswer`.
  * Multi-select: toggle buttons + a "Submit" button (disabled until
@@ -65,7 +73,7 @@ export function ChatPendingQuestion({
     // misclick.
     return (
       <div
-        className="border-t bg-background px-3 py-2"
+        className="mb-1.5 rounded-lg border bg-card p-2"
         data-testid="chat-pending-question"
       >
         <p className="mb-2 text-sm font-normal leading-snug text-foreground">
@@ -113,7 +121,7 @@ export function ChatPendingQuestion({
 
   return (
     <div
-      className="border-t bg-background px-3 py-2"
+      className="mb-1.5 rounded-lg border bg-card p-2"
       data-testid="chat-pending-question"
     >
       <p className="mb-2 text-sm font-normal leading-snug text-foreground">

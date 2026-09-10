@@ -123,6 +123,12 @@ interface EditorRightRailProps {
    * branchless surfaces degrade to the empty-state explainer.
    */
   branches?: BranchesApi
+  /**
+   * The agent's inline `ask_user_question` form. Passed straight through
+   * to the chat panel, which slots it above the composer. The surface
+   * composes it because the surface owns the pending promise.
+   */
+  pendingQuestion?: React.ReactNode
 }
 
 export function EditorRightRail({
@@ -140,6 +146,7 @@ export function EditorRightRail({
   onEscalateToChat,
   activeBreakpoint,
   branches,
+  pendingQuestion,
 }: EditorRightRailProps) {
   // Per-session textarea draft cache. Mounted at the rail (not inside
   // EditorChatPanel) so switching the active tab — which causes
@@ -477,6 +484,7 @@ export function EditorRightRail({
             }
             draftCache={chatSessions.enabled ? draftCache : undefined}
             tabs={chatTabs}
+            pendingQuestion={pendingQuestion}
           />
         </TabsContent>
 
