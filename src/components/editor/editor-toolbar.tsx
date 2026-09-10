@@ -201,10 +201,12 @@ export function EditorToolbar({
       // has; two earlier attempts today put it 50px down, first as margin
       // on top of that anchor, then as the offset itself, both too low.
       //
-      // `p-0.5`, down from `p-1` (Mo, 2026-09-08: "smaller padding for the
-      // toolbar container"), in the same pass that tightened the picker's
-      // own padding and dropped its labels to 8px.
-      className="absolute left-1/2 top-2.5 z-[60] flex -translate-x-1/2 items-center gap-1 rounded-md border bg-card p-0.5 shadow-xs"
+      // `px-1 py-0.5`: the padding came down from `p-1` to `p-0.5` on
+      // 2026-09-08 (Mo: "smaller padding for the toolbar container"), in the
+      // pass that tightened the picker's own padding and dropped its labels
+      // to 8px; on 2026-09-10 Mo asked for a little more room on the x axis
+      // only, so the sides went back to 4px and the top and bottom stayed.
+      className="absolute left-1/2 top-2.5 z-[60] flex -translate-x-1/2 items-center gap-1 rounded-md border bg-card px-1 py-0.5 shadow-xs"
       data-testid="editor-toolbar"
     >
       {/* The tool picker. Navigate = clicks drive the prototype. Select =
