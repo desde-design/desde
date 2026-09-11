@@ -903,6 +903,78 @@ describe("createPrototypeProcesses", () => {
   })
 
   /**
+   * A lease is released against the record it was taken on, never against
+   * whatever record happens to be under that id later. `forget` drops the
+   * record while a request is still in flight; the next request creates a
+   * fresh one and starts a new child under its own lease. Releasing the old
+   * lease onto the new record left that child unprotected mid-response, so
+   * the very next cold start elsewhere could evict it.
+   */
+  it("a lease released after a forget is not charged to the record that replaced it", async () => {
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1", "d2"]),
+      maxRunning: 1,
+    })
+    managers.push(procs)
+    const releaseFirst = holdLease(procs, "d1")
+    await procs.ensure({ id: "d1", serverStart: start() })
+    await procs.forget("d1")
+
+    // A pinned listener is still open for d1, so a second request lands and
+    // starts it again under its own lease.
+    const releaseSecond = holdLease(procs, "d1")
+    await procs.ensure({ id: "d1", serverStart: start() })
+    // The first request's response finally closes.
+    await releaseFirst()
+
+    // d1 is still answering a request, so it is not a victim: the cold start
+    // that wanted its slot is refused instead.
+    await expect(procs.ensure({ id: "d2", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+    expect(procs.status("d1").state).toBe("running")
+    await releaseSecond()
+  })
+
+  /**
+   * `forget` during a cold start. The child is killed rather than left
+   * running (the machine's `forget` row), the cold start rejects, and the id
+   * is left clean enough to start again from scratch — no record of the
+   * abandoned attempt, no leftover log.
+   */
+  it("a forget during a cold start kills the child and leaves the id startable again", async () => {
+    let chosen = 0
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      spawnEnv: { FAKE_DELAY_MS: "400" },
+      pickPort: async () => {
+        chosen = await pickLoopbackPort()
+        return chosen
+      },
+    })
+    managers.push(procs)
+    const ensuring = procs.ensure({ id: "d1", serverStart: start() })
+    await vi.waitFor(() => {
+      expect(procs.serverLog("d1")).toContain("fake server: starting")
+    })
+    await procs.forget("d1")
+
+    await expect(ensuring).rejects.toBeInstanceOf(PrototypeProcessError)
+    await expect(get(chosen)).rejects.toThrow()
+    expect(procs.status("d1").state).toBe("stopped")
+
+    const again = await procs.ensure({ id: "d1", serverStart: start() })
+    expect((await get(again.port)).body).toContain("hello from")
+  })
+
+  it("stop on a deployment the manager has never seen does nothing, and the id still starts", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+    managers.push(procs)
+    await procs.stop("d1")
+    expect(procs.status("d1").state).toBe("stopped")
+    const { port } = await procs.ensure({ id: "d1", serverStart: start() })
+    expect((await get(port)).body).toContain("hello from")
+  })
+
+  /**
    * Codex round 3, item 3. A throw from `pickPort`, `substitutePort` (empty
    * `serverStart`) or the `.desde-home` `mkdir` — all AFTER `start()` marks
    * the entry "starting" to reserve its cap slot, but BEFORE `spawn` — used

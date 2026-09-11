@@ -553,6 +553,23 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const closedError = (): PrototypeProcessError =>
     new PrototypeProcessError({ state: "stopped" }, "The viewer is shutting down.")
 
+  /**
+   * A cold start whose record was dropped under it: `forget` ran while the
+   * child was coming up, so there is nothing left that owns this child.
+   *
+   * Kills it and hands back the refusal to reject `ensure` with. Deliberately
+   * does NOT apply an event: every event goes through `entryFor`, which would
+   * CREATE a record for a deployment the manager has just been told to forget
+   * — a record nothing would ever drop. The sentence is the retired one,
+   * which is what a reader in this position needs: this deployment is gone,
+   * rebuild it.
+   */
+  const abandonedStart = (child: ChildProcess): PrototypeProcessError => {
+    killTree(child, "SIGKILL")
+    child.kill("SIGKILL")
+    return new PrototypeProcessError({ state: "stopped" }, RETIRED_REFUSAL)
+  }
+
   async function answers(port: number): Promise<boolean> {
     return await new Promise<boolean>((resolve) => {
       const req = httpRequest({ host: "127.0.0.1", port, path: "/", method: "GET", timeout: 1000 }, (res) => {
@@ -769,6 +786,14 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       console.error("[viewer] prototype process setup failed:", error)
       void lock.run(id, async () => {
         if (entries.get(id) !== entry || entry.child !== child) return
+        // Node emits `error` on a ChildProcess for more than a failed spawn:
+        // a `kill()` that fails (an EPERM, say) raises one on a child that is
+        // up and answering. `start-failed` is a no-op once the record is
+        // `running`, so clearing the handle there dropped the manager's only
+        // way to stop that child while leaving the record claiming it was
+        // running. The ring buffer above has the message either way; only a
+        // start that has not finished acts on it.
+        if (entry.record.state.kind !== "starting") return
         entry.child = null
         await applyAllowingRefusal(id, { type: "start-failed", reason: SETUP_FAILED_REASON, permanent: false })
       })
@@ -781,6 +806,11 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     while (!exited && entry.child === child && now() < deadline) {
       if (await answers(port)) {
         const ready = await lock.run(id, async () => {
+          // The record this start belongs to is gone (a `forget` while the
+          // child was coming up). Applying anything here would CREATE a
+          // record for a deployment the manager has deliberately forgotten,
+          // so the child is killed and the start rejected without one.
+          if (entries.get(id) !== entry) throw abandonedStart(child)
           try {
             await apply(id, { type: "ready", port, generation })
             return true
@@ -804,7 +834,10 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // here, and the lock is FIFO, so the status this reports is the settled
     // one rather than a race with it.
     return await lock.run(id, async () => {
-      if (entries.get(id) === entry && !exited && entry.child === child) {
+      // Same rule as the ready branch above: no record, no event, no
+      // phantom. The kill covers the case this loop left a child behind.
+      if (entries.get(id) !== entry) throw abandonedStart(child)
+      if (!exited && entry.child === child) {
         // Timed out on our own clock, not stopped or exited elsewhere.
         await applyAllowingRefusal(id, { type: "timed-out" })
       }
@@ -880,20 +913,38 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // The acquire CREATES the record when there is none, which is the
       // point: the cold start `fn` is about to ask for must find the lease
       // already on the record it creates, or the round 11 window is still
-      // open. The release only applies to a record that is still there —
-      // a `forget` during the lease dropped it, and re-creating it here to
-      // decrement a counter nobody reads would leave a phantom behind.
+      // open.
+      //
+      // The release applies to THAT record and no other. Checking only that
+      // some record exists under this id was not enough: a `forget` during
+      // the lease drops the record, the next request creates a fresh one and
+      // starts a new child under its own lease, and this release would then
+      // decrement that stranger's counter to zero while its request was
+      // still being answered — leaving it evictable mid-response, which is
+      // the exact thing a lease exists to prevent.
       applySync(id, { type: "lease-acquired" })
+      const leased = entries.get(id) ?? null
       return (async () => {
         try {
           return await fn()
         } finally {
-          if (entries.has(id)) applySync(id, { type: "lease-released" })
+          if (leased !== null && entries.get(id) === leased) applySync(id, { type: "lease-released" })
         }
       })()
     },
     async stop(id) {
-      await lock.run(id, () => applyAllowingRefusal(id, { type: "stop-requested" }))
+      // The guard is INSIDE the lock, unlike `markUnreachable`'s and
+      // `forget`'s. A `stop` racing a cold start must still land: `ensure`
+      // creates the record in its own lock hold, so an id with a start
+      // already queued has no entry yet at this line, and checking out here
+      // would turn that stop into a no-op and leave the child running. Under
+      // the lock the only ids with no record are the ones nothing has ever
+      // asked for — and applying an event to those would CREATE an idle
+      // record that nothing ever drops.
+      await lock.run(id, async () => {
+        if (!entries.has(id)) return
+        await applyAllowingRefusal(id, { type: "stop-requested" })
+      })
     },
     async markUnreachable(id) {
       if (!entries.has(id)) return
