@@ -69,7 +69,8 @@ export type ViewerLoopbackListenersMode = "auto" | "on" | "off"
  *   function's own doc comment for why round 10 inverted this from a
  *   negative check. See `ViewerConfig.loopbackBindAllInterfaces`, the
  *   boolean this resolves to, and `loopbackBindNetworkUnrecognized`, which
- *   tells the banner WHY it stayed narrow.
+ *   tells the banner the layout could not be confirmed as bridged, whether
+ *   or not that left the bind narrow.
  *
  * `"off"` for `VIEWER_LOOPBACK_LISTENERS` always wins over this: no listener
  * opens at all, so there is nothing to bind either way.
@@ -331,18 +332,27 @@ export interface ViewerConfig {
    */
   loopbackBindAllInterfaces: boolean
   /**
-   * True when a container was detected under `VIEWER_LOOPBACK_BIND=auto` but
+   * True whenever a container was detected (`isLikelyContainerized()`) but
    * `isLikelyBridgedNamespace()` could not recognise the network layout —
-   * the reason `loopbackBindAllInterfaces` stayed false even though a
-   * listener did open. Read by `origin-mode-banner.ts` to print the one line
-   * telling an operator why their published ports are not reachable and
-   * that `VIEWER_LOOPBACK_BIND=all` is the way through.
+   * REGARDLESS of `VIEWER_LOOPBACK_BIND`'s mode (server-prototypes rework,
+   * Task 5). Widened from the original "only under `auto`" rule so the same
+   * fact reaches the banner even when an operator's explicit `"loopback"` or
+   * `"all"` choice, or the shipped Docker image's `ENV VIEWER_LOOPBACK_BIND=all`,
+   * turns out to be the wrong one for their actual network layout — the
+   * detector still ran, it just no longer gets to decide the bind by itself.
    *
-   * Deliberately NOT true for `VIEWER_LOOPBACK_BIND=loopback` (an operator's
-   * own explicit choice, most often `--network host`, needs no such line —
-   * they already said what they wanted) or for `VIEWER_LOOPBACK_LISTENERS=off`
-   * (no listener opens, so there is nothing to explain). Only the "auto"
-   * branch's own inconclusive detection sets this.
+   * Under `"auto"` this is the reason `loopbackBindAllInterfaces` stayed
+   * false even though a listener did open: `origin-mode-banner.ts` reads it
+   * to print the line telling an operator that `VIEWER_LOOPBACK_BIND=all`
+   * is the way through. Under `"all"` the bind is wide regardless, but this
+   * can still be true, and the banner prints a different line for that case:
+   * the wide bind may not be reachable (a `--network host` container's own
+   * loopback is already the host's) or may be an unnecessary exposure, and
+   * `VIEWER_LOOPBACK_BIND=loopback` is the fix.
+   *
+   * Always false for `VIEWER_LOOPBACK_LISTENERS=off` (no listener opens, so
+   * there is nothing to explain) and for any laptop where no container was
+   * detected at all (nothing to recognise or fail to recognise).
    */
   loopbackBindNetworkUnrecognized: boolean
 }
@@ -712,15 +722,17 @@ export function loadConfig(
           ? true
           : actuallyInContainer && bridgedNamespace
 
-  // The reason `loopbackBindAllInterfaces` stayed false under "auto" even
-  // though a listener did open: a container was detected, but
-  // `isLikelyBridgedNamespace()` could not recognise the layout. An
-  // operator's own explicit `"loopback"` needs no explaining — they already
-  // said what they wanted — so this is true for `"auto"` alone.
-  // `origin-mode-banner.ts` reads it to print the one line naming
-  // `VIEWER_LOOPBACK_BIND=all` as the way through.
+  // Widened by the server-prototypes rework (Task 5): a container was
+  // detected and its network layout could not be confirmed as bridged, full
+  // stop — no longer restricted to `loopbackBind === "auto"`. The Docker
+  // image now ships `ENV VIEWER_LOOPBACK_BIND=all` unconditionally (it IS
+  // the container case), so an operator on `--network host` who does not
+  // override that back to `"loopback"` needs to hear about the mismatch too,
+  // not just an `"auto"` operator whose bind stayed narrow.
+  // `origin-mode-banner.ts` reads this alongside `loopbackBindAllInterfaces`
+  // to pick which of its two mutually exclusive lines to print.
   const loopbackBindNetworkUnrecognized =
-    loopbackListeners !== "off" && loopbackBind === "auto" && actuallyInContainer && !bridgedNamespace
+    loopbackListeners !== "off" && actuallyInContainer && !bridgedNamespace
 
   const dataDir = env.VIEWER_DATA_DIR ?? ".desde-viewer"
   // Fallback source for `sessionSecret` and, when neither GitHub sign-in nor

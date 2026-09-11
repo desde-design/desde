@@ -39,7 +39,11 @@ docker run -d --name desde-viewer -p 3100:3100 -p 127.0.0.1:3101-3120:3101-3120 
 
 The second `-p` publishes the twenty ports prototypes open on (`VIEWER_LOOPBACK_PORT_RANGE`, defaulted from `PORT` inside a container); without it a prototype's page never loads and the review screen names this flag. The `127.0.0.1:` prefix on it keeps those ports on your own machine, which is where a prototype port belongs: a prototype listener has no sign-in of its own, so anyone who can reach the port can open the prototype.
 
-If you run the container with `--network host` instead, set `VIEWER_LOOPBACK_BIND=loopback`. Docker ignores `-p` on host networking, so the container's ports already face the network directly, and the container's own loopback is already your machine's loopback. Without that setting, `auto` only widens the bind when it can positively recognise the container's network layout as Docker's ordinary bridge. A host-networking container is unaffected either way. So is a container runtime that `auto` does not recognise (Podman included): it also stays on the narrow bind. If that is your case and you published ports with `-p`, set `VIEWER_LOOPBACK_BIND=all` to force the wide bind by hand. The boot log names this when it applies.
+The image sets `VIEWER_LOOPBACK_BIND=all`, since the image is the container case. That binds every prototype listener to every network interface, which is what lets the `-p` line above publish them.
+
+If you run the container with `--network host` instead, add `-e VIEWER_LOOPBACK_BIND=loopback` to the run line. Docker ignores `-p` on host networking, so the container's ports already face the network directly, and the container's own loopback is already your machine's loopback. Binding every interface there would only expose the ports on your LAN for no reason. If you forget this override, the boot log prints a warning naming the mismatch.
+
+Outside the image, the default is `auto`. It only widens the bind when it can positively recognise the container's network layout as Docker's ordinary bridge. A container runtime `auto` does not recognise (Podman included) stays on the narrow bind instead of guessing. If that is your case and you published ports with `-p`, set `VIEWER_LOOPBACK_BIND=all` to force the wide bind by hand. The boot log names this when it applies.
 
 Then open http://localhost:3100 and follow the one-time sign-in link the
 container prints (`docker logs desde-viewer`). Everything below is the

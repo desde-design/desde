@@ -1034,15 +1034,29 @@ describe("loadConfig", () => {
       expect(config.loopbackBindNetworkUnrecognized).toBe(false)
     })
 
-    it("loopback: stays on loopback even inside a container", () => {
+    it("loopback: stays on loopback even inside a container, when the layout IS recognised", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "loopback" },
         { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
       expect(config.loopbackBindAllInterfaces).toBe(false)
-      // An operator's own explicit "loopback" needs no explaining — they
-      // already said what they wanted, whatever the detector would have said.
+      // A recognised layout means the check has nothing to flag, whichever
+      // bind mode the operator chose.
       expect(config.loopbackBindNetworkUnrecognized).toBe(false)
+    })
+
+    it("loopback: still flags an unrecognised layout even though the operator's own choice already keeps the bind narrow (Task 5 widening)", () => {
+      // `loopbackBindNetworkUnrecognized` used to be true only under `auto`.
+      // The server-prototypes rework (Task 5) widened it to fire on ANY bind
+      // mode whenever a container was detected and the layout was not
+      // confirmed as bridged, so the same fact is available to the banner
+      // regardless of how the operator set VIEWER_LOOPBACK_BIND.
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "loopback" },
+        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => false },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(false)
+      expect(config.loopbackBindNetworkUnrecognized).toBe(true)
     })
 
     it("all: binds every interface on a plain laptop (not a container)", () => {
@@ -1051,6 +1065,8 @@ describe("loadConfig", () => {
         { isLikelyContainerized: () => false },
       )
       expect(config.loopbackBindAllInterfaces).toBe(true)
+      // Never a container, so nothing to flag either.
+      expect(config.loopbackBindNetworkUnrecognized).toBe(false)
     })
 
     it("all: stays false under VIEWER_LOOPBACK_LISTENERS=off, since no listener opens", () => {
@@ -1063,6 +1079,28 @@ describe("loadConfig", () => {
         { isLikelyContainerized: () => true },
       )
       expect(config.loopbackBindAllInterfaces).toBe(false)
+    })
+
+    it("all: a recognised bridged container widens the bind and flags nothing (the shipped image's normal case)", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "all" },
+        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(true)
+      expect(config.loopbackBindNetworkUnrecognized).toBe(false)
+    })
+
+    it("all: a container whose layout is NOT recognised as bridged still widens the bind (the operator forced it), but flags the mismatch (Task 5 widening)", () => {
+      // This is the shipped image on `--network host` (or on a runtime the
+      // heuristic does not recognise) without the operator overriding back to
+      // `loopback`: the image's `ENV VIEWER_LOOPBACK_BIND=all` still forces
+      // the wide bind, but the check now has something to say about it.
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "all" },
+        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => false },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(true)
+      expect(config.loopbackBindNetworkUnrecognized).toBe(true)
     })
   })
 
