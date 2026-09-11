@@ -69,12 +69,22 @@ const baseConfig: ViewerConfig = {
 const loopbackConfig = baseConfig
 
 /**
- * A container reached through a published port (`docker run -p
- * 3100:3100`), or any deployment where `VIEWER_LOOPBACK_LISTENERS=off` /
- * `auto` detected a container: same publicUrl as `loopbackConfig`, but
- * `loopbackAvailable: false` — the Docker/remote follow-up this task adds.
+ * A deployment with `VIEWER_LOOPBACK_LISTENERS=off`: same publicUrl as
+ * `loopbackConfig`, but `loopbackAvailable: false` — the Docker/remote
+ * follow-up this task adds.
+ *
+ * `auto` inside a container is NOT this case any more (task 4,
+ * VIEWER_LOOPBACK_PORT_RANGE): a container now gets a default port range, so
+ * `loopbackAvailable` is `true` there, not `false`. Only the explicit `off`
+ * mode still forces it false, which is why `loopbackListeners` is set here
+ * too, not just `loopbackAvailable` — the two must describe one real
+ * configuration, not just happen to produce the same boolean.
  */
-const containerConfig: ViewerConfig = { ...baseConfig, loopbackAvailable: false }
+const containerConfig: ViewerConfig = {
+  ...baseConfig,
+  loopbackListeners: "off",
+  loopbackAvailable: false,
+}
 
 /** A deployed instance with wildcard DNS. */
 const subdomainConfig: ViewerConfig = {
