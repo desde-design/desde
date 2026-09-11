@@ -65,21 +65,30 @@ export async function pruneSupersededCheckouts(
   afterRemove?: (deploymentId: string) => Promise<void>,
 ): Promise<void> {
   const deployments = await storage.listDeployments(projectId)
-  const rest = deployments.filter((d) => d.id !== keepActiveId)
+  // Only deployments that HAVE a checkout count toward the window (codex
+  // round 9). A failed build or a static one has none, and when such a row
+  // was newer than the previous server build it took the retained slot on
+  // paper while the real previous checkout was pruned: a pinned review of
+  // it broke and there was nothing to roll back to. The stat here is the
+  // same one the loop below used to do; it simply moved ahead of the slice.
+  const rest: string[] = []
+  for (const d of deployments) {
+    if (d.id === keepActiveId) continue
+    const present = await stat(checkoutDirFor(checkoutsRoot, d.id)).then(
+      () => true,
+      () => false,
+    )
+    if (present) rest.push(d.id)
+  }
   const stale = rest.slice(CHECKOUT_RETENTION_COUNT - 1)
-  for (const d of stale) {
-    const dir = checkoutDirFor(checkoutsRoot, d.id)
+  for (const id of stale) {
+    const dir = checkoutDirFor(checkoutsRoot, id)
     try {
-      const present = await stat(dir).then(
-        () => true,
-        () => false,
-      )
-      if (!present) continue
-      await beforeRemove?.(d.id)
+      await beforeRemove?.(id)
       await rm(dir, { recursive: true, force: true })
-      await afterRemove?.(d.id)
+      await afterRemove?.(id)
     } catch (error) {
-      console.error(`[viewer] failed to prune checkout for deployment ${d.id}:`, error)
+      console.error(`[viewer] failed to prune checkout for deployment ${id}:`, error)
     }
   }
 }

@@ -67,6 +67,26 @@ describe("pruneSupersededCheckouts", () => {
     expect(await exists(checkoutDirFor(root, ids[1]!))).toBe(false)
     expect(removed.sort()).toEqual([ids[1]!, ids[2]!].sort())
   })
+  it("counts only deployments that have a checkout when choosing what to keep", async () => {
+    // Codex round 9. A failed build, or a static one, has no checkout. When
+    // one of those is NEWER than the previous server build, it used to take
+    // the one retained slot, and the real previous checkout was pruned: a
+    // pinned review of it broke, and there was nothing to roll back to.
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    const root = await tmp()
+    const previous = await storage.createDeployment({ projectId: project.id })
+    await mkdir(checkoutDirFor(root, previous.id), { recursive: true })
+    await storage.createDeployment({ projectId: project.id }) // failed: no checkout
+    const active = await storage.createDeployment({ projectId: project.id })
+    await mkdir(checkoutDirFor(root, active.id), { recursive: true })
+    const removed: string[] = []
+    await pruneSupersededCheckouts(storage, root, project.id, active.id, async (id) => {
+      removed.push(id)
+    })
+    expect(await exists(checkoutDirFor(root, previous.id))).toBe(true)
+    expect(removed).toEqual([])
+  })
   it("tolerates a deployment with no checkout directory", async () => {
     const storage = new InMemoryStorage()
     const project = await storage.createProject({ slug: "p", name: "P" })
@@ -152,8 +172,11 @@ describe("pruneSupersededCheckouts", () => {
     const root = await tmp()
     const active = await storage.createDeployment({ projectId: project.id })
     const stale = await storage.createDeployment({ projectId: project.id })
-    await storage.createDeployment({ projectId: project.id })
+    const newest = await storage.createDeployment({ projectId: project.id })
     await mkdir(checkoutDirFor(root, stale.id), { recursive: true })
+    // The newest needs a checkout of its own to take the retained slot;
+    // since codex round 9 a row with no checkout does not count.
+    await mkdir(checkoutDirFor(root, newest.id), { recursive: true })
     const calls: string[] = []
     await pruneSupersededCheckouts(
       storage,
