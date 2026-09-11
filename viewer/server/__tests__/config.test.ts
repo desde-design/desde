@@ -96,6 +96,7 @@ describe("loadConfig", () => {
       loopbackListeners: "off",
       loopbackAvailable: false,
       loopbackPortRange: null,
+      loopbackBindAllInterfaces: false,
     })
   })
 
@@ -906,6 +907,70 @@ describe("loadConfig", () => {
       )
       expect(config.loopbackListeners).toBe("auto")
       expect(config.loopbackAvailable).toBe(true)
+    })
+  })
+
+  /**
+   * `loopbackBindAllInterfaces` (codex round 2, item 1). `loopbackAvailable`
+   * says whether a listener may open at all; this says whether it binds
+   * every interface (`0.0.0.0`) instead of loopback alone. They used to be
+   * the SAME question, answered by "is a port range configured" — but an
+   * operator can set `VIEWER_LOOPBACK_PORT_RANGE` on a laptop, and that laptop
+   * is not a container, so binding `0.0.0.0` there would make a private
+   * prototype reachable from the LAN on a predictable port. This is only
+   * true when the process is ACTUALLY in a container, regardless of which
+   * `VIEWER_LOOPBACK_LISTENERS` mode asked for listeners to open.
+   */
+  describe("loopbackBindAllInterfaces", () => {
+    it("is true for a container detected under auto", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir() },
+        { isLikelyContainerized: () => true },
+      )
+      expect(config.loopbackListeners).toBe("auto")
+      expect(config.loopbackBindAllInterfaces).toBe(true)
+    })
+
+    it("is false on a laptop (not a container) with an explicit port range set by hand", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_PORT_RANGE: "4000-4005" },
+        { isLikelyContainerized: () => false },
+      )
+      expect(config.loopbackPortRange).toEqual({ from: 4000, to: 4005 })
+      expect(config.loopbackBindAllInterfaces).toBe(false)
+    })
+
+    it("is false when VIEWER_LOOPBACK_LISTENERS=off, even inside a container", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_LISTENERS: "off" },
+        { isLikelyContainerized: () => true },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(false)
+    })
+
+    it("is true for VIEWER_LOOPBACK_LISTENERS=on inside an actually-detected container", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_LISTENERS: "on" },
+        { isLikelyContainerized: () => true },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(true)
+    })
+
+    it("is false for VIEWER_LOOPBACK_LISTENERS=on forced on a laptop that is not a container", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_LISTENERS: "on" },
+        { isLikelyContainerized: () => false },
+      )
+      expect(config.loopbackAvailable).toBe(true)
+      expect(config.loopbackBindAllInterfaces).toBe(false)
+    })
+
+    it("is false on a plain laptop default (auto, not a container)", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir() },
+        { isLikelyContainerized: () => false },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(false)
     })
   })
 

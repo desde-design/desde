@@ -13,6 +13,7 @@ import {
   requireReadableProject,
   resolveReadContext,
 } from "../auth/authorize"
+import { pruneSupersededCheckouts } from "../build/checkouts"
 import { pruneSupersededDeploymentAssets, publishOutputDir } from "../build/publish-output"
 import { scanOutputTreeForRootAbsoluteAssets } from "../build/root-absolute-scan"
 import { withProjectLock } from "../project-locks"
@@ -483,6 +484,19 @@ export function createDeploymentsRoutes(
       // best-effort (it never throws, so it can't turn a successful upload
       // into a failed response).
       await pruneSupersededDeploymentAssets(deps.storage, deps.assets, project.id, deployment.id)
+      // Same follow-up the build-queue lane already makes (`build-queue.ts`):
+      // a project that had SERVER builds before this upload keeps their
+      // on-disk checkouts (`node_modules` and all) forever otherwise, since
+      // the asset prune above only ever touches the asset store. Same
+      // best-effort, retire-before-remove shape — `retire` stops any process
+      // still running out of a checkout before its directory is deleted.
+      await pruneSupersededCheckouts(
+        deps.storage,
+        join(deps.config.dataDir, "checkouts"),
+        project.id,
+        deployment.id,
+        (id) => deps.prototypeProcesses.retire(id),
+      )
 
       res.status(201).json({ ...deployed, fileCount: publishFiles.length })
     } catch (error) {

@@ -4,16 +4,20 @@ import type { ViewerConfig } from "../../../server/config"
 import { loadConfig } from "../../../server/config"
 import { buildHostAllowlist, isAllowedHost } from "../../../server/serve/host-allowlist"
 import { mintPrototypeCapability } from "../../../server/serve/prototype-capability"
-import {
-  resolveOrigins,
-  SHELL_ORIGIN_HEADER,
-  type OriginMode,
-} from "../../../server/serve/prototype-origin-resolve"
-import type { ProcessStatus } from "../../../server/serve/prototype-processes"
-import type { DeploymentServe } from "../../../server/storage/types"
+import { resolveOrigins, SHELL_ORIGIN_HEADER } from "../../../server/serve/prototype-origin-resolve"
 import { prototypeAnonymouslyReadable } from "../../prototype-origin"
 import { NeverDeployed } from "./never-deployed"
+import {
+  FALLBACK_EMBED_ORIGIN,
+  readPrototypeOrigin,
+  type ReviewEmbedOrigin,
+} from "./prototype-origin-response"
 import { ReviewShell } from "./review-shell"
+
+// Re-exported so every existing import of these two names from `"./page"`
+// (including `page.test.ts`) needs no edit — see `prototype-origin-response.ts`'s
+// own doc comment for why the implementation moved there.
+export { readPrototypeOrigin, type ReviewEmbedOrigin }
 
 export interface ProjectSummary {
   id: string
@@ -21,42 +25,6 @@ export interface ProjectSummary {
   name: string
   activeDeploymentId: string | null
   access: "all-members" | "invited" | "public-link"
-}
-
-/**
- * The fields of the prototype-origin answer this page acts on.
- *
- * `serve` and `process` (server-prototypes work, 2026-09-10) say whether the
- * project's active deployment is a folder of files or a process, and what
- * that process is doing. `range` is the configured loopback port range, sent
- * with loopback mode's bodies and with the ports-exhausted 503 — it is what
- * the port banner names the `-p` flag from, and what the exhausted panel
- * counts. `reason` carries the one 503 reason this page cares about: the
- * loopback port range is full.
- */
-export interface ReviewEmbedOrigin {
-  mode: OriginMode
-  origin: string | null
-  serve: DeploymentServe
-  process?: ProcessStatus
-  range: { from: number; to: number } | null
-  reason?: "ports-exhausted"
-  /**
-   * Where the bridge bundle lives on the prototype origin, relative to its
-   * root (`__desde/bridge-<version>.js`), or `null` when the server did not
-   * say. The port watchdog probes it: the serve router answers it before the
-   * server-prototype fork, so it proves the PORT is reachable without waiting
-   * on a cold `next start`.
-   */
-  bridgeAssetPath?: string | null
-}
-
-/** What every unusable answer resolves to. See `readPrototypeOrigin`. */
-const FALLBACK_EMBED_ORIGIN: ReviewEmbedOrigin = {
-  mode: "fallback",
-  origin: null,
-  serve: "static",
-  range: null,
 }
 
 /**
@@ -175,106 +143,6 @@ export function reviewShellOrigin(
     loopbackAvailable: config.loopbackAvailable,
     prototypeOrigin: config.prototypeOrigin,
   }).shellOrigin
-}
-
-/**
- * The prototype-origin route's body, reduced to the two fields this page acts
- * on, with every shape it does not recognise collapsed to fallback.
- *
- * Failing closed is the point. Fallback is today's behaviour — the sandboxed
- * same-host embed — which works. The other direction, inventing an isolated
- * origin out of a shape nobody vouched for, is what would hand
- * `allow-same-origin` to a frame the server never named. `capabilityRequired`
- * is deliberately ignored: this page mints a capability by its own rule
- * (`prototypeAnonymouslyReadable`), and it must keep minting one even in an
- * isolated mode, because `resolvePrototypeEmbed` can still fall back to the
- * path prefix, where the capability is what makes the sandbox affordable.
- */
-export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return FALLBACK_EMBED_ORIGIN
-  }
-  const {
-    mode,
-    origin,
-    serve: rawServe,
-    process: rawProcess,
-    range: rawRange,
-    reason: rawReason,
-    bridgeAssetPath: rawBridgeAssetPath,
-  } = value as {
-    mode?: unknown
-    origin?: unknown
-    serve?: unknown
-    process?: unknown
-    range?: unknown
-    reason?: unknown
-    bridgeAssetPath?: unknown
-  }
-
-  // Read before the shape checks below can bail out: the ports-exhausted 503
-  // body carries no `mode` at all, and the page still has to act on all three
-  // of these. `reason` says what happened; `serve` decides whether it matters
-  // (a static prototype still loads from the shell's own path prefix); `range`
-  // is the count the panel names.
-  const reason = rawReason === "ports-exhausted" ? ("ports-exhausted" as const) : undefined
-  // `serve` defaults to "static" so an older server's body (no field at all)
-  // parses exactly like it used to: a static deployment, no process to show.
-  const serve: DeploymentServe = rawServe === "server" ? "server" : "static"
-  const range =
-    typeof rawRange === "object" &&
-    rawRange !== null &&
-    typeof (rawRange as { from?: unknown }).from === "number" &&
-    typeof (rawRange as { to?: unknown }).to === "number"
-      ? (rawRange as { from: number; to: number })
-      : null
-  /** What every unusable body falls back to, carrying what it did say. */
-  const fallback: ReviewEmbedOrigin = {
-    ...FALLBACK_EMBED_ORIGIN,
-    serve,
-    range,
-    ...(reason ? { reason } : {}),
-  }
-
-  if (
-    mode !== "loopback" &&
-    mode !== "subdomain" &&
-    mode !== "fallback" &&
-    mode !== "prototype-origin"
-  ) {
-    return fallback
-  }
-  if (origin !== null && typeof origin !== "string") {
-    return fallback
-  }
-
-  // Named `processStatus`, not `process` — this file runs on the Node
-  // server, where `process` is the global.
-  const processStatus =
-    serve === "server" &&
-    typeof rawProcess === "object" &&
-    rawProcess !== null &&
-    typeof (rawProcess as { state?: unknown }).state === "string"
-      ? (rawProcess as ProcessStatus)
-      : undefined
-  // The bridge asset's path on the prototype origin, which the shell probes
-  // to tell "this port is unreachable" from "this app is slow to start". A
-  // body without it (an older server) leaves it null and the probe falls back
-  // to the origin root. Only its TYPE is checked here: it is a path this same
-  // server built, and it is used as a URL suffix, never as markup.
-  // Omitted rather than nulled when absent, like `reason` above: a body that
-  // did not name one should parse to exactly the object it used to.
-  const bridgeAssetPath = typeof rawBridgeAssetPath === "string" ? rawBridgeAssetPath : null
-
-  return {
-    mode,
-    origin,
-    serve,
-    process: processStatus,
-    range,
-    ...(bridgeAssetPath ? { bridgeAssetPath } : {}),
-    ...(reason ? { reason } : {}),
-  }
 }
 
 /**

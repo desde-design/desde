@@ -47,6 +47,7 @@ export function nullPrototypeProcesses(): PrototypeProcesses {
         new PrototypeProcessError({ state: "stopped" }, "No prototype process manager in this test."),
       ),
     touch: () => {},
+    beginRequest: () => () => {},
     stop: () => Promise.resolve(),
     forget: () => Promise.resolve(),
     retire: () => Promise.resolve(),

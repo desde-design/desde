@@ -51,20 +51,36 @@ describe("originModeBannerLines", () => {
   })
 
   /**
-   * With a range configured the pairing never chooses `[::1]` — the listener
-   * binds the IPv4 wildcard, so an IPv6 origin would refuse the connection.
-   * The banner reads the same pairing the route does, so it names `localhost`
-   * here where the no-range case below names `[::1]`.
+   * With `loopbackBindAllInterfaces` the pairing never chooses `[::1]` — the
+   * listener binds the IPv4 wildcard, so an IPv6 origin would refuse the
+   * connection. The banner reads the same pairing the route does, so it
+   * names `localhost` here where the no-range case below names `[::1]`.
    */
-  it("loopback: a 127.0.0.1 shell with a range configured names localhost, not [::1]", () => {
+  it("loopback: a 127.0.0.1 shell with loopbackBindAllInterfaces names localhost, not [::1]", () => {
+    const { lines } = originModeBannerLines({
+      publicUrl: "http://127.0.0.1:3100",
+      serveDomain: null,
+      loopbackAvailable: true,
+      loopbackPortRange: { from: 3101, to: 3120 },
+      loopbackBindAllInterfaces: true,
+    })
+    expect(lines[0]).toContain("prototypes=http://localhost:<3101-3120>")
+    expect(lines[0]).not.toContain("[::1]")
+  })
+
+  /**
+   * Codex round 2, item 1. A range configured BY ITSELF (no
+   * `loopbackBindAllInterfaces`) is the laptop case: the listener still
+   * binds loopback, so `[::1]` is fine to keep naming.
+   */
+  it("loopback: a 127.0.0.1 shell with a range but no loopbackBindAllInterfaces still names [::1]", () => {
     const { lines } = originModeBannerLines({
       publicUrl: "http://127.0.0.1:3100",
       serveDomain: null,
       loopbackAvailable: true,
       loopbackPortRange: { from: 3101, to: 3120 },
     })
-    expect(lines[0]).toContain("prototypes=http://localhost:<3101-3120>")
-    expect(lines[0]).not.toContain("[::1]")
+    expect(lines[0]).toContain("prototypes=http://[::1]:<3101-3120>")
   })
 
   it("loopback: no port-range line when loopbackPortRange is unset", () => {

@@ -58,6 +58,7 @@ const authConfig: ViewerConfig = {
   loopbackListeners: "auto",
   loopbackAvailable: true,
   loopbackPortRange: null,
+  loopbackBindAllInterfaces: false,
 }
 
 const admin = { Authorization: "Bearer admin-secret" }
@@ -384,6 +385,7 @@ describe("GET /deployments/:id/server-log (same gate as the build log)", () => {
     return {
       ensure: () => Promise.reject(new Error("not used by this route")),
       touch: () => {},
+      beginRequest: () => () => {},
       stop: () => Promise.resolve(),
       forget: () => Promise.resolve(),
       retire: () => Promise.resolve(),

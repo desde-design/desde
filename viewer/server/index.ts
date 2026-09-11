@@ -203,6 +203,7 @@ async function main(): Promise<void> {
         prototypeProcesses,
       }),
     portRange: config.loopbackPortRange,
+    bindAllInterfaces: config.loopbackBindAllInterfaces,
   })
 
   const appDeps: AppDeps = {

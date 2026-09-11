@@ -117,6 +117,7 @@ function fakeProcesses(overrides: Partial<PrototypeProcesses> = {}): PrototypePr
     ensure: () =>
       Promise.reject(new PrototypeProcessError({ state: "stopped" }, "No process manager in this test.")),
     touch: () => {},
+    beginRequest: () => () => {},
     stop: () => Promise.resolve(),
     forget: () => Promise.resolve(),
     retire: () => Promise.resolve(),

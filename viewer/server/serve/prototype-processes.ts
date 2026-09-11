@@ -61,6 +61,23 @@ export class PrototypeProcessError extends Error {
 export interface PrototypeProcesses {
   ensure(deployment: Pick<Deployment, "id" | "serverStart">): Promise<{ port: number }>
   touch(deploymentId: string): void
+  /**
+   * Marks a request as in-flight against this deployment's process, so the
+   * idle reaper leaves it alone for as long as the request is open.
+   *
+   * Call it right before proxying to the process and call the returned
+   * function when the response ends — `res.once("close", release)` in
+   * `serve-router.ts`. Without this, `touch()` at request-start alone was not
+   * enough: a long SSE stream or a large streamed download can outlive the
+   * idle bound while it is still actively being answered, and the reaper
+   * would cut it out from under the client (codex round 2, item 3).
+   *
+   * Safe to call for an entry that does not exist yet, or one that is not
+   * currently running — it only affects whether a FUTURE reap tick skips
+   * this id, so there is nothing to guard against calling it early or for an
+   * id the manager has never seen.
+   */
+  beginRequest(deploymentId: string): () => void
   stop(deploymentId: string): Promise<void>
   /**
    * `stop`, and then forget the deployment entirely — its status, its log,
@@ -238,6 +255,17 @@ interface Entry {
    * (deleting the entry outright) or a brand new deployment id clears it.
    */
   retired: boolean
+  /**
+   * How many requests `beginRequest` has opened against this entry that have
+   * not yet called their release function. The reaper skips any entry with
+   * `inFlight > 0`, whatever `lastUsedAt` says — see `beginRequest` on
+   * `PrototypeProcesses`.
+   *
+   * A counter, not a flag, because two requests can be in flight against the
+   * same process at once (two reviewers, or a page issuing several fetches);
+   * the entry stays protected until the LAST one releases.
+   */
+  inFlight: number
 }
 
 export function createPrototypeProcesses(deps: PrototypeProcessesDeps): PrototypeProcesses {
@@ -267,7 +295,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const entryFor = (id: string): Entry => {
     let e = entries.get(id)
     if (!e) {
-      e = { status: { state: "stopped" }, child: null, port: null, lastUsedAt: now(), recency: recencyCounter++, log: "", restartsAt: [], opening: null, generation: 0, permanentFailure: false, retired: false }
+      e = { status: { state: "stopped" }, child: null, port: null, lastUsedAt: now(), recency: recencyCounter++, log: "", restartsAt: [], opening: null, generation: 0, permanentFailure: false, retired: false, inFlight: 0 }
       entries.set(id, e)
     }
     return e
@@ -582,6 +610,21 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       const e = entries.get(id)
       if (e) touchEntry(e)
     },
+    beginRequest(id) {
+      const e = entryFor(id)
+      e.inFlight++
+      let released = false
+      return () => {
+        // Idempotent: `res.once("close", release)` fires at most once, but a
+        // caller that ALSO invokes the returned function directly (belt and
+        // braces around an error path, say) must not double-decrement and
+        // let the count drift below the number of requests actually open.
+        if (released) return
+        released = true
+        e.inFlight--
+        touchEntry(e)
+      }
+    },
     async stop(id) {
       const e = entries.get(id)
       if (e) await stopEntry(e)
@@ -621,6 +664,13 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     startReaper() {
       const timer = setInterval(() => {
         for (const [, e] of running()) {
+          // A request that began before the idle bound passed and is still
+          // being answered (an SSE stream, a large download) must not be cut
+          // out from under the client — see `beginRequest`. `stop`/`retire`/
+          // `forget`/`shutdown` are unaffected: they kill regardless, because
+          // they are explicit "this deployment is going away" actions, not
+          // the passive idle sweep.
+          if (e.inFlight > 0) continue
           if (now() - e.lastUsedAt >= idleMs) void stopEntry(e)
         }
       }, reapIntervalMs)

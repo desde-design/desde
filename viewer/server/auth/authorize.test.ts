@@ -60,6 +60,7 @@ const baseConfig: ViewerConfig = {
   loopbackListeners: "auto",
   loopbackAvailable: true,
   loopbackPortRange: null,
+  loopbackBindAllInterfaces: false,
 }
 
 function makeProject(overrides: Partial<Project> = {}): Project {

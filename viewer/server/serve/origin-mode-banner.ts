@@ -56,6 +56,11 @@ export function originModeBannerLines(
     // `VIEWER_LOOPBACK_PORT_RANGE` need no edit. Absent or null means no
     // fixed range is configured, so no extra line is printed.
     loopbackPortRange?: { from: number; to: number } | null
+    // Same reasoning again: optional, so callers that never configure
+    // `loopbackBindAllInterfaces` need no edit. Absent reads as `false` —
+    // the pairing named below keeps offering `[::1]`, exactly as it did
+    // before this field existed.
+    loopbackBindAllInterfaces?: boolean
   },
 ): OriginModeBanner {
   const resolved = resolveOrigins({
@@ -116,11 +121,13 @@ export function originModeBannerLines(
     // here is never null — asserted below rather than silently emitting
     // "null" into the banner if that contract were ever broken.
     const shellHostname = new URL(resolved.shellOrigin).hostname
-    // The same pairing the route makes, told the same port-range fact — with
-    // a range the listener binds the IPv4 wildcard, so the pairing never
-    // names `[::1]` and neither may this line.
+    // The same pairing the route makes, told the same bind-all-interfaces
+    // fact — a genuinely detected container binds the IPv4 wildcard, so the
+    // pairing never names `[::1]` there and neither may this line. NOT the
+    // same as "a range is configured": an explicit range on a laptop that is
+    // not a container leaves the bind on loopback, so `[::1]` still answers.
     const prototypeHost = pairedLoopbackHost(shellHostname, {
-      portRangeConfigured: Boolean(config.loopbackPortRange),
+      bindAllInterfaces: Boolean(config.loopbackBindAllInterfaces),
     })
     if (!prototypeHost) {
       throw new Error(

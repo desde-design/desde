@@ -37,6 +37,7 @@ const config: ViewerConfig = {
   loopbackListeners: "auto",
   loopbackAvailable: true,
   loopbackPortRange: null,
+  loopbackBindAllInterfaces: false,
 }
 
 const auth = { Authorization: "Bearer test-token" }

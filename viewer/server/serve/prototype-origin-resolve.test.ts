@@ -41,42 +41,57 @@ describe("pairedLoopbackHost", () => {
   })
 
   /**
-   * A configured port range is the container case, and there the listener
-   * binds the IPv4 wildcard `0.0.0.0` (`loopback-listeners.ts`). `[::1]`
-   * would then be an origin the socket cannot answer on: the browser would
-   * be handed `http://[::1]:<port>` and get connection refused. Binding
-   * `::` instead is not an answer either — a container may have no IPv6 at
-   * all. So the pairing itself stops choosing `[::1]` whenever a range is
-   * set, and `localhost` takes its place for a shell on `127.0.0.1`.
+   * A listener that binds every interface (`0.0.0.0`, `loopback-listeners.ts`)
+   * is the container case. `[::1]` would then be an origin the socket cannot
+   * answer on: the browser would be handed `http://[::1]:<port>` and get
+   * connection refused. Binding `::` instead is not an answer either — a
+   * container may have no IPv6 at all. So the pairing itself stops choosing
+   * `[::1]` whenever `bindAllInterfaces` is true, and `localhost` takes its
+   * place for a shell on `127.0.0.1`.
    *
    * Cookie isolation is unharmed: cookies are keyed on the HOST STRING, so
    * `localhost` and `127.0.0.1` are still two different cookie hosts, and
    * `assertIsolatedOrigins` still sees two different origins.
    */
-  describe("with a configured port range (the container case)", () => {
-    const withRange = { portRangeConfigured: true }
+  describe("with bindAllInterfaces (the container case)", () => {
+    const withBindAll = { bindAllInterfaces: true }
 
     it("still pairs localhost with 127.0.0.1", () => {
-      expect(pairedLoopbackHost("localhost", withRange)).toBe("127.0.0.1")
+      expect(pairedLoopbackHost("localhost", withBindAll)).toBe("127.0.0.1")
     })
 
     it("pairs 127.0.0.1 with localhost, never with [::1]", () => {
-      expect(pairedLoopbackHost("127.0.0.1", withRange)).toBe("localhost")
+      expect(pairedLoopbackHost("127.0.0.1", withBindAll)).toBe("localhost")
     })
 
     it("still pairs [::1] with 127.0.0.1", () => {
-      expect(pairedLoopbackHost("[::1]", withRange)).toBe("127.0.0.1")
+      expect(pairedLoopbackHost("[::1]", withBindAll)).toBe("127.0.0.1")
     })
 
     it("never chooses [::1] for any loopback spelling", () => {
       for (const hostname of LOOPBACK_HOSTS) {
-        expect(pairedLoopbackHost(hostname, withRange)).not.toBe("[::1]")
+        expect(pairedLoopbackHost(hostname, withBindAll)).not.toBe("[::1]")
       }
     })
 
     it("still returns null for a non-loopback hostname", () => {
-      expect(pairedLoopbackHost("desde.acme.test", withRange)).toBeNull()
+      expect(pairedLoopbackHost("desde.acme.test", withBindAll)).toBeNull()
     })
+  })
+
+  /**
+   * Codex round 2, item 1. A caller must not derive `bindAllInterfaces` from
+   * "is a port range configured" — an explicit `VIEWER_LOOPBACK_PORT_RANGE`
+   * on a laptop that is not a container binds the loopback address it was
+   * asked for, so `[::1]` still answers and the pairing must still offer it.
+   * This module has no opinion on that derivation (it takes the boolean as
+   * given); this test only proves the default (`bindAllInterfaces` omitted)
+   * keeps the old behaviour, which is what a laptop with an explicit range
+   * and no container gets.
+   */
+  it("with bindAllInterfaces omitted (the laptop-with-an-explicit-range case), still pairs 127.0.0.1 with [::1]", () => {
+    expect(pairedLoopbackHost("127.0.0.1")).toBe("[::1]")
+    expect(pairedLoopbackHost("127.0.0.1", { bindAllInterfaces: false })).toBe("[::1]")
   })
 })
 
@@ -171,12 +186,16 @@ describe("resolveOrigins", () => {
 
   /**
    * The same pairing rule, reached through `resolveOrigins` — which is where
-   * the route actually reads `prototypeHost` from. A container publishes a
-   * range, the listener binds the IPv4 wildcard, and a `[::1]` origin there
-   * would be refused by the browser's connect. See `pairedLoopbackHost`'s
-   * own port-range block above.
+   * the route actually reads `prototypeHost` from. A container binds the
+   * IPv4 wildcard, and a `[::1]` origin there would be refused by the
+   * browser's connect. See `pairedLoopbackHost`'s own `bindAllInterfaces`
+   * block above.
+   *
+   * Keyed on `loopbackBindAllInterfaces`, NOT on whether a port range is
+   * merely configured (codex round 2, item 1) — see the companion describe
+   * block below for the laptop-with-an-explicit-range case this excludes.
    */
-  describe("a configured loopback port range keeps the pairing off [::1]", () => {
+  describe("loopbackBindAllInterfaces keeps the pairing off [::1]", () => {
     it("loopback shell on 127.0.0.1:3100 pairs the prototype to localhost", () => {
       expect(
         resolveOrigins({
@@ -186,7 +205,7 @@ describe("resolveOrigins", () => {
           publicUrl: "http://localhost:3100",
           serveDomain: null,
           loopbackAvailable: true,
-          loopbackPortRange: { from: 3101, to: 3120 },
+          loopbackBindAllInterfaces: true,
         }),
       ).toEqual({
         mode: "loopback",
@@ -204,7 +223,7 @@ describe("resolveOrigins", () => {
           publicUrl: "http://localhost:3100",
           serveDomain: null,
           loopbackAvailable: true,
-          loopbackPortRange: { from: 3101, to: 3120 },
+          loopbackBindAllInterfaces: true,
         }).prototypeHost,
       ).toBe("127.0.0.1")
     })
@@ -218,10 +237,30 @@ describe("resolveOrigins", () => {
           publicUrl: "http://localhost:3100",
           serveDomain: null,
           loopbackAvailable: true,
-          loopbackPortRange: { from: 3101, to: 3120 },
+          loopbackBindAllInterfaces: true,
         }).prototypeHost,
       ).toBe("127.0.0.1")
     })
+  })
+
+  /**
+   * Codex round 2, item 1: the actual defect. A configured port range on a
+   * laptop that is NOT a container must not widen the bind, so the pairing
+   * must not avoid `[::1]` either — the listener binds the loopback address
+   * it was asked for, and `[::1]` answers fine there.
+   */
+  it("an explicit port range with loopbackBindAllInterfaces false still pairs 127.0.0.1 with [::1]", () => {
+    expect(
+      resolveOrigins({
+        requestHost: "127.0.0.1:3100",
+        hostAllowed: true,
+        hostIsPrototype: false,
+        publicUrl: "http://localhost:3100",
+        serveDomain: null,
+        loopbackAvailable: true,
+        loopbackBindAllInterfaces: false,
+      }).prototypeHost,
+    ).toBe("[::1]")
   })
 
   it("a non-allowed Host falls back to publicUrl for the shell origin", () => {

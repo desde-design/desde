@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { promises as fs } from "node:fs"
 import { DiskAssetStore } from "../../assets/disk-asset-store"
 import type { AssetStore, StoredAsset } from "../../assets/types"
-import { createApp, type AppDeps } from "../../__tests__/test-app"
+import { createApp, nullPrototypeProcesses, type AppDeps } from "../../__tests__/test-app"
+import { checkoutDirFor } from "../../build/checkouts"
+import type { PrototypeProcesses } from "../../serve/prototype-processes"
 import { createSwappableApp } from "../../__tests__/swappable-app"
 import { InMemoryStorage } from "../../storage/in-memory-storage"
 import type { DeploymentUpdatePatch, StorageAdapter } from "../../storage/types"
@@ -39,6 +41,7 @@ const config: ViewerConfig = {
   loopbackListeners: "auto",
   loopbackAvailable: true,
   loopbackPortRange: null,
+  loopbackBindAllInterfaces: false,
 }
 
 const auth = { Authorization: "Bearer test-token" }
@@ -324,6 +327,67 @@ describe("deployments API", () => {
     // The currently active deployment still serves correctly.
     const page = await request(ctx.app).get("/p/acme/").expect(200)
     expect(page.text).toContain("<body>5")
+  })
+
+  /**
+   * Codex round 2, item 4. Upload activation called
+   * `pruneSupersededDeploymentAssets` (the test above) but never
+   * `pruneSupersededCheckouts`, so a project that had server builds before
+   * kept their checkouts on disk forever — `node_modules` and all — once
+   * uploads took over. The build-queue lane (`build-queue.ts`) already calls
+   * both prunes together; this proves the upload lane now does too, with the
+   * same best-effort retire-before-remove shape.
+   */
+  it("S5 follow-up: prunes superseded checkouts on upload activation too, and retires the process for the pruned one", async () => {
+    const dataDir = join(workDir, "data")
+    const checkoutsRoot = join(dataDir, "checkouts")
+    const retired: string[] = []
+    const prototypeProcesses: PrototypeProcesses = {
+      ...nullPrototypeProcesses(),
+      retire: async (id) => {
+        retired.push(id)
+      },
+    }
+    const deps: AppDeps = {
+      storage: new InMemoryStorage(),
+      assets: new DiskAssetStore(join(workDir, "assets")),
+      config: { ...config, dataDir },
+      bridgeScript: BRIDGE,
+      github: testGithubRuntime(),
+      prototypeProcesses,
+    }
+    stable.use(createApp(deps))
+    const app = stable.app
+
+    const project = await createProject(app)
+
+    // Two older SERVER deployments, each with its own on-disk checkout —
+    // the shape `pruneSupersededCheckouts` reaps. `CHECKOUT_RETENTION_COUNT`
+    // is 2, so once the upload below activates a THIRD deployment, only the
+    // newest of these two survives; the oldest is pruned.
+    const older: string[] = []
+    for (let i = 0; i < 2; i++) {
+      const d = await deps.storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await deps.storage.updateDeployment(d.id, { serve: "server", serverStart: ["node", "x.js"] })
+      await fs.mkdir(checkoutDirFor(checkoutsRoot, d.id), { recursive: true })
+      older.push(d.id)
+    }
+    const [oldest, newest] = older
+
+    await request(app)
+      .post(`/api/v1/projects/${project.id}/deployments`)
+      .set(auth)
+      .set("Content-Type", "application/gzip")
+      .send(makeBundle({ "index.html": "<body>uploaded</body>" }))
+      .expect(201)
+
+    // The older-than-retention checkout is gone from disk...
+    await expect(fs.stat(checkoutDirFor(checkoutsRoot, oldest as string))).rejects.toThrow()
+    // ...the newer of the two survives...
+    await expect(fs.stat(checkoutDirFor(checkoutsRoot, newest as string))).resolves.toBeTruthy()
+    // ...and the process manager was told to retire the pruned one, before
+    // its directory was removed.
+    expect(retired).toEqual([oldest])
   })
 
   it("re-roots a tarred-the-folder bundle (dist/index.html) and serves it as if tarred correctly", async () => {

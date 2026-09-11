@@ -137,6 +137,39 @@ describe("createPrototypeProcesses", () => {
     expect(procs.status("d1").state).toBe("stopped")
   })
 
+  /**
+   * Codex round 2, item 3: the reaper used to touch `lastUsedAt` only when a
+   * request BEGINS, so a long-lived response (SSE, a streamed download) was
+   * cut once the idle bound passed even though it was actively being
+   * answered. `beginRequest` marks an entry in-flight for the duration of one
+   * request; the reaper must skip any entry with an open in-flight count.
+   */
+  it("does not reap an entry with a request held open via beginRequest, and reaps it once released", async () => {
+    let now = 0
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      now: () => now,
+      idleMs: 200,
+      reapIntervalMs: 20,
+    })
+    managers.push(procs)
+    await procs.ensure({ id: "d1", serverStart: start() })
+    const release = procs.beginRequest("d1")
+    const stop = procs.startReaper()
+
+    now = 5000
+    await new Promise((r) => setTimeout(r, 200))
+    // Still in-flight: the reaper must have skipped it, however far past the
+    // idle bound the clock has moved.
+    expect(procs.status("d1").state).toBe("running")
+
+    release()
+    now = 5300
+    await new Promise((r) => setTimeout(r, 200))
+    stop()
+    expect(procs.status("d1").state).toBe("stopped")
+  })
+
   it("shutdown kills every server", async () => {
     const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["a", "b"]) })
     managers.push(procs)

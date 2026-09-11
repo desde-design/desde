@@ -121,19 +121,26 @@ export type PrototypeLoopbackHost = "127.0.0.1" | "[::1]" | "localhost"
  * `"[::1]"`; `"[::1]"` → `"127.0.0.1"`. Returns `null` for anything that is
  * not one of the three loopback names.
  *
- * ## `portRangeConfigured`: the container case never pairs to `[::1]`
+ * ## `bindAllInterfaces`: the container case never pairs to `[::1]`
  *
- * A configured `VIEWER_LOOPBACK_PORT_RANGE` is the container signal, and
- * there the listener binds `0.0.0.0` — the IPv4 wildcard — because Docker
- * forwards a published port to the container's external interface and never
- * to the container's own loopback (`loopback-listeners.ts`, `open()`). An
- * IPv4-only socket cannot answer on `[::1]`, so pairing a `127.0.0.1` shell
- * with `[::1]` there hands the browser an origin that refuses the
- * connection. Binding `::` instead is not the answer: a container may have
- * no IPv6 at all.
+ * A listener bound to every interface (`0.0.0.0` — see
+ * `ViewerConfig.loopbackBindAllInterfaces`, true only when the process is
+ * actually in a container) is the IPv4 wildcard, because Docker forwards a
+ * published port to the container's external interface and never to the
+ * container's own loopback (`loopback-listeners.ts`, `open()`). An IPv4-only
+ * socket cannot answer on `[::1]`, so pairing a `127.0.0.1` shell with
+ * `[::1]` there hands the browser an origin that refuses the connection.
+ * Binding `::` instead is not the answer: a container may have no IPv6 at
+ * all.
+ *
+ * This is keyed on `bindAllInterfaces` and NOT on whether a port range is
+ * merely configured: an operator can set `VIEWER_LOOPBACK_PORT_RANGE` on a
+ * laptop that is not a container, and there the listener binds the loopback
+ * address it was asked for, not the wildcard — `[::1]` answers fine, so
+ * there is nothing to avoid.
  *
  * The fix is made HERE, in the pairing, so nothing downstream has to reason
- * about it: with a range configured, `"127.0.0.1"` → `"localhost"` and the
+ * about it: with `bindAllInterfaces`, `"127.0.0.1"` → `"localhost"` and the
  * other two are unchanged. `"localhost"` is safe as a prototype host in that
  * one case precisely because the socket is on the wildcard: whichever family
  * the browser's resolver picks for the name, IPv4 answers, and every browser
@@ -151,12 +158,12 @@ export type PrototypeLoopbackHost = "127.0.0.1" | "[::1]" | "localhost"
  */
 export function pairedLoopbackHost(
   hostname: string,
-  options: { portRangeConfigured?: boolean } = {},
+  options: { bindAllInterfaces?: boolean } = {},
 ): PrototypeLoopbackHost | null {
   const lower = hostname.toLowerCase()
   if (lower === "localhost") return "127.0.0.1"
   if (lower === "[::1]") return "127.0.0.1"
-  if (lower === "127.0.0.1") return options.portRangeConfigured ? "localhost" : "[::1]"
+  if (lower === "127.0.0.1") return options.bindAllInterfaces ? "localhost" : "[::1]"
   return null
 }
 
@@ -445,17 +452,22 @@ export function resolveOrigins(input: {
    */
   prototypeOrigin?: string | null
   /**
-   * `ViewerConfig.loopbackPortRange`, or `null`/absent when no range is
-   * configured. Read for ONE thing: whether the pairing may choose `[::1]`.
+   * `ViewerConfig.loopbackBindAllInterfaces`. Read for ONE thing: whether the
+   * pairing may choose `[::1]`.
    *
-   * A configured range means the listener binds the IPv4 wildcard (the
-   * container case), so an IPv6 prototype origin would refuse the browser's
-   * connection. `pairedLoopbackHost` takes the fact and does the rest; see
-   * its own doc comment. Optional so the callers that only read
-   * `shellOrigin` or `mode` need no edit — absent reads as "no range", which
-   * is the laptop case and the behaviour every one of them had before.
+   * True means the listener binds the IPv4 wildcard (the container case), so
+   * an IPv6 prototype origin would refuse the browser's connection.
+   * `pairedLoopbackHost` takes the fact and does the rest; see its own doc
+   * comment. Optional so the callers that only read `shellOrigin` or `mode`
+   * need no edit — absent reads as `false`, which is the laptop case and the
+   * behaviour every one of them had before.
+   *
+   * Deliberately NOT derived from whether a port range is configured: an
+   * operator can set `VIEWER_LOOPBACK_PORT_RANGE` on a laptop that is not a
+   * container, and there the listener binds the loopback address it was
+   * asked for, so `[::1]` is fine to offer.
    */
-  loopbackPortRange?: { from: number; to: number } | null
+  loopbackBindAllInterfaces?: boolean
 }): ResolvedOrigins {
   const publicUrl = new URL(input.publicUrl)
   const publicUrlIsLoopback = (LOOPBACK_HOSTS as readonly string[]).includes(
@@ -533,7 +545,7 @@ export function resolveOrigins(input: {
     prototypeHost:
       mode === "loopback"
         ? pairedLoopbackHost(shellHostname, {
-            portRangeConfigured: Boolean(input.loopbackPortRange),
+            bindAllInterfaces: Boolean(input.loopbackBindAllInterfaces),
           })
         : null,
     // Present ONLY in prototype-origin mode — absent (not null) elsewhere, so

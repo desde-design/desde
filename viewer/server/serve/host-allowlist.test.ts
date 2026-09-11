@@ -487,6 +487,7 @@ describe("mounted in createApp", () => {
     loopbackListeners: "auto",
     loopbackAvailable: true,
     loopbackPortRange: null,
+    loopbackBindAllInterfaces: false,
   }
 
   /** ONE stable app object for this file — see `__tests__/swappable-app.ts`. */

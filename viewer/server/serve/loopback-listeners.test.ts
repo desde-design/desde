@@ -140,6 +140,8 @@ function makeRegistry(
     prototypeProcesses?: PrototypeProcesses
     /** The container case: fixed ports, and a wildcard bind. See `open()`. */
     portRange?: { from: number; to: number } | null
+    /** Whether the socket binds every interface instead of a loopback one. See `open()`. */
+    bindAllInterfaces?: boolean
   } = {},
 ) {
   const { storage: seeded, prototypeProcesses, ...registryOptions } = options
@@ -234,7 +236,7 @@ describe("createLoopbackListenerRegistry", () => {
      * resolver maps `localhost` to `127.0.0.1`. No `::1` anywhere.
      */
     it("a shell on 127.0.0.1 pairs to a localhost listener that answers, when a range is configured", async () => {
-      const paired = pairedLoopbackHost("127.0.0.1", { portRangeConfigured: true })
+      const paired = pairedLoopbackHost("127.0.0.1", { bindAllInterfaces: true })
       expect(paired).toBe("localhost")
       const bindHost = loopbackBindHostFor(paired as "127.0.0.1" | "[::1]" | "localhost")
       expect(bindHost).toBe("localhost")
@@ -248,7 +250,7 @@ describe("createLoopbackListenerRegistry", () => {
 
       const registry = makeRegistry(
         { d1: { "index.html": "<html><body>range</body></html>" } },
-        { portRange: { from: free, to: free + 3 } },
+        { portRange: { from: free, to: free + 3 }, bindAllInterfaces: true },
       )
       const listener = await registry.ensure(deployment("d1"), {
         bindHost,
@@ -448,6 +450,13 @@ describe("createLoopbackListenerRegistry", () => {
         // is the thing under test here (see the module doc comment above).
         makeApp: () => express(),
         portRange: { from: takenPort, to: takenPort + 3 },
+        // This test is about the retry/skip loop, not about which interface
+        // the bind lands on — the two taken servers below occupy `0.0.0.0`,
+        // so the registry's own attempts have to match that address to
+        // reliably collide with them (measured on macOS: a specific-address
+        // bind does not always conflict with an already-bound wildcard, the
+        // asymmetric case of the note above).
+        bindAllInterfaces: true,
       })
       try {
         const listener = await registry.ensure(
@@ -488,7 +497,7 @@ describe("createLoopbackListenerRegistry", () => {
      * 127.0.0.1 only, never 0.0.0.0" above, which asserts the same
      * `boundAddress` field for a registry with no `portRange`.
      */
-    it("binds every interface when a range is configured, and still names the loopback host", async () => {
+    it("binds every interface when a range is configured AND bindAllInterfaces is true, and still names the loopback host", async () => {
       const probe = createServer((_req, res) => res.end())
       await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()))
       const free = (probe.address() as AddressInfo).port
@@ -499,6 +508,7 @@ describe("createLoopbackListenerRegistry", () => {
         // http.Server, never requested through supertest.
         makeApp: () => express(),
         portRange: { from: free, to: free + 3 },
+        bindAllInterfaces: true,
       })
       try {
         const listener = await registry.ensure(
@@ -508,6 +518,44 @@ describe("createLoopbackListenerRegistry", () => {
         expect(listener.boundAddress).toBe("0.0.0.0")
         // The origin the browser is told to use is unchanged: the loopback
         // spelling paired with the shell, never the bind address.
+        expect(listener.host).toBe("127.0.0.1")
+        expect(listener.origin).toBe(`http://127.0.0.1:${listener.port}`)
+      } finally {
+        await registry.closeAll()
+      }
+    })
+
+    /**
+     * Codex round 2, item 1. Before `bindAllInterfaces` existed, ANY
+     * configured port range widened the bind to `0.0.0.0` — but an operator
+     * can set `VIEWER_LOOPBACK_PORT_RANGE` on a laptop that is not a
+     * container, and Docker's port-forwarding NAT is the only reason the
+     * container case needs a wildcard bind at all. With `bindAllInterfaces:
+     * false`, an explicit range binds the loopback host exactly like the
+     * ephemeral-port case ("binds 127.0.0.1 only, never 0.0.0.0" above) —
+     * the range only changes WHICH port, never WHICH interface.
+     */
+    it("binds the loopback host, not 0.0.0.0, for an explicit range when bindAllInterfaces is false", async () => {
+      const probe = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()))
+      const free = (probe.address() as AddressInfo).port
+      await new Promise<void>((r) => probe.close(() => r()))
+
+      const registry = createLoopbackListenerRegistry({
+        // desde-allow-own-server: same as above — wrapped in a real
+        // http.Server, never requested through supertest.
+        makeApp: () => express(),
+        portRange: { from: free, to: free + 3 },
+        // Deliberately omitted, to prove the DEFAULT is also safe: a caller
+        // who forgets to pass `bindAllInterfaces` must not get a wildcard
+        // bind for free just because a range is configured.
+      })
+      try {
+        const listener = await registry.ensure(
+          { id: "dep-1", slug: "one", projectId: "p", serve: "static" },
+          { bindHost: "127.0.0.1", shellOrigin: "http://localhost:3100" },
+        )
+        expect(listener.boundAddress).toBe("127.0.0.1")
         expect(listener.host).toBe("127.0.0.1")
         expect(listener.origin).toBe(`http://127.0.0.1:${listener.port}`)
       } finally {

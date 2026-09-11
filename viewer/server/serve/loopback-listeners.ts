@@ -48,13 +48,21 @@ import type { DeploymentServe } from "../storage/types"
  * is only ever given `127.0.0.1` or `::1` — never `localhost`, which may
  * resolve to both families and so does not name one origin.
  *
- * A configured port range (`deps.portRange`) is the CONTAINER case, and there
- * the bind widens to `0.0.0.0`. Docker forwards a published port to the
- * container's EXTERNAL interface and never to the container's own loopback,
- * so a `127.0.0.1` bind inside a container answers nothing from the host,
- * whatever `-p` says (MEASURED on Docker Desktop, 2026-09-11). What that
- * costs, and what the documented `-p 127.0.0.1:...` run line buys back, is
- * written out at the bind in `open()`.
+ * `deps.bindAllInterfaces` is the CONTAINER case, and there the bind widens
+ * to `0.0.0.0`. Docker forwards a published port to the container's EXTERNAL
+ * interface and never to the container's own loopback, so a `127.0.0.1` bind
+ * inside a container answers nothing from the host, whatever `-p` says
+ * (MEASURED on Docker Desktop, 2026-09-11). What that costs, and what the
+ * documented `-p 127.0.0.1:...` run line buys back, is written out at the
+ * bind in `open()`.
+ *
+ * This flag is DELIBERATELY separate from `deps.portRange`: a configured
+ * range only says which ports to try, and an operator can set
+ * `VIEWER_LOOPBACK_PORT_RANGE` on a laptop that is not a container. Widening
+ * the bind there — as this module used to do, keyed on the range alone —
+ * would make a private prototype reachable from the LAN on a predictable
+ * port. `bindAllInterfaces` is true only when the caller has actually
+ * detected a container (`ViewerConfig.loopbackBindAllInterfaces`).
  *
  * The origin handed to the browser is never the bind address: it always
  * names the loopback spelling paired with the shell
@@ -189,6 +197,18 @@ export interface LoopbackListenerRegistryDeps {
    * omitted) keeps the old `listen(0, ...)` behaviour.
    */
   portRange?: { from: number; to: number } | null
+  /**
+   * Whether `open()` binds every interface (`0.0.0.0`) instead of
+   * `target.bindHost`. Default `false`.
+   *
+   * This is INDEPENDENT of `portRange` being set — see the module header's
+   * "Scope, and the one case that binds every interface". A caller passes
+   * `true` only when the process is genuinely inside a container
+   * (`ViewerConfig.loopbackBindAllInterfaces`); a port range configured by
+   * hand on a laptop must not widen the bind, or a private prototype becomes
+   * reachable from the LAN on a predictable port.
+   */
+  bindAllInterfaces?: boolean
 }
 
 /** Every port in `VIEWER_LOOPBACK_PORT_RANGE` is bound. Surfaced to the review page by name. */
@@ -287,31 +307,42 @@ export function createLoopbackListenerRegistry(
     // shell here, and the placeholder answers 503 rather than falling
     // through to anything.
     const range = deps.portRange ?? null
-    if (range === null && target.bindHost === "localhost") {
+    const bindAllInterfaces = deps.bindAllInterfaces ?? false
+    if (!bindAllInterfaces && target.bindHost === "localhost") {
       // `localhost` is a NAME, and this branch would pass it to `listen()`.
       // It is only ever a legitimate listener host when the socket is on the
-      // wildcard, which is exactly the case a range signals — see
-      // `pairedLoopbackHost`, which only produces it when told a range is
-      // configured. Two modules reading the same config have to agree for
-      // that to hold, so the contradiction is refused here rather than
-      // trusted.
+      // wildcard, which is exactly what `bindAllInterfaces` signals — see
+      // `pairedLoopbackHost`, which only produces it when told the bind is
+      // widened. Two modules reading the same config have to agree for that
+      // to hold, so the contradiction is refused here rather than trusted.
       throw new Error(
-        `A loopback prototype listener cannot bind "localhost" with no port range configured. ` +
+        `A loopback prototype listener cannot bind "localhost" without bindAllInterfaces. ` +
           `"localhost" is a name a browser may resolve to either address family, so it does not ` +
-          `name one origin unless the socket is on every interface, which is what a configured ` +
-          `port range does. This is a bug in the caller's pairing, not in config.`,
+          `name one origin unless the socket is on every interface, which is what bindAllInterfaces ` +
+          `signals. This is a bug in the caller's pairing, not in config.`,
       )
     }
     /**
      * What the socket binds. The loopback address on a laptop; every
      * interface in a container.
      *
-     * A range is configured exactly when this is a container (see
-     * `config.ts`'s default), and inside a container `127.0.0.1` is the
-     * container's own loopback, which a published port never reaches: Docker
-     * DNATs a published port to the container's external interface. So a
-     * loopback bind there is unreachable from the host's browser with the
-     * range published and without it alike (MEASURED, Task 14, 2026-09-11).
+     * `bindAllInterfaces` is true exactly when this is a genuinely detected
+     * container (see `config.ts`'s `loopbackBindAllInterfaces`), and inside a
+     * container `127.0.0.1` is the container's own loopback, which a
+     * published port never reaches: Docker DNATs a published port to the
+     * container's external interface. So a loopback bind there is
+     * unreachable from the host's browser with the range published and
+     * without it alike (MEASURED, Task 14, 2026-09-11).
+     *
+     * This is deliberately NOT keyed on `range` alone any more (codex round 2,
+     * item 1): an operator can set `VIEWER_LOOPBACK_PORT_RANGE` by hand on a
+     * laptop that is not a container, and widening the bind there would make
+     * a private prototype reachable from the LAN on a predictable port with
+     * `Host: localhost:<port>` — the loopback boundary this whole mechanism
+     * rests on would be gone. A range only ever says WHICH ports to try;
+     * `bindAllInterfaces` is the separate, narrower question of which
+     * interface, and it comes from the caller having actually detected a
+     * container.
      *
      * ## What that costs, stated honestly
      *
@@ -340,7 +371,7 @@ export function createLoopbackListenerRegistry(
      * still the paired loopback name, not on which interface the socket
      * listens on.
      */
-    const bindAddress: string = range === null ? target.bindHost : "0.0.0.0"
+    const bindAddress: string = bindAllInterfaces ? "0.0.0.0" : target.bindHost
 
     let app: express.Express | null = null
     const server = createServer((req, res) => {

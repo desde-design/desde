@@ -266,6 +266,29 @@ export interface ViewerConfig {
    * server-prototypes spec, "Loopback port range".
    */
   loopbackPortRange: { from: number; to: number } | null
+  /**
+   * Whether a loopback listener binds every interface (`0.0.0.0`) instead of
+   * a loopback address alone.
+   *
+   * This is a NARROWER question than `loopbackPortRange` being set. Before
+   * this field existed, `loopback-listeners.ts` widened the bind whenever
+   * `deps.portRange` was non-null — but an operator can set
+   * `VIEWER_LOOPBACK_PORT_RANGE` on a laptop for reasons that have nothing to
+   * do with being in a container, and that laptop is not behind Docker's
+   * port-forwarding NAT. Binding `0.0.0.0` there makes a private prototype
+   * reachable from anyone else on the LAN, on a predictable port, with
+   * `Host: localhost:<port>` — the loopback boundary the whole listener
+   * design rests on would be gone.
+   *
+   * True ONLY when the process is ACTUALLY detected as a container (never
+   * merely told to behave like one): `"auto"` mode's own container check, or
+   * `"on"` mode's container check run for this purpose alone (see
+   * `loadConfig`). `"off"` is always false, since no listener opens at all.
+   * `"on"` forced by an operator on a real laptop is also false: forcing
+   * listeners open is not the same statement as forcing the wildcard bind,
+   * and only the second one is safe to infer from the first.
+   */
+  loopbackBindAllInterfaces: boolean
 }
 
 const PROFILES: ViewerProfile[] = ["selfhost"]
@@ -570,6 +593,17 @@ export function loadConfig(
   const loopbackAvailable =
     loopbackListeners === "on" ? true : loopbackListeners === "off" ? false : !inContainer || loopbackPortRange !== null
 
+  // Whether to widen the bind to every interface. Deliberately a SEPARATE
+  // probe from `inContainer` above, which is forced to `false` for "on"/"off"
+  // and never calls `detectContainer()` for them: this question is "is the
+  // process actually in a container", independent of the operator's
+  // requested mode, so "off" is answered without probing (no listener opens
+  // either way) and "on" probes fresh rather than reusing the forced `false`.
+  // See `ViewerConfig.loopbackBindAllInterfaces` for why this must not simply
+  // be "is a port range configured".
+  const loopbackBindAllInterfaces =
+    loopbackListeners === "off" ? false : loopbackListeners === "auto" ? inContainer : detectContainer()
+
   const dataDir = env.VIEWER_DATA_DIR ?? ".desde-viewer"
   // Fallback source for `sessionSecret` and, when neither GitHub sign-in nor
   // GitHub App env vars are set, for `githubAuth`/`githubApp` too. Never an
@@ -657,6 +691,7 @@ export function loadConfig(
     loopbackListeners,
     loopbackAvailable,
     loopbackPortRange,
+    loopbackBindAllInterfaces,
     /*
       Env first, stored settings as the fallback — `runtime-config.ts`'s rule,
       not a new one. An operator who has set `VIEWER_SMTP_HOST` in their

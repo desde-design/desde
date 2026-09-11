@@ -189,10 +189,12 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
       serveDomain: deps.config.serveDomain,
       loopbackAvailable: deps.config.loopbackAvailable,
       prototypeOrigin: deps.config.prototypeOrigin,
-      // Read for one thing only: a configured range means the listener binds
-      // the IPv4 wildcard, so the pairing must not choose `[::1]`. See
-      // `pairedLoopbackHost`.
-      loopbackPortRange: deps.config.loopbackPortRange,
+      // Read for one thing only: a genuinely detected container binds the
+      // listener to the IPv4 wildcard, so the pairing must not choose
+      // `[::1]`. NOT the same as "a port range is configured" — an operator
+      // can set that by hand on a laptop, where the bind stays loopback and
+      // `[::1]` is fine. See `pairedLoopbackHost`.
+      loopbackBindAllInterfaces: deps.config.loopbackBindAllInterfaces,
     })
 
     // `serveDomain` is what MADE the mode "subdomain" (see `resolveOrigins`),
@@ -247,11 +249,12 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     let shellOrigin = resolved.shellOrigin
     let prototypeHost = resolved.prototypeHost
     if (statedOrigin !== null) {
-      // Same port-range fact as the `resolveOrigins` call above, for the same
-      // reason: the shell's stated origin decides the pairing here, and the
-      // pairing must not name `[::1]` when the listener binds the wildcard.
+      // Same bind-all-interfaces fact as the `resolveOrigins` call above, for
+      // the same reason: the shell's stated origin decides the pairing here,
+      // and the pairing must not name `[::1]` when the listener binds the
+      // wildcard.
       const paired = pairedLoopbackHost(new URL(statedOrigin).hostname, {
-        portRangeConfigured: deps.config.loopbackPortRange !== null,
+        bindAllInterfaces: deps.config.loopbackBindAllInterfaces,
       })
       if (paired !== null) {
         shellOrigin = statedOrigin

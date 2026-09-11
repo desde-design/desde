@@ -882,6 +882,14 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       // child's own cookies and displaces a child value that shares its name.
       // See `ProxyOptions.setCookie`.
       const capabilityCookie = capabilityCookieToSet()
+      // Marks this deployment in-flight for as long as this response stays
+      // open, so the idle reaper (`prototype-processes.ts`'s `startReaper`)
+      // does not stop a process answering a long SSE stream or a large
+      // streamed download just because the idle bound passed mid-response
+      // (codex round 2, item 3). `touch()` above only covers the MOMENT the
+      // request begins; a response can easily outlive that.
+      const releaseInFlight = deps.prototypeProcesses.beginRequest(deployment.id)
+      res.once("close", releaseInFlight)
       proxyToProcess(req, res, {
         port,
         ...(capabilityCookie !== null ? { setCookie: capabilityCookie } : {}),
