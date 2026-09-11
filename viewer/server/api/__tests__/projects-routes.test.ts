@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest"
 import { createBuildQueue } from "../../build/build-queue"
 import { createApp, nullPrototypeProcesses, type AppDeps } from "../../__tests__/test-app"
 import { tmpViewerDataDir } from "../../__tests__/test-config"
+import { PrototypeProcessError } from "../../serve/prototype-processes"
 import { InMemoryStorage } from "../../storage/in-memory-storage"
 import { DiskAssetStore } from "../../assets/disk-asset-store"
 import type { AssetStore, StoredAsset } from "../../assets/types"
@@ -16,7 +17,7 @@ import { generateMachineToken } from "../../auth/machine-token"
 import { createSwappableApp } from "../../__tests__/swappable-app"
 import { testGithubRuntime } from "../../__tests__/test-github-runtime"
 import { upsertTestUser } from "../../__tests__/user-fixtures"
-import type { InstanceRole, StorageAdapter } from "../../storage/types"
+import type { Deployment, InstanceRole, StorageAdapter } from "../../storage/types"
 
 class NullAssetStore implements AssetStore {
   async put(): Promise<void> {}
@@ -1256,6 +1257,145 @@ describe("projects API", () => {
         await request(stable.app).delete(`/api/v1/projects/${project.id}`).set(auth).expect(204)
 
         expect(existsSync(checkout)).toBe(false)
+      } finally {
+        rmSync(dataDir, { recursive: true, force: true })
+      }
+    })
+
+    /**
+     * Codex round 4, Fix 1. The route used to call `forget()` first, then
+     * `rm` the checkout. `forget()` drops the manager's entry outright, so a
+     * request landing in the gap between `forget` and `rm` could call
+     * `ensure()`, find no entry at all, and spawn a brand new child from a
+     * checkout that is mid-delete. `retire()` closes that gap: it marks the
+     * entry permanently refused SYNCHRONOUSLY (see its doc comment in
+     * `prototype-processes.ts`), before the checkout is ever touched.
+     * Required order: retire, then remove the directory, then forget (so the
+     * map does not keep a retired entry around for a project that no longer
+     * exists).
+     *
+     * The fake's `retire` and `forget` both record their name into a shared
+     * `order` array, and each also checks whether the checkout directory
+     * still exists AT THE MOMENT it is called — that is what proves the
+     * directory removal genuinely happened BETWEEN the two calls, not just
+     * that the calls happened in the right order with the `rm` timed
+     * arbitrarily.
+     */
+    it("retires the process before removing the checkout, and forgets it only after", async () => {
+      const storage = new InMemoryStorage()
+      const dataDir = mkdtempSync(join(tmpdir(), "viewer-checkouts-retire-order-"))
+      try {
+        const project = await storage.createProject({ slug: "acme", name: "Acme" })
+        const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+        const checkout = join(dataDir, "checkouts", dep.id)
+        mkdirSync(join(checkout, "node_modules"), { recursive: true })
+        writeFileSync(join(checkout, "package.json"), "{}")
+
+        const order: string[] = []
+        const checkoutExistsAt: Record<string, boolean> = {}
+        stable.use(
+          createApp({
+            storage,
+            assets: new NullAssetStore(),
+            config: { ...authConfig, dataDir },
+            bridgeScript: "// bridge",
+            github: testGithubRuntime(),
+            prototypeProcesses: {
+              ...nullPrototypeProcesses(),
+              retire: async (_id: string) => {
+                order.push("retire")
+                checkoutExistsAt.retire = existsSync(checkout)
+              },
+              forget: async (_id: string) => {
+                order.push("forget")
+                checkoutExistsAt.forget = existsSync(checkout)
+              },
+            },
+          }),
+        )
+
+        await request(stable.app).delete(`/api/v1/projects/${project.id}`).set(auth).expect(204)
+
+        expect(order).toEqual(["retire", "forget"])
+        // Still there when `retire` ran — the directory is removed AFTER it.
+        expect(checkoutExistsAt.retire).toBe(true)
+        // Already gone by the time `forget` ran — the directory is removed BEFORE it.
+        expect(checkoutExistsAt.forget).toBe(false)
+        expect(existsSync(checkout)).toBe(false)
+      } finally {
+        rmSync(dataDir, { recursive: true, force: true })
+      }
+    })
+
+    /**
+     * Codex round 4, Fix 1, second case. Once `retire()` has run, the
+     * manager must refuse `ensure()` for this id — permanently, not just
+     * until the checkout is removed — so a request that lands anywhere
+     * between `retire` and `forget` cannot resurrect a child into a checkout
+     * that is being (or has just been) deleted.
+     *
+     * The REAL manager's own contract for this is already proven at the
+     * unit level in `prototype-processes.test.ts` ("retire stops the server
+     * and permanently refuses ensure until forget", "retire refuses a
+     * concurrent ensure immediately, before its slow stop finishes") —
+     * constructing a real manager with a fake spawner here as well would
+     * duplicate that coverage for no added confidence in the ROUTE, whose
+     * own job is only to call `retire` before `rm`. So this test stays on
+     * the fake, and asserts the fake's own `ensure` — wired to consult the
+     * same `retired` flag `retire()` sets — is refused once the delete
+     * request has gone through.
+     */
+    it("ensure() is refused once retire() has run, for the rest of the delete", async () => {
+      const storage = new InMemoryStorage()
+      const dataDir = mkdtempSync(join(tmpdir(), "viewer-checkouts-ensure-refused-"))
+      try {
+        const project = await storage.createProject({ slug: "acme", name: "Acme" })
+        const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+        const checkout = join(dataDir, "checkouts", dep.id)
+        mkdirSync(join(checkout, "node_modules"), { recursive: true })
+        writeFileSync(join(checkout, "package.json"), "{}")
+
+        let retired = false
+        const fakeProcesses = {
+          ...nullPrototypeProcesses(),
+          retire: async (_id: string) => {
+            retired = true
+          },
+          forget: async (_id: string) => {},
+          ensure: async (_deployment: Pick<Deployment, "id" | "serverStart">): Promise<{ port: number }> => {
+            if (retired) {
+              throw new PrototypeProcessError(
+                { state: "stopped" },
+                "The checkout for this deployment was removed. Rebuild it.",
+              )
+            }
+            return { port: 1234 }
+          },
+        }
+        stable.use(
+          createApp({
+            storage,
+            assets: new NullAssetStore(),
+            config: { ...authConfig, dataDir },
+            bridgeScript: "// bridge",
+            github: testGithubRuntime(),
+            prototypeProcesses: fakeProcesses,
+          }),
+        )
+
+        // Before the delete, a request would have started the process fine.
+        await expect(fakeProcesses.ensure({ id: dep.id, serverStart: ["node", "server.js"] })).resolves.toEqual({
+          port: 1234,
+        })
+
+        await request(stable.app).delete(`/api/v1/projects/${project.id}`).set(auth).expect(204)
+
+        // After the delete — which called `retire()` before removing the
+        // checkout — the SAME id is refused, simulating a request that
+        // landed anywhere from `retire` onward.
+        await expect(fakeProcesses.ensure({ id: dep.id, serverStart: ["node", "server.js"] })).rejects.toThrow(
+          "The checkout for this deployment was removed. Rebuild it.",
+        )
       } finally {
         rmSync(dataDir, { recursive: true, force: true })
       }

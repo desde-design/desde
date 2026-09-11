@@ -698,19 +698,33 @@ export function createProjectsRoutes(
         cleanups.push({
           what: `checkout for deployment ${deployment.id}`,
           done: (async () => {
-            // Stop before remove: deleting a directory out from under a
-            // running server is how a child ends up logging ENOENT forever.
+            // `retire`, not `forget`, goes first. `forget` drops the
+            // manager's entry outright, so a request already in flight for
+            // this deployment could call `ensure()` in the gap between
+            // dropping the entry and removing the directory below, and spawn
+            // a fresh child into a checkout that is mid-delete. `retire`
+            // marks the entry permanently refused SYNCHRONOUSLY (see its
+            // doc comment on `PrototypeProcesses`) before the directory is
+            // ever touched, closing that gap. `forget` still runs, but only
+            // once the directory is gone, so the map does not keep a
+            // retired entry around for a project that no longer exists.
             //
-            // `finally`, so a `forget` that rejects (a child that will not
-            // die, say) cannot take the `rm` with it. The two are ordered,
-            // not conditional: the checkout is hundreds of megabytes and this
-            // route is the only thing that will ever reclaim it, so a failure
-            // to stop the child must not also leak the disk. Whatever `forget`
-            // threw still propagates and is logged by name below.
+            // Both `finally`s so neither step can take the next one with
+            // it: a `retire` that rejects (a child that will not die, say)
+            // must not skip the `rm`, and a `rm` that rejects must not skip
+            // the `forget`. The checkout is hundreds of megabytes and this
+            // route is the only thing that will ever reclaim it, so a
+            // failure at either step must not also leak the disk or the
+            // manager's entry. Whatever each step threw still propagates
+            // and is logged by name below.
             try {
-              await deps.prototypeProcesses.forget(deployment.id)
+              await deps.prototypeProcesses.retire(deployment.id)
             } finally {
-              await rm(checkoutDirFor(checkoutsRoot, deployment.id), { recursive: true, force: true })
+              try {
+                await rm(checkoutDirFor(checkoutsRoot, deployment.id), { recursive: true, force: true })
+              } finally {
+                await deps.prototypeProcesses.forget(deployment.id)
+              }
             }
           })(),
         })
