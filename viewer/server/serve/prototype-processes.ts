@@ -159,6 +159,18 @@ const RESTART_WINDOW_MS = 5 * 60_000
  */
 const SETUP_FAILED_REASON = "The server could not be started. See the viewer's log."
 
+/**
+ * The public message for a failure to reserve a slot at the concurrency cap
+ * because every running entry is actively answering a request.
+ *
+ * Reader-visible (it reaches the proxy's 503 body via `PrototypeProcessError`,
+ * same as `SETUP_FAILED_REASON`), so it is a plain sentence with nothing
+ * deployment-specific in it — there is nothing deployment-specific TO leak
+ * here, since this is never that deployment's own fault. A reload retries the
+ * `ensure` and nothing else is needed on the client (codex round 8, Fix 2).
+ */
+const BUSY_MESSAGE = "Every prototype server is busy. Try again in a moment."
+
 export interface PrototypeProcessesDeps {
   checkoutsRoot: string
   now?: () => number
@@ -529,25 +541,57 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // wait target, and the earliest one never waits (it always sees itself
     // as the leader and proceeds). Once the leader settles (running or
     // crashed) the waiters re-check from scratch.
+    //
+    // A `running` entry with `inFlight > 0` (an open response — an SSE
+    // stream, a large download — held by `beginRequest`) is never a victim
+    // either (codex round 8, Fix 2). Eviction used to sort every `running`
+    // entry by recency and stop the oldest one regardless of `inFlight`, so
+    // a fifth prototype opening while the least-recently-used one was
+    // mid-response would kill it out from under its reader — exactly what
+    // `beginRequest`/`inFlight` exist to protect against for the idle
+    // reaper, but eviction never consulted them.
     while (occupied().length > maxRunning) {
-      const runningNow = running()
-      if (runningNow.length > 0) {
-        const [victimId] = runningNow.sort((a, b) => a[1].recency - b[1].recency)[0]!
+      const evictable = running().filter(([, oe]) => oe.inFlight === 0)
+      if (evictable.length > 0) {
+        const [victimId] = evictable.sort((a, b) => a[1].recency - b[1].recency)[0]!
         await stopEntry(entryFor(victimId))
         continue
       }
       const leaderId = [...entries].find(([, oe]) => oe.status.state === "starting")?.[0]
-      if (!leaderId || leaderId === id) break
-      const leaderOpening = entries.get(leaderId)?.opening
-      if (leaderOpening) {
-        await leaderOpening.catch(() => {})
-      } else {
-        // Should be unreachable — a `starting` entry's `opening` is set in
-        // the same synchronous turn as its status (see above), so this is
-        // only a defensive yield against ever spinning the event loop if
-        // that invariant is somehow violated.
-        await Promise.resolve()
+      if (leaderId && leaderId !== id) {
+        const leaderOpening = entries.get(leaderId)?.opening
+        if (leaderOpening) {
+          await leaderOpening.catch(() => {})
+        } else {
+          // Should be unreachable — a `starting` entry's `opening` is set in
+          // the same synchronous turn as its status (see above), so this is
+          // only a defensive yield against ever spinning the event loop if
+          // that invariant is somehow violated.
+          await Promise.resolve()
+        }
+        continue
       }
+      // No running entry can be evicted, and there is no OTHER starting
+      // entry to wait on either. Two cases reach here, and they must be told
+      // apart:
+      //
+      // - `running().length === 0`: every occupied slot is a fresh cold
+      //   start, including possibly this one. This is the deadlock-freedom
+      //   case above — `leaderId` is either absent or this entry itself, so
+      //   there is nothing productive left to wait for, and breaking out
+      //   (proceeding to spawn over the cap, transiently) is what lets the
+      //   single leader through instead of every `starting` entry waiting on
+      //   every other.
+      // - `running().length > 0`: every slot is held by a RUNNING entry that
+      //   is actively answering a request, and nothing here will free one on
+      //   its own. Waiting would either spin or block indefinitely on a
+      //   response that may not end soon — so this attempt fails fast
+      //   instead, releasing the slot it reserved.
+      if (running().length > 0) {
+        e.status = { state: "stopped" }
+        throw new PrototypeProcessError(exposedStatus(e), BUSY_MESSAGE)
+      }
+      break
     }
 
     // Setup between reserving the slot above and the actual `spawn` below,

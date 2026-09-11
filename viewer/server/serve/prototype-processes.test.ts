@@ -163,6 +163,75 @@ describe("createPrototypeProcesses", () => {
     expect(procs.status("a").state).toBe("running")
   })
 
+  /**
+   * Codex round 8, Fix 2. Eviction used to sort every `running` entry by
+   * recency and stop the oldest one, regardless of whether it was actively
+   * answering a request (`inFlight > 0`, held open by `beginRequest`). A
+   * fifth prototype opening while the least-recently-used one was mid-SSE
+   * or mid-download would kill that response out from under its reader —
+   * exactly what `beginRequest`/`inFlight` exist to prevent from the idle
+   * reaper, but eviction never consulted them.
+   *
+   * These three tests share one shape: fill the cap, mark every running
+   * entry busy with `beginRequest`, and prove eviction refuses to touch any
+   * of them until one goes idle again.
+   */
+  it("fails fast with a fixed sentence when the cap is full and every running entry is busy", async () => {
+    const ids = ["a", "b", "c", "d"]
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot([...ids, "e"]), maxRunning: 4 })
+    managers.push(procs)
+    for (const id of ids) await procs.ensure({ id, serverStart: start() })
+    const releases = ids.map((id) => procs.beginRequest(id))
+
+    await expect(procs.ensure({ id: "e", serverStart: start() })).rejects.toMatchObject({
+      message: "Every prototype server is busy. Try again in a moment.",
+    })
+
+    for (const id of ids) expect(procs.status(id).state).toBe("running")
+    // The failed attempt released its own reserved slot rather than sitting
+    // there as a permanent `crashed` status — nothing is wrong with this
+    // deployment, and it must not spend the restart budget.
+    const e = procs.status("e")
+    expect(e.state).toBe("stopped")
+
+    for (const release of releases) release()
+  })
+
+  it("evicts the one idle entry among busy ones, even though it is the most recently used", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["a", "b", "c"]), maxRunning: 2 })
+    managers.push(procs)
+    await procs.ensure({ id: "a", serverStart: start() })
+    const releaseA = procs.beginRequest("a")
+    // b is ensured (and so touched) AFTER a, and stays idle — the plain LRU
+    // rule that used to run would pick a, the older entry, as the victim.
+    await procs.ensure({ id: "b", serverStart: start() })
+
+    await procs.ensure({ id: "c", serverStart: start() })
+
+    expect(procs.status("a").state).toBe("running")
+    expect(procs.status("b").state).toBe("stopped")
+    expect(procs.status("c").state).toBe("running")
+    releaseA()
+  })
+
+  it("evicts the busy entry once its in-flight count drops back to zero", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["a", "b"]), maxRunning: 1 })
+    managers.push(procs)
+    await procs.ensure({ id: "a", serverStart: start() })
+    const releaseA = procs.beginRequest("a")
+
+    await expect(procs.ensure({ id: "b", serverStart: start() })).rejects.toMatchObject({
+      message: "Every prototype server is busy. Try again in a moment.",
+    })
+    expect(procs.status("a").state).toBe("running")
+
+    releaseA()
+    const b = await procs.ensure({ id: "b", serverStart: start() })
+    expect(b.port).toBeGreaterThan(0)
+    expect(procs.status("a").state).toBe("stopped")
+    expect(procs.status("b").state).toBe("running")
+  })
+
   it("stops a server that has been idle past the bound", async () => {
     let now = 0
     const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]), now: () => now, idleMs: 1000, reapIntervalMs: 20 })
