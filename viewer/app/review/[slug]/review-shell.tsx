@@ -225,12 +225,33 @@ export function ReviewShell({
    * server-rendered page then re-resolves `decidePrototypeEmbed` from the
    * fresh process status and shows the crashed panel (or a fresh working
    * frame, if the crash already cleared).
+   *
+   * Codex round 5, Fix 1. `router.refresh()` alone was not enough for a
+   * RETRYABLE crash: the server render still answers `embed` (a retryable
+   * crash keeps `decidePrototypeEmbed` on the embed branch), so the iframe's
+   * `src` and identity stay unchanged and React keeps the same DOM node —
+   * the one already showing the proxy's error page. No new request ever
+   * reached the proxy, `ensure()` was never called again, and the poll kept
+   * seeing `crashed` forever.
+   *
+   * `frameEpoch` fixes that: it is bumped on every embedded crash and passed
+   * to the iframe as `key`, so React unmounts the stale frame and mounts a
+   * fresh one — a brand new DOM node, whose own request is what calls
+   * `ensure()` and restarts the child within the budget. The router refresh
+   * still runs alongside it, for the crash that is past the budget: that one
+   * needs the SERVER render to swap in the crashed panel, which a remounted
+   * iframe alone cannot do.
    */
+  const [frameEpoch, setFrameEpoch] = useState(0)
   const refreshRouterOnEmbeddedCrash = useRouterRefresh()
+  const recoverFromEmbeddedCrash = useCallback(() => {
+    setFrameEpoch((epoch) => epoch + 1)
+    refreshRouterOnEmbeddedCrash()
+  }, [refreshRouterOnEmbeddedCrash])
   useProcessRecovery({
     active: embed.kind === "embed" && project.serve === "server",
     projectId: project.id,
-    onShouldRefresh: refreshRouterOnEmbeddedCrash,
+    onShouldRefresh: recoverFromEmbeddedCrash,
     mode: "embedded",
   })
 
@@ -426,6 +447,16 @@ export function ReviewShell({
    * better than nothing.
    */
   const [prototypeLoaded, setPrototypeLoaded] = useState(false)
+  /**
+   * `frameEpoch` (above) remounts the iframe on an embedded retryable crash —
+   * a fresh DOM node, presumed unloaded again. Without this, `prototypeLoaded`
+   * would still read `true` from the frame that just crashed, and the
+   * "Loading" overlay (below) would never come back for the replacement while
+   * it cold-starts.
+   */
+  useEffect(() => {
+    setPrototypeLoaded(false)
+  }, [frameEpoch])
   /**
    * The overlay clears on EITHER the iframe's own load event or the bridge
    * handshake, because the load event alone loses a race it cannot recover
@@ -1144,6 +1175,14 @@ export function ReviewShell({
         {embed.kind === "embed" ? (
           <>
             <iframe
+              // `frameEpoch`, not the default reconciliation-by-position: a
+              // retryable crash bumps it (see `recoverFromEmbeddedCrash`
+              // above) specifically to force React to discard this DOM node
+              // and mount a fresh one, whose own request restarts the child.
+              // Changing `iframeProps.src` alone would not do that — React
+              // only re-navigates a frame when the string itself changes,
+              // and after a crash it has not.
+              key={frameEpoch}
               ref={iframeRef}
               {...iframeProps}
               className="h-full w-full border-0"
