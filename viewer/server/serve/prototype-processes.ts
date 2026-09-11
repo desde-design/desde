@@ -477,13 +477,39 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       }
     }
 
-    const port = await pickPort()
-    const { file, args } = substitutePort(serverStart, port)
-    // Inside the checkout, not beside it: `pruneSupersededCheckouts` deletes
-    // `checkoutDirFor(...)` wholesale, so a home dir living inside it is
-    // pruned along with the checkout instead of leaking forever.
-    const home = join(cwd, ".desde-home")
-    await mkdir(home, { recursive: true })
+    // Setup between reserving the slot above and the actual `spawn` below,
+    // wrapped so a throw here cannot leave the entry stuck "starting"
+    // forever: `pickPort` can reject (ports exhausted), `substitutePort`
+    // throws synchronously on an empty `serverStart`, and `mkdir` can reject
+    // (permissions, disk full). Before this wrap, any of those rejected
+    // `ensure` while leaving `e.status` at "starting", permanently occupying
+    // a slot against `maxRunning` — enough of them and the room-making loop
+    // above waits forever on entries that will never resolve (codex round 3,
+    // item 3).
+    let port: number
+    let file: string
+    let args: string[]
+    let home: string
+    try {
+      port = await pickPort()
+      ;({ file, args } = substitutePort(serverStart, port))
+      // Inside the checkout, not beside it: `pruneSupersededCheckouts`
+      // deletes `checkoutDirFor(...)` wholesale, so a home dir living inside
+      // it is pruned along with the checkout instead of leaking forever.
+      home = join(cwd, ".desde-home")
+      await mkdir(home, { recursive: true })
+    } catch (error) {
+      // Retryable: nothing here says the NEXT attempt would fail the same
+      // way (a port that is free a moment later, a transient mkdir error).
+      // The message is built from the error's own text, never the id.
+      e.status = {
+        state: "crashed",
+        exitCode: null,
+        restarts: e.restartsAt.length,
+        reason: `The server could not be started: ${error instanceof Error ? error.message : String(error)}`,
+      }
+      throw new PrototypeProcessError(exposedStatus(e), e.status.reason)
+    }
     // Immediately before the spawn. Everything above this line has awaited at
     // least once, so a `stop()` or a `shutdown()` can have landed in between —
     // and a spawn after either of those is a child nobody will ever stop,
@@ -644,9 +670,23 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // `ensure` for this same id must never fall through to `start()` and
       // find an inviting empty slot.
       const e = entryFor(id)
-      await stopEntry(e)
+      // `e.retired` — the flag `ensure` checks FIRST, before anything else —
+      // is set SYNCHRONOUSLY, before `stopEntry`'s own first `await` (its
+      // wait for the old child to exit, which a SIGTERM-ignoring child can
+      // stretch out for up to 5s). Without this, a request on the still-open
+      // pinned listener could call `ensure` in that window: `stopEntry`
+      // already reset `e.status` to "stopped" synchronously at ITS top, so
+      // `ensure` would see an entry that looks safe to restart and spawn a
+      // replacement — one that `pruneSupersededCheckouts` then deletes the
+      // checkout out from under, once this `retire` finishes and the
+      // directory removal proceeds (codex round 3, item 1).
       e.retired = true
       e.permanentFailure = true
+      await stopEntry(e)
+      // `stopEntry` just reset `e.status` to "stopped" as part of stopping the
+      // child; restore the permanent refusal now that the stop is done. The
+      // `retired` flag above is what actually closed the race — this is the
+      // status a caller reading `status()` afterward should see.
       e.status = {
         state: "crashed",
         exitCode: null,

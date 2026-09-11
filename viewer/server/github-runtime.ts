@@ -77,6 +77,16 @@ export interface CreateGithubRuntimeArgs {
    * deployment.
    */
   beforeCheckoutRemove?: (deploymentId: string) => Promise<void>
+  /**
+   * Awaited after a superseded checkout is actually removed, so the process
+   * manager can drop the permanent, non-retryable entry `beforeCheckoutRemove`
+   * left behind for that id. `server/index.ts` passes `prototypeProcesses.forget`.
+   * Without this, `pruneSupersededCheckouts` re-visits every id it has ever
+   * pruned on every later build, and each visit's `retire()` (via
+   * `beforeCheckoutRemove`) recreates a live map entry for an id whose
+   * checkout is long gone.
+   */
+  afterCheckoutRemove?: (deploymentId: string) => Promise<void>
   /** Injected fakes. Each one pins its field permanently, including across `reload`. */
   overrides?: Partial<Pick<GithubRuntime, "authProvider" | "appClient" | "buildQueue">>
 }
@@ -185,6 +195,9 @@ export function createGithubRuntime(args: CreateGithubRuntimeArgs): GithubRuntim
                 onChange: args.onBuildChange,
                 ...(args.beforeCheckoutRemove
                   ? { beforeCheckoutRemove: args.beforeCheckoutRemove }
+                  : {}),
+                ...(args.afterCheckoutRemove
+                  ? { afterCheckoutRemove: args.afterCheckoutRemove }
                   : {}),
                 runner: createInProcessBuildRunner({
                   assets: args.assets,

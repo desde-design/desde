@@ -130,14 +130,18 @@ function cookieNameOf(entry: string): string {
 
 /**
  * The `Set-Cookie` values for a proxied response: the child's, minus any whose
- * NAME is the viewer's own, with the viewer's last.
+ * NAME is one of the viewer's own capability cookie names, with the viewer's
+ * OWN value (if it is setting one on this response) last.
  *
- * Both halves matter and they close different holes. Dropping the child's
- * same-named value stops a prototype writing its own `dsv_cap` (or
- * `__Host-dsv_cap`) onto the origin — a cookie the viewer reads back as a read
- * capability on every later request. Putting ours LAST is what makes it the
- * value the browser keeps, since a jar stores one value per name and the last
- * `Set-Cookie` wins.
+ * The drop happens UNCONDITIONALLY, whether or not `ours` is present. `ours`
+ * is only ever set on the first response after a `?~c=` capability grant —
+ * every later response on that origin proxies with `ours` undefined. Before
+ * this fix, an undefined `ours` skipped the drop entirely, so a child
+ * `Set-Cookie: dsv_cap=…` (or `__Host-dsv_cap=…`) on any of those later
+ * responses passed straight through and could replace or expire the read
+ * capability the viewer had already granted. Putting `ours` LAST when it IS
+ * present is what makes it the value the browser keeps, since a jar stores
+ * one value per name and the last `Set-Cookie` wins.
  *
  * Names are compared exactly, which is why the `__Host-` form needs no special
  * case: the prefix is part of the name on both sides.
@@ -147,9 +151,12 @@ export function mergeSetCookies(
   ours: string | undefined,
 ): string[] {
   const child = fromChild === undefined ? [] : Array.isArray(fromChild) ? fromChild : [fromChild]
-  if (ours === undefined) return child
-  const ourName = cookieNameOf(ours)
-  return [...child.filter((entry) => cookieNameOf(entry) !== ourName), ours]
+  // `ours`, when present, always carries one of these same two names (see
+  // `capabilityCookieName`), so one name-based filter closes both holes: a
+  // child cookie sharing the viewer's name is always dropped, `ours` is
+  // always appended last when it exists.
+  const withoutOurNames = child.filter((entry) => !VIEWER_COOKIE_NAMES.has(cookieNameOf(entry)))
+  return ours === undefined ? withoutOurNames : [...withoutOurNames, ours]
 }
 
 function isHtml(contentType: string | undefined): boolean {

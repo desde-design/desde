@@ -434,5 +434,95 @@ describe("createPrototypeProcesses", () => {
     await procs.retire("d1")
     await procs.forget("d1")
     expect(procs.status("d1").state).toBe("stopped")
+    // Nothing left behind either — this is the half of codex round 3, item 4
+    // (`checkouts.ts`) that lives here: once a checkout is actually gone,
+    // `pruneSupersededCheckouts` calls `forget`, not just `retire`, so the
+    // permanent map entry `retire` left is dropped too.
+    expect(procs.serverLog("d1")).toBe("")
+  })
+
+  /**
+   * Codex round 3, item 1. `retire()` used to await `stopEntry` (which waits
+   * for the old child to exit, up to 5s on a SIGTERM it ignores) BEFORE
+   * setting `e.retired`. A request landing on the still-open pinned listener
+   * in that window could call `ensure`, find the entry not retired yet (its
+   * status had already been reset to "stopped" by `stopEntry`'s own
+   * synchronous top-of-function reset), and start a replacement — which
+   * `retire`'s caller (`pruneSupersededCheckouts`) then deletes the checkout
+   * directory out from under, once `retire` itself finishes.
+   *
+   * `FAKE_SIGTERM_DELAY_MS` makes the fixture hold off exiting so the window
+   * `stopEntry` is awaiting in is wide enough to land a concurrent `ensure`
+   * inside it deterministically, not by timing luck.
+   */
+  it("retire refuses a concurrent ensure immediately, before its slow stop finishes", async () => {
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      spawnEnv: { FAKE_SIGTERM_DELAY_MS: "300" },
+    })
+    managers.push(procs)
+    await procs.ensure({ id: "d1", serverStart: start() })
+    // Deliberately not awaited: `retire`'s synchronous prefix must run and
+    // mark the entry retired before this call returns control here.
+    const retiring = procs.retire("d1")
+    // The refusal is immediate: `ensure` rejects well before `retiring`
+    // settles (the fixture is still 300ms from exiting).
+    await expect(procs.ensure({ id: "d1", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+    // No replacement child was spawned in the window: the fixture logs
+    // "fake server: starting" once per spawn, and there must be exactly one.
+    const startingLines = procs.serverLog("d1").split("\n").filter((l) => l.includes("fake server: starting"))
+    expect(startingLines).toHaveLength(1)
+    await retiring
+    const status = procs.status("d1")
+    expect(status.state).toBe("crashed")
+    if (status.state === "crashed") {
+      expect(status.retryable).toBe(false)
+      expect(status.reason).toMatch(/removed/i)
+    }
+  })
+
+  /**
+   * Codex round 3, item 3. A throw from `pickPort`, `substitutePort` (empty
+   * `serverStart`) or the `.desde-home` `mkdir` — all AFTER `start()` marks
+   * the entry "starting" to reserve its cap slot, but BEFORE `spawn` — used
+   * to reject `ensure` while leaving the entry stuck `starting` forever,
+   * permanently occupying a slot against `maxRunning`.
+   */
+  it("a setup failure before spawn (empty serverStart) is crashed, not stuck starting", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+    managers.push(procs)
+    await expect(procs.ensure({ id: "d1", serverStart: [] })).rejects.toBeInstanceOf(PrototypeProcessError)
+    const status = procs.status("d1")
+    expect(status.state).toBe("crashed")
+    if (status.state === "crashed") {
+      expect(status.reason).toContain("could not be started")
+      expect(status.retryable).toBe(true)
+    }
+  })
+
+  it("a setup failure before spawn (pickPort rejects) is crashed, not stuck starting", async () => {
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      pickPort: async () => {
+        throw new Error("no ports available")
+      },
+    })
+    managers.push(procs)
+    await expect(procs.ensure({ id: "d1", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+    const status = procs.status("d1")
+    expect(status.state).toBe("crashed")
+    if (status.state === "crashed") expect(status.reason).toContain("could not be started")
+  })
+
+  it("a setup failure releases its cap slot, so a healthy deployment can still start under a tight cap", async () => {
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["bad", "good"]),
+      maxRunning: 1,
+    })
+    managers.push(procs)
+    await expect(procs.ensure({ id: "bad", serverStart: [] })).rejects.toBeInstanceOf(PrototypeProcessError)
+    expect(procs.status("bad").state).not.toBe("starting")
+    await expect(procs.ensure({ id: "good", serverStart: start() })).resolves.toBeTruthy()
+    expect(procs.status("good").state).toBe("running")
   })
 })

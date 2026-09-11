@@ -1,13 +1,21 @@
 // A stand-in for `next start`: listens on $PORT, answers HTTP, and does what
 // the test's env asks: FAKE_DELAY_MS before listening, FAKE_EXIT_CODE to die
-// instead of listening, GET /exit to die while running, and GET /env to
-// answer with the child's own env (so the env-allowlist test can see exactly
-// what reached the process).
+// instead of listening, FAKE_SIGTERM_DELAY_MS to hold off exiting on SIGTERM
+// (widens the window a `stop`/`retire` is actually waiting in, for tests that
+// need to land a concurrent call inside it), GET /exit to die while running,
+// and GET /env to answer with the child's own env (so the env-allowlist test
+// can see exactly what reached the process).
 import { createServer } from "node:http"
 const port = Number(process.env.PORT)
 if (process.env.FAKE_EXIT_CODE) {
   console.error("fake server: refusing to start")
   process.exit(Number(process.env.FAKE_EXIT_CODE))
+}
+if (process.env.FAKE_SIGTERM_DELAY_MS) {
+  const delay = Number(process.env.FAKE_SIGTERM_DELAY_MS)
+  process.on("SIGTERM", () => {
+    setTimeout(() => process.exit(0), delay)
+  })
 }
 console.log(`fake server: starting on ${port}`)
 setTimeout(() => {

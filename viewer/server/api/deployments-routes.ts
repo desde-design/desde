@@ -496,6 +496,7 @@ export function createDeploymentsRoutes(
         project.id,
         deployment.id,
         (id) => deps.prototypeProcesses.retire(id),
+        (id) => deps.prototypeProcesses.forget(id),
       )
 
       res.status(201).json({ ...deployed, fileCount: publishFiles.length })

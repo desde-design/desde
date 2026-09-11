@@ -67,6 +67,14 @@ export interface BuildQueueDeps {
    * leave unset until then — `pruneSupersededCheckouts` treats it as a no-op.
    */
   beforeCheckoutRemove?: (deploymentId: string) => Promise<void>
+  /**
+   * Called after a superseded checkout is actually removed, so the process
+   * manager can drop the permanent map entry `beforeCheckoutRemove`'s
+   * `retire()` left behind for that id. Without this, every deployment
+   * `pruneSupersededCheckouts` has ever pruned keeps a live entry forever
+   * (codex round 3, item 4).
+   */
+  afterCheckoutRemove?: (deploymentId: string) => Promise<void>
   onChange?: (deploymentId: string) => void
 }
 
@@ -201,6 +209,7 @@ export function createBuildQueue(deps: BuildQueueDeps): BuildQueue {
               projectId,
               deployment.id,
               deps.beforeCheckoutRemove,
+              deps.afterCheckoutRemove,
             )
             deps.onChange?.(deployment.id)
           } else {

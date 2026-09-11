@@ -111,6 +111,11 @@ async function main(): Promise<void> {
     // fresh child into a directory that is mid-delete. `retire` stops the
     // process AND leaves it permanently refusing, closing that window.
     beforeCheckoutRemove: (deploymentId) => prototypeProcesses.retire(deploymentId),
+    // Once the directory `retire` was guarding is actually gone, drop the
+    // permanent map entry it left behind — otherwise every id ever pruned
+    // keeps occupying a live entry forever, and every later build re-visits
+    // it for nothing (codex round 3, item 4).
+    afterCheckoutRemove: (deploymentId) => prototypeProcesses.forget(deploymentId),
   })
 
   // No GitHub sign-in configured means nobody could otherwise obtain a

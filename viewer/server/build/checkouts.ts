@@ -1,4 +1,4 @@
-import { cp, mkdir, rename, rm } from "node:fs/promises"
+import { cp, mkdir, rename, rm, stat } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import type { StorageAdapter } from "../storage/types"
 
@@ -40,7 +40,21 @@ export const CHECKOUT_RETENTION_COUNT = 2
 /**
  * Same shape as `pruneSupersededDeploymentAssets`: best effort, one failure
  * does not stop the sweep, the active id is always kept. `beforeRemove` lets
- * the process manager stop a process whose directory is about to go.
+ * the process manager stop a process whose directory is about to go;
+ * `afterRemove` lets it forget that id entirely once the directory is
+ * actually gone.
+ *
+ * `listDeployments` returns a project's WHOLE history, so every deployment
+ * outside the retention window reaches this loop again on every later
+ * activation — including ones whose checkout was already removed by a
+ * PREVIOUS prune. Without the stat check below, `beforeRemove` (wired to the
+ * process manager's `retire()`) ran for every one of those every time: a
+ * permanent map entry created per id, forever, for quadratic and pointless
+ * work (codex round 3, item 4). Stating first and skipping both hooks when
+ * there is nothing there closes that: past the first prune that actually
+ * removes a given id's directory, `afterRemove` (wired to `forget()`) drops
+ * the map entry, and every later visit to that same id finds no directory
+ * and does nothing at all.
  */
 export async function pruneSupersededCheckouts(
   storage: Pick<StorageAdapter, "listDeployments">,
@@ -48,14 +62,22 @@ export async function pruneSupersededCheckouts(
   projectId: string,
   keepActiveId: string,
   beforeRemove?: (deploymentId: string) => Promise<void>,
+  afterRemove?: (deploymentId: string) => Promise<void>,
 ): Promise<void> {
   const deployments = await storage.listDeployments(projectId)
   const rest = deployments.filter((d) => d.id !== keepActiveId)
   const stale = rest.slice(CHECKOUT_RETENTION_COUNT - 1)
   for (const d of stale) {
+    const dir = checkoutDirFor(checkoutsRoot, d.id)
     try {
+      const present = await stat(dir).then(
+        () => true,
+        () => false,
+      )
+      if (!present) continue
       await beforeRemove?.(d.id)
-      await rm(checkoutDirFor(checkoutsRoot, d.id), { recursive: true, force: true })
+      await rm(dir, { recursive: true, force: true })
+      await afterRemove?.(d.id)
     } catch (error) {
       console.error(`[viewer] failed to prune checkout for deployment ${d.id}:`, error)
     }

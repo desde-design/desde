@@ -265,6 +265,25 @@ describe("proxyToProcess", () => {
     expect(res.headers["set-cookie"]).toEqual(["other=1", ours])
   })
 
+  /**
+   * Codex round 3, item 2. `opts.setCookie` is only present on the first
+   * response after a `?~c=` capability grant — every later response on that
+   * origin proxies with no `setCookie` at all. The old merge only dropped a
+   * same-named child cookie when `ours` was defined, so on every one of
+   * those later responses a child `Set-Cookie: dsv_cap=…` (or
+   * `__Host-dsv_cap=…`) passed straight through and could replace or expire
+   * the viewer's own read capability. The child's own, differently-named
+   * cookies still pass through untouched either way.
+   */
+  it("drops a child's own capability cookie even when the viewer is not setting one", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("set-cookie", ["__Host-dsv_cap=evil; Path=/; Secure", "other=1"])
+      res.end("x")
+    })
+    const res = await request(appFor(port)).get("/p/acme/")
+    expect(res.headers["set-cookie"]).toEqual(["other=1"])
+  })
+
   it("sets the viewer's cookie even when the child sends none", async () => {
     const port = await child((_req, res) => res.end("x"))
     const ours = "dsv_cap=ours; Path=/"
