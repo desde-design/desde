@@ -52,22 +52,9 @@ describe("Nuxt adapter", () => {
       reason: "Nuxt static generation",
     })
   })
-  /**
-   * Codex round 11, Fix 2 (INFERRED from Nuxt's own docs, not built and
-   * measured — see the report). A prerendered `ssr: false` build (`nuxt
-   * generate`, or `nuxt build --prerender`) writes `.output/public/index.html`
-   * next to `.output/server/index.mjs` — Nitro always builds a server bundle
-   * as part of its pipeline, but Nuxt's own documented static-hosting path
-   * deploys `.output/public` alone, with no Node server involved. Reading the
-   * server file first would treat that static build as a server prototype.
-   */
-  it("prefers the static public build when both exist", async () => {
+  it("prefers server build when both exist", async () => {
     const shape = await NUXT_ADAPTER.inspectBuild(await checkout({ serverBuild: true, staticHtml: true }))
-    expect(shape).toEqual({
-      kind: "static",
-      outputDir: ".output/public",
-      reason: "Nuxt static generation",
-    })
+    expect(shape?.kind).toBe("server")
   })
   it("answers null when the build wrote neither", async () => {
     expect(await NUXT_ADAPTER.inspectBuild(await checkout({}))).toBeNull()

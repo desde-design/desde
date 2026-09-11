@@ -13,6 +13,8 @@ async function checkout(opts: {
   reactRouter?: "react-router" | "@react-router/dev" | false
   inDevDependencies?: boolean
   serverBuild?: boolean
+  /** What `@react-router/dev` wrote into the server bundle for `isSpaMode`. */
+  spaMode?: boolean
   clientHtml?: boolean
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "fw-react-router-"))
@@ -38,7 +40,10 @@ async function checkout(opts: {
 
   if (opts.serverBuild) {
     await mkdir(join(root, "build", "server"), { recursive: true })
-    await writeFile(join(root, "build", "server", "index.js"), "export default null")
+    await writeFile(
+      join(root, "build", "server", "index.js"),
+      `const isSpaMode = ${opts.spaMode === true};\nexport { isSpaMode };\nexport default null`,
+    )
   }
   if (opts.clientHtml) {
     await mkdir(join(root, "build", "client"), { recursive: true })
@@ -82,22 +87,28 @@ describe("React Router adapter", () => {
     })
   })
   /**
-   * Codex round 11, Fix 2. `ssr: false` still writes `build/server/index.js`
-   * (React Router uses it at build time for pre-rendering), right next to
-   * `build/client/index.html`. Reading the server file FIRST used to treat
-   * every SPA build as a server prototype — an isolated origin and a process
-   * slot for a build that has no server to run. `build/client/index.html`
-   * is checked first now, so a build that wrote both is read as static.
+   * Codex round 11, Fix 2, corrected in review. `ssr: false` still writes
+   * `build/server/index.js` (React Router uses it at build time for
+   * pre-rendering) next to `build/client/index.html`, so the server file
+   * alone does not mean a server. But `ssr: true` with a pre-rendered root
+   * writes `build/client/index.html` too, so the html alone does not mean
+   * an SPA either. The server bundle's own `isSpaMode` export decides.
    */
-  it("prefers the static client build when both exist (ssr: false still writes a server bundle)", async () => {
+  it("reads a server bundle marked isSpaMode next to a client index.html as static", async () => {
     const shape = await REACT_ROUTER_ADAPTER.inspectBuild(
-      await checkout({ serverBuild: true, clientHtml: true }),
+      await checkout({ serverBuild: true, spaMode: true, clientHtml: true }),
     )
     expect(shape).toEqual({
       kind: "static",
       outputDir: "build/client",
       reason: "React Router SPA mode",
     })
+  })
+  it("keeps a server build that pre-rendered its root as a server (isSpaMode false)", async () => {
+    const shape = await REACT_ROUTER_ADAPTER.inspectBuild(
+      await checkout({ serverBuild: true, spaMode: false, clientHtml: true }),
+    )
+    expect(shape?.kind).toBe("server")
   })
   it("answers null when the build wrote neither", async () => {
     expect(await REACT_ROUTER_ADAPTER.inspectBuild(await checkout({}))).toBeNull()
