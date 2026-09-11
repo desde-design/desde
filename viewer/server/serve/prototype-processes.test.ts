@@ -4,7 +4,13 @@ import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createPrototypeProcesses, pickLoopbackPort, PrototypeProcessError } from "./prototype-processes"
 
-const FAKE = resolve(__dirname, "__tests__/fixtures/fake-server.mjs")
+/**
+ * The child this manager spawns. Under `__fixtures__/`, not `fixtures/`,
+ * because it is reached by PATH and spawned — no module imports it, so knip
+ * reads it as an unused file unless it sits in the directory name
+ * `knip.json` already ignores for exactly this case.
+ */
+const FAKE = resolve(__dirname, "__tests__/__fixtures__/fake-server.mjs")
 const roots: string[] = []
 async function checkoutsRoot(ids: string[]): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "procs-"))
@@ -208,7 +214,9 @@ describe("createPrototypeProcesses", () => {
    * The rule is the manager's own restart budget, not a second copy of it.
    */
   it("marks a transient crash retryable and an over-budget one not", async () => {
-    let now = 1_000_000
+    // A frozen clock, so all four crashes fall inside one restart window and
+    // the budget verdict is the thing under test rather than wall-clock luck.
+    const now = 1_000_000
     const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]), now: () => now })
     managers.push(procs)
     const { port } = await procs.ensure({ id: "d1", serverStart: start() })
