@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -231,13 +231,54 @@ describe("createPrototypeProcesses", () => {
     expect(procs.status("d1").state).toBe("stopped")
   })
 
-  it("a spawn failure (bad binary) fails fast with a crashed status naming the cause", async () => {
+  /**
+   * Codex round 7, Fix 4. This is the `child.once("error", …)` spawn-failure
+   * path (ENOENT, here) — the SAME class of bug as the `mkdir` failure
+   * below: before the fix, `reason` echoed the raw Node error message, which
+   * for a spawn failure carries the absolute binary path. The public reason
+   * is now the fixed sentence, whatever the raw error said.
+   */
+  it("a spawn failure (bad binary) fails fast with a crashed status, and never echoes the binary path", async () => {
     const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]), readyTimeoutMs: 5000 })
     managers.push(procs)
     await expect(procs.ensure({ id: "d1", serverStart: ["/nonexistent/binary"] })).rejects.toBeInstanceOf(PrototypeProcessError)
     const status = procs.status("d1")
     expect(status.state).toBe("crashed")
-    if (status.state === "crashed") expect(status.reason).toContain("could not be started")
+    if (status.state === "crashed") {
+      expect(status.reason).toContain("could not be started")
+      expect(status.reason).toBe("The server could not be started. See the viewer's log.")
+      expect(status.reason).not.toContain("/nonexistent/binary")
+    }
+  })
+
+  /**
+   * Codex round 7, Fix 4. A failure BEFORE spawn (here, the `.desde-home`
+   * `mkdir`) used to put the raw Node error's message into `reason` — and
+   * that message carries the full path, absolute and including the
+   * deployment id, which is exactly what a public status must not leak (the
+   * crashed panel and the 503 body reach every reader, public-link readers
+   * included). The marker id below stands in for anything sensitive that
+   * message could carry.
+   *
+   * `.desde-home` is pre-created as a FILE (not a directory) so the
+   * manager's own `mkdir(home, { recursive: true })` fails with an error
+   * whose message embeds the full path — the same shape a permissions or
+   * disk-full error would take, just deterministic.
+   */
+  it("a setup failure before spawn (mkdir for .desde-home fails) exposes a fixed sentence, never the raw error", async () => {
+    const id = "homeblockedmarker"
+    const root = await checkoutsRoot([id])
+    await writeFile(join(root, id, ".desde-home"), "x")
+    const procs = createPrototypeProcesses({ checkoutsRoot: root })
+    managers.push(procs)
+    await expect(procs.ensure({ id, serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+    const status = procs.status(id)
+    expect(status.state).toBe("crashed")
+    if (status.state === "crashed") {
+      expect(status.reason).toBe("The server could not be started. See the viewer's log.")
+      expect(status.reason).not.toContain(id)
+      expect(status.reason).not.toContain(root)
+    }
   })
 
   it("never hands the child the viewer's own environment, only the allowlist plus spawnEnv", async () => {

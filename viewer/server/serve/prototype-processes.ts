@@ -144,6 +144,21 @@ const LOG_CHARS = 64 * 1024
 const RESTART_BUDGET = 3
 const RESTART_WINDOW_MS = 5 * 60_000
 
+/**
+ * The public `reason` for a failure to even START the child — before spawn
+ * (a `pickPort`/`substitutePort`/`mkdir` throw) or at spawn itself (a
+ * `child.once("error", …)`, e.g. ENOENT).
+ *
+ * Both call sites used to build `reason` from the raw Node error's own
+ * message, and that message routinely carries the checkout's absolute path
+ * and the deployment id — exactly the kind of detail the crashed panel and
+ * the 503 body must not leak, since both reach every reader including a
+ * public-link one with no sign-in (codex round 7, Fix 4). The raw error is
+ * logged with `console.error` at each site instead — the manager's own
+ * server log, never the reader-visible one.
+ */
+const SETUP_FAILED_REASON = "The server could not be started. See the viewer's log."
+
 export interface PrototypeProcessesDeps {
   checkoutsRoot: string
   now?: () => number
@@ -559,12 +574,15 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     } catch (error) {
       // Retryable: nothing here says the NEXT attempt would fail the same
       // way (a port that is free a moment later, a transient mkdir error).
-      // The message is built from the error's own text, never the id.
+      // The raw error goes to the manager's own log ONLY — never into
+      // `reason`, which a reader (including a public-link one) can see
+      // through the crashed panel and the 503 body. See `SETUP_FAILED_REASON`.
+      console.error("[viewer] prototype process setup failed:", error)
       e.status = {
         state: "crashed",
         exitCode: null,
         restarts: e.restartsAt.length,
-        reason: `The server could not be started: ${error instanceof Error ? error.message : String(error)}`,
+        reason: SETUP_FAILED_REASON,
       }
       throw new PrototypeProcessError(exposedStatus(e), e.status.reason)
     }
@@ -628,12 +646,18 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // ENOENT — without setting `exited` here the poll loop would run all
       // the way to `readyTimeoutMs` reporting a misleading "did not answer".
       exited = true
+      // The child's own ring buffer (`serverLog`) keeps the raw message —
+      // that route is already reader-visible by design ("See the server
+      // log" is what several other crash reasons point readers to) and
+      // carries no MORE than a spawn failure's own text. `reason` is the
+      // separate, narrower surface this fix closes: see `SETUP_FAILED_REASON`.
       append(e, `\n${error.message}\n`)
+      console.error("[viewer] prototype process setup failed:", error)
       if (e.child !== child) return
       e.child = null
       e.port = null
       e.restartsAt.push(now())
-      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: `The server could not be started: ${error.message}` }
+      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: SETUP_FAILED_REASON }
     })
 
     const deadline = now() + readyTimeoutMs
