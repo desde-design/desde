@@ -265,8 +265,16 @@ export type PrototypeProcessStatus =
  * `serve === "server"`.
  *
  * `range` is the configured loopback port range (`ViewerConfig.
- * loopbackPortRange`), present only on the two `loopback` shapes — it names
- * the `-p` flag the review page's port banner points an operator at.
+ * loopbackPortRange`), present on the two `loopback` shapes — it names
+ * the `-p` flag the review page's port banner points an operator at. (The
+ * ports-exhausted 503, which is not one of these shapes, carries it too, for
+ * the panel that counts the ports.)
+ *
+ * `bridgeAssetPath` is where the bridge bundle lives on a prototype origin,
+ * relative to its root. Only the `loopback` shapes carry it, because the
+ * shell's port probe only runs in loopback mode: it fetches that path to ask
+ * whether the PORT answers at all, which the serve router decides before it
+ * would ever start a server prototype's process.
  */
 export type PrototypeOriginResponse =
   | {
@@ -276,6 +284,7 @@ export type PrototypeOriginResponse =
       serve: PrototypeServeMode
       process?: PrototypeProcessStatus
       range: { from: number; to: number } | null
+      bridgeAssetPath: string
     }
   | {
       mode: "loopback"
@@ -284,6 +293,7 @@ export type PrototypeOriginResponse =
       reason: "no-deployment"
       serve: "static"
       range: { from: number; to: number } | null
+      bridgeAssetPath: string
     }
   | {
       mode: "subdomain"

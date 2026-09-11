@@ -25,7 +25,7 @@ describe("decidePrototypeEmbed", () => {
       }),
     ).toEqual({ kind: "embed" })
   })
-  it("shows the crash instead of a frame that would 503", () => {
+  it("shows a crash the manager would NOT retry, instead of a frame that would 503", () => {
     expect(
       decidePrototypeEmbed({
         mode: "loopback",
@@ -34,9 +34,43 @@ describe("decidePrototypeEmbed", () => {
       }),
     ).toEqual({ kind: "crashed", reason: "The server kept exiting." })
   })
-  it("reports exhausted ports ahead of everything", () => {
-    expect(decidePrototypeEmbed({ mode: "fallback", serve: "static", reason: "ports-exhausted" })).toEqual({
-      kind: "ports-exhausted",
-    })
+  /**
+   * One transient exit is not a dead end. The manager restarts on the next
+   * `ensure`, and the iframe's own request IS that ensure, so embedding is
+   * both faster (seconds) and more honest than a panel whose only offer is a
+   * multi-minute rebuild.
+   */
+  it("embeds a crash the manager would retry", () => {
+    expect(
+      decidePrototypeEmbed({
+        mode: "loopback",
+        serve: "server",
+        process: { state: "crashed", exitCode: 1, restarts: 1, reason: "The server exited.", retryable: true },
+      }),
+    ).toEqual({ kind: "embed" })
+  })
+  /**
+   * Exhausted ports stop a SERVER prototype only. A static one is served
+   * from the asset store in path mode with no listener at all, which is
+   * exactly what the fallback shape the page builds already points at — so
+   * blanking it would be a regression against the pre-branch behaviour.
+   */
+  it("reports exhausted ports for a server prototype and embeds a static one anyway", () => {
+    expect(
+      decidePrototypeEmbed({ mode: "fallback", serve: "server", reason: "ports-exhausted" }),
+    ).toEqual({ kind: "ports-exhausted", count: null })
+    expect(
+      decidePrototypeEmbed({ mode: "fallback", serve: "static", reason: "ports-exhausted" }),
+    ).toEqual({ kind: "embed" })
+  })
+  it("names how many ports there are when the server reported the range", () => {
+    expect(
+      decidePrototypeEmbed({
+        mode: "fallback",
+        serve: "server",
+        reason: "ports-exhausted",
+        range: { from: 3101, to: 3120 },
+      }),
+    ).toEqual({ kind: "ports-exhausted", count: 20 })
   })
 })

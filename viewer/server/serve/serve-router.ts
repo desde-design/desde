@@ -268,7 +268,7 @@ export function resolvePrototypeCsp(
  * string byte-for-byte — and a version bump immediately stops matching, so
  * old cached URLs never resolve to a newer, different bundle.
  */
-function bridgeAssetRelPath(version: string): string {
+export function bridgeAssetRelPath(version: string): string {
   return `__desde/bridge-${version}.js`
 }
 

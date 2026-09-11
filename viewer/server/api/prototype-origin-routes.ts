@@ -12,6 +12,7 @@ import {
   SHELL_ORIGIN_HEADER,
   type PrototypeOriginResponse,
 } from "../serve/prototype-origin-resolve"
+import { bridgeAssetRelPath } from "../serve/serve-router"
 import { prototypeOriginFor } from "../serve/subdomain"
 import type { DeploymentServe } from "../storage/types"
 
@@ -125,6 +126,10 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     allowAnyLoopbackPort: deps.allowAnyLoopbackPort,
   })
   const acceptableOrigins = acceptableShellOrigins(deps.config)
+  // Where the bridge bundle sits on a prototype origin, for the shell's port
+  // probe. The same `?? "dev"` default `create-app.ts` hands the serve
+  // router, so the path this route names is the one that router answers.
+  const bridgeAssetPath = bridgeAssetRelPath(deps.bridgeVersion ?? "dev")
 
   router.get("/projects/:id/prototype-origin", async (req, res) => {
     // On EVERY response, including the refusals below. The answer names a
@@ -269,6 +274,7 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         reason: "no-deployment",
         serve: "static",
         range: deps.config.loopbackPortRange,
+        bridgeAssetPath,
       }
       res.json(body)
       return
@@ -291,12 +297,22 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         capabilityRequired: false,
         serve,
         range: deps.config.loopbackPortRange,
+        bridgeAssetPath,
         ...(processStatus ? { process: processStatus } : {}),
       }
       res.json(body)
     } catch (error) {
       if (error instanceof LoopbackPortsExhaustedError) {
-        res.status(503).json({ error: error.message, reason: "ports-exhausted" })
+        // `serve` and `range` ride along because the page decides what to do
+        // with this from them: a STATIC prototype still loads from the shell's
+        // own path prefix and must not be blanked, and the panel a server
+        // prototype gets names how many ports there are.
+        res.status(503).json({
+          error: error.message,
+          reason: "ports-exhausted",
+          serve,
+          range: deps.config.loopbackPortRange,
+        })
         return
       }
       // A constant plus the error's CLASS, never its message.

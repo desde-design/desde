@@ -263,10 +263,50 @@ describe("readPrototypeOrigin", () => {
     ).toEqual({ from: 3101, to: 3120 })
   })
 
-  it("parses the ports-exhausted 503 body's reason even though it has no mode", () => {
+  it("carries the bridge asset path the port watchdog probes", () => {
+    expect(
+      readPrototypeOrigin({
+        mode: "loopback",
+        origin: "http://127.0.0.1:45001",
+        capabilityRequired: false,
+        serve: "static",
+        range: null,
+        bridgeAssetPath: "__desde/bridge-2026-09-10h.js",
+      }).bridgeAssetPath,
+    ).toBe("__desde/bridge-2026-09-10h.js")
+    // An older server's body says nothing, and the shell then probes the
+    // origin root as it used to.
+    expect(
+      readPrototypeOrigin({ mode: "loopback", origin: "http://127.0.0.1:45001", serve: "static" })
+        .bridgeAssetPath,
+    ).toBeUndefined()
+  })
+
+  /**
+   * The 503 has no `mode`, so everything else about it falls back — but the
+   * page acts on all three of the fields it DOES carry: `reason` says what
+   * happened, `serve` decides whether it matters (a static prototype still
+   * loads from the shell's own path prefix), and `range` is the count the
+   * panel names.
+   */
+  it("parses the ports-exhausted 503 body's reason, serve and range even though it has no mode", () => {
     expect(
       readPrototypeOrigin({ error: "No free loopback ports", reason: "ports-exhausted" }),
     ).toEqual({ mode: "fallback", origin: null, serve: "static", range: null, reason: "ports-exhausted" })
+    expect(
+      readPrototypeOrigin({
+        error: "No free loopback ports",
+        reason: "ports-exhausted",
+        serve: "server",
+        range: { from: 3101, to: 3120 },
+      }),
+    ).toEqual({
+      mode: "fallback",
+      origin: null,
+      serve: "server",
+      range: { from: 3101, to: 3120 },
+      reason: "ports-exhausted",
+    })
   })
 
   it("ignores an unrecognised reason value", () => {

@@ -295,6 +295,10 @@ describe("GET /projects/:id/prototype-origin", () => {
         reason: "no-deployment",
         serve: "static",
         range: null,
+        // Stated on both loopback shapes, so the field describes the MODE
+        // rather than this one answer. Nothing probes it here: there is no
+        // origin yet to probe.
+        bridgeAssetPath: "__desde/bridge-test-bridge.js",
       })
     })
 
@@ -897,7 +901,13 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(logged).toContain("Error")
     })
 
-    it("answers 503 with reason ports-exhausted when the configured range is full", async () => {
+    /**
+     * The body carries `serve` and `range` as well as the reason, and the
+     * page acts on both: a STATIC prototype still loads from the shell's own
+     * path prefix when no listener can be opened, so only a server one gets
+     * the panel, and the panel names the count from the range.
+     */
+    it("answers 503 with reason ports-exhausted, the serve mode and the range", async () => {
       const thrown = new LoopbackPortsExhaustedError({ from: 3101, to: 3120 })
       const exhausted: LoopbackListenerRegistry = {
         ensure: () => Promise.reject(thrown),
@@ -907,8 +917,15 @@ describe("GET /projects/:id/prototype-origin", () => {
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
-      const ctx = setup({ prototypeListeners: exhausted })
+      const ctx = setup({
+        prototypeListeners: exhausted,
+        config: { ...loopbackConfig, loopbackPortRange: { from: 3101, to: 3120 } },
+      })
       const project = await seedProject(ctx.storage)
+      await ctx.storage.updateDeployment(project.activeDeploymentId as string, {
+        serve: "server",
+        serverStart: ["node", "server.js"],
+      })
 
       const res = await request(ctx.app)
         .get(`/api/v1/projects/${project.id}/prototype-origin`)
@@ -918,6 +935,8 @@ describe("GET /projects/:id/prototype-origin", () => {
 
       expect(res.body.reason).toBe("ports-exhausted")
       expect(res.body.error).toBe(thrown.message)
+      expect(res.body.serve).toBe("server")
+      expect(res.body.range).toEqual({ from: 3101, to: 3120 })
     })
   })
 })

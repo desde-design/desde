@@ -84,7 +84,14 @@ export function PrototypeUnavailable({
         <EmptyState
           size="sm"
           frame="panel"
-          title="All prototype ports are in use"
+          // The count comes from the range the server reported, so the
+          // sentence names the number the operator configured rather than a
+          // vague "all". Without a range there is no honest number to give.
+          title={
+            embed.count === null
+              ? "All prototype ports are in use"
+              : `All ${embed.count} prototype ports are in use`
+          }
           description="Close some reviews, or widen VIEWER_LOOPBACK_PORT_RANGE."
           data-testid="prototype-ports-exhausted"
         />

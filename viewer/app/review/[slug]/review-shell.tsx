@@ -140,6 +140,12 @@ export interface ReviewShellProject {
    * `reason` — a different failure, read off `process` instead.
    */
   originReason?: "ports-exhausted"
+  /**
+   * The bridge bundle's path on the prototype origin, relative to its root
+   * (`__desde/bridge-<version>.js`), when the server named one. The port
+   * watchdog below probes it. Absent means probe the origin root instead.
+   */
+  bridgeAssetPath?: string | null
 }
 
 const POPUP_WIDTH = 320
@@ -188,6 +194,7 @@ export function ReviewShell({
     serve: project.serve,
     process: project.process,
     reason: project.originReason,
+    range: project.range,
   })
 
   /**
@@ -434,13 +441,16 @@ export function ReviewShell({
    * the "did anything answer" signal this needs, independent of status code
    * or CORS.
    *
-   * Probes `/` rather than a specific bridge asset path: the served bridge
-   * bundle's version is resolved server-side (`server/create-app.ts`'s
-   * `bridgeVersion`) and is not threaded down into `ReviewShellProject`
-   * today, so there is no asset path this component can name. A loopback
-   * listener's root (its `index.html`) needs no capability either — see
-   * `prototype-origin.ts`'s module doc, "the listener is the credential" —
-   * so it is an equally honest, unauthenticated probe target.
+   * Probes the BRIDGE ASSET, not `/`. The serve router answers that path
+   * before it reaches the server-prototype fork, so the probe never waits on
+   * a process: a cold `next start` can take up to 60 s to answer `/`, which
+   * would abort this 8 s race and show the Docker banner for a prototype
+   * that is merely slow. The listener answers the bridge path in
+   * milliseconds either way, which is the right signal, because the question
+   * is only ever "does this PORT answer". It needs no capability either —
+   * see `prototype-origin.ts`'s module doc, "the listener is the credential".
+   * `bridgeAssetPath` comes from the prototype-origin route (the server knows
+   * the version); an older body without it falls back to `/`.
    *
    * State is set from the fetch's own `.then`/`.catch`, never from the
    * effect body — the effect only starts the race and cleans it up.
@@ -454,7 +464,7 @@ export function ReviewShell({
     // promise reject, which the `.catch` below reports the same way it
     // reports a real connection refusal.
     const timer = setTimeout(() => controller.abort(), watchdogMs)
-    fetch(`${project.prototypeOrigin}/`, {
+    fetch(`${project.prototypeOrigin}/${project.bridgeAssetPath ?? ""}`, {
       mode: "no-cors",
       cache: "no-store",
       signal: controller.signal,
@@ -470,7 +480,7 @@ export function ReviewShell({
       clearTimeout(timer)
       controller.abort()
     }
-  }, [project.mode, project.prototypeOrigin, watchdogMs])
+  }, [project.mode, project.prototypeOrigin, project.bridgeAssetPath, watchdogMs])
   const portWarning = shouldWarnPortUnreachable({
     mode: project.mode,
     bridgeReady: bridgeReadyEpoch > 0,

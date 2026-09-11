@@ -583,6 +583,27 @@ export const REVIEW_SHELL_SURFACE: SurfaceEntry = {
       readyWhen: '[data-testid="prototype-needs-origin"]',
     },
     {
+      // Every port in the configured range is already serving a review, so
+      // there is no listener left to open for this one. The panel names the
+      // count from the range the server reported. A STATIC prototype never
+      // reaches this state: it still loads from the shell's own path prefix.
+      id: "review/prototype-ports-exhausted",
+      label: "Prototype embed — every prototype port is in use",
+      render: () => (
+        <Scenario routes={{ [COMMENTS_PATH]: COMMENTS_OK }}>
+          <ReviewShell
+            project={{
+              ...REVIEW_PROJECT,
+              serve: "server",
+              originReason: "ports-exhausted",
+              range: { from: 45000, to: 45019 },
+            }}
+          />
+        </Scenario>
+      ),
+      readyWhen: '[data-testid="prototype-ports-exhausted"]',
+    },
+    {
       // A server prototype ON its own loopback origin, whose process has
       // crashed. The manager-only server log and Rebuild button both render
       // (the default signed-in user, `ME_SIGNED_IN`, is an admin) — the log
@@ -649,7 +670,11 @@ export const REVIEW_SHELL_SURFACE: SurfaceEntry = {
             // registry sweep's `readyWhen` below only passes if
             // `review-shell.tsx` actually calls this fetch, actually reads
             // its rejection, and actually renders the banner because of it.
-            "http://127.0.0.1:45001/": NETWORK_ERROR,
+            //
+            // The bridge asset, not the origin root: the probe names the
+            // path the server reported, because the router answers that one
+            // without ever starting a server prototype's process.
+            "http://127.0.0.1:45001/__desde/bridge-gallery.js": NETWORK_ERROR,
           }}
         >
           <ReviewShell
@@ -659,6 +684,7 @@ export const REVIEW_SHELL_SURFACE: SurfaceEntry = {
               mode: "loopback",
               serve: "static",
               range: { from: 45000, to: 45010 },
+              bridgeAssetPath: "__desde/bridge-gallery.js",
             }}
             watchdogMs={10}
           />
