@@ -31,7 +31,7 @@ database and built prototypes in, and one variable saying what URL it is
 reached at:
 
 ```bash
-docker run -d --name desde-viewer -p 3100:3100 \
+docker run -d --name desde-viewer -p 3100-3120:3100-3120 \
   -v desde-viewer-data:/data \
   -e VIEWER_PUBLIC_URL=http://localhost:3100 \
   ghcr.io/desde-design/viewer:latest
