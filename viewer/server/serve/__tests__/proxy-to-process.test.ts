@@ -348,6 +348,42 @@ describe("proxyToProcess", () => {
     expect(res.text).not.toContain("bridge-test.js")
   })
 
+  /**
+   * Codex round 7, Fix 1. The non-rewrite branch called `up.pipe(res)` and
+   * returned before `up.on("error", …)` was attached — that listener only
+   * existed on the rewrite path, further down. `pipe()` does not forward
+   * errors, so a child that starts a non-HTML response and then resets the
+   * connection mid-stream emitted `error` on `up` with no listener at all,
+   * which Node turns into an uncaught exception that ends the whole Viewer
+   * process. The fix attaches the error listener as the first thing in the
+   * response callback, before the rewrite/stream branch, so both paths have
+   * it.
+   */
+  it("does not crash the process when a non-HTML upstream resets mid-response, and destroys the client response", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("content-type", "application/octet-stream")
+      res.write("partial")
+      // A mid-response reset, not a graceful end — the shape that used to
+      // reach `up` as an unhandled "error" event.
+      setImmediate(() => res.socket?.destroy())
+    })
+    let uncaught: unknown
+    const onUncaught = (error: unknown): void => {
+      uncaught = error
+    }
+    process.once("uncaughtException", onUncaught)
+    try {
+      // The reset means the client side never sees a clean response either —
+      // it is the OTHER half of "the client response is destroyed".
+      await expect(request(appFor(port)).get("/p/acme/data.bin")).rejects.toThrow()
+    } finally {
+      process.removeListener("uncaughtException", onUncaught)
+    }
+    // A tick for anything that WOULD have crashed the process to have done so.
+    await new Promise((r) => setTimeout(r, 20))
+    expect(uncaught).toBeUndefined()
+  })
+
   it("answers 502 with an HTML page, its own headers, and reports it when the child is unreachable", async () => {
     let reported = false
     const res = await request(

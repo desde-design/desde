@@ -218,6 +218,14 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
     },
     (up) => {
       responded = true
+      // Attached FIRST, before the rewrite/stream branch below, so both
+      // paths have it. `pipe()` (the non-rewrite path, right below) does not
+      // forward errors — before this was hoisted here, a child that started
+      // a non-HTML response and then reset the connection mid-stream emitted
+      // "error" on `up` with no listener at all, which Node turns into an
+      // uncaught exception that ends the whole Viewer process (codex round
+      // 7, Fix 1).
+      up.on("error", () => res.destroy())
       // A child that ignores `accept-encoding: identity` and answers encoded
       // anyway cannot be safely rewritten — decoding it is out of scope, and
       // treating the compressed bytes as UTF-8 HTML would corrupt them. Fall
@@ -282,7 +290,6 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
       }
       up.on("data", onData)
       up.on("end", onEnd)
-      up.on("error", () => res.destroy())
     },
   )
 
