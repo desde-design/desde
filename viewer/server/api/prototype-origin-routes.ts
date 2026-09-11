@@ -11,6 +11,7 @@ import {
   resolveOrigins,
   SHELL_ORIGIN_HEADER,
   type PrototypeOriginResponse,
+  type PrototypeProcessStatus,
 } from "../serve/prototype-origin-resolve"
 import type { ProcessStatus } from "../serve/prototype-processes"
 import { bridgeAssetRelPath } from "../serve/serve-router"
@@ -627,12 +628,47 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
       send(current)
     }
 
+    /**
+     * The process status the last body carried, or `undefined` when it
+     * carried none.
+     *
+     * Read back off `current` rather than tracked in a second variable, so
+     * there is one answer to "what does the page believe right now" however
+     * the last body was built (a full resolve, or a patch).
+     */
+    const sentProcess = (): PrototypeProcessStatus | undefined =>
+      current.status === 200 && "process" in current.body ? current.body.process : undefined
+
+    /**
+     * Re-reads the followed deployment's process status and sends a fresh
+     * body when it differs from the one the page has.
+     *
+     * Subscribers fire on TRANSITIONS, and `retryable` is not a transition:
+     * it is computed when the status is read, from the crash timestamps and
+     * the clock (see `ProcessStatus.retryable`). So a crashed prototype whose
+     * restart budget ages out of its five minute window becomes retryable
+     * with no event to notify on, and the page would sit on the crashed panel
+     * until someone reloaded it. This runs on the heartbeat tick, which is
+     * the only clock this connection has.
+     */
+    const resendIfProcessChanged = (): void => {
+      if (closed || current.status !== 200) return
+      const deploymentId = current.deploymentId
+      if (deploymentId === null || current.body.serve !== "server") return
+      const status = deps.prototypeProcesses.status(deploymentId)
+      if (JSON.stringify(status) === JSON.stringify(sentProcess())) return
+      current = { ...current, body: { ...current.body, process: status } as PrototypeOriginResponse }
+      send(current)
+    }
+
     if (current.deploymentId && current.body.serve === "server") {
       subscribeToProcess(current.deploymentId)
     }
 
     heartbeat = setInterval(() => {
-      if (!closed) res.write(": ping\n\n")
+      if (closed) return
+      res.write(": ping\n\n")
+      resendIfProcessChanged()
     }, pingMs)
   })
 

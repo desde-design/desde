@@ -165,6 +165,13 @@ function refusingListeners(): LoopbackListenerRegistry {
 interface FakePrototypeProcesses extends PrototypeProcesses {
   subscribers: Map<string, Set<(status: ProcessStatus) => void>>
   emit(deploymentId: string, status: ProcessStatus): void
+  /**
+   * Changes what `status()` answers WITHOUT firing a subscriber, which is
+   * the real manager's own behaviour for `retryable`: it is computed when
+   * the status is read, so a spent restart budget ages back into a retryable
+   * one with no event to notify on.
+   */
+  setStatus(deploymentId: string, status: ProcessStatus): void
 }
 
 function fakePrototypeProcesses(): FakePrototypeProcesses {
@@ -199,7 +206,20 @@ function fakePrototypeProcesses(): FakePrototypeProcesses {
       statusFor.set(id, status)
       for (const listener of subscribers.get(id) ?? []) listener(status)
     },
+    setStatus(id, status) {
+      statusFor.set(id, status)
+    },
   }
+}
+
+/** A server deployment, which is what gives the stream a process to follow. */
+async function makeServerDeployment(ctx: Ctx, project: Project): Promise<string> {
+  const deploymentId = project.activeDeploymentId as string
+  await ctx.storage.updateDeployment(deploymentId, {
+    serve: "server",
+    serverStart: ["node", "server.js"],
+  })
+  return deploymentId
 }
 
 /** ONE stable app object for this whole file — see `__tests__/swappable-app.ts`. */
@@ -1182,6 +1202,43 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     } finally {
       for (const s of open) s.destroy()
     }
+  })
+
+  /**
+   * The crashed panel has to give way on its own when the restart budget
+   * ages out. `retryable` is computed when the status is READ, so the moment
+   * the last crash falls out of the five minute window the manager would
+   * answer `retryable: true` — but no event was applied, so no subscriber
+   * fires and the page would sit on a dead end until a reload. The heartbeat
+   * tick re-reads the status and sends a fresh body when it differs.
+   */
+  it("sends a fresh body when the process status changed with no transition to notify on", async () => {
+    const fake = fakePrototypeProcesses()
+    const ctx = setup({ prototypeProcesses: fake, prototypeOriginStreamPingMs: 20 })
+    const project = await seedProject(ctx.storage)
+    const deploymentId = await makeServerDeployment(ctx, project)
+    const spent: ProcessStatus = {
+      state: "crashed",
+      exitCode: 1,
+      restarts: 4,
+      reason: "The server kept exiting. See the server log.",
+      retryable: false,
+    }
+    const agedOut: ProcessStatus = { ...spent, reason: "The server exited.", retryable: true }
+    fake.setStatus(deploymentId, spent)
+
+    const { received, destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 2, {
+      onFirstByte: () => {
+        // No `emit`: the budget ageing out fires nothing, which is the whole
+        // point of this test.
+        fake.setStatus(deploymentId, agedOut)
+      },
+    })
+    destroy()
+
+    const frames = originFrames(received) as { process?: ProcessStatus }[]
+    expect(frames[0]?.process).toEqual(spent)
+    expect(frames[1]?.process).toEqual(agedOut)
   })
 
   it("unsubscribes from the process manager when the client disconnects", async () => {
