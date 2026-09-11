@@ -338,9 +338,9 @@ export function DeploymentsPanel({
 
            DEFENSIVE, not a designed destination (Mo, 2026-08-30, option
            2): the review page refuses a project with no active
-           deployment (`resolveReviewProject`), and a never-deployed card
-           on the dashboard resumes the Add wizard instead of opening
-           review. A person can only meet this state if the deployments
+           deployment (`resolveReviewProject`) and renders
+           `never-deployed.tsx` instead, which shows a first build itself
+           (2026-09-10). A person can only meet this state if the deployments
            list answers empty for a page that just resolved an active
            deployment. It briefly carried call-to-action buttons; they were
            designed for a screen the product never routes to — exactly the

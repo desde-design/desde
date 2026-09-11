@@ -24,6 +24,7 @@ import type { MachineTokenScope, User, UserInstallationEntry } from "../../stora
 import { testGithubRuntime } from "../../__tests__/test-github-runtime"
 import { upsertTestUser } from "../../__tests__/user-fixtures"
 import type { InstanceRole } from "../../storage/types"
+import { BuildQueueFullError, createBuildQueue, type BuildQueue } from "../../build/build-queue"
 
 const nullAssets: AssetStore = {
   async put() {},
@@ -167,7 +168,7 @@ describe("GitHub connect/disconnect API (Phase 3c-1 Task 4)", () => {
     return `Bearer ${gen.token}`
   }
 
-  function appWithGithub(filesByRepo?: Record<string, string | null>) {
+  function appWithGithub(filesByRepo?: Record<string, string | null>, buildQueue?: BuildQueue) {
     const githubApp = createFakeGitHubAppClient({
       installations: [INSTALLATION, FOREIGN_INSTALLATION],
       reposByInstallation: {
@@ -193,7 +194,9 @@ describe("GitHub connect/disconnect API (Phase 3c-1 Task 4)", () => {
         assets: nullAssets,
         config,
         bridgeScript: "// bridge",
-        github: testGithubRuntime({ overrides: { appClient: githubApp } }),
+        github: testGithubRuntime({
+          overrides: { appClient: githubApp, ...(buildQueue ? { buildQueue } : {}) },
+        }),
       }),
     )
     return stable.app
@@ -648,6 +651,103 @@ describe("GitHub connect/disconnect API (Phase 3c-1 Task 4)", () => {
       expect(res.body.identityConflict).toEqual({
         embeddedId: "emb-1",
         conflictWith: other.id,
+      })
+    })
+
+    // ---------------------------------------------------------------
+    // The first connect starts the first build (Mo, 2026-09-10)
+    // ---------------------------------------------------------------
+    //
+    // Before this, a connect only saved settings. The Deploy button lives on
+    // the review screen, and the review screen needs a finished build, so a
+    // prototype connected from the Add dialog had no way to its first build.
+
+    describe("first build", () => {
+      /** A real queue whose runner never finishes, so the build stays `building`. */
+      function hangingQueue(): BuildQueue {
+        return createBuildQueue({
+          storage,
+          assets: nullAssets,
+          runner: { run: () => new Promise<never>(() => {}) },
+        })
+      }
+
+      it("starts a build on the first connect and reports it", async () => {
+        const { project, ownerCookie } = await seedOwnedProject()
+        const res = await request(appWithGithub(undefined, hangingQueue()))
+          .put(`/api/v1/projects/${project.id}/repo`)
+          .set("Cookie", ownerCookie)
+          .send(VALID_REPO_BODY)
+          .expect(200)
+        const deployments = await storage.listDeployments(project.id)
+        expect(deployments).toHaveLength(1)
+        expect(deployments[0]!.status).toBe("building")
+        expect(res.body.build).toEqual({ deploymentId: deployments[0]!.id })
+      })
+
+      it("starts nothing when a repository was already connected", async () => {
+        const { project, ownerCookie } = await seedOwnedProject()
+        const built = appWithGithub(undefined, hangingQueue())
+        await request(built)
+          .put(`/api/v1/projects/${project.id}/repo`)
+          .set("Cookie", ownerCookie)
+          .send(VALID_REPO_BODY)
+          .expect(200)
+        // A settings save, not a connect.
+        const res = await request(built)
+          .put(`/api/v1/projects/${project.id}/repo`)
+          .set("Cookie", ownerCookie)
+          .send({ ...VALID_REPO_BODY, buildCommand: "npm run build:prod" })
+          .expect(200)
+        expect(res.body.build).toBeUndefined()
+        expect(await storage.listDeployments(project.id)).toHaveLength(1)
+      })
+
+      it("starts nothing on an upload-backed prototype, which already has a build to protect", async () => {
+        const { project, ownerCookie } = await seedOwnedProject()
+        const uploaded = await storage.createDeployment({
+          projectId: project.id,
+          status: "deployed",
+          commitSha: null,
+        })
+        await storage.updateProject(project.id, { activeDeploymentId: uploaded.id })
+        const res = await request(appWithGithub(undefined, hangingQueue()))
+          .put(`/api/v1/projects/${project.id}/repo`)
+          .set("Cookie", ownerCookie)
+          .send(VALID_REPO_BODY)
+          .expect(200)
+        expect(res.body.build).toBeUndefined()
+        expect(await storage.listDeployments(project.id)).toHaveLength(1)
+      })
+
+      it("keeps the connect when builds are not enabled, and says why nothing built", async () => {
+        const { project, ownerCookie } = await seedOwnedProject()
+        const res = await request(appWithGithub())
+          .put(`/api/v1/projects/${project.id}/repo`)
+          .set("Cookie", ownerCookie)
+          .send(VALID_REPO_BODY)
+          .expect(200)
+        expect(res.body.repoConfig).not.toBeNull()
+        expect(res.body.build).toEqual({ error: "Builds are not enabled on this deployment" })
+        expect(await storage.listDeployments(project.id)).toHaveLength(0)
+      })
+
+      it("keeps the connect when the build cannot start, and reports the reason", async () => {
+        const { project, ownerCookie } = await seedOwnedProject()
+        const full: BuildQueue = {
+          async start() {
+            throw new BuildQueueFullError()
+          },
+          activeDeploymentFor: () => undefined,
+          async shutdown() {},
+        }
+        const res = await request(appWithGithub(undefined, full))
+          .put(`/api/v1/projects/${project.id}/repo`)
+          .set("Cookie", ownerCookie)
+          .send(VALID_REPO_BODY)
+          .expect(200)
+        expect(res.body.repoConfig).not.toBeNull()
+        expect(res.body.build).toEqual({ error: new BuildQueueFullError().message })
       })
     })
 

@@ -245,6 +245,7 @@ function BaseDialog({
             returnPath={`/?connect=${PID}`}
             onSetUpGithub={() => setSettingUpGithub(true)}
             onUploaded={() => ctx.log("onUploaded")}
+            onConnected={(slug) => ctx.log("onConnected", slug)}
           />
         ) : (
           <ProjectRepoPanel

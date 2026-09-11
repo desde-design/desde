@@ -90,6 +90,20 @@ export interface ProjectRepoPanelProps {
    * everyone else.
    */
   onSetUpGithub?: () => void
+  /**
+   * Called once a connect returns 2xx, with the project's slug (null only if
+   * the reply somehow lacked one). A host that supplies it owns what happens
+   * next, and the panel does not move to the settings form.
+   *
+   * Only the Add-project wizard passes it (Mo, 2026-09-10). Without it, a
+   * successful connect there landed on the settings form for the connection
+   * just made. Its Save was disabled because nothing had changed since the
+   * connect, so the dialog read as stuck. The server now starts the first
+   * build on a first connect, so that host sends the reader to the review
+   * route to watch it. The settings hosts leave this unset: for them the form
+   * IS the settled state.
+   */
+  onConnected?: (slug: string | null) => void
   className?: string
 }
 
@@ -133,6 +147,7 @@ export interface ProjectRepoPanelProps {
 export function ProjectRepoPanel({
   projectId,
   onClose,
+  onConnected,
   returnPath,
   onSetUpGithub,
   className,
@@ -452,6 +467,10 @@ export function ProjectRepoPanel({
       if (!buildFieldsAreValid(errors)) return
       setSubmitting(true)
       setSubmitError(null)
+      // Set when the host takes over. The button stays busy from then on,
+      // because the host is navigating away and a second click would only
+      // save the same settings again.
+      let handedOff = false
       try {
         const res = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/repo`, {
           method: "PUT",
@@ -491,7 +510,18 @@ export function ProjectRepoPanel({
          * carry over rather than being re-read: `resetWizardSelections`
          * clears the picker's account and repo, and the form keeps what the
          * reader just submitted.
+         *
+         * Unless the host takes over: see `onConnected`.
          */
+        if (onConnected) {
+          const slug =
+            body !== null && typeof body === "object" && typeof (body as { slug?: unknown }).slug === "string"
+              ? (body as { slug: string }).slug
+              : null
+          handedOff = true
+          onConnected(slug)
+          return
+        }
         resetWizardSelections()
         setBuildFields(buildFields)
         setFlowMode("edit")
@@ -499,10 +529,10 @@ export function ProjectRepoPanel({
       } catch (err) {
         setSubmitError(err instanceof Error ? err.message : String(err))
       } finally {
-        setSubmitting(false)
+        if (!handedOff) setSubmitting(false)
       }
     },
-    [buildFields, projectId, resetWizardSelections, loadProject],
+    [buildFields, projectId, onConnected, resetWizardSelections, loadProject],
   )
 
   /*

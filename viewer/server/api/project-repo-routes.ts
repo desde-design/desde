@@ -18,6 +18,40 @@ import { callerCanSeeInstallation, filterReposForCaller } from "../github/caller
 import { NotFoundError } from "../storage/errors"
 import { readIdentityFromConfig } from "../../../src/core/project-identity"
 import type { ProjectRepoConfig } from "../storage/types"
+import { BuildInProgressError, BuildQueueFullError } from "../build/build-queue"
+
+/** What a first connect says about the build it tried to start. */
+type FirstBuildResult = { deploymentId: string } | { error: string }
+
+/**
+ * Starts the build a first connect owes the reader (Mo, 2026-09-10).
+ *
+ * Before this, connecting only saved settings, and nothing in the product
+ * could start a first build: Deploy lives on the review screen, and the
+ * review screen needs a finished build to open. The connect route is the one
+ * place every first connect passes through, so the rule lives here rather
+ * than in whichever dialog happens to call it.
+ *
+ * Never throws. The repository IS connected by the time this runs, so a build
+ * that cannot start is reported next to the connect, the same way
+ * `identityConflict` is, rather than failing it. The messages match
+ * `build-routes.ts`, which answers the same three cases for the Deploy button.
+ */
+async function startFirstBuild(deps: AppDeps, projectId: string): Promise<FirstBuildResult> {
+  // Read into a local before the await, for the reason `build-routes.ts`
+  // gives: the queue is a mutable field on the runtime.
+  const buildQueue = deps.github.buildQueue
+  if (!buildQueue) return { error: "Builds are not enabled on this deployment" }
+  try {
+    return { deploymentId: await buildQueue.start(projectId, null) }
+  } catch (error) {
+    // Already building: hand back that build, so the reader watches it.
+    if (error instanceof BuildInProgressError) return { deploymentId: error.deploymentId }
+    if (error instanceof BuildQueueFullError) return { error: error.message }
+    console.error(`[viewer] could not start the first build for project ${projectId}:`, error)
+    return { error: "Could not start the build" }
+  }
+}
 
 const MAX_SHORT_STRING_CHARS = 255
 const MAX_COMMAND_CHARS = 2000
@@ -138,6 +172,12 @@ export function createProjectRepoRoutes(deps: AppDeps): Router {
     // someone who hasn't cleared authorization yet.
     const project = await requireProjectManage(deps, req, res, String(req.params.id), "connect a repository")
     if (!project) return
+    // A first connect on a prototype with nothing deployed, as opposed to a
+    // settings save. Only that starts a build: see `startFirstBuild`. The
+    // deployment check matters on its own: an upload-backed prototype has a
+    // build and no repository, and a connect there must not replace what is
+    // being served with a build nobody asked for (codex review, 2026-09-10).
+    const isFirstConnect = project.repoConfig === null && project.activeDeploymentId === null
 
     // Read into a local before this handler's next `await`. The App client is
     // a mutable field on the runtime now (`github-runtime.ts`) — narrowing on
@@ -319,7 +359,15 @@ export function createProjectRepoRoutes(deps: AppDeps): Router {
         // Absent / malformed / unreadable — all "no identity", never fatal.
       }
 
-      res.json(identityConflict ? { ...project2, identityConflict } : project2)
+      // After the identity read, so a build never clones a repo whose
+      // connect is still being settled.
+      const build = isFirstConnect ? await startFirstBuild(deps, project.id) : undefined
+
+      res.json({
+        ...project2,
+        ...(identityConflict ? { identityConflict } : {}),
+        ...(build ? { build } : {}),
+      })
     } catch (error) {
       if (error instanceof NotFoundError) {
         res.status(404).json({ error: error.message })

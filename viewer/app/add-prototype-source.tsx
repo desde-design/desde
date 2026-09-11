@@ -24,6 +24,8 @@ export interface AddPrototypeSourceProps {
   returnPath: string
   /** Called once an upload returns 2xx; the host closes and refreshes. */
   onUploaded: () => void
+  /** Called once a GitHub connect returns 2xx, with the project's slug. See `ProjectRepoPanelProps.onConnected`. */
+  onConnected: (slug: string | null) => void
   /** See `ProjectRepoPanelProps.onSetUpGithub` — the host's App-setup step. */
   onSetUpGithub?: () => void
 }
@@ -33,6 +35,7 @@ export function AddPrototypeSource({
   onClose,
   returnPath,
   onUploaded,
+  onConnected,
   onSetUpGithub,
 }: AddPrototypeSourceProps) {
   return (
@@ -50,6 +53,7 @@ export function AddPrototypeSource({
           onClose={onClose}
           returnPath={returnPath}
           onSetUpGithub={onSetUpGithub}
+          onConnected={onConnected}
         />
       </TabsContent>
       <TabsContent value="upload" className="pt-2">

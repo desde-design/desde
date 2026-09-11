@@ -68,6 +68,11 @@ interface ProjectSummary {
    * same claim and a future card may want to tell them apart.
    */
   activeDeployment?: ActiveDeployment | null
+  /**
+   * Present only for a caller who can manage (the server omits it for anyone
+   * else). The card reads only whether it is set.
+   */
+  repoConfig?: { owner: string; name: string } | null
 }
 
 export function ProjectsList({ serveDomain, publicUrl }: ProjectsListProps) {
@@ -463,6 +468,20 @@ export function ProjectsList({ serveDomain, publicUrl }: ProjectsListProps) {
                     /* The new deployment should show on the card straight away. */
                     setReloadToken((n) => n + 1)
                   }}
+                  onConnected={(slug) => {
+                    /* The server started the first build (Mo, 2026-09-10),
+                       and the review route is where it can be watched: it
+                       shows the build until one finishes, then the review
+                       screen. A plain navigation, like the cards' own links.
+                       Without a slug there is nowhere to go, so close and
+                       refresh the list instead. */
+                    if (slug) {
+                      window.location.assign(`/review/${encodeURIComponent(slug)}`)
+                      return
+                    }
+                    closeConnecting()
+                    setReloadToken((n) => n + 1)
+                  }}
                 />
               ) : null}
             </>
@@ -679,7 +698,11 @@ function ProjectCard({
           so the prototype is still what you see, with the comment rail beside
           it. The card keeps printing the prototype's own URL below the name,
           which is where it is served rather than where this click goes. */}
-      {deployed ? (
+      {/* A connected repository opens the review route too, even with no
+          finished build (Mo, 2026-09-10). That route shows the first build
+          running, or offers Deploy. The Add wizard below would only reopen a
+          settings form with nothing left to connect. */}
+      {deployed || project.repoConfig ? (
         <Button asChild variant="outline" className={cn(cardBase, cardInteractive)}>
           <a href={`/review/${project.slug}`} data-testid={`project-open-${project.slug}`}>
             {body}

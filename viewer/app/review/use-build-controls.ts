@@ -33,6 +33,12 @@ export interface BuildControlsInput {
 export interface BuildControls {
   /** The newest deployment, or null before one loads. */
   deployment: DeploymentView | null
+  /**
+   * The first read of the list has answered. Needed because `deployment` is
+   * null BOTH before that read and when there are no builds, and only the
+   * second is an answer (see `decideNeverDeployedView`).
+   */
+  loaded: boolean
   /** Its log, appended live while a build streams. */
   log: string
   /** A failed start, in the reader's terms. */
@@ -58,6 +64,7 @@ export function useBuildControls({
   const [log, setLog] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
+  const [loaded, setLoaded] = useState(false)
 
   const isBuilding = deployment?.status === "building"
 
@@ -76,6 +83,10 @@ export function useBuildControls({
       // A failed refresh leaves the last known state on screen rather than
       // blanking it — the same "sticky load error" rule the comments rail
       // needed after it blanked itself on a transient failure.
+    } finally {
+      // A failed read counts as answered: the page then offers Deploy, and a
+      // Deploy that meets a running build gets its id back from the 409.
+      setLoaded(true)
     }
   }, [projectId])
 
@@ -176,6 +187,7 @@ export function useBuildControls({
 
   return {
     deployment,
+    loaded,
     log,
     error,
     starting,
