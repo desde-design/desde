@@ -30,8 +30,14 @@ import type { DeploymentServe } from "../../../server/storage/types"
  * that process is doing. `range` is the configured loopback port range, sent
  * with loopback mode's bodies and with the ports-exhausted 503 — it is what
  * the port banner names the `-p` flag from, and what the exhausted panel
- * counts. `reason` carries the one 503 reason this page cares about: the
- * loopback port range is full.
+ * counts. `reason` carries the two 503 reasons this page cares about: the
+ * loopback port range is full (`"ports-exhausted"`), or a listener could not
+ * be opened for some other reason (`"listener-failed"`, codex round 6, Fix
+ * 2 — an `EADDRNOTAVAIL` on an IPv4-only host trying `::1`, say). Neither
+ * 503 carries a `mode`, so both fall back to `"fallback"` here — but a
+ * STATIC deployment still loads fine from the shell's own path prefix in
+ * fallback mode, which is why `serve` travels alongside `reason` rather than
+ * this page just blanking the frame outright.
  */
 export interface ReviewEmbedOrigin {
   mode: OriginMode
@@ -39,7 +45,7 @@ export interface ReviewEmbedOrigin {
   serve: DeploymentServe
   process?: ProcessStatus
   range: { from: number; to: number } | null
-  reason?: "ports-exhausted"
+  reason?: "ports-exhausted" | "listener-failed"
   /**
    * Where the bridge bundle lives on the prototype origin, relative to its
    * root (`__desde/bridge-<version>.js`), or `null` when the server did not
@@ -93,12 +99,18 @@ export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
     bridgeAssetPath?: unknown
   }
 
-  // Read before the shape checks below can bail out: the ports-exhausted 503
-  // body carries no `mode` at all, and the page still has to act on all three
-  // of these. `reason` says what happened; `serve` decides whether it matters
-  // (a static prototype still loads from the shell's own path prefix); `range`
-  // is the count the panel names.
-  const reason = rawReason === "ports-exhausted" ? ("ports-exhausted" as const) : undefined
+  // Read before the shape checks below can bail out: neither 503 body (ports
+  // exhausted, or the generic listener failure) carries `mode` at all, and
+  // the page still has to act on all three of these. `reason` says what
+  // happened; `serve` decides whether it matters (a static prototype still
+  // loads from the shell's own path prefix); `range` is the count the panel
+  // names, when there is one.
+  const reason =
+    rawReason === "ports-exhausted"
+      ? ("ports-exhausted" as const)
+      : rawReason === "listener-failed"
+        ? ("listener-failed" as const)
+        : undefined
   // `serve` defaults to "static" so an older server's body (no field at all)
   // parses exactly like it used to: a static deployment, no process to show.
   const serve: DeploymentServe = rawServe === "server" ? "server" : "static"

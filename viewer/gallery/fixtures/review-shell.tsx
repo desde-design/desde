@@ -604,6 +604,26 @@ export const REVIEW_SHELL_SURFACE: SurfaceEntry = {
       readyWhen: '[data-testid="prototype-ports-exhausted"]',
     },
     {
+      // The generic 503 (codex round 6, Fix 2): the listener registry
+      // rejected ensure() for some reason other than exhausted ports (an
+      // EADDRNOTAVAIL on an IPv4-only host trying ::1, say). A STATIC
+      // prototype never reaches this state either, same as ports-exhausted.
+      id: "review/prototype-listener-failed",
+      label: "Prototype embed — the listener could not be opened",
+      render: () => (
+        <Scenario routes={{ [COMMENTS_PATH]: COMMENTS_OK }}>
+          <ReviewShell
+            project={{
+              ...REVIEW_PROJECT,
+              serve: "server",
+              originReason: "listener-failed",
+            }}
+          />
+        </Scenario>
+      ),
+      readyWhen: '[data-testid="prototype-listener-failed"]',
+    },
+    {
       // A server prototype ON its own loopback origin, whose process has
       // crashed. The manager-only server log and Rebuild button both render
       // (the default signed-in user, `ME_SIGNED_IN`, is an admin) — the log

@@ -136,12 +136,14 @@ export interface ReviewShellProject {
    */
   range: { from: number; to: number } | null
   /**
-   * The one 503 reason `page.tsx` reads off the prototype-origin route:
-   * every loopback port is already in use. Named `originReason`, not
-   * `reason`, so it cannot be confused with a crashed process's OWN
-   * `reason` — a different failure, read off `process` instead.
+   * The two 503 reasons `page.tsx` reads off the prototype-origin route:
+   * every loopback port is already in use, or a listener could not be
+   * opened for some other reason (codex round 6, Fix 2). Named
+   * `originReason`, not `reason`, so it cannot be confused with a crashed
+   * process's OWN `reason` — a different failure, read off `process`
+   * instead.
    */
-  originReason?: "ports-exhausted"
+  originReason?: "ports-exhausted" | "listener-failed"
   /**
    * The bridge bundle's path on the prototype origin, relative to its root
    * (`__desde/bridge-<version>.js`), when the server named one. The port

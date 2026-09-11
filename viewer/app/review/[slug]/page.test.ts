@@ -312,6 +312,30 @@ describe("readPrototypeOrigin", () => {
   it("ignores an unrecognised reason value", () => {
     expect(readPrototypeOrigin({ error: "boom", reason: "something-else" }).reason).toBeUndefined()
   })
+
+  /**
+   * Codex round 6, Fix 2. The generic 503 (any `ensure()` failure other than
+   * exhausted ports — an `EADDRNOTAVAIL` on an IPv4-only host trying `::1`,
+   * say) also has no `mode`, and it carries `serve` but no `range`. Before
+   * this, the body was `{ error }` alone, `serve` defaulted to `"static"` on
+   * the client no matter what it actually was, and a server deployment's
+   * embed decision landed on the iframe instead of a panel.
+   */
+  it("parses the generic listener-failed 503 body's reason and serve, with no range", () => {
+    expect(
+      readPrototypeOrigin({
+        error: "Prototype origin unavailable",
+        reason: "listener-failed",
+        serve: "server",
+      }),
+    ).toEqual({
+      mode: "fallback",
+      origin: null,
+      serve: "server",
+      range: null,
+      reason: "listener-failed",
+    })
+  })
 })
 
 describe("resolveReviewProject", () => {

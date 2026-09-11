@@ -73,4 +73,20 @@ describe("decidePrototypeEmbed", () => {
       }),
     ).toEqual({ kind: "ports-exhausted", count: 20 })
   })
+
+  /**
+   * Codex round 6, Fix 2. `reason: "listener-failed"` is the generic 503 —
+   * any `ensure()` failure other than exhausted ports. Same rule as
+   * ports-exhausted: a SERVER deployment has no other way to get an origin,
+   * so it gets a panel; a STATIC one still loads from the shell's own path
+   * prefix in fallback mode, so embedding it is unaffected.
+   */
+  it("shows a panel for a server prototype whose listener failed, and embeds a static one anyway", () => {
+    expect(
+      decidePrototypeEmbed({ mode: "fallback", serve: "server", reason: "listener-failed" }),
+    ).toEqual({ kind: "listener-failed" })
+    expect(
+      decidePrototypeEmbed({ mode: "fallback", serve: "static", reason: "listener-failed" }),
+    ).toEqual({ kind: "embed" })
+  })
 })

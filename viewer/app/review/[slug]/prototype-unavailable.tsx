@@ -97,6 +97,25 @@ export function PrototypeUnavailable({
           data-testid="prototype-ports-exhausted"
         />
       )
+    case "listener-failed":
+      // Codex round 6, Fix 2. The generic 503: `ensure()` failed for some
+      // reason other than exhausted ports (an `EADDRNOTAVAIL` on an
+      // IPv4-only host trying `::1`, say). `tone="error"` — the broken
+      // vacuum — because this is an actual fault, not "nothing is here" or
+      // "this did not load and can usually be retried" (ports-exhausted,
+      // above, uses neither tone either, but that one is a capacity limit,
+      // not a fault). No Reload control: the ports-exhausted panel beside it
+      // does not offer one either.
+      return (
+        <EmptyState
+          size="sm"
+          frame="panel"
+          tone="error"
+          title="The prototype could not be opened"
+          description="The viewer could not open a port for this prototype. Check the viewer's log, then try again."
+          data-testid="prototype-listener-failed"
+        />
+      )
     case "crashed":
       return (
         <EmptyState

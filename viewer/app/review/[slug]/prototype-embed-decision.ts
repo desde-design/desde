@@ -29,6 +29,14 @@ export type PrototypeEmbed =
   | { kind: "needs-origin" }
   /** `count` is how many ports the range holds, or `null` when none was reported. */
   | { kind: "ports-exhausted"; count: number | null }
+  /**
+   * The generic 503 (codex round 6, Fix 2): `ensure()` failed for a reason
+   * other than exhausted ports (an `EADDRNOTAVAIL` on an IPv4-only host
+   * trying `::1`, say). Same rule as `ports-exhausted`: only a SERVER
+   * deployment reaches this, since a static one loads from the shell's own
+   * path prefix regardless.
+   */
+  | { kind: "listener-failed" }
   | { kind: "crashed"; reason: string }
 
 /**
@@ -39,30 +47,36 @@ export type PrototypeEmbed =
  *    run. A STATIC one does: the page's fallback shape serves it from the
  *    asset store under the shell's own path prefix, exactly as it did before
  *    listeners existed, so blanking it would be a regression.
- * 2. A static deployment always embeds — the router proxies static assets in
+ * 2. `reason: "listener-failed"` on a SERVER deployment — the generic 503
+ *    (codex round 6, Fix 2): `ensure()` failed for some other reason. Same
+ *    "a static deployment is unaffected" rule as the ports-exhausted case.
+ * 3. A static deployment always embeds — the router proxies static assets in
  *    every mode, so there is nothing here to say.
- * 3. A server deployment needs an origin of its own: only `loopback` and
+ * 4. A server deployment needs an origin of its own: only `loopback` and
  *    `subdomain` mode can proxy it.
- * 4. A server deployment whose process crashed and will NOT be retried shows
+ * 5. A server deployment whose process crashed and will NOT be retried shows
  *    the crash instead of an iframe that would just 503. A retryable crash
  *    embeds: the iframe's own request is the `ensure` that restarts it, and
  *    that takes seconds where the panel offers a multi-minute rebuild. The
  *    verdict is the manager's (`ProcessStatus.retryable`), never a second
  *    copy of its restart budget written here.
- * 5. Otherwise, embed — including `starting` and `stopped`, both of which the
+ * 6. Otherwise, embed — including `starting` and `stopped`, both of which the
  *    router starts on the iframe's own request.
  */
 export function decidePrototypeEmbed(input: {
   mode: OriginMode
   serve: DeploymentServe
   process?: ProcessStatus
-  reason?: "ports-exhausted"
+  reason?: "ports-exhausted" | "listener-failed"
   /** The configured loopback port range, when the server reported one. */
   range?: { from: number; to: number } | null
 }): PrototypeEmbed {
   if (input.reason === "ports-exhausted" && input.serve === "server") {
     const range = input.range ?? null
     return { kind: "ports-exhausted", count: range ? range.to - range.from + 1 : null }
+  }
+  if (input.reason === "listener-failed" && input.serve === "server") {
+    return { kind: "listener-failed" }
   }
   if (input.serve === "static") return { kind: "embed" }
   if (input.mode !== "loopback" && input.mode !== "subdomain") return { kind: "needs-origin" }

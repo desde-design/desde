@@ -345,7 +345,16 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         "[viewer] could not open a prototype origin listener:",
         error instanceof Error ? error.name : "unknown",
       )
-      res.status(503).json(ORIGIN_UNAVAILABLE)
+      // `serve` rides along for the same reason it does on the
+      // ports-exhausted body above: a STATIC prototype still loads from the
+      // shell's own path prefix and must not be blanked. Before `reason` and
+      // `serve` were added here (codex round 6, Fix 2), this body was
+      // `ORIGIN_UNAVAILABLE` alone, `readPrototypeOrigin` defaulted `serve`
+      // to `"static"` on the client no matter what it actually was, and
+      // `decidePrototypeEmbed` embedded `/p/:slug/` for a SERVER deployment
+      // — which the serve router then answers 409 for, INSIDE the frame,
+      // instead of showing a panel.
+      res.status(503).json({ ...ORIGIN_UNAVAILABLE, reason: "listener-failed", serve })
     }
   })
 

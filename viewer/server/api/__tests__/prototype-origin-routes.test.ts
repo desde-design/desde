@@ -858,7 +858,16 @@ describe("GET /projects/:id/prototype-origin", () => {
   })
 
   describe("when a listener cannot be opened", () => {
-    it("answers 503 with a constant body", async () => {
+    /**
+     * Codex round 6, Fix 2. This used to be `{ error: "Prototype origin
+     * unavailable" }` alone — no `reason`, no `serve`. `readPrototypeOrigin`
+     * then defaulted `serve` to `"static"` on the client, the review page
+     * embedded `/p/:slug/` for a SERVER deployment, and the serve router
+     * answered 409 inside the frame. Naming `reason: "listener-failed"` is
+     * what lets `decidePrototypeEmbed` show a panel instead, the same way it
+     * already does for `reason: "ports-exhausted"`.
+     */
+    it("answers 503 with reason listener-failed and the serve mode, for a static deployment", async () => {
       vi.spyOn(console, "error").mockImplementation(() => {})
       const ctx = setup({ prototypeListeners: refusingListeners() })
       const project = await seedProject(ctx.storage)
@@ -869,7 +878,33 @@ describe("GET /projects/:id/prototype-origin", () => {
         .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
         .expect(503)
 
-      expect(res.body).toEqual({ error: "Prototype origin unavailable" })
+      expect(res.body).toEqual({
+        error: "Prototype origin unavailable",
+        reason: "listener-failed",
+        serve: "static",
+      })
+    })
+
+    it("answers 503 with serve: \"server\" for a server deployment", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {})
+      const ctx = setup({ prototypeListeners: refusingListeners() })
+      const project = await seedProject(ctx.storage)
+      await ctx.storage.updateDeployment(project.activeDeploymentId as string, {
+        serve: "server",
+        serverStart: ["node", "server.js"],
+      })
+
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(503)
+
+      expect(res.body).toEqual({
+        error: "Prototype origin unavailable",
+        reason: "listener-failed",
+        serve: "server",
+      })
     })
 
     /**
