@@ -2,7 +2,13 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { createPrototypeProcesses, pickLoopbackPort, PrototypeProcessError, substitutePort } from "./prototype-processes"
+import {
+  createPrototypeProcesses,
+  pickLoopbackPort,
+  PrototypeProcessError,
+  substitutePort,
+  type PrototypeProcesses,
+} from "./prototype-processes"
 
 /**
  * The child this manager spawns. Under `__fixtures__/`, not `fixtures/`,
@@ -30,6 +36,32 @@ function start(): string[] {
 async function get(port: number, path = "/"): Promise<{ status: number; body: string }> {
   const res = await fetch(`http://127.0.0.1:${port}${path}`)
   return { status: res.status, body: await res.text() }
+}
+
+/** A promise this file settles by hand, to hold a scope open for as long as a test needs. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void
+  const promise = new Promise<void>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
+}
+
+/**
+ * One open request lease, held until `release()` is called and awaited.
+ *
+ * The lease is a SCOPE (`withLease`), not a begin/end pair, so a test that
+ * needs one held across other calls expresses it as a scope whose body it
+ * settles itself. `release()` resolves once the scope has actually finished,
+ * which is when the lease is released.
+ */
+function holdLease(procs: PrototypeProcesses, id: string): () => Promise<void> {
+  const done = deferred()
+  const leased = procs.withLease(id, () => done.promise)
+  return async () => {
+    done.resolve()
+    await leased
+  }
 }
 
 /**
@@ -166,22 +198,22 @@ describe("createPrototypeProcesses", () => {
   /**
    * Codex round 8, Fix 2. Eviction used to sort every `running` entry by
    * recency and stop the oldest one, regardless of whether it was actively
-   * answering a request (`inFlight > 0`, held open by `beginRequest`). A
-   * fifth prototype opening while the least-recently-used one was mid-SSE
-   * or mid-download would kill that response out from under its reader —
-   * exactly what `beginRequest`/`inFlight` exist to prevent from the idle
-   * reaper, but eviction never consulted them.
+   * answering a request (an open lease, held by `withLease`). A fifth
+   * prototype opening while the least-recently-used one was mid-SSE or
+   * mid-download would kill that response out from under its reader —
+   * exactly what the lease exists to prevent from the idle reaper, but
+   * eviction never consulted it.
    *
-   * These three tests share one shape: fill the cap, mark every running
-   * entry busy with `beginRequest`, and prove eviction refuses to touch any
-   * of them until one goes idle again.
+   * These three tests share one shape: fill the cap, hold a lease open on
+   * every running entry, and prove eviction refuses to touch any of them
+   * until one goes idle again.
    */
   it("fails fast with a fixed sentence when the cap is full and every running entry is busy", async () => {
     const ids = ["a", "b", "c", "d"]
     const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot([...ids, "e"]), maxRunning: 4 })
     managers.push(procs)
     for (const id of ids) await procs.ensure({ id, serverStart: start() })
-    const releases = ids.map((id) => procs.beginRequest(id))
+    const releases = ids.map((id) => holdLease(procs, id))
 
     await expect(procs.ensure({ id: "e", serverStart: start() })).rejects.toMatchObject({
       message: "Every prototype server is busy. Try again in a moment.",
@@ -194,14 +226,14 @@ describe("createPrototypeProcesses", () => {
     const e = procs.status("e")
     expect(e.state).toBe("stopped")
 
-    for (const release of releases) release()
+    for (const release of releases) await release()
   })
 
   it("evicts the one idle entry among busy ones, even though it is the most recently used", async () => {
     const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["a", "b", "c"]), maxRunning: 2 })
     managers.push(procs)
     await procs.ensure({ id: "a", serverStart: start() })
-    const releaseA = procs.beginRequest("a")
+    const releaseA = holdLease(procs, "a")
     // b is ensured (and so touched) AFTER a, and stays idle — the plain LRU
     // rule that used to run would pick a, the older entry, as the victim.
     await procs.ensure({ id: "b", serverStart: start() })
@@ -211,25 +243,71 @@ describe("createPrototypeProcesses", () => {
     expect(procs.status("a").state).toBe("running")
     expect(procs.status("b").state).toBe("stopped")
     expect(procs.status("c").state).toBe("running")
-    releaseA()
+    await releaseA()
   })
 
   it("evicts the busy entry once its in-flight count drops back to zero", async () => {
     const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["a", "b"]), maxRunning: 1 })
     managers.push(procs)
     await procs.ensure({ id: "a", serverStart: start() })
-    const releaseA = procs.beginRequest("a")
+    const releaseA = holdLease(procs, "a")
 
     await expect(procs.ensure({ id: "b", serverStart: start() })).rejects.toMatchObject({
       message: "Every prototype server is busy. Try again in a moment.",
     })
     expect(procs.status("a").state).toBe("running")
 
-    releaseA()
+    await releaseA()
     const b = await procs.ensure({ id: "b", serverStart: start() })
     expect(b.port).toBeGreaterThan(0)
     expect(procs.status("a").state).toBe("stopped")
     expect(procs.status("b").state).toBe("running")
+  })
+
+  /**
+   * The lease is a scope, so the release is a `finally`, not a call the
+   * caller has to remember on every path. A `fn` that throws is the path
+   * the begin/end pair kept losing: a request that failed mid-flight left
+   * the entry marked in use for ever, exempt from both the idle reaper and
+   * eviction.
+   */
+  it("withLease releases the lease even when its body rejects", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["a", "b"]), maxRunning: 1 })
+    managers.push(procs)
+    await procs.ensure({ id: "a", serverStart: start() })
+
+    await expect(
+      procs.withLease("a", () => Promise.reject(new Error("the request blew up"))),
+    ).rejects.toThrow("the request blew up")
+
+    // Proof the lease is gone rather than merely believed gone: at a cap of
+    // one, `b` can only start if `a` is evictable, and a leaked lease would
+    // have made `a` permanently un-evictable.
+    await expect(procs.ensure({ id: "b", serverStart: start() })).resolves.toBeTruthy()
+    expect(procs.status("a").state).toBe("stopped")
+    expect(procs.status("b").state).toBe("running")
+  })
+
+  /**
+   * What the prototype-origin SSE stream reads (section 3 of the rework
+   * spec): the page follows the process rather than polling for it. A
+   * transition that leaves the exposed status the same (the `spawned`
+   * acknowledgement, a touch) must not wake it.
+   */
+  it("subscribe reports starting, running and crashed across a start and an exit, and stops on unsubscribe", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+    managers.push(procs)
+    const seen: string[] = []
+    const unsubscribe = procs.subscribe("d1", (status) => seen.push(status.state))
+
+    const { port } = await procs.ensure({ id: "d1", serverStart: start() })
+    await get(port, "/exit")
+    await new Promise((r) => setTimeout(r, 200))
+    expect(seen).toEqual(["starting", "running", "crashed"])
+
+    unsubscribe()
+    await procs.ensure({ id: "d1", serverStart: start() })
+    expect(seen).toEqual(["starting", "running", "crashed"])
   })
 
   it("stops a server that has been idle past the bound", async () => {
@@ -248,10 +326,10 @@ describe("createPrototypeProcesses", () => {
    * Codex round 2, item 3: the reaper used to touch `lastUsedAt` only when a
    * request BEGINS, so a long-lived response (SSE, a streamed download) was
    * cut once the idle bound passed even though it was actively being
-   * answered. `beginRequest` marks an entry in-flight for the duration of one
-   * request; the reaper must skip any entry with an open in-flight count.
+   * answered. `withLease` marks an entry in-flight for the duration of one
+   * request; the reaper must skip any entry with an open lease.
    */
-  it("does not reap an entry with a request held open via beginRequest, and reaps it once released", async () => {
+  it("does not reap an entry with a request held open via withLease, and reaps it once released", async () => {
     let now = 0
     const procs = createPrototypeProcesses({
       checkoutsRoot: await checkoutsRoot(["d1"]),
@@ -261,7 +339,7 @@ describe("createPrototypeProcesses", () => {
     })
     managers.push(procs)
     await procs.ensure({ id: "d1", serverStart: start() })
-    const release = procs.beginRequest("d1")
+    const release = holdLease(procs, "d1")
     const stop = procs.startReaper()
 
     now = 5000
@@ -270,7 +348,7 @@ describe("createPrototypeProcesses", () => {
     // idle bound the clock has moved.
     expect(procs.status("d1").state).toBe("running")
 
-    release()
+    await release()
     now = 5300
     await new Promise((r) => setTimeout(r, 200))
     stop()

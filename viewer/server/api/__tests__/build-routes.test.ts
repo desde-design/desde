@@ -380,18 +380,19 @@ describe("GET /deployments/:id/server-log (same gate as the build log)", () => {
    * so a passing 200 test proves the route is really reading
    * `deps.prototypeProcesses`, not a hardcoded shape.
    */
-  const fakeStatus: ProcessStatus = { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z" }
+  const fakeStatus: ProcessStatus = { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z", generation: 1 }
 
   function fakeProcesses(): PrototypeProcesses {
     return {
       ensure: () => Promise.reject(new Error("not used by this route")),
       touch: () => {},
-      beginRequest: () => () => {},
+      withLease: (_id, fn) => fn(),
       stop: () => Promise.resolve(),
       forget: () => Promise.resolve(),
       retire: () => Promise.resolve(),
       markUnreachable: () => Promise.resolve(),
       status: () => fakeStatus,
+      subscribe: () => () => {},
       serverLog: () => "hello",
       startReaper: () => () => {},
       shutdown: () => Promise.resolve(),

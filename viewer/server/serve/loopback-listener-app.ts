@@ -165,7 +165,7 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
   // outlives the idle bound while it is still being answered — an SSE
   // stream, a large streamed download — needs to stay protected for its
   // whole life, which is what `beginRequest`/`release` are for (codex round
-  // 7, Fix 3, mirroring `prototypeProcesses.beginRequest`). `release` also
+  // 7, Fix 3, mirroring `prototypeProcesses.withLease`). `release` also
   // touches the listener again, so the idle clock restarts from when the
   // response actually ends.
   app.use((_req, res, next) => {

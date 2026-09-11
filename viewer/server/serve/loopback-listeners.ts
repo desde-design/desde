@@ -162,12 +162,12 @@ export interface LoopbackListenerAppContext {
    *
    * Call it right when a request starts and call the returned function when
    * the response ends (`res.once("close", release)` in
-   * `loopback-listener-app.ts`). Mirrors `PrototypeProcesses.beginRequest`
+   * `loopback-listener-app.ts`). Mirrors `PrototypeProcesses.withLease`
    * (`prototype-processes.ts`) — without this, `touch()` at request-start
    * alone is not enough: a response that outlives the idle bound while it is
    * still being answered (an SSE stream, a large streamed download) would be
    * cut out from under the client by the reaper (codex round 7, Fix 3, the
-   * same defect `beginRequest` closed for the process itself in codex round
+   * same defect the process lease closed for the process itself in codex round
    * 2, item 3).
    *
    * The returned release function also touches the listener, so the idle

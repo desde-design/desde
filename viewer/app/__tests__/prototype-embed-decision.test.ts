@@ -21,7 +21,7 @@ describe("decidePrototypeEmbed", () => {
       decidePrototypeEmbed({
         mode: "subdomain",
         serve: "server",
-        process: { state: "running", port: 1, since: "" },
+        process: { state: "running", port: 1, since: "", generation: 1 },
       }),
     ).toEqual({ kind: "embed" })
   })

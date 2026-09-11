@@ -237,7 +237,7 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
       // has answered, `setTimeout(0)` clears the socket's inactivity timer
       // so a quiet stream (SSE, a slow download) is never destroyed on its
       // account — a quiet body is the child's own business, and the in-flight
-      // request count (`beginRequest` in `prototype-processes.ts`) is already
+      // request lease (`withLease` in `prototype-processes.ts`) is already
       // what keeps the process itself alive for as long as this response is
       // open. Deliberately no SEPARATE body-phase timeout is added in its
       // place (codex round 7, Fix 2).

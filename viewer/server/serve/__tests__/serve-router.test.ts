@@ -117,12 +117,13 @@ function fakeProcesses(overrides: Partial<PrototypeProcesses> = {}): PrototypePr
     ensure: () =>
       Promise.reject(new PrototypeProcessError({ state: "stopped" }, "No process manager in this test.")),
     touch: () => {},
-    beginRequest: () => () => {},
+    withLease: (_id, fn) => fn(),
     stop: () => Promise.resolve(),
     forget: () => Promise.resolve(),
     retire: () => Promise.resolve(),
     markUnreachable: () => Promise.resolve(),
     status: () => ({ state: "stopped" }),
+    subscribe: () => () => {},
     serverLog: () => "",
     startReaper: () => () => {},
     shutdown: () => Promise.resolve(),
@@ -1611,21 +1612,20 @@ describe("createServeRouter", () => {
     }
 
     /**
-     * A `beginRequest` fake with the same idempotent-release shape as the
-     * real one in `prototype-processes.ts` (`res.once("close", release)`
-     * firing, plus a caller invoking the returned function directly, must
-     * not double-decrement). `count()` reads the live in-flight number.
+     * A `withLease` fake with the same scope shape as the real one in
+     * `prototype-processes.ts`: the lease is taken before the body runs and
+     * released in a `finally`, however the body settles. `count()` reads the
+     * live in-flight number.
      */
-    function trackedBeginRequest(): { beginRequest: PrototypeProcesses["beginRequest"]; count: () => number } {
+    function trackedLease(): { withLease: PrototypeProcesses["withLease"]; count: () => number } {
       let inFlight = 0
       return {
         count: () => inFlight,
-        beginRequest: () => {
+        withLease: async (_id, fn) => {
           inFlight++
-          let released = false
-          return () => {
-            if (released) return
-            released = true
+          try {
+            return await fn()
+          } finally {
             inFlight--
           }
         },
@@ -1861,14 +1861,14 @@ describe("createServeRouter", () => {
       it("is already held while ensure() is still pending, and is released when the client closes first", async () => {
         const gate = deferred<{ port: number }>()
         let ensureCalled = false
-        const tracked = trackedBeginRequest()
+        const tracked = trackedLease()
         const { app } = await loopbackAppWith({
           prototypeProcesses: fakeProcesses({
             ensure: () => {
               ensureCalled = true
               return gate.promise
             },
-            beginRequest: tracked.beginRequest,
+            withLease: tracked.withLease,
           }),
         })
 
@@ -1897,27 +1897,31 @@ describe("createServeRouter", () => {
         expect(tracked.count()).toBe(1)
 
         clientReq.destroy()
-        await vi.waitFor(() => expect(tracked.count()).toBe(0))
+        // Still held: the lease is a SCOPE, and the scope is the cold start
+        // it is protecting. A client that gave up does not free the entry
+        // for eviction while a start it asked for is still running.
+        await new Promise((r) => setTimeout(r, 20))
+        expect(tracked.count()).toBe(1)
 
         // Resolving late must not throw or double-release: the handler
-        // resumes, sees the response already closed, and returns.
+        // resumes, sees the response already closed, and returns, which ends
+        // the scope and releases the lease.
         gate.resolve({ port: 1 })
-        await new Promise((r) => setTimeout(r, 20))
-        expect(tracked.count()).toBe(0)
+        await vi.waitFor(() => expect(tracked.count()).toBe(0))
       })
 
       it("holds the lease until the response closes, for a request that completes normally", async () => {
         const port = await child((_req, res) => res.end("ok"))
         const gate = deferred<{ port: number }>()
         let ensureCalled = false
-        const tracked = trackedBeginRequest()
+        const tracked = trackedLease()
         const { app } = await loopbackAppWith({
           prototypeProcesses: fakeProcesses({
             ensure: () => {
               ensureCalled = true
               return gate.promise
             },
-            beginRequest: tracked.beginRequest,
+            withLease: tracked.withLease,
           }),
         })
 
@@ -1950,14 +1954,14 @@ describe("createServeRouter", () => {
       it("releases the lease when ensure() rejects", async () => {
         const gate = deferred<{ port: number }>()
         let ensureCalled = false
-        const tracked = trackedBeginRequest()
+        const tracked = trackedLease()
         const { app } = await loopbackAppWith({
           prototypeProcesses: fakeProcesses({
             ensure: () => {
               ensureCalled = true
               return gate.promise
             },
-            beginRequest: tracked.beginRequest,
+            withLease: tracked.withLease,
           }),
         })
 

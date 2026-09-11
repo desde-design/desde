@@ -5,6 +5,18 @@ import { mkdir, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { buildEnv } from "../build/exec"
 import { checkoutDirFor } from "../build/checkouts"
+import { createKeyedLock } from "../keyed-lock"
+import {
+  chooseVictim,
+  newRecord,
+  retryable,
+  transition,
+  RETIRED_REFUSAL,
+  type Limits,
+  type ProcessEvent,
+  type ProcessRecord,
+  type TransitionResult,
+} from "./process-state"
 import type { Deployment } from "../storage/types"
 
 /**
@@ -15,11 +27,30 @@ import type { Deployment } from "../storage/types"
  * discipline is `build/exec.ts`'s: an env ALLOWLIST (the Viewer's secrets
  * never reach the child), `detached` so the whole tree dies together, and
  * a loopback bind only. See the server-prototypes spec, "Process manager".
+ *
+ * This file is the RUNTIME. Every rule about when a start, stop, reap or
+ * eviction is allowed lives in the pure machine next door
+ * (`process-state.ts`); this file drives that machine under one lock per
+ * deployment id and executes the effects it returns. See the rework spec,
+ * "The process manager becomes an explicit state machine"
+ * (`docs/superpowers/specs/2026-09-11-server-prototypes-rework-design.md`).
  */
 export type ProcessStatus =
   | { state: "stopped" }
   | { state: "starting" }
-  | { state: "running"; port: number; since: string }
+  | {
+      state: "running"
+      port: number
+      since: string
+      /**
+       * Increments on every spawn for this deployment.
+       *
+       * The one public fact the state machine added. The review page keys
+       * the iframe on it, so a restart remounts the frame without any
+       * epoch bookkeeping of its own in the shell.
+       */
+      generation: number
+    }
   | {
       state: "crashed"
       exitCode: number | null
@@ -62,22 +93,25 @@ export interface PrototypeProcesses {
   ensure(deployment: Pick<Deployment, "id" | "serverStart">): Promise<{ port: number }>
   touch(deploymentId: string): void
   /**
-   * Marks a request as in-flight against this deployment's process, so the
-   * idle reaper leaves it alone for as long as the request is open.
+   * Runs `fn` with a request lease held against this deployment's process,
+   * so neither the idle reaper nor eviction can stop it while `fn` is still
+   * running.
    *
-   * Call it right before proxying to the process and call the returned
-   * function when the response ends — `res.once("close", release)` in
-   * `serve-router.ts`. Without this, `touch()` at request-start alone was not
-   * enough: a long SSE stream or a large streamed download can outlive the
-   * idle bound while it is still actively being answered, and the reaper
-   * would cut it out from under the client (codex round 2, item 3).
+   * The lease is a SCOPE, not a pair of calls: it is taken synchronously,
+   * before this function's first await, and released in a `finally` however
+   * `fn` settles. The serve router wraps the whole of "ensure the process,
+   * then proxy to it" in one of these, so the lease covers the cold start
+   * AND the response (codex rounds 2 and 11). The two defects the pair-of-
+   * calls shape kept producing were a release that never ran (the client
+   * gave up before `res.once("close", release)` was registered) and a window
+   * at the start of a request with no lease at all, during which a
+   * concurrent cold start could evict the just-ready process.
    *
-   * Safe to call for an entry that does not exist yet, or one that is not
-   * currently running — it only affects whether a FUTURE reap tick skips
-   * this id, so there is nothing to guard against calling it early or for an
-   * id the manager has never seen.
+   * Safe for a deployment the manager has never seen: the record is created
+   * on demand, and a lease on an idle record only decides whether a FUTURE
+   * reap or eviction skips it.
    */
-  beginRequest(deploymentId: string): () => void
+  withLease<T>(deploymentId: string, fn: () => Promise<T>): Promise<T>
   stop(deploymentId: string): Promise<void>
   /**
    * `stop`, and then forget the deployment entirely — its status, its log,
@@ -111,7 +145,7 @@ export interface PrototypeProcesses {
    *
    * If the entry is `running`, this stops the child and records a `crashed`
    * status with `reason: "The server stopped answering."` — a RETRYABLE
-   * crash (an ordinary entry in `restartsAt`, the same as an exit or a
+   * crash (an ordinary entry in the attempt list, the same as an exit or a
    * timeout), so the next `ensure` restarts it under the normal budget.
    *
    * `stop()` was the wrong call for this (codex round 5, Fix 2): it leaves
@@ -120,7 +154,7 @@ export interface PrototypeProcesses {
    * entry never told the reader anything was wrong, and the 502 page in the
    * frame makes no further request on its own, so the process was never
    * restarted without a manual reload. Recording `crashed` instead is what
-   * gets the reader an iframe remount (`review-shell.tsx`'s `frameEpoch`).
+   * gets the reader an iframe remount.
    *
    * If the entry is already `crashed` (the exit handler beat the proxy to
    * it, or a previous `markUnreachable` already ran), this leaves the status
@@ -129,10 +163,22 @@ export interface PrototypeProcesses {
    * overwriting a more specific reason with this generic one would be a
    * regression. If the entry is `starting` or `stopped`, this does nothing:
    * neither state claims the child is up, so there is nothing to correct.
+   * All four of those rows are the machine's, not this file's.
    */
   markUnreachable(deploymentId: string): Promise<void>
   status(deploymentId: string): ProcessStatus
   serverLog(deploymentId: string): string
+  /**
+   * Calls `listener` with the new status every time this deployment's
+   * status CHANGES, and returns the unsubscribe.
+   *
+   * Same shape as `build-change-bus.ts`, except that the status rides the
+   * call: a subscriber (the prototype-origin SSE stream) would otherwise
+   * have to read it back and could miss a transition that was reversed in
+   * between. A transition that leaves the exposed status identical (the
+   * `spawned` acknowledgement, a touch) fires nothing.
+   */
+  subscribe(deploymentId: string, listener: (status: ProcessStatus) => void): () => void
   startReaper(): () => void
   shutdown(): Promise<void>
 }
@@ -140,8 +186,16 @@ export interface PrototypeProcesses {
 export const MAX_RUNNING_SERVER_PROTOTYPES = 4
 /** The log ring buffer is measured in characters (`string.slice`), not bytes. */
 const LOG_CHARS = 64 * 1024
-/** At most this many restarts (crashes followed by another attempt) inside `RESTART_WINDOW_MS`. */
-const RESTART_BUDGET = 3
+/**
+ * At most this many FAILED ATTEMPTS inside `RESTART_WINDOW_MS`.
+ *
+ * The product rule is "at most 3 restarts in 5 minutes", and the first
+ * attempt is not a restart — so the budget is four recorded attempts, and
+ * the fifth is the one refused. The machine refuses `start-requested` once
+ * the window already holds this many attempts, which is the same line the
+ * hand-written check drew when it read `recent.length > 3`.
+ */
+const RESTART_BUDGET_ATTEMPTS = 4
 const RESTART_WINDOW_MS = 5 * 60_000
 
 /**
@@ -160,6 +214,13 @@ const RESTART_WINDOW_MS = 5 * 60_000
 const SETUP_FAILED_REASON = "The server could not be started. See the viewer's log."
 
 /**
+ * The public `reason` for a checkout that is not on disk, or a deployment id
+ * that cannot name one. Fixed and generic on purpose: `checkoutDirFor`'s own
+ * message echoes the id, which is not safe to hand back as a crash reason.
+ */
+const MISSING_CHECKOUT_REASON = "The checkout for this deployment is missing. Rebuild it."
+
+/**
  * The public message for a failure to reserve a slot at the concurrency cap
  * because every running entry is actively answering a request.
  *
@@ -170,6 +231,9 @@ const SETUP_FAILED_REASON = "The server could not be started. See the viewer's l
  * `ensure` and nothing else is needed on the client (codex round 8, Fix 2).
  */
 const BUSY_MESSAGE = "Every prototype server is busy. Try again in a moment."
+
+/** The refusal when a start ends with no more specific reason on record. */
+const DID_NOT_START_REASON = "The server did not start."
 
 export interface PrototypeProcessesDeps {
   checkoutsRoot: string
@@ -228,129 +292,23 @@ export function substitutePort(argv: string[], port: number): { file: string; ar
 }
 
 /**
- * What an entry RECORDS: `ProcessStatus` with the crashed variant's
- * `retryable` left out, because that field is computed when the status is
- * read (see `exposedStatus`). Storing it was the defect: the budget is a
- * moving five-minute window, so a value written at crash time is stale from
- * the next tick onward.
+ * Everything the runtime holds for one deployment that the pure record does
+ * not: the child handle, the log ring buffer, and the in-flight cold start.
  */
-type StoredStatus =
-  | { state: "stopped" }
-  | { state: "starting" }
-  | { state: "running"; port: number; since: string }
-  | { state: "crashed"; exitCode: number | null; restarts: number; reason: string }
-
-/**
- * A `crashed` status's own reason, or `fallback` otherwise.
- *
- * Pulled out as a function (rather than an inline `status.state === "crashed"
- * ? status.reason : fallback` at the call site) because TypeScript narrows
- * `entry.status` to whatever literal it was last assigned along the
- * SYNCHRONOUS path it can see — it does not know an `async` callback (the
- * child's `exit`/`error` handlers) can reassign it during an `await`. Taking
- * `status: ProcessStatus` as a plain parameter resets that narrowing to the
- * full declared union on every call, which is what makes the check safe to
- * write at all right after an `await`.
- */
-function reasonOrFallback(status: StoredStatus, fallback: string): string {
-  return status.state === "crashed" ? status.reason : fallback
-}
-
-/**
- * A `crashed` status's own `exitCode`, or `null` otherwise.
- *
- * Same reason as `reasonOrFallback` above, and now needed for the same
- * cause: `start()` assigns `e.status = { state: "starting" }` synchronously
- * near its top (to reserve the entry's slot against the concurrency cap),
- * so by the time the restart-budget check reads `e.status.state ===
- * "crashed"` further down, TypeScript narrows the FIELD to the literal
- * `{ state: "starting" }` it last saw assigned along this function's own
- * synchronous path — it has no way to know the intervening `await` let a
- * concurrent `stop()`/`retire()` on this same entry reassign it. Taking
- * `status: StoredStatus` as a plain parameter resets that narrowing to the
- * full declared union, which is what makes the check safe to write at all.
- */
-function crashedExitCodeOrNull(status: StoredStatus): number | null {
-  return status.state === "crashed" ? status.exitCode : null
-}
-
-/**
- * Whether a status is `"stopped"`.
- *
- * Same reason as `reasonOrFallback`/`crashedExitCodeOrNull` above, and needed
- * by `markUnreachable`: it narrows `e.status.state` to `"running"` at an
- * early-return guard, then awaits `stopEntry(e)` — which reassigns
- * `e.status` during that await, something TypeScript cannot see happening
- * inside an opaque async call. Without this, the later `e.status.state !==
- * "stopped"` check is flagged as comparing two literals TypeScript still
- * believes can never overlap. Taking `status: StoredStatus` as a plain
- * parameter resets that narrowing to the full declared union.
- */
-function isStopped(status: StoredStatus): boolean {
-  return status.state === "stopped"
-}
-
 interface Entry {
-  status: StoredStatus
+  record: ProcessRecord
   child: ChildProcess | null
-  port: number | null
-  lastUsedAt: number
-  /**
-   * A monotonic counter, bumped alongside `lastUsedAt` on every touch.
-   *
-   * `lastUsedAt` alone is `now()`, which under the real clock has 1ms
-   * resolution: two entries touched within the same millisecond tie, and
-   * `Array.prototype.sort`'s stability then falls back to Map insertion
-   * order, evicting whichever entry was CREATED first rather than used
-   * least recently. `recency` can never tie, so LRU eviction stays correct
-   * even when `touch()` and a sibling's start race inside one millisecond
-   * (MEASURED: this happened in the LRU test on this machine).
-   */
-  recency: number
   log: string
-  restartsAt: number[]
+  /**
+   * The cold start currently under way, or `null`.
+   *
+   * Two jobs. A second `ensure` for the same id joins it instead of starting
+   * a second child, and a concurrent cold start on ANOTHER id waits on it
+   * when the cap leaves nothing to evict (see the room-making loop). Set in
+   * the same lock hold as the `start-requested` transition, so a record that
+   * is `starting` always has one.
+   */
   opening: Promise<{ port: number }> | null
-  /**
-   * Bumped by every `stopEntry`. A `start()` reads it before and after
-   * `spawn` to notice a stop it could not otherwise see.
-   *
-   * `e.child` is the flag for a stop that lands while a child exists, but
-   * between `pickPort()` and `spawn()` there IS no child: `stopEntry` finds
-   * `e.child === null`, no-ops, and the spawn then proceeds into a process
-   * nobody is holding a handle to. A counter records that a stop happened at
-   * all, which is the part `e.child` cannot.
-   */
-  generation: number
-  /**
-   * The last crash was one no restart can clear: the checkout is missing, or
-   * the deployment id is malformed.
-   *
-   * Kept on the ENTRY rather than in the status because `retryable` is
-   * computed from the restart window at read time, and this is the one input
-   * to that answer which the passing of time must not change. Cleared at the
-   * top of every `start()`, so a later attempt decides afresh whatever its
-   * outcome.
-   */
-  permanentFailure: boolean
-  /**
-   * Set by `retire()` and never cleared by `start()` (unlike
-   * `permanentFailure`, which every fresh attempt resets). `ensure` checks
-   * this BEFORE calling `start()` at all, so a retired entry stays refused
-   * regardless of how many restart-budget windows pass. Only `forget`
-   * (deleting the entry outright) or a brand new deployment id clears it.
-   */
-  retired: boolean
-  /**
-   * How many requests `beginRequest` has opened against this entry that have
-   * not yet called their release function. The reaper skips any entry with
-   * `inFlight > 0`, whatever `lastUsedAt` says — see `beginRequest` on
-   * `PrototypeProcesses`.
-   *
-   * A counter, not a flag, because two requests can be in flight against the
-   * same process at once (two reviewers, or a page issuing several fetches);
-   * the entry stays protected until the LAST one releases.
-   */
-  inFlight: number
 }
 
 export function createPrototypeProcesses(deps: PrototypeProcessesDeps): PrototypeProcesses {
@@ -360,8 +318,27 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const reapIntervalMs = deps.reapIntervalMs ?? 5 * 60_000
   const maxRunning = deps.maxRunning ?? MAX_RUNNING_SERVER_PROTOTYPES
   const pickPort = deps.pickPort ?? pickLoopbackPort
+  const limits: Limits = { restartBudget: RESTART_BUDGET_ATTEMPTS, restartWindowMs: RESTART_WINDOW_MS }
   const entries = new Map<string, Entry>()
-  let recencyCounter = 0
+  /**
+   * Kept OUTSIDE the entry, so a `forget` (which drops the record) does not
+   * silently drop the SSE stream watching that deployment with it.
+   */
+  const listeners = new Map<string, Set<(status: ProcessStatus) => void>>()
+  /**
+   * One lock per deployment id. Every mutating operation on a record runs
+   * under it, so the await gaps that codex rounds 1, 3, 4, 5 and 11 found
+   * cannot interleave: a child ignoring SIGTERM holds its own id's lock for
+   * up to five seconds and other operations on THAT id wait, which is
+   * correct. Different ids never wait on each other.
+   *
+   * The lock is not reentrant (see `keyed-lock.ts`), so no `run` call for an
+   * id ever nests inside another one for the same id. The two places that
+   * reach across ids — eviction taking the victim's lock, and the leader-wait
+   * awaiting another id's cold start — are safe because a `starting` record
+   * is never an eviction victim and never holds its own lock while waiting.
+   */
+  const lock = createKeyedLock()
   /**
    * Set by `shutdown()` before it kills anything, and never cleared.
    *
@@ -371,16 +348,34 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    * leaving that child holding a port with nobody to stop it.
    */
   let closed = false
-  /** Bumps both the human-readable `lastUsedAt` and the tie-proof `recency`. */
-  const touchEntry = (e: Entry): void => {
-    e.lastUsedAt = now()
-    e.recency = recencyCounter++
+
+  /**
+   * The clock the machine sees: `now()`, but never twice the same value.
+   *
+   * `lastUsedAt` is what `chooseVictim` orders eviction by, and under the
+   * real clock `now()` has 1ms resolution: two records touched inside one
+   * millisecond tie, and the tie breaks on Map insertion order instead of
+   * use, evicting whichever was CREATED first. (MEASURED: this happened in
+   * the LRU test on this machine, which is why the record this replaced
+   * carried a separate `recency` counter.) Nudging the value forward by 1ms
+   * when the clock has not moved keeps the order exact. The drift it can
+   * introduce is one millisecond per applied event under a FROZEN clock,
+   * against a five-minute budget window and a thirty-minute idle bound.
+   *
+   * Reads (`retryable`, the reaper's `now`) use `now()` directly: they must
+   * not move a clock they only inspect.
+   */
+  let lastStamp = 0
+  const tick = (): number => {
+    const t = now()
+    lastStamp = t > lastStamp ? t : lastStamp + 1
+    return lastStamp
   }
 
   const entryFor = (id: string): Entry => {
     let e = entries.get(id)
     if (!e) {
-      e = { status: { state: "stopped" }, child: null, port: null, lastUsedAt: now(), recency: recencyCounter++, log: "", restartsAt: [], opening: null, generation: 0, permanentFailure: false, retired: false, inFlight: 0 }
+      e = { record: newRecord(tick()), child: null, log: "", opening: null }
       entries.set(id, e)
     }
     return e
@@ -395,64 +390,112 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       /* already gone */
     }
   }
-  const running = (): [string, Entry][] => [...entries].filter(([, e]) => e.status.state === "running")
-  /**
-   * `running` PLUS `starting` — every entry that currently occupies a slot
-   * against `maxRunning`. `start()` reserves its own slot by setting its
-   * status to `starting` synchronously before its first `await` (see
-   * there), so by the time any concurrent `start()` reaches the room-making
-   * loop below, every entry racing it is already counted here — that is
-   * what closes the concurrent-cold-start cap bypass.
-   */
-  const occupied = (): [string, Entry][] =>
-    [...entries].filter(([, e]) => e.status.state === "running" || e.status.state === "starting")
 
   /**
-   * Would the next `ensure` start this entry again?
-   *
-   * The same question `start()` asks of its own budget below, asked from the
-   * crash sites so the status can STATE the answer. Written once here rather
-   * than at each site, because a second copy of the budget rule is how the
-   * status and the behaviour would come to disagree.
-   */
-  const withinRestartBudget = (e: Entry): boolean =>
-    e.restartsAt.filter((t) => now() - t < RESTART_WINDOW_MS).length <= RESTART_BUDGET
-
-  /**
-   * The entry's status as callers see it: the stored one, plus the computed
+   * The record as callers see it: the machine's state, plus the computed
    * `retryable` on a crash.
    *
    * The single place `retryable` is decided, and it is decided at READ time
-   * on purpose — see `ProcessStatus`. `permanentFailure` is the only thing
-   * that can veto the budget's own answer.
+   * on purpose — see `ProcessStatus`. A `retired` record reports the same
+   * shape a permanent crash does, because that is what it is to a reader:
+   * this deployment will not start again until it is rebuilt.
    */
-  const exposedStatus = (e: Entry): ProcessStatus =>
-    e.status.state === "crashed"
-      ? { ...e.status, retryable: !e.permanentFailure && withinRestartBudget(e) }
-      : e.status
-
-  /** The refusal `ensure` gives once `shutdown()` has run. */
-  const closedError = (): PrototypeProcessError =>
-    new PrototypeProcessError({ state: "stopped" }, "The viewer is shutting down.")
+  const exposedStatus = (record: ProcessRecord): ProcessStatus => {
+    switch (record.state.kind) {
+      case "idle":
+        return { state: "stopped" }
+      case "starting":
+        return { state: "starting" }
+      case "running":
+        return {
+          state: "running",
+          port: record.state.port,
+          since: new Date(record.state.since).toISOString(),
+          generation: record.state.generation,
+        }
+      case "crashed":
+        return {
+          state: "crashed",
+          exitCode: record.state.exitCode,
+          restarts: record.attempts.length,
+          reason: record.state.reason,
+          retryable: retryable(record, now(), limits),
+        }
+      case "retired":
+        return {
+          state: "crashed",
+          exitCode: null,
+          restarts: record.attempts.length,
+          reason: RETIRED_REFUSAL,
+          retryable: false,
+        }
+    }
+  }
+  const statusOf = (id: string): ProcessStatus => {
+    const e = entries.get(id)
+    return e ? exposedStatus(e.record) : { state: "stopped" }
+  }
+  /**
+   * Compared by value, not by identity: `exposedStatus` builds a fresh
+   * object every call, and only a CHANGE is worth waking a subscriber for.
+   * Every status is a flat object of primitives built in one place above, so
+   * the key order is stable and this is a faithful equality.
+   */
+  const sameStatus = (a: ProcessStatus, b: ProcessStatus): boolean => JSON.stringify(a) === JSON.stringify(b)
+  const notify = (id: string, status: ProcessStatus): void => {
+    for (const listener of listeners.get(id) ?? []) {
+      try {
+        listener(status)
+      } catch (error) {
+        // A subscriber that throws is its own bug, and must not leave a
+        // transition half-applied (an unawaited kill, a lock held).
+        console.error("[viewer] prototype process subscriber failed:", error)
+      }
+    }
+  }
 
   /**
-   * Stops an entry's child, if it has one, and marks it `stopped`.
+   * Applies one event: run the pure machine, store the record, perform the
+   * synchronous half of each effect, and notify subscribers when the exposed
+   * status changed.
    *
-   * `e.child` is nulled and `e.status` becomes `stopped` SYNCHRONOUSLY,
-   * before anything is awaited. A concurrent `start()` for the same entry
-   * reads `e.child` every poll iteration precisely so it notices a stop
-   * landing mid-start without any separate flag: `e.child` IS that flag,
-   * and this is the moment it flips. See `start()`'s poll loop.
+   * The `kill` effect's own wait (SIGTERM, then SIGKILL after five seconds)
+   * is returned rather than performed, so the only async step is the
+   * caller's. The `spawn` effect is NOT performed here: starting a child
+   * needs the checkout, the cap, a port and a home directory, all of which
+   * are async and belong outside a synchronous transition. `ensure` reads
+   * the effect and does the work; see `startChild`.
    */
-  async function stopEntry(e: Entry): Promise<void> {
-    const child = e.child
-    // Bumped for every stop, child or not — see `Entry.generation` for the
-    // window `e.child` cannot cover.
-    e.generation++
-    e.child = null
-    e.port = null
-    e.status = { state: "stopped" }
-    if (!child || child.exitCode !== null || child.signalCode !== null) return
+  const applySync = (id: string, event: ProcessEvent): { result: TransitionResult; killing: ChildProcess | null } => {
+    const entry = entryFor(id)
+    const before = exposedStatus(entry.record)
+    const result = transition(entry.record, event, tick(), limits)
+    entry.record = result.record
+    let killing: ChildProcess | null = null
+    for (const effect of result.effects) {
+      switch (effect.kind) {
+        case "kill":
+          killing = entry.child
+          entry.child = null
+          break
+        case "drop":
+          entries.delete(id)
+          break
+        case "spawn":
+          break
+      }
+    }
+    const after = statusOf(id)
+    if (!sameStatus(before, after)) notify(id, after)
+    return { result, killing }
+  }
+
+  /**
+   * Stops a child: SIGTERM to the whole group, SIGKILL five seconds later if
+   * it is still there.
+   */
+  const killAndWait = async (child: ChildProcess): Promise<void> => {
+    if (child.exitCode !== null || child.signalCode !== null) return
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         killTree(child, "SIGKILL")
@@ -464,6 +507,45 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       killTree(child, "SIGTERM")
     })
   }
+
+  /**
+   * `applySync`, plus the kill effect's wait and the refusal.
+   *
+   * MUST be called inside `lock.run(id, …)` — the two lease events are the
+   * only exception, and `withLease` says why. A refusal becomes the existing
+   * `PrototypeProcessError` carrying the machine's own sentence, so the
+   * runtime never writes a second copy of one.
+   */
+  const apply = async (id: string, event: ProcessEvent): Promise<TransitionResult> => {
+    const { result, killing } = applySync(id, event)
+    if (killing) await killAndWait(killing)
+    if (result.refused) throw new PrototypeProcessError(statusOf(id), result.refused)
+    return result
+  }
+
+  /**
+   * `apply`, for the events whose refusal IS the answer: a `reap` or an
+   * `evict` the machine turned down (the record is leased, or it moved on)
+   * means there was nothing to do, not that something failed.
+   */
+  const applyAllowingRefusal = async (id: string, event: ProcessEvent): Promise<void> => {
+    try {
+      await apply(id, event)
+    } catch (error) {
+      if (!(error instanceof PrototypeProcessError)) throw error
+    }
+  }
+
+  /** Every record that currently occupies a slot against `maxRunning`. */
+  const occupied = (): number =>
+    [...entries.values()].filter((e) => e.record.state.kind === "running" || e.record.state.kind === "starting").length
+  const runningCount = (): number => [...entries.values()].filter((e) => e.record.state.kind === "running").length
+  const recordsById = (): Map<string, ProcessRecord> =>
+    new Map([...entries].map(([id, e]) => [id, e.record] as const))
+
+  /** The refusal `ensure` gives once `shutdown()` has run. */
+  const closedError = (): PrototypeProcessError =>
+    new PrototypeProcessError({ state: "stopped" }, "The viewer is shutting down.")
 
   async function answers(port: number): Promise<boolean> {
     return await new Promise<boolean>((resolve) => {
@@ -480,128 +562,112 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     })
   }
 
-  async function start(id: string, serverStart: string[], e: Entry): Promise<{ port: number }> {
-    // Read once, at the top: every check below asks whether a stop has landed
-    // SINCE this attempt began, and a value re-read later would answer a
-    // different question.
-    const generation = e.generation
-    // This attempt decides the verdict afresh: a previous "no restart can fix
-    // this" must not outlive the attempt that recorded it.
-    e.permanentFailure = false
-    // Reserves this entry's slot for the cap check below, SYNCHRONOUSLY,
-    // before the first `await` in this function. Without this, several
-    // concurrent `ensure()`s for different stopped deployments could each
-    // read the cap as "not yet full" before any of them had a chance to
-    // record that it was starting — spawning more children than
-    // `maxRunning` allows. See the "make room" loop, which now counts this
-    // status too.
-    e.status = { state: "starting" }
-    let cwd: string
-    try {
-      // Inside the try: a malformed id makes `checkoutDirFor` throw
-      // synchronously, and that must land here too, not escape as an
-      // uncaught rejection. The reason string below is fixed and generic on
-      // purpose — `checkoutDirFor`'s own message echoes the id, which is not
-      // safe to hand back as a crash reason.
-      cwd = checkoutDirFor(deps.checkoutsRoot, id)
-      if (!(await stat(cwd)).isDirectory()) throw new Error("not a directory")
-    } catch {
-      // Not retryable, and not by the budget's reckoning either: no number of
-      // restarts puts the files back, and no amount of waiting does. Only a
-      // rebuild does, which is what the review page then offers.
-      e.permanentFailure = true
-      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The checkout for this deployment is missing. Rebuild it." }
-      throw new PrototypeProcessError(exposedStatus(e), e.status.reason)
-    }
-    const recent = e.restartsAt.filter((t) => now() - t < RESTART_WINDOW_MS)
-    e.restartsAt = recent
-    // "At most 3 restarts in 5 minutes": the very first attempt is not a
-    // restart, so this refuses once a 4th crash (the would-be 4th restart)
-    // is already on record, not on the 3rd.
-    if (recent.length > RESTART_BUDGET) {
-      // No `retryable` written here either: `exposedStatus` asks
-      // `withinRestartBudget` the same question this branch just asked, so
-      // the status says `false` now and says `true` again once these crashes
-      // age out of the window — which is exactly when the next `ensure`
-      // would start trying again.
-      e.status = { state: "crashed", exitCode: crashedExitCodeOrNull(e.status), restarts: recent.length, reason: "The server kept exiting. See the server log." }
-      throw new PrototypeProcessError(exposedStatus(e), e.status.reason)
-    }
-    // Make room. `occupied()` counts this entry too (it just reserved its
-    // own `starting` slot above), so the condition is `> maxRunning`, not
-    // `>=`: this entry alone is allowed to fill the last slot.
-    //
-    // Never evict a `starting` entry — it may have no child yet, or one
-    // mid-spawn. When every occupied slot is `starting` (nothing `running`
-    // to evict), the entry that reserved its slot FIRST — stable Map
-    // insertion order — is always let through, and every other `starting`
-    // entry waits on THAT ONE specifically. That fixed, single leader is
-    // what keeps this from deadlocking: two `starting` entries can never end
-    // up waiting on each other, because only the earliest one is ever a
-    // wait target, and the earliest one never waits (it always sees itself
-    // as the leader and proceeds). Once the leader settles (running or
-    // crashed) the waiters re-check from scratch.
-    //
-    // A `running` entry with `inFlight > 0` (an open response — an SSE
-    // stream, a large download — held by `beginRequest`) is never a victim
-    // either (codex round 8, Fix 2). Eviction used to sort every `running`
-    // entry by recency and stop the oldest one regardless of `inFlight`, so
-    // a fifth prototype opening while the least-recently-used one was
-    // mid-response would kill it out from under its reader — exactly what
-    // `beginRequest`/`inFlight` exist to protect against for the idle
-    // reaper, but eviction never consulted them.
-    while (occupied().length > maxRunning) {
-      const evictable = running().filter(([, oe]) => oe.inFlight === 0)
-      if (evictable.length > 0) {
-        const [victimId] = evictable.sort((a, b) => a[1].recency - b[1].recency)[0]!
-        await stopEntry(entryFor(victimId))
+  /**
+   * Frees a slot for a record that has already transitioned to `starting`.
+   *
+   * `occupied()` counts that record too, so the condition is `> maxRunning`,
+   * not `>=`: this record alone is allowed to fill the last slot.
+   *
+   * Never evicts a `starting` record — it may have no child yet, or one
+   * mid-spawn, and `chooseVictim` only ever returns a `running` one. When
+   * every occupied slot is `starting` (nothing `running` to evict), the
+   * record that reserved its slot FIRST — stable Map insertion order — is
+   * always let through, and every other `starting` record waits on THAT ONE
+   * specifically. That fixed, single leader is what keeps this from
+   * deadlocking: two starting records can never end up waiting on each
+   * other, because only the earliest one is ever a wait target, and the
+   * earliest one never waits (it always sees itself as the leader and
+   * proceeds). Once the leader settles (running or crashed) the waiters
+   * re-check from scratch.
+   *
+   * A `running` record with an open lease (a response still being streamed)
+   * is never a victim either (codex round 8, Fix 2) — that rule is
+   * `chooseVictim`'s, which skips any record with `leases > 0`.
+   */
+  async function makeRoom(id: string): Promise<void> {
+    while (occupied() > maxRunning) {
+      const victimId = chooseVictim(recordsById())
+      if (victimId !== null) {
+        await lock.run(victimId, () => applyAllowingRefusal(victimId, { type: "evict" }))
         continue
       }
-      const leaderId = [...entries].find(([, oe]) => oe.status.state === "starting")?.[0]
-      if (leaderId && leaderId !== id) {
+      const leaderId = [...entries].find(([, e]) => e.record.state.kind === "starting")?.[0]
+      if (leaderId !== undefined && leaderId !== id) {
         const leaderOpening = entries.get(leaderId)?.opening
         if (leaderOpening) {
           await leaderOpening.catch(() => {})
         } else {
-          // Should be unreachable — a `starting` entry's `opening` is set in
-          // the same synchronous turn as its status (see above), so this is
+          // Should be unreachable — a `starting` record's `opening` is set in
+          // the same lock hold as its transition (see `ensure`), so this is
           // only a defensive yield against ever spinning the event loop if
           // that invariant is somehow violated.
           await Promise.resolve()
         }
         continue
       }
-      // No running entry can be evicted, and there is no OTHER starting
-      // entry to wait on either. Two cases reach here, and they must be told
+      // No running record can be evicted, and there is no OTHER starting
+      // record to wait on either. Two cases reach here, and they must be told
       // apart:
       //
-      // - `running().length === 0`: every occupied slot is a fresh cold
-      //   start, including possibly this one. This is the deadlock-freedom
-      //   case above — `leaderId` is either absent or this entry itself, so
-      //   there is nothing productive left to wait for, and breaking out
+      // - nothing is running: every occupied slot is a fresh cold start,
+      //   including possibly this one. This is the deadlock-freedom case
+      //   above — `leaderId` is either absent or this record itself, so there
+      //   is nothing productive left to wait for, and breaking out
       //   (proceeding to spawn over the cap, transiently) is what lets the
-      //   single leader through instead of every `starting` entry waiting on
+      //   single leader through instead of every starting record waiting on
       //   every other.
-      // - `running().length > 0`: every slot is held by a RUNNING entry that
+      // - something IS running: every slot is held by a running record that
       //   is actively answering a request, and nothing here will free one on
       //   its own. Waiting would either spin or block indefinitely on a
       //   response that may not end soon — so this attempt fails fast
       //   instead, releasing the slot it reserved.
-      if (running().length > 0) {
-        e.status = { state: "stopped" }
-        throw new PrototypeProcessError(exposedStatus(e), BUSY_MESSAGE)
+      if (runningCount() > 0) {
+        await lock.run(id, () => apply(id, { type: "stop-requested" }))
+        throw new PrototypeProcessError(statusOf(id), BUSY_MESSAGE)
       }
       break
     }
+  }
 
-    // Setup between reserving the slot above and the actual `spawn` below,
-    // wrapped so a throw here cannot leave the entry stuck "starting"
+  /**
+   * The whole cold start for a record the machine has already moved to
+   * `starting` at `generation`.
+   *
+   * Runs OUTSIDE this id's lock, and takes it for each transition. That is
+   * deliberate: a cold start can take a minute, and `stop`, `retire` and
+   * `forget` must land promptly rather than queue behind it. What keeps the
+   * start honest across those gaps is the generation the machine stamped on
+   * `starting`: `spawned` and `ready` carry it, and either is refused once
+   * something else has moved the record on.
+   */
+  async function startChild(id: string, serverStart: string[], generation: number): Promise<{ port: number }> {
+    let cwd: string
+    try {
+      // Inside the try: a malformed id makes `checkoutDirFor` throw
+      // synchronously, and that must land here too, not escape as an
+      // uncaught rejection.
+      cwd = checkoutDirFor(deps.checkoutsRoot, id)
+      if (!(await stat(cwd)).isDirectory()) throw new Error("not a directory")
+    } catch {
+      // Permanent: no number of restarts puts the files back, and no amount
+      // of waiting does. Only a rebuild does, which is what the review page
+      // then offers.
+      await lock.run(id, () =>
+        apply(id, { type: "start-failed", reason: MISSING_CHECKOUT_REASON, permanent: true }),
+      )
+      throw new PrototypeProcessError(statusOf(id), MISSING_CHECKOUT_REASON)
+    }
+
+    await makeRoom(id)
+
+    // Setup between the room-making above and the actual `spawn` below,
+    // wrapped so a throw here cannot leave the record stuck `starting`
     // forever: `pickPort` can reject (ports exhausted), `substitutePort`
     // throws synchronously on an empty `serverStart`, and `mkdir` can reject
     // (permissions, disk full). Before this wrap, any of those rejected
-    // `ensure` while leaving `e.status` at "starting", permanently occupying
-    // a slot against `maxRunning` — enough of them and the room-making loop
-    // above waits forever on entries that will never resolve (codex round 3,
+    // `ensure` while leaving the record `starting`, permanently occupying a
+    // slot against `maxRunning` — enough of them and the room-making loop
+    // waits forever on records that will never resolve (codex round 3,
     // item 3).
     let port: number
     let file: string
@@ -621,74 +687,67 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // The raw error goes to the manager's own log ONLY — never into
       // `reason`, which a reader (including a public-link one) can see
       // through the crashed panel and the 503 body. See `SETUP_FAILED_REASON`.
-      console.error("[viewer] prototype process setup failed:", error)
       // Charged to the restart budget like any other failed attempt (codex
-      // round 9). Uncharged, a failure that repeats on every attempt stayed
-      // retryable for ever, and the review page's embedded poll remounted
-      // the frame every five seconds without end.
-      e.restartsAt.push(now())
-      e.status = {
-        state: "crashed",
-        exitCode: null,
-        restarts: e.restartsAt.length,
-        reason: SETUP_FAILED_REASON,
-      }
-      throw new PrototypeProcessError(exposedStatus(e), e.status.reason)
+      // round 9): uncharged, a failure that repeats on every attempt stayed
+      // retryable for ever, and the review page remounted the frame every
+      // five seconds without end. The machine charges it, because the
+      // `permanent` flag below is false.
+      console.error("[viewer] prototype process setup failed:", error)
+      await lock.run(id, () => apply(id, { type: "start-failed", reason: SETUP_FAILED_REASON, permanent: false }))
+      throw new PrototypeProcessError(statusOf(id), SETUP_FAILED_REASON)
     }
-    // Immediately before the spawn. Everything above this line has awaited at
-    // least once, so a `stop()` or a `shutdown()` can have landed in between —
-    // and a spawn after either of those is a child nobody will ever stop,
-    // because the manager has already forgotten it is coming.
-    if (closed) throw closedError()
-    if (e.generation !== generation) {
-      throw new PrototypeProcessError(exposedStatus(e), "The server was stopped before it finished starting.")
-    }
-    e.status = { state: "starting" }
-    e.log = ""
-    const child = spawn(file, args, {
-      cwd,
-      env: buildEnv(home, {
-        // `spawnEnv` first, so it can never shadow the four below — see its
-        // doc comment on `PrototypeProcessesDeps`.
-        ...deps.spawnEnv,
-        NODE_ENV: "production",
-        PORT: String(port),
-        HOSTNAME: "127.0.0.1",
-        // Nitro/Nuxt and react-router-serve read HOST where Next reads the
-        // `-H` flag; setting both is a hint, not enforcement — a server that
-        // ignores its env and binds elsewhere is a substrate bug, not one
-        // this manager can fix.
-        HOST: "127.0.0.1",
-      }) as NodeJS.ProcessEnv,
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-    // And immediately after it. DEFENCE, not a window: every line between the
-    // check above and `spawn` is synchronous, so no stop can land in between
-    // and this branch is unreachable as the code stands. It is kept because
-    // one `await` added above `spawn` would open that window silently, and
-    // this is what would already be here to close it. A child spawned across
-    // a stop is killed rather than left running.
-    if (closed || e.generation !== generation) {
-      killTree(child, "SIGKILL")
-      // The group kill can lose a race with the child's own `setsid` (spawn
-      // has returned, the child may not have run yet), so the pid is killed
-      // directly as well. Either call is a no-op once the other has landed.
-      child.kill("SIGKILL")
+
+    // The spawn itself, under the lock, with the `spawned` acknowledgement
+    // applied first. Everything above has awaited at least once, so a stop, a
+    // retire or a shutdown can have landed in between — and a spawn after any
+    // of those is a child nobody will ever stop, because the manager has
+    // already forgotten it is coming. The machine refuses `spawned` at a
+    // stale generation, so that refusal IS the check, and it happens before
+    // the child exists rather than after: there is nothing to kill, and the
+    // log stays empty, which is how a test can tell "never spawned" from
+    // "spawned and cleaned up". Nothing between that refusal point and the
+    // handlers being wired is async, so no stop can land inside this block.
+    const { entry, child } = await lock.run(id, async () => {
+      await apply(id, { type: "spawned", generation })
       if (closed) throw closedError()
-      throw new PrototypeProcessError(exposedStatus(e), "The server was stopped before it finished starting.")
-    }
-    e.child = child
-    child.stdout?.on("data", (b: Buffer) => append(e, b.toString("utf8")))
-    child.stderr?.on("data", (b: Buffer) => append(e, b.toString("utf8")))
+      const entry = entryFor(id)
+      entry.log = ""
+      const spawned = spawn(file, args, {
+        cwd,
+        env: buildEnv(home, {
+          // `spawnEnv` first, so it can never shadow the four below — see its
+          // doc comment on `PrototypeProcessesDeps`.
+          ...deps.spawnEnv,
+          NODE_ENV: "production",
+          PORT: String(port),
+          HOSTNAME: "127.0.0.1",
+          // Nitro/Nuxt and react-router-serve read HOST where Next reads the
+          // `-H` flag; setting both is a hint, not enforcement — a server that
+          // ignores its env and binds elsewhere is a substrate bug, not one
+          // this manager can fix.
+          HOST: "127.0.0.1",
+        }) as NodeJS.ProcessEnv,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      entry.child = spawned
+      spawned.stdout?.on("data", (b: Buffer) => append(entry, b.toString("utf8")))
+      spawned.stderr?.on("data", (b: Buffer) => append(entry, b.toString("utf8")))
+      return { entry, child: spawned }
+    })
+
     let exited = false
+    // The identity guard runs INSIDE the lock, not at handler time: `child`
+    // is only ever assigned or cleared under this id's lock, so a handler
+    // that read it before queueing could act on a record a newer start had
+    // already taken over.
     child.once("exit", (code) => {
       exited = true
-      if (e.child !== child) return
-      e.child = null
-      e.port = null
-      e.restartsAt.push(now())
-      e.status = { state: "crashed", exitCode: code, restarts: e.restartsAt.length, reason: "The server exited." }
+      void lock.run(id, async () => {
+        if (entries.get(id) !== entry || entry.child !== child) return
+        entry.child = null
+        await applyAllowingRefusal(id, { type: "exited", code })
+      })
     })
     child.once("error", (error) => {
       // Node emits `error` (never `exit`) for a spawn-time failure like
@@ -700,174 +759,191 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // log" is what several other crash reasons point readers to) and
       // carries no MORE than a spawn failure's own text. `reason` is the
       // separate, narrower surface this fix closes: see `SETUP_FAILED_REASON`.
-      append(e, `\n${error.message}\n`)
+      append(entry, `\n${error.message}\n`)
       console.error("[viewer] prototype process setup failed:", error)
-      if (e.child !== child) return
-      e.child = null
-      e.port = null
-      e.restartsAt.push(now())
-      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: SETUP_FAILED_REASON }
+      void lock.run(id, async () => {
+        if (entries.get(id) !== entry || entry.child !== child) return
+        entry.child = null
+        await applyAllowingRefusal(id, { type: "start-failed", reason: SETUP_FAILED_REASON, permanent: false })
+      })
     })
 
     const deadline = now() + readyTimeoutMs
-    // `e.child === child` is re-checked every iteration so a `stop()` (or an
+    // `entry.child === child` is re-checked every iteration so a stop (or an
     // eviction) landing mid-poll ends this loop promptly instead of running
     // to the timeout against a child that is already gone.
-    while (!exited && e.child === child && now() < deadline) {
+    while (!exited && entry.child === child && now() < deadline) {
       if (await answers(port)) {
-        // The request above can outlive a `stop()` that lands while it is in
-        // flight. Bail rather than declare a dead child "running" — this is
-        // the same identity guard the exit handler uses.
-        if (e.child !== child) {
-          throw new PrototypeProcessError(exposedStatus(e), reasonOrFallback(e.status, "The server was stopped before it finished starting."))
-        }
-        e.port = port
-        e.status = { state: "running", port, since: new Date(now()).toISOString() }
-        touchEntry(e)
-        return { port }
+        const ready = await lock.run(id, async () => {
+          try {
+            await apply(id, { type: "ready", port, generation })
+            return true
+          } catch (error) {
+            // Refused: a stop, a retire or a newer start landed while the
+            // request above was in flight, so this child belongs to nobody.
+            // Kill it rather than leave it holding a port, then let the
+            // refusal reject this `ensure`.
+            killTree(child, "SIGKILL")
+            child.kill("SIGKILL")
+            throw error
+          }
+        })
+        if (ready) return { port }
       }
       await new Promise((r) => setTimeout(r, 250))
     }
-    if (!exited && e.child === child) {
-      // Timed out on our own clock, not stopped or exited elsewhere.
-      await stopEntry(e)
-      e.restartsAt.push(now())
-      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The server did not answer in time." }
-    }
-    throw new PrototypeProcessError(exposedStatus(e), reasonOrFallback(e.status, "The server did not start."))
+    // One more lock hold, for two reasons. It decides the timeout case, and
+    // it is where an `exited`/`error` handler's own queued transition has
+    // certainly landed: those queue on this lock before `exited` is read
+    // here, and the lock is FIFO, so the status this reports is the settled
+    // one rather than a race with it.
+    return await lock.run(id, async () => {
+      if (entries.get(id) === entry && !exited && entry.child === child) {
+        // Timed out on our own clock, not stopped or exited elsewhere.
+        await applyAllowingRefusal(id, { type: "timed-out" })
+      }
+      const status = statusOf(id)
+      throw new PrototypeProcessError(
+        status,
+        status.state === "crashed" ? status.reason : DID_NOT_START_REASON,
+      )
+    })
   }
 
   return {
     async ensure(deployment) {
-      // Before anything else, including the entry lookup: after `shutdown()`
+      // Before anything else, including the record lookup: after `shutdown()`
       // there is nothing this manager can honestly promise, and a spawn here
       // outlives the process (children are detached).
       if (closed) throw closedError()
-      if (!deployment.serverStart) {
+      const serverStart = deployment.serverStart
+      if (!serverStart) {
         throw new PrototypeProcessError({ state: "stopped" }, "This deployment is served as files, not as a server.")
       }
-      const e = entryFor(deployment.id)
-      // Checked before the running/opening fast paths: a retired entry is
-      // never running and never mid-open (`retire` stops it first), but
-      // this order also makes the refusal explicit rather than incidental.
-      if (e.retired) {
-        throw new PrototypeProcessError(exposedStatus(e), reasonOrFallback(e.status, "The checkout for this deployment was removed. Rebuild it."))
-      }
-      if (e.status.state === "running" && e.port !== null) {
-        touchEntry(e)
-        return { port: e.port }
-      }
-      if (e.opening) return await e.opening
-      e.opening = start(deployment.id, deployment.serverStart, e).finally(() => {
-        e.opening = null
-      })
-      return await e.opening
+      const id = deployment.id
+      // Under the lock: reuse, join, or start. Only the DECISION is taken
+      // here; the cold start itself runs outside (see `startChild`). The
+      // decision is returned as a promise WRAPPED IN AN OBJECT rather than
+      // returned directly, because an async function awaits a promise it
+      // returns — which would hold this id's lock for the whole cold start
+      // and leave `stop`, `retire` and `forget` queued behind it.
+      const decision = await lock.run(
+        id,
+        async (): Promise<{ port: number } | { opening: Promise<{ port: number }> }> => {
+          const entry = entryFor(id)
+          const state = entry.record.state
+          if (state.kind === "running") {
+            // A touch, not an event: the machine has no transition for "still
+            // in use", and this is the same bump `touch()` makes.
+            entry.record = { ...entry.record, lastUsedAt: tick() }
+            return { port: state.port }
+          }
+          if (entry.opening) return { opening: entry.opening }
+          // Refused when the record is retired, permanently failed, or over
+          // the restart budget. The sentence is the machine's.
+          await apply(id, { type: "start-requested" })
+          const generation = entry.record.generation
+          // Assigned in this same lock hold, so a record that is `starting` is
+          // never seen without its `opening` — the room-making loop's leader
+          // wait depends on that.
+          const started = startChild(id, serverStart, generation).finally(() => {
+            entry.opening = null
+          })
+          entry.opening = started
+          return { opening: started }
+        },
+      )
+      return "port" in decision ? { port: decision.port } : await decision.opening
     },
     touch(id) {
+      // A field, not an event: "still in use" is not a state change, and the
+      // status a subscriber sees does not move.
       const e = entries.get(id)
-      if (e) touchEntry(e)
+      if (e) e.record = { ...e.record, lastUsedAt: tick() }
     },
-    beginRequest(id) {
-      const e = entryFor(id)
-      e.inFlight++
-      let released = false
-      return () => {
-        // Idempotent: `res.once("close", release)` fires at most once, but a
-        // caller that ALSO invokes the returned function directly (belt and
-        // braces around an error path, say) must not double-decrement and
-        // let the count drift below the number of requests actually open.
-        if (released) return
-        released = true
-        e.inFlight--
-        touchEntry(e)
-      }
+    withLease(id, fn) {
+      // Applied HERE, synchronously, before this function's first await, and
+      // released in the `finally` below. Both are the only transitions taken
+      // OUTSIDE the lock, on purpose: a request must not wait on a five
+      // second SIGTERM to record that it is in flight, and the lease it takes
+      // would be pointless if it landed after the eviction it exists to
+      // prevent. They are safe there because they touch nothing but the
+      // counter and `lastUsedAt`, and the machine refuses `reap` and `evict`
+      // on a positive counter whatever the interleaving.
+      //
+      // The acquire CREATES the record when there is none, which is the
+      // point: the cold start `fn` is about to ask for must find the lease
+      // already on the record it creates, or the round 11 window is still
+      // open. The release only applies to a record that is still there —
+      // a `forget` during the lease dropped it, and re-creating it here to
+      // decrement a counter nobody reads would leave a phantom behind.
+      applySync(id, { type: "lease-acquired" })
+      return (async () => {
+        try {
+          return await fn()
+        } finally {
+          if (entries.has(id)) applySync(id, { type: "lease-released" })
+        }
+      })()
     },
     async stop(id) {
-      const e = entries.get(id)
-      if (e) await stopEntry(e)
+      await lock.run(id, () => applyAllowingRefusal(id, { type: "stop-requested" }))
     },
     async markUnreachable(id) {
-      const e = entries.get(id)
-      if (!e) return
-      // Only a `running` entry is this call's business — see the interface
-      // doc comment for why `crashed`/`starting`/`stopped` are each a no-op.
-      if (e.status.state !== "running") return
-      await stopEntry(e)
-      // `stopEntry` awaits the old child's exit (up to 5s on a SIGTERM it
-      // ignores), during which a concurrent `ensure()` can have raced in and
-      // started a fresh attempt of its own — `stopEntry` reset the status to
-      // `stopped` synchronously at its own top, which is exactly the moment
-      // a racing `start()` reads as "safe to restart". Only record THIS call's
-      // crash if nothing else has touched the entry since: a status that is
-      // still `stopped` is this stop's own doing, and anything else (a fresh
-      // `starting`/`running`, or another crash) is a newer answer than this
-      // one and must not be clobbered.
-      if (!isStopped(e.status)) return
-      e.restartsAt.push(now())
-      e.status = {
-        state: "crashed",
-        exitCode: null,
-        restarts: e.restartsAt.length,
-        reason: "The server stopped answering.",
-      }
+      if (!entries.has(id)) return
+      await lock.run(id, () => applyAllowingRefusal(id, { type: "unreachable" }))
     },
     async forget(id) {
-      const e = entries.get(id)
-      if (!e) return
-      // Stopped first, dropped second. Dropping first would let a concurrent
-      // `ensure` create a fresh entry and spawn into a checkout that is about
-      // to be deleted; this way the child is down before the record goes.
-      await stopEntry(e)
-      entries.delete(id)
+      if (!entries.has(id)) return
+      // The machine orders the effects `kill` then `drop`, so the child is
+      // down before the record goes: dropping first would let a concurrent
+      // `ensure` create a fresh record and spawn into a checkout that is
+      // about to be deleted.
+      await lock.run(id, () => applyAllowingRefusal(id, { type: "forget" }))
     },
     async retire(id) {
-      // `entryFor`, not `entries.get`: a deployment can be pruned before it
-      // was ever `ensure`d, and the refusal must still be recorded — a later
-      // `ensure` for this same id must never fall through to `start()` and
-      // find an inviting empty slot.
-      const e = entryFor(id)
-      // `e.retired` — the flag `ensure` checks FIRST, before anything else —
-      // is set SYNCHRONOUSLY, before `stopEntry`'s own first `await` (its
-      // wait for the old child to exit, which a SIGTERM-ignoring child can
-      // stretch out for up to 5s). Without this, a request on the still-open
-      // pinned listener could call `ensure` in that window: `stopEntry`
-      // already reset `e.status` to "stopped" synchronously at ITS top, so
-      // `ensure` would see an entry that looks safe to restart and spawn a
-      // replacement — one that `pruneSupersededCheckouts` then deletes the
-      // checkout out from under, once this `retire` finishes and the
-      // directory removal proceeds (codex round 3, item 1).
-      e.retired = true
-      e.permanentFailure = true
-      await stopEntry(e)
-      // `stopEntry` just reset `e.status` to "stopped" as part of stopping the
-      // child; restore the permanent refusal now that the stop is done. The
-      // `retired` flag above is what actually closed the race — this is the
-      // status a caller reading `status()` afterward should see.
-      e.status = {
-        state: "crashed",
-        exitCode: null,
-        restarts: e.restartsAt.length,
-        reason: "The checkout for this deployment was removed. Rebuild it.",
-      }
+      // The refusal is recorded even for a deployment that was never
+      // `ensure`d: a later `ensure` for this same id must never fall through
+      // to a start and find an inviting empty slot.
+      //
+      // It lands promptly, too. `lock.run` queues this transition
+      // SYNCHRONOUSLY, before any caller can queue one of its own, so a
+      // request landing on a still-open pinned listener in the seconds this
+      // takes to stop a SIGTERM-ignoring child is refused rather than raced
+      // (codex round 3, item 1).
+      await lock.run(id, () => applyAllowingRefusal(id, { type: "retire" }))
     },
     status(id) {
-      const e = entries.get(id)
-      return e ? exposedStatus(e) : { state: "stopped" }
+      return statusOf(id)
     },
     serverLog(id) {
       return entries.get(id)?.log ?? ""
     },
+    subscribe(id, listener) {
+      let set = listeners.get(id)
+      if (!set) {
+        set = new Set()
+        listeners.set(id, set)
+      }
+      set.add(listener)
+      return () => {
+        const current = listeners.get(id)
+        if (!current) return
+        current.delete(listener)
+        if (current.size === 0) listeners.delete(id)
+      }
+    },
     startReaper() {
       const timer = setInterval(() => {
-        for (const [, e] of running()) {
-          // A request that began before the idle bound passed and is still
-          // being answered (an SSE stream, a large download) must not be cut
-          // out from under the client — see `beginRequest`. `stop`/`retire`/
-          // `forget`/`shutdown` are unaffected: they kill regardless, because
-          // they are explicit "this deployment is going away" actions, not
-          // the passive idle sweep.
-          if (e.inFlight > 0) continue
-          if (now() - e.lastUsedAt >= idleMs) void stopEntry(e)
+        // The machine decides: a record that is not running, not idle long
+        // enough, or holding a lease is refused or left alone. A request that
+        // began before the idle bound passed and is still being answered (an
+        // SSE stream, a large download) must not be cut out from under the
+        // client — see `withLease`. `stop`/`retire`/`forget`/`shutdown` are
+        // unaffected: they kill regardless, because they are explicit "this
+        // deployment is going away" actions, not the passive idle sweep.
+        for (const id of [...entries.keys()]) {
+          void lock.run(id, () => applyAllowingRefusal(id, { type: "reap", now: now(), idleMs }))
         }
       }, reapIntervalMs)
       timer.unref()
@@ -878,7 +954,9 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // request that lands while the children are being killed cannot start
       // a new one behind us.
       closed = true
-      await Promise.all([...entries.values()].map((e) => stopEntry(e)))
+      await Promise.all(
+        [...entries.keys()].map((id) => lock.run(id, () => applyAllowingRefusal(id, { type: "stop-requested" }))),
+      )
     },
   }
 }

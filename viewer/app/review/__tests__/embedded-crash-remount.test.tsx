@@ -60,7 +60,7 @@ const PROJECT: ReviewShellProject = {
   prototypeOrigin: "http://127.0.0.1:4321",
   mode: "loopback",
   serve: "server",
-  process: { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z" },
+  process: { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z", generation: 1 },
   range: null,
 }
 

@@ -22,7 +22,7 @@ describe("shouldRefreshAfterPoll", () => {
     const rows: ProcessStatus[] = [
       { state: "stopped" },
       { state: "starting" },
-      { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z" },
+      { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z", generation: 1 },
     ]
     for (const status of rows) {
       expect(shouldRefreshAfterPoll(status)).toBe(true)
@@ -73,7 +73,7 @@ describe("shouldRefreshWhileEmbedded", () => {
     const rows: ProcessStatus[] = [
       { state: "stopped" },
       { state: "starting" },
-      { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z" },
+      { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z", generation: 1 },
     ]
     for (const status of rows) {
       expect(shouldRefreshWhileEmbedded(status)).toBe(false)
@@ -207,7 +207,7 @@ describe("useProcessRecovery — embedded mode", () => {
     vi.useFakeTimers()
     const responses: ProcessStatus[] = [
       { state: "starting" },
-      { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z" },
+      { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z", generation: 1 },
     ]
     let call = 0
     const onShouldRefresh = vi.fn()
