@@ -398,6 +398,21 @@ const deploymentCommitMessage: Migration = {
 }
 
 /**
+ * Two columns for server prototypes (2026-09-10). `serve` defaults to
+ * `'static'`, which is true of every existing row: uploads are files, and
+ * every build before this migration published files. `server_start` is a
+ * JSON array, nullable for the same reason `steps` is.
+ */
+const deploymentServe: Migration = {
+  version: 8,
+  description: "deployments: serve mode column and server_start JSON column",
+  up(db) {
+    db.exec(`ALTER TABLE deployments ADD COLUMN serve TEXT NOT NULL DEFAULT 'static';`)
+    db.exec(`ALTER TABLE deployments ADD COLUMN server_start TEXT;`)
+  },
+}
+
+/**
  * The real migration list, applied on every boot after the baseline schema
  * `exec` in `SqliteStorage`'s constructor. See the comment above
  * `project_repo_configs` in sqlite-storage.ts for why a versioned mechanism
@@ -415,6 +430,7 @@ export const MIGRATIONS: Migration[] = [
   deploymentWarnings,
   deploymentSteps,
   deploymentCommitMessage,
+  deploymentServe,
 ]
 
 /**
