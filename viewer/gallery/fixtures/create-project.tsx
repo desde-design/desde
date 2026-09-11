@@ -17,13 +17,11 @@ import { CreateProjectDialog } from "@/../viewer/app/create-project-dialog"
 import { Scenario } from "../harness/scenario"
 import { ME_SIGNED_IN } from "../harness/fixture-data"
 
-/**
- * `VIEWER_PUBLIC_URL` for the URL preview under the slug field. A real
- * origin rather than a placeholder, because the preview line is one of the
- * things this screen exists to get right and `https://example.com` renders a
- * different width from a real host.
+/*
+ * One field since 2026-09-10 (Mo). The URL field, its derived-slug state, its
+ * invalid-slug state and the 409 state all went with it: the server derives
+ * and suffixes the slug now, so none of those can be met.
  */
-const PUBLIC_URL = "https://review.acme.dev"
 
 const CREATED = ok({ id: "proj-new", slug: "checkout-redesign", name: "Checkout redesign" })
 
@@ -39,7 +37,6 @@ function Fixture({
       <CreateProjectDialog
         open
         onOpenChange={(next) => ctx.log("onOpenChange", next)}
-        publicUrl={PUBLIC_URL}
         onCreated={(project) => ctx.log("onCreated", project.slug)}
       />
     </Scenario>
@@ -57,12 +54,6 @@ async function typeName(value: string, cancelled: () => boolean): Promise<void> 
   setNativeValue(input, value)
 }
 
-async function typeSlug(value: string, cancelled: () => boolean): Promise<void> {
-  const input = await waitForElement(() => inDialog<HTMLInputElement>('[data-testid="new-project-slug"]'))
-  if (!input || cancelled()) return
-  setNativeValue(input, value)
-}
-
 async function submit(cancelled: () => boolean): Promise<void> {
   const button = await waitForElement(() =>
     inDialog<HTMLButtonElement>('[data-testid="new-project-submit"]:not(:disabled)'),
@@ -71,26 +62,11 @@ async function submit(cancelled: () => boolean): Promise<void> {
   clickLikeUser(button)
 }
 
-/** Fills the name (which derives the slug) and stops there. */
+/** Fills the name and stops there. */
 function FilledFixture({ ctx }: { ctx: SurfaceRenderContext }) {
   useEffect(() => {
     let cancelled = false
     runDrivenInteraction(() => typeName("Checkout redesign", () => cancelled))
-    return () => {
-      cancelled = true
-    }
-  }, [])
-  return <Fixture ctx={ctx} />
-}
-
-/** Fills the name, then overwrites the slug with something the rule rejects. */
-function InvalidSlugFixture({ ctx }: { ctx: SurfaceRenderContext }) {
-  useEffect(() => {
-    let cancelled = false
-    runDrivenInteraction(async () => {
-      await typeName("Checkout redesign", () => cancelled)
-      await typeSlug("Checkout Redesign!", () => cancelled)
-    })
     return () => {
       cancelled = true
     }
@@ -127,36 +103,20 @@ export const CREATE_PROJECT_SURFACE: SurfaceEntry = {
   states: [
     {
       id: "create-project/empty",
-      label: "Empty — Add disabled until both fields are valid",
+      label: "Empty — Add disabled until a name is typed",
       render: (ctx) => <Fixture ctx={ctx} />,
     },
     {
-      id: "create-project/slug-derived",
-      label: "Name typed — slug derived, URL previewed",
-      // The preview line only exists once a slug does, so it is the honest
-      // signal that the derivation actually ran.
-      readyWhen: '[role="dialog"] [data-testid="new-project-slug"][value]',
+      id: "create-project/filled",
+      label: "Name typed — Add enabled",
+      readyWhen: '[role="dialog"] [data-testid="new-project-submit"]:not(:disabled)',
       render: (ctx) => <FilledFixture ctx={ctx} />,
-    },
-    {
-      id: "create-project/invalid-slug",
-      label: "Slug edited to something the rule rejects",
-      readyWhen: '[role="dialog"] .text-destructive',
-      render: (ctx) => <InvalidSlugFixture ctx={ctx} />,
     },
     {
       id: "create-project/submitting",
       label: "Submitting — the POST has not answered",
       readyWhen: '[role="dialog"] [data-testid="new-project-submit"]:disabled',
       render: (ctx) => <SubmittedFixture ctx={ctx} post={PENDING} />,
-    },
-    {
-      id: "create-project/slug-taken",
-      label: "409 — that slug is already in use",
-      readyWhen: '[role="dialog"] [data-testid="new-project-error"]',
-      render: (ctx) => (
-        <SubmittedFixture ctx={ctx} post={fail(409, "A project with that slug already exists")} />
-      ),
     },
     {
       id: "create-project/refused",

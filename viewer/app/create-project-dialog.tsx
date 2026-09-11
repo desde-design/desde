@@ -13,37 +13,9 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 
-/**
- * The slug rule, mirrored from the server's `SLUG_PATTERN`
- * (`server/api/projects-routes.ts`): 2-63 characters, lowercase letters,
- * digits and hyphens, starting with a letter or digit.
- *
- * Duplicated deliberately, and it is a duplication with a rule attached: the
- * SERVER is the authority and its 400 is always shown verbatim. This copy
- * exists only so the Create button can be disabled before a round trip that
- * is certain to fail. If the two ever disagree, the server wins and the user
- * sees the server's words — the failure mode of a stale copy here is a
- * button that stays disabled, never a project created with a bad slug.
- */
-const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{1,62}$/
-
-/**
- * Derives a URL slug from a display name — the same transform the original
- * Desde used: lowercase, runs of anything non-alphanumeric collapse to
- * a single hyphen, and leading/trailing hyphens are trimmed.
- */
-export function slugFromName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-}
-
 export interface CreateProjectDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  /** `VIEWER_PUBLIC_URL` — used only to show the URL the slug will produce. */
-  publicUrl: string
   /**
    * Called with the created project once the server returns 201. The
    * dashboard uses it to reload the list and hand the new project straight
@@ -53,44 +25,36 @@ export interface CreateProjectDialogProps {
 }
 
 /**
- * New project — name and URL slug, and nothing else.
+ * New project — a name, and nothing else.
  *
  * A dialog rather than the Editor's full-page stepper, because the two flows
  * are not the same size. The Editor's has four steps of real content (source,
- * name, design systems, reference folders); the Viewer's create API takes
- * exactly `{ slug, name }`, so a stepper here would be one step wearing a
- * costume. This matches the original Desde' own create dialog.
+ * name, design systems, reference folders); the Viewer's create API takes a
+ * name, so a stepper here would be one step wearing a costume.
  *
- * The slug tracks the name until the moment the user edits the slug
- * themselves, and then stops forever. That "stops forever" is the part worth
- * keeping: a slug that quietly re-derives after a manual edit throws away
- * work the user did on purpose, and they will not notice until the URL is
- * already live.
+ * There is no URL field (Mo, 2026-09-10: "generate it automatically, opaque
+ * to the user"). The server derives the slug from the name and suffixes it
+ * when the name is already taken, so nothing about the URL is the user's
+ * problem. Until then the dialog showed a second field that tracked the name
+ * and could be edited by hand; nobody needed to.
  *
- * The server is the only authority on whether a slug is acceptable. Its 400
- * and 409 bodies are shown verbatim rather than re-phrased, so a rule that
- * changes server-side reaches the user without this file being touched.
+ * No placeholder text in the field either (Mo, same day: "it isn't
+ * helpful"). The label says what goes there.
+ *
+ * The server's 400 and 403 bodies are shown verbatim rather than re-phrased,
+ * so a rule that changes server-side reaches the user without this file
+ * being touched.
  */
-export function CreateProjectDialog({
-  open,
-  onOpenChange,
-  publicUrl,
-  onCreated,
-}: CreateProjectDialogProps) {
+export function CreateProjectDialog({ open, onOpenChange, onCreated }: CreateProjectDialogProps) {
   const [name, setName] = useState("")
-  const [slug, setSlug] = useState("")
-  const [slugEdited, setSlugEdited] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const trimmedName = name.trim()
-  const slugValid = SLUG_PATTERN.test(slug)
-  const canSubmit = trimmedName.length > 0 && slugValid && !busy
+  const canSubmit = trimmedName.length > 0 && !busy
 
   function reset() {
     setName("")
-    setSlug("")
-    setSlugEdited(false)
     setBusy(false)
     setError(null)
   }
@@ -103,11 +67,6 @@ export function CreateProjectDialog({
     onOpenChange(next)
   }
 
-  function handleNameChange(value: string) {
-    setName(value)
-    if (!slugEdited) setSlug(slugFromName(value))
-  }
-
   async function handleSubmit() {
     if (!canSubmit) return
     setBusy(true)
@@ -116,13 +75,11 @@ export function CreateProjectDialog({
       const res = await fetch("/api/v1/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slug, name: trimmedName }),
+        body: JSON.stringify({ name: trimmedName }),
       })
       if (!res.ok) {
-        // The server's own wording, not a re-phrasing of it. A 409 already
-        // says the slug is taken; a 400 already names the rule that was
-        // broken. Only a response with no usable body needs us to invent
-        // anything.
+        // The server's own wording, not a re-phrasing of it. Only a response
+        // with no usable body needs us to invent anything.
         const body = (await res.json().catch(() => null)) as { error?: string } | null
         setError(body?.error ?? "Couldn't create the project. Try again.")
         setBusy(false)
@@ -147,58 +104,25 @@ export function CreateProjectDialog({
               as one thing, and it matches the dashboard button that opened it
               (Mo, 2026-08-29). */}
           <DialogTitle>Add project</DialogTitle>
-          <DialogDescription>
-            Give it a name and a URL. You can connect a repository next.
-          </DialogDescription>
+          <DialogDescription>Give it a name. You can connect a repository next.</DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-4">
+        <form
+          className="flex flex-col gap-4"
+          onSubmit={(e) => {
+            // One field, so Enter submits, the way a one-field form should.
+            e.preventDefault()
+            void handleSubmit()
+          }}
+        >
           <Field label="Project name" htmlFor="new-project-name">
             <Input
               id="new-project-name"
               value={name}
-              onChange={(e) => handleNameChange(e.target.value)}
-              placeholder="Checkout redesign"
+              onChange={(e) => setName(e.target.value)}
               autoFocus
               disabled={busy}
               data-testid="new-project-name"
-            />
-          </Field>
-
-          <Field
-            label="URL"
-            htmlFor="new-project-slug"
-            hint={
-              slug
-                ? `Served at ${publicUrl.replace(/\/$/, "")}/p/${slug}/`
-                : "Lowercase letters, digits and hyphens."
-            }
-            /* Only complain once there is something to complain ABOUT. An
-               empty field is incomplete, not wrong, and reddening it before
-               the user has typed reads as an accusation. */
-            error={
-              slug.length > 0 && !slugValid
-                ? "Use 2-63 lowercase letters, digits or hyphens, starting with a letter or digit."
-                : undefined
-            }
-          >
-            <Input
-              id="new-project-slug"
-              value={slug}
-              onChange={(e) => {
-                setSlug(e.target.value)
-                setSlugEdited(true)
-              }}
-              placeholder="checkout-redesign"
-              disabled={busy}
-              /* Not mono (Mo, 2026-08-29). docs/design.md puts paths and
-                 routes in mono, but the rule's other half decides this one:
-                 "text the user typed: the UI font". This is a field being
-                 typed into, not a value being read back, and mono here made
-                 the slug look like output rather than input. Where it IS
-                 shown back — the "Served at …/p/<slug>/" hint below — it can
-                 stay a path. */
-              data-testid="new-project-slug"
             />
           </Field>
 
@@ -207,7 +131,7 @@ export function CreateProjectDialog({
               {error}
             </Callout>
           ) : null}
-        </div>
+        </form>
 
         <DialogFooter>
           <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={busy}>

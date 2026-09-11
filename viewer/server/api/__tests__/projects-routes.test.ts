@@ -270,6 +270,38 @@ describe("projects API", () => {
   })
 
   /**
+   * The Add dialog stopped showing a URL field on 2026-09-10 (Mo: generate
+   * it, opaque to the user), so a create with no slug must succeed.
+   */
+  it("derives the slug from the name when none is sent", async () => {
+    const res = await request(ctx.app)
+      .post("/api/v1/projects")
+      .set(auth)
+      .send({ name: "  Checkout Redesign (Q4)! " })
+      .expect(201)
+    expect(res.body.slug).toBe("checkout-redesign-q4")
+    expect(res.body.name).toBe("Checkout Redesign (Q4)!")
+  })
+
+  it("falls back to a generic slug, still unique, when the name yields none", async () => {
+    // One letter derives to "a", which the pattern refuses (two characters
+    // minimum); punctuation derives to nothing at all.
+    const first = await request(ctx.app).post("/api/v1/projects").set(auth).send({ name: "A" }).expect(201)
+    expect(first.body.slug).toBe("project")
+    const second = await request(ctx.app).post("/api/v1/projects").set(auth).send({ name: "!!!" }).expect(201)
+    expect(second.body.slug).toBe("project-2")
+  })
+
+  it("still validates a slug that IS sent", async () => {
+    const res = await request(ctx.app)
+      .post("/api/v1/projects")
+      .set(auth)
+      .send({ slug: "Bad Slug", name: "n" })
+      .expect(400)
+    expect(res.body.error).toMatch(/slug/i)
+  })
+
+  /**
    * A duplicate slug used to 409, and the dialog told the caller to invent a
    * variation. Since 2026-08-29 the server suffixes instead (Mo: "can we not
    * be smart and append some digits... just happens transparently in the

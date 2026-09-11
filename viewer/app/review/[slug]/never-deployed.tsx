@@ -154,10 +154,12 @@ function FirstBuild({ project }: { project: ProjectSummary }) {
     case "building":
       /* The spinning cat in a box (Mo, 2026-09-10), the same wait every
          other surface shows, rather than the empty state's still picture:
-         something is happening. The log sits under it, closed. */
+         something is happening. No label under it (Mo, same day): the
+         sentence below already says what is happening. The log sits under
+         that, closed. */
       return (
         <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 pb-20">
-          <ProjectLoader size={80} label="Building" />
+          <ProjectLoader size={80} />
           <p className="max-w-md text-center text-sm text-muted-foreground">
             The first build is running. The prototype opens here when it finishes.
           </p>

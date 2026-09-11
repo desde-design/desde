@@ -16,6 +16,7 @@ import { getAllowAnonymousComments, getAllowPublicLinks } from "../instance-sett
 import { withProjectLock } from "../project-locks"
 import { ConflictError, NotFoundError } from "../storage/errors"
 import { nextSlugCandidate } from "./free-slug"
+import { deriveSlug } from "../../../src/core/project-identity"
 import { decideResolution, parseRepoRemote } from "./project-resolve"
 import type {
   Deployment,
@@ -423,18 +424,31 @@ export function createProjectsRoutes(
   })
 
   router.post("/projects", requireWrite, async (req, res) => {
-    const { slug, name, repoUrl, access } = req.body ?? {}
+    const { slug: requestedSlug, name, repoUrl, access } = req.body ?? {}
 
-    if (typeof slug !== "string" || !SLUG_PATTERN.test(slug)) {
-      res.status(400).json({
-        error:
-          "Invalid slug: use 2-63 lowercase letters, digits or hyphens, starting with a letter or digit",
-      })
-      return
-    }
     if (typeof name !== "string" || name.trim() === "") {
       res.status(400).json({ error: "name is required" })
       return
+    }
+    // The slug is optional (Mo, 2026-09-10: the Add dialog no longer shows a
+    // URL field; the slug is generated, opaque to the user). Sent, it is
+    // validated as before. Absent, it is derived from the name with the same
+    // transform the Editor uses. A name with fewer than two letters or digits
+    // derives to something the pattern refuses, so that case falls back to
+    // "project"; the suffixing below keeps it unique.
+    let slug: string
+    if (requestedSlug === undefined) {
+      const derived = deriveSlug(name.trim())
+      slug = SLUG_PATTERN.test(derived) ? derived : "project"
+    } else {
+      if (typeof requestedSlug !== "string" || !SLUG_PATTERN.test(requestedSlug)) {
+        res.status(400).json({
+          error:
+            "Invalid slug: use 2-63 lowercase letters, digits or hyphens, starting with a letter or digit",
+        })
+        return
+      }
+      slug = requestedSlug
     }
     if (access !== undefined && !ACCESS_VALUES.includes(access)) {
       res.status(400).json({ error: `access must be one of ${ACCESS_VALUES.join(", ")}` })

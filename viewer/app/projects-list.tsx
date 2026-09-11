@@ -415,7 +415,6 @@ export function ProjectsList({ serveDomain, publicUrl }: ProjectsListProps) {
       <CreateProjectDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
-        publicUrl={publicUrl}
         onCreated={handleCreated}
       />
 
