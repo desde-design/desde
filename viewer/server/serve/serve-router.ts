@@ -404,22 +404,21 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
   })
 
   /**
-   * The prototype route. Registered TWICE on one path, with one handler, and
-   * the duplication is load-bearing (task 8b).
+   * The prototype route, registered for EVERY method (task 8b): a server
+   * prototype takes form posts, server actions and API writes, so the handler
+   * has to see them all. The handler hands back everything it does not answer.
    *
-   * A server prototype takes form posts, server actions and API writes, so the
-   * handler has to see every method — hence the `all` registration. But a
-   * route registered ONLY with `all` contributes nothing to Express's
-   * automatic OPTIONS response: the router builds that `Allow` list from
-   * routes that do NOT handle the method, and `all` handles all of them. A
-   * static prototype's answer to `OPTIONS /p/{slug}/` would have silently
-   * changed from `200 Allow: GET, HEAD` to a fall-through. Keeping the `get`
-   * registration keeps that list, and the `all` registration below it is what
-   * carries every other method into the handler.
-   *
-   * Order matters: the `get` route is first, so a GET is dispatched once, by
-   * it. The handler never calls `next()` for GET or HEAD, so the `all` route
-   * is only ever reached by the methods the `get` route does not take.
+   * One `all` registration, and NOT `all` plus a `get` — an earlier draft of
+   * this task had both, and it shipped a real regression. Express's router
+   * answers OPTIONS by itself for a path it routes but whose method no route
+   * handles, building `Allow` from the routes that declined; an `all` route
+   * declines nothing, so a lone `all` never produces that answer while a
+   * `get` beside it still does. On an isolated prototype origin that automatic
+   * `200 Allow: GET, HEAD` was emitted from INSIDE this router, before
+   * `createPrototypeHostTerminalFence` could refuse it — turning a prototype
+   * host's `404 Not found` into a 200. Hence: no `get` route here, and the
+   * path mode answer Express used to give is reproduced explicitly in the
+   * handler (see the OPTIONS branch).
    *
    * `{*rest}` (an optional wildcard group) is required, not `*rest`: a bare
    * `*rest` demands at least one character after the slash, so it would
@@ -493,6 +492,73 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     // together with `pinned`, whether the prototype owns the origin root
     // (`servesAtRoot`).
     const onSubdomain = (req as unknown as SubdomainRequest).prototypeSubdomain !== undefined
+
+    // The single `VIEWER_PROTOTYPE_ORIGIN` host, marked by
+    // `createPrototypeOriginMark` (`prototype-host-scope.ts`). It is a THIRD
+    // isolated mode, but a different SHAPE from the two below: cross-origin
+    // (isolated CSP, real-origin sandbox, no session cookie) BUT
+    // path-namespaced — all prototypes share one host, so none owns `/`, and
+    // root-absolute assets still need the base href, the root-relative rewrite
+    // and the prefixed bridge path. That is why it drives `isIsolatedOrigin`
+    // but NOT `servesAtRoot`.
+    const onPrototypeOrigin = (req as unknown as PrototypeOriginHostRequest).onPrototypeOrigin === true
+
+    // OWNS `/` on its origin: no base href, no root-relative rewrite, the
+    // bridge at the origin root. A `{slug}.{serveDomain}` host and a loopback
+    // listener; NOT the shared prototype origin. Only the two places the modes
+    // genuinely differ (skipping authorization, and which deployment's bytes
+    // to read) branch on `pinned` itself. Anything that branches on
+    // `onSubdomain` alone below this line is a bug in loopback mode.
+    const servesAtRoot = onSubdomain || pinned !== null
+
+    // CROSS-ORIGIN from the shell: the isolated-origin CSP, the real-origin
+    // sandbox (chosen client-side), and NO session cookie or ACAO. Every
+    // `servesAtRoot` mode is cross-origin, and so is the shared prototype
+    // origin — but the shared origin is path-namespaced, so it is
+    // `isIsolatedOrigin` WITHOUT being `servesAtRoot`. This is the decoupling:
+    // the CSP and the CORS decision follow the origin boundary; the document
+    // shaping (base href / rewrite / bridge path) follows who owns `/`.
+    //
+    // All three are resolved HERE, at the top, rather than beside their first
+    // use further down: the OPTIONS branch immediately below has to know the
+    // origin mode, and it has to answer before any storage lookup.
+    const isIsolatedOrigin = servesAtRoot || onPrototypeOrigin
+
+    /**
+     * OPTIONS in PATH MODE, byte-for-byte what Express used to send, decided
+     * before anything is looked up.
+     *
+     * Until task 8b this route was `router.get`, so Express's router answered
+     * OPTIONS itself: a path it routes whose method no route handles gets an
+     * automatic `200` with `Allow` built from the routes that declined. That
+     * answer went out for EVERY path under this route — an unknown slug and an
+     * unreadable project included — because it came from route matching and
+     * never ran the handler. Reproducing it here, ahead of the lookups, is what
+     * keeps it that way; answering it further down would make a readable
+     * prototype tell itself apart from an unreadable one by its OPTIONS reply.
+     *
+     * The fields mirror the router's own `sendOptionsResponse`, including the
+     * bare `text/plain` with no charset, which is why this is `res.end` rather
+     * than `res.type(...).send(...)`.
+     *
+     * Isolated origins deliberately do NOT come through here. A prototype
+     * origin answered `404 Not found` to OPTIONS before this task (the
+     * write-method fence refused it), and it still does: the request carries on
+     * into the handler, a static deployment reaches the fall-through below, and
+     * `createPrototypeHostTerminalFence` ends it. A `serve: "server"`
+     * deployment on an origin of its own proxies instead — a prototype's own
+     * CORS preflight is its process's to answer.
+     */
+    if (req.method === "OPTIONS" && !isIsolatedOrigin) {
+      const allow = "GET, HEAD"
+      res.statusCode = 200
+      res.setHeader("Allow", allow)
+      res.setHeader("Content-Length", Buffer.byteLength(allow))
+      res.setHeader("Content-Type", "text/plain")
+      res.setHeader("X-Content-Type-Options", "nosniff")
+      res.end(allow)
+      return
+    }
 
     // Whether cookies this handler sets/reads carry the `__Host-` prefix. True
     // exactly when the deployment is https (the same condition as `Secure`),
@@ -612,35 +678,9 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     // is strictly safer than trying to enumerate "scriptable" types here.
     // Subdomain mode gives the prototype its OWN origin, so the CSP can be
     // the stronger `connect-src 'self'` form and the shell's host-only
-    // session cookie is never sent here at all. `onSubdomain` is computed at
-    // the top of the handler (it also decides where the capability comes from).
-
-    // The single `VIEWER_PROTOTYPE_ORIGIN` host, marked by
-    // `createPrototypeOriginMark` (`prototype-host-scope.ts`). It is a THIRD
-    // isolated mode, but a different SHAPE from the two below: cross-origin
-    // (isolated CSP, real-origin sandbox, no session cookie) BUT
-    // path-namespaced — all prototypes share one host, so none owns `/`, and
-    // root-absolute assets still need the base href, the root-relative rewrite
-    // and the prefixed bridge path. That is why it drives `isIsolatedOrigin`
-    // but NOT `servesAtRoot`.
-    const onPrototypeOrigin = (req as unknown as PrototypeOriginHostRequest).onPrototypeOrigin === true
-
-    // OWNS `/` on its origin: no base href, no root-relative rewrite, the
-    // bridge at the origin root. A `{slug}.{serveDomain}` host and a loopback
-    // listener; NOT the shared prototype origin. Only the two places the modes
-    // genuinely differ (skipping authorization, and which deployment's bytes
-    // to read) branch on `pinned` itself. Anything that branches on
-    // `onSubdomain` alone below this line is a bug in loopback mode.
-    const servesAtRoot = onSubdomain || pinned !== null
-
-    // CROSS-ORIGIN from the shell: the isolated-origin CSP, the real-origin
-    // sandbox (chosen client-side), and NO session cookie or ACAO. Every
-    // `servesAtRoot` mode is cross-origin, and so is the shared prototype
-    // origin — but the shared origin is path-namespaced, so it is
-    // `isIsolatedOrigin` WITHOUT being `servesAtRoot`. This is the decoupling:
-    // the CSP and the CORS decision follow the origin boundary; the document
-    // shaping (base href / rewrite / bridge path) follows who owns `/`.
-    const isIsolatedOrigin = servesAtRoot || onPrototypeOrigin
+    // session cookie is never sent here at all. `onSubdomain`, `servesAtRoot`
+    // and `isIsolatedOrigin` are all computed at the top of the handler, where
+    // the OPTIONS branch needs them.
 
     /**
      * `Access-Control-Allow-Origin: *`, on the same-origin path mode ONLY.
@@ -950,8 +990,6 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     res.send(asset.body)
   }
 
-  // See `servePrototype`'s doc comment for why this path is registered twice.
-  router.get("/p/:slug/{*rest}", servePrototype)
   router.all("/p/:slug/{*rest}", servePrototype)
 
   return router

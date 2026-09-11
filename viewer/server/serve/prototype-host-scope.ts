@@ -219,21 +219,26 @@ function sendPrototypeNotFound(res: Response): void {
  * Whether a non-GET on a prototype host is headed for the SERVE ROUTER's
  * prototype route, and may therefore be passed to it instead of refused here.
  *
- * Built for `create-app.ts`'s two prototype-host shapes, and it answers by
- * asking what ROUTING will do with this request, not what the path looks
- * like:
+ * The rule is ONE host shape: a `{slug}.{serveDomain}` subdomain.
+ * `createSubdomainRewrite` — mounted just after the fence, and reading this
+ * same `serveDomain` through this same `slugFromHost` — turns EVERY path on
+ * that host into `/p/{slug}/…`. So on a slug host every path is the prototype
+ * route, including one spelled `/api/v1/auth/logout`: after the rewrite it
+ * names a file inside the prototype, and the shell's API is not mounted
+ * anywhere it could reach. Sharing the one function with the rewrite is what
+ * makes "the rewrite will fire" a fact rather than an assumption.
  *
- * - A `{slug}.{serveDomain}` host. `createSubdomainRewrite` — mounted just
- *   after the fence, and reading this same `serveDomain` through this same
- *   `slugFromHost` — turns EVERY path on that host into `/p/{slug}/…`. So on
- *   a slug host every path is the prototype route, including one spelled
- *   `/api/v1/auth/logout`: after the rewrite it names a file inside the
- *   prototype, and the shell's API is not mounted anywhere it could reach.
- *   Sharing the one function with the rewrite is what makes "the rewrite will
- *   fire" a fact rather than an assumption.
- * - The single `VIEWER_PROTOTYPE_ORIGIN` host, which has no rewrite: a
- *   request there already arrives as `/p/{slug}/…` or it is not prototype
- *   content at all, so the prefix is the whole test.
+ * The single `VIEWER_PROTOTYPE_ORIGIN` host is deliberately NOT included, even
+ * though a request there already arrives as `/p/{slug}/…`. That host is
+ * path-namespaced, so no prototype owns `/` on it and the serve router refuses
+ * a server deployment there outright (409) — nothing on it could ever accept a
+ * write, so letting one through buys nothing. It also costs something: an
+ * earlier draft of this rule passed any `/p/`-prefixed path, and
+ * `OPTIONS /p/{slug}` (the bare-slug redirect route) then reached the router,
+ * which answered Express's automatic `200 Allow: GET, HEAD` from INSIDE itself
+ * — before `createPrototypeHostTerminalFence` could refuse it. The handler
+ * cannot close that, because on that path the handler never runs. Refusing
+ * here does.
  *
  * A loopback listener never reaches this rule — it is a separate server with
  * its own app, and its fence asks a different question (see
@@ -245,12 +250,23 @@ function sendPrototypeNotFound(res: Response): void {
  * `serve: "server"` deployment on an origin of its own — and a refusal there
  * falls through to `createPrototypeHostTerminalFence`, which answers with the
  * same body this module would have.
+ *
+ * **What a passed write costs before it is refused.** On a slug host a write
+ * against an ordinary static prototype now runs `getProjectBySlug`,
+ * `resolveReadContextLenient`, `canReadProject`, `loadProjectReadPolicy` and
+ * `getDeployment` before the serve router hands it back — where this fence
+ * used to refuse it for the price of one string comparison. The requests are
+ * unauthenticated, and a rewritten subdomain path never matches the `/api/v1`
+ * mount, so the API rate limiter does not see them. This is the same work an
+ * unauthenticated GET to the same host already does, so it is not a new class
+ * of exposure — but it is a second way to reach that cost, and it is the price
+ * of the fence not knowing which deployment it fronts. A loopback listener
+ * pays none of it: its fence reads `serve` off the pinned context.
  */
 export function createPrototypeRouteWriteRule(
   serveDomain: string | null,
 ): (req: Request) => boolean {
   return function writeReachesPrototypeRoute(req: Request): boolean {
-    if (req.url.startsWith("/p/")) return true
     const host = typeof req.headers.host === "string" ? req.headers.host : undefined
     return slugFromHost(host, serveDomain) !== null
   }
@@ -281,10 +297,25 @@ export function createPrototypeRouteWriteRule(
  *
  * OPTIONS travels with the other write methods, and for a server prototype
  * that is the point: it is the app's own CORS preflight, which only its
- * process can answer. On everything else the serve router hands it straight
- * back, so Express answers it exactly as it did before.
+ * process can answer. Who answers it otherwise is worth stating exactly,
+ * because it moved during task 8b and moved back:
  *
- * On the shell host this is a no-op: no marking, no behaviour change.
+ * | host | who answers OPTIONS | what it says |
+ * | --- | --- | --- |
+ * | `VIEWER_PROTOTYPE_ORIGIN` | this fence | `404 Not found` |
+ * | `{slug}.{serveDomain}`, static deployment | `createPrototypeHostTerminalFence`, after the serve router hands it back | `404 Not found` |
+ * | `{slug}.{serveDomain}`, `serve: "server"` | the prototype's own process, proxied | whatever the app says |
+ * | a loopback listener | its own fence, unless it fronts a server deployment | `404 Not found`, or the app's answer |
+ * | the shell host (path mode) | `serve-router.ts`'s own OPTIONS branch | `200 Allow: GET, HEAD` |
+ *
+ * Every row is the answer that host gave before server prototypes existed,
+ * except the server-deployment rows, which had no prototype to ask. The last
+ * row used to come from Express's automatic OPTIONS response and is now
+ * written out by hand, byte for byte — see that branch's comment for why it
+ * could not stay automatic.
+ *
+ * On the shell host this middleware is a no-op: no marking, no behaviour
+ * change.
  */
 export function createPrototypeHostScope(deps: {
   registry: PrototypeHostRegistry

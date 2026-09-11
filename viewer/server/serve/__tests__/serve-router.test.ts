@@ -1916,17 +1916,15 @@ describe("createServeRouter", () => {
      */
     describe("methods other than GET", () => {
       /**
-       * A pinned loopback listener fronting a `serve: "static"` deployment —
-       * the control for every server-deployment assertion in this block.
+       * A `serve: "static"` deployment at slug `acme`, on the shell host in
+       * PATH MODE — no pin, no subdomain marker.
        */
-      async function staticPinnedApp(prototypeProcesses?: PrototypeProcesses) {
+      async function staticPathModeApp() {
         const c = await setup({
-          prototypeProcesses:
-            prototypeProcesses ??
-            fakeProcesses({
-              ensure: () =>
-                Promise.reject(new Error("a static deployment must never start a process")),
-            }),
+          prototypeProcesses: fakeProcesses({
+            ensure: () =>
+              Promise.reject(new Error("a static deployment must never start a process")),
+          }),
         })
         const project = await c.storage.createProject({
           slug: "acme",
@@ -1936,7 +1934,17 @@ describe("createServeRouter", () => {
         const deployment = await c.storage.createDeployment({ projectId: project.id })
         await c.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
         await c.assets.put(deployment.id, "index.html", Buffer.from("<html><body>files</body></html>"))
-        pinnedMarker = { deploymentId: deployment.id, slug: "acme" }
+        return { ...c, deploymentId: deployment.id }
+      }
+
+      /**
+       * The same deployment, behind a pinned loopback listener — an ISOLATED
+       * origin, and the control for every server-deployment assertion in this
+       * block.
+       */
+      async function staticPinnedApp() {
+        const c = await staticPathModeApp()
+        pinnedMarker = { deploymentId: c.deploymentId, slug: "acme" }
         return c
       }
 
@@ -2004,19 +2012,47 @@ describe("createServeRouter", () => {
       })
 
       /**
-       * MEASURED the same way: `OPTIONS /p/acme/` was answered by Express's
-       * own automatic OPTIONS response — 200, `Allow: GET, HEAD`, with that
-       * string as the body. It still is. This is the reason the route is
-       * registered TWICE in `serve-router.ts` (see the comment there): a route
-       * registered only with `router.all` contributes nothing to that `Allow`
-       * list, and a static prototype's answer would silently change.
+       * MEASURED the same way, in PATH MODE: `OPTIONS /p/acme/` was answered
+       * by Express's own automatic OPTIONS response — 200, `Allow: GET, HEAD`,
+       * with that string as the body, `Content-Type: text/plain` with no
+       * charset. It still is, but the handler writes it rather than the router,
+       * because the route is now `router.all` and an `all` route never triggers
+       * the automatic answer. See the OPTIONS branch in `serve-router.ts`.
+       *
+       * Every path under the route, including a slug that does not exist:
+       * before this task the answer came from route matching and never ran the
+       * handler, so it could not depend on what the storage held, and it still
+       * must not.
        */
-      it("leaves OPTIONS on a static deployment to Express's own Allow response", async () => {
+      it("answers OPTIONS in path mode exactly as Express used to", async () => {
+        const c = await staticPathModeApp()
+        for (const path of ["/p/acme/", "/p/acme/x", "/p/nosuchslug/"]) {
+          const res = await request(c.app).options(path)
+          expect(res.status, path).toBe(200)
+          expect(res.headers["allow"], path).toBe("GET, HEAD")
+          expect(res.headers["content-type"], path).toBe("text/plain")
+          expect(res.text, path).toBe("GET, HEAD")
+        }
+      })
+
+      /**
+       * On an ISOLATED origin the same request must NOT get that answer. A
+       * prototype origin answered `404 Not found` to OPTIONS before this task
+       * — the write-method fence refused it — and the way it keeps doing so is
+       * that the handler hands OPTIONS back like any other write, for
+       * `createPrototypeHostTerminalFence` to end.
+       *
+       * This harness has no terminal fence, so what it can show is the
+       * fall-through itself: Express's default 404, meaning this router
+       * answered nothing. `prototype-host-scope.test.ts` carries the real-app
+       * half, where the fence turns that into `404 Not found`.
+       */
+      it("hands OPTIONS back on an isolated origin instead of answering Allow", async () => {
         const c = await staticPinnedApp()
         const res = await request(c.app).options("/p/acme/")
-        expect(res.status).toBe(200)
-        expect(res.headers["allow"]).toBe("GET, HEAD")
-        expect(res.text).toBe("GET, HEAD")
+        expect(res.status).toBe(404)
+        expect(res.headers["allow"]).toBeUndefined()
+        expect(res.text).toContain("Cannot OPTIONS /p/acme/")
       })
 
       it("still serves GET and HEAD on a static deployment", async () => {
@@ -2083,6 +2119,35 @@ describe("createServeRouter", () => {
         const res = await request(app).post("/p/srv/").send("x=1")
         expect(res.status).toBe(409)
         expect(res.text).toContain("origin of its own")
+        expect(ensures).toBe(0)
+      })
+
+      /**
+       * OPTIONS in path mode does NOT take the 409, and that is deliberate.
+       * The 409 needs the deployment row, and reading it would make the
+       * OPTIONS answer depend on what storage holds — which is exactly what it
+       * never did before this task, when the router answered from route
+       * matching alone. A path-mode `Allow: GET, HEAD` for a prototype that
+       * path mode refuses to serve at all is a little untrue, but it is the
+       * answer this URL has always given, and it gives it for every slug
+       * alike. The 409 still lands on every method that carries a request
+       * body, which is the one the boundary is about.
+       */
+      it("answers OPTIONS in path mode without reading the deployment, even for a server one", async () => {
+        let ensures = 0
+        const { app } = await loopbackAppWith({
+          pinned: false,
+          prototypeProcesses: fakeProcesses({
+            ensure: () => {
+              ensures += 1
+              return Promise.resolve({ port: 1 })
+            },
+          }),
+        })
+
+        const res = await request(app).options("/p/srv/")
+        expect(res.status).toBe(200)
+        expect(res.headers["allow"]).toBe("GET, HEAD")
         expect(ensures).toBe(0)
       })
 

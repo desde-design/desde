@@ -107,6 +107,16 @@ export interface LoopbackListenerAppContext {
    * every path on this origin is — and what it asks instead is whether the
    * deployment it fronts is a process that can take a write at all. See
    * `loopback-listener-app.ts`.
+   *
+   * Being a snapshot, it can in principle go stale, and it goes stale in the
+   * SAFE direction. A build publishes `serve` on a NEW deployment row, and a
+   * new row means a new registry key and therefore a new listener, so the
+   * ordinary case never produces a stale value at all. The only way to produce
+   * one is to flip an existing row in place: `static` → `server` leaves this
+   * listener still refusing writes until it is reaped, which is a feature that
+   * does not appear rather than a boundary that gives way. The other direction,
+   * `server` → `static`, passes a write to a serve router that immediately
+   * hands it back, and `createPrototypeHostTerminalFence` refuses it.
    */
   serve: DeploymentServe
   /** The one acceptable `Host` value: `127.0.0.1:45001` or `[::1]:45001`. */
