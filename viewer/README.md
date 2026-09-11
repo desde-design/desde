@@ -37,6 +37,8 @@ docker run -d --name desde-viewer -p 3100-3120:3100-3120 \
   ghcr.io/desde-design/viewer:latest
 ```
 
+The `3100-3120` range publishes the twenty loopback ports prototypes open on (`VIEWER_LOOPBACK_PORT_RANGE`, defaulted from `PORT` inside a container); without it a prototype's page never loads and the review screen names this flag.
+
 Then open http://localhost:3100 and follow the one-time sign-in link the
 container prints (`docker logs desde-viewer`). Everything below is the
 from-source path, which is what the image is built from.
