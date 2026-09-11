@@ -139,8 +139,10 @@ describe("readPrototypeOrigin", () => {
         mode: "loopback",
         origin: "http://127.0.0.1:45001",
         capabilityRequired: false,
+        serve: "static",
+        range: null,
       }),
-    ).toEqual({ mode: "loopback", origin: "http://127.0.0.1:45001" })
+    ).toEqual({ mode: "loopback", origin: "http://127.0.0.1:45001", serve: "static", range: null })
   })
 
   it("passes a well-formed subdomain answer through", () => {
@@ -149,8 +151,9 @@ describe("readPrototypeOrigin", () => {
         mode: "subdomain",
         origin: "https://acme.desde.test",
         capabilityRequired: true,
+        serve: "static",
       }),
-    ).toEqual({ mode: "subdomain", origin: "https://acme.desde.test" })
+    ).toEqual({ mode: "subdomain", origin: "https://acme.desde.test", serve: "static", range: null })
   })
 
   it("keeps the null origin of a loopback project with nothing built", () => {
@@ -160,15 +163,21 @@ describe("readPrototypeOrigin", () => {
         origin: null,
         capabilityRequired: false,
         reason: "no-deployment",
+        serve: "static",
+        range: null,
       }),
-    ).toEqual({ mode: "loopback", origin: null })
+    ).toEqual({ mode: "loopback", origin: null, serve: "static", range: null })
   })
 
   it("passes a fallback answer through unchanged", () => {
-    expect(readPrototypeOrigin({ mode: "fallback", origin: null, capabilityRequired: true })).toEqual({
-      mode: "fallback",
-      origin: null,
-    })
+    expect(
+      readPrototypeOrigin({
+        mode: "fallback",
+        origin: null,
+        capabilityRequired: true,
+        serve: "static",
+      }),
+    ).toEqual({ mode: "fallback", origin: null, serve: "static", range: null })
   })
 
   // Every unrecognised shape lands on fallback, which `resolvePrototypeEmbed`
@@ -184,7 +193,124 @@ describe("readPrototypeOrigin", () => {
     ["null", null],
     ["an array", []],
   ])("falls back for %s", (_label, value) => {
-    expect(readPrototypeOrigin(value)).toEqual({ mode: "fallback", origin: null })
+    expect(readPrototypeOrigin(value)).toEqual({
+      mode: "fallback",
+      origin: null,
+      serve: "static",
+      range: null,
+    })
+  })
+
+  // An older server's body carries no `serve` at all — this page must still
+  // render the prototype it used to, not silently treat every project as a
+  // server one.
+  it("defaults serve to \"static\" when the field is absent (an older server's body)", () => {
+    expect(
+      readPrototypeOrigin({ mode: "fallback", origin: null, capabilityRequired: true }),
+    ).toEqual({ mode: "fallback", origin: null, serve: "static", range: null })
+  })
+
+  it("carries the process status for a server deployment", () => {
+    const status = { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z" }
+    expect(
+      readPrototypeOrigin({
+        mode: "loopback",
+        origin: "http://127.0.0.1:45001",
+        capabilityRequired: false,
+        serve: "server",
+        process: status,
+        range: null,
+      }),
+    ).toEqual({
+      mode: "loopback",
+      origin: "http://127.0.0.1:45001",
+      serve: "server",
+      process: status,
+      range: null,
+    })
+  })
+
+  it("drops a process field that is not shaped like a status, and ignores one on a static deployment", () => {
+    expect(
+      readPrototypeOrigin({
+        mode: "fallback",
+        origin: null,
+        capabilityRequired: true,
+        serve: "server",
+        process: "not an object",
+      }).process,
+    ).toBeUndefined()
+    expect(
+      readPrototypeOrigin({
+        mode: "fallback",
+        origin: null,
+        capabilityRequired: true,
+        serve: "static",
+        process: { state: "running", port: 1, since: "x" },
+      }).process,
+    ).toBeUndefined()
+  })
+
+  it("carries the configured loopback port range", () => {
+    expect(
+      readPrototypeOrigin({
+        mode: "loopback",
+        origin: "http://127.0.0.1:45001",
+        capabilityRequired: false,
+        serve: "static",
+        range: { from: 3101, to: 3120 },
+      }).range,
+    ).toEqual({ from: 3101, to: 3120 })
+  })
+
+  it("carries the bridge asset path the port watchdog probes", () => {
+    expect(
+      readPrototypeOrigin({
+        mode: "loopback",
+        origin: "http://127.0.0.1:45001",
+        capabilityRequired: false,
+        serve: "static",
+        range: null,
+        bridgeAssetPath: "__desde/bridge-2026-09-10h.js",
+      }).bridgeAssetPath,
+    ).toBe("__desde/bridge-2026-09-10h.js")
+    // An older server's body says nothing, and the shell then probes the
+    // origin root as it used to.
+    expect(
+      readPrototypeOrigin({ mode: "loopback", origin: "http://127.0.0.1:45001", serve: "static" })
+        .bridgeAssetPath,
+    ).toBeUndefined()
+  })
+
+  /**
+   * The 503 has no `mode`, so everything else about it falls back — but the
+   * page acts on all three of the fields it DOES carry: `reason` says what
+   * happened, `serve` decides whether it matters (a static prototype still
+   * loads from the shell's own path prefix), and `range` is the count the
+   * panel names.
+   */
+  it("parses the ports-exhausted 503 body's reason, serve and range even though it has no mode", () => {
+    expect(
+      readPrototypeOrigin({ error: "No free loopback ports", reason: "ports-exhausted" }),
+    ).toEqual({ mode: "fallback", origin: null, serve: "static", range: null, reason: "ports-exhausted" })
+    expect(
+      readPrototypeOrigin({
+        error: "No free loopback ports",
+        reason: "ports-exhausted",
+        serve: "server",
+        range: { from: 3101, to: 3120 },
+      }),
+    ).toEqual({
+      mode: "fallback",
+      origin: null,
+      serve: "server",
+      range: { from: 3101, to: 3120 },
+      reason: "ports-exhausted",
+    })
+  })
+
+  it("ignores an unrecognised reason value", () => {
+    expect(readPrototypeOrigin({ error: "boom", reason: "something-else" }).reason).toBeUndefined()
   })
 })
 

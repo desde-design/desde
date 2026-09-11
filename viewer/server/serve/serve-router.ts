@@ -1,4 +1,4 @@
-import { Router, type Request } from "express"
+import { Router, type Request, type RequestHandler } from "express"
 import { extname } from "node:path"
 import {
   canReadProject,
@@ -25,6 +25,8 @@ import { allowPrototypeCors } from "./prototype-cors"
 import { PROTOTYPE_NOT_FOUND_BODY, type PrototypeOriginHostRequest } from "./prototype-host-scope"
 import { resolveIsolatedOriginCsp, type SubdomainRequest } from "./subdomain"
 import { isCss, isHtml } from "./mime"
+import { PrototypeProcessError, type PrototypeProcesses } from "./prototype-processes"
+import { proxyToProcess } from "./proxy-to-process"
 
 export interface ServeRouterDeps {
   storage: StorageAdapter
@@ -55,6 +57,70 @@ export interface ServeRouterDeps {
    * header; any other string is sent as-is.
    */
   prototypeCsp: string | null
+  /**
+   * The process manager for `serve: "server"` deployments
+   * (`prototype-processes.ts`). One per process, so a deployment has at most
+   * one child however many routers, listeners or origins reach it.
+   */
+  prototypeProcesses: PrototypeProcesses
+}
+
+/**
+ * The path a server prototype's own process should see, given the URL this
+ * request arrived on and the prefixes the viewer may have put in front of it.
+ *
+ * Two transformations, both about handing the child ITS url rather than ours.
+ *
+ * **The prefix.** `originalUrl`, not `req.url`, is the input. Express fixes
+ * `originalUrl` before any middleware runs, so on a real isolated origin it is
+ * already the path the browser asked for (`/orders?page=2`) — the
+ * `/p/{slug}/…` form in `req.url` is what the subdomain and pinned-listener
+ * rewrites produce for the ROUTER's benefit. So the common case is to pass it
+ * through untouched. `prefixes` covers the request that genuinely arrived in
+ * the `/p/{slug}/…` shape, longest first: the capability-bearing
+ * `/p/{slug}/~c/{token}/` and the bare `/p/{slug}/`. Each ends in `/`, so
+ * slicing one character short of its length keeps the leading `/` the child
+ * needs.
+ *
+ * **The capability.** `~c` is dropped from the query. On a subdomain it
+ * arrives as `?~c=<token>` on the document load (see
+ * `readSubdomainCapability`). That is the viewer's channel, not the
+ * prototype's: forwarding it would put a read credential into the app's own
+ * request log, its analytics, and any link it builds out of
+ * `location.search`. Every other parameter survives, and the `?` goes with the
+ * last one.
+ *
+ * The query is returned UNCHANGED when there is no `~c` in it, which is the
+ * overwhelmingly common case. That early return is deliberate: re-serializing
+ * through `URLSearchParams` normalizes encodings (a space becomes `+`, `%7E`
+ * becomes `~`), and a proxy should hand the child exactly the bytes it was
+ * given unless it has an actual reason not to.
+ */
+export function childPathFor(originalUrl: string, prefixes: string[]): string {
+  let path = originalUrl
+  for (const prefix of prefixes) {
+    if (path.startsWith(prefix)) {
+      path = path.slice(prefix.length - 1)
+      break
+    }
+  }
+  const mark = path.indexOf("?")
+  if (mark === -1) return path
+  const params = new URLSearchParams(path.slice(mark + 1))
+  if (!params.has(CAPABILITY_SEGMENT)) return path
+  params.delete(CAPABILITY_SEGMENT)
+  const rest = params.toString()
+  return rest === "" ? path.slice(0, mark) : `${path.slice(0, mark)}?${rest}`
+}
+
+/** Minimal HTML escaping for the two refusal pages below. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
 }
 
 /**
@@ -202,7 +268,7 @@ export function resolvePrototypeCsp(
  * string byte-for-byte — and a version bump immediately stops matching, so
  * old cached URLs never resolve to a newer, different bundle.
  */
-function bridgeAssetRelPath(version: string): string {
+export function bridgeAssetRelPath(version: string): string {
   return `__desde/bridge-${version}.js`
 }
 
@@ -317,23 +383,65 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
   // when a trailing slash is present — the two are mutually exclusive.
   const router = Router({ strict: true })
 
-  // No explicit `Request`/`Response` annotations on the handlers below:
-  // typing the params that way widens `req.params` to Express 5's generic
+  // No explicit `Request`/`Response` annotation on the handler below: typing
+  // the params that way widens `req.params` to Express 5's generic
   // `ParamsDictionary` (`string | string[]` for every key, since it must
   // cover repeated/wildcard params for ANY route). Leaving the callback
   // untyped lets TS infer the precise per-route params type from
   // `RouteParameters<Route>` instead — plain `string` for `:slug`,
-  // `string[] | undefined` for the optional `{*rest}` wildcard.
+  // `string[] | undefined` for the optional `{*rest}` wildcard. (The
+  // prototype route below is the exception: it is one handler shared by two
+  // registrations, so it has to be declared as a `RequestHandler` and reads
+  // its two params defensively.)
+  //
+  // GET (and so HEAD) only, deliberately. This route is a redirect, not the
+  // prototype route, and a write here has never reached it: on an isolated
+  // origin every rewrite ends in a trailing slash, so the bare-slug form only
+  // occurs in path mode — where a server prototype is refused anyway.
   router.get("/p/:slug", (req, res) => {
     // Without the trailing slash, relative asset URLs resolve one level too high.
     res.redirect(301, `/p/${encodeURIComponent(req.params.slug)}/`)
   })
 
-  // `{*rest}` (an optional wildcard group) is required, not `*rest`: a bare
-  // `*rest` demands at least one character after the slash, so it would
-  // never match `/p/acme/` (the trailing-slash, no-extra-path case).
-  router.get("/p/:slug/{*rest}", async (req, res) => {
-    const { slug } = req.params
+  /**
+   * The prototype route, registered for EVERY method (task 8b): a server
+   * prototype takes form posts, server actions and API writes, so the handler
+   * has to see them all. The handler hands back everything it does not answer.
+   *
+   * One `all` registration, and NOT `all` plus a `get` — an earlier draft of
+   * this task had both, and it shipped a real regression. Express's router
+   * answers OPTIONS by itself for a path it routes but whose method no route
+   * handles, building `Allow` from the routes that declined; an `all` route
+   * declines nothing, so a lone `all` never produces that answer while a
+   * `get` beside it still does. On an isolated prototype origin that automatic
+   * `200 Allow: GET, HEAD` was emitted from INSIDE this router, before
+   * `createPrototypeHostTerminalFence` could refuse it — turning a prototype
+   * host's `404 Not found` into a 200. Hence: no `get` route here, and the
+   * path mode answer Express used to give is reproduced explicitly in the
+   * handler (see the OPTIONS branch).
+   *
+   * `{*rest}` (an optional wildcard group) is required, not `*rest`: a bare
+   * `*rest` demands at least one character after the slash, so it would
+   * never match `/p/acme/` (the trailing-slash, no-extra-path case).
+   */
+  const servePrototype: RequestHandler = async (req, res, next) => {
+    const slug = String(req.params.slug)
+    /**
+     * A method this handler did not answer before task 8b.
+     *
+     * The route was `router.get`, which Express also routes HEAD to, so GET
+     * and HEAD were the two that reached it; everything else fell straight
+     * through to whatever `create-app.ts` mounts next. That fall-through is
+     * preserved exactly, by `next()` at every exit below that is not the
+     * server-prototype fork — and it is preserved for a reason beyond
+     * fidelity. Answering a write HERE would make the difference between
+     * "this prototype exists and you may read it" and "it does not, or you
+     * may not" visible to anybody willing to send a POST, because a readable
+     * static prototype would fall through while an unknown or unreadable one
+     * got a 404 from this handler. The byte-identical-404 rule this file
+     * already keeps for GET has to hold for every other method too.
+     */
+    const writeMethod = req.method !== "GET" && req.method !== "HEAD"
     // Resolved ONCE per request and reused everywhere below (the CSP and
     // the bridge's `data-shell-origin` alike) — see
     // `ServeRouterDeps.resolveShellOrigin`. Calling it more than once per
@@ -385,6 +493,73 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     // (`servesAtRoot`).
     const onSubdomain = (req as unknown as SubdomainRequest).prototypeSubdomain !== undefined
 
+    // The single `VIEWER_PROTOTYPE_ORIGIN` host, marked by
+    // `createPrototypeOriginMark` (`prototype-host-scope.ts`). It is a THIRD
+    // isolated mode, but a different SHAPE from the two below: cross-origin
+    // (isolated CSP, real-origin sandbox, no session cookie) BUT
+    // path-namespaced — all prototypes share one host, so none owns `/`, and
+    // root-absolute assets still need the base href, the root-relative rewrite
+    // and the prefixed bridge path. That is why it drives `isIsolatedOrigin`
+    // but NOT `servesAtRoot`.
+    const onPrototypeOrigin = (req as unknown as PrototypeOriginHostRequest).onPrototypeOrigin === true
+
+    // OWNS `/` on its origin: no base href, no root-relative rewrite, the
+    // bridge at the origin root. A `{slug}.{serveDomain}` host and a loopback
+    // listener; NOT the shared prototype origin. Only the two places the modes
+    // genuinely differ (skipping authorization, and which deployment's bytes
+    // to read) branch on `pinned` itself. Anything that branches on
+    // `onSubdomain` alone below this line is a bug in loopback mode.
+    const servesAtRoot = onSubdomain || pinned !== null
+
+    // CROSS-ORIGIN from the shell: the isolated-origin CSP, the real-origin
+    // sandbox (chosen client-side), and NO session cookie or ACAO. Every
+    // `servesAtRoot` mode is cross-origin, and so is the shared prototype
+    // origin — but the shared origin is path-namespaced, so it is
+    // `isIsolatedOrigin` WITHOUT being `servesAtRoot`. This is the decoupling:
+    // the CSP and the CORS decision follow the origin boundary; the document
+    // shaping (base href / rewrite / bridge path) follows who owns `/`.
+    //
+    // All three are resolved HERE, at the top, rather than beside their first
+    // use further down: the OPTIONS branch immediately below has to know the
+    // origin mode, and it has to answer before any storage lookup.
+    const isIsolatedOrigin = servesAtRoot || onPrototypeOrigin
+
+    /**
+     * OPTIONS in PATH MODE, byte-for-byte what Express used to send, decided
+     * before anything is looked up.
+     *
+     * Until task 8b this route was `router.get`, so Express's router answered
+     * OPTIONS itself: a path it routes whose method no route handles gets an
+     * automatic `200` with `Allow` built from the routes that declined. That
+     * answer went out for EVERY path under this route — an unknown slug and an
+     * unreadable project included — because it came from route matching and
+     * never ran the handler. Reproducing it here, ahead of the lookups, is what
+     * keeps it that way; answering it further down would make a readable
+     * prototype tell itself apart from an unreadable one by its OPTIONS reply.
+     *
+     * The fields mirror the router's own `sendOptionsResponse`, including the
+     * bare `text/plain` with no charset, which is why this is `res.end` rather
+     * than `res.type(...).send(...)`.
+     *
+     * Isolated origins deliberately do NOT come through here. A prototype
+     * origin answered `404 Not found` to OPTIONS before this task (the
+     * write-method fence refused it), and it still does: the request carries on
+     * into the handler, a static deployment reaches the fall-through below, and
+     * `createPrototypeHostTerminalFence` ends it. A `serve: "server"`
+     * deployment on an origin of its own proxies instead — a prototype's own
+     * CORS preflight is its process's to answer.
+     */
+    if (req.method === "OPTIONS" && !isIsolatedOrigin) {
+      const allow = "GET, HEAD"
+      res.statusCode = 200
+      res.setHeader("Allow", allow)
+      res.setHeader("Content-Length", Buffer.byteLength(allow))
+      res.setHeader("Content-Type", "text/plain")
+      res.setHeader("X-Content-Type-Options", "nosniff")
+      res.end(allow)
+      return
+    }
+
     // Whether cookies this handler sets/reads carry the `__Host-` prefix. True
     // exactly when the deployment is https (the same condition as `Secure`),
     // because the browser only accepts a `__Host-` cookie over a secure
@@ -409,6 +584,8 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     // slug-shaped existence oracle) on a path that has no use for either.
     const project = pinned ? null : await deps.storage.getProjectBySlug(slug)
     if (!pinned && !project) {
+      // `next()`, not the 404, for anything but a read — see `writeMethod`.
+      if (writeMethod) return next()
       res.status(404).type("text/plain").send("Prototype not found")
       return
     }
@@ -470,6 +647,9 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
         await loadProjectReadPolicy(deps.storage),
       )
       if (!readable) {
+        // Same `next()` as the unknown-slug branch above, and for the same
+        // reason: the two must stay indistinguishable for every method.
+        if (writeMethod) return next()
         res.status(404).type("text/plain").send("Prototype not found")
         return
       }
@@ -498,35 +678,9 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     // is strictly safer than trying to enumerate "scriptable" types here.
     // Subdomain mode gives the prototype its OWN origin, so the CSP can be
     // the stronger `connect-src 'self'` form and the shell's host-only
-    // session cookie is never sent here at all. `onSubdomain` is computed at
-    // the top of the handler (it also decides where the capability comes from).
-
-    // The single `VIEWER_PROTOTYPE_ORIGIN` host, marked by
-    // `createPrototypeOriginMark` (`prototype-host-scope.ts`). It is a THIRD
-    // isolated mode, but a different SHAPE from the two below: cross-origin
-    // (isolated CSP, real-origin sandbox, no session cookie) BUT
-    // path-namespaced — all prototypes share one host, so none owns `/`, and
-    // root-absolute assets still need the base href, the root-relative rewrite
-    // and the prefixed bridge path. That is why it drives `isIsolatedOrigin`
-    // but NOT `servesAtRoot`.
-    const onPrototypeOrigin = (req as unknown as PrototypeOriginHostRequest).onPrototypeOrigin === true
-
-    // OWNS `/` on its origin: no base href, no root-relative rewrite, the
-    // bridge at the origin root. A `{slug}.{serveDomain}` host and a loopback
-    // listener; NOT the shared prototype origin. Only the two places the modes
-    // genuinely differ (skipping authorization, and which deployment's bytes
-    // to read) branch on `pinned` itself. Anything that branches on
-    // `onSubdomain` alone below this line is a bug in loopback mode.
-    const servesAtRoot = onSubdomain || pinned !== null
-
-    // CROSS-ORIGIN from the shell: the isolated-origin CSP, the real-origin
-    // sandbox (chosen client-side), and NO session cookie or ACAO. Every
-    // `servesAtRoot` mode is cross-origin, and so is the shared prototype
-    // origin — but the shared origin is path-namespaced, so it is
-    // `isIsolatedOrigin` WITHOUT being `servesAtRoot`. This is the decoupling:
-    // the CSP and the CORS decision follow the origin boundary; the document
-    // shaping (base href / rewrite / bridge path) follows who owns `/`.
-    const isIsolatedOrigin = servesAtRoot || onPrototypeOrigin
+    // session cookie is never sent here at all. `onSubdomain`, `servesAtRoot`
+    // and `isIsolatedOrigin` are all computed at the top of the handler, where
+    // the OPTIONS branch needs them.
 
     /**
      * `Access-Control-Allow-Origin: *`, on the same-origin path mode ONLY.
@@ -557,6 +711,45 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       ? resolveIsolatedOriginCsp(deps.prototypeCsp, shellOrigin)
       : resolvePrototypeCsp(deps.prototypeCsp, shellOrigin, slug)
 
+    /**
+     * Promotes a verified `?~c=` document-load capability to a host-only
+     * `dsv_cap` cookie, so the frame's own same-site subresource requests
+     * carry it without the query being repeated in every relative URL.
+     *
+     * Set ONLY when: this is a subdomain host (`onSubdomain`), the capability
+     * VERIFIED (`capabilityGranted`), and it arrived on the QUERY
+     * (`capabilityFromQuery`). It is therefore never set on the shell host or
+     * a loopback listener (neither is `onSubdomain`), never for a token that
+     * arrived in the cookie (no need to re-set it), and never for one that
+     * failed to verify. `capabilityToken` is non-null on this path — a
+     * query-sourced token is what `capabilityFromQuery` means — but the guard
+     * states it for the type checker too.
+     *
+     * ONE function because there are now TWO document responses that must do
+     * this: the static HTML branch below, and the server-prototype proxy. A
+     * server prototype on a subdomain that skipped it would load its first
+     * page and then 404 every asset, because each subsequent request would
+     * arrive with no capability at all and be judged anonymously.
+     */
+    const capabilityCookieToSet = (): string | null =>
+      onSubdomain && capabilityGranted && capabilityFromQuery && capabilityToken !== null
+        ? serializeCapabilityCookie(capabilityToken, secureCookies)
+        : null
+
+    /**
+     * {@link capabilityCookieToSet}, put on THIS response.
+     *
+     * Only the static branch uses it. The proxy branch hands the same string to
+     * `proxyToProcess` as `setCookie` instead, because on a proxied response
+     * the child's own `Set-Cookie` values arrive later and a browser keeps the
+     * last value for a name — so appending here would let a prototype override
+     * the viewer's own cookie just by using its name.
+     */
+    const promoteCapabilityCookie = (): void => {
+      const cookie = capabilityCookieToSet()
+      if (cookie !== null) res.append("Set-Cookie", cookie)
+    }
+
     // The bridge bundle, served as its own resource under the prototype's
     // own path prefix — same `canReadProject` gate as everything else under
     // `/p/:slug/**` (computed once, above), same path-scoped CSP. Checked
@@ -566,6 +759,12 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     // is no second route to keep in sync with this gate, and no ordering
     // question about which route matches first — it's the same match.
     if (relPath === bridgeAssetRelPath(deps.bridgeVersion)) {
+      // `__desde/` is the viewer's reserved namespace on the prototype's own
+      // origin. A read there is answered with the bundle; a write there is
+      // nobody's, and above all it must not reach the child — so it takes the
+      // same fall-through every other write does, BEFORE the server fork can
+      // proxy it.
+      if (writeMethod) return next()
       res.status(200)
       res.setHeader("Content-Type", "application/javascript; charset=utf-8")
       // `private`, not `public`: a shared cache (CDN/corporate proxy) that
@@ -594,9 +793,128 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     } else if (project?.activeDeploymentId) {
       deploymentId = project.activeDeploymentId
     } else {
+      if (writeMethod) return next()
       res.status(404).type("text/plain").send("Prototype has no deployment yet")
       return
     }
+
+    // Server prototypes: a process, not a folder. Everything above this line
+    // has already decided WHICH deployment answers and whether the caller may
+    // read it; this only changes where the bytes come from.
+    //
+    // It is also the ONLY branch of this handler that answers a method other
+    // than GET or HEAD. A process takes form posts, server actions and API
+    // writes; a folder of files never did, so everything below this fork
+    // hands a write straight back to the stack (see `writeMethod`). That
+    // includes OPTIONS, which for a server prototype is its own CORS
+    // preflight and only its process can answer.
+    //
+    // Reached only AFTER the bridge-asset route above, which is what keeps the
+    // bridge bundle ours to serve — the child never sees that URL and so can
+    // never shadow it.
+    //
+    // `servesAtRoot` ONLY — a loopback listener or a `{slug}.{serveDomain}`
+    // subdomain — and the refusal is a boundary rather than a convenience.
+    //
+    // PATH mode is the security case. The shell and the prototype share an
+    // origin there, so a proxied `set-cookie` (which `proxy-to-process.ts`
+    // passes through untouched, by design) would write onto the SHELL's
+    // origin. Refusing here, before `ensure` is ever called, is what makes
+    // that unreachable rather than merely unlikely.
+    //
+    // The shared `VIEWER_PROTOTYPE_ORIGIN` host is refused too, and that is
+    // `servesAtRoot` rather than `isIsolatedOrigin` deciding. That origin is
+    // cross-origin from the shell (so the cookie hazard is absent) but it is
+    // PATH-NAMESPACED: every prototype lives under `/p/{slug}/`, so none owns
+    // `/`. A proxied app's own root-absolute asset URLs would resolve to that
+    // shared origin's root and 404, and unlike the static branch below there
+    // is no `rewriteRootRelativeUrls` pass on a proxied response to correct
+    // them. Serving a prototype whose scripts and styles cannot load is worse
+    // than saying it needs an origin of its own, which on a shared origin is
+    // exactly what it does not have. (The spec's §6 snippet writes this test
+    // as `isIsolatedOrigin`; its §5 prose says "loopback and subdomain mode
+    // (both `servesAtRoot`)". This follows the prose.)
+    const deployment = await deps.storage.getDeployment(deploymentId)
+    if (deployment?.serve === "server") {
+      // Both refusal pages below are HTML on a `/p/**` URL, so they take the
+      // same CSP and nosniff every other response from this handler takes —
+      // see the "applies to EVERY response" note where `csp` is resolved.
+      // `proxyToProcess` sets both itself on the paths it owns, including its
+      // own 502.
+      const refuse = (status: number, body: string): void => {
+        res.status(status).type("text/html")
+        res.setHeader("X-Content-Type-Options", "nosniff")
+        if (csp !== null) res.setHeader("Content-Security-Policy", csp)
+        res.send(body)
+      }
+      if (!servesAtRoot) {
+        refuse(
+          409,
+          "<!doctype html><title>Prototype needs an origin</title><p>This prototype runs as a server and needs an origin of its own. Open the viewer on localhost, or set VIEWER_SERVE_DOMAIN.</p>",
+        )
+        return
+      }
+      let port: number
+      try {
+        port = (await deps.prototypeProcesses.ensure(deployment)).port
+      } catch (error) {
+        // `PrototypeProcessError.message` is written as a plain sentence for a
+        // reader (`prototype-processes.ts`); anything else is an internal
+        // failure whose text is not safe to show.
+        const message =
+          error instanceof PrototypeProcessError
+            ? error.message
+            : "The prototype's server could not be started."
+        refuse(503, `<!doctype html><title>Prototype unavailable</title><p>${escapeHtml(message)}</p>`)
+        return
+      }
+      // After `ensure`, not before: this marks the deployment as in use so the
+      // idle reaper does not stop a process mid-review.
+      deps.prototypeProcesses.touch(deployment.id)
+      allowCors()
+      // Same promotion the static HTML branch does, for the same reason: on a
+      // subdomain the token rides the document's `?~c=` query, and every
+      // request after that has only the cookie to carry it. Without this a
+      // private server prototype would render its first page and then 404
+      // every asset it asked for.
+      //
+      // Handed to the proxy rather than appended here, so it lands AFTER the
+      // child's own cookies and displaces a child value that shares its name.
+      // See `ProxyOptions.setCookie`.
+      const capabilityCookie = capabilityCookieToSet()
+      proxyToProcess(req, res, {
+        port,
+        ...(capabilityCookie !== null ? { setCookie: capabilityCookie } : {}),
+        path: childPathFor(req.originalUrl, [pathPrefix, prototypePathPrefix(slug, null)]),
+        shellOrigin,
+        // The scheme the BROWSER used to reach THIS origin, which is not
+        // always the shell's. A pinned loopback listener is always http (the
+        // registry refuses to pair one with an https shell), while a
+        // subdomain prototype is on the shell's own scheme. The child reads
+        // it as `X-Forwarded-Proto`.
+        forwardedProto: pinned !== null || !shellOrigin.startsWith("https:") ? "http" : "https",
+        // The prototype owns `/` on this origin (`servesAtRoot` is the gate
+        // above), so this is the same bridge path the HTML branch below uses.
+        bridgeSrc: `/${bridgeAssetRelPath(deps.bridgeVersion)}`,
+        csp,
+        // Only fires when the child answered nothing at all, so the manager's
+        // record of "running" is wrong and the entry should be dropped.
+        // Best effort: a `stop` that rejects must not become an unhandled
+        // rejection (which would take the process down), and the next request
+        // starts the child again either way.
+        onUnreachable: () => {
+          deps.prototypeProcesses.stop(deployment.id).catch(() => {})
+        },
+      })
+      return
+    }
+
+    // A static deployment is a folder of files. There is nothing here for a
+    // write to do, so the request goes back to the stack exactly as it did
+    // when this route was registered for GET alone — on a prototype origin
+    // `createPrototypeHostTerminalFence` ends it with the shared not-found
+    // body, and on the shell host it falls through as it always has.
+    if (writeMethod) return next()
 
     let asset
     try {
@@ -648,20 +966,7 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       res.setHeader("X-Content-Type-Options", "nosniff")
       allowCors()
       if (csp !== null) res.setHeader("Content-Security-Policy", csp)
-      // Promote a verified `?~c=` document-load capability to a host-only
-      // `dsv_cap` cookie, so the frame's own same-site subresource requests
-      // carry it without the query being repeated in every relative URL. Set
-      // ONLY here, and ONLY when: this is a subdomain host (`onSubdomain`), the
-      // capability VERIFIED (`capabilityGranted`), and it arrived on the QUERY
-      // (`capabilityFromQuery`). It is therefore never set on the shell host or
-      // a loopback listener (neither is `onSubdomain`), never for a token that
-      // arrived in the cookie (no need to re-set it), and never for one that
-      // failed to verify. `capabilityToken` is non-null on this path — a
-      // query-sourced token is what `capabilityFromQuery` means — but the guard
-      // states it for the type checker too.
-      if (onSubdomain && capabilityGranted && capabilityFromQuery && capabilityToken !== null) {
-        res.append("Set-Cookie", serializeCapabilityCookie(capabilityToken, secureCookies))
-      }
+      promoteCapabilityCookie()
       res.send(html)
       return
     }
@@ -689,7 +994,9 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       return
     }
     res.send(asset.body)
-  })
+  }
+
+  router.all("/p/:slug/{*rest}", servePrototype)
 
   return router
 }

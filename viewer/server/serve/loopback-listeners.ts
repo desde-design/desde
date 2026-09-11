@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
 import { assertIsolatedOrigins } from "./prototype-origin-resolve"
 import type { PrototypeHostRegistry } from "./prototype-host-scope"
+import type { DeploymentServe } from "../storage/types"
 
 /**
  * One `http.Server` per (deployment, shell origin), bound to a loopback
@@ -41,15 +42,36 @@ import type { PrototypeHostRegistry } from "./prototype-host-scope"
  * port; the old one idles out and is reaped. A review in progress therefore
  * cannot have the bytes change underneath it.
  *
- * ## Scope
+ * ## Scope, and the one case that binds every interface
  *
- * This is a local-machine facility. `listen` is only ever given `127.0.0.1`
- * or `::1` — never `0.0.0.0`, and never `localhost`, which may resolve to
- * both families and so does not name one origin.
+ * This is a local-machine facility. With no configured port range, `listen`
+ * is only ever given `127.0.0.1` or `::1` — never `localhost`, which may
+ * resolve to both families and so does not name one origin.
+ *
+ * A configured port range (`deps.portRange`) is the CONTAINER case, and there
+ * the bind widens to `0.0.0.0`. Docker forwards a published port to the
+ * container's EXTERNAL interface and never to the container's own loopback,
+ * so a `127.0.0.1` bind inside a container answers nothing from the host,
+ * whatever `-p` says (MEASURED on Docker Desktop, 2026-09-11). What that
+ * costs, and what the documented `-p 127.0.0.1:...` run line buys back, is
+ * written out at the bind in `open()`.
+ *
+ * The origin handed to the browser is never the bind address: it always
+ * names the loopback spelling paired with the shell
+ * (`pairedLoopbackHost`). With a range configured that pairing never
+ * chooses `[::1]`, because an IPv4 wildcard cannot answer there.
  */
 
-/** The literal addresses a listener may bind. Never `0.0.0.0`, never a name. */
-export type LoopbackBindHost = "127.0.0.1" | "::1"
+/**
+ * What a listener may be told to bind.
+ *
+ * Two literal addresses, plus the NAME `localhost`, which occurs only in the
+ * container case: with a port range configured the socket goes on the
+ * wildcard, so the name is used for the display spelling and never passed to
+ * `listen()`. `open()` refuses `localhost` without a range. Never `0.0.0.0`
+ * from a caller — widening the bind is this module's own decision.
+ */
+export type LoopbackBindHost = "127.0.0.1" | "::1" | "localhost"
 
 /** Default idle bound: a listener unused for this long is reaped. */
 const DEFAULT_IDLE_MS = 30 * 60 * 1000
@@ -66,8 +88,11 @@ export interface LoopbackListener {
   deploymentId: string
   projectId: string
   slug: string
-  /** The `Host` and URL spelling: `127.0.0.1`, or `[::1]` with brackets. */
-  host: "127.0.0.1" | "[::1]"
+  /**
+   * The `Host` and URL spelling: `127.0.0.1`, `[::1]` with brackets, or
+   * `localhost` (the port-range pairing only).
+   */
+  host: "127.0.0.1" | "[::1]" | "localhost"
   port: number
   /** `http://127.0.0.1:45001`. Always `http` — a loopback shell is http. */
   origin: string
@@ -95,6 +120,29 @@ export interface LoopbackListener {
 export interface LoopbackListenerAppContext {
   deploymentId: string
   slug: string
+  /**
+   * How the pinned deployment is served, carried from the deployment row the
+   * caller already had in hand (`api/prototype-origin-routes.ts`).
+   *
+   * A listener fronts exactly ONE deployment for its whole life, so this is
+   * fixed at open time and no request on it ever needs a storage lookup to
+   * learn it. The write-method fence is what reads it: it runs before the path
+   * is rewritten, so it cannot ask whether a path is the prototype route —
+   * every path on this origin is — and what it asks instead is whether the
+   * deployment it fronts is a process that can take a write at all. See
+   * `loopback-listener-app.ts`.
+   *
+   * Being a snapshot, it can in principle go stale, and it goes stale in the
+   * SAFE direction. A build publishes `serve` on a NEW deployment row, and a
+   * new row means a new registry key and therefore a new listener, so the
+   * ordinary case never produces a stale value at all. The only way to produce
+   * one is to flip an existing row in place: `static` → `server` leaves this
+   * listener still refusing writes until it is reaped, which is a feature that
+   * does not appear rather than a boundary that gives way. The other direction,
+   * `server` → `static`, passes a write to a serve router that immediately
+   * hands it back, and `createPrototypeHostTerminalFence` refuses it.
+   */
+  serve: DeploymentServe
   /** The one acceptable `Host` value: `127.0.0.1:45001` or `[::1]:45001`. */
   hostPort: string
   shellOrigin: string
@@ -115,7 +163,7 @@ export interface LoopbackListenerRegistry extends PrototypeHostRegistry {
    * the prototype origin — see this module's header).
    */
   ensure(
-    deployment: { id: string; slug: string; projectId: string },
+    deployment: { id: string; slug: string; projectId: string; serve: DeploymentServe },
     target: { bindHost: LoopbackBindHost; shellOrigin: string },
   ): Promise<LoopbackListener>
   /** Marks the listener on this port as used just now. No-op for a dead port. */
@@ -135,10 +183,24 @@ export interface LoopbackListenerRegistryDeps {
   idleMs?: number
   /** Injected clock, so idle reaping is testable without real time. */
   now?: () => number
+  /**
+   * When set, `open()` tries each port in `[from, to]` in order, skipping any
+   * already in use, instead of asking the OS for an ephemeral one. `null` (or
+   * omitted) keeps the old `listen(0, ...)` behaviour.
+   */
+  portRange?: { from: number; to: number } | null
+}
+
+/** Every port in `VIEWER_LOOPBACK_PORT_RANGE` is bound. Surfaced to the review page by name. */
+export class LoopbackPortsExhaustedError extends Error {
+  readonly name = "LoopbackPortsExhaustedError"
+  constructor(range: { from: number; to: number }) {
+    super(`All ${range.to - range.from + 1} loopback prototype ports (${range.from}-${range.to}) are in use`)
+  }
 }
 
 /**
- * `[::1]` from `::1`; `127.0.0.1` unchanged.
+ * `[::1]` from `::1`; `127.0.0.1` and `localhost` unchanged.
  *
  * The display-spelling INVERSE of `loopbackBindHostFor`
  * (`prototype-origin-resolve.ts`), which strips the same brackets in the
@@ -151,8 +213,8 @@ export interface LoopbackListenerRegistryDeps {
  * outputs agree on the two loopback addresses that occur in practice, not
  * that one calls the other.
  */
-function hostSpellingFor(bindHost: LoopbackBindHost): "127.0.0.1" | "[::1]" {
-  return bindHost === "::1" ? "[::1]" : "127.0.0.1"
+function hostSpellingFor(bindHost: LoopbackBindHost): "127.0.0.1" | "[::1]" | "localhost" {
+  return bindHost === "::1" ? "[::1]" : bindHost
 }
 
 /**
@@ -194,7 +256,7 @@ export function createLoopbackListenerRegistry(
   }
 
   async function open(
-    deployment: { id: string; slug: string; projectId: string },
+    deployment: { id: string; slug: string; projectId: string; serve: DeploymentServe },
     target: { bindHost: LoopbackBindHost; shellOrigin: string },
     key: string,
   ): Promise<LoopbackListener> {
@@ -224,6 +286,62 @@ export function createLoopbackListenerRegistry(
     // request cannot slip through the gap and reach the shell: there is no
     // shell here, and the placeholder answers 503 rather than falling
     // through to anything.
+    const range = deps.portRange ?? null
+    if (range === null && target.bindHost === "localhost") {
+      // `localhost` is a NAME, and this branch would pass it to `listen()`.
+      // It is only ever a legitimate listener host when the socket is on the
+      // wildcard, which is exactly the case a range signals — see
+      // `pairedLoopbackHost`, which only produces it when told a range is
+      // configured. Two modules reading the same config have to agree for
+      // that to hold, so the contradiction is refused here rather than
+      // trusted.
+      throw new Error(
+        `A loopback prototype listener cannot bind "localhost" with no port range configured. ` +
+          `"localhost" is a name a browser may resolve to either address family, so it does not ` +
+          `name one origin unless the socket is on every interface, which is what a configured ` +
+          `port range does. This is a bug in the caller's pairing, not in config.`,
+      )
+    }
+    /**
+     * What the socket binds. The loopback address on a laptop; every
+     * interface in a container.
+     *
+     * A range is configured exactly when this is a container (see
+     * `config.ts`'s default), and inside a container `127.0.0.1` is the
+     * container's own loopback, which a published port never reaches: Docker
+     * DNATs a published port to the container's external interface. So a
+     * loopback bind there is unreachable from the host's browser with the
+     * range published and without it alike (MEASURED, Task 14, 2026-09-11).
+     *
+     * ## What that costs, stated honestly
+     *
+     * Inside a container the socket is then on ALL of the container's
+     * interfaces, and a listener carries no credential of its own — on a
+     * laptop the port WAS the credential, because it was loopback-only and
+     * ephemeral, and in a container it is neither.
+     *
+     * The one-entry Host allowlist (`loopback-listener-app.ts`) pins this
+     * listener to exactly one `host:port`, which stops a browser-driven
+     * cross-origin request: a browser always sends the `Host` of the URL it
+     * was given, so it cannot reach this socket under some other name. It
+     * does NOT stop a non-browser client that simply sends the right `Host`
+     * itself.
+     *
+     * What keeps that out of reach is the published port: every documented
+     * run line publishes the range to the DOCKER HOST'S LOOPBACK
+     * (`-p 127.0.0.1:<from>-<to>:<from>-<to>`), so nothing off the machine
+     * can connect at all. What remains is a peer on the same Docker network,
+     * and that is the same trust a laptop already extends to another local
+     * process — which is what the "loopback boundary" section of
+     * `viewer/README.md` says out loud.
+     *
+     * The cookie-isolation argument at the top of this module is untouched
+     * either way: it rests on the HOST SPELLING the browser uses, which is
+     * still the paired loopback name, not on which interface the socket
+     * listens on.
+     */
+    const bindAddress: string = range === null ? target.bindHost : "0.0.0.0"
+
     let app: express.Express | null = null
     const server = createServer((req, res) => {
       if (!app) {
@@ -234,19 +352,36 @@ export function createLoopbackListenerRegistry(
       app(req, res)
     })
 
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error): void => {
-        server.removeListener("listening", onListening)
-        reject(error)
+    const listenOn = (port: number): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        const onError = (error: Error): void => {
+          server.removeListener("listening", onListening)
+          reject(error)
+        }
+        const onListening = (): void => {
+          server.removeListener("error", onError)
+          resolve()
+        }
+        server.once("error", onError)
+        server.once("listening", onListening)
+        server.listen(port, bindAddress)
+      })
+
+    if (range === null) {
+      await listenOn(0)
+    } else {
+      let bound = false
+      for (let port = range.from; port <= range.to; port++) {
+        try {
+          await listenOn(port)
+          bound = true
+          break
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error
+        }
       }
-      const onListening = (): void => {
-        server.removeListener("error", onError)
-        resolve()
-      }
-      server.once("error", onError)
-      server.once("listening", onListening)
-      server.listen(0, target.bindHost)
-    })
+      if (!bound) throw new LoopbackPortsExhaustedError(range)
+    }
 
     // A socket error AFTER a successful bind (an ECONNRESET storm, say) is an
     // `error` event with no listener, which Node turns into an uncaught
@@ -295,6 +430,7 @@ export function createLoopbackListenerRegistry(
       app = deps.makeApp({
         deploymentId: deployment.id,
         slug: deployment.slug,
+        serve: deployment.serve,
         hostPort: `${host}:${address.port}`,
         shellOrigin: target.shellOrigin,
         touch: () => {

@@ -810,6 +810,10 @@ describe("a very old deployment: the FULL pre-branch schema, all five migrations
       // Migration 7, same shape again: a pre-field row honestly has no
       // commit message to show.
       commitMessage: null,
+      // Migration 8: `serve` defaults to `'static'` for every pre-existing
+      // row, and `server_start` is nullable the same way `steps` is.
+      serve: "static",
+      serverStart: null,
       createdAt: "2026-02-02T02:00:00.000Z",
     })
 
@@ -902,6 +906,10 @@ describe("migration 5 — deployments gains a nullable warnings column", () => {
       steps: null,
       // Migration 7's column, same reading: no commit message recorded.
       commitMessage: null,
+      // Migration 8's columns, same reading: `serve` defaults to `'static'`,
+      // `server_start` is nullable.
+      serve: "static",
+      serverStart: null,
       createdAt: "2026-02-01T00:00:00.000Z",
     })
 

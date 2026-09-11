@@ -1,5 +1,8 @@
 import { Router, type RequestHandler, type Response } from "express"
+import { rm } from "node:fs/promises"
+import { join } from "node:path"
 import type { AppDeps } from "../create-app"
+import { checkoutDirFor } from "../build/checkouts"
 import {
   canReadProject,
   getRequestContext,
@@ -676,15 +679,46 @@ export function createProjectsRoutes(
       // asset directory has a permissions problem. `all` would reject on
       // the first failure and skip the rest; `allSettled` runs them all and
       // logs each.
-      const cleanups = await Promise.allSettled(
-        deployments.map((deployment) => deps.assets.deleteDeployment(deployment.id)),
-      )
-      cleanups.forEach((result, index) => {
+      //
+      // A SERVER deployment leaves two more things behind, and neither is an
+      // asset directory: a kept checkout at `<dataDir>/checkouts/<id>` (with
+      // `node_modules`, hundreds of MB) and possibly a running child process
+      // serving it. `pruneSupersededCheckouts` cannot reclaim either once the
+      // project row is gone — it is keyed on that project — so, like the
+      // assets above, this route is the only thing that ever will. `forget`
+      // (not `stop`) because the deployment will never be asked for again:
+      // it drops the manager's entry as well as the child.
+      const checkoutsRoot = join(deps.config.dataDir, "checkouts")
+      const cleanups: { what: string; done: Promise<unknown> }[] = []
+      for (const deployment of deployments) {
+        cleanups.push({
+          what: `assets for deployment ${deployment.id}`,
+          done: deps.assets.deleteDeployment(deployment.id),
+        })
+        cleanups.push({
+          what: `checkout for deployment ${deployment.id}`,
+          done: (async () => {
+            // Stop before remove: deleting a directory out from under a
+            // running server is how a child ends up logging ENOENT forever.
+            //
+            // `finally`, so a `forget` that rejects (a child that will not
+            // die, say) cannot take the `rm` with it. The two are ordered,
+            // not conditional: the checkout is hundreds of megabytes and this
+            // route is the only thing that will ever reclaim it, so a failure
+            // to stop the child must not also leak the disk. Whatever `forget`
+            // threw still propagates and is logged by name below.
+            try {
+              await deps.prototypeProcesses.forget(deployment.id)
+            } finally {
+              await rm(checkoutDirFor(checkoutsRoot, deployment.id), { recursive: true, force: true })
+            }
+          })(),
+        })
+      }
+      const settled = await Promise.allSettled(cleanups.map((c) => c.done))
+      settled.forEach((result, index) => {
         if (result.status === "rejected") {
-          console.error(
-            `[viewer] failed to delete assets for deployment ${deployments[index]?.id}:`,
-            result.reason,
-          )
+          console.error(`[viewer] failed to delete ${cleanups[index]?.what}:`, result.reason)
         }
       })
       res.status(204).end()

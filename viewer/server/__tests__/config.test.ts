@@ -95,6 +95,7 @@ describe("loadConfig", () => {
       trustProxy: false,
       loopbackListeners: "off",
       loopbackAvailable: false,
+      loopbackPortRange: null,
     })
   })
 
@@ -879,12 +880,15 @@ describe("loadConfig", () => {
       expect(config.loopbackAvailable).toBe(false)
     })
 
-    it('"auto" follows the container check: containerized -> loopbackAvailable false', () => {
+    // Since task 4 (VIEWER_LOOPBACK_PORT_RANGE), a container gets a default
+    // port range, so loopbackAvailable is true here too. See the
+    // "VIEWER_LOOPBACK_PORT_RANGE" describe block below for the range itself.
+    it('"auto" follows the container check: containerized -> loopbackAvailable true (a default range now applies)', () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_LISTENERS: "auto" },
         { isLikelyContainerized: () => true },
       )
-      expect(config.loopbackAvailable).toBe(false)
+      expect(config.loopbackAvailable).toBe(true)
     })
 
     it('"auto" follows the container check: not containerized -> loopbackAvailable true', () => {
@@ -895,12 +899,56 @@ describe("loadConfig", () => {
       expect(config.loopbackAvailable).toBe(true)
     })
 
-    it("the default mode (no env var set) also follows the container check", () => {
+    it("the default mode (no env var set) also follows the container check, and is now available there too", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir() },
         { isLikelyContainerized: () => true },
       )
       expect(config.loopbackListeners).toBe("auto")
+      expect(config.loopbackAvailable).toBe(true)
+    })
+  })
+
+  /**
+   * `VIEWER_LOOPBACK_PORT_RANGE` (task 4 of the server-prototypes spec). A
+   * random ephemeral port can't be published with Docker's `-p`, so a
+   * container gets a fixed range instead, defaulted from `PORT`. This makes
+   * loopback mode available again inside a container: see the
+   * `loopbackAvailable` assertions below.
+   */
+  describe("VIEWER_LOOPBACK_PORT_RANGE", () => {
+    it("is null outside a container when unset: ephemeral ports as before", () => {
+      const config = loadConfig({ VIEWER_DATA_DIR: tmpViewerDataDir() }, { isLikelyContainerized: () => false })
+      expect(config.loopbackPortRange).toBeNull()
+      expect(config.loopbackAvailable).toBe(true)
+    })
+    it("defaults to the twenty ports above PORT inside a container, and makes loopback available there", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100" },
+        { isLikelyContainerized: () => true },
+      )
+      expect(config.loopbackPortRange).toEqual({ from: 3101, to: 3120 })
+      expect(config.loopbackAvailable).toBe(true)
+    })
+    it("parses an explicit range", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_PORT_RANGE: "4000-4005" },
+        { isLikelyContainerized: () => false },
+      )
+      expect(config.loopbackPortRange).toEqual({ from: 4000, to: 4005 })
+    })
+    it("refuses a malformed, inverted, privileged, or PORT-overlapping range", () => {
+      for (const bad of ["x", "4000", "4005-4000", "80-90", "3090-3110"]) {
+        expect(() =>
+          loadConfig({ VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_PORT_RANGE: bad }),
+        ).toThrow(/VIEWER_LOOPBACK_PORT_RANGE/)
+      }
+    })
+    it("still honours VIEWER_LOOPBACK_LISTENERS=off inside a container", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_LISTENERS: "off" },
+        { isLikelyContainerized: () => true },
+      )
       expect(config.loopbackAvailable).toBe(false)
     })
   })

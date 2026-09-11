@@ -11,7 +11,10 @@ import { join } from "node:path"
 import type { AssetStore } from "../assets/types"
 import type { BuildStep, DeploymentWarning, ProjectRepoConfig } from "../storage/types"
 import type { GitHubAppClient } from "../github/types"
+import { checkoutDirFor, keepCheckout } from "./checkouts"
 import { buildEnv, buildStepEnv, execStep, redact } from "./exec"
+import { inspectBuild } from "./frameworks"
+import type { FrameworkAdapter } from "./frameworks"
 import {
   UnsafeOutputError,
   collectOutputFiles,
@@ -25,6 +28,10 @@ import type { BuildRequest, BuildResult, BuildRunner } from "./types"
 export interface InProcessBuildRunnerOptions {
   assets: AssetStore
   githubApp: GitHubAppClient
+  /** Where a `server`-shaped build's checkout is kept. `<dataDir>/checkouts`. */
+  checkoutsRoot: string
+  /** Overrides the framework adapters `inspectBuild` tries, in order. Tests only. */
+  adapters?: FrameworkAdapter[]
   apiBaseUrl?: string
   timeoutMs?: number
   maxOutputBytes?: number
@@ -230,8 +237,31 @@ export function createInProcessBuildRunner(opts: InProcessBuildRunnerOptions): B
         }
 
         beginStep("Publish")
-        say(`\nPublishing ${repo.outputDir}\n`)
-        const outputRoot = await resolveOutputDir(checkout, repo.outputDir)
+        const shape = await inspectBuild(checkout, repo.outputDir, opts.adapters)
+        if (shape.kind === "server") {
+          say(`\nPublishing as a server prototype (${shape.reason}). The output dir is not used.\n`)
+          const dest = checkoutDirFor(opts.checkoutsRoot, deployment.id)
+          // The scratch HOME is not kept; only the repo.
+          await keepCheckout(checkout, dest)
+          say(`Kept the checkout for ${shape.start.join(" ")}\n`)
+          closeOpenStep("succeeded")
+          publishSteps()
+          return {
+            ok: true,
+            commitSha,
+            commitMessage,
+            fileCount: 0,
+            warnings: null,
+            serve: "server",
+            serverStart: shape.start,
+          }
+        }
+        if (shape.outputDir !== repo.outputDir) {
+          say(`\nPublishing ${shape.outputDir} (${shape.reason}; the configured "${repo.outputDir}" is not used)\n`)
+        } else {
+          say(`\nPublishing ${shape.outputDir}\n`)
+        }
+        const outputRoot = await resolveOutputDir(checkout, shape.outputDir)
         const files = await collectOutputFiles(outputRoot)
         requireIndexHtml(files)
         const published = await publishOutputDir(
@@ -263,7 +293,15 @@ export function createInProcessBuildRunner(opts: InProcessBuildRunnerOptions): B
         // effect.
         closeOpenStep("succeeded")
         publishSteps()
-        return { ok: true, commitSha, commitMessage, fileCount: published.fileCount, warnings }
+        return {
+          ok: true,
+          commitSha,
+          commitMessage,
+          fileCount: published.fileCount,
+          warnings,
+          serve: "static",
+          serverStart: null,
+        }
       } catch (error) {
         // `UnsafeOutputError` is authored for a human and safe to show. Any
         // other throw may carry host detail, so it is logged server-side and
@@ -294,7 +332,19 @@ export function createInProcessBuildRunner(opts: InProcessBuildRunnerOptions): B
         } catch (cleanupError) {
           console.error(`[viewer] failed to clean up assets for failed build ${deployment.id}:`, cleanupError)
         }
-        return { ok: false, commitSha, commitMessage, fileCount: 0, failureReason: reason }
+        // Mirrors the assets cleanup above: a failure after `keepCheckout` has
+        // already moved a checkout into place (a scan/publish step failing
+        // for a `server`-shaped build, once one exists) must not strand it.
+        await rm(checkoutDirFor(opts.checkoutsRoot, deployment.id), { recursive: true, force: true }).catch(() => {})
+        return {
+          ok: false,
+          commitSha,
+          commitMessage,
+          fileCount: 0,
+          failureReason: reason,
+          serve: "static",
+          serverStart: null,
+        }
       }
     },
   }

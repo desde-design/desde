@@ -62,6 +62,8 @@ interface DeploymentRow {
   build_log: string
   warnings: string | null
   steps: string | null
+  serve: string
+  server_start: string | null
   created_at: string
 }
 
@@ -253,6 +255,25 @@ function parseDeploymentSteps(raw: string | null): BuildStep[] | null {
   } catch {
     return null
   }
+}
+
+/**
+ * Reads `deployments.server_start`. Mirrors `parseDeploymentSteps`: malformed
+ * or non-string-array JSON degrades to `null` rather than throwing, so a
+ * corrupt row still lists instead of failing `getDeployment`/`listDeployments`
+ * outright.
+ */
+function parseServerStart(raw: string | null): string[] | null {
+  if (raw === null) return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "string") ? parsed : null
+  } catch {
+    return null
+  }
+}
+function serializeServerStart(argv: string[] | null): string | null {
+  return argv === null ? null : JSON.stringify(argv)
 }
 
 /**
@@ -560,6 +581,8 @@ export class SqliteStorage implements StorageAdapter {
       buildLog: row.build_log,
       warnings: parseDeploymentWarnings(row.warnings),
       steps: parseDeploymentSteps(row.steps),
+      serve: row.serve === "server" ? "server" : "static",
+      serverStart: parseServerStart(row.server_start),
       createdAt: row.created_at,
     }
   }
@@ -885,6 +908,8 @@ export class SqliteStorage implements StorageAdapter {
       // `null`, not `[]`: a deployment has no phases until a build records
       // one, and an upload never will.
       steps: null,
+      serve: "static",
+      serverStart: null,
       createdAt: new Date().toISOString(),
     }
     this.db
@@ -968,7 +993,7 @@ export class SqliteStorage implements StorageAdapter {
     const next: Deployment = { ...existing, ...omitUndefined(patch) }
     this.db
       .prepare(
-        `UPDATE deployments SET status = ?, build_log = ?, commit_sha = ?, commit_message = ?, warnings = ?, steps = ? WHERE id = ?`,
+        `UPDATE deployments SET status = ?, build_log = ?, commit_sha = ?, commit_message = ?, warnings = ?, steps = ?, serve = ?, server_start = ? WHERE id = ?`,
       )
       .run(
         next.status,
@@ -977,6 +1002,8 @@ export class SqliteStorage implements StorageAdapter {
         next.commitMessage,
         serializeDeploymentWarnings(next.warnings),
         serializeDeploymentSteps(next.steps),
+        next.serve,
+        serializeServerStart(next.serverStart),
         id,
       )
     return next

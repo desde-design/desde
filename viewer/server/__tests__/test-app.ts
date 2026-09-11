@@ -5,6 +5,7 @@ import {
   createLoopbackListenerRegistry,
   type LoopbackListenerRegistry,
 } from "../serve/loopback-listeners"
+import { PrototypeProcessError, type PrototypeProcesses } from "../serve/prototype-processes"
 
 /**
  * `AppDeps` with `prototypeListeners` made OPTIONAL.
@@ -21,8 +22,38 @@ import {
  * with `createTestPrototypeListeners` and pass it here, so it can close the
  * listeners it opened.
  */
-export type AppDeps = Omit<RealAppDeps, "prototypeListeners"> & {
+export type AppDeps = Omit<RealAppDeps, "prototypeListeners" | "prototypeProcesses"> & {
   prototypeListeners?: LoopbackListenerRegistry
+  prototypeProcesses?: PrototypeProcesses
+}
+
+/**
+ * A `PrototypeProcesses` that starts nothing.
+ *
+ * The real field is required on `AppDeps` (see its doc comment in
+ * `create-app.ts`) so the one boot path cannot forget to pass the process's
+ * single manager. A test app has no such hazard: a suite that never serves a
+ * `serve: "server"` deployment never reaches the fork at all, and one that
+ * does should pass a fake of its own so it can assert on it.
+ *
+ * `ensure` REJECTS rather than returning a port. A fake that quietly succeeded
+ * would let a router bug — forking on a static deployment — pass as a 502
+ * somewhere unrelated instead of failing where it happened.
+ */
+export function nullPrototypeProcesses(): PrototypeProcesses {
+  return {
+    ensure: () =>
+      Promise.reject(
+        new PrototypeProcessError({ state: "stopped" }, "No prototype process manager in this test."),
+      ),
+    touch: () => {},
+    stop: () => Promise.resolve(),
+    forget: () => Promise.resolve(),
+    status: () => ({ state: "stopped" }),
+    serverLog: () => "",
+    startReaper: () => () => {},
+    shutdown: () => Promise.resolve(),
+  }
 }
 
 /**
@@ -35,7 +66,10 @@ export type AppDeps = Omit<RealAppDeps, "prototypeListeners"> & {
  * and hangs the run.
  */
 export function createTestPrototypeListeners(
-  deps: Pick<AppDeps, "storage" | "assets" | "config" | "bridgeScript" | "bridgeVersion">,
+  deps: Pick<
+    AppDeps,
+    "storage" | "assets" | "config" | "bridgeScript" | "bridgeVersion" | "prototypeProcesses"
+  >,
 ): LoopbackListenerRegistry {
   return createLoopbackListenerRegistry({
     makeApp: (context) =>
@@ -48,6 +82,7 @@ export function createTestPrototypeListeners(
         // Same default `createApp` uses for the shell's serve router.
         bridgeVersion: deps.bridgeVersion ?? "dev",
         prototypeCsp: deps.config.prototypeCsp,
+        prototypeProcesses: deps.prototypeProcesses ?? nullPrototypeProcesses(),
       }),
   })
 }
@@ -83,9 +118,15 @@ export function createTestPrototypeListeners(
  * (`assertNoTestHostRelaxation`).
  */
 export function createApp(deps: AppDeps): Express {
+  // Resolved ONCE and given to both the app and the listener registry it
+  // builds, mirroring the real boot: one manager per process, so a deployment
+  // opened on the shell and on its listener shares a single child.
+  const prototypeProcesses = deps.prototypeProcesses ?? nullPrototypeProcesses()
   return createRealApp({
     ...deps,
-    prototypeListeners: deps.prototypeListeners ?? createTestPrototypeListeners(deps),
+    prototypeProcesses,
+    prototypeListeners:
+      deps.prototypeListeners ?? createTestPrototypeListeners({ ...deps, prototypeProcesses }),
     allowAnyLoopbackPort: true,
   })
 }

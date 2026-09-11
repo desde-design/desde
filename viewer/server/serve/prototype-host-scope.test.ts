@@ -10,6 +10,8 @@
  * *after* setting a cookie.
  */
 import express, { type Router } from "express"
+import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
 import request from "supertest"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createApiRouter } from "../api/api-router"
@@ -20,7 +22,7 @@ import { loadConfig } from "../config"
 // shape — so building it as the real type is what keeps `prototypeListeners`
 // genuinely present rather than merely assigned to an optional field.
 import type { AppDeps } from "../create-app"
-import { createApp, createTestPrototypeListeners } from "../__tests__/test-app"
+import { createApp, createTestPrototypeListeners, nullPrototypeProcesses } from "../__tests__/test-app"
 import { createSwappableApp } from "../__tests__/swappable-app"
 import { tmpViewerDataDir } from "../__tests__/test-config"
 import { testGithubRuntime } from "../__tests__/test-github-runtime"
@@ -32,6 +34,7 @@ import {
   createPrototypeHostScope,
   createPrototypeHostTerminalFence,
   createPrototypeOriginRegistry,
+  createPrototypeRouteWriteRule,
   createServeDomainRegistry,
   prototypeOriginHostSpellings,
   type PrototypeHostRegistry,
@@ -120,6 +123,39 @@ describe("composePrototypeHostRegistries", () => {
   })
 })
 
+describe("createPrototypeRouteWriteRule", () => {
+  const rule = createPrototypeRouteWriteRule(DOMAIN)
+  const req = (host: string, url: string) =>
+    ({ headers: { host }, url }) as unknown as Parameters<typeof rule>[0]
+
+  it("passes any path on a slug subdomain — the rewrite puts all of them under /p/", () => {
+    expect(rule(req(SUBDOMAIN_HOST, "/"))).toBe(true)
+    expect(rule(req(SUBDOMAIN_HOST, "/submit"))).toBe(true)
+    expect(rule(req(SUBDOMAIN_HOST, "/api/v1/auth/logout"))).toBe(true)
+  })
+
+  /**
+   * A host with no rewrite behind it — the `VIEWER_PROTOTYPE_ORIGIN` host — is
+   * refused whatever the path, INCLUDING a genuine `/p/{slug}/…` one. An
+   * earlier draft passed those, and `OPTIONS /p/acme` then reached the router
+   * and got Express's automatic `200 Allow: GET, HEAD` out of the bare-slug
+   * redirect route, from inside the router where the terminal fence could not
+   * reach it. Nothing is lost: that host is path-namespaced, so the serve
+   * router refuses a server deployment on it anyway.
+   */
+  it("refuses every path on a host with no rewrite, the prototype route included", () => {
+    for (const url of ["/p/acme/orders", "/p/acme", "/api/v1/auth/logout", "/signin", "/"]) {
+      expect(rule(req("proto.example.net", url)), url).toBe(false)
+    }
+  })
+
+  it("refuses everything when no serve domain is configured", () => {
+    const noDomain = createPrototypeRouteWriteRule(null)
+    expect(noDomain(req(SUBDOMAIN_HOST, "/submit"))).toBe(false)
+    expect(noDomain(req(SUBDOMAIN_HOST, "/p/acme/submit"))).toBe(false)
+  })
+})
+
 /**
  * The middleware chain in the order `create-app.ts` mounts it — scope →
  * subdomain rewrite → API fence → shell API → serve router → terminal fence —
@@ -140,7 +176,16 @@ describe("createPrototypeHostScope + the two fences", () => {
 
   const stable = createSwappableApp()
   const inner = express()
-  inner.use(createPrototypeHostScope({ registry }))
+  inner.use(
+    createPrototypeHostScope({
+      registry,
+      // The same rule `create-app.ts` passes (task 8b). Without it the fence
+      // refuses every write on a prototype host outright, which is what it did
+      // before server prototypes existed — and this chain would then prove
+      // nothing about the shape that actually ships.
+      writeReachesPrototypeRoute: createPrototypeRouteWriteRule(DOMAIN),
+    }),
+  )
   inner.use(createSubdomainRewrite(DOMAIN))
   inner.use(createPrototypeHostApiFence())
 
@@ -164,8 +209,17 @@ describe("createPrototypeHostScope + the two fences", () => {
    * since both real routes (`/p/:slug` and `/p/:slug/{*rest}`) require one.
    * `/p/` exactly falls through here, exactly as it does in the real app,
    * which is the gap the terminal fence closes.
+   *
+   * GET and HEAD only, which is also what the real router ANSWERS for a
+   * static deployment: since task 8b it takes every method, but it hands a
+   * write back to the stack (`next()`) unless the deployment is a
+   * `serve: "server"` one on an origin of its own. Nothing in this chain
+   * reads storage, so a static deployment is the only case it can model —
+   * and it is the one that decides whether a write can still reach a shell
+   * router, which is what this suite is about.
    */
   inner.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") return next()
     if (!/^\/p\/[^/]/.test(req.url)) return next()
     res.status(200).type("text/plain").send(req.url)
   })
@@ -252,6 +306,18 @@ describe("createPrototypeHostScope + the two fences", () => {
       expect(res.headers["set-cookie"]).toBeUndefined()
     })
 
+    /**
+     * The shell's own write route, on a prototype host: refused, with the same
+     * status and the same body it had before task 8b, and above all without
+     * the sentinel or a cookie.
+     *
+     * WHICH layer refuses it moved. It used to be the write-method fence, at
+     * the very top. Now the fence lets it past — on a subdomain the rewrite
+     * turns every path into `/p/{slug}/…`, so this one is headed for the serve
+     * router and not for `POST /api/v1/auth/logout` at all — and the terminal
+     * fence is what ends it. The observable answer is identical, which is the
+     * only thing a caller can see and the only thing this asserts.
+     */
     it("refuses a mutating method with the serve router's not-found body", async () => {
       const res = await request(app)
         .post("/api/v1/auth/logout")
@@ -263,9 +329,39 @@ describe("createPrototypeHostScope + the two fences", () => {
       expect(res.headers["set-cookie"]).toBeUndefined()
     })
 
-    it("refuses a mutating method even on a genuine prototype path", async () => {
+    it("refuses a mutating method on a genuine prototype path for a deployment that is not a server", async () => {
       const res = await request(app).put("/p/acme/x").set("Host", SUBDOMAIN_HOST).expect(404)
       expect(res.text).toBe(PROTOTYPE_NOT_FOUND_BODY)
+      expect(res.headers[SENTINEL]).toBeUndefined()
+    })
+
+    /**
+     * The write-method fence's whole purpose, restated for task 8b: a write
+     * that arrives on a prototype origin must never be answered by a shell
+     * router. Every shell route in this chain is asserted directly, by both
+     * sentinels, rather than by a status code that a cookie-setting 404 would
+     * also produce.
+     *
+     * Every write METHOD, not only POST — a fence that agreed about POST and
+     * disagreed about PATCH would pass a one-method test. OPTIONS is in the
+     * list too, but it can only be half-proved here: this chain has no serve
+     * router REGISTRATIONS, so Express's automatic `Allow` response — which
+     * is what actually regressed on this host during the task — cannot occur
+     * in it at all. The real-app suite below carries that one.
+     */
+    it("lets no shell router answer a write, whatever the path or the method", async () => {
+      const paths = ["/api/v1/auth/logout", "/api/v1/ping", "/signin", "/p/acme/x", "/"]
+      const methods = ["post", "put", "patch", "delete", "options"] as const
+      for (const method of methods) {
+        for (const path of paths) {
+          const where = `${method.toUpperCase()} ${path}`
+          const res = await request(app)[method](path).set("Host", SUBDOMAIN_HOST)
+          expect(res.headers[SENTINEL], where).toBeUndefined()
+          expect(res.headers["set-cookie"], where).toBeUndefined()
+          expect(res.status, where).toBe(404)
+          expect(res.text, where).toBe(PROTOTYPE_NOT_FOUND_BODY)
+        }
+      }
     })
 
     it("never falls through to the shell catch-all", async () => {
@@ -330,6 +426,22 @@ describe("createPrototypeHostScope + the two fences", () => {
         .expect(404)
       expect(res.text).toBe(PROTOTYPE_NOT_FOUND_BODY)
       expect(res.headers["set-cookie"]).toBeUndefined()
+    })
+
+    /**
+     * With no rewrite behind it, a write is refused by the fence whatever the
+     * path — a genuine `/p/{slug}/…` one included. This is the shape the real
+     * app produces on the single `VIEWER_PROTOTYPE_ORIGIN` host, where no
+     * prototype owns `/` and so none can accept a write in the first place.
+     */
+    it("refuses a write on a /p/ path too, with no rewrite behind it", async () => {
+      for (const method of ["post", "put", "patch", "delete", "options"] as const) {
+        const res = await request(app)[method]("/p/acme/orders").set("Host", LOOPBACK_HOST)
+        expect(res.status, method).toBe(404)
+        expect(res.text, method).toBe(PROTOTYPE_NOT_FOUND_BODY)
+        expect(res.headers[SENTINEL], method).toBeUndefined()
+        expect(res.headers["set-cookie"], method).toBeUndefined()
+      }
     })
   })
 })
@@ -435,6 +547,7 @@ describe("prototype-host scoping in the real app", () => {
       bridgeScript: "// bridge",
       bridgeVersion: "test-1",
       github: testGithubRuntime(),
+      prototypeProcesses: nullPrototypeProcesses(),
       // Built explicitly rather than left to the test factory's default,
       // because the route-table walk below hands this same `deps` to the REAL
       // `createApiRouter`, whose `AppDeps` requires the field. Nothing here
@@ -480,6 +593,49 @@ describe("prototype-host scoping in the real app", () => {
   })
 
   /**
+   * The write that would create a prototype, aimed at the API through a
+   * prototype origin — a CSRF-shaped attack, and the reason the write-method
+   * fence exists at all. Task 8b relaxed that fence so a server prototype can
+   * take writes; this is the assertion that it relaxed nothing else. The
+   * project here is a `serve: "static"` deployment, which is what every
+   * prototype on this instance is unless a build says otherwise.
+   */
+  it("still refuses a write aimed at the API on a prototype host", async () => {
+    const before = (await storage.listProjects()).length
+    const res = await request(stable.app)
+      .post("/api/v1/projects")
+      .set("Host", SUBDOMAIN_HOST)
+      .send({ repoUrl: "https://github.com/x/y" })
+      .expect(404)
+    expect(res.text).toBe(PROTOTYPE_NOT_FOUND_BODY)
+    expect(res.headers["content-type"]).toMatch(/^text\/plain/)
+    expect(res.headers["set-cookie"]).toBeUndefined()
+    // Nothing ran: the API never saw it.
+    expect((await storage.listProjects()).length).toBe(before)
+  })
+
+  /**
+   * The same every-method sweep the stub chain runs, against the REAL app —
+   * which is the only place Express's automatic OPTIONS response can occur,
+   * and therefore the only place its absence on a prototype host means
+   * anything.
+   */
+  it("refuses every write method on a prototype host, whatever the path", async () => {
+    const paths = ["/", "/api/v1/auth/logout", "/p/acme/x", "/settings"]
+    const methods = ["post", "put", "patch", "delete", "options"] as const
+    for (const method of methods) {
+      for (const path of paths) {
+        const where = `${method.toUpperCase()} ${path}`
+        const res = await request(stable.app)[method](path).set("Host", SUBDOMAIN_HOST)
+        expect(res.status, where).toBe(404)
+        expect(res.text, where).toBe(PROTOTYPE_NOT_FOUND_BODY)
+        expect(res.headers["set-cookie"], where).toBeUndefined()
+        expect(res.headers["allow"], where).toBeUndefined()
+      }
+    }
+  })
+
+  /**
    * `GET /p/` exactly — the path the API fence's prefix rule lets through and
    * no serve route matches. On the slug host the rewrite makes it
    * `/p/acme/p/`, so the serve router answers it and the terminal fence is
@@ -493,6 +649,44 @@ describe("prototype-host scoping in the real app", () => {
     expect(res.text).toBe(PROTOTYPE_NOT_FOUND_BODY)
     expect(res.headers["content-type"]).toMatch(/^text\/plain/)
     expect(res.headers["set-cookie"]).toBeUndefined()
+  })
+
+  /**
+   * OPTIONS is a write method as far as the fences are concerned, and it is the
+   * one whose answer Express can produce BY ITSELF — the router sends an
+   * automatic `Allow` response for a path it routes but whose method no route
+   * handles, and it sends it from inside the router, before the terminal fence
+   * could ever see the request.
+   *
+   * MEASURED before task 8b, on this same app:
+   *
+   * - on a prototype host (subdomain or `VIEWER_PROTOTYPE_ORIGIN`): `404 Not
+   *   found`, `text/plain` — the write-method fence refused it.
+   * - in path mode on the shell host: `200`, `Allow: GET, HEAD`, body
+   *   `GET, HEAD` — Express's automatic response.
+   *
+   * Both must still hold. The first regressed once during this task, which is
+   * why these live against the REAL app: the stub chain has no serve router
+   * registrations, so it cannot produce Express's automatic response at all
+   * and would have passed throughout.
+   */
+  it("still refuses OPTIONS on a prototype host, on the origin root and on a /p/ path", async () => {
+    for (const path of ["/", "/api/v1/auth/logout", "/p/acme/x"]) {
+      const res = await request(stable.app).options(path).set("Host", SUBDOMAIN_HOST)
+      expect(res.status, path).toBe(404)
+      expect(res.text, path).toBe(PROTOTYPE_NOT_FOUND_BODY)
+      expect(res.headers["content-type"], path).toMatch(/^text\/plain/)
+      expect(res.headers["allow"], path).toBeUndefined()
+    }
+  })
+
+  it("keeps Express's own Allow answer for OPTIONS in path mode on the shell host", async () => {
+    for (const path of ["/p/acme/", "/p/acme/x", "/p/nosuchslug/"]) {
+      const res = await request(stable.app).options(path).set("Host", SHELL_HOST)
+      expect(res.status, path).toBe(200)
+      expect(res.headers["allow"], path).toBe("GET, HEAD")
+      expect(res.text, path).toBe("GET, HEAD")
+    }
   })
 
   it("uses the same not-found body the serve router already sends", async () => {
@@ -537,9 +731,16 @@ describe("prototype-host scoping in the real app", () => {
         `${route.method} ${path} answered with JSON`,
       ).not.toMatch(/application\/json/)
       if (route.method !== "GET" && route.method !== "HEAD") {
-        // Refused by the scope itself, not merely unrouted. Without the
-        // scope these fall through to Express's default HTML 404, which is
-        // also harmless but says nothing about the boundary holding.
+        // Refused with the prototype's own not-found body, not merely
+        // unrouted. Without the prototype-host scoping these fall through to
+        // Express's default HTML 404, which is also harmless but says nothing
+        // about the boundary holding.
+        //
+        // WHICH layer refuses is not the claim, and on this host it is no
+        // longer the scope: since task 8b the subdomain rewrite runs and
+        // `createPrototypeHostTerminalFence` is what ends the request, after
+        // the serve router hands a write back for a static deployment. The
+        // body and the absent cookie are the contract.
         expect(res.status, `${route.method} ${path}`).toBe(404)
         expect(res.text, `${route.method} ${path}`).toBe(PROTOTYPE_NOT_FOUND_BODY)
       }
@@ -559,6 +760,100 @@ describe("prototype-host scoping in the real app", () => {
     expect(missing.status).toBe(404)
     expect(unreadable.status).toBe(404)
     expect(unreadable.text).toBe(missing.text)
+  })
+})
+
+/**
+ * Task 8b end to end, over the REAL app: a form post to a `serve: "server"`
+ * prototype on its own subdomain reaches the prototype's process.
+ *
+ * This is the only place the two halves of the change are shown working
+ * together — the write-method fence letting a write past on a slug host, and
+ * the serve router proxying it because the deployment is a server. Everything
+ * else in this file proves the half that must NOT change.
+ */
+describe("a server prototype on a subdomain takes writes (task 8b)", () => {
+  const stable = createSwappableApp()
+  const child = createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on("data", (chunk: Buffer) => chunks.push(chunk))
+    req.on("end", () => {
+      res.statusCode = 201
+      res.setHeader("content-type", "application/json")
+      res.end(JSON.stringify({ method: req.method, url: req.url, body: Buffer.concat(chunks).toString() }))
+    })
+  })
+  let deps: AppDeps
+
+  beforeEach(async () => {
+    await new Promise<void>((r) => child.listen(0, "127.0.0.1", () => r()))
+    const childPort = (child.address() as AddressInfo).port
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "srv", name: "srv", access: "public-link" })
+    const deployment = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await storage.updateProject(project.id, { activeDeploymentId: deployment.id })
+    await storage.updateDeployment(deployment.id, { serve: "server", serverStart: ["node", "x.js"] })
+    const assets: AssetStore = {
+      async put() {},
+      async get() {
+        return null
+      },
+      async deleteDeployment() {},
+    }
+    deps = {
+      storage,
+      assets,
+      config: loadConfig({
+        VIEWER_PUBLIC_URL: "http://localhost:3100",
+        VIEWER_SERVE_DOMAIN: DOMAIN,
+        VIEWER_DATA_DIR: tmpViewerDataDir(),
+      }),
+      bridgeScript: "// bridge",
+      bridgeVersion: "test-1",
+      github: testGithubRuntime(),
+      prototypeProcesses: {
+        ...nullPrototypeProcesses(),
+        ensure: () => Promise.resolve({ port: childPort }),
+      },
+      prototypeListeners: createTestPrototypeListeners({
+        storage,
+        assets,
+        config: loadConfig({ VIEWER_DATA_DIR: tmpViewerDataDir() }),
+        bridgeScript: "// bridge",
+      }),
+    }
+    stable.use(createApp(deps))
+  })
+
+  afterEach(async () => {
+    await deps.prototypeListeners.closeAll()
+    child.close()
+  })
+
+  it("carries a form post to the prototype's own process, at its own path", async () => {
+    const res = await request(stable.app)
+      .post("/orders")
+      .set("Host", `srv.${DOMAIN}:3100`)
+      .set("content-type", "application/json")
+      .send('{"qty":2}')
+
+    expect(res.status).toBe(201)
+    expect(res.body).toEqual({ method: "POST", url: "/orders", body: '{"qty":2}' })
+    // Still a prototype origin: the shell issues no cookie here, write or not.
+    expect(res.headers["set-cookie"]).toBeUndefined()
+  })
+
+  it("still refuses a write aimed at the shell's API on that same host", async () => {
+    const res = await request(stable.app)
+      .post("/api/v1/auth/logout")
+      .set("Host", `srv.${DOMAIN}:3100`)
+    // The child answers it as its OWN route — `/api/v1/auth/logout` on a
+    // prototype origin is the prototype's path, and the shell's API is not
+    // mounted anywhere this request could reach. The proof is the body: it is
+    // the child's echo, not the shell's JSON, and no session cookie came back.
+    expect(res.status).toBe(201)
+    expect(res.body).toEqual({ method: "POST", url: "/api/v1/auth/logout", body: "" })
+    expect(res.headers["set-cookie"]).toBeUndefined()
   })
 })
 
@@ -604,6 +899,7 @@ describe("prototype-origin host scoping in the real app (VIEWER_PROTOTYPE_ORIGIN
       bridgeScript: "// bridge",
       bridgeVersion: "test-1",
       github: testGithubRuntime(),
+      prototypeProcesses: nullPrototypeProcesses(),
       // Never opens a listener: prototype-origin mode answers without one.
       prototypeListeners: createTestPrototypeListeners({
         storage,
@@ -634,6 +930,39 @@ describe("prototype-origin host scoping in the real app (VIEWER_PROTOTYPE_ORIGIN
     const res = await request(stable.app).post("/api/v1/auth/logout").set("Host", PROTO_HOST).expect(404)
     expect(res.text).toBe(PROTOTYPE_NOT_FOUND_BODY)
     expect(res.headers["set-cookie"]).toBeUndefined()
+  })
+
+  /**
+   * Task 8b: this host has no rewrite, so the write rule only lets a path
+   * that already names the prototype route past the fence. `/api/v1/**` never
+   * does, and a `/p/{slug}/` write on this host is refused one layer down —
+   * a shared prototype origin is path-namespaced, so it never serves a server
+   * prototype at all (the serve router's 409).
+   */
+  it("refuses a write aimed at the API, and a write on a prototype path too", async () => {
+    const api = await request(stable.app).post("/api/v1/projects").set("Host", PROTO_HOST).expect(404)
+    expect(api.text).toBe(PROTOTYPE_NOT_FOUND_BODY)
+    expect(api.headers["set-cookie"]).toBeUndefined()
+
+    const onPrototype = await request(stable.app).post("/p/acme/orders").set("Host", PROTO_HOST).expect(404)
+    expect(onPrototype.text).toBe(PROTOTYPE_NOT_FOUND_BODY)
+    expect(onPrototype.headers["set-cookie"]).toBeUndefined()
+  })
+
+  /**
+   * The same OPTIONS measurement as on the slug host: `404 Not found` before
+   * task 8b, and still. The bare-slug form is in the list because it is the one
+   * path this host can produce that the wildcard route does not match — the
+   * redirect route does, and Express would answer its `Allow` automatically if
+   * the fence ever let an OPTIONS reach the router here.
+   */
+  it("still refuses OPTIONS, including on the bare-slug path", async () => {
+    for (const path of ["/p/acme/", "/p/acme/x", "/p/acme", "/api/v1/auth/logout"]) {
+      const res = await request(stable.app).options(path).set("Host", PROTO_HOST)
+      expect(res.status, path).toBe(404)
+      expect(res.text, path).toBe(PROTOTYPE_NOT_FOUND_BODY)
+      expect(res.headers["allow"], path).toBeUndefined()
+    }
   })
 
   it("does not route the shell API on the prototype origin (fenced before the shell routers)", async () => {

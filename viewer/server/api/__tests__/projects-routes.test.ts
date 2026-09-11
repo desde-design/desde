@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import request from "supertest"
 import { beforeEach, describe, expect, it } from "vitest"
 import { createBuildQueue } from "../../build/build-queue"
-import { createApp, type AppDeps } from "../../__tests__/test-app"
+import { createApp, nullPrototypeProcesses, type AppDeps } from "../../__tests__/test-app"
+import { tmpViewerDataDir } from "../../__tests__/test-config"
 import { InMemoryStorage } from "../../storage/in-memory-storage"
 import { DiskAssetStore } from "../../assets/disk-asset-store"
 import type { AssetStore, StoredAsset } from "../../assets/types"
@@ -104,6 +105,7 @@ const config: ViewerConfig = {
   trustProxy: false,
   loopbackListeners: "auto",
   loopbackAvailable: true,
+  loopbackPortRange: null,
 }
 
 /**
@@ -1168,6 +1170,96 @@ describe("projects API", () => {
       }
     })
 
+    /**
+     * The same leak one layer down, found in the final review of the
+     * server-prototypes branch. A server deployment keeps its CHECKOUT (with
+     * `node_modules`, hundreds of MB) at `<dataDir>/checkouts/<deployment>`,
+     * and may have a child process still serving it. Neither was touched by
+     * a project delete: `pruneSupersededCheckouts` is keyed on a project
+     * that no longer exists, so nothing would ever reclaim them.
+     */
+    it("cascades: each deployment's checkout is removed and its process forgotten", async () => {
+      const storage = new InMemoryStorage()
+      const dataDir = mkdtempSync(join(tmpdir(), "viewer-checkouts-delete-"))
+      try {
+        const project = await storage.createProject({ slug: "acme", name: "Acme" })
+        const dep1 = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+        const dep2 = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+        const checkoutFor = (id: string) => join(dataDir, "checkouts", id)
+        for (const id of [dep1.id, dep2.id]) {
+          mkdirSync(join(checkoutFor(id), "node_modules"), { recursive: true })
+          writeFileSync(join(checkoutFor(id), "package.json"), "{}")
+        }
+
+        const forgotten: string[] = []
+        stable.use(
+          createApp({
+            storage,
+            assets: new NullAssetStore(),
+            config: { ...authConfig, dataDir },
+            bridgeScript: "// bridge",
+            github: testGithubRuntime(),
+            prototypeProcesses: {
+              ...nullPrototypeProcesses(),
+              forget: async (id: string) => {
+                forgotten.push(id)
+              },
+            },
+          }),
+        )
+
+        await request(stable.app).delete(`/api/v1/projects/${project.id}`).set(auth).expect(204)
+
+        expect(forgotten.sort()).toEqual([dep1.id, dep2.id].sort())
+        expect(existsSync(checkoutFor(dep1.id))).toBe(false)
+        expect(existsSync(checkoutFor(dep2.id))).toBe(false)
+      } finally {
+        rmSync(dataDir, { recursive: true, force: true })
+      }
+    })
+
+    /**
+     * Round 2, minor (c): the two cleanups were sequential `await`s, so a
+     * `forget` that rejects — a child that will not die, say — skipped the
+     * `rm` entirely and left hundreds of megabytes behind that nothing else
+     * will ever reclaim. They are ordered, not conditional, so the `rm` now
+     * runs in a `finally`. The route still answers 204 either way: the DB
+     * delete has already committed, and these cleanups are best-effort.
+     */
+    it("removes the checkout even when forgetting the process fails", async () => {
+      const storage = new InMemoryStorage()
+      const dataDir = mkdtempSync(join(tmpdir(), "viewer-checkouts-forget-fail-"))
+      try {
+        const project = await storage.createProject({ slug: "acme", name: "Acme" })
+        const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+        const checkout = join(dataDir, "checkouts", dep.id)
+        mkdirSync(join(checkout, "node_modules"), { recursive: true })
+        writeFileSync(join(checkout, "package.json"), "{}")
+
+        stable.use(
+          createApp({
+            storage,
+            assets: new NullAssetStore(),
+            config: { ...authConfig, dataDir },
+            bridgeScript: "// bridge",
+            github: testGithubRuntime(),
+            prototypeProcesses: {
+              ...nullPrototypeProcesses(),
+              forget: async () => {
+                throw new Error("the child would not stop")
+              },
+            },
+          }),
+        )
+
+        await request(stable.app).delete(`/api/v1/projects/${project.id}`).set(auth).expect(204)
+
+        expect(existsSync(checkout)).toBe(false)
+      } finally {
+        rmSync(dataDir, { recursive: true, force: true })
+      }
+    })
+
     // Wave 2, codex round 2: the route used to reclaim the deployment ASSET
     // directories on disk BEFORE calling `storage.deleteProject`. If that DB
     // call then threw (a lock, an IO error), the project row survived with
@@ -1351,6 +1443,7 @@ describe("projects API", () => {
         const buildQueue = createBuildQueue({
           storage,
           assets: new NullAssetStore(),
+          checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
           // Never resolves on its own — `queue.start()` resolves as soon as
           // the lock section is done, well before `run()` is ever awaited.
           runner: { run: () => new Promise<never>(() => {}) },
@@ -1412,6 +1505,7 @@ describe("projects API", () => {
         const buildQueue = createBuildQueue({
           storage,
           assets: new NullAssetStore(),
+          checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
           runner: { run: () => new Promise<never>(() => {}) },
         })
         stable.use(

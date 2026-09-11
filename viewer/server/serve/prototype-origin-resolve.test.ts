@@ -39,6 +39,45 @@ describe("pairedLoopbackHost", () => {
   it("returns null for a non-loopback hostname", () => {
     expect(pairedLoopbackHost("desde.acme.test")).toBeNull()
   })
+
+  /**
+   * A configured port range is the container case, and there the listener
+   * binds the IPv4 wildcard `0.0.0.0` (`loopback-listeners.ts`). `[::1]`
+   * would then be an origin the socket cannot answer on: the browser would
+   * be handed `http://[::1]:<port>` and get connection refused. Binding
+   * `::` instead is not an answer either — a container may have no IPv6 at
+   * all. So the pairing itself stops choosing `[::1]` whenever a range is
+   * set, and `localhost` takes its place for a shell on `127.0.0.1`.
+   *
+   * Cookie isolation is unharmed: cookies are keyed on the HOST STRING, so
+   * `localhost` and `127.0.0.1` are still two different cookie hosts, and
+   * `assertIsolatedOrigins` still sees two different origins.
+   */
+  describe("with a configured port range (the container case)", () => {
+    const withRange = { portRangeConfigured: true }
+
+    it("still pairs localhost with 127.0.0.1", () => {
+      expect(pairedLoopbackHost("localhost", withRange)).toBe("127.0.0.1")
+    })
+
+    it("pairs 127.0.0.1 with localhost, never with [::1]", () => {
+      expect(pairedLoopbackHost("127.0.0.1", withRange)).toBe("localhost")
+    })
+
+    it("still pairs [::1] with 127.0.0.1", () => {
+      expect(pairedLoopbackHost("[::1]", withRange)).toBe("127.0.0.1")
+    })
+
+    it("never chooses [::1] for any loopback spelling", () => {
+      for (const hostname of LOOPBACK_HOSTS) {
+        expect(pairedLoopbackHost(hostname, withRange)).not.toBe("[::1]")
+      }
+    })
+
+    it("still returns null for a non-loopback hostname", () => {
+      expect(pairedLoopbackHost("desde.acme.test", withRange)).toBeNull()
+    })
+  })
 })
 
 describe("loopbackBindHostFor", () => {
@@ -63,6 +102,18 @@ describe("loopbackBindHostFor", () => {
       // Every non-null pairedLoopbackHost output is a valid loopbackBindHostFor input.
       expect(() => loopbackBindHostFor(paired as "127.0.0.1" | "[::1]")).not.toThrow()
     }
+  })
+
+  /**
+   * `localhost` is a NAME, not an address, so it is never handed to
+   * `server.listen()`. It only ever comes back from a pairing that was told
+   * a port range is configured, and there the registry binds the wildcard
+   * and uses this value for the display spelling alone. See
+   * `loopback-listeners.ts`'s `open()`, which refuses the other combination
+   * (a `localhost` bind host with no range) outright.
+   */
+  it("passes localhost through unchanged, for the port-range pairing", () => {
+    expect(loopbackBindHostFor("localhost")).toBe("localhost")
   })
 })
 
@@ -115,6 +166,61 @@ describe("resolveOrigins", () => {
       mode: "loopback",
       shellOrigin: "http://[::1]:3100",
       prototypeHost: "127.0.0.1",
+    })
+  })
+
+  /**
+   * The same pairing rule, reached through `resolveOrigins` — which is where
+   * the route actually reads `prototypeHost` from. A container publishes a
+   * range, the listener binds the IPv4 wildcard, and a `[::1]` origin there
+   * would be refused by the browser's connect. See `pairedLoopbackHost`'s
+   * own port-range block above.
+   */
+  describe("a configured loopback port range keeps the pairing off [::1]", () => {
+    it("loopback shell on 127.0.0.1:3100 pairs the prototype to localhost", () => {
+      expect(
+        resolveOrigins({
+          requestHost: "127.0.0.1:3100",
+          hostAllowed: true,
+          hostIsPrototype: false,
+          publicUrl: "http://localhost:3100",
+          serveDomain: null,
+          loopbackAvailable: true,
+          loopbackPortRange: { from: 3101, to: 3120 },
+        }),
+      ).toEqual({
+        mode: "loopback",
+        shellOrigin: "http://127.0.0.1:3100",
+        prototypeHost: "localhost",
+      })
+    })
+
+    it("loopback shell on localhost:3100 still pairs the prototype to 127.0.0.1", () => {
+      expect(
+        resolveOrigins({
+          requestHost: "localhost:3100",
+          hostAllowed: true,
+          hostIsPrototype: false,
+          publicUrl: "http://localhost:3100",
+          serveDomain: null,
+          loopbackAvailable: true,
+          loopbackPortRange: { from: 3101, to: 3120 },
+        }).prototypeHost,
+      ).toBe("127.0.0.1")
+    })
+
+    it("loopback shell on [::1]:3100 still pairs the prototype to 127.0.0.1", () => {
+      expect(
+        resolveOrigins({
+          requestHost: "[::1]:3100",
+          hostAllowed: true,
+          hostIsPrototype: false,
+          publicUrl: "http://localhost:3100",
+          serveDomain: null,
+          loopbackAvailable: true,
+          loopbackPortRange: { from: 3101, to: 3120 },
+        }).prototypeHost,
+      ).toBe("127.0.0.1")
     })
   })
 

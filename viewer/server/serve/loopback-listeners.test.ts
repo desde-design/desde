@@ -15,17 +15,27 @@
  * Every registry created here is closed in `afterEach`. A listener left open
  * keeps a handle alive and hangs the run.
  */
-import { request as httpRequest, type IncomingHttpHeaders } from "node:http"
-import { afterEach, describe, expect, it } from "vitest"
+import express from "express"
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingHttpHeaders,
+  type Server,
+} from "node:http"
+import { Server as NetServer, type AddressInfo } from "node:net"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AssetStore, StoredAsset } from "../assets/types"
 import { loadConfig } from "../config"
 import { InMemoryStorage } from "../storage/in-memory-storage"
+import { nullPrototypeProcesses } from "../__tests__/test-app"
+import type { PrototypeProcesses } from "./prototype-processes"
 import { tmpViewerDataDir } from "../__tests__/test-config"
 import { contentTypeFor } from "./mime"
 import { createLoopbackListenerApp } from "./loopback-listener-app"
 import { loopbackBindHostFor, pairedLoopbackHost } from "./prototype-origin-resolve"
 import {
   createLoopbackListenerRegistry,
+  LoopbackPortsExhaustedError,
   type LoopbackListenerRegistry,
 } from "./loopback-listeners"
 
@@ -69,15 +79,24 @@ function httpCall(options: {
   path: string
   method?: string
   hostHeader?: string
+  /** Request body, sent as-is. `contentType` names it for the child. */
+  body?: string
+  contentType?: string
 }): Promise<HttpResult> {
   return new Promise((resolve, reject) => {
+    const headers: Record<string, string> = {}
+    if (options.hostHeader !== undefined) headers.Host = options.hostHeader
+    if (options.body !== undefined) {
+      headers["Content-Type"] = options.contentType ?? "application/json"
+      headers["Content-Length"] = String(Buffer.byteLength(options.body))
+    }
     const req = httpRequest(
       {
         host: options.host,
         port: options.port,
         path: options.path,
         method: options.method ?? "GET",
-        headers: options.hostHeader === undefined ? {} : { Host: options.hostHeader },
+        headers,
       },
       (res) => {
         const chunks: Buffer[] = []
@@ -92,20 +111,39 @@ function httpCall(options: {
       },
     )
     req.on("error", reject)
-    req.end()
+    req.end(options.body)
   })
 }
 
 const openRegistries: LoopbackListenerRegistry[] = []
 const stopReapers: (() => void)[] = []
+/** Stand-ins for a server prototype's own process. Closed with the listeners. */
+const childServers: Server[] = []
 
 afterEach(async () => {
   for (const stop of stopReapers.splice(0)) stop()
   for (const registry of openRegistries.splice(0)) await registry.closeAll()
+  for (const child of childServers.splice(0)) child.close()
 })
 
-function makeRegistry(files: Files, options: { now?: () => number; idleMs?: number } = {}) {
-  const storage = new InMemoryStorage()
+function makeRegistry(
+  files: Files,
+  options: {
+    now?: () => number
+    idleMs?: number
+    /**
+     * A pre-seeded storage. Every other test here serves from the asset store
+     * and never needs a deployment ROW; a `serve: "server"` deployment is the
+     * one shape the router reads out of storage, so that test seeds its own.
+     */
+    storage?: InMemoryStorage
+    prototypeProcesses?: PrototypeProcesses
+    /** The container case: fixed ports, and a wildcard bind. See `open()`. */
+    portRange?: { from: number; to: number } | null
+  } = {},
+) {
+  const { storage: seeded, prototypeProcesses, ...registryOptions } = options
+  const storage = seeded ?? new InMemoryStorage()
   const registry = createLoopbackListenerRegistry({
     makeApp: (context) =>
       createLoopbackListenerApp({
@@ -116,8 +154,9 @@ function makeRegistry(files: Files, options: { now?: () => number; idleMs?: numb
         bridgeScript: BRIDGE,
         bridgeVersion: BRIDGE_VERSION,
         prototypeCsp: null,
+        prototypeProcesses: prototypeProcesses ?? nullPrototypeProcesses(),
       }),
-    ...options,
+    ...registryOptions,
   })
   openRegistries.push(registry)
   return registry
@@ -126,7 +165,7 @@ function makeRegistry(files: Files, options: { now?: () => number; idleMs?: numb
 const V4 = { bindHost: "127.0.0.1", shellOrigin: SHELL_ORIGIN } as const
 
 function deployment(id: string, slug = "acme") {
-  return { id, slug, projectId: `project-${id}` }
+  return { id, slug, projectId: `project-${id}`, serve: "static" as const }
 }
 
 describe("createLoopbackListenerRegistry", () => {
@@ -176,6 +215,70 @@ describe("createLoopbackListenerRegistry", () => {
         throw error
       }
       expect(listener.host).toBe("[::1]")
+    })
+
+    /**
+     * The container pairing, end to end against a real socket.
+     *
+     * With a port range configured the bind widens to `0.0.0.0`, which is
+     * IPv4 only, so an origin naming `[::1]` would be one the socket cannot
+     * answer on — `pairedLoopbackHost` therefore hands back `localhost` for
+     * a shell on `127.0.0.1` once it is told a range is set. This drives the
+     * full derivation and then actually fetches the origin, because the
+     * defect this closes was exactly an origin that parsed fine and refused
+     * the connection.
+     *
+     * The request carries the origin's own `Host` (`localhost:<port>`, which
+     * is the only value the listener's one-entry allowlist admits) and
+     * connects over IPv4, which is the path a browser takes once its
+     * resolver maps `localhost` to `127.0.0.1`. No `::1` anywhere.
+     */
+    it("a shell on 127.0.0.1 pairs to a localhost listener that answers, when a range is configured", async () => {
+      const paired = pairedLoopbackHost("127.0.0.1", { portRangeConfigured: true })
+      expect(paired).toBe("localhost")
+      const bindHost = loopbackBindHostFor(paired as "127.0.0.1" | "[::1]" | "localhost")
+      expect(bindHost).toBe("localhost")
+
+      // A free port to start the range at, found and released the same way
+      // the container test below does it.
+      const probe = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()))
+      const free = (probe.address() as AddressInfo).port
+      await new Promise<void>((r) => probe.close(() => r()))
+
+      const registry = makeRegistry(
+        { d1: { "index.html": "<html><body>range</body></html>" } },
+        { portRange: { from: free, to: free + 3 } },
+      )
+      const listener = await registry.ensure(deployment("d1"), {
+        bindHost,
+        shellOrigin: "http://127.0.0.1:3100",
+      })
+      expect(listener.host).toBe("localhost")
+      expect(listener.origin).toBe(`http://localhost:${listener.port}`)
+      expect(listener.boundAddress).toBe("0.0.0.0")
+
+      const res = await httpCall({ host: "127.0.0.1", port: listener.port, path: "/", hostHeader: `localhost:${listener.port}` })
+      expect(res.status).toBe(200)
+      expect(res.body).toContain("range")
+    })
+
+    /**
+     * The inverse, stated as a refusal rather than trusted: `localhost` is a
+     * name a browser may resolve to either family, so it is only ever a
+     * legitimate listener host when the socket is on the wildcard — which is
+     * exactly when a range is configured. With no range it would have to be
+     * passed to `listen()`, and a listener reachable under a name whose
+     * family the OS picks is not one origin.
+     */
+    it("refuses a localhost bind host when no range is configured", async () => {
+      const registry = makeRegistry({ d1: {} })
+      await expect(
+        registry.ensure(deployment("d1"), {
+          bindHost: "localhost",
+          shellOrigin: "http://127.0.0.1:3100",
+        }),
+      ).rejects.toThrow(/localhost/i)
     })
   })
 
@@ -305,6 +408,129 @@ describe("createLoopbackListenerRegistry", () => {
     })
   })
 
+  describe("binding from a configured port range", () => {
+    /**
+     * Two REAL listening servers occupy `takenPort` and `takenPort + 1`, so
+     * the only way `ensure` can land on `takenPort + 2` is by trying both
+     * taken ports, getting `EADDRINUSE` twice, and moving on — it cannot
+     * happen by OS ephemeral-port-allocation coincidence the way a single
+     * taken port could (measured: `listen(0, ...)` right after closing one
+     * bound port tends to hand back the very next port on this machine, which
+     * would make a one-port version of this test pass against the OLD
+     * `listen(0, ...)` code with no range logic at all).
+     *
+     * Both occupy `0.0.0.0`, which is what a registry WITH a range binds (see
+     * the container test below). MEASURED on macOS: a wildcard bind succeeds
+     * over a port already held on `127.0.0.1` alone, because BSD's
+     * `SO_REUSEADDR` treats the two addresses as different — so occupying the
+     * loopback address would not produce the `EADDRINUSE` this test is about.
+     * The real occupants in a container are this same registry's own
+     * listeners, which bind the wildcard too.
+     */
+    it("binds the first free port in the range and skips two taken ones", async () => {
+      const taken1 = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => taken1.listen(0, "0.0.0.0", () => r()))
+      const takenPort = (taken1.address() as AddressInfo).port
+
+      const taken2 = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => taken2.listen(takenPort + 1, "0.0.0.0", () => r()))
+
+      // Spied only AFTER both taken servers are already listening, so their
+      // own `.listen()` calls are not recorded — only the registry's own
+      // attempts. `listen` lives on `net.Server.prototype` (not
+      // `http.Server.prototype`, which inherits it), so that is what has to
+      // be spied on to see every attempt the registry's http.Server makes.
+      const listenSpy = vi.spyOn(NetServer.prototype, "listen")
+
+      const registry = createLoopbackListenerRegistry({
+        // desde-allow-own-server: this Express app is never handed to
+        // supertest — the registry wraps it in its own real http.Server, which
+        // is the thing under test here (see the module doc comment above).
+        makeApp: () => express(),
+        portRange: { from: takenPort, to: takenPort + 3 },
+      })
+      try {
+        const listener = await registry.ensure(
+          { id: "dep-1", slug: "one", projectId: "p", serve: "static" },
+          { bindHost: "127.0.0.1", shellOrigin: "http://localhost:3100" },
+        )
+        expect(listener.port).toBe(takenPort + 2)
+
+        // The landing port alone is not proof of the retry loop: measured on
+        // this machine, `listen(0, ...)` right after two explicit binds tends
+        // to hand back the very next port regardless, by OS ephemeral-port
+        // sequencing — so even a build with NO range/retry logic at all lands
+        // on `takenPort + 2` here too. This is the assertion that actually
+        // distinguishes them: it fails unless the registry tried
+        // `takenPort` and `takenPort + 1` first, got `EADDRINUSE` both times,
+        // and only then tried `takenPort + 2`.
+        const attemptedPorts = listenSpy.mock.calls
+          .map((call) => call[0])
+          .filter((port): port is number => typeof port === "number")
+        expect(attemptedPorts).toEqual([takenPort, takenPort + 1, takenPort + 2])
+      } finally {
+        listenSpy.mockRestore()
+        await registry.closeAll()
+        taken1.close()
+        taken2.close()
+      }
+    })
+
+    /**
+     * The container case, measured on Docker Desktop 2026-09-11 (Task 14).
+     * A published port DNATs to the container's EXTERNAL interface, never to
+     * the container's own loopback, so a listener bound to `127.0.0.1` inside
+     * a container answers nothing from the host however the range is
+     * published. A configured range is the container signal, so that is when
+     * the bind widens.
+     *
+     * The counterpart — no range, so a loopback bind as before — is "binds
+     * 127.0.0.1 only, never 0.0.0.0" above, which asserts the same
+     * `boundAddress` field for a registry with no `portRange`.
+     */
+    it("binds every interface when a range is configured, and still names the loopback host", async () => {
+      const probe = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()))
+      const free = (probe.address() as AddressInfo).port
+      await new Promise<void>((r) => probe.close(() => r()))
+
+      const registry = createLoopbackListenerRegistry({
+        // desde-allow-own-server: same as above — wrapped in a real
+        // http.Server, never requested through supertest.
+        makeApp: () => express(),
+        portRange: { from: free, to: free + 3 },
+      })
+      try {
+        const listener = await registry.ensure(
+          { id: "dep-1", slug: "one", projectId: "p", serve: "static" },
+          { bindHost: "127.0.0.1", shellOrigin: "http://localhost:3100" },
+        )
+        expect(listener.boundAddress).toBe("0.0.0.0")
+        // The origin the browser is told to use is unchanged: the loopback
+        // spelling paired with the shell, never the bind address.
+        expect(listener.host).toBe("127.0.0.1")
+        expect(listener.origin).toBe(`http://127.0.0.1:${listener.port}`)
+      } finally {
+        await registry.closeAll()
+      }
+    })
+
+    it("throws LoopbackPortsExhaustedError when every port in the range is taken", async () => {
+      const registry = createLoopbackListenerRegistry({
+        // desde-allow-own-server: same as above — wrapped in a real
+        // http.Server, never requested through supertest.
+        makeApp: () => express(),
+        portRange: { from: 0, to: -1 }, // empty range: nothing to try
+      })
+      await expect(
+        registry.ensure(
+          { id: "dep-1", slug: "one", projectId: "p", serve: "static" },
+          { bindHost: "127.0.0.1", shellOrigin: "http://localhost:3100" },
+        ),
+      ).rejects.toBeInstanceOf(LoopbackPortsExhaustedError)
+    })
+  })
+
   describe("what a listener serves", () => {
     const html = "<html><head></head><body><h1>one</h1></body></html>"
 
@@ -402,6 +628,122 @@ describe("createLoopbackListenerRegistry", () => {
       expect(res.headers["content-security-policy"]).toContain("worker-src 'none'")
     })
 
+    /**
+     * A `serve: "server"` deployment, through a REAL listener socket.
+     *
+     * The router's own suite drives the fork with the rewritten `/p/{slug}/…`
+     * form. This is the shape that actually ships, and it is the one that
+     * proves the path handed to the child is right: the listener rewrites
+     * `req.url`, but `req.originalUrl` stays the path the caller asked for,
+     * which is exactly what the child should see.
+     */
+    it("proxies a server deployment to its process, at the path the caller asked for", async () => {
+      let seen: string | undefined
+      const child = createServer((req, res) => {
+        seen = req.url
+        res.setHeader("content-type", "text/html")
+        res.end("<html><body>from the child</body></html>")
+      })
+      childServers.push(child)
+      await new Promise<void>((r) => child.listen(0, "127.0.0.1", () => r()))
+      const childPort = (child.address() as AddressInfo).port
+
+      const storage = new InMemoryStorage()
+      const project = await storage.createProject({ slug: "one", name: "One" })
+      const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await storage.updateDeployment(dep.id, { serve: "server", serverStart: ["node", "x.js"] })
+      const registry = makeRegistry(
+        {},
+        {
+          storage,
+          prototypeProcesses: {
+            ...nullPrototypeProcesses(),
+            ensure: () => Promise.resolve({ port: childPort }),
+          },
+        },
+      )
+      const listener = await registry.ensure(
+        { id: dep.id, slug: "one", projectId: project.id, serve: "server" },
+        V4,
+      )
+
+      const res = await httpCall({ host: "127.0.0.1", port: listener.port, path: "/orders?page=2" })
+      expect(res.status).toBe(200)
+      expect(res.body).toContain("from the child")
+      expect(res.body).toContain(`data-shell-origin="${SHELL_ORIGIN}"`)
+      expect(res.body).toContain(`src="/__desde/bridge-${BRIDGE_VERSION}.js"`)
+      expect(seen).toBe("/orders?page=2")
+    })
+
+    /**
+     * A form post through a REAL listener socket (task 8b).
+     *
+     * The write-method fence on a listener runs BEFORE the path is rewritten,
+     * so it cannot ask "is this the prototype route?" of the path — every path
+     * on this origin is. What it asks instead is what the listener was OPENED
+     * for: a listener pinned to a `serve: "server"` deployment fronts a
+     * process that legitimately takes writes, and one pinned to a folder of
+     * files does not (the test in "what a listener refuses" below is that
+     * half). This is the shape that actually ships, through a socket, with a
+     * body on the wire.
+     */
+    it("carries a POST body through to a server deployment's process", async () => {
+      let seen: { method?: string; url?: string; contentType?: string; body: string } | null = null
+      const child = createServer((req, res) => {
+        const chunks: Buffer[] = []
+        req.on("data", (chunk: Buffer) => chunks.push(chunk))
+        req.on("end", () => {
+          seen = {
+            method: req.method,
+            url: req.url,
+            contentType: req.headers["content-type"],
+            body: Buffer.concat(chunks).toString("utf-8"),
+          }
+          res.statusCode = 201
+          res.setHeader("content-type", "application/json")
+          res.end('{"ok":true}')
+        })
+      })
+      childServers.push(child)
+      await new Promise<void>((r) => child.listen(0, "127.0.0.1", () => r()))
+      const childPort = (child.address() as AddressInfo).port
+
+      const storage = new InMemoryStorage()
+      const project = await storage.createProject({ slug: "one", name: "One" })
+      const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await storage.updateDeployment(dep.id, { serve: "server", serverStart: ["node", "x.js"] })
+      const registry = makeRegistry(
+        {},
+        {
+          storage,
+          prototypeProcesses: {
+            ...nullPrototypeProcesses(),
+            ensure: () => Promise.resolve({ port: childPort }),
+          },
+        },
+      )
+      const listener = await registry.ensure(
+        { id: dep.id, slug: "one", projectId: project.id, serve: "server" },
+        V4,
+      )
+
+      const res = await httpCall({
+        host: "127.0.0.1",
+        port: listener.port,
+        path: "/submit",
+        method: "POST",
+        body: '{"name":"ada"}',
+      })
+      expect(res.status).toBe(201)
+      expect(res.body).toBe('{"ok":true}')
+      expect(seen).toEqual({
+        method: "POST",
+        url: "/submit",
+        contentType: "application/json",
+        body: '{"name":"ada"}',
+      })
+    })
+
     /** Two ports, two deployments, no leakage between them. */
     it("keeps two deployments' bodies apart", async () => {
       const registry = makeRegistry({
@@ -475,6 +817,13 @@ describe("createLoopbackListenerRegistry", () => {
       expect(res.body).toContain("app")
     })
 
+    /**
+     * The static half of the write-method rule (task 8b). A listener fronting
+     * a folder of files has nothing that could accept a write, so its fence
+     * refuses one before the request is even rewritten — the same answer it
+     * gave before server prototypes existed. `deployment()` builds a
+     * `serve: "static"` deployment, which is what pins this listener.
+     */
     it("refuses a write method", async () => {
       const registry = makeRegistry({ d1: { "index.html": html } })
       const listener = await registry.ensure(deployment("d1"), V4)

@@ -19,6 +19,7 @@ import { createSwappableApp } from "../../__tests__/swappable-app"
 import { testGithubRuntime } from "../../__tests__/test-github-runtime"
 import { upsertTestUser } from "../../__tests__/user-fixtures"
 import type { InstanceRole } from "../../storage/types"
+import type { PrototypeProcesses, ProcessStatus } from "../../serve/prototype-processes"
 
 /**
  * ONE stable app object for this whole file — see `__tests__/swappable-app.ts`.
@@ -56,6 +57,7 @@ const authConfig: ViewerConfig = {
   trustProxy: false,
   loopbackListeners: "auto",
   loopbackAvailable: true,
+  loopbackPortRange: null,
 }
 
 const admin = { Authorization: "Bearer admin-secret" }
@@ -220,6 +222,27 @@ describe("GET /deployments/:id/log/stream (S7 — manage authority only)", () =>
     expect(res.status).toBe(404)
   })
 
+  // The repo-wide rule: a private project's 404 must be byte-identical to a
+  // nonexistent one. `denied` (a real deployment on a project this anonymous
+  // caller cannot read) and `missing` (a deployment id that does not exist at
+  // all) must be indistinguishable — status, body, AND content-type. This is
+  // the template `server-log`'s own paired test was copied from. ONE app
+  // instance for both requests, per `createSwappableApp`'s "last `use()`
+  // wins" rule.
+  it("answers a byte-identical 404 for an unreadable project and an unknown deployment id", async () => {
+    const { project } = await makeMembersProject(storage)
+    const dep = await storage.createDeployment({ projectId: project.id })
+    const requestApp = app()
+
+    const denied = await request(requestApp).get(`/api/v1/deployments/${dep.id}/log/stream`)
+    const missing = await request(requestApp).get("/api/v1/deployments/does-not-exist/log/stream")
+
+    expect(denied.status).toBe(404)
+    expect(denied.status).toBe(missing.status)
+    expect(denied.text).toBe(missing.text)
+    expect(denied.headers["content-type"]).toBe(missing.headers["content-type"])
+  })
+
   // Under Authorization v2 the log stream is `requireProjectManageRead`: the
   // caller must be able to READ the project (this one is `invited`, so a
   // membership row is what gets them in) AND hold a managing instance role.
@@ -334,5 +357,107 @@ describe("GET /deployments/:id/log/stream (S7 — manage authority only)", () =>
     const res = await request(app()).get(`/api/v1/deployments/${dep.id}/log/stream`).set(admin)
     expect(res.status).toBe(200)
     expect(res.text).toContain("admin-visible log")
+  })
+})
+
+/**
+ * `GET /deployments/:id/server-log` — a server prototype's stdout/stderr.
+ * Gated exactly like the build log stream above: same 404s, same 403, same
+ * manage authority. Copied from that describe block rather than sharing it,
+ * because the fake process manager below is specific to this route.
+ */
+describe("GET /deployments/:id/server-log (same gate as the build log)", () => {
+  let storage: InMemoryStorage
+
+  beforeEach(() => {
+    storage = new InMemoryStorage()
+  })
+
+  /**
+   * A distinguishable status (not the "stopped" a null fake would answer),
+   * so a passing 200 test proves the route is really reading
+   * `deps.prototypeProcesses`, not a hardcoded shape.
+   */
+  const fakeStatus: ProcessStatus = { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z" }
+
+  function fakeProcesses(): PrototypeProcesses {
+    return {
+      ensure: () => Promise.reject(new Error("not used by this route")),
+      touch: () => {},
+      stop: () => Promise.resolve(),
+      forget: () => Promise.resolve(),
+      status: () => fakeStatus,
+      serverLog: () => "hello",
+      startReaper: () => () => {},
+      shutdown: () => Promise.resolve(),
+    }
+  }
+
+  function app() {
+    stable.use(
+      createApp({
+        storage,
+        assets: new NullAssetStore(),
+        config: authConfig,
+        bridgeScript: "// bridge",
+        github: testGithubRuntime(),
+        prototypeProcesses: fakeProcesses(),
+      }),
+    )
+    return stable.app
+  }
+
+  it("404s for an unknown deployment", async () => {
+    const res = await request(app()).get("/api/v1/deployments/does-not-exist/server-log").set(admin)
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: "Project not found" })
+  })
+
+  // The repo-wide rule: a private project's 404 must be byte-identical to a
+  // nonexistent one, so a caller cannot learn a private deployment exists
+  // from the response body. `denied` (a real deployment on a project this
+  // anonymous caller cannot read) and `missing` (a deployment id that does
+  // not exist at all) must be indistinguishable — status, body, AND
+  // content-type. Same pattern as `prototype-origin-routes.test.ts`'s
+  // "answers a byte-identical 404 for an unreadable project and a missing
+  // id". ONE app instance for both requests — `createSwappableApp`'s "last
+  // `use()` wins" rule means a second `app()` call mid-test would swap the
+  // handler out from under the first request if issued afterward.
+  it("answers a byte-identical 404 for an unreadable project and an unknown deployment id", async () => {
+    const { project } = await makeMembersProject(storage)
+    const dep = await storage.createDeployment({ projectId: project.id })
+    const requestApp = app()
+
+    // Anonymous caller against an `invited` project with no access-list row.
+    const denied = await request(requestApp).get(`/api/v1/deployments/${dep.id}/server-log`)
+    const missing = await request(requestApp).get("/api/v1/deployments/does-not-exist/server-log")
+
+    expect(denied.status).toBe(404)
+    expect(denied.status).toBe(missing.status)
+    expect(denied.text).toBe(missing.text)
+    expect(denied.headers["content-type"]).toBe(missing.headers["content-type"])
+  })
+
+  it("403s a signed-in VIEWER on a project they can read", async () => {
+    const project = await storage.createProject({ slug: "open3", name: "Open" })
+    const dep = await storage.createDeployment({ projectId: project.id })
+    const { cookie: viewerCookie } = await signInAs(storage, "reader3@x.com", "viewer")
+
+    const res = await request(app())
+      .get(`/api/v1/deployments/${dep.id}/server-log`)
+      .set("Cookie", viewerCookie)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: "Only editors and admins may view the server log" })
+  })
+
+  it("200s { log, status } for a manager", async () => {
+    const { project, member } = await makeMembersProject(storage)
+    const dep = await storage.createDeployment({ projectId: project.id })
+
+    const res = await request(app())
+      .get(`/api/v1/deployments/${dep.id}/server-log`)
+      .set("Cookie", member.cookie)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ log: "hello", status: fakeStatus })
   })
 })

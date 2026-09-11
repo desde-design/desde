@@ -167,6 +167,9 @@ export interface BuildStep {
   endedAt?: string
 }
 
+/** How a deployment is served: a folder of files, or a process the Viewer runs and proxies to. */
+export type DeploymentServe = "static" | "server"
+
 export interface Deployment {
   id: string
   projectId: string
@@ -201,6 +204,19 @@ export interface Deployment {
    * running Clone for the second.
    */
   steps: BuildStep[] | null
+  /**
+   * `"static"`: the asset store holds the files (every upload, and every
+   * build until 2026-09-10). `"server"`: the build kept its checkout and the
+   * Viewer runs `serverStart` in it, proxying requests. See
+   * `docs/superpowers/specs/2026-09-10-server-prototypes-design.md`.
+   */
+  serve: DeploymentServe
+  /**
+   * The argv the process manager runs for a `server` deployment, decided by
+   * a framework adapter at build time and recorded so what was built is what
+   * runs. `$PORT` is substituted at start. `null` for a static deployment.
+   */
+  serverStart: string[] | null
   /** ISO-8601 UTC timestamp. Not guaranteed unique; `createdAt` has millisecond resolution. */
   createdAt: string
 }
@@ -234,6 +250,8 @@ export interface DeploymentUpdatePatch {
    * traffic that made `appendDeploymentLog` need its own append path.
    */
   steps?: BuildStep[] | null
+  serve?: DeploymentServe
+  serverStart?: string[] | null
 }
 
 /** Input for creating a comment. The author snapshot is denormalized — no user table exists until Phase 3. */

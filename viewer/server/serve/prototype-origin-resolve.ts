@@ -94,51 +94,93 @@ export const SHELL_ORIGIN_HEADER = "X-Viewer-Shell-Origin"
 export type OriginMode = "loopback" | "subdomain" | "fallback" | "prototype-origin"
 
 /**
+ * The loopback spellings a PROTOTYPE can be served on, as a browser writes
+ * them in a `Host` header and a URL.
+ *
+ * `"localhost"` is in this union and `"127.0.0.1"`/`"[::1]"` are the other
+ * two; which of them `pairedLoopbackHost` may choose depends on whether a
+ * port range is configured. See that function.
+ */
+export type PrototypeLoopbackHost = "127.0.0.1" | "[::1]" | "localhost"
+
+/**
  * The loopback name paired with `hostname`: whichever spelling the shell
  * used, this is the OTHER one, so a prototype served on it is a genuinely
  * different origin from the same process.
  *
- * NUMERIC pairs (changed 2026-08-22, task 4b). `"localhost"` still pairs
- * with `"127.0.0.1"` — a shell reached by name is safely paired with a
- * concrete address. But the two numeric addresses now pair with EACH
- * OTHER, not both back through `"localhost"`: a per-deployment loopback
- * listener (`loopback-listeners.ts`) has to BIND an address, and
- * `"localhost"` is a NAME a browser is free to resolve to either
- * `127.0.0.1` or `::1`. A listener bound to one of those addresses could be
- * unreachable through the name `localhost` if the browser's resolver picked
- * the other family — so the pairing this function hands a listener must
- * always be something `server.listen()` can bind directly.
+ * NUMERIC pairs (changed 2026-08-22, task 4b). `"localhost"` pairs with
+ * `"127.0.0.1"` — a shell reached by name is safely paired with a concrete
+ * address. The two numeric addresses pair with EACH OTHER rather than both
+ * back through `"localhost"`: a per-deployment loopback listener
+ * (`loopback-listeners.ts`) has to BIND an address, and `"localhost"` is a
+ * NAME a browser is free to resolve to either `127.0.0.1` or `::1`. A
+ * listener bound to one of those addresses could be unreachable through the
+ * name if the browser's resolver picked the other family.
  *
- * `"localhost"` → `"127.0.0.1"`; `"127.0.0.1"` → `"[::1]"`; `"[::1]"` →
- * `"127.0.0.1"`. Returns `null` for anything that is not one of the three
- * loopback names.
+ * So, with no port range: `"localhost"` → `"127.0.0.1"`; `"127.0.0.1"` →
+ * `"[::1]"`; `"[::1]"` → `"127.0.0.1"`. Returns `null` for anything that is
+ * not one of the three loopback names.
+ *
+ * ## `portRangeConfigured`: the container case never pairs to `[::1]`
+ *
+ * A configured `VIEWER_LOOPBACK_PORT_RANGE` is the container signal, and
+ * there the listener binds `0.0.0.0` — the IPv4 wildcard — because Docker
+ * forwards a published port to the container's external interface and never
+ * to the container's own loopback (`loopback-listeners.ts`, `open()`). An
+ * IPv4-only socket cannot answer on `[::1]`, so pairing a `127.0.0.1` shell
+ * with `[::1]` there hands the browser an origin that refuses the
+ * connection. Binding `::` instead is not the answer: a container may have
+ * no IPv6 at all.
+ *
+ * The fix is made HERE, in the pairing, so nothing downstream has to reason
+ * about it: with a range configured, `"127.0.0.1"` → `"localhost"` and the
+ * other two are unchanged. `"localhost"` is safe as a prototype host in that
+ * one case precisely because the socket is on the wildcard: whichever family
+ * the browser's resolver picks for the name, IPv4 answers, and every browser
+ * falls back to it.
+ *
+ * Cookie isolation is untouched. Cookies are keyed on the host STRING, so
+ * `localhost` and `127.0.0.1` remain two different cookie hosts, and
+ * `assertIsolatedOrigins` still sees two different origins.
  *
  * The sibling `loopbackBindHostFor` turns this function's non-null result
- * into the bare address `server.listen()` wants (no brackets). Together
- * they are the ONE place this pairing is decided — `loopback-listeners.ts`
- * takes a `bindHost` from its caller rather than deciding one itself; see
- * its `hostSpellingFor`, which only formats a given bind host for display
- * and does not choose one.
+ * into the value `loopback-listeners.ts` takes as a bind host. Together they
+ * are the ONE place this pairing is decided — the registry takes a
+ * `bindHost` from its caller rather than deciding one itself; see its
+ * `hostSpellingFor`, which only formats a given bind host for display.
  */
-export function pairedLoopbackHost(hostname: string): "127.0.0.1" | "[::1]" | null {
+export function pairedLoopbackHost(
+  hostname: string,
+  options: { portRangeConfigured?: boolean } = {},
+): PrototypeLoopbackHost | null {
   const lower = hostname.toLowerCase()
   if (lower === "localhost") return "127.0.0.1"
-  if (lower === "127.0.0.1") return "[::1]"
   if (lower === "[::1]") return "127.0.0.1"
+  if (lower === "127.0.0.1") return options.portRangeConfigured ? "localhost" : "[::1]"
   return null
 }
 
 /**
- * Strips the brackets from a loopback hostname so it can be passed to
- * `server.listen()`, which wants a bare address, not the bracketed
- * Host-header spelling `pairedLoopbackHost` returns.
+ * Turns a paired loopback hostname into the bind host
+ * `loopback-listeners.ts` takes: the bracketed Host-header spelling `[::1]`
+ * becomes the bare address `::1`, and the other two pass through.
  *
- * The only two inputs that occur in practice are `pairedLoopbackHost`'s
- * non-null outputs, which is why the parameter type is exactly that union
- * rather than `string`.
+ * `"localhost"` passes through as a NAME, and it is the one output that is
+ * never handed to `server.listen()`. It only occurs when the pairing was
+ * told a port range is configured, and in that case the registry binds the
+ * wildcard and uses this value for the display spelling alone. The registry
+ * refuses the contradictory combination — a `localhost` bind host with no
+ * range — rather than trusting the two modules to stay in step.
+ *
+ * The inputs that occur in practice are exactly `pairedLoopbackHost`'s
+ * non-null outputs, which is why the parameter type is that union rather
+ * than `string`.
  */
-export function loopbackBindHostFor(hostname: "127.0.0.1" | "[::1]"): "127.0.0.1" | "::1" {
-  return hostname === "[::1]" ? "::1" : "127.0.0.1"
+export function loopbackBindHostFor(
+  hostname: PrototypeLoopbackHost,
+): "127.0.0.1" | "::1" | "localhost" {
+  if (hostname === "[::1]") return "::1"
+  return hostname
 }
 
 export interface ResolvedOrigins {
@@ -157,7 +199,7 @@ export interface ResolvedOrigins {
    * bare `string` here forced every such consumer into a cast, which is a
    * cast past a fact this module already knows.
    */
-  prototypeHost: "127.0.0.1" | "[::1]" | null
+  prototypeHost: PrototypeLoopbackHost | null
   /**
    * The single shared origin ALL prototypes are served from in
    * `"prototype-origin"` mode (`VIEWER_PROTOTYPE_ORIGIN`), echoed verbatim
@@ -204,6 +246,35 @@ export function prototypeAnonymouslyReadable(
 }
 
 /**
+ * How a deployment is served: a folder of files, or a process the Viewer
+ * runs and proxies to. Duplicated from `storage/types.ts`'s
+ * `DeploymentServe` rather than imported — same no-imports reason as every
+ * other type in this file. The two stay assignment-compatible because
+ * TypeScript compares them structurally; there is nothing to keep in sync
+ * beyond the two literal members.
+ */
+export type PrototypeServeMode = "static" | "server"
+
+/**
+ * A server prototype's process state, as reported by
+ * `server/serve/prototype-processes.ts`'s `PrototypeProcesses.status`.
+ * Duplicated rather than imported for the same reason as `PrototypeServeMode`
+ * above — this module must never pull in `node:child_process`.
+ */
+export type PrototypeProcessStatus =
+  | { state: "stopped" }
+  | { state: "starting" }
+  | { state: "running"; port: number; since: string }
+  | {
+      state: "crashed"
+      exitCode: number | null
+      restarts: number
+      reason: string
+      /** Whether the next request would start it again. See `ProcessStatus`. */
+      retryable: boolean
+    }
+
+/**
  * The body of `GET /api/v1/projects/:id/prototype-origin` — where the shell
  * should point a browser at this prototype right now.
  *
@@ -225,13 +296,68 @@ export function prototypeAnonymouslyReadable(
  * prototype's assets to load. A loopback listener never needs one: reaching
  * its ephemeral loopback socket is itself the credential, and the route
  * only opens one for a project the caller may already read.
+ *
+ * `serve` and `process` (server-prototypes work, 2026-09-10) say whether
+ * this project's active deployment is a folder of files or a process, and
+ * what that process is doing right now. They are present in EVERY mode's
+ * body, including `fallback` and `prototype-origin` — modes that cannot
+ * proxy a server deployment at all — because the review page needs to know
+ * `serve: "server"` there too, to show a "this prototype needs an origin of
+ * its own" panel instead of a blank frame. `process` is present only when
+ * `serve === "server"`.
+ *
+ * `range` is the configured loopback port range (`ViewerConfig.
+ * loopbackPortRange`), present on the two `loopback` shapes — it names
+ * the `-p` flag the review page's port banner points an operator at. (The
+ * ports-exhausted 503, which is not one of these shapes, carries it too, for
+ * the panel that counts the ports.)
+ *
+ * `bridgeAssetPath` is where the bridge bundle lives on a prototype origin,
+ * relative to its root. Only the `loopback` shapes carry it, because the
+ * shell's port probe only runs in loopback mode: it fetches that path to ask
+ * whether the PORT answers at all, which the serve router decides before it
+ * would ever start a server prototype's process.
  */
 export type PrototypeOriginResponse =
-  | { mode: "loopback"; origin: string; capabilityRequired: false }
-  | { mode: "loopback"; origin: null; capabilityRequired: false; reason: "no-deployment" }
-  | { mode: "subdomain"; origin: string; capabilityRequired: boolean }
-  | { mode: "prototype-origin"; origin: string; capabilityRequired: boolean }
-  | { mode: "fallback"; origin: null; capabilityRequired: true }
+  | {
+      mode: "loopback"
+      origin: string
+      capabilityRequired: false
+      serve: PrototypeServeMode
+      process?: PrototypeProcessStatus
+      range: { from: number; to: number } | null
+      bridgeAssetPath: string
+    }
+  | {
+      mode: "loopback"
+      origin: null
+      capabilityRequired: false
+      reason: "no-deployment"
+      serve: "static"
+      range: { from: number; to: number } | null
+      bridgeAssetPath: string
+    }
+  | {
+      mode: "subdomain"
+      origin: string
+      capabilityRequired: boolean
+      serve: PrototypeServeMode
+      process?: PrototypeProcessStatus
+    }
+  | {
+      mode: "prototype-origin"
+      origin: string
+      capabilityRequired: boolean
+      serve: PrototypeServeMode
+      process?: PrototypeProcessStatus
+    }
+  | {
+      mode: "fallback"
+      origin: null
+      capabilityRequired: true
+      serve: PrototypeServeMode
+      process?: PrototypeProcessStatus
+    }
 
 /**
  * Decides which origin mode is in play for one request, and the shell
@@ -318,6 +444,18 @@ export function resolveOrigins(input: {
    * verbatim into `ResolvedOrigins.prototypeOrigin`.
    */
   prototypeOrigin?: string | null
+  /**
+   * `ViewerConfig.loopbackPortRange`, or `null`/absent when no range is
+   * configured. Read for ONE thing: whether the pairing may choose `[::1]`.
+   *
+   * A configured range means the listener binds the IPv4 wildcard (the
+   * container case), so an IPv6 prototype origin would refuse the browser's
+   * connection. `pairedLoopbackHost` takes the fact and does the rest; see
+   * its own doc comment. Optional so the callers that only read
+   * `shellOrigin` or `mode` need no edit — absent reads as "no range", which
+   * is the laptop case and the behaviour every one of them had before.
+   */
+  loopbackPortRange?: { from: number; to: number } | null
 }): ResolvedOrigins {
   const publicUrl = new URL(input.publicUrl)
   const publicUrlIsLoopback = (LOOPBACK_HOSTS as readonly string[]).includes(
@@ -392,7 +530,12 @@ export function resolveOrigins(input: {
   return {
     mode,
     shellOrigin,
-    prototypeHost: mode === "loopback" ? pairedLoopbackHost(shellHostname) : null,
+    prototypeHost:
+      mode === "loopback"
+        ? pairedLoopbackHost(shellHostname, {
+            portRangeConfigured: Boolean(input.loopbackPortRange),
+          })
+        : null,
     // Present ONLY in prototype-origin mode — absent (not null) elsewhere, so
     // the field's mere presence answers "is this that mode?" and existing
     // full-object assertions on the other three modes stay unchanged.

@@ -239,19 +239,33 @@ export interface ViewerConfig {
   loopbackListeners: ViewerLoopbackListenersMode
   /**
    * Computed from `loopbackListeners`: `"on"` → `true`, `"off"` → `false`,
-   * `"auto"` → `!isLikelyContainerized()`. This is the value `resolveOrigins`
+   * `"auto"` → not a container, OR a container that has a
+   * {@link ViewerConfig.loopbackPortRange} (which is every container, since
+   * the range has a container default). This is the value `resolveOrigins`
    * (`server/serve/prototype-origin-resolve.ts`) actually reads — it stays
    * import-free and pure, so the container check has to run here, at boot,
    * and get threaded in as a plain boolean.
    *
    * When `false`, a shell that would otherwise get loopback mode (a
    * loopback `VIEWER_PUBLIC_URL`) falls back to same-host path mode
-   * instead: no per-deployment listener is opened. This is what closes the
-   * `docker run -p 3100:3100` gap — a loopback listener bound inside the
-   * container is unreachable from a host browser through the one published
-   * port, so opening one there is worse than not opening one at all.
+   * instead: no per-deployment listener is opened.
+   *
+   * The container case needs TWO things to be reachable, and the range is
+   * only one of them: a published port forwards to the container's external
+   * interface and never to the container's own loopback, so the listener
+   * also binds `0.0.0.0` whenever a range is configured. See
+   * `serve/loopback-listeners.ts`. Before that bind widened, a container
+   * with a published range served nothing at all (MEASURED, 2026-09-11).
    */
   loopbackAvailable: boolean
+  /**
+   * Loopback listeners bind ports from this range instead of ephemeral ones.
+   * `VIEWER_LOOPBACK_PORT_RANGE="3101-3120"`. Defaults to the twenty ports
+   * above `PORT` inside a container and to `null` (ephemeral) elsewhere. It
+   * exists so a container can publish the range with one `-p` flag; see the
+   * server-prototypes spec, "Loopback port range".
+   */
+  loopbackPortRange: { from: number; to: number } | null
 }
 
 const PROFILES: ViewerProfile[] = ["selfhost"]
@@ -450,6 +464,26 @@ function parseSmtpPort(raw: string | undefined): number {
 }
 
 /**
+ * Parses `VIEWER_LOOPBACK_PORT_RANGE`, e.g. `"3101-3120"`. `port` is the
+ * Viewer's own port (`PORT`), so the range can be checked for overlap with
+ * it: a loopback listener sharing the Viewer's own port would collide with
+ * it, so that overlap is refused rather than silently allowed.
+ */
+function parseLoopbackPortRange(raw: string, port: number): { from: number; to: number } {
+  const m = /^(\d{1,5})-(\d{1,5})$/.exec(raw.trim())
+  if (!m) throw new Error(`VIEWER_LOOPBACK_PORT_RANGE "${raw}" must look like "3101-3120"`)
+  const from = Number(m[1])
+  const to = Number(m[2])
+  if (from < 1024 || to > 65535 || from > to) {
+    throw new Error(`VIEWER_LOOPBACK_PORT_RANGE "${raw}" must be within 1024-65535 and ascending`)
+  }
+  if (port >= from && port <= to) {
+    throw new Error(`VIEWER_LOOPBACK_PORT_RANGE "${raw}" must not include the Viewer's own port ${port}`)
+  }
+  return { from, to }
+}
+
+/**
  * `overrides.isLikelyContainerized` exists ONLY for tests: the real default
  * is the real `isLikelyContainerized` (`server/serve/container-detect.ts`),
  * which touches the actual filesystem. Injecting a stub here is what lets
@@ -507,8 +541,15 @@ export function loadConfig(
   // says "on" or "off" is stating the answer, not asking us to detect it.
   // Only "auto" (the default) asks `isLikelyContainerized`.
   const detectContainer = overrides.isLikelyContainerized ?? isLikelyContainerized
+  const inContainer = loopbackListeners === "auto" ? detectContainer() : false
+  const loopbackPortRange = env.VIEWER_LOOPBACK_PORT_RANGE
+    ? parseLoopbackPortRange(env.VIEWER_LOOPBACK_PORT_RANGE, port)
+    : inContainer
+      ? { from: port + 1, to: port + 20 }
+      : null
+  // A container now gets loopback mode too, on a range it can publish.
   const loopbackAvailable =
-    loopbackListeners === "on" ? true : loopbackListeners === "off" ? false : !detectContainer()
+    loopbackListeners === "on" ? true : loopbackListeners === "off" ? false : !inContainer || loopbackPortRange !== null
 
   const dataDir = env.VIEWER_DATA_DIR ?? ".desde-viewer"
   // Fallback source for `sessionSecret` and, when neither GitHub sign-in nor
@@ -596,6 +637,7 @@ export function loadConfig(
     trustProxy: parseTrustProxy(env.VIEWER_TRUST_PROXY),
     loopbackListeners,
     loopbackAvailable,
+    loopbackPortRange,
     /*
       Env first, stored settings as the fallback — `runtime-config.ts`'s rule,
       not a new one. An operator who has set `VIEWER_SMTP_HOST` in their

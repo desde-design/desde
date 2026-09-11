@@ -7,6 +7,7 @@
  * `signSessionId`, `loadConfig({...})` as the config factory.
  */
 import { generateKeyPairSync } from "node:crypto"
+import { join } from "node:path"
 import express from "express"
 import request from "supertest"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -668,6 +669,7 @@ describe("GitHub connect/disconnect API (Phase 3c-1 Task 4)", () => {
         return createBuildQueue({
           storage,
           assets: nullAssets,
+          checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
           runner: { run: () => new Promise<never>(() => {}) },
         })
       }
@@ -899,6 +901,44 @@ describe("GitHub connect/disconnect API (Phase 3c-1 Task 4)", () => {
         .send({ ...VALID_REPO_BODY, installationId: 123456 })
         .expect(400)
       expect(anotherForged.body).toEqual(forged.body)
+    })
+
+    /**
+     * The caller's captured installation set is from SIGN-IN, so it can name
+     * an installation the App has since lost (uninstalled, or the id was
+     * simply wrong). GitHub answers 404 for that id, the App client throws,
+     * and nothing used to catch it: the connect answered a bare 500
+     * (MEASURED in the live acceptance run, 2026-09-11).
+     *
+     * The answer is the SAME 400 a foreign id gets, deliberately — a
+     * distinct one would tell a caller whether an installation exists.
+     */
+    it("400s, not 500s, when the App no longer has the installation GitHub is asked about", async () => {
+      const githubApp = createFakeGitHubAppClient({
+        installations: [INSTALLATION],
+        reposByInstallation: { [INSTALLATION.id]: [REPO] },
+        // The App asks GitHub for this installation and is told it does not
+        // exist, exactly as a live App without it would be.
+        notFoundInstallations: [INSTALLATION.id],
+      })
+      stable.use(
+        createApp({
+          storage,
+          assets: nullAssets,
+          config,
+          bridgeScript: "// bridge",
+          github: testGithubRuntime({ overrides: { appClient: githubApp } }),
+        }),
+      )
+      const { project, ownerCookie } = await seedOwnedProject()
+
+      const res = await request(stable.app)
+        .put(`/api/v1/projects/${project.id}/repo`)
+        .set("Cookie", ownerCookie)
+        .send(VALID_REPO_BODY)
+        .expect(400)
+      expect(res.body).toEqual({ error: "Invalid installation" })
+      expect((await storage.getProject(project.id))?.repoConfig).toBeNull()
     })
 
     it("refuses when the repo isn't a member of the installation's repo list", async () => {

@@ -31,11 +31,13 @@ database and built prototypes in, and one variable saying what URL it is
 reached at:
 
 ```bash
-docker run -d --name desde-viewer -p 3100:3100 \
+docker run -d --name desde-viewer -p 3100:3100 -p 127.0.0.1:3101-3120:3101-3120 \
   -v desde-viewer-data:/data \
   -e VIEWER_PUBLIC_URL=http://localhost:3100 \
   ghcr.io/desde-design/viewer:latest
 ```
+
+The second `-p` publishes the twenty ports prototypes open on (`VIEWER_LOOPBACK_PORT_RANGE`, defaulted from `PORT` inside a container); without it a prototype's page never loads and the review screen names this flag. The `127.0.0.1:` prefix on it keeps those ports on your own machine, which is where a prototype port belongs: a prototype listener has no sign-in of its own, so anyone who can reach the port can open the prototype.
 
 Then open http://localhost:3100 and follow the one-time sign-in link the
 container prints (`docker logs desde-viewer`). Everything below is the
@@ -275,22 +277,28 @@ across ports, but nothing else: each port gets its own `localStorage`, its
 own IndexedDB, its own DOM. This is an accepted cost on a single-user
 laptop.
 
-**Loopback listeners auto-fall-back in a container.** Loopback mode only
-works when the browser is on the same machine as the viewer. Run the viewer
-in a container published with `docker run -p 3100:3100` and a default
-`VIEWER_PUBLIC_URL`, and a loopback listener binds an address *inside the
-container*, which the host browser can't reach through the one published
-port. `VIEWER_LOOPBACK_LISTENERS` (default `auto`) exists for this: `auto`
-checks for `/.dockerenv` or `/run/.containerenv` at boot, and if either is
-present, the viewer treats loopback listeners as unavailable and every
-prototype that would have been loopback mode falls back to fallback mode
-instead (same-host, sandboxed) rather than opening a listener nobody outside
-the container can reach. Set `VIEWER_LOOPBACK_LISTENERS=off` to force that
-behavior regardless of what the container check finds, or `=on` to force
-listeners open anyway (correct for a container run with `--network host`,
-where the browser genuinely does share the host's loopback interface). None
-of this is a substitute for real isolation on a real deployment: set
-`VIEWER_SERVE_DOMAIN` (subdomain mode) for that.
+**Loopback listeners in a container.** Loopback mode only works when the
+browser is on the same machine as the viewer. Inside a container there is a
+second catch: Docker forwards a published port to the container's external
+interface and never to the container's own loopback, so a listener bound to
+`127.0.0.1` in there answers nothing, whatever `-p` you write. A container
+therefore opens its listeners on every one of its own interfaces, on a fixed
+port range (`VIEWER_LOOPBACK_PORT_RANGE`, twenty ports above `PORT` by
+default) so you have something stable to publish. Publish that range to your
+own loopback, as the run line at the top of this file does
+(`-p 127.0.0.1:3101-3120:3101-3120`), and the ports stay on your machine
+exactly as they do on a laptop. Leave the prefix off and they are reachable
+from your network, which a prototype listener is not built for: it has no
+sign-in of its own. A container on the same Docker network can still reach
+them, which is the same trust a laptop gives another local program.
+
+`VIEWER_LOOPBACK_LISTENERS` (default `auto`) is the switch: `auto` checks for
+`/.dockerenv` or `/run/.containerenv` at boot and uses the range described
+above when it finds one. Set `=off` to open no listeners at all, so every
+prototype that would have been loopback mode falls back to same-host path
+mode (sandboxed) instead. Set `=on` to force listeners open whatever the
+container check finds. None of this is a substitute for real isolation on a
+real deployment: set `VIEWER_SERVE_DOMAIN` (subdomain mode) for that.
 
 **The DNS you need for subdomain mode.** Subdomain mode needs one wildcard
 DNS record (`*.yourdomain.com`) and a matching wildcard TLS certificate.

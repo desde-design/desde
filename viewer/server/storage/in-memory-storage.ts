@@ -256,6 +256,8 @@ export class InMemoryStorage implements StorageAdapter {
       // `null`, not `[]`: a deployment has no phases until a build records
       // one, and an upload never will.
       steps: null,
+      serve: "static",
+      serverStart: null,
       createdAt: this.nextTimestamp(),
     }
     this.deployments.set(deployment.id, deployment)

@@ -2,6 +2,7 @@ import { Router } from "express"
 import type { AppDeps } from "../create-app"
 import { requireProjectReadWithPolicy } from "../auth/authorize"
 import { buildHostAllowlist, isAllowedHost } from "../serve/host-allowlist"
+import { LoopbackPortsExhaustedError } from "../serve/loopback-listeners"
 import {
   LOOPBACK_HOSTS,
   loopbackBindHostFor,
@@ -11,7 +12,9 @@ import {
   SHELL_ORIGIN_HEADER,
   type PrototypeOriginResponse,
 } from "../serve/prototype-origin-resolve"
+import { bridgeAssetRelPath } from "../serve/serve-router"
 import { prototypeOriginFor } from "../serve/subdomain"
+import type { DeploymentServe } from "../storage/types"
 
 /**
  * `GET /api/v1/projects/:id/prototype-origin` — which origin the shell
@@ -123,6 +126,10 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     allowAnyLoopbackPort: deps.allowAnyLoopbackPort,
   })
   const acceptableOrigins = acceptableShellOrigins(deps.config)
+  // Where the bridge bundle sits on a prototype origin, for the shell's port
+  // probe. The same `?? "dev"` default `create-app.ts` hands the serve
+  // router, so the path this route names is the one that router answers.
+  const bridgeAssetPath = bridgeAssetRelPath(deps.bridgeVersion ?? "dev")
 
   router.get("/projects/:id/prototype-origin", async (req, res) => {
     // On EVERY response, including the refusals below. The answer names a
@@ -150,6 +157,25 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     if (!access) return
     const { project, policy } = access
 
+    // Loaded ONCE, before any mode branch, so EVERY mode's answer can state
+    // `serve` correctly — subdomain, prototype-origin and fallback used to
+    // answer before ever looking at the deployment, which was fine while the
+    // field did not exist. A dangling `activeDeploymentId` reads as "nothing
+    // built" here too, same as everywhere else in this route: the client
+    // cannot act on the difference, and a deployment row that is gone can
+    // only ever 404.
+    const deployment = project.activeDeploymentId
+      ? await deps.storage.getDeployment(project.activeDeploymentId)
+      : null
+    const serve: DeploymentServe = deployment?.serve ?? "static"
+    // Only when there IS a deployment and it is a server one — `deployment`
+    // is re-checked rather than trusting `serve`, so a stale `serve` value
+    // could never call `.status` with a null id.
+    const processStatus =
+      deployment && deployment.serve === "server"
+        ? deps.prototypeProcesses.status(deployment.id)
+        : undefined
+
     const resolved = resolveOrigins({
       requestHost: req.headers.host,
       hostAllowed: isAllowedHost(allowlist, req.headers.host, deps.config.serveDomain),
@@ -163,6 +189,10 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
       serveDomain: deps.config.serveDomain,
       loopbackAvailable: deps.config.loopbackAvailable,
       prototypeOrigin: deps.config.prototypeOrigin,
+      // Read for one thing only: a configured range means the listener binds
+      // the IPv4 wildcard, so the pairing must not choose `[::1]`. See
+      // `pairedLoopbackHost`.
+      loopbackPortRange: deps.config.loopbackPortRange,
     })
 
     // `serveDomain` is what MADE the mode "subdomain" (see `resolveOrigins`),
@@ -181,6 +211,8 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         // cookie is host-only, so it is never sent to `{slug}.{serveDomain}`
         // and cannot authorize the prototype's own subresources.
         capabilityRequired: !prototypeAnonymouslyReadable(project.access, policy.allowPublicLinks),
+        serve,
+        ...(processStatus ? { process: processStatus } : {}),
       }
       res.json(body)
       return
@@ -200,6 +232,8 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         mode: "prototype-origin",
         origin: resolved.prototypeOrigin,
         capabilityRequired: !prototypeAnonymouslyReadable(project.access, policy.allowPublicLinks),
+        serve,
+        ...(processStatus ? { process: processStatus } : {}),
       }
       res.json(body)
       return
@@ -213,7 +247,12 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     let shellOrigin = resolved.shellOrigin
     let prototypeHost = resolved.prototypeHost
     if (statedOrigin !== null) {
-      const paired = pairedLoopbackHost(new URL(statedOrigin).hostname)
+      // Same port-range fact as the `resolveOrigins` call above, for the same
+      // reason: the shell's stated origin decides the pairing here, and the
+      // pairing must not name `[::1]` when the listener binds the wildcard.
+      const paired = pairedLoopbackHost(new URL(statedOrigin).hostname, {
+        portRangeConfigured: deps.config.loopbackPortRange !== null,
+      })
       if (paired !== null) {
         shellOrigin = statedOrigin
         prototypeHost = paired
@@ -229,24 +268,22 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         mode: "fallback",
         origin: null,
         capabilityRequired: true,
+        serve,
+        ...(processStatus ? { process: processStatus } : {}),
       }
       res.json(body)
       return
     }
 
-    // A dangling `activeDeploymentId` reads as "nothing built", exactly as it
-    // does in `projects-routes.ts`: the client cannot act on the difference,
-    // and opening a listener for a deployment row that is gone would bind a
-    // port that can only ever 404.
-    const deployment = project.activeDeploymentId
-      ? await deps.storage.getDeployment(project.activeDeploymentId)
-      : null
     if (!deployment) {
       const body: PrototypeOriginResponse = {
         mode: "loopback",
         origin: null,
         capabilityRequired: false,
         reason: "no-deployment",
+        serve: "static",
+        range: deps.config.loopbackPortRange,
+        bridgeAssetPath,
       }
       res.json(body)
       return
@@ -254,7 +291,11 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
 
     try {
       const listener = await deps.prototypeListeners.ensure(
-        { id: deployment.id, slug: project.slug, projectId: project.id },
+        // `serve` travels with the deployment because this route already has
+        // the row in hand. A listener's write-method fence reads it once, at
+        // open time, rather than asking storage on every request — see
+        // `serve/loopback-listeners.ts`'s `LoopbackListenerAppContext.serve`.
+        { id: deployment.id, slug: project.slug, projectId: project.id, serve: deployment.serve },
         { bindHost: loopbackBindHostFor(prototypeHost), shellOrigin },
       )
       const body: PrototypeOriginResponse = {
@@ -263,9 +304,26 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         // Reaching an ephemeral loopback socket IS the credential, and this
         // route only opens one for a project the caller may already read.
         capabilityRequired: false,
+        serve,
+        range: deps.config.loopbackPortRange,
+        bridgeAssetPath,
+        ...(processStatus ? { process: processStatus } : {}),
       }
       res.json(body)
     } catch (error) {
+      if (error instanceof LoopbackPortsExhaustedError) {
+        // `serve` and `range` ride along because the page decides what to do
+        // with this from them: a STATIC prototype still loads from the shell's
+        // own path prefix and must not be blanked, and the panel a server
+        // prototype gets names how many ports there are.
+        res.status(503).json({
+          error: error.message,
+          reason: "ports-exhausted",
+          serve,
+          range: deps.config.loopbackPortRange,
+        })
+        return
+      }
       // A constant plus the error's CLASS, never its message.
       //
       // Logging the error object was wrong, and not by a little: every

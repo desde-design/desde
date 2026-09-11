@@ -14,6 +14,7 @@
  * a real network client mid-suite.
  */
 
+import { join } from "node:path"
 import { createGitHubAuthProvider } from "./auth/github-auth-provider"
 import { createBuildQueue, type BuildQueue } from "./build/build-queue"
 import { createInProcessBuildRunner } from "./build/in-process-build-runner"
@@ -62,6 +63,17 @@ export interface CreateGithubRuntimeArgs {
   storage: StorageAdapter
   assets: AssetStore
   onBuildChange: (deploymentId: string) => void
+  /**
+   * Awaited before a superseded deployment's checkout directory is deleted
+   * (`build/build-queue.ts`), so a server prototype still running out of that
+   * directory is stopped first. `server/index.ts` passes
+   * `prototypeProcesses.stop`.
+   *
+   * Optional: a deployment whose checkout is pruned while nothing runs from it
+   * needs no hook at all, which is every test and every static-only
+   * deployment.
+   */
+  beforeCheckoutRemove?: (deploymentId: string) => Promise<void>
   /** Injected fakes. Each one pins its field permanently, including across `reload`. */
   overrides?: Partial<Pick<GithubRuntime, "authProvider" | "appClient" | "buildQueue">>
 }
@@ -166,10 +178,15 @@ export function createGithubRuntime(args: CreateGithubRuntimeArgs): GithubRuntim
             ? createBuildQueue({
                 storage: args.storage,
                 assets: args.assets,
+                checkoutsRoot: join(config.dataDir, "checkouts"),
                 onChange: args.onBuildChange,
+                ...(args.beforeCheckoutRemove
+                  ? { beforeCheckoutRemove: args.beforeCheckoutRemove }
+                  : {}),
                 runner: createInProcessBuildRunner({
                   assets: args.assets,
                   githubApp: appClient,
+                  checkoutsRoot: join(config.dataDir, "checkouts"),
                   ...(config.githubApp.apiBaseUrl !== undefined
                     ? { apiBaseUrl: config.githubApp.apiBaseUrl }
                     : {}),

@@ -14,6 +14,7 @@ import {
 import { Scenario } from "../harness/scenario"
 import {
   fail,
+  NETWORK_ERROR,
   ok,
   PENDING,
   type FetchOverrideResult,
@@ -82,6 +83,8 @@ const REVIEW_PROJECT: ReviewShellProject = {
   shellOrigin: "http://localhost:3100",
   prototypeOrigin: null,
   mode: "fallback",
+  serve: "static",
+  range: null,
 }
 
 /**
@@ -564,6 +567,130 @@ export const REVIEW_SHELL_SURFACE: SurfaceEntry = {
         </Scenario>
       ),
       readyWhen: 'iframe[src^="http://127.0.0.1:45001/"][sandbox~="allow-same-origin"]',
+    },
+    {
+      // A server prototype in path mode: the router can only proxy a
+      // process when the review iframe sits at an origin's root, which path
+      // mode never does. `decidePrototypeEmbed` shows this panel instead of
+      // a frame that would just 409.
+      id: "review/prototype-needs-origin",
+      label: "Prototype embed — a server prototype needs an origin of its own",
+      render: () => (
+        <Scenario routes={{ [COMMENTS_PATH]: COMMENTS_OK }}>
+          <ReviewShell project={{ ...REVIEW_PROJECT, mode: "fallback", serve: "server" }} />
+        </Scenario>
+      ),
+      readyWhen: '[data-testid="prototype-needs-origin"]',
+    },
+    {
+      // Every port in the configured range is already serving a review, so
+      // there is no listener left to open for this one. The panel names the
+      // count from the range the server reported. A STATIC prototype never
+      // reaches this state: it still loads from the shell's own path prefix.
+      id: "review/prototype-ports-exhausted",
+      label: "Prototype embed — every prototype port is in use",
+      render: () => (
+        <Scenario routes={{ [COMMENTS_PATH]: COMMENTS_OK }}>
+          <ReviewShell
+            project={{
+              ...REVIEW_PROJECT,
+              serve: "server",
+              originReason: "ports-exhausted",
+              range: { from: 45000, to: 45019 },
+            }}
+          />
+        </Scenario>
+      ),
+      readyWhen: '[data-testid="prototype-ports-exhausted"]',
+    },
+    {
+      // A server prototype ON its own loopback origin, whose process has
+      // crashed. The manager-only server log and Rebuild button both render
+      // (the default signed-in user, `ME_SIGNED_IN`, is an admin) — the log
+      // comes from its own route, separate from the process status carried
+      // on `project.process`.
+      id: "review/prototype-crashed",
+      label: "Prototype embed — the server crashed",
+      render: () => (
+        <Scenario
+          routes={{
+            [COMMENTS_PATH]: COMMENTS_OK,
+            "/api/v1/deployments/dep-401/server-log": ok({
+              log: "Error: listen EADDRINUSE",
+              status: { state: "crashed", exitCode: 1, restarts: 3, reason: "The server kept exiting." },
+            }),
+          }}
+        >
+          <ReviewShell
+            project={{
+              ...REVIEW_PROJECT,
+              prototypeOrigin: "http://127.0.0.1:45001",
+              mode: "loopback",
+              serve: "server",
+              process: {
+                state: "crashed",
+                exitCode: 1,
+                restarts: 3,
+                reason: "The server kept exiting.",
+                // Past the restart budget, which is what makes the panel the
+                // honest answer here rather than an embedded frame.
+                retryable: false,
+              },
+            }}
+          />
+        </Scenario>
+      ),
+      readyWhen: '[data-testid="prototype-crashed"] pre',
+    },
+    {
+      // The port-unreachable watchdog: a loopback prototype that never
+      // loads (nothing serves the fake port either, same as
+      // `review/loopback-embed`), with its wait shrunk from the real 8s to
+      // 10ms through `watchdogMs` so the fixture does not have to actually
+      // wait 8 seconds.
+      id: "review/port-watchdog",
+      label: "Port-unreachable watchdog — the loopback port never answers",
+      render: () => (
+        <Scenario
+          routes={{
+            [COMMENTS_PATH]: COMMENTS_OK,
+            // The reachability probe (`review-shell.tsx`'s `probe` state)
+            // fetches this exact URL — the loopback origin's root — and this
+            // stub makes it REJECT, the same outcome a real refused
+            // connection produces. That is the honest case this state
+            // demonstrates: on the HOST machine, an unpublished Docker port
+            // is refused almost instantly (not a hang), and — measured —
+            // Chromium still fires the iframe's OWN `onLoad` for that failed
+            // navigation's error page, which is exactly why the banner does
+            // not key off `onLoad`/`prototypeLoaded` any more. The probe's
+            // `fetch` is the only signal that tells "nothing answered" apart
+            // from "the browser already gave up and rendered its own page",
+            // and stubbing it with `NETWORK_ERROR` is what makes this state
+            // an automated test of that wiring, not just a picture: the
+            // registry sweep's `readyWhen` below only passes if
+            // `review-shell.tsx` actually calls this fetch, actually reads
+            // its rejection, and actually renders the banner because of it.
+            //
+            // The bridge asset, not the origin root: the probe names the
+            // path the server reported, because the router answers that one
+            // without ever starting a server prototype's process.
+            "http://127.0.0.1:45001/__desde/bridge-gallery.js": NETWORK_ERROR,
+          }}
+        >
+          <ReviewShell
+            project={{
+              ...REVIEW_PROJECT,
+              prototypeOrigin: "http://127.0.0.1:45001",
+              mode: "loopback",
+              serve: "static",
+              range: { from: 45000, to: 45010 },
+              bridgeAssetPath: "__desde/bridge-gallery.js",
+            }}
+            watchdogMs={10}
+          />
+        </Scenario>
+      ),
+      readyWhen: '[data-testid="port-watchdog"]',
     },
     {
       // Folds two must-have states into one screenshot: the resolved row

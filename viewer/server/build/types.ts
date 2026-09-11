@@ -57,6 +57,10 @@ export interface BuildResult {
    * `updateDeployment` call in that branch.
    */
   warnings?: DeploymentWarning[] | null
+  /** How the published deployment is served. See `Deployment.serve`. */
+  serve: "static" | "server"
+  /** The argv for a `server` result; `null` otherwise. See `Deployment.serverStart`. */
+  serverStart: string[] | null
 }
 
 export interface BuildRunner {

@@ -15,6 +15,7 @@ import { promisify } from "node:util"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AssetStore } from "../../assets/types"
 import type { Deployment, Project, ProjectRepoConfig } from "../../storage/types"
+import { tmpViewerDataDir } from "../../__tests__/test-config"
 import { createInProcessBuildRunner } from "../in-process-build-runner"
 import type { BuildLogChunk } from "../types"
 
@@ -29,6 +30,15 @@ async function tempDir(prefix: string): Promise<string> {
   const d = await mkdtemp(join(tmpdir(), prefix))
   dirs.push(d)
   return d
+}
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await fs.stat(p)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Creates a real git repo whose "build" just copies a prepared tree. */
@@ -111,6 +121,7 @@ function runnerFor(sourceDir: string, assets: AssetStore, over: Record<string, u
     } as never,
     // Keeps the real clone/checkout/publish code path — only the URL differs.
     cloneUrlFor: () => sourceDir,
+    checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
     ...over,
   } as never)
 }
@@ -146,6 +157,29 @@ describe("in-process build runner", () => {
     // The subject line, captured at the same moment as the sha — `makeRepo`
     // commits with `-m "init"`.
     expect(result.commitMessage).toBe("init")
+  })
+
+  /**
+   * A `server`-shaped build (Task 3) skips the asset store entirely and
+   * keeps the checkout on disk instead, under `checkoutsRoot`, so the process
+   * manager (a later task) has a real working tree to run `serverStart` in.
+   */
+  it("keeps the checkout and records serverStart for a server-shaped build", async () => {
+    const src = await makeRepo({ "package.json": "{}" })
+    const checkoutsRoot = await tempDir("viewer-checkouts-")
+    const { result } = await build(src, repoConfig(), collectingAssets(), {
+      checkoutsRoot,
+      adapters: [
+        {
+          id: "fake",
+          inspectBuild: async () => ({ kind: "server", start: ["node", "server.js"], reason: "fake" }),
+        },
+      ],
+    })
+    expect(result.ok).toBe(true)
+    expect(result.serve).toBe("server")
+    expect(result.serverStart).toEqual(["node", "server.js"])
+    expect(await exists(join(checkoutsRoot, DEPLOYMENT.id, "package.json"))).toBe(true)
   })
 
   it("fails a build whose output has no index.html at its root", async () => {
@@ -381,10 +415,11 @@ describe("build queue", () => {
     const queue = createBuildQueue({
       storage,
       assets: collectingAssets(),
+      checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
       runner: {
         async run() {
           await gate
-          return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1 }
+          return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1, serve: "static", serverStart: null }
         },
       },
     })
@@ -418,9 +453,18 @@ describe("build queue", () => {
     const queue = createBuildQueue({
       storage,
       assets: collectingAssets(),
+      checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
       runner: {
         async run() {
-          return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1, warnings }
+          return {
+            ok: true,
+            commitSha: "abc",
+            commitMessage: null,
+            fileCount: 1,
+            warnings,
+            serve: "static",
+            serverStart: null,
+          }
         },
       },
     })
@@ -442,9 +486,10 @@ describe("build queue", () => {
     const queue = createBuildQueue({
       storage,
       assets: collectingAssets(),
+      checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
       runner: {
         async run() {
-          return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1 }
+          return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1, serve: "static", serverStart: null }
         },
       },
     })
@@ -481,10 +526,11 @@ describe("build queue", () => {
     const queue = createBuildQueue({
       storage,
       assets: collectingAssets(),
+      checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
       runner: {
         async run() {
           await gate
-          return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1 }
+          return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1, serve: "static", serverStart: null }
         },
       },
     })
@@ -529,9 +575,10 @@ describe("build queue", () => {
     const queue = createBuildQueue({
       storage,
       assets,
+      checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
       runner: {
         async run() {
-          return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1 }
+          return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1, serve: "static", serverStart: null }
         },
       },
     })
@@ -561,11 +608,20 @@ describe("build queue", () => {
     const queue = createBuildQueue({
       storage,
       assets: collectingAssets(),
+      checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
       runner: {
         run: (req) =>
           new Promise((resolveRun) => {
             req.signal?.addEventListener("abort", () =>
-              resolveRun({ ok: false, commitSha: null, commitMessage: null, fileCount: 0, failureReason: "aborted" }),
+              resolveRun({
+                ok: false,
+                commitSha: null,
+                commitMessage: null,
+                fileCount: 0,
+                failureReason: "aborted",
+                serve: "static",
+                serverStart: null,
+              }),
             )
           }),
       },
@@ -594,9 +650,17 @@ describe("build queue", () => {
     const queue = createBuildQueue({
       storage,
       assets: collectingAssets(),
+      checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
       runner: {
         async run() {
-          return { ok: true, commitSha: "0123456789abcdef0123456789abcdef01234567", commitMessage: null, fileCount: 1 }
+          return {
+            ok: true,
+            commitSha: "0123456789abcdef0123456789abcdef01234567",
+            commitMessage: null,
+            fileCount: 1,
+            serve: "static",
+            serverStart: null,
+          }
         },
       },
     })
@@ -619,10 +683,11 @@ describe("build queue", () => {
     const queue = createBuildQueue({
       storage,
       assets: collectingAssets(),
+      checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
       runner: {
         async run(req) {
           req.onLog({ stream: "stdout", text: "streamed-line\n" })
-          return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1 }
+          return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1, serve: "static", serverStart: null }
         },
       },
     })
@@ -631,5 +696,40 @@ describe("build queue", () => {
     expect((await storage.getDeployment(id))?.buildLog).toContain("streamed-line")
     expect((await storage.getDeployment(id))?.status).toBe("deployed")
     await queue.shutdown()
+  })
+
+  it("records serve and serverStart on the deployment when the runner reports a server build", async () => {
+    const { createBuildQueue } = await import("../build-queue")
+    const { InMemoryStorage } = await import("../../storage/in-memory-storage")
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "q5", name: "Q", repoUrl: null })
+    await storage.setProjectRepoConfig(project.id, repoConfig())
+
+    const queue = createBuildQueue({
+      storage,
+      assets: collectingAssets(),
+      checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
+      runner: {
+        async run() {
+          return {
+            ok: true,
+            commitSha: "abc",
+            commitMessage: null,
+            fileCount: 0,
+            warnings: null,
+            serve: "server",
+            serverStart: ["node", "server.js"],
+          }
+        },
+      },
+    })
+
+    const id = await queue.start(project.id)
+    await new Promise((r) => setTimeout(r, 50))
+    await queue.shutdown()
+
+    const d = await storage.getDeployment(id)
+    expect(d?.serve).toBe("server")
+    expect(d?.serverStart).toEqual(["node", "server.js"])
   })
 })

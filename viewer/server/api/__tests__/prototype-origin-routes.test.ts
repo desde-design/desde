@@ -24,7 +24,7 @@ import { testGithubRuntime } from "../../__tests__/test-github-runtime"
 import { InMemoryStorage } from "../../storage/in-memory-storage"
 import type { AssetStore, StoredAsset } from "../../assets/types"
 import type { ViewerConfig } from "../../config"
-import type { LoopbackListenerRegistry } from "../../serve/loopback-listeners"
+import { LoopbackPortsExhaustedError, type LoopbackListenerRegistry } from "../../serve/loopback-listeners"
 import type { Project } from "../../storage/types"
 
 const SHELL_ORIGIN_HEADER = "X-Viewer-Shell-Origin"
@@ -62,18 +62,29 @@ const baseConfig: ViewerConfig = {
   trustProxy: false,
   loopbackListeners: "auto",
   loopbackAvailable: true,
+  loopbackPortRange: null,
 }
 
 /** A laptop: the shell is reached on a loopback name, no serve domain. */
 const loopbackConfig = baseConfig
 
 /**
- * A container reached through a published port (`docker run -p
- * 3100:3100`), or any deployment where `VIEWER_LOOPBACK_LISTENERS=off` /
- * `auto` detected a container: same publicUrl as `loopbackConfig`, but
- * `loopbackAvailable: false` — the Docker/remote follow-up this task adds.
+ * A deployment with `VIEWER_LOOPBACK_LISTENERS=off`: same publicUrl as
+ * `loopbackConfig`, but `loopbackAvailable: false` — the Docker/remote
+ * follow-up this task adds.
+ *
+ * `auto` inside a container is NOT this case any more (task 4,
+ * VIEWER_LOOPBACK_PORT_RANGE): a container now gets a default port range, so
+ * `loopbackAvailable` is `true` there, not `false`. Only the explicit `off`
+ * mode still forces it false, which is why `loopbackListeners` is set here
+ * too, not just `loopbackAvailable` — the two must describe one real
+ * configuration, not just happen to produce the same boolean.
  */
-const containerConfig: ViewerConfig = { ...baseConfig, loopbackAvailable: false }
+const containerConfig: ViewerConfig = {
+  ...baseConfig,
+  loopbackListeners: "off",
+  loopbackAvailable: false,
+}
 
 /** A deployed instance with wildcard DNS. */
 const subdomainConfig: ViewerConfig = {
@@ -282,7 +293,62 @@ describe("GET /projects/:id/prototype-origin", () => {
         origin: null,
         capabilityRequired: false,
         reason: "no-deployment",
+        serve: "static",
+        range: null,
+        // Stated on both loopback shapes, so the field describes the MODE
+        // rather than this one answer. Nothing probes it here: there is no
+        // origin yet to probe.
+        bridgeAssetPath: "__desde/bridge-test-bridge.js",
       })
+    })
+
+    it("carries serve: \"static\" and no process field for a static deployment", async () => {
+      const project = await seedProject(ctx.storage)
+
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(200)
+
+      expect(res.body.serve).toBe("static")
+      expect(res.body.process).toBeUndefined()
+    })
+
+    it("carries serve: \"server\" and the process status for a server deployment", async () => {
+      const project = await seedProject(ctx.storage)
+      await ctx.storage.updateDeployment(project.activeDeploymentId as string, {
+        serve: "server",
+        serverStart: ["node", "server.js"],
+      })
+
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(200)
+
+      expect(res.body.serve).toBe("server")
+      // The fake process manager `test-app.ts` installs by default
+      // (`nullPrototypeProcesses`) never started anything for this id, so
+      // its `status` answers "stopped" — proving the field is really wired
+      // to `deps.prototypeProcesses.status`, not a hardcoded value.
+      expect(res.body.process).toEqual({ state: "stopped" })
+    })
+
+    it("carries the configured loopback port range", async () => {
+      const withRange = setup({
+        config: { ...loopbackConfig, loopbackPortRange: { from: 4100, to: 4110 } },
+      })
+      const project = await seedProject(withRange.storage)
+
+      const res = await request(withRange.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(200)
+
+      expect(res.body.range).toEqual({ from: 4100, to: 4110 })
     })
 
     it("opens no listener for a project with no active deployment", async () => {
@@ -485,6 +551,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         mode: "subdomain",
         origin: "https://acme.desde.test",
         capabilityRequired: true,
+        serve: "static",
       })
     })
 
@@ -501,7 +568,25 @@ describe("GET /projects/:id/prototype-origin", () => {
         mode: "subdomain",
         origin: "https://acme.desde.test",
         capabilityRequired: false,
+        serve: "static",
       })
+    })
+
+    it("carries serve: \"server\" and the process status too", async () => {
+      const ctx = setup({ config: subdomainConfig })
+      const project = await seedProject(ctx.storage, { access: "all-members" })
+      await ctx.storage.updateDeployment(project.activeDeploymentId as string, {
+        serve: "server",
+        serverStart: ["node", "server.js"],
+      })
+
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .expect(200)
+
+      expect(res.body.serve).toBe("server")
+      expect(res.body.process).toEqual({ state: "stopped" })
     })
   })
 
@@ -519,6 +604,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         mode: "prototype-origin",
         origin: "https://proto.example.net",
         capabilityRequired: true,
+        serve: "static",
       })
     })
 
@@ -535,7 +621,31 @@ describe("GET /projects/:id/prototype-origin", () => {
         mode: "prototype-origin",
         origin: "https://proto.example.net",
         capabilityRequired: false,
+        serve: "static",
       })
+    })
+
+    // The router 409s a request for the shared origin's own prototype path
+    // when the pinned deployment is `serve: "server"` — this mode cannot
+    // proxy one. The review page still needs to KNOW that, to show a
+    // "this prototype needs an origin of its own" panel instead of a blank
+    // frame, which is why this field is not skipped here the way the rest
+    // of the response is unaffected by what this mode can serve.
+    it("carries serve: \"server\" too, even though this mode cannot proxy one", async () => {
+      const ctx = setup({ config: prototypeOriginConfig })
+      const project = await seedProject(ctx.storage, { access: "all-members" })
+      await ctx.storage.updateDeployment(project.activeDeploymentId as string, {
+        serve: "server",
+        serverStart: ["node", "server.js"],
+      })
+
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .expect(200)
+
+      expect(res.body.serve).toBe("server")
+      expect(res.body.process).toEqual({ state: "stopped" })
     })
 
     it("opens no listener — the shared origin is not a loopback listener", async () => {
@@ -565,7 +675,39 @@ describe("GET /projects/:id/prototype-origin", () => {
         .set(auth)
         .expect(200)
 
-      expect(res.body).toEqual({ mode: "fallback", origin: null, capabilityRequired: true })
+      expect(res.body).toEqual({
+        mode: "fallback",
+        origin: null,
+        capabilityRequired: true,
+        serve: "static",
+      })
+    })
+
+    // The whole reason this task loads the deployment for a mode that used
+    // to answer without one: fallback mode has no isolated origin to proxy a
+    // server deployment from, but the review page still needs to know
+    // `serve: "server"` to show its needs-origin panel instead of a blank
+    // frame.
+    it("reports serve: \"server\" for a server deployment even with no isolated origin to offer", async () => {
+      const ctx = setup({ config: fallbackConfig })
+      const project = await seedProject(ctx.storage)
+      await ctx.storage.updateDeployment(project.activeDeploymentId as string, {
+        serve: "server",
+        serverStart: ["node", "server.js"],
+      })
+
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .expect(200)
+
+      expect(res.body).toEqual({
+        mode: "fallback",
+        origin: null,
+        capabilityRequired: true,
+        serve: "server",
+        process: { state: "stopped" },
+      })
     })
 
     it("opens no listener even when the header names a loopback shell", async () => {
@@ -611,7 +753,12 @@ describe("GET /projects/:id/prototype-origin", () => {
         .set(SHELL_ORIGIN_HEADER, "https://localhost:3100")
         .expect(200)
 
-      expect(res.body).toEqual({ mode: "fallback", origin: null, capabilityRequired: true })
+      expect(res.body).toEqual({
+        mode: "fallback",
+        origin: null,
+        capabilityRequired: true,
+        serve: "static",
+      })
     })
   })
 
@@ -641,7 +788,12 @@ describe("GET /projects/:id/prototype-origin", () => {
         .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
         .expect(200)
 
-      expect(res.body).toEqual({ mode: "fallback", origin: null, capabilityRequired: true })
+      expect(res.body).toEqual({
+        mode: "fallback",
+        origin: null,
+        capabilityRequired: true,
+        serve: "static",
+      })
     })
 
     it("downgrades even when the request Host itself is the loopback shell (no header)", async () => {
@@ -654,7 +806,12 @@ describe("GET /projects/:id/prototype-origin", () => {
         .set("Host", "localhost:3100")
         .expect(200)
 
-      expect(res.body).toEqual({ mode: "fallback", origin: null, capabilityRequired: true })
+      expect(res.body).toEqual({
+        mode: "fallback",
+        origin: null,
+        capabilityRequired: true,
+        serve: "static",
+      })
     })
 
     it("never calls registry.ensure — asserted directly, not just inferred from the status code", async () => {
@@ -694,6 +851,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         mode: "subdomain",
         origin: "https://acme.desde.test",
         capabilityRequired: true,
+        serve: "static",
       })
     })
   })
@@ -741,6 +899,44 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(logged).not.toContain(project.id)
       // What DOES reach it: enough to tell one failure class from another.
       expect(logged).toContain("Error")
+    })
+
+    /**
+     * The body carries `serve` and `range` as well as the reason, and the
+     * page acts on both: a STATIC prototype still loads from the shell's own
+     * path prefix when no listener can be opened, so only a server one gets
+     * the panel, and the panel names the count from the range.
+     */
+    it("answers 503 with reason ports-exhausted, the serve mode and the range", async () => {
+      const thrown = new LoopbackPortsExhaustedError({ from: 3101, to: 3120 })
+      const exhausted: LoopbackListenerRegistry = {
+        ensure: () => Promise.reject(thrown),
+        touch: () => {},
+        reapIdle: () => Promise.resolve(0),
+        closeAll: () => Promise.resolve(),
+        startReaper: () => () => {},
+        isPrototypeHost: () => false,
+      }
+      const ctx = setup({
+        prototypeListeners: exhausted,
+        config: { ...loopbackConfig, loopbackPortRange: { from: 3101, to: 3120 } },
+      })
+      const project = await seedProject(ctx.storage)
+      await ctx.storage.updateDeployment(project.activeDeploymentId as string, {
+        serve: "server",
+        serverStart: ["node", "server.js"],
+      })
+
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(503)
+
+      expect(res.body.reason).toBe("ports-exhausted")
+      expect(res.body.error).toBe(thrown.message)
+      expect(res.body.serve).toBe("server")
+      expect(res.body.range).toEqual({ from: 3101, to: 3120 })
     })
   })
 })

@@ -30,6 +30,7 @@ const baseConfig: ViewerConfig = {
   trustProxy: false,
   loopbackListeners: "auto",
   loopbackAvailable: true,
+  loopbackPortRange: null,
 }
 
 function req(cookie?: string) {

@@ -17,6 +17,7 @@ import type { StorageAdapter } from "../storage/types"
 import type { AssetStore } from "../assets/types"
 import { MAX_BUILD_LOG_BYTES } from "../storage/log-append"
 import { withProjectLock } from "../project-locks"
+import { pruneSupersededCheckouts } from "./checkouts"
 import { pruneSupersededDeploymentAssets } from "./publish-output"
 import type { BuildRunner } from "./types"
 
@@ -58,6 +59,14 @@ export interface BuildQueueDeps {
   storage: StorageAdapter
   assets: AssetStore
   runner: BuildRunner
+  /** Where a `server`-shaped build's checkout is kept. `<dataDir>/checkouts`. */
+  checkoutsRoot: string
+  /**
+   * Called before a superseded checkout is removed, so a process manager can
+   * stop whatever is running out of it first. Wired starting Task 8; safe to
+   * leave unset until then — `pruneSupersededCheckouts` treats it as a no-op.
+   */
+  beforeCheckoutRemove?: (deploymentId: string) => Promise<void>
   onChange?: (deploymentId: string) => void
 }
 
@@ -177,6 +186,8 @@ export function createBuildQueue(deps: BuildQueueDeps): BuildQueue {
               // record" rule the upload lane follows — see
               // `Deployment.warnings`'s doc comment.
               warnings: result.warnings ?? null,
+              serve: result.serve,
+              serverStart: result.serverStart,
             })
             await deps.storage.updateProject(projectId, { activeDeploymentId: deployment.id })
             // S5: the build lane leaked identically to the upload lane —
@@ -184,6 +195,13 @@ export function createBuildQueue(deps: BuildQueueDeps): BuildQueue {
             // assets forever. Same asset-only, best-effort sweep as the
             // upload route.
             await pruneSupersededDeploymentAssets(deps.storage, deps.assets, projectId, deployment.id)
+            await pruneSupersededCheckouts(
+              deps.storage,
+              deps.checkoutsRoot,
+              projectId,
+              deployment.id,
+              deps.beforeCheckoutRemove,
+            )
             deps.onChange?.(deployment.id)
           } else {
             await finish(deployment.id, "failed", "")

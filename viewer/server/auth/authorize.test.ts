@@ -59,6 +59,7 @@ const baseConfig: ViewerConfig = {
   trustProxy: false,
   loopbackListeners: "auto",
   loopbackAvailable: true,
+  loopbackPortRange: null,
 }
 
 function makeProject(overrides: Partial<Project> = {}): Project {
