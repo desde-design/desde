@@ -7,10 +7,20 @@ import { inspectBuild, ADAPTERS } from "./index"
 
 /**
  * Detection reads what the build WROTE, never the config: `out/` means a
- * static export happened, `.next/BUILD_ID` means a server build happened.
+ * static export happened, `BUILD_ID` (+ `required-server-files.json`)
+ * together mean a server build happened.
+ *
+ * Codex round 4, Fix 4: `buildId` no longer always means `.next` — pass
+ * `distDir` to write it somewhere else, the way a checkout with `distDir:
+ * "build"` in `next.config` would.
  */
 const roots: string[] = []
-async function checkout(opts: { next?: boolean; out?: boolean; buildId?: boolean }): Promise<string> {
+async function checkout(opts: {
+  next?: boolean
+  out?: boolean
+  buildId?: boolean
+  distDir?: string
+}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "fw-next-"))
   roots.push(root)
   await writeFile(
@@ -18,9 +28,11 @@ async function checkout(opts: { next?: boolean; out?: boolean; buildId?: boolean
     JSON.stringify({ name: "x", dependencies: opts.next === false ? {} : { next: "^16.0.0" } }),
   )
   if (opts.out) await mkdir(join(root, "out"), { recursive: true })
+  const distDir = opts.distDir ?? ".next"
   if (opts.buildId) {
-    await mkdir(join(root, ".next"), { recursive: true })
-    await writeFile(join(root, ".next", "BUILD_ID"), "abc123")
+    await mkdir(join(root, distDir), { recursive: true })
+    await writeFile(join(root, distDir, "BUILD_ID"), "abc123")
+    await writeFile(join(root, distDir, "required-server-files.json"), "{}")
   }
   return root
 }
@@ -52,6 +64,29 @@ describe("Next.js adapter", () => {
   })
   it("answers null when the build wrote neither", async () => {
     expect(await NEXT_ADAPTER.inspectBuild(await checkout({}))).toBeNull()
+  })
+
+  /**
+   * Codex round 4, Fix 4. `BUILD_ID` used to be hard-coded under `.next`, so
+   * a checkout with a custom `distDir` in `next.config` (`distDir: "build"`)
+   * fell through to static publishing and failed to detect a server build
+   * at all — see `findNextDistDir` (`fs-probe.ts`) for the scan this now
+   * runs instead.
+   */
+  it("detects a server build under a custom depth-1 distDir (distDir: \"build\")", async () => {
+    expect(await NEXT_ADAPTER.inspectBuild(await checkout({ buildId: true, distDir: "build" }))).toEqual({
+      kind: "server",
+      start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
+      reason: "Next.js with server-rendered routes",
+    })
+  })
+
+  it("detects a server build under a custom nested distDir (distDir: \"build/next\")", async () => {
+    expect(await NEXT_ADAPTER.inspectBuild(await checkout({ buildId: true, distDir: "build/next" }))).toEqual({
+      kind: "server",
+      start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
+      reason: "Next.js with server-rendered routes",
+    })
   })
 })
 
