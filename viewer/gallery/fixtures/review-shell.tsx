@@ -132,6 +132,7 @@ const CRASHED_SERVER_PROJECT: ReviewShellProject = {
     restarts: 3,
     reason: "The server kept exiting.",
     retryable: false,
+    generation: 1,
   },
 }
 

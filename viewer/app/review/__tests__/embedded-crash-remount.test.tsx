@@ -65,12 +65,23 @@ const RUNNING_GENERATION_2: ProcessStatus = {
 /** The same child as `RUNNING_GENERATION_2`, still coming up. */
 const STARTING_GENERATION_2: ProcessStatus = { state: "starting", generation: 2 }
 
+/** Generation 1 died and the manager would try again: the page keeps the frame, keyed on the start to come. */
+const RETRYABLE_CRASH_OF_1: ProcessStatus = {
+  state: "crashed",
+  exitCode: 143,
+  restarts: 1,
+  reason: "The server exited.",
+  retryable: true,
+  generation: 1,
+}
+
 const PERMANENT_CRASH: ProcessStatus = {
   state: "crashed",
   exitCode: 1,
   restarts: 3,
   reason: "The server kept exiting.",
   retryable: false,
+  generation: 1,
 }
 
 const PROJECT: ReviewShellProject = {
@@ -194,6 +205,37 @@ describe("review shell — following the process-state stream", () => {
 
     pushOrigin(RUNNING_GENERATION_2)
     expect(frame(), "the frame remounted for the child it was already waiting on").toBe(starting)
+  })
+
+  /**
+   * A retryable crash is one restart, so it is one remount: the crashed body
+   * keys the frame on the generation the restart will have, and the
+   * `starting` and `running` bodies that follow carry that same generation.
+   * Keying the crash on a constant remounted twice, and the first of those
+   * frames' request was still waiting on the cold start when the second
+   * threw it away (live run, 2026-09-11).
+   */
+  it("remounts the frame exactly once across a retryable crash and the restart that follows", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+    const before = frame()
+    expect(before).not.toBeNull()
+
+    pushOrigin(RETRYABLE_CRASH_OF_1)
+    const afterCrash = frame()
+    expect(afterCrash, "a retryable crash must keep a frame up, since its request is the restart").not.toBeNull()
+    expect(afterCrash).not.toBe(before)
+
+    pushOrigin(STARTING_GENERATION_2)
+    expect(frame(), "the frame remounted again when the restart began").toBe(afterCrash)
+
+    pushOrigin(RUNNING_GENERATION_2)
+    expect(frame(), "the frame remounted again when the restart finished").toBe(afterCrash)
+    expect(refresh).not.toHaveBeenCalled()
   })
 
   it("shows the crashed panel for a crashed body, without refreshing the page", () => {

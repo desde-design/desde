@@ -1223,6 +1223,7 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
       restarts: 4,
       reason: "The server kept exiting. See the server log.",
       retryable: false,
+      generation: 1,
     }
     const agedOut: ProcessStatus = { ...spent, reason: "The server exited.", retryable: true }
     fake.setStatus(deploymentId, spent)
@@ -1269,6 +1270,7 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
       restarts: 1,
       reason: "The server exited.",
       retryable: true,
+      generation: 1,
     }
     let secondDeployment = ""
 

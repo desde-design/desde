@@ -75,7 +75,7 @@ describe("useLivePrototypeOrigin", () => {
     act(() => {
       source?.dispatch(
         "origin",
-        loopbackBody({ state: "crashed", exitCode: 1, restarts: 1, reason: "It exited.", retryable: true }),
+        loopbackBody({ state: "crashed", exitCode: 1, restarts: 1, reason: "It exited.", retryable: true, generation: 1 }),
       )
     })
     expect(result.current.process?.state).toBe("crashed")
@@ -134,7 +134,7 @@ describe("useLivePrototypeOrigin", () => {
     act(() => {
       first?.dispatch(
         "origin",
-        loopbackBody({ state: "crashed", exitCode: 1, restarts: 4, reason: "It exited.", retryable: false }),
+        loopbackBody({ state: "crashed", exitCode: 1, restarts: 4, reason: "It exited.", retryable: false, generation: 1 }),
       )
     })
     expect(result.current.process?.state).toBe("crashed")

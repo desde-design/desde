@@ -91,6 +91,13 @@ export type ProcessStatus =
        * is gone, the id is malformed) stay `false` regardless.
        */
       retryable: boolean
+      /**
+       * The generation of the child that crashed. The review page keys its
+       * frame on `generation + 1` for a retryable crash, so the remount that
+       * restarts the child and the `starting`/`running` that follow share
+       * one key: one restart, one remount.
+       */
+      generation: number
     }
 
 export class PrototypeProcessError extends Error {
@@ -438,6 +445,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
           // returns. A permanent failure always keeps its own reason.
           reason: !record.state.permanent && !canRetry ? BUDGET_REFUSAL : record.state.reason,
           retryable: canRetry,
+          generation: record.generation,
         }
       }
       case "retired":
@@ -447,6 +455,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
           restarts: record.attempts.length,
           reason: RETIRED_REFUSAL,
           retryable: false,
+          generation: record.generation,
         }
     }
   }

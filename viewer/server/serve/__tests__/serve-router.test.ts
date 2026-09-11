@@ -2132,7 +2132,7 @@ describe("createServeRouter", () => {
           ensure: () =>
             Promise.reject(
               new PrototypeProcessError(
-                { state: "crashed", exitCode: 1, restarts: 3, reason: "The server kept exiting.", retryable: false },
+                { state: "crashed", exitCode: 1, restarts: 3, reason: "The server kept exiting.", retryable: false, generation: 1 },
                 "The server kept exiting.",
               ),
             ),

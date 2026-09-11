@@ -30,7 +30,7 @@ describe("decidePrototypeEmbed", () => {
       decidePrototypeEmbed({
         mode: "loopback",
         serve: "server",
-        process: { state: "crashed", exitCode: 1, restarts: 3, reason: "The server kept exiting.", retryable: false },
+        process: { state: "crashed", exitCode: 1, restarts: 3, reason: "The server kept exiting.", retryable: false, generation: 1 },
       }),
     ).toEqual({ kind: "crashed", reason: "The server kept exiting." })
   })
@@ -45,7 +45,7 @@ describe("decidePrototypeEmbed", () => {
       decidePrototypeEmbed({
         mode: "loopback",
         serve: "server",
-        process: { state: "crashed", exitCode: 1, restarts: 1, reason: "The server exited.", retryable: true },
+        process: { state: "crashed", exitCode: 1, restarts: 1, reason: "The server exited.", retryable: true, generation: 1 },
       }),
     ).toEqual({ kind: "embed" })
   })

@@ -1,3 +1,7 @@
+// A type-only import is erased at compile time, so the "no imports" rule
+// below (no runtime dependency on the server) still holds.
+import type { ProcessStatus } from "./prototype-processes"
+
 /**
  * Which origin a prototype and the shell reviewing it are on right now,
  * plus boot-time refusals for a config that would put them on the same
@@ -268,18 +272,12 @@ export type PrototypeServeMode = "static" | "server"
  * Duplicated rather than imported for the same reason as `PrototypeServeMode`
  * above — this module must never pull in `node:child_process`.
  */
-export type PrototypeProcessStatus =
-  | { state: "stopped" }
-  | { state: "starting" }
-  | { state: "running"; port: number; since: string }
-  | {
-      state: "crashed"
-      exitCode: number | null
-      restarts: number
-      reason: string
-      /** Whether the next request would start it again. See `ProcessStatus`. */
-      retryable: boolean
-    }
+/**
+ * The manager's own status type, re-exported under the name this module's
+ * callers use. It was a hand copy that had already drifted twice (no
+ * `generation` on `running`, then none on `starting`); one definition now.
+ */
+export type PrototypeProcessStatus = ProcessStatus
 
 /**
  * The body of `GET /api/v1/projects/:id/prototype-origin` — where the shell

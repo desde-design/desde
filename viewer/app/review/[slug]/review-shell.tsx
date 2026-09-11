@@ -272,11 +272,15 @@ export function ReviewShell({
    * running process with no generation on it: without it the key would be
    * `undefined`, which React silently replaces with the child's index.
    */
+  // A retryable crash keys the frame on the generation the NEXT start will
+  // have: the remount is what sends the request that restarts the child,
+  // and `starting` then `running` arrive under that same generation, so a
+  // restart remounts the frame exactly once (final review, minor).
   const frameGeneration: BridgeGeneration =
-    liveOrigin.serve === "server" &&
-    (liveProcess?.state === "running" || liveProcess?.state === "starting") &&
-    typeof liveProcess.generation === "number"
-      ? liveProcess.generation
+    liveOrigin.serve === "server" && liveProcess && "generation" in liveProcess
+      ? liveProcess.state === "crashed"
+        ? liveProcess.generation + 1
+        : liveProcess.generation
       : "static"
 
   /**
