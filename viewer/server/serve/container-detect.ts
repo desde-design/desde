@@ -29,33 +29,67 @@ export function isLikelyContainerized(fileExists: (path: string) => boolean = ex
 }
 
 /**
- * Best-effort detection of "this container shares the host's network
- * namespace" — `docker run --network host`. Used by `config.ts`, under
- * `VIEWER_LOOPBACK_BIND=auto`, to decide whether an already-detected
- * container still needs its loopback listeners to bind every interface.
+ * Best-effort detection of "this container is on Docker's ordinary bridged
+ * networking" — the layout `config.ts` needs before it widens a loopback
+ * listener's bind to every interface. Used under `VIEWER_LOOPBACK_BIND=auto`
+ * to decide whether an already-detected container still needs that wide
+ * bind.
+ *
+ * ## Why this asks a POSITIVE question, not a negative one
+ *
+ * Codex round 6 asked the opposite question — `isLikelyHostNetworking`, true
+ * only when `/proc/net/dev` listed one of Docker's own host-side names
+ * (`docker0`, `br-*`, `veth*`). Everything that did not match read as "not
+ * host networking", which under `auto` meant "widen the bind" — a default
+ * that trusted an UNRECOGNISED listing the same as a genuinely bridged one.
+ * `podman run --network host` breaks that: Podman's own interfaces are named
+ * `podman0`, `cni-podman0`, or the host's physical NICs (`enp0s3`, `wlan0`)
+ * — none of Docker's three names — so the round-6 check called it "not host
+ * networking" and widened the bind on a namespace that was never bridged at
+ * all, facing the predictable container port range at the LAN with no `-p`
+ * boundary in the way.
+ *
+ * This function asks the other direction instead: true only on POSITIVE
+ * evidence of Docker's bridged shape, so an unrecognised runtime reads as
+ * false — the safe direction, since `auto` then leaves the bind on the
+ * container's own loopback rather than widening it on a guess. A container
+ * whose layout this function does not recognise still gets a real answer:
+ * `VIEWER_LOOPBACK_BIND=all` widens it by explicit operator choice instead.
+ *
+ * ## What counts as bridged
  *
  * A container's `/proc/net/dev` lists every interface visible INSIDE its own
- * network namespace. With Docker's default bridged networking that is only
- * the container's own loopback (`lo`) and its one veth-backed interface
- * (usually named `eth0`) — the bridge itself (`docker0`) and the other side
- * of the veth pair (`br-...`, or a bare `veth...` name) live on the DOCKER
- * HOST's namespace, not the container's. So seeing one of those three names
- * from inside means there is no separate namespace at all: the container is
- * sharing the host's, which is exactly what `--network host` does.
+ * network namespace. True only when that listing is `lo` plus at least one
+ * OTHER interface, every one of those other interfaces matches `^eth\d+$`
+ * (Docker's own veth-backed naming), and none of them is one of the known
+ * HOST-side names (`docker0`, `br-*`, `veth*`, `podman*`, `cni*`, `virbr*`) —
+ * the second check is belt-and-braces over the first, since none of those
+ * names matches `^eth\d+$` to begin with, but stating it separately is what
+ * keeps a future relaxation of the `eth` pattern from silently admitting one
+ * of them. A multi-network Compose setup (`eth0` AND `eth1`, both
+ * veth-backed) reads as bridged too — correctly: that container has no
+ * single external interface a wide bind would even need to distinguish, so
+ * treating it the same as the one-interface case is right, not a gap.
+ *
+ * The one case this function cannot tell apart from "unrecognised": a
+ * multi-network Compose container that ALSO happens to be `eth0` and `eth1`
+ * with nothing else, which is exactly the bridged shape — there is nothing
+ * to disambiguate here, and there does not need to be; either way the
+ * container is bridged, and `VIEWER_LOOPBACK_BIND=all` remains the explicit
+ * escape hatch for any layout an operator still needs to force.
  *
  * `readNetDev` is injectable so this is unit-testable without touching the
  * real filesystem; it defaults to reading `/proc/net/dev` with `readFileSync`.
- * Any read error (the file does not exist, e.g. not Linux) reads as false —
- * the safe direction, since a container that was already detected keeps
- * widening its bind either way, and this function only ever NARROWS that.
+ * Any read error (the file does not exist, e.g. not Linux) reads as false,
+ * for the same "unrecognised widens nothing" reason as an unmatched listing.
  *
- * MEASURED (Task 2, `desde-viewer-srv`, bridged): only `lo` and `eth0`.
- * INFERRED, not measured: the host-network listing. This Docker Desktop
- * cannot run `--network host` without changing its settings, so the
- * `docker0`/`br-`/`veth` markers above are read off Docker's own networking
- * documentation, not off a live container. See the codex-r6 report.
+ * MEASURED (Task 2, `desde-viewer-srv`, bridged): only `lo` and `eth0`. Every
+ * other listing above — the podman names, a physical NIC, a multi-`eth`
+ * Compose setup — is INFERRED from Docker's and Podman's own networking
+ * documentation, not measured against a live container. See the codex-r6 and
+ * codex-r10 reports.
  */
-export function isLikelyHostNetworking(
+export function isLikelyBridgedNamespace(
   readNetDev: (path: string) => string = (path) => readFileSync(path, "utf8"),
 ): boolean {
   let contents: string
@@ -64,5 +98,9 @@ export function isLikelyHostNetworking(
   } catch {
     return false
   }
-  return /^\s*(docker0|br-[^:\s]*|veth[^:\s]*):/m.test(contents)
+  const interfaceNames = [...contents.matchAll(/^\s*([^:\s]+):/gm)].map((match) => match[1])
+  const nonLoopback = interfaceNames.filter((name) => name !== "lo")
+  if (nonLoopback.length === 0) return false
+  const hostSideName = /^(docker0|br-|veth|podman|cni|virbr)/
+  return nonLoopback.every((name) => /^eth\d+$/.test(name) && !hostSideName.test(name))
 }

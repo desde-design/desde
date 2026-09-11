@@ -154,6 +154,53 @@ describe("originModeBannerLines", () => {
     })
   })
 
+  /**
+   * Codex round 10, Fix 2. `loopbackBindNetworkUnrecognized` is the OTHER
+   * side of the `auto` decision from the wide-bind line above: a container
+   * was detected, but `isLikelyBridgedNamespace()` (`container-detect.ts`)
+   * could not recognise the layout (Podman, a bare physical NIC, or plain
+   * `--network host`), so the bind stayed on the container's own loopback
+   * instead of widening.
+   */
+  describe("loopback: the network-layout-unrecognised line (VIEWER_LOOPBACK_BIND=auto)", () => {
+    const UNRECOGNIZED_LINE =
+      "[viewer] Prototype ports stay on the container's own loopback because the network layout " +
+      "was not recognised. If the viewer is in Docker with -p published ports, set " +
+      "VIEWER_LOOPBACK_BIND=all."
+
+    it("prints the line when the layout was not recognised", () => {
+      const { lines } = originModeBannerLines({
+        publicUrl: "http://localhost:3100",
+        serveDomain: null,
+        loopbackAvailable: true,
+        loopbackPortRange: { from: 3101, to: 3120 },
+        loopbackBindNetworkUnrecognized: true,
+      })
+      expect(lines).toContain(UNRECOGNIZED_LINE)
+    })
+
+    it("does NOT print the line when the layout was recognised as bridged (loopbackBindAllInterfaces: true)", () => {
+      const { lines } = originModeBannerLines({
+        publicUrl: "http://localhost:3100",
+        serveDomain: null,
+        loopbackAvailable: true,
+        loopbackPortRange: { from: 3101, to: 3120 },
+        loopbackBindAllInterfaces: true,
+        loopbackBindNetworkUnrecognized: false,
+      })
+      expect(lines).not.toContain(UNRECOGNIZED_LINE)
+    })
+
+    it("does NOT print the line on a plain laptop (loopbackBindNetworkUnrecognized unset)", () => {
+      const { lines } = originModeBannerLines({
+        publicUrl: "http://localhost:3100",
+        serveDomain: null,
+        loopbackAvailable: true,
+      })
+      expect(lines).not.toContain(UNRECOGNIZED_LINE)
+    })
+  })
+
   it("subdomain: names the configured serve domain, scheme taken from publicUrl", () => {
     expect(
       originModeBannerLines({
@@ -260,6 +307,13 @@ describe("originModeBannerLines", () => {
         serveDomain: null,
         loopbackAvailable: true,
         prototypeOrigin: "https://proto.example.net",
+      },
+      {
+        publicUrl: "http://localhost:3100",
+        serveDomain: null,
+        loopbackAvailable: true,
+        loopbackPortRange: { from: 3101, to: 3120 },
+        loopbackBindNetworkUnrecognized: true,
       },
     ]) {
       const { lines } = originModeBannerLines(config)

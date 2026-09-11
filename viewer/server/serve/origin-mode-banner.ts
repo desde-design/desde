@@ -43,6 +43,19 @@ const LOOPBACK_DISABLED_LINE =
   "fully load for signed-in members. For real isolation set VIEWER_SERVE_DOMAIN. If the browser " +
   "shares this host (host-network mode) set VIEWER_LOOPBACK_LISTENERS=on."
 
+/**
+ * Codex round 10, Fix 2. Printed in loopback mode, alongside (never instead
+ * of) the listener lines, when a container was detected but
+ * `isLikelyBridgedNamespace()` could not recognise the network layout — the
+ * listener still opened (so this is NOT the downgrade-to-fallback case
+ * `LOOPBACK_DISABLED_LINE` covers), it just stayed on the container's own
+ * loopback instead of widening to every interface. Plain language, no em
+ * dashes, same house style as the line beside it.
+ */
+const NETWORK_LAYOUT_UNRECOGNIZED_LINE =
+  "[viewer] Prototype ports stay on the container's own loopback because the network layout was " +
+  "not recognised. If the viewer is in Docker with -p published ports, set VIEWER_LOOPBACK_BIND=all."
+
 export function originModeBannerLines(
   config: Pick<ViewerConfig, "publicUrl" | "serveDomain" | "loopbackAvailable"> & {
     // Optional here (not on the required `Pick`) so the many existing callers
@@ -61,6 +74,10 @@ export function originModeBannerLines(
     // the pairing named below keeps offering `[::1]`, exactly as it did
     // before this field existed.
     loopbackBindAllInterfaces?: boolean
+    // Optional, same reasoning: absent reads as `false`, so a caller that
+    // never configures it (every existing one) gets no extra line, exactly
+    // as before this field existed (codex round 10, Fix 2).
+    loopbackBindNetworkUnrecognized?: boolean
   },
 ): OriginModeBanner {
   const resolved = resolveOrigins({
@@ -177,6 +194,13 @@ export function originModeBannerLines(
                 `On --network host set VIEWER_LOOPBACK_BIND=loopback.`,
             ]
           : []),
+        // Codex round 10, Fix 2. The OTHER side of the same `auto` decision:
+        // a container was detected, but the network layout was not
+        // positively recognised as bridged, so the bind stayed narrow. An
+        // operator publishing ports with `-p` needs to know why they are
+        // unreachable and what to set instead — mutually exclusive with the
+        // line above, since only one of the two conditions can hold.
+        ...(config.loopbackBindNetworkUnrecognized ? [NETWORK_LAYOUT_UNRECOGNIZED_LINE] : []),
       ],
     }
   }

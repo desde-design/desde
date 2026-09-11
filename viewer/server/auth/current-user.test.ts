@@ -32,6 +32,7 @@ const baseConfig: ViewerConfig = {
   loopbackAvailable: true,
   loopbackPortRange: null,
   loopbackBindAllInterfaces: false,
+  loopbackBindNetworkUnrecognized: false,
 }
 
 function req(cookie?: string) {

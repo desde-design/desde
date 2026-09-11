@@ -46,6 +46,7 @@ const DEFAULT_CONFIG: ViewerConfig = {
   loopbackAvailable: true,
   loopbackPortRange: null,
   loopbackBindAllInterfaces: false,
+  loopbackBindNetworkUnrecognized: false,
 }
 
 let current: ViewerConfig = DEFAULT_CONFIG

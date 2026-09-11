@@ -10,7 +10,7 @@
 
 import { createPrivateKey } from "node:crypto"
 import { loadRuntimeConfig } from "./runtime-config"
-import { isLikelyContainerized, isLikelyHostNetworking } from "./serve/container-detect"
+import { isLikelyBridgedNamespace, isLikelyContainerized } from "./serve/container-detect"
 
 /**
  * Only `selfhost` ships. The type stays a union of one so the profile
@@ -62,9 +62,14 @@ export type ViewerLoopbackListenersMode = "auto" | "on" | "off"
  * - `"all"` — always bind every interface. Use this for a bridged container
  *   whose runtime this heuristic does not recognise.
  * - `"auto"` — bind every interface only when the process is ACTUALLY in a
- *   container (`isLikelyContainerized()`) AND host networking is not
- *   detected (`isLikelyHostNetworking()`, `serve/container-detect.ts`). See
- *   `ViewerConfig.loopbackBindAllInterfaces`, the boolean this resolves to.
+ *   container (`isLikelyContainerized()`) AND a bridged namespace is
+ *   POSITIVELY recognised (`isLikelyBridgedNamespace()`,
+ *   `serve/container-detect.ts`). An unrecognised layout (Podman, a bare
+ *   physical NIC) stays narrow rather than widening on a guess — see that
+ *   function's own doc comment for why round 10 inverted this from a
+ *   negative check. See `ViewerConfig.loopbackBindAllInterfaces`, the
+ *   boolean this resolves to, and `loopbackBindNetworkUnrecognized`, which
+ *   tells the banner WHY it stayed narrow.
  *
  * `"off"` for `VIEWER_LOOPBACK_LISTENERS` always wins over this: no listener
  * opens at all, so there is nothing to bind either way.
@@ -315,12 +320,31 @@ export interface ViewerConfig {
    * `"loopback"` forces this false and `"all"` forces it true (except under
    * `VIEWER_LOOPBACK_LISTENERS=off`, where it stays false because no
    * listener opens). The default, `"auto"`, is the container check above,
-   * narrowed by `!isLikelyHostNetworking()` — a `--network host` container
-   * shares the host's own loopback, so it does not need the wildcard bind
-   * and widening it there would face the ports at the LAN directly. See
-   * `ViewerLoopbackBindMode`.
+   * narrowed by `isLikelyBridgedNamespace()` (codex round 10, Fix 2 — see
+   * that function's own doc comment in `container-detect.ts`): the bind
+   * widens only on POSITIVE evidence of Docker's ordinary bridged layout, so
+   * a `--network host` container (which shares the host's own loopback
+   * already) and a runtime this heuristic does not recognise at all (Podman,
+   * a bare physical NIC) both leave the bind narrow, rather than the pre-round-10
+   * behaviour of widening on anything that merely failed to LOOK like host
+   * networking. See `ViewerLoopbackBindMode`.
    */
   loopbackBindAllInterfaces: boolean
+  /**
+   * True when a container was detected under `VIEWER_LOOPBACK_BIND=auto` but
+   * `isLikelyBridgedNamespace()` could not recognise the network layout —
+   * the reason `loopbackBindAllInterfaces` stayed false even though a
+   * listener did open. Read by `origin-mode-banner.ts` to print the one line
+   * telling an operator why their published ports are not reachable and
+   * that `VIEWER_LOOPBACK_BIND=all` is the way through.
+   *
+   * Deliberately NOT true for `VIEWER_LOOPBACK_BIND=loopback` (an operator's
+   * own explicit choice, most often `--network host`, needs no such line —
+   * they already said what they wanted) or for `VIEWER_LOOPBACK_LISTENERS=off`
+   * (no listener opens, so there is nothing to explain). Only the "auto"
+   * branch's own inconclusive detection sets this.
+   */
+  loopbackBindNetworkUnrecognized: boolean
 }
 
 const PROFILES: ViewerProfile[] = ["selfhost"]
@@ -559,9 +583,9 @@ function defaultLoopbackPortRange(port: number): { from: number; to: number } {
 }
 
 /**
- * `overrides.isLikelyContainerized` and `overrides.isLikelyHostNetworking`
+ * `overrides.isLikelyContainerized` and `overrides.isLikelyBridgedNamespace`
  * exist ONLY for tests: the real defaults are the real
- * `isLikelyContainerized` and `isLikelyHostNetworking`
+ * `isLikelyContainerized` and `isLikelyBridgedNamespace`
  * (`server/serve/container-detect.ts`), which touch the actual filesystem.
  * Injecting a stub here is what lets the "auto" mode's tests assert a
  * deterministic `loopbackAvailable` / `loopbackBindAllInterfaces` without
@@ -572,7 +596,7 @@ function defaultLoopbackPortRange(port: number): { from: number; to: number } {
  */
 export function loadConfig(
   env: Partial<NodeJS.ProcessEnv> = process.env,
-  overrides: { isLikelyContainerized?: () => boolean; isLikelyHostNetworking?: () => boolean } = {},
+  overrides: { isLikelyContainerized?: () => boolean; isLikelyBridgedNamespace?: () => boolean } = {},
 ): ViewerConfig {
   const profile = (env.VIEWER_PROFILE ?? "selfhost") as ViewerProfile
   if (!PROFILES.includes(profile)) {
@@ -653,14 +677,15 @@ export function loadConfig(
         `${LOOPBACK_BIND_MODES.join(", ")}`,
     )
   }
-  // Host networking (`docker run --network host`) only ever matters for a
-  // process that was ACTUALLY detected as a container — a laptop is never
-  // "host networking", it just has no network namespace to share in the
-  // first place. Probed only there, both to keep the common case (no
-  // container) from touching `/proc/net/dev` at all and because that is the
-  // one case `ViewerLoopbackBindMode`'s "auto" doc comment promises.
-  const detectHostNetworking = overrides.isLikelyHostNetworking ?? isLikelyHostNetworking
-  const hostNetworking = actuallyInContainer ? detectHostNetworking() : false
+  // Whether the container's network namespace is positively recognised as
+  // Docker's ordinary bridged layout only ever matters for a process that
+  // was ACTUALLY detected as a container — a laptop is never bridged OR
+  // host-networked, it just has no network namespace to share in the first
+  // place. Probed only there, both to keep the common case (no container)
+  // from touching `/proc/net/dev` at all and because that is the one case
+  // `ViewerLoopbackBindMode`'s "auto" doc comment promises.
+  const detectBridgedNamespace = overrides.isLikelyBridgedNamespace ?? isLikelyBridgedNamespace
+  const bridgedNamespace = actuallyInContainer ? detectBridgedNamespace() : false
 
   // Whether to widen the bind to every interface.
   //
@@ -669,12 +694,14 @@ export function loadConfig(
   // never happens. `"loopback"` and `"all"` are then the operator's own
   // statement, taken as given. `"auto"` is the SAME "actually in a
   // container" question `actuallyInContainer` answers above, narrowed by
-  // `!hostNetworking`: a published range only reaches the host once the
+  // `bridgedNamespace`: a published range only reaches the host once the
   // listener also binds every interface, and that has to hold under BOTH
-  // "auto" and "on" — UNLESS the container shares the host's network
-  // namespace already, in which case its own loopback already IS the host's,
-  // and widening the bind would face the ports at the LAN instead (codex
-  // round 6, Fix 1). See `ViewerConfig.loopbackBindAllInterfaces` for why the
+  // "auto" and "on" — UNLESS the layout was not positively recognised as
+  // Docker's ordinary bridge (codex round 10, Fix 2 — a `--network host`
+  // container shares the host's own loopback already, and an unrecognised
+  // runtime such as Podman gets no default guess either way), in which case
+  // widening the bind would either be unnecessary or a guess this heuristic
+  // cannot back up. See `ViewerConfig.loopbackBindAllInterfaces` for why the
   // container question must not simply be "is a port range configured".
   const loopbackBindAllInterfaces =
     loopbackListeners === "off"
@@ -683,7 +710,17 @@ export function loadConfig(
         ? false
         : loopbackBind === "all"
           ? true
-          : actuallyInContainer && !hostNetworking
+          : actuallyInContainer && bridgedNamespace
+
+  // The reason `loopbackBindAllInterfaces` stayed false under "auto" even
+  // though a listener did open: a container was detected, but
+  // `isLikelyBridgedNamespace()` could not recognise the layout. An
+  // operator's own explicit `"loopback"` needs no explaining — they already
+  // said what they wanted — so this is true for `"auto"` alone.
+  // `origin-mode-banner.ts` reads it to print the one line naming
+  // `VIEWER_LOOPBACK_BIND=all` as the way through.
+  const loopbackBindNetworkUnrecognized =
+    loopbackListeners !== "off" && loopbackBind === "auto" && actuallyInContainer && !bridgedNamespace
 
   const dataDir = env.VIEWER_DATA_DIR ?? ".desde-viewer"
   // Fallback source for `sessionSecret` and, when neither GitHub sign-in nor
@@ -773,6 +810,7 @@ export function loadConfig(
     loopbackAvailable,
     loopbackPortRange,
     loopbackBindAllInterfaces,
+    loopbackBindNetworkUnrecognized,
     /*
       Env first, stored settings as the fallback — `runtime-config.ts`'s rule,
       not a new one. An operator who has set `VIEWER_SMTP_HOST` in their

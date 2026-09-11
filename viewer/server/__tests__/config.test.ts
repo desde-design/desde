@@ -97,6 +97,7 @@ describe("loadConfig", () => {
       loopbackAvailable: false,
       loopbackPortRange: null,
       loopbackBindAllInterfaces: false,
+      loopbackBindNetworkUnrecognized: false,
     })
   })
 
@@ -925,10 +926,10 @@ describe("loadConfig", () => {
     it("is true for a container detected under auto", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir() },
-        // No host networking: pinned explicitly rather than left to the real
-        // `/proc/net/dev` on whatever machine runs this suite (VIEWER_LOOPBACK_BIND
-        // task, codex round 6, Fix 1).
-        { isLikelyContainerized: () => true, isLikelyHostNetworking: () => false },
+        // A recognised bridged layout: pinned explicitly rather than left to
+        // the real `/proc/net/dev` on whatever machine runs this suite
+        // (VIEWER_LOOPBACK_BIND task, codex round 6, Fix 1 / round 10, Fix 2).
+        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
       expect(config.loopbackListeners).toBe("auto")
       expect(config.loopbackBindAllInterfaces).toBe(true)
@@ -954,7 +955,7 @@ describe("loadConfig", () => {
     it("is true for VIEWER_LOOPBACK_LISTENERS=on inside an actually-detected container", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_LISTENERS: "on" },
-        { isLikelyContainerized: () => true, isLikelyHostNetworking: () => false },
+        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
       expect(config.loopbackBindAllInterfaces).toBe(true)
     })
@@ -978,13 +979,18 @@ describe("loadConfig", () => {
   })
 
   /**
-   * `VIEWER_LOOPBACK_BIND` (codex round 6, Fix 1). `docker run --network
+   * `VIEWER_LOOPBACK_BIND` (codex round 6, Fix 1; the `auto` default
+   * strengthened again in codex round 10, Fix 2). `docker run --network
    * host` still makes container detection succeed, but host networking
    * means the container's loopback IS the host's loopback, so `auto`'s
    * container-implies-wildcard-bind rule is wrong there — the fix is an
-   * explicit control, plus a safer `auto` default that probes for host
-   * networking (`isLikelyHostNetworking`, `container-detect.ts`) before
-   * widening the bind.
+   * explicit control, plus a safer `auto` default that widens only on
+   * POSITIVE evidence of Docker's ordinary bridged layout
+   * (`isLikelyBridgedNamespace`, `container-detect.ts`). Round 10 tightened
+   * this further: a round-6 negative check ("not one of Docker's own
+   * host-side names") read an unrecognised runtime — Podman's own bridge
+   * names included — as safe to widen; the positive check reads the same
+   * runtime as "stay narrow" instead.
    */
   describe("VIEWER_LOOPBACK_BIND", () => {
     it("rejects an unknown VIEWER_LOOPBACK_BIND value", () => {
@@ -993,41 +999,50 @@ describe("loadConfig", () => {
       ).toThrow(/Unknown VIEWER_LOOPBACK_BIND/)
     })
 
-    it("auto: a container WITHOUT host networking still binds every interface", () => {
+    it("auto: a container with a recognised bridged layout binds every interface", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "auto" },
-        { isLikelyContainerized: () => true, isLikelyHostNetworking: () => false },
+        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
       expect(config.loopbackBindAllInterfaces).toBe(true)
+      expect(config.loopbackBindNetworkUnrecognized).toBe(false)
     })
 
-    it("auto: a container WITH host networking (--network host) stays on loopback", () => {
+    it("auto: a container whose network layout is not recognised as bridged stays on loopback", () => {
+      // Covers BOTH host networking (--network host) and a runtime this
+      // heuristic simply does not recognise (Podman) — isLikelyBridgedNamespace
+      // returns false for either, and auto treats them the same: narrow.
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "auto" },
-        { isLikelyContainerized: () => true, isLikelyHostNetworking: () => true },
+        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => false },
       )
       expect(config.loopbackBindAllInterfaces).toBe(false)
+      expect(config.loopbackBindNetworkUnrecognized).toBe(true)
     })
 
-    it("auto: never probes host networking outside a container", () => {
+    it("auto: never probes the bridged-namespace check outside a container", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "auto" },
         {
           isLikelyContainerized: () => false,
-          isLikelyHostNetworking: () => {
+          isLikelyBridgedNamespace: () => {
             throw new Error("must not be called when no container was detected")
           },
         },
       )
       expect(config.loopbackBindAllInterfaces).toBe(false)
+      expect(config.loopbackBindNetworkUnrecognized).toBe(false)
     })
 
     it("loopback: stays on loopback even inside a container", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "loopback" },
-        { isLikelyContainerized: () => true, isLikelyHostNetworking: () => false },
+        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
       expect(config.loopbackBindAllInterfaces).toBe(false)
+      // An operator's own explicit "loopback" needs no explaining — they
+      // already said what they wanted, whatever the detector would have said.
+      expect(config.loopbackBindNetworkUnrecognized).toBe(false)
     })
 
     it("all: binds every interface on a plain laptop (not a container)", () => {
@@ -1139,7 +1154,11 @@ describe("loadConfig", () => {
     it("defaults the range (and binds every interface) for VIEWER_LOOPBACK_LISTENERS=on inside an actually-detected container", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_LISTENERS: "on" },
-        { isLikelyContainerized: () => true },
+        // A recognised bridged layout: pinned explicitly (codex round 10, Fix
+        // 2) rather than left to the real `/proc/net/dev` on whatever machine
+        // runs this suite — an unpinned default now reads as "unrecognised"
+        // on a non-Linux runner, the opposite of what this test needs.
+        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
       expect(config.loopbackPortRange).toEqual({ from: 3101, to: 3120 })
       expect(config.loopbackBindAllInterfaces).toBe(true)
@@ -1175,7 +1194,7 @@ describe("loadConfig", () => {
     it("auto: still defaults the range (and binds every interface) inside a container", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_LISTENERS: "auto" },
-        { isLikelyContainerized: () => true },
+        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
       expect(config.loopbackPortRange).toEqual({ from: 3101, to: 3120 })
       expect(config.loopbackBindAllInterfaces).toBe(true)
