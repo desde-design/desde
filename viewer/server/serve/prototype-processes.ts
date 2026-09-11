@@ -11,6 +11,7 @@ import {
   newRecord,
   retryable,
   transition,
+  BUDGET_REFUSAL,
   RETIRED_REFUSAL,
   type Limits,
   type ProcessEvent,
@@ -413,14 +414,20 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
           since: new Date(record.state.since).toISOString(),
           generation: record.state.generation,
         }
-      case "crashed":
+      case "crashed": {
+        const canRetry = retryable(record, now(), limits)
         return {
           state: "crashed",
           exitCode: record.state.exitCode,
           restarts: record.attempts.length,
-          reason: record.state.reason,
-          retryable: retryable(record, now(), limits),
+          // While the budget is spent the reader is told the server kept
+          // exiting, which names the log as the way out; once the window
+          // passes and a retry is worth it, the last crash's own reason
+          // returns. A permanent failure always keeps its own reason.
+          reason: !record.state.permanent && !canRetry ? BUDGET_REFUSAL : record.state.reason,
+          retryable: canRetry,
         }
+      }
       case "retired":
         return {
           state: "crashed",

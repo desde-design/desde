@@ -526,6 +526,8 @@ describe("createPrototypeProcesses", () => {
     await expect(procs.ensure({ id: "d1", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
     const spent = procs.status("d1")
     expect(spent.state === "crashed" && spent.retryable).toBe(false)
+    // The reader is told the server kept exiting while the budget is spent.
+    expect(spent.state === "crashed" && spent.reason).toBe("The server kept exiting. See the server log.")
 
     // The budget is a five-minute window, and `status()` answers "would the
     // next ensure try again?" as of NOW. Once the four crashes are outside
@@ -535,6 +537,8 @@ describe("createPrototypeProcesses", () => {
     now += 6 * 60_000
     const aged = procs.status("d1")
     expect(aged.state === "crashed" && aged.retryable).toBe(true)
+    // And once a retry is worth it, the last crash's own reason returns.
+    expect(aged.state === "crashed" && aged.reason).toBe("The server exited.")
   })
 
   it("refuses to ensure after shutdown, and spawns nothing", async () => {
