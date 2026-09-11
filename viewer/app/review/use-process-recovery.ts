@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect } from "react"
+import { useEffect, useRef } from "react"
 import type { ProcessStatus } from "../../server/serve/prototype-processes"
 import { readPrototypeOrigin } from "./[slug]/prototype-origin-response"
 
@@ -112,6 +112,17 @@ export function useProcessRecovery(options: {
 }): void {
   const { active, projectId, onShouldRefresh, intervalMs = 30_000, mode = "crashed-panel" } = options
 
+  // The latest callback, read at poll time. `useRouterRefresh` hands its
+  // callers a fresh function on every render, and the review shell
+  // re-renders on bridge messages and comment updates; had the callback been
+  // an effect dependency, every one of those renders would have torn the
+  // timer down and started it over, and a shell re-rendering more often
+  // than the poll interval would never have polled at all.
+  const refreshRef = useRef(onShouldRefresh)
+  useEffect(() => {
+    refreshRef.current = onShouldRefresh
+  }, [onShouldRefresh])
+
   useEffect(() => {
     if (!active) return
     let cancelled = false
@@ -135,7 +146,7 @@ export function useProcessRecovery(options: {
           // silently doing nothing.
           const process = await fetchProcess()
           if (cancelled) return
-          if (shouldRefreshAfterPoll(process)) onShouldRefresh()
+          if (shouldRefreshAfterPoll(process)) refreshRef.current()
         } catch {
           // A network hiccup says nothing about whether the process is still
           // stuck. Leave it for the next tick rather than refreshing on a
@@ -168,7 +179,7 @@ export function useProcessRecovery(options: {
         // Unlike the crashed-panel branch above, an unrecognised body must
         // NOT refresh here — see `shouldRefreshWhileEmbedded`'s own doc
         // comment for why.
-        if (shouldRefreshWhileEmbedded(process)) onShouldRefresh()
+        if (shouldRefreshWhileEmbedded(process)) refreshRef.current()
       } catch {
         // Same reasoning as the crashed-panel branch: a network hiccup is
         // not a verdict on the process, so it is left for the next tick.
@@ -187,5 +198,5 @@ export function useProcessRecovery(options: {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [active, projectId, intervalMs, mode, onShouldRefresh])
+  }, [active, projectId, intervalMs, mode])
 }

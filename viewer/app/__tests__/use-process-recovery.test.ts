@@ -162,6 +162,47 @@ describe("useProcessRecovery — embedded mode", () => {
     expect(onShouldRefresh).toHaveBeenCalledTimes(1)
   })
 
+  it("keeps its timer across re-renders that hand it a new callback identity", async () => {
+    // The review shell re-renders on bridge messages and comment updates,
+    // and `useRouterRefresh` returns a fresh function each render. If the
+    // effect restarted on every callback identity, a shell re-rendering
+    // more often than every 5s would never let the first poll fire.
+    vi.useFakeTimers()
+    let call = 0
+    const seen: (() => void)[] = []
+
+    function useHarness() {
+      useFetchOverride(
+        routeTable({
+          "GET /api/v1/projects/p1/prototype-origin": () => {
+            call++
+            return ok(loopbackBody({ state: "crashed", exitCode: 1, restarts: 1, reason: "x", retryable: true }))
+          },
+        }),
+      )
+      const onShouldRefresh = () => {
+        seen.push(onShouldRefresh)
+      }
+      useProcessRecovery({ active: true, projectId: "p1", onShouldRefresh, mode: "embedded" })
+    }
+
+    const { rerender } = renderHook(() => useHarness())
+
+    // Re-render at +4s, +8s: each render passes a new callback.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000)
+    })
+    rerender()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000)
+    })
+    rerender()
+    // The first poll was due at +5s and must have fired despite the re-renders.
+    expect(call).toBe(1)
+    // And it called the LATEST callback, not the one from the first render.
+    expect(seen).toHaveLength(1)
+  })
+
   it("switches to the 30s cadence once running has been observed", async () => {
     vi.useFakeTimers()
     const responses: ProcessStatus[] = [
