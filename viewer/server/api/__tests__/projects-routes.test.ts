@@ -105,6 +105,7 @@ const config: ViewerConfig = {
   trustProxy: false,
   loopbackListeners: "auto",
   loopbackAvailable: true,
+  loopbackPortRange: null,
 }
 
 /**

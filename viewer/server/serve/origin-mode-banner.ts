@@ -51,6 +51,11 @@ export function originModeBannerLines(
     // reads as unset, which is the safe default — the mode is never
     // prototype-origin.
     prototypeOrigin?: string | null
+    // Same reasoning as `prototypeOrigin` above: optional here, not on the
+    // required `Pick`, so existing callers that never configure
+    // `VIEWER_LOOPBACK_PORT_RANGE` need no edit. Absent or null means no
+    // fixed range is configured, so no extra line is printed.
+    loopbackPortRange?: { from: number; to: number } | null
   },
 ): OriginModeBanner {
   const resolved = resolveOrigins({
@@ -125,6 +130,13 @@ export function originModeBannerLines(
           `(shell=${resolved.shellOrigin} prototypes=${scheme}//${prototypeHost}:<ephemeral>)`,
         `[viewer] Loopback prototype listeners are reachable only from a browser on this same host. ` +
           `A containerized or remote deployment should set VIEWER_SERVE_DOMAIN, or a non-loopback VIEWER_PUBLIC_URL.`,
+        ...(config.loopbackPortRange
+          ? [
+              `[viewer] Loopback prototype ports: ${config.loopbackPortRange.from}-${config.loopbackPortRange.to}. ` +
+                `In Docker, publish them: -p ${config.loopbackPortRange.from}-${config.loopbackPortRange.to}:` +
+                `${config.loopbackPortRange.from}-${config.loopbackPortRange.to}`,
+            ]
+          : []),
       ],
     }
   }

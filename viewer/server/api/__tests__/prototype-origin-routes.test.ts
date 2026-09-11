@@ -62,6 +62,7 @@ const baseConfig: ViewerConfig = {
   trustProxy: false,
   loopbackListeners: "auto",
   loopbackAvailable: true,
+  loopbackPortRange: null,
 }
 
 /** A laptop: the shell is reached on a loopback name, no serve domain. */

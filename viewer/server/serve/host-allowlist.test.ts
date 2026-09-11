@@ -486,6 +486,7 @@ describe("mounted in createApp", () => {
     trustProxy: false,
     loopbackListeners: "auto",
     loopbackAvailable: true,
+    loopbackPortRange: null,
   }
 
   /** ONE stable app object for this file — see `__tests__/swappable-app.ts`. */

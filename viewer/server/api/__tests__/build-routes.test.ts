@@ -56,6 +56,7 @@ const authConfig: ViewerConfig = {
   trustProxy: false,
   loopbackListeners: "auto",
   loopbackAvailable: true,
+  loopbackPortRange: null,
 }
 
 const admin = { Authorization: "Bearer admin-secret" }

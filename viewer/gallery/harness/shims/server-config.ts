@@ -44,6 +44,7 @@ const DEFAULT_CONFIG: ViewerConfig = {
   trustProxy: false,
   loopbackListeners: "auto",
   loopbackAvailable: true,
+  loopbackPortRange: null,
 }
 
 let current: ViewerConfig = DEFAULT_CONFIG

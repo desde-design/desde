@@ -20,6 +20,35 @@ describe("originModeBannerLines", () => {
     })
   })
 
+  it("loopback: prints the port range and the Docker publish command when a range is configured (task 4)", () => {
+    expect(
+      originModeBannerLines({
+        publicUrl: "http://localhost:3100",
+        serveDomain: null,
+        loopbackAvailable: true,
+        loopbackPortRange: { from: 3101, to: 3120 },
+      }),
+    ).toEqual({
+      mode: "loopback",
+      lines: [
+        "[viewer] prototypes are served from the other loopback name on an ephemeral port " +
+          "(shell=http://localhost:3100 prototypes=http://127.0.0.1:<ephemeral>)",
+        "[viewer] Loopback prototype listeners are reachable only from a browser on this same host. " +
+          "A containerized or remote deployment should set VIEWER_SERVE_DOMAIN, or a non-loopback VIEWER_PUBLIC_URL.",
+        "[viewer] Loopback prototype ports: 3101-3120. In Docker, publish them: -p 3101-3120:3101-3120",
+      ],
+    })
+  })
+
+  it("loopback: no port-range line when loopbackPortRange is unset", () => {
+    const { lines } = originModeBannerLines({
+      publicUrl: "http://localhost:3100",
+      serveDomain: null,
+      loopbackAvailable: true,
+    })
+    expect(lines.some((line) => line.includes("Loopback prototype ports"))).toBe(false)
+  })
+
   it("loopback: pairs 127.0.0.1 with [::1] (numeric pairing, task 4b)", () => {
     expect(
       originModeBannerLines({
