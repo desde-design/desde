@@ -906,12 +906,25 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
         bridgeSrc: `/${bridgeAssetRelPath(deps.bridgeVersion)}`,
         csp,
         // Only fires when the child answered nothing at all, so the manager's
-        // record of "running" is wrong and the entry should be dropped.
-        // Best effort: a `stop` that rejects must not become an unhandled
-        // rejection (which would take the process down), and the next request
-        // starts the child again either way.
+        // record of "running" is wrong and the entry should be corrected.
+        //
+        // `markUnreachable`, not `stop` (codex round 5, Fix 2). `stop` would
+        // overwrite the entry with a plain `stopped` status even when the
+        // child's own exit handler had already recorded `crashed` — and the
+        // review page's embedded poll (`shouldRefreshWhileEmbedded`) only
+        // reacts to `crashed`, never to `stopped`. A `stopped` entry told the
+        // reader nothing was wrong while the 502 page sitting in their iframe
+        // made no further request on its own, so the process stayed down
+        // until someone reloaded by hand. `markUnreachable` records a
+        // RETRYABLE `crashed` instead, so the next request's `ensure` (the
+        // page's own poll-triggered iframe remount) restarts it under the
+        // normal budget.
+        //
+        // Best effort: a call that rejects must not become an unhandled
+        // rejection (which would take the process down), and the next
+        // request tries `ensure` again either way.
         onUnreachable: () => {
-          deps.prototypeProcesses.stop(deployment.id).catch(() => {})
+          deps.prototypeProcesses.markUnreachable(deployment.id).catch(() => {})
         },
       })
       return

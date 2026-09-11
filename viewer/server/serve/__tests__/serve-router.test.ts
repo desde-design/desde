@@ -121,6 +121,7 @@ function fakeProcesses(overrides: Partial<PrototypeProcesses> = {}): PrototypePr
     stop: () => Promise.resolve(),
     forget: () => Promise.resolve(),
     retire: () => Promise.resolve(),
+    markUnreachable: () => Promise.resolve(),
     status: () => ({ state: "stopped" }),
     serverLog: () => "",
     startReaper: () => () => {},
@@ -1763,37 +1764,37 @@ describe("createServeRouter", () => {
       expect(touched).toEqual([deployment.id])
     })
 
-    it("stops the process when the child gives no answer at all", async () => {
-      const stopped: string[] = []
+    it("marks the process unreachable when the child gives no answer at all", async () => {
+      const markedUnreachable: string[] = []
       const { app, deployment } = await loopbackAppWith({
         prototypeProcesses: fakeProcesses({
           // Nothing listens on port 1, so the proxy's `onUnreachable` fires.
           ensure: () => Promise.resolve({ port: 1 }),
-          stop: (id) => {
-            stopped.push(id)
+          markUnreachable: (id) => {
+            markedUnreachable.push(id)
             return Promise.resolve()
           },
         }),
       })
 
       await request(app).get("/p/srv/").expect(502)
-      expect(stopped).toEqual([deployment.id])
+      expect(markedUnreachable).toEqual([deployment.id])
     })
 
     /**
-     * Stopping is best effort, and a `stop` that rejects must not take the
-     * process down with an unhandled rejection.
+     * Marking unreachable is best effort, and a `markUnreachable` that
+     * rejects must not take the process down with an unhandled rejection.
      *
      * Vitest FAILS a run on an unhandled rejection, so this test passing IS
      * the assertion — there is nothing else to check beyond the response still
      * being the proxy's 502 page. Without the `.catch` on `onUnreachable`'s
      * promise the run reports the rejection and fails.
      */
-    it("survives a stop() that rejects", async () => {
+    it("survives a markUnreachable() that rejects", async () => {
       const { app } = await loopbackAppWith({
         prototypeProcesses: fakeProcesses({
           ensure: () => Promise.resolve({ port: 1 }),
-          stop: () => Promise.reject(new Error("boom")),
+          markUnreachable: () => Promise.reject(new Error("boom")),
         }),
       })
 

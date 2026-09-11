@@ -51,6 +51,7 @@ export function nullPrototypeProcesses(): PrototypeProcesses {
     stop: () => Promise.resolve(),
     forget: () => Promise.resolve(),
     retire: () => Promise.resolve(),
+    markUnreachable: () => Promise.resolve(),
     status: () => ({ state: "stopped" }),
     serverLog: () => "",
     startReaper: () => () => {},

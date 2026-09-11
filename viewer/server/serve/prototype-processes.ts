@@ -104,6 +104,33 @@ export interface PrototypeProcesses {
    * the directory is ever touched.
    */
   retire(deploymentId: string): Promise<void>
+  /**
+   * The proxy's own signal that a `running` entry lied: the child gave no
+   * response at all — the connection could not be made, or failed before any
+   * status line came back (`proxy-to-process.ts`'s `onUnreachable`).
+   *
+   * If the entry is `running`, this stops the child and records a `crashed`
+   * status with `reason: "The server stopped answering."` — a RETRYABLE
+   * crash (an ordinary entry in `restartsAt`, the same as an exit or a
+   * timeout), so the next `ensure` restarts it under the normal budget.
+   *
+   * `stop()` was the wrong call for this (codex round 5, Fix 2): it leaves
+   * the entry `stopped`, and the review page's embedded poll
+   * (`shouldRefreshWhileEmbedded`) only reacts to `crashed` — a `stopped`
+   * entry never told the reader anything was wrong, and the 502 page in the
+   * frame makes no further request on its own, so the process was never
+   * restarted without a manual reload. Recording `crashed` instead is what
+   * gets the reader an iframe remount (`review-shell.tsx`'s `frameEpoch`).
+   *
+   * If the entry is already `crashed` (the exit handler beat the proxy to
+   * it, or a previous `markUnreachable` already ran), this leaves the status
+   * and its reason exactly as they are — the proxy's failure is not new
+   * information once the manager already knows the child is down, and
+   * overwriting a more specific reason with this generic one would be a
+   * regression. If the entry is `starting` or `stopped`, this does nothing:
+   * neither state claims the child is up, so there is nothing to correct.
+   */
+  markUnreachable(deploymentId: string): Promise<void>
   status(deploymentId: string): ProcessStatus
   serverLog(deploymentId: string): string
   startReaper(): () => void
@@ -218,6 +245,22 @@ function reasonOrFallback(status: StoredStatus, fallback: string): string {
  */
 function crashedExitCodeOrNull(status: StoredStatus): number | null {
   return status.state === "crashed" ? status.exitCode : null
+}
+
+/**
+ * Whether a status is `"stopped"`.
+ *
+ * Same reason as `reasonOrFallback`/`crashedExitCodeOrNull` above, and needed
+ * by `markUnreachable`: it narrows `e.status.state` to `"running"` at an
+ * early-return guard, then awaits `stopEntry(e)` — which reassigns
+ * `e.status` during that await, something TypeScript cannot see happening
+ * inside an opaque async call. Without this, the later `e.status.state !==
+ * "stopped"` check is flagged as comparing two literals TypeScript still
+ * believes can never overlap. Taking `status: StoredStatus` as a plain
+ * parameter resets that narrowing to the full declared union.
+ */
+function isStopped(status: StoredStatus): boolean {
+  return status.state === "stopped"
 }
 
 interface Entry {
@@ -669,6 +712,31 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     async stop(id) {
       const e = entries.get(id)
       if (e) await stopEntry(e)
+    },
+    async markUnreachable(id) {
+      const e = entries.get(id)
+      if (!e) return
+      // Only a `running` entry is this call's business — see the interface
+      // doc comment for why `crashed`/`starting`/`stopped` are each a no-op.
+      if (e.status.state !== "running") return
+      await stopEntry(e)
+      // `stopEntry` awaits the old child's exit (up to 5s on a SIGTERM it
+      // ignores), during which a concurrent `ensure()` can have raced in and
+      // started a fresh attempt of its own — `stopEntry` reset the status to
+      // `stopped` synchronously at its own top, which is exactly the moment
+      // a racing `start()` reads as "safe to restart". Only record THIS call's
+      // crash if nothing else has touched the entry since: a status that is
+      // still `stopped` is this stop's own doing, and anything else (a fresh
+      // `starting`/`running`, or another crash) is a newer answer than this
+      // one and must not be clobbered.
+      if (!isStopped(e.status)) return
+      e.restartsAt.push(now())
+      e.status = {
+        state: "crashed",
+        exitCode: null,
+        restarts: e.restartsAt.length,
+        reason: "The server stopped answering.",
+      }
     },
     async forget(id) {
       const e = entries.get(id)

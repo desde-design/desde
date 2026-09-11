@@ -386,6 +386,87 @@ describe("createPrototypeProcesses", () => {
   })
 
   /**
+   * Codex round 5, Fix 2. `serve-router.ts`'s `onUnreachable` used to call
+   * `stop()`, which overwrote the manager's status with `stopped` even when
+   * the child was genuinely down — and the review page's embedded poll
+   * (`shouldRefreshWhileEmbedded`) only reacts to `crashed`, never
+   * `stopped`, so nothing told the reader the process needed restarting.
+   * `markUnreachable` records a RETRYABLE `crashed` instead, so the next
+   * `ensure` restarts it under the normal budget — same as any other exit.
+   */
+  describe("markUnreachable", () => {
+    it("on a running server, stops it and records a retryable crash", async () => {
+      const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+      managers.push(procs)
+      const { port } = await procs.ensure({ id: "d1", serverStart: start() })
+      expect(procs.status("d1").state).toBe("running")
+
+      await procs.markUnreachable("d1")
+
+      const status = procs.status("d1")
+      expect(status.state).toBe("crashed")
+      if (status.state === "crashed") {
+        expect(status.reason).toBe("The server stopped answering.")
+        expect(status.retryable).toBe(true)
+      }
+      await expect(get(port)).rejects.toThrow()
+    })
+
+    it("on an already-crashed entry, leaves the status and its reason alone", async () => {
+      const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+      managers.push(procs)
+      const { port } = await procs.ensure({ id: "d1", serverStart: start() })
+      // Crash it for real first, so there is a specific reason on record —
+      // the exit handler's own, not this call's generic one.
+      await get(port, "/exit")
+      await new Promise((r) => setTimeout(r, 200))
+      const before = procs.status("d1")
+      expect(before.state).toBe("crashed")
+
+      await procs.markUnreachable("d1")
+
+      const after = procs.status("d1")
+      expect(after).toEqual(before)
+    })
+
+    it("does nothing to a starting or stopped entry", async () => {
+      const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1", "d2"]) })
+      managers.push(procs)
+
+      // Never `ensure`d at all: `stopped`.
+      await procs.markUnreachable("d2")
+      expect(procs.status("d2").state).toBe("stopped")
+
+      // Stopped explicitly, then marked unreachable — still `stopped`, not a
+      // manufactured crash for a process that was never claimed to be up.
+      await procs.ensure({ id: "d1", serverStart: start() })
+      await procs.stop("d1")
+      expect(procs.status("d1").state).toBe("stopped")
+      await procs.markUnreachable("d1")
+      expect(procs.status("d1").state).toBe("stopped")
+    })
+
+    it("is a no-op for an id the manager has never seen", async () => {
+      const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot([]) })
+      managers.push(procs)
+      await expect(procs.markUnreachable("never-heard-of-it")).resolves.toBeUndefined()
+      expect(procs.status("never-heard-of-it").state).toBe("stopped")
+    })
+
+    it("a later ensure restarts the server under the normal budget", async () => {
+      const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+      managers.push(procs)
+      await procs.ensure({ id: "d1", serverStart: start() })
+      await procs.markUnreachable("d1")
+      expect(procs.status("d1").state).toBe("crashed")
+
+      const restarted = await procs.ensure({ id: "d1", serverStart: start() })
+      expect(procs.status("d1").state).toBe("running")
+      expect(typeof restarted.port).toBe("number")
+    })
+  })
+
+  /**
    * The cap only ever counted `running` entries, so several `ensure()`s for
    * DIFFERENT stopped deployments, fired without awaiting between them,
    * could all pass the "is there room" check before any of them had
