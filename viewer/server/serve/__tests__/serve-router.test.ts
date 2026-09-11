@@ -1660,8 +1660,11 @@ describe("createServeRouter", () => {
       const port = await child((req, res) => {
         seen = req.url
         res.setHeader("content-type", "text/html")
-        // The child sets a cookie of its own, which must NOT displace ours.
-        res.setHeader("set-cookie", "app_sid=1; Path=/")
+        // Two cookies from the child: one of its own, which must survive, and
+        // one that TAKES OUR NAME, which must not. A prototype that could set
+        // `__Host-dsv_cap` would be choosing the read capability the viewer
+        // reads back on every later request.
+        res.setHeader("set-cookie", ["app_sid=1; Path=/", "__Host-dsv_cap=evil; Path=/; Secure"])
         res.end("<html><body>private srv</body></html>")
       })
       const c = await setup({
@@ -1683,14 +1686,20 @@ describe("createServeRouter", () => {
       // prefix — the same name, and the same attributes, the static HTML
       // branch sets for this config (see the capability-cookie block below).
       // Both branches call one function, so the http spelling is covered there.
-      const ours = cookies.find((v) => v.includes("dsv_cap="))
-      expect(ours).toBeDefined()
+      // Exactly one `dsv_cap` on the response, it is OURS, and it is LAST —
+      // a jar keeps the last value for a name, so anything of ours that
+      // preceded the child's would lose.
+      const capCookies = cookies.filter((v) => v.includes("dsv_cap="))
+      expect(capCookies).toHaveLength(1)
+      const ours = capCookies[0]
       expect(ours?.startsWith(`__Host-dsv_cap=${token}`)).toBe(true)
+      expect(cookies[cookies.length - 1]).toBe(ours)
       expect(ours).toContain("Path=/")
       expect(ours).toContain("HttpOnly")
       expect(ours).toContain("SameSite=Lax")
       expect(ours).toMatch(/Secure/i)
-      // The child's own cookie survives alongside it.
+      // The child's same-named cookie is gone; its other one survives.
+      expect(cookies.some((v) => v.includes("dsv_cap=evil"))).toBe(false)
       expect(cookies.some((v) => v.startsWith("app_sid=1"))).toBe(true)
 
       // The capability is the viewer's channel. The child sees its own root
@@ -1766,6 +1775,27 @@ describe("createServeRouter", () => {
 
       await request(app).get("/p/srv/").expect(502)
       expect(stopped).toEqual([deployment.id])
+    })
+
+    /**
+     * Stopping is best effort, and a `stop` that rejects must not take the
+     * process down with an unhandled rejection.
+     *
+     * Vitest FAILS a run on an unhandled rejection, so this test passing IS
+     * the assertion — there is nothing else to check beyond the response still
+     * being the proxy's 502 page. Without the `.catch` on `onUnreachable`'s
+     * promise the run reports the rejection and fails.
+     */
+    it("survives a stop() that rejects", async () => {
+      const { app } = await loopbackAppWith({
+        prototypeProcesses: fakeProcesses({
+          ensure: () => Promise.resolve({ port: 1 }),
+          stop: () => Promise.reject(new Error("boom")),
+        }),
+      })
+
+      const res = await request(app).get("/p/srv/").expect(502)
+      expect(res.text).toContain("not answering")
     })
 
     it("serves the bridge bundle itself, never proxying it to the child", async () => {

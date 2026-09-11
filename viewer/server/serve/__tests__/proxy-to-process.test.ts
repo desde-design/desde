@@ -171,6 +171,45 @@ describe("proxyToProcess", () => {
     expect(res.headers["set-cookie"]).toEqual(["proto=1; Path=/"])
   })
 
+  /**
+   * The viewer's own cookie must be the one the browser keeps, and a prototype
+   * must not be able to take its name.
+   *
+   * A jar stores one value per cookie name and the LAST `Set-Cookie` wins, so
+   * order is the whole mechanism here: ours goes after everything the child
+   * sent, and a child value sharing our name is dropped rather than merely
+   * out-ordered (leaving it would put an attacker-chosen `dsv_cap` on the
+   * origin for anything that reads the header list rather than the jar).
+   */
+  it("puts the viewer's own Set-Cookie last and drops a child cookie of the same name", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("set-cookie", ["other=1", "__Host-dsv_cap=evil; Path=/; Secure"])
+      res.end("x")
+    })
+    const ours = "__Host-dsv_cap=ours; Path=/; Secure; HttpOnly; SameSite=Lax"
+    const res = await request(appFor(port, { setCookie: ours })).get("/p/acme/")
+    expect(res.headers["set-cookie"]).toEqual(["other=1", ours])
+  })
+
+  it("sets the viewer's cookie even when the child sends none", async () => {
+    const port = await child((_req, res) => res.end("x"))
+    const ours = "dsv_cap=ours; Path=/"
+    const res = await request(appFor(port, { setCookie: ours })).get("/p/acme/")
+    expect(res.headers["set-cookie"]).toEqual([ours])
+  })
+
+  /** The streaming branch takes the merged cookies too, not just the rewrite one. */
+  it("carries the merged cookies on a streamed (non-HTML) response", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("content-type", "application/json")
+      res.setHeader("set-cookie", "app=1")
+      res.end('{"a":1}')
+    })
+    const ours = "dsv_cap=ours; Path=/"
+    const res = await request(appFor(port, { setCookie: ours })).get("/p/acme/data.json")
+    expect(res.headers["set-cookie"]).toEqual(["app=1", ours])
+  })
+
   it("passes a HEAD response through with no injected Content-Length", async () => {
     const port = await child((req, res) => {
       res.setHeader("content-type", "text/html; charset=utf-8")

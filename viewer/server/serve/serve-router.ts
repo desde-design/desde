@@ -643,10 +643,23 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
      * page and then 404 every asset, because each subsequent request would
      * arrive with no capability at all and be judged anonymously.
      */
+    const capabilityCookieToSet = (): string | null =>
+      onSubdomain && capabilityGranted && capabilityFromQuery && capabilityToken !== null
+        ? serializeCapabilityCookie(capabilityToken, secureCookies)
+        : null
+
+    /**
+     * {@link capabilityCookieToSet}, put on THIS response.
+     *
+     * Only the static branch uses it. The proxy branch hands the same string to
+     * `proxyToProcess` as `setCookie` instead, because on a proxied response
+     * the child's own `Set-Cookie` values arrive later and a browser keeps the
+     * last value for a name — so appending here would let a prototype override
+     * the viewer's own cookie just by using its name.
+     */
     const promoteCapabilityCookie = (): void => {
-      if (onSubdomain && capabilityGranted && capabilityFromQuery && capabilityToken !== null) {
-        res.append("Set-Cookie", serializeCapabilityCookie(capabilityToken, secureCookies))
-      }
+      const cookie = capabilityCookieToSet()
+      if (cookie !== null) res.append("Set-Cookie", cookie)
     }
 
     // The bridge bundle, served as its own resource under the prototype's
@@ -763,11 +776,13 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       // private server prototype would render its first page and then 404
       // every asset it asked for.
       //
-      // Before `proxyToProcess`, which is safe because the proxy APPENDS the
-      // child's own `set-cookie` rather than replacing the header.
-      promoteCapabilityCookie()
+      // Handed to the proxy rather than appended here, so it lands AFTER the
+      // child's own cookies and displaces a child value that shares its name.
+      // See `ProxyOptions.setCookie`.
+      const capabilityCookie = capabilityCookieToSet()
       proxyToProcess(req, res, {
         port,
+        ...(capabilityCookie !== null ? { setCookie: capabilityCookie } : {}),
         path: childPathFor(req.originalUrl, [pathPrefix, prototypePathPrefix(slug, null)]),
         shellOrigin,
         // The prototype owns `/` on this origin (`servesAtRoot` is the gate
