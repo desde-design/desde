@@ -1241,6 +1241,71 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     expect(frames[1]?.process).toEqual(agedOut)
   })
 
+  /**
+   * Two status callbacks in flight across a deployment change used to leave
+   * a listener behind for ever. Both re-read the project, both saw the new
+   * deployment, and each subscribed to it — the second overwriting the
+   * first's unsubscribe, so `cleanup` could only ever release one of them.
+   * The leaked listener held the response, the project and the body in its
+   * closure and woke on every later transition.
+   *
+   * The callbacks run through one promise chain per connection now, so the
+   * second sees what the first did.
+   */
+  it("keeps exactly one process subscription when two callbacks land across a deployment change", async () => {
+    const fake = fakePrototypeProcesses()
+    const ctx = setup({ prototypeProcesses: fake })
+    const project = await seedProject(ctx.storage)
+    const firstDeployment = await makeServerDeployment(ctx, project)
+    const running: ProcessStatus = {
+      state: "running",
+      port: 4321,
+      since: "2026-09-11T00:00:00.000Z",
+      generation: 1,
+    }
+    const crashed: ProcessStatus = {
+      state: "crashed",
+      exitCode: 1,
+      restarts: 1,
+      reason: "The server exited.",
+      retryable: true,
+    }
+    let secondDeployment = ""
+
+    const { destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 2, {
+      onFirstByte: () => {
+        void (async () => {
+          const deployment = await ctx.storage.createDeployment({
+            projectId: project.id,
+            status: "deployed",
+          })
+          await ctx.storage.updateDeployment(deployment.id, {
+            serve: "server",
+            serverStart: ["node", "server.js"],
+          })
+          await ctx.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
+          secondDeployment = deployment.id
+          // Back to back, both for the OLD deployment, both after the active
+          // one changed: the shape the leak needed.
+          fake.emit(firstDeployment, running)
+          fake.emit(firstDeployment, crashed)
+        })()
+      },
+    })
+
+    await vi.waitFor(() => {
+      expect(secondDeployment).not.toBe("")
+      expect(fake.subscribers.get(firstDeployment)?.size ?? 0).toBe(0)
+      expect(fake.subscribers.get(secondDeployment)?.size ?? 0).toBe(1)
+    })
+
+    destroy()
+    await vi.waitFor(() => {
+      const total = [...fake.subscribers.values()].reduce((n, set) => n + set.size, 0)
+      expect(total).toBe(0)
+    })
+  })
+
   it("unsubscribes from the process manager when the client disconnects", async () => {
     const fake = fakePrototypeProcesses()
     const ctx = setup({ prototypeProcesses: fake })

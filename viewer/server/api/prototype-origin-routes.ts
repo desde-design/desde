@@ -569,13 +569,74 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     if (closed) return
     send(current)
 
+    /**
+     * One promise chain for everything this connection does after it has
+     * opened: every status callback, and every heartbeat re-check.
+     *
+     * Two callbacks used to be free to interleave across a deployment
+     * change. Both read the project, both saw the new active deployment, and
+     * each subscribed to it — the second overwriting the first's
+     * unsubscribe, which then never ran. Ordering them means the second one
+     * sees what the first one did, and there is exactly one subscription at
+     * a time.
+     *
+     * A task that throws is logged and swallowed: the chain has to survive
+     * it, or one failed storage read would silently stop every later update
+     * on this connection.
+     */
+    let queue: Promise<void> = Promise.resolve()
+    const enqueue = (task: () => Promise<void>): void => {
+      queue = queue.then(task).catch((error: unknown) => {
+        console.error("[viewer] prototype-origin stream update failed:", error)
+      })
+    }
+
     // `current.body.serve` is on every shape `buildPrototypeOriginBody`
     // returns (success and 503 alike), so this is enough to decide whether
     // there is a process to subscribe to — no second deployment read needed.
+    //
+    // The previous subscription is always released first. There is never a
+    // moment with two of them, whichever path got here.
     const subscribeToProcess = (deploymentId: string): void => {
+      if (unsubscribeProcess) {
+        unsubscribeProcess()
+        unsubscribeProcess = null
+      }
       unsubscribeProcess = deps.prototypeProcesses.subscribe(deploymentId, (status) => {
-        void handleProcessStatus(status)
+        enqueue(() => handleProcessStatus(deploymentId, status))
       })
+    }
+
+    /**
+     * Moves the whole follow onto the project's current active deployment: a
+     * full re-resolution (a genuinely new deployment can need a new
+     * listener, so `ensure` runs again here — see the doc comment on
+     * `buildPrototypeOriginBody` for why it must NOT run on the patch path),
+     * a fresh `origin` event, and the process subscription pointed at the new
+     * id.
+     *
+     * The old subscription is released FIRST, before the await, so nothing
+     * more arrives for a deployment this stream has left.
+     */
+    const refollowActiveDeployment = async (freshProject: Project): Promise<void> => {
+      if (unsubscribeProcess) {
+        unsubscribeProcess()
+        unsubscribeProcess = null
+      }
+      current = await buildPrototypeOriginBody({
+        deps,
+        allowlist,
+        bridgeAssetPath,
+        project: freshProject,
+        policy,
+        requestHost,
+        statedOrigin: stated.origin,
+      })
+      if (closed) return
+      send(current)
+      if (current.deploymentId && current.body.serve === "server") {
+        subscribeToProcess(current.deploymentId)
+      }
     }
 
     /**
@@ -585,39 +646,24 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
      * Re-reads the project's active deployment id FIRST, because the
      * subscription this callback fired from may no longer be the active
      * one — a build can have published a new deployment since connect. When
-     * it has, this re-subscribes to the new one and fully re-resolves the
-     * body (a genuinely new deployment can need a new listener, so `ensure`
-     * runs again here — see the doc comment above for why it must NOT run
-     * on the branch below). When the active deployment is unchanged, this
-     * only patches `process` into the body already in hand.
+     * it has, `refollowActiveDeployment` above takes over. When the active
+     * deployment is unchanged, this only patches `process` into the body
+     * already in hand.
      */
-    const handleProcessStatus = async (status: ProcessStatus): Promise<void> => {
+    const handleProcessStatus = async (fromDeploymentId: string, status: ProcessStatus): Promise<void> => {
       if (closed) return
       const freshProject = await deps.storage.getProject(project.id)
       if (closed) return
       if (!freshProject) return
-      const freshDeploymentId = freshProject.activeDeploymentId ?? null
-      if (freshDeploymentId !== current.deploymentId) {
-        if (unsubscribeProcess) {
-          unsubscribeProcess()
-          unsubscribeProcess = null
-        }
-        current = await buildPrototypeOriginBody({
-          deps,
-          allowlist,
-          bridgeAssetPath,
-          project: freshProject,
-          policy,
-          requestHost,
-          statedOrigin: stated.origin,
-        })
-        if (closed) return
-        send(current)
-        if (current.deploymentId && current.body.serve === "server") {
-          subscribeToProcess(current.deploymentId)
-        }
+      if ((freshProject.activeDeploymentId ?? null) !== current.deploymentId) {
+        await refollowActiveDeployment(freshProject)
         return
       }
+      // A status for a deployment this stream has already moved off. It can
+      // only be a callback that was queued before the change and ran after
+      // it, and patching an old deployment's process into the new
+      // deployment's body would be a lie the page acts on.
+      if (fromDeploymentId !== current.deploymentId) return
       if (current.status === 200) {
         // The cast is safe: this branch only runs when `subscribeToProcess`
         // was called, which only happens for a body whose `serve` is
