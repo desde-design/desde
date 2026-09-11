@@ -13,6 +13,7 @@ import {
   type PrototypeOriginResponse,
 } from "../serve/prototype-origin-resolve"
 import { prototypeOriginFor } from "../serve/subdomain"
+import type { DeploymentServe } from "../storage/types"
 
 /**
  * `GET /api/v1/projects/:id/prototype-origin` — which origin the shell
@@ -151,6 +152,25 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     if (!access) return
     const { project, policy } = access
 
+    // Loaded ONCE, before any mode branch, so EVERY mode's answer can state
+    // `serve` correctly — subdomain, prototype-origin and fallback used to
+    // answer before ever looking at the deployment, which was fine while the
+    // field did not exist. A dangling `activeDeploymentId` reads as "nothing
+    // built" here too, same as everywhere else in this route: the client
+    // cannot act on the difference, and a deployment row that is gone can
+    // only ever 404.
+    const deployment = project.activeDeploymentId
+      ? await deps.storage.getDeployment(project.activeDeploymentId)
+      : null
+    const serve: DeploymentServe = deployment?.serve ?? "static"
+    // Only when there IS a deployment and it is a server one — `deployment`
+    // is re-checked rather than trusting `serve`, so a stale `serve` value
+    // could never call `.status` with a null id.
+    const processStatus =
+      deployment && deployment.serve === "server"
+        ? deps.prototypeProcesses.status(deployment.id)
+        : undefined
+
     const resolved = resolveOrigins({
       requestHost: req.headers.host,
       hostAllowed: isAllowedHost(allowlist, req.headers.host, deps.config.serveDomain),
@@ -182,6 +202,8 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         // cookie is host-only, so it is never sent to `{slug}.{serveDomain}`
         // and cannot authorize the prototype's own subresources.
         capabilityRequired: !prototypeAnonymouslyReadable(project.access, policy.allowPublicLinks),
+        serve,
+        ...(processStatus ? { process: processStatus } : {}),
       }
       res.json(body)
       return
@@ -201,6 +223,8 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         mode: "prototype-origin",
         origin: resolved.prototypeOrigin,
         capabilityRequired: !prototypeAnonymouslyReadable(project.access, policy.allowPublicLinks),
+        serve,
+        ...(processStatus ? { process: processStatus } : {}),
       }
       res.json(body)
       return
@@ -230,24 +254,21 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         mode: "fallback",
         origin: null,
         capabilityRequired: true,
+        serve,
+        ...(processStatus ? { process: processStatus } : {}),
       }
       res.json(body)
       return
     }
 
-    // A dangling `activeDeploymentId` reads as "nothing built", exactly as it
-    // does in `projects-routes.ts`: the client cannot act on the difference,
-    // and opening a listener for a deployment row that is gone would bind a
-    // port that can only ever 404.
-    const deployment = project.activeDeploymentId
-      ? await deps.storage.getDeployment(project.activeDeploymentId)
-      : null
     if (!deployment) {
       const body: PrototypeOriginResponse = {
         mode: "loopback",
         origin: null,
         capabilityRequired: false,
         reason: "no-deployment",
+        serve: "static",
+        range: deps.config.loopbackPortRange,
       }
       res.json(body)
       return
@@ -268,6 +289,9 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         // Reaching an ephemeral loopback socket IS the credential, and this
         // route only opens one for a project the caller may already read.
         capabilityRequired: false,
+        serve,
+        range: deps.config.loopbackPortRange,
+        ...(processStatus ? { process: processStatus } : {}),
       }
       res.json(body)
     } catch (error) {

@@ -19,6 +19,7 @@ import { createSwappableApp } from "../../__tests__/swappable-app"
 import { testGithubRuntime } from "../../__tests__/test-github-runtime"
 import { upsertTestUser } from "../../__tests__/user-fixtures"
 import type { InstanceRole } from "../../storage/types"
+import type { PrototypeProcesses, ProcessStatus } from "../../serve/prototype-processes"
 
 /**
  * ONE stable app object for this whole file — see `__tests__/swappable-app.ts`.
@@ -335,5 +336,90 @@ describe("GET /deployments/:id/log/stream (S7 — manage authority only)", () =>
     const res = await request(app()).get(`/api/v1/deployments/${dep.id}/log/stream`).set(admin)
     expect(res.status).toBe(200)
     expect(res.text).toContain("admin-visible log")
+  })
+})
+
+/**
+ * `GET /deployments/:id/server-log` — a server prototype's stdout/stderr.
+ * Gated exactly like the build log stream above: same 404s, same 403, same
+ * manage authority. Copied from that describe block rather than sharing it,
+ * because the fake process manager below is specific to this route.
+ */
+describe("GET /deployments/:id/server-log (same gate as the build log)", () => {
+  let storage: InMemoryStorage
+
+  beforeEach(() => {
+    storage = new InMemoryStorage()
+  })
+
+  /**
+   * A distinguishable status (not the "stopped" a null fake would answer),
+   * so a passing 200 test proves the route is really reading
+   * `deps.prototypeProcesses`, not a hardcoded shape.
+   */
+  const fakeStatus: ProcessStatus = { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z" }
+
+  function fakeProcesses(): PrototypeProcesses {
+    return {
+      ensure: () => Promise.reject(new Error("not used by this route")),
+      touch: () => {},
+      stop: () => Promise.resolve(),
+      status: () => fakeStatus,
+      serverLog: () => "hello",
+      startReaper: () => () => {},
+      shutdown: () => Promise.resolve(),
+    }
+  }
+
+  function app() {
+    stable.use(
+      createApp({
+        storage,
+        assets: new NullAssetStore(),
+        config: authConfig,
+        bridgeScript: "// bridge",
+        github: testGithubRuntime(),
+        prototypeProcesses: fakeProcesses(),
+      }),
+    )
+    return stable.app
+  }
+
+  it("404s for an unknown deployment", async () => {
+    const res = await request(app()).get("/api/v1/deployments/does-not-exist/server-log").set(admin)
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: "Deployment not found" })
+  })
+
+  it("404s for a non-readable project, same as an unreadable project", async () => {
+    const { project } = await makeMembersProject(storage)
+    const dep = await storage.createDeployment({ projectId: project.id })
+
+    // Anonymous caller against an `invited` project with no access-list row.
+    const res = await request(app()).get(`/api/v1/deployments/${dep.id}/server-log`)
+    expect(res.status).toBe(404)
+  })
+
+  it("403s a signed-in VIEWER on a project they can read", async () => {
+    const project = await storage.createProject({ slug: "open3", name: "Open" })
+    const dep = await storage.createDeployment({ projectId: project.id })
+    const { cookie: viewerCookie } = await signInAs(storage, "reader3@x.com", "viewer")
+
+    const res = await request(app())
+      .get(`/api/v1/deployments/${dep.id}/server-log`)
+      .set("Cookie", viewerCookie)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: "Only editors and admins may view the server log" })
+  })
+
+  it("200s { log, status } for a manager", async () => {
+    const { project, member } = await makeMembersProject(storage)
+    const dep = await storage.createDeployment({ projectId: project.id })
+
+    const res = await request(app())
+      .get(`/api/v1/deployments/${dep.id}/server-log`)
+      .set("Cookie", member.cookie)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ log: "hello", status: fakeStatus })
   })
 })

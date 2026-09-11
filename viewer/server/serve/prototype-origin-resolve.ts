@@ -204,6 +204,28 @@ export function prototypeAnonymouslyReadable(
 }
 
 /**
+ * How a deployment is served: a folder of files, or a process the Viewer
+ * runs and proxies to. Duplicated from `storage/types.ts`'s
+ * `DeploymentServe` rather than imported — same no-imports reason as every
+ * other type in this file. The two stay assignment-compatible because
+ * TypeScript compares them structurally; there is nothing to keep in sync
+ * beyond the two literal members.
+ */
+export type PrototypeServeMode = "static" | "server"
+
+/**
+ * A server prototype's process state, as reported by
+ * `server/serve/prototype-processes.ts`'s `PrototypeProcesses.status`.
+ * Duplicated rather than imported for the same reason as `PrototypeServeMode`
+ * above — this module must never pull in `node:child_process`.
+ */
+export type PrototypeProcessStatus =
+  | { state: "stopped" }
+  | { state: "starting" }
+  | { state: "running"; port: number; since: string }
+  | { state: "crashed"; exitCode: number | null; restarts: number; reason: string }
+
+/**
  * The body of `GET /api/v1/projects/:id/prototype-origin` — where the shell
  * should point a browser at this prototype right now.
  *
@@ -225,13 +247,58 @@ export function prototypeAnonymouslyReadable(
  * prototype's assets to load. A loopback listener never needs one: reaching
  * its ephemeral loopback socket is itself the credential, and the route
  * only opens one for a project the caller may already read.
+ *
+ * `serve` and `process` (server-prototypes work, 2026-09-10) say whether
+ * this project's active deployment is a folder of files or a process, and
+ * what that process is doing right now. They are present in EVERY mode's
+ * body, including `fallback` and `prototype-origin` — modes that cannot
+ * proxy a server deployment at all — because the review page needs to know
+ * `serve: "server"` there too, to show a "this prototype needs an origin of
+ * its own" panel instead of a blank frame. `process` is present only when
+ * `serve === "server"`.
+ *
+ * `range` is the configured loopback port range (`ViewerConfig.
+ * loopbackPortRange`), present only on the two `loopback` shapes — it names
+ * the `-p` flag the review page's port banner points an operator at.
  */
 export type PrototypeOriginResponse =
-  | { mode: "loopback"; origin: string; capabilityRequired: false }
-  | { mode: "loopback"; origin: null; capabilityRequired: false; reason: "no-deployment" }
-  | { mode: "subdomain"; origin: string; capabilityRequired: boolean }
-  | { mode: "prototype-origin"; origin: string; capabilityRequired: boolean }
-  | { mode: "fallback"; origin: null; capabilityRequired: true }
+  | {
+      mode: "loopback"
+      origin: string
+      capabilityRequired: false
+      serve: PrototypeServeMode
+      process?: PrototypeProcessStatus
+      range: { from: number; to: number } | null
+    }
+  | {
+      mode: "loopback"
+      origin: null
+      capabilityRequired: false
+      reason: "no-deployment"
+      serve: "static"
+      range: { from: number; to: number } | null
+    }
+  | {
+      mode: "subdomain"
+      origin: string
+      capabilityRequired: boolean
+      serve: PrototypeServeMode
+      process?: PrototypeProcessStatus
+    }
+  | {
+      mode: "prototype-origin"
+      origin: string
+      capabilityRequired: boolean
+      serve: PrototypeServeMode
+      process?: PrototypeProcessStatus
+    }
+  | {
+      mode: "fallback"
+      origin: null
+      capabilityRequired: true
+      serve: PrototypeServeMode
+      process?: PrototypeProcessStatus
+    }
 
 /**
  * Decides which origin mode is in play for one request, and the shell
