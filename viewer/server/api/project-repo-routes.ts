@@ -15,6 +15,8 @@ import { Router } from "express"
 import type { AppDeps } from "../create-app"
 import { hasAdminAuthority, requireProjectManage, resolveReadContext } from "../auth/authorize"
 import { callerCanSeeInstallation, filterReposForCaller } from "../github/caller-installations"
+import { GitHubApiError } from "../github/github-app-client"
+import type { Repo } from "../github/types"
 import { NotFoundError } from "../storage/errors"
 import { readIdentityFromConfig } from "../../../src/core/project-identity"
 import type { ProjectRepoConfig } from "../storage/types"
@@ -282,7 +284,26 @@ export function createProjectRepoRoutes(deps: AppDeps): Router {
     // The refusal stays the SAME 400 as a genuine miss, deliberately: a
     // distinct "exists, but you can't see it" would be an existence oracle
     // for private repo names — the exact leak Phase 3c-1b closed one level up.
-    const installationRepos = await appClient.listInstallationRepos(installationId as number)
+    //
+    // A 404 here is the caller's id being wrong, not a server fault. The
+    // caller's installation set was captured at SIGN-IN, so it can name an
+    // installation the App has since lost — and an admin bearer skips the
+    // caller check above entirely, so any id at all reaches this call. GitHub
+    // answers 404 for an installation this App does not have, and before this
+    // catch that escaped as a bare 500 (MEASURED live, 2026-09-11). Answered
+    // as the same `400 Invalid installation` the caller check gives, so a
+    // wrong id and a foreign one stay indistinguishable. Any other status is
+    // a genuine failure and keeps going to the error handler.
+    let installationRepos: Repo[]
+    try {
+      installationRepos = await appClient.listInstallationRepos(installationId as number)
+    } catch (error) {
+      if (error instanceof GitHubApiError && error.httpStatus === 404) {
+        res.status(400).json({ error: "Invalid installation" })
+        return
+      }
+      throw error
+    }
     // Same admin-bearer carve-out as step 1, for the same reason: a bare
     // admin bearer asserts no identity, so it has no per-user repo set to
     // intersect with, and it is a deployment-level operator credential held

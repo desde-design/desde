@@ -126,7 +126,35 @@ function toRepo(raw: GitHubRepoResponse): Repo {
  */
 function githubApiError(action: string, res: Response): Error {
   console.error(`[viewer] github app client: ${action} failed with status ${res.status}`)
-  return new Error(`${action} failed (GitHub returned ${res.status})`)
+  return new GitHubApiError(`${action} failed (GitHub returned ${res.status})`, res.status)
+}
+
+/**
+ * A non-2xx answer from GitHub, carrying the STATUS and nothing else from the
+ * response.
+ *
+ * The status is what a route needs to tell one failure from another: an
+ * installation id GitHub does not know 404s, and a caller who named a wrong
+ * id deserves the same clean 400 a foreign one gets, not a 500. Matching on
+ * the message text would work today and break the first time the sentence is
+ * reworded, so the class carries the number instead. The body is still never
+ * read — see {@link githubApiError}.
+ *
+ * The field is `httpStatus`, NOT `status`, and that is load-bearing.
+ * `server/error-handler.ts` reads `error.status ?? error.statusCode` off any
+ * error that escapes a route, so naming it `status` would silently make every
+ * uncaught GitHub failure answer with GitHub's own status code and GitHub's
+ * own message — a routing decision made by accident, everywhere at once,
+ * instead of by the one route that has a reason to make it.
+ */
+export class GitHubApiError extends Error {
+  readonly name = "GitHubApiError"
+  constructor(
+    message: string,
+    readonly httpStatus: number,
+  ) {
+    super(message)
+  }
 }
 
 export interface GitHubAppClientConfig {

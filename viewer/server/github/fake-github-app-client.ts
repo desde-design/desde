@@ -6,6 +6,7 @@
  * GitHub.
  */
 
+import { GitHubApiError } from "./github-app-client"
 import type { GitHubAppClient, Installation, Repo } from "./types"
 
 export interface FakeGitHubAppClientConfig {
@@ -26,6 +27,16 @@ export interface FakeGitHubAppClientConfig {
   branchesByRepo?: Record<string, string[]>
   /** Prefix for minted fake tokens — defaults to a value that is obviously not a real GitHub token. */
   tokenPrefix?: string
+  /**
+   * Installation ids GitHub answers 404 for, as it does for an installation
+   * this App does not have.
+   *
+   * Distinct from a missing `reposByInstallation` key, which means "the App
+   * has this installation and it grants no repos" and answers an empty list.
+   * This one THROWS, because that is the case a caller can reach with a
+   * stale id captured at sign-in.
+   */
+  notFoundInstallations?: number[]
 }
 
 export function createFakeGitHubAppClient(cfg: FakeGitHubAppClientConfig = {}): GitHubAppClient {
@@ -34,6 +45,12 @@ export function createFakeGitHubAppClient(cfg: FakeGitHubAppClientConfig = {}): 
   const tokenPrefix = cfg.tokenPrefix ?? "fake-installation-token"
   const filesByRepo = cfg.filesByRepo ?? {}
   const branchesByRepo = cfg.branchesByRepo ?? {}
+  const notFound = new Set(cfg.notFoundInstallations ?? [])
+  const assertKnown = (installationId: number): void => {
+    if (notFound.has(installationId)) {
+      throw new GitHubApiError(`List repos for installation ${installationId} failed (GitHub returned 404)`, 404)
+    }
+  }
 
   return {
     async listInstallations(): Promise<Installation[]> {
@@ -41,6 +58,7 @@ export function createFakeGitHubAppClient(cfg: FakeGitHubAppClientConfig = {}): 
     },
 
     async listInstallationRepos(installationId: number): Promise<Repo[]> {
+      assertKnown(installationId)
       return (reposByInstallation[installationId] ?? []).map((r) => ({ ...r }))
     },
 
