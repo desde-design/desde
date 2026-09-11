@@ -239,17 +239,23 @@ export interface ViewerConfig {
   loopbackListeners: ViewerLoopbackListenersMode
   /**
    * Computed from `loopbackListeners`: `"on"` → `true`, `"off"` → `false`,
-   * `"auto"` → `!isLikelyContainerized()`. This is the value `resolveOrigins`
+   * `"auto"` → not a container, OR a container that has a
+   * {@link ViewerConfig.loopbackPortRange} (which is every container, since
+   * the range has a container default). This is the value `resolveOrigins`
    * (`server/serve/prototype-origin-resolve.ts`) actually reads — it stays
    * import-free and pure, so the container check has to run here, at boot,
    * and get threaded in as a plain boolean.
    *
    * When `false`, a shell that would otherwise get loopback mode (a
    * loopback `VIEWER_PUBLIC_URL`) falls back to same-host path mode
-   * instead: no per-deployment listener is opened. This is what closes the
-   * `docker run -p 3100:3100` gap — a loopback listener bound inside the
-   * container is unreachable from a host browser through the one published
-   * port, so opening one there is worse than not opening one at all.
+   * instead: no per-deployment listener is opened.
+   *
+   * The container case needs TWO things to be reachable, and the range is
+   * only one of them: a published port forwards to the container's external
+   * interface and never to the container's own loopback, so the listener
+   * also binds `0.0.0.0` whenever a range is configured. See
+   * `serve/loopback-listeners.ts`. Before that bind widened, a container
+   * with a published range served nothing at all (MEASURED, 2026-09-11).
    */
   loopbackAvailable: boolean
   /**

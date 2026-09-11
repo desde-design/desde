@@ -123,18 +123,24 @@ export function originModeBannerLines(
           `shell hostname "${shellHostname}". This is a bug in resolveOrigins, not in config.`,
       )
     }
+    // A configured range and an ephemeral port are different facts, and this
+    // line used to state the ephemeral one even when the line below it named
+    // the range — two consecutive lines telling an operator two different
+    // things about the same port (live acceptance finding, 2026-09-11).
+    const range = config.loopbackPortRange
+    const portPhrase = range ? "a port from the range below" : "an ephemeral port"
+    const portSpelling = range ? `<${range.from}-${range.to}>` : "<ephemeral>"
     return {
       mode: "loopback",
       lines: [
-        `[viewer] prototypes are served from the other loopback name on an ephemeral port ` +
-          `(shell=${resolved.shellOrigin} prototypes=${scheme}//${prototypeHost}:<ephemeral>)`,
+        `[viewer] prototypes are served from the other loopback name on ${portPhrase} ` +
+          `(shell=${resolved.shellOrigin} prototypes=${scheme}//${prototypeHost}:${portSpelling})`,
         `[viewer] Loopback prototype listeners are reachable only from a browser on this same host. ` +
           `A containerized or remote deployment should set VIEWER_SERVE_DOMAIN, or a non-loopback VIEWER_PUBLIC_URL.`,
-        ...(config.loopbackPortRange
+        ...(range
           ? [
-              `[viewer] Loopback prototype ports: ${config.loopbackPortRange.from}-${config.loopbackPortRange.to}. ` +
-                `In Docker, publish them: -p ${config.loopbackPortRange.from}-${config.loopbackPortRange.to}:` +
-                `${config.loopbackPortRange.from}-${config.loopbackPortRange.to}`,
+              `[viewer] Loopback prototype ports: ${range.from}-${range.to}. ` +
+                `In Docker, publish them: -p ${range.from}-${range.to}:${range.from}-${range.to}`,
             ]
           : []),
       ],

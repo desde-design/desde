@@ -31,8 +31,11 @@ describe("originModeBannerLines", () => {
     ).toEqual({
       mode: "loopback",
       lines: [
-        "[viewer] prototypes are served from the other loopback name on an ephemeral port " +
-          "(shell=http://localhost:3100 prototypes=http://127.0.0.1:<ephemeral>)",
+        // Not "<ephemeral>": the next line names 3101-3120, and an operator
+        // reading two consecutive lines was being told two different things
+        // about the same port (live acceptance finding, 2026-09-11).
+        "[viewer] prototypes are served from the other loopback name on a port from the range below " +
+          "(shell=http://localhost:3100 prototypes=http://127.0.0.1:<3101-3120>)",
         "[viewer] Loopback prototype listeners are reachable only from a browser on this same host. " +
           "A containerized or remote deployment should set VIEWER_SERVE_DOMAIN, or a non-loopback VIEWER_PUBLIC_URL.",
         "[viewer] Loopback prototype ports: 3101-3120. In Docker, publish them: -p 3101-3120:3101-3120",

@@ -352,14 +352,22 @@ describe("createLoopbackListenerRegistry", () => {
      * bound port tends to hand back the very next port on this machine, which
      * would make a one-port version of this test pass against the OLD
      * `listen(0, ...)` code with no range logic at all).
+     *
+     * Both occupy `0.0.0.0`, which is what a registry WITH a range binds (see
+     * the container test below). MEASURED on macOS: a wildcard bind succeeds
+     * over a port already held on `127.0.0.1` alone, because BSD's
+     * `SO_REUSEADDR` treats the two addresses as different — so occupying the
+     * loopback address would not produce the `EADDRINUSE` this test is about.
+     * The real occupants in a container are this same registry's own
+     * listeners, which bind the wildcard too.
      */
     it("binds the first free port in the range and skips two taken ones", async () => {
       const taken1 = createServer((_req, res) => res.end())
-      await new Promise<void>((r) => taken1.listen(0, "127.0.0.1", () => r()))
+      await new Promise<void>((r) => taken1.listen(0, "0.0.0.0", () => r()))
       const takenPort = (taken1.address() as AddressInfo).port
 
       const taken2 = createServer((_req, res) => res.end())
-      await new Promise<void>((r) => taken2.listen(takenPort + 1, "127.0.0.1", () => r()))
+      await new Promise<void>((r) => taken2.listen(takenPort + 1, "0.0.0.0", () => r()))
 
       // Spied only AFTER both taken servers are already listening, so their
       // own `.listen()` calls are not recorded — only the registry's own
@@ -399,6 +407,45 @@ describe("createLoopbackListenerRegistry", () => {
         await registry.closeAll()
         taken1.close()
         taken2.close()
+      }
+    })
+
+    /**
+     * The container case, measured on Docker Desktop 2026-09-11 (Task 14).
+     * A published port DNATs to the container's EXTERNAL interface, never to
+     * the container's own loopback, so a listener bound to `127.0.0.1` inside
+     * a container answers nothing from the host however the range is
+     * published. A configured range is the container signal, so that is when
+     * the bind widens.
+     *
+     * The counterpart — no range, so a loopback bind as before — is "binds
+     * 127.0.0.1 only, never 0.0.0.0" above, which asserts the same
+     * `boundAddress` field for a registry with no `portRange`.
+     */
+    it("binds every interface when a range is configured, and still names the loopback host", async () => {
+      const probe = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()))
+      const free = (probe.address() as AddressInfo).port
+      await new Promise<void>((r) => probe.close(() => r()))
+
+      const registry = createLoopbackListenerRegistry({
+        // desde-allow-own-server: same as above — wrapped in a real
+        // http.Server, never requested through supertest.
+        makeApp: () => express(),
+        portRange: { from: free, to: free + 3 },
+      })
+      try {
+        const listener = await registry.ensure(
+          { id: "dep-1", slug: "one", projectId: "p", serve: "static" },
+          { bindHost: "127.0.0.1", shellOrigin: "http://localhost:3100" },
+        )
+        expect(listener.boundAddress).toBe("0.0.0.0")
+        // The origin the browser is told to use is unchanged: the loopback
+        // spelling paired with the shell, never the bind address.
+        expect(listener.host).toBe("127.0.0.1")
+        expect(listener.origin).toBe(`http://127.0.0.1:${listener.port}`)
+      } finally {
+        await registry.closeAll()
       }
     })
 

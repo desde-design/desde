@@ -42,11 +42,19 @@ import type { DeploymentServe } from "../storage/types"
  * port; the old one idles out and is reaped. A review in progress therefore
  * cannot have the bytes change underneath it.
  *
- * ## Scope
+ * ## Scope, and the one case that binds every interface
  *
- * This is a local-machine facility. `listen` is only ever given `127.0.0.1`
- * or `::1` — never `0.0.0.0`, and never `localhost`, which may resolve to
- * both families and so does not name one origin.
+ * This is a local-machine facility. With no configured port range, `listen`
+ * is only ever given `127.0.0.1` or `::1` — never `localhost`, which may
+ * resolve to both families and so does not name one origin.
+ *
+ * A configured port range (`deps.portRange`) is the CONTAINER case, and there
+ * the bind widens to `0.0.0.0`. Docker forwards a published port to the
+ * container's EXTERNAL interface and never to the container's own loopback,
+ * so a `127.0.0.1` bind inside a container answers nothing from the host,
+ * whatever `-p` says (MEASURED on Docker Desktop, 2026-09-11). The origin
+ * handed to the browser is unchanged either way: it always names the loopback
+ * spelling paired with the shell, never the bind address. See `open()`.
  */
 
 /** The literal addresses a listener may bind. Never `0.0.0.0`, never a name. */
@@ -262,6 +270,29 @@ export function createLoopbackListenerRegistry(
     // request cannot slip through the gap and reach the shell: there is no
     // shell here, and the placeholder answers 503 rather than falling
     // through to anything.
+    const range = deps.portRange ?? null
+    /**
+     * What the socket binds. The loopback address on a laptop; every
+     * interface in a container.
+     *
+     * A range is configured exactly when this is a container (see
+     * `config.ts`'s default), and inside a container `127.0.0.1` is the
+     * container's own loopback, which a published port never reaches: Docker
+     * DNATs a published port to the container's external interface. So a
+     * loopback bind there is unreachable from the host's browser with the
+     * range published and without it alike (MEASURED, Task 14, 2026-09-11).
+     *
+     * Widening the bind does not widen what the listener will ANSWER. Its
+     * Express app pins a one-entry Host allowlist to exactly this
+     * `host:port` (`loopback-listener-app.ts`), so a request that arrives on
+     * another interface carrying any other `Host` is refused before it can
+     * reach a prototype. The cookie-isolation argument at the top of this
+     * module is untouched too: it rests on the HOST SPELLING the browser
+     * uses, which is still the paired loopback name, not on which interface
+     * the socket listens on.
+     */
+    const bindAddress: string = range === null ? target.bindHost : "0.0.0.0"
+
     let app: express.Express | null = null
     const server = createServer((req, res) => {
       if (!app) {
@@ -284,10 +315,9 @@ export function createLoopbackListenerRegistry(
         }
         server.once("error", onError)
         server.once("listening", onListening)
-        server.listen(port, target.bindHost)
+        server.listen(port, bindAddress)
       })
 
-    const range = deps.portRange ?? null
     if (range === null) {
       await listenOn(0)
     } else {
