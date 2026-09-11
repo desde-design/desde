@@ -72,6 +72,8 @@ import type { DeploymentServe } from "../../../server/storage/types"
 import { decidePrototypeEmbed } from "./prototype-embed-decision"
 import { PrototypeUnavailable } from "./prototype-unavailable"
 import { PORT_WATCHDOG_MS, shouldWarnPortUnreachable } from "../port-watchdog"
+import { useProcessRecovery } from "../use-process-recovery"
+import { useRouterRefresh } from "../use-router-refresh"
 
 export interface ReviewShellProject {
   id: string
@@ -201,6 +203,35 @@ export function ReviewShell({
     process: project.process,
     reason: project.originReason,
     range: project.range,
+  })
+
+  /**
+   * Codex round 4, Fix 2. `embed` above is resolved SERVER-SIDE, once, in
+   * `page.tsx` — so on a normal first visit to a server prototype, the
+   * server-rendered `process` is `stopped`, and the iframe's OWN request is
+   * what triggers `ensure()` on the viewer. If that start fails, or the
+   * child crashes later, the proxy's 503 response lands INSIDE the iframe:
+   * nothing in this shell notices, `project.process` never changes, and
+   * `PrototypeUnavailable`'s own recovery poll (below, `mode:
+   * "crashed-panel"`) is not even mounted, because no crashed panel is
+   * showing — the reader is left looking at a broken frame until they
+   * reload by hand.
+   *
+   * This is the other `useProcessRecovery` call site: active only while a
+   * SERVER deployment is actually embedded as a frame, polling the same
+   * route and refreshing the moment the polled status says the process has
+   * crashed — `shouldRefreshWhileEmbedded`, not `shouldRefreshAfterPoll`, so
+   * an unrecognised body does nothing instead of refreshing in a loop. The
+   * server-rendered page then re-resolves `decidePrototypeEmbed` from the
+   * fresh process status and shows the crashed panel (or a fresh working
+   * frame, if the crash already cleared).
+   */
+  const refreshRouterOnEmbeddedCrash = useRouterRefresh()
+  useProcessRecovery({
+    active: embed.kind === "embed" && project.serve === "server",
+    projectId: project.id,
+    onShouldRefresh: refreshRouterOnEmbeddedCrash,
+    mode: "embedded",
   })
 
   /**

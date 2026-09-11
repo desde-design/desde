@@ -15,7 +15,6 @@
  */
 
 import { useEffect, useRef, useState } from "react"
-import { useRouter } from "next/navigation"
 import { ChevronDown } from "lucide-react"
 import { Callout, EmptyState } from "@/components/blocks"
 import { Button } from "@/components/ui/button"
@@ -25,30 +24,8 @@ import { shouldRefreshAfterRebuild } from "../rebuild-refresh"
 import { useBuildAccess } from "../use-build-access"
 import { useBuildControls } from "../use-build-controls"
 import { useProcessRecovery } from "../use-process-recovery"
+import { useRouterRefresh } from "../use-router-refresh"
 import type { PrototypeEmbed } from "./prototype-embed-decision"
-
-/**
- * `useRouter().refresh`, guarded against a missing Next App Router context.
- *
- * The gallery's registry sweep (`gallery/registry.test.tsx`) renders this
- * panel directly through React Testing Library — there is no real Next app
- * around it, no `<AppRouterContext>`, nothing `useRouter()` can read — and
- * it throws synchronously there ("invariant expected app router to be
- * mounted"). The real review page always has the context (it is rendered by
- * the actual Next app), so the catch below is a gallery-only path, never a
- * product one. The `try` wraps a single unconditional call, in the same
- * position on every render — it changes what `useRouter()` DOES, not
- * whether or how many times this component calls it, so it does not trip
- * the hook-order rule the way a real conditional hook call would.
- */
-function useRouterRefresh(): () => void {
-  try {
-    const router = useRouter()
-    return () => router.refresh()
-  } catch {
-    return () => {}
-  }
-}
 
 export interface PrototypeUnavailableProps {
   /** Never `{ kind: "embed" }` — the caller only renders this panel otherwise. */
