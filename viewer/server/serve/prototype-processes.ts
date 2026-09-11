@@ -622,6 +622,11 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // `reason`, which a reader (including a public-link one) can see
       // through the crashed panel and the 503 body. See `SETUP_FAILED_REASON`.
       console.error("[viewer] prototype process setup failed:", error)
+      // Charged to the restart budget like any other failed attempt (codex
+      // round 9). Uncharged, a failure that repeats on every attempt stayed
+      // retryable for ever, and the review page's embedded poll remounted
+      // the frame every five seconds without end.
+      e.restartsAt.push(now())
       e.status = {
         state: "crashed",
         exitCode: null,

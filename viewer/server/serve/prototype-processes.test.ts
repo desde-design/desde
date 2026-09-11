@@ -350,6 +350,30 @@ describe("createPrototypeProcesses", () => {
     }
   })
 
+  it("charges a setup failure before spawn to the restart budget", async () => {
+    // Codex round 9. A failure that happens on every attempt (a home dir
+    // that cannot be made, say) used to record a crash with no restart
+    // counted, so it stayed retryable for ever: the review page's embedded
+    // poll remounted the frame every five seconds, each remount called
+    // ensure, and nothing ever reached the non-retryable panel.
+    const id = "homeblockedforever"
+    const root = await checkoutsRoot([id])
+    await writeFile(join(root, id, ".desde-home"), "x")
+    let now = 1_000_000
+    const procs = createPrototypeProcesses({ checkoutsRoot: root, now: () => now })
+    managers.push(procs)
+    for (let i = 0; i < 4; i++) {
+      await expect(procs.ensure({ id, serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+    }
+    const spent = procs.status(id)
+    expect(spent.state === "crashed" && spent.retryable).toBe(false)
+    // Same window rule as a real crash: once the attempts age out, it is
+    // worth trying again.
+    now += 6 * 60_000
+    const aged = procs.status(id)
+    expect(aged.state === "crashed" && aged.retryable).toBe(true)
+  })
+
   it("never hands the child the viewer's own environment, only the allowlist plus spawnEnv", async () => {
     process.env.VIEWER_TEST_SECRET = "must-not-leak"
     try {
