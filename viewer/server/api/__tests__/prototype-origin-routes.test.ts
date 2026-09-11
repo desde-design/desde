@@ -755,8 +755,9 @@ describe("GET /projects/:id/prototype-origin", () => {
     })
 
     it("answers 503 with reason ports-exhausted when the configured range is full", async () => {
+      const thrown = new LoopbackPortsExhaustedError({ from: 3101, to: 3120 })
       const exhausted: LoopbackListenerRegistry = {
-        ensure: () => Promise.reject(new LoopbackPortsExhaustedError({ from: 3101, to: 3120 })),
+        ensure: () => Promise.reject(thrown),
         touch: () => {},
         reapIdle: () => Promise.resolve(0),
         closeAll: () => Promise.resolve(),
@@ -773,6 +774,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         .expect(503)
 
       expect(res.body.reason).toBe("ports-exhausted")
+      expect(res.body.error).toBe(thrown.message)
     })
   })
 })

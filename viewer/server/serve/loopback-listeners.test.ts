@@ -17,8 +17,8 @@
  */
 import express from "express"
 import { createServer, request as httpRequest, type IncomingHttpHeaders } from "node:http"
-import type { AddressInfo } from "node:net"
-import { afterEach, describe, expect, it } from "vitest"
+import { Server as NetServer, type AddressInfo } from "node:net"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AssetStore, StoredAsset } from "../assets/types"
 import { loadConfig } from "../config"
 import { InMemoryStorage } from "../storage/in-memory-storage"
@@ -309,26 +309,62 @@ describe("createLoopbackListenerRegistry", () => {
   })
 
   describe("binding from a configured port range", () => {
-    it("binds the first free port in the range and skips a taken one", async () => {
-      const taken = createServer((_req, res) => res.end())
-      await new Promise<void>((r) => taken.listen(0, "127.0.0.1", () => r()))
-      const takenPort = (taken.address() as AddressInfo).port
+    /**
+     * Two REAL listening servers occupy `takenPort` and `takenPort + 1`, so
+     * the only way `ensure` can land on `takenPort + 2` is by trying both
+     * taken ports, getting `EADDRINUSE` twice, and moving on — it cannot
+     * happen by OS ephemeral-port-allocation coincidence the way a single
+     * taken port could (measured: `listen(0, ...)` right after closing one
+     * bound port tends to hand back the very next port on this machine, which
+     * would make a one-port version of this test pass against the OLD
+     * `listen(0, ...)` code with no range logic at all).
+     */
+    it("binds the first free port in the range and skips two taken ones", async () => {
+      const taken1 = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => taken1.listen(0, "127.0.0.1", () => r()))
+      const takenPort = (taken1.address() as AddressInfo).port
+
+      const taken2 = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => taken2.listen(takenPort + 1, "127.0.0.1", () => r()))
+
+      // Spied only AFTER both taken servers are already listening, so their
+      // own `.listen()` calls are not recorded — only the registry's own
+      // attempts. `listen` lives on `net.Server.prototype` (not
+      // `http.Server.prototype`, which inherits it), so that is what has to
+      // be spied on to see every attempt the registry's http.Server makes.
+      const listenSpy = vi.spyOn(NetServer.prototype, "listen")
+
       const registry = createLoopbackListenerRegistry({
         // desde-allow-own-server: this Express app is never handed to
         // supertest — the registry wraps it in its own real http.Server, which
         // is the thing under test here (see the module doc comment above).
         makeApp: () => express(),
-        portRange: { from: takenPort, to: takenPort + 2 },
+        portRange: { from: takenPort, to: takenPort + 3 },
       })
       try {
         const listener = await registry.ensure(
           { id: "dep-1", slug: "one", projectId: "p" },
           { bindHost: "127.0.0.1", shellOrigin: "http://localhost:3100" },
         )
-        expect(listener.port).toBe(takenPort + 1)
+        expect(listener.port).toBe(takenPort + 2)
+
+        // The landing port alone is not proof of the retry loop: measured on
+        // this machine, `listen(0, ...)` right after two explicit binds tends
+        // to hand back the very next port regardless, by OS ephemeral-port
+        // sequencing — so even a build with NO range/retry logic at all lands
+        // on `takenPort + 2` here too. This is the assertion that actually
+        // distinguishes them: it fails unless the registry tried
+        // `takenPort` and `takenPort + 1` first, got `EADDRINUSE` both times,
+        // and only then tried `takenPort + 2`.
+        const attemptedPorts = listenSpy.mock.calls
+          .map((call) => call[0])
+          .filter((port): port is number => typeof port === "number")
+        expect(attemptedPorts).toEqual([takenPort, takenPort + 1, takenPort + 2])
       } finally {
+        listenSpy.mockRestore()
         await registry.closeAll()
-        taken.close()
+        taken1.close()
+        taken2.close()
       }
     })
 
