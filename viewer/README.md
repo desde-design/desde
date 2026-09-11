@@ -363,6 +363,19 @@ deciding which mode applies lives in
 `server/serve/prototype-origin-resolve.ts`; the per-deployment loopback
 listeners live in `server/serve/loopback-listeners.ts`.
 
+**Server prototypes.** A Next.js, Nuxt or React Router build with
+server-rendered routes is not a folder of files. The viewer keeps the built
+checkout and runs the project's own server as a child process, started by
+the first request and stopped when idle, behind a small proxy that injects
+the bridge. Such a prototype needs an origin of its own (loopback or
+subdomain mode); in fallback mode the review page says so instead of
+loading it. The review page follows the process state live over a
+server-sent-events stream and keys the frame on the process generation, so
+a restart reloads the frame on its own and a crash past the restart budget
+shows the log with a Rebuild button, with no page reload in either case.
+The lifecycle rules live in one table, `server/serve/process-state.ts`;
+the runtime that drives it is `server/serve/prototype-processes.ts`.
+
 ## Prototype isolation
 
 Prototypes are served same-origin at `/p/{slug}/**`, alongside the API at
