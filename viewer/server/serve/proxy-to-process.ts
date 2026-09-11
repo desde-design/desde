@@ -278,7 +278,17 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
       setOwnHeaders(res, opts.csp)
 
       if (!rewrite) {
-        if (!bodiless && up.headers["content-length"]) res.setHeader("Content-Length", up.headers["content-length"])
+        // The general header filter above dropped `Content-Length`
+        // (`DROP_RESPONSE`) so it can be recomputed for a rewritten body —
+        // this branch has no rewritten body to recompute one FROM, so it is
+        // restored from upstream instead where that is still meaningful
+        // (codex round 11, Fix 4). A HEAD answer legitimately carries the
+        // length of the GET representation, and clients use it; a 304 may
+        // carry one for the same reason. A 204 must never carry one at all,
+        // so it is left dropped even when upstream sent it.
+        if (!bodiless || req.method === "HEAD" || up.statusCode === 304) {
+          if (up.headers["content-length"]) res.setHeader("Content-Length", up.headers["content-length"])
+        }
         up.pipe(res)
         return
       }

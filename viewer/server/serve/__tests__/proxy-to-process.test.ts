@@ -325,6 +325,56 @@ describe("proxyToProcess", () => {
     expect(res.headers["content-length"]).toBeUndefined()
   })
 
+  /**
+   * Codex round 11, Fix 4. The general header filter drops `Content-Length`
+   * from every response (`DROP_RESPONSE`) so it can be recomputed for a
+   * rewritten HTML body. The `bodiless` branch (HEAD, 204, 304) never sends
+   * a body to recompute a length FROM, so it never restored the upstream
+   * value either — but a HEAD answer legitimately carries the length of the
+   * GET representation, and clients use it. A 204 is the opposite case: it
+   * must never carry a Content-Length at all, so an upstream one is dropped
+   * there even though it IS restored for HEAD and 304.
+   */
+  describe("Content-Length on a bodiless response", () => {
+    it("restores the upstream Content-Length on a HEAD response, with an empty body", async () => {
+      const port = await child((_req, res) => {
+        res.setHeader("content-type", "text/html; charset=utf-8")
+        res.setHeader("content-length", "1234")
+        res.end()
+      })
+      const res = await request(appFor(port)).head("/p/acme/")
+      expect(res.status).toBe(200)
+      expect(res.headers["content-length"]).toBe("1234")
+      // A HEAD response carries no body at all — supertest leaves `res.text`
+      // `undefined` rather than `""` here, unlike a GET with an empty body.
+      expect(res.text).toBeFalsy()
+    })
+
+    it("restores the upstream Content-Length on a 304", async () => {
+      const port = await child((_req, res) => {
+        res.statusCode = 304
+        res.setHeader("content-length", "1234")
+        res.end()
+      })
+      const res = await request(appFor(port)).get("/p/acme/")
+      expect(res.status).toBe(304)
+      expect(res.headers["content-length"]).toBe("1234")
+      expect(res.text).toBe("")
+    })
+
+    it("drops an upstream Content-Length on a 204", async () => {
+      const port = await child((_req, res) => {
+        res.statusCode = 204
+        res.setHeader("content-length", "1234")
+        res.end()
+      })
+      const res = await request(appFor(port)).get("/p/acme/")
+      expect(res.status).toBe(204)
+      expect(res.headers["content-length"]).toBeUndefined()
+      expect(res.text).toBe("")
+    })
+  })
+
   it("does not inject into a genuinely empty HTML body", async () => {
     const port = await child((_req, res) => {
       res.setHeader("content-type", "text/html; charset=utf-8")
