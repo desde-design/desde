@@ -1306,6 +1306,61 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     })
   })
 
+  /**
+   * A rebuild has to reach an open page. The build change bus is keyed by
+   * DEPLOYMENT id, so a stream following the old deployment has nothing
+   * subscribed that a new one would fire — and the old deployment's process
+   * need never transition again (a rebuild keeps one previous checkout, so
+   * it is not even retired). Before this, only a full reload or a second
+   * rebuild got the page off the old body. The heartbeat tick re-reads the
+   * project, so the change is picked up with no event at all.
+   */
+  it("follows a rebuild: a new active deployment is picked up with no process event", async () => {
+    const fake = fakePrototypeProcesses()
+    const ctx = setup({ prototypeProcesses: fake, prototypeOriginStreamPingMs: 20 })
+    const project = await seedProject(ctx.storage)
+    const firstDeployment = await makeServerDeployment(ctx, project)
+    const running: ProcessStatus = {
+      state: "running",
+      port: 4321,
+      since: "2026-09-11T00:03:00.000Z",
+      generation: 1,
+    }
+    let secondDeployment = ""
+
+    const { received, destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 2, {
+      onFirstByte: () => {
+        void (async () => {
+          const deployment = await ctx.storage.createDeployment({
+            projectId: project.id,
+            status: "deployed",
+          })
+          await ctx.storage.updateDeployment(deployment.id, {
+            serve: "server",
+            serverStart: ["node", "server.js"],
+          })
+          fake.setStatus(deployment.id, running)
+          await ctx.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
+          secondDeployment = deployment.id
+        })()
+      },
+    })
+
+    await vi.waitFor(() => {
+      expect(secondDeployment).not.toBe("")
+      expect(fake.subscribers.get(firstDeployment)?.size ?? 0).toBe(0)
+      expect(fake.subscribers.get(secondDeployment)?.size ?? 0).toBe(1)
+    })
+    destroy()
+
+    const frames = originFrames(received) as { origin?: string; process?: ProcessStatus }[]
+    expect(frames).toHaveLength(2)
+    // The new deployment's own listener, and the new deployment's own
+    // process — not a patch of the old body.
+    expect(frames[1]?.origin).not.toBe(frames[0]?.origin)
+    expect(frames[1]?.process).toEqual(running)
+  })
+
   it("unsubscribes from the process manager when the client disconnects", async () => {
     const fake = fakePrototypeProcesses()
     const ctx = setup({ prototypeProcesses: fake })

@@ -707,6 +707,33 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
       send(current)
     }
 
+    /**
+     * The heartbeat tick's own work: has anything changed that no callback
+     * would have told this connection about?
+     *
+     * Two things can. The active deployment can change under the stream — a
+     * rebuild publishes a new one, and the build change bus is keyed by
+     * DEPLOYMENT id, so there is no project-level subscription to receive.
+     * The old deployment need never transition again either (a rebuild keeps
+     * one previous checkout, so it is not even retired), which is why
+     * `handleProcessStatus` cannot be the only place that notices. And the
+     * process status can change with the clock alone — see
+     * `resendIfProcessChanged`.
+     *
+     * Runs through the same queue the status callbacks do, so a tick and a
+     * callback can never both be half way through a deployment change.
+     */
+    const pollForChanges = async (): Promise<void> => {
+      if (closed) return
+      const freshProject = await deps.storage.getProject(project.id)
+      if (closed || !freshProject) return
+      if ((freshProject.activeDeploymentId ?? null) !== current.deploymentId) {
+        await refollowActiveDeployment(freshProject)
+        return
+      }
+      resendIfProcessChanged()
+    }
+
     if (current.deploymentId && current.body.serve === "server") {
       subscribeToProcess(current.deploymentId)
     }
@@ -714,7 +741,7 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     heartbeat = setInterval(() => {
       if (closed) return
       res.write(": ping\n\n")
-      resendIfProcessChanged()
+      enqueue(pollForChanges)
     }, pingMs)
   })
 
