@@ -39,6 +39,8 @@ docker run -d --name desde-viewer -p 3100:3100 -p 127.0.0.1:3101-3120:3101-3120 
 
 The second `-p` publishes the twenty ports prototypes open on (`VIEWER_LOOPBACK_PORT_RANGE`, defaulted from `PORT` inside a container); without it a prototype's page never loads and the review screen names this flag. The `127.0.0.1:` prefix on it keeps those ports on your own machine, which is where a prototype port belongs: a prototype listener has no sign-in of its own, so anyone who can reach the port can open the prototype.
 
+If you run the container with `--network host` instead, set `VIEWER_LOOPBACK_BIND=loopback`. Docker ignores `-p` on host networking, so the container's ports already face the network directly, and the container's own loopback is already your machine's loopback. Without that setting the viewer widens the bind for a normal published container, which on host networking would put every prototype on the network with no sign-in at all.
+
 Then open http://localhost:3100 and follow the one-time sign-in link the
 container prints (`docker logs desde-viewer`). Everything below is the
 from-source path, which is what the image is built from.

@@ -10,7 +10,7 @@
 
 import { createPrivateKey } from "node:crypto"
 import { loadRuntimeConfig } from "./runtime-config"
-import { isLikelyContainerized } from "./serve/container-detect"
+import { isLikelyContainerized, isLikelyHostNetworking } from "./serve/container-detect"
 
 /**
  * Only `selfhost` ships. The type stays a union of one so the profile
@@ -47,6 +47,29 @@ export type ViewerDevBundler = "turbopack" | "webpack"
  *   actually reads.
  */
 export type ViewerLoopbackListenersMode = "auto" | "on" | "off"
+
+/**
+ * Whether a loopback listener binds every interface (`0.0.0.0`) instead of
+ * loopback alone, from `VIEWER_LOOPBACK_BIND`. Default `"auto"`.
+ *
+ * This exists because container detection alone is not enough. `docker run
+ * --network host` still makes `isLikelyContainerized()` return true, but
+ * host networking means the container's loopback IS the host's loopback —
+ * so widening the bind there is both unnecessary and a real exposure: the
+ * ports would face the LAN directly, since `--network host` ignores `-p`.
+ *
+ * - `"loopback"` — always bind loopback alone. Use this on `--network host`.
+ * - `"all"` — always bind every interface. Use this for a bridged container
+ *   whose runtime this heuristic does not recognise.
+ * - `"auto"` — bind every interface only when the process is ACTUALLY in a
+ *   container (`isLikelyContainerized()`) AND host networking is not
+ *   detected (`isLikelyHostNetworking()`, `serve/container-detect.ts`). See
+ *   `ViewerConfig.loopbackBindAllInterfaces`, the boolean this resolves to.
+ *
+ * `"off"` for `VIEWER_LOOPBACK_LISTENERS` always wins over this: no listener
+ * opens at all, so there is nothing to bind either way.
+ */
+export type ViewerLoopbackBindMode = "auto" | "loopback" | "all"
 
 export interface ViewerConfig {
   profile: ViewerProfile
@@ -287,6 +310,15 @@ export interface ViewerConfig {
    * `"on"` forced by an operator on a real laptop is also false: forcing
    * listeners open is not the same statement as forcing the wildcard bind,
    * and only the second one is safe to infer from the first.
+   *
+   * Directly controllable with `VIEWER_LOOPBACK_BIND` (codex round 6, Fix 1):
+   * `"loopback"` forces this false and `"all"` forces it true (except under
+   * `VIEWER_LOOPBACK_LISTENERS=off`, where it stays false because no
+   * listener opens). The default, `"auto"`, is the container check above,
+   * narrowed by `!isLikelyHostNetworking()` — a `--network host` container
+   * shares the host's own loopback, so it does not need the wildcard bind
+   * and widening it there would face the ports at the LAN directly. See
+   * `ViewerLoopbackBindMode`.
    */
   loopbackBindAllInterfaces: boolean
 }
@@ -294,6 +326,7 @@ export interface ViewerConfig {
 const PROFILES: ViewerProfile[] = ["selfhost"]
 const DEV_BUNDLERS: ViewerDevBundler[] = ["turbopack", "webpack"]
 const LOOPBACK_LISTENERS_MODES: ViewerLoopbackListenersMode[] = ["auto", "on", "off"]
+const LOOPBACK_BIND_MODES: ViewerLoopbackBindMode[] = ["auto", "loopback", "all"]
 
 /**
  * Parses the allowlist. An entry containing `@` is an exact address; anything
@@ -526,10 +559,12 @@ function defaultLoopbackPortRange(port: number): { from: number; to: number } {
 }
 
 /**
- * `overrides.isLikelyContainerized` exists ONLY for tests: the real default
- * is the real `isLikelyContainerized` (`server/serve/container-detect.ts`),
- * which touches the actual filesystem. Injecting a stub here is what lets
- * the "auto" mode's tests assert a deterministic `loopbackAvailable` without
+ * `overrides.isLikelyContainerized` and `overrides.isLikelyHostNetworking`
+ * exist ONLY for tests: the real defaults are the real
+ * `isLikelyContainerized` and `isLikelyHostNetworking`
+ * (`server/serve/container-detect.ts`), which touch the actual filesystem.
+ * Injecting a stub here is what lets the "auto" mode's tests assert a
+ * deterministic `loopbackAvailable` / `loopbackBindAllInterfaces` without
  * depending on whether the machine running the suite happens to be a
  * container. Same shape as `buildHostAllowlist`'s options-bag second
  * parameter (`serve/host-allowlist.ts`) — an options bag rather than
@@ -537,7 +572,7 @@ function defaultLoopbackPortRange(port: number): { from: number; to: number } {
  */
 export function loadConfig(
   env: Partial<NodeJS.ProcessEnv> = process.env,
-  overrides: { isLikelyContainerized?: () => boolean } = {},
+  overrides: { isLikelyContainerized?: () => boolean; isLikelyHostNetworking?: () => boolean } = {},
 ): ViewerConfig {
   const profile = (env.VIEWER_PROFILE ?? "selfhost") as ViewerProfile
   if (!PROFILES.includes(profile)) {
@@ -611,13 +646,44 @@ export function loadConfig(
   const loopbackAvailable =
     loopbackListeners === "on" ? true : loopbackListeners === "off" ? false : !inContainer || loopbackPortRange !== null
 
-  // Whether to widen the bind to every interface — the SAME "actually in a
-  // container" question `actuallyInContainer` answers above, for the same
-  // reason: a published range only reaches the host once the listener also
-  // binds every interface, and that has to hold under BOTH "auto" and "on".
-  // See `ViewerConfig.loopbackBindAllInterfaces` for why this must not simply
-  // be "is a port range configured".
-  const loopbackBindAllInterfaces = actuallyInContainer
+  const loopbackBind = (env.VIEWER_LOOPBACK_BIND ?? "auto") as ViewerLoopbackBindMode
+  if (!LOOPBACK_BIND_MODES.includes(loopbackBind)) {
+    throw new Error(
+      `Unknown VIEWER_LOOPBACK_BIND "${loopbackBind}". Expected one of ` +
+        `${LOOPBACK_BIND_MODES.join(", ")}`,
+    )
+  }
+  // Host networking (`docker run --network host`) only ever matters for a
+  // process that was ACTUALLY detected as a container — a laptop is never
+  // "host networking", it just has no network namespace to share in the
+  // first place. Probed only there, both to keep the common case (no
+  // container) from touching `/proc/net/dev` at all and because that is the
+  // one case `ViewerLoopbackBindMode`'s "auto" doc comment promises.
+  const detectHostNetworking = overrides.isLikelyHostNetworking ?? isLikelyHostNetworking
+  const hostNetworking = actuallyInContainer ? detectHostNetworking() : false
+
+  // Whether to widen the bind to every interface.
+  //
+  // `"off"` wins over everything: no listener opens at all, so there is
+  // nothing to bind — `"all"` forced by hand must not widen a bind that
+  // never happens. `"loopback"` and `"all"` are then the operator's own
+  // statement, taken as given. `"auto"` is the SAME "actually in a
+  // container" question `actuallyInContainer` answers above, narrowed by
+  // `!hostNetworking`: a published range only reaches the host once the
+  // listener also binds every interface, and that has to hold under BOTH
+  // "auto" and "on" — UNLESS the container shares the host's network
+  // namespace already, in which case its own loopback already IS the host's,
+  // and widening the bind would face the ports at the LAN instead (codex
+  // round 6, Fix 1). See `ViewerConfig.loopbackBindAllInterfaces` for why the
+  // container question must not simply be "is a port range configured".
+  const loopbackBindAllInterfaces =
+    loopbackListeners === "off"
+      ? false
+      : loopbackBind === "loopback"
+        ? false
+        : loopbackBind === "all"
+          ? true
+          : actuallyInContainer && !hostNetworking
 
   const dataDir = env.VIEWER_DATA_DIR ?? ".desde-viewer"
   // Fallback source for `sessionSecret` and, when neither GitHub sign-in nor

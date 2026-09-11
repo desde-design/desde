@@ -110,6 +110,50 @@ describe("originModeBannerLines", () => {
     })
   })
 
+  /**
+   * Codex round 6, Fix 1. `loopbackBindAllInterfaces` means Docker publishes
+   * the ports, and an operator on `--network host` needs to be told to turn
+   * it off with `VIEWER_LOOPBACK_BIND=loopback` — the wildcard bind is
+   * unnecessary and a real exposure there, since host networking ignores
+   * `-p` and faces the ports at the LAN directly.
+   */
+  describe("loopback: the wide-bind line (VIEWER_LOOPBACK_BIND)", () => {
+    const WIDE_BIND_LINE =
+      "[viewer] Prototype ports bind every interface so Docker can publish them. On --network host " +
+      "set VIEWER_LOOPBACK_BIND=loopback."
+
+    it("prints the extra line when the bind is widened", () => {
+      const { lines } = originModeBannerLines({
+        publicUrl: "http://localhost:3100",
+        serveDomain: null,
+        loopbackAvailable: true,
+        loopbackPortRange: { from: 3101, to: 3120 },
+        loopbackBindAllInterfaces: true,
+      })
+      expect(lines).toContain(WIDE_BIND_LINE)
+    })
+
+    it("does NOT print the line when the bind is not widened (a laptop)", () => {
+      const { lines } = originModeBannerLines({
+        publicUrl: "http://localhost:3100",
+        serveDomain: null,
+        loopbackAvailable: true,
+      })
+      expect(lines).not.toContain(WIDE_BIND_LINE)
+    })
+
+    it("does NOT print the line when loopbackBindAllInterfaces is explicitly false (VIEWER_LOOPBACK_BIND=loopback)", () => {
+      const { lines } = originModeBannerLines({
+        publicUrl: "http://localhost:3100",
+        serveDomain: null,
+        loopbackAvailable: true,
+        loopbackPortRange: { from: 3101, to: 3120 },
+        loopbackBindAllInterfaces: false,
+      })
+      expect(lines).not.toContain(WIDE_BIND_LINE)
+    })
+  })
+
   it("subdomain: names the configured serve domain, scheme taken from publicUrl", () => {
     expect(
       originModeBannerLines({

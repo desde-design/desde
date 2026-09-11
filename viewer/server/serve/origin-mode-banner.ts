@@ -166,6 +166,17 @@ export function originModeBannerLines(
                 `-p 127.0.0.1:${range.from}-${range.to}:${range.from}-${range.to}`,
             ]
           : []),
+        // Codex round 6, Fix 1. `loopbackBindAllInterfaces` means the socket
+        // is on every interface, not just loopback — worth saying on its
+        // own, separate from the range line above, because a `--network
+        // host` operator needs the opposite of what that line recommends:
+        // turning the wide bind OFF, not publishing it.
+        ...(config.loopbackBindAllInterfaces
+          ? [
+              `[viewer] Prototype ports bind every interface so Docker can publish them. ` +
+                `On --network host set VIEWER_LOOPBACK_BIND=loopback.`,
+            ]
+          : []),
       ],
     }
   }

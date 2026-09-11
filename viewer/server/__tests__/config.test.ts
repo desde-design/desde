@@ -925,7 +925,10 @@ describe("loadConfig", () => {
     it("is true for a container detected under auto", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir() },
-        { isLikelyContainerized: () => true },
+        // No host networking: pinned explicitly rather than left to the real
+        // `/proc/net/dev` on whatever machine runs this suite (VIEWER_LOOPBACK_BIND
+        // task, codex round 6, Fix 1).
+        { isLikelyContainerized: () => true, isLikelyHostNetworking: () => false },
       )
       expect(config.loopbackListeners).toBe("auto")
       expect(config.loopbackBindAllInterfaces).toBe(true)
@@ -951,7 +954,7 @@ describe("loadConfig", () => {
     it("is true for VIEWER_LOOPBACK_LISTENERS=on inside an actually-detected container", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_LISTENERS: "on" },
-        { isLikelyContainerized: () => true },
+        { isLikelyContainerized: () => true, isLikelyHostNetworking: () => false },
       )
       expect(config.loopbackBindAllInterfaces).toBe(true)
     })
@@ -969,6 +972,80 @@ describe("loadConfig", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir() },
         { isLikelyContainerized: () => false },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(false)
+    })
+  })
+
+  /**
+   * `VIEWER_LOOPBACK_BIND` (codex round 6, Fix 1). `docker run --network
+   * host` still makes container detection succeed, but host networking
+   * means the container's loopback IS the host's loopback, so `auto`'s
+   * container-implies-wildcard-bind rule is wrong there — the fix is an
+   * explicit control, plus a safer `auto` default that probes for host
+   * networking (`isLikelyHostNetworking`, `container-detect.ts`) before
+   * widening the bind.
+   */
+  describe("VIEWER_LOOPBACK_BIND", () => {
+    it("rejects an unknown VIEWER_LOOPBACK_BIND value", () => {
+      expect(() =>
+        loadConfig({ VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "sometimes" }),
+      ).toThrow(/Unknown VIEWER_LOOPBACK_BIND/)
+    })
+
+    it("auto: a container WITHOUT host networking still binds every interface", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "auto" },
+        { isLikelyContainerized: () => true, isLikelyHostNetworking: () => false },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(true)
+    })
+
+    it("auto: a container WITH host networking (--network host) stays on loopback", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "auto" },
+        { isLikelyContainerized: () => true, isLikelyHostNetworking: () => true },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(false)
+    })
+
+    it("auto: never probes host networking outside a container", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "auto" },
+        {
+          isLikelyContainerized: () => false,
+          isLikelyHostNetworking: () => {
+            throw new Error("must not be called when no container was detected")
+          },
+        },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(false)
+    })
+
+    it("loopback: stays on loopback even inside a container", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "loopback" },
+        { isLikelyContainerized: () => true, isLikelyHostNetworking: () => false },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(false)
+    })
+
+    it("all: binds every interface on a plain laptop (not a container)", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "all" },
+        { isLikelyContainerized: () => false },
+      )
+      expect(config.loopbackBindAllInterfaces).toBe(true)
+    })
+
+    it("all: stays false under VIEWER_LOOPBACK_LISTENERS=off, since no listener opens", () => {
+      const config = loadConfig(
+        {
+          VIEWER_DATA_DIR: tmpViewerDataDir(),
+          VIEWER_LOOPBACK_BIND: "all",
+          VIEWER_LOOPBACK_LISTENERS: "off",
+        },
+        { isLikelyContainerized: () => true },
       )
       expect(config.loopbackBindAllInterfaces).toBe(false)
     })
