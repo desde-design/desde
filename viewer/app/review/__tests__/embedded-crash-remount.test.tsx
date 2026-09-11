@@ -62,6 +62,9 @@ const RUNNING_GENERATION_2: ProcessStatus = {
   generation: 2,
 }
 
+/** The same child as `RUNNING_GENERATION_2`, still coming up. */
+const STARTING_GENERATION_2: ProcessStatus = { state: "starting", generation: 2 }
+
 const PERMANENT_CRASH: ProcessStatus = {
   state: "crashed",
   exitCode: 1,
@@ -168,6 +171,29 @@ describe("review shell — following the process-state stream", () => {
     const after = frame()
     expect(after, "no iframe rendered after the restart").not.toBeNull()
     expect(after).not.toBe(before)
+  })
+
+  /**
+   * A cold start is ONE new child, so it is one remount. The status used to
+   * carry no generation while `starting`, so the shell keyed that body on
+   * the constant `"static"`: the frame remounted when the start began and
+   * again when it finished, and the second remount threw away the frame that
+   * had just loaded the app it was waiting for.
+   */
+  it("does not remount the frame when the child it is waiting on comes up", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+
+    pushOrigin(STARTING_GENERATION_2)
+    const starting = frame()
+    expect(starting, "no iframe rendered while the process was starting").not.toBeNull()
+
+    pushOrigin(RUNNING_GENERATION_2)
+    expect(frame(), "the frame remounted for the child it was already waiting on").toBe(starting)
   })
 
   it("shows the crashed panel for a crashed body, without refreshing the page", () => {

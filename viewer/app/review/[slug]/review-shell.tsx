@@ -258,9 +258,15 @@ export function ReviewShell({
    * it means React discards that DOM node and mounts a fresh one, whose own
    * request is what the viewer starts the child for.
    *
+   * `starting` counts as the same child as the `running` that follows it,
+   * and carries the same generation. Keying it on the constant instead meant
+   * a cold start remounted the frame twice: once when the start began, and
+   * again when it finished, discarding the frame that had just loaded.
+   *
    * A constant for everything else — a static prototype, and a server one
-   * that is not running — because there is no child whose identity could have
-   * changed. It is a string, so it can never collide with a generation.
+   * that is stopped or crashed — because there is no child whose identity
+   * could have changed. It is a string, so it can never collide with a
+   * generation.
    *
    * The `typeof` guard is for a body from an older server that reports a
    * running process with no generation on it: without it the key would be
@@ -268,7 +274,7 @@ export function ReviewShell({
    */
   const frameGeneration: BridgeGeneration =
     liveOrigin.serve === "server" &&
-    liveProcess?.state === "running" &&
+    (liveProcess?.state === "running" || liveProcess?.state === "starting") &&
     typeof liveProcess.generation === "number"
       ? liveProcess.generation
       : "static"

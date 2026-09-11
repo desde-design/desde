@@ -38,7 +38,20 @@ import type { Deployment } from "../storage/types"
  */
 export type ProcessStatus =
   | { state: "stopped" }
-  | { state: "starting" }
+  | {
+      state: "starting"
+      /**
+       * The generation of the child that is coming up. Same counter, and the
+       * same purpose, as the one on `running` below.
+       *
+       * It is on this state too because a cold start is ONE new child: the
+       * page keys its frame on the generation, so `starting` and the
+       * `running` that follows it must agree, or the frame is thrown away
+       * and remounted the moment the app it was waiting for finishes
+       * loading.
+       */
+      generation: number
+    }
   | {
       state: "running"
       port: number
@@ -405,7 +418,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       case "idle":
         return { state: "stopped" }
       case "starting":
-        return { state: "starting" }
+        return { state: "starting", generation: record.state.generation }
       case "running":
         return {
           state: "running",
