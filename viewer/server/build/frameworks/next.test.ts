@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { NEXT_ADAPTER } from "./next"
-import { inspectBuild } from "./index"
+import { inspectBuild, ADAPTERS } from "./index"
 
 /**
  * Detection reads what the build WROTE, never the config: `out/` means a
@@ -65,5 +65,24 @@ describe("inspectBuild", () => {
   })
   it("returns the first adapter's answer", async () => {
     expect((await inspectBuild(await checkout({ buildId: true }), "dist")).kind).toBe("server")
+  })
+  it("recognises a Nuxt server checkout through the default ADAPTERS", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fw-nuxt-"))
+    try {
+      await writeFile(
+        join(root, "package.json"),
+        JSON.stringify({ name: "x", dependencies: { nuxt: "^3.0.0" } }),
+      )
+      await mkdir(join(root, ".output", "server"), { recursive: true })
+      await writeFile(join(root, ".output", "server", "index.mjs"), "export default null")
+      const result = await inspectBuild(root, "dist", ADAPTERS)
+      expect(result).toEqual({
+        kind: "server",
+        start: ["node", ".output/server/index.mjs"],
+        reason: "Nuxt with a server build",
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })
