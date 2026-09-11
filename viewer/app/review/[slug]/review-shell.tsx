@@ -50,7 +50,7 @@ import {
   type PrototypeEmbedTarget,
 } from "../../prototype-origin"
 import { resolveAuthor, saveReviewerIdentity } from "../reviewer-identity"
-import { useViewerBridge } from "../use-viewer-bridge"
+import { useViewerBridge, type BridgeGeneration } from "../use-viewer-bridge"
 import { DeploymentsPanel } from "../deployments-panel"
 import { AccountMenu } from "../../account-menu"
 import { failureMessage } from "../../api-client"
@@ -72,8 +72,8 @@ import type { DeploymentServe } from "../../../server/storage/types"
 import { decidePrototypeEmbed } from "./prototype-embed-decision"
 import { PrototypeUnavailable } from "./prototype-unavailable"
 import { PORT_WATCHDOG_MS, shouldWarnPortUnreachable } from "../port-watchdog"
-import { useProcessRecovery } from "../use-process-recovery"
-import { useRouterRefresh } from "../use-router-refresh"
+import { useLivePrototypeOrigin } from "../use-live-prototype-origin"
+import type { ReviewEmbedOrigin } from "./prototype-origin-response"
 
 export interface ReviewShellProject {
   id: string
@@ -195,17 +195,83 @@ export function ReviewShell({
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
   /**
+   * The prototype-origin body the SERVER rendered this page with. It is the
+   * answer until the live stream below sends its first one, which it does on
+   * connect — so this is what the first paint uses, not a blank.
+   */
+  const initialOrigin: ReviewEmbedOrigin = useMemo(
+    () => ({
+      mode: project.mode,
+      origin: project.prototypeOrigin,
+      serve: project.serve,
+      process: project.process,
+      range: project.range,
+      ...(project.originReason ? { reason: project.originReason } : {}),
+      ...(project.bridgeAssetPath ? { bridgeAssetPath: project.bridgeAssetPath } : {}),
+    }),
+    [
+      project.mode,
+      project.prototypeOrigin,
+      project.serve,
+      project.process,
+      project.range,
+      project.originReason,
+      project.bridgeAssetPath,
+    ],
+  )
+
+  /**
+   * The same answer, followed live over server-sent events.
+   *
+   * This replaces four separate patches on a value that used to be resolved
+   * once and never change: a poll while the crashed panel was up, a second
+   * poll while the frame was embedded, a `router.refresh()` from each, and a
+   * frame-epoch counter to force the iframe to remount because a refresh
+   * alone left React holding the same DOM node. Codex rounds 2, 4, 5 and 7
+   * each found a defect in one of those pieces. The server pushes the body
+   * now, and the decision below is simply recomputed from it.
+   */
+  const liveOrigin = useLivePrototypeOrigin(project.id, initialOrigin)
+
+  /**
    * What the iframe slot shows for THIS prototype right now — the frame
    * itself, or a panel explaining why not. See `decidePrototypeEmbed`'s own
    * doc comment for the three reasons a server prototype cannot be embedded.
    */
   const embed = decidePrototypeEmbed({
-    mode: project.mode,
-    serve: project.serve,
-    process: project.process,
-    reason: project.originReason,
-    range: project.range,
+    mode: liveOrigin.mode,
+    serve: liveOrigin.serve,
+    process: liveOrigin.process,
+    reason: liveOrigin.reason,
+    range: liveOrigin.range,
   })
+
+  // Named `liveProcess`, not `process` — this component is server-rendered
+  // too, where `process` is the Node global.
+  const liveProcess = liveOrigin.process
+  /**
+   * The iframe's `key`, and the whole of the remount mechanism.
+   *
+   * `generation` increments in the process manager on every spawn, so a new
+   * one IS a new child, and a new child needs a new frame: the old one is
+   * showing whatever the proxy answered while the child was down. Keying on
+   * it means React discards that DOM node and mounts a fresh one, whose own
+   * request is what the viewer starts the child for.
+   *
+   * A constant for everything else — a static prototype, and a server one
+   * that is not running — because there is no child whose identity could have
+   * changed. It is a string, so it can never collide with a generation.
+   *
+   * The `typeof` guard is for a body from an older server that reports a
+   * running process with no generation on it: without it the key would be
+   * `undefined`, which React silently replaces with the child's index.
+   */
+  const frameGeneration: BridgeGeneration =
+    liveOrigin.serve === "server" &&
+    liveProcess?.state === "running" &&
+    typeof liveProcess.generation === "number"
+      ? liveProcess.generation
+      : "static"
 
   /**
    * The one resolved answer to "where is this prototype, and how contained".
@@ -248,6 +314,7 @@ export function ReviewShell({
 
   const {
     bridgeReadyEpoch,
+    bridgeReadyGeneration,
     pinClick,
     clearPinClick,
     draft,
@@ -263,68 +330,12 @@ export function ReviewShell({
     inspection,
     activateInspector,
     deactivateInspector,
-  } = useViewerBridge(iframeRef, { prototypeOrigin: bridgeOrigin, mode: project.mode })
-
-  /**
-   * Codex round 4, Fix 2. `embed` above is resolved SERVER-SIDE, once, in
-   * `page.tsx` — so on a normal first visit to a server prototype, the
-   * server-rendered `process` is `stopped`, and the iframe's OWN request is
-   * what triggers `ensure()` on the viewer. If that start fails, or the
-   * child crashes later, the proxy's 503 response lands INSIDE the iframe:
-   * nothing in this shell notices, `project.process` never changes, and
-   * `PrototypeUnavailable`'s own recovery poll (below, `mode:
-   * "crashed-panel"`) is not even mounted, because no crashed panel is
-   * showing — the reader is left looking at a broken frame until they
-   * reload by hand.
-   *
-   * This is the other `useProcessRecovery` call site: active only while a
-   * SERVER deployment is actually embedded as a frame, polling the same
-   * route and refreshing the moment the polled status says the process has
-   * crashed — `shouldRefreshWhileEmbedded`, not `shouldRefreshAfterPoll`, so
-   * an unrecognised body does nothing instead of refreshing in a loop. The
-   * server-rendered page then re-resolves `decidePrototypeEmbed` from the
-   * fresh process status and shows the crashed panel (or a fresh working
-   * frame, if the crash already cleared).
-   *
-   * Codex round 5, Fix 1. `router.refresh()` alone was not enough for a
-   * RETRYABLE crash: the server render still answers `embed` (a retryable
-   * crash keeps `decidePrototypeEmbed` on the embed branch), so the iframe's
-   * `src` and identity stay unchanged and React keeps the same DOM node —
-   * the one already showing the proxy's error page. No new request ever
-   * reached the proxy, `ensure()` was never called again, and the poll kept
-   * seeing `crashed` forever.
-   *
-   * `frameEpoch` fixes that: it is bumped on every embedded crash and passed
-   * to the iframe as `key`, so React unmounts the stale frame and mounts a
-   * fresh one — a brand new DOM node, whose own request is what calls
-   * `ensure()` and restarts the child within the budget. The router refresh
-   * still runs alongside it, for the crash that is past the budget: that one
-   * needs the SERVER render to swap in the crashed panel, which a remounted
-   * iframe alone cannot do.
-   *
-   * Codex round 7, Fix 5. `frameEpoch` alone fixed the STALE FRAME, not the
-   * LOADING OVERLAY. `prototypeVisible` (below) also reads `bridgeReadyEpoch`,
-   * and that counter only ever goes up — it is never reset. So after a
-   * remount the REPLACEMENT frame is a cold start with no bridge yet, but
-   * `bridgeReadyEpoch` was already positive from the OLD frame, and the
-   * overlay never came back to say so. `epochAtRemount` records what the
-   * epoch WAS at the moment of THIS remount, so `prototypeVisible` can ask
-   * "has the epoch grown PAST that point" instead of merely "is it
-   * positive".
-   */
-  const [frameEpoch, setFrameEpoch] = useState(0)
-  const [epochAtRemount, setEpochAtRemount] = useState(0)
-  const refreshRouterOnEmbeddedCrash = useRouterRefresh()
-  const recoverFromEmbeddedCrash = useCallback(() => {
-    setFrameEpoch((epoch) => epoch + 1)
-    setEpochAtRemount(bridgeReadyEpoch)
-    refreshRouterOnEmbeddedCrash()
-  }, [refreshRouterOnEmbeddedCrash, bridgeReadyEpoch])
-  useProcessRecovery({
-    active: embed.kind === "embed" && project.serve === "server",
-    projectId: project.id,
-    onShouldRefresh: recoverFromEmbeddedCrash,
-    mode: "embedded",
+  } = useViewerBridge(iframeRef, {
+    prototypeOrigin: bridgeOrigin,
+    mode: project.mode,
+    // Stamps the handshake with the frame it belongs to, so the loading
+    // overlay below can tell THIS frame's hello from the one it replaced.
+    generation: frameGeneration,
   })
 
   /**
@@ -462,15 +473,19 @@ export function ReviewShell({
    */
   const [prototypeLoaded, setPrototypeLoaded] = useState(false)
   /**
-   * `frameEpoch` (above) remounts the iframe on an embedded retryable crash —
-   * a fresh DOM node, presumed unloaded again. Without this, `prototypeLoaded`
-   * would still read `true` from the frame that just crashed, and the
-   * "Loading" overlay (below) would never come back for the replacement while
-   * it cold-starts.
+   * A new `frameGeneration` (above) remounts the iframe — a fresh DOM node,
+   * presumed unloaded again. Without this, `prototypeLoaded` would still read
+   * `true` from the frame the restart replaced, and the "Loading" overlay
+   * (below) would never come back while the new one cold-starts.
+   *
+   * An effect keyed on the generation rather than moving this state into a
+   * wrapper component around the iframe. Both work; this one leaves every
+   * other hook in this file in the position it already had, and a wrapper
+   * would have to forward the ref, the props and the `onLoad` for no gain.
    */
   useEffect(() => {
     setPrototypeLoaded(false)
-  }, [frameEpoch])
+  }, [frameGeneration])
   /**
    * The overlay clears on EITHER the iframe's own load event or the bridge
    * handshake, because the load event alone loses a race it cannot recover
@@ -496,14 +511,15 @@ export function ReviewShell({
    * overlay on `onLoad`, and a frame whose load event was missed still clears
    * on the handshake.
    *
-   * `bridgeReadyEpoch > epochAtRemount`, not `> 0` (codex round 7, Fix 5).
-   * The epoch only ever goes up, so `> 0` stayed true forever once ANY frame
-   * had ever said hello — including the frame a round-5 remount just
-   * replaced. Comparing against the epoch AT the remount asks "has the epoch
-   * grown past that point", which is false for a freshly remounted, not yet
-   * booted frame and true again the moment its own bridge says hello.
+   * `bridgeReadyGeneration === frameGeneration`, not a positive epoch (codex
+   * round 7, Fix 5). The epoch only ever goes up, so "is it positive" stayed
+   * true forever once ANY frame had said hello — including over the frame a
+   * restart had just replaced. The bridge hook stamps each handshake with the
+   * generation it arrived under, so this asks the only question that matters:
+   * has the frame ON SCREEN said hello. It is false for a freshly remounted,
+   * not yet booted frame, and true again the moment its own bridge speaks.
    */
-  const prototypeVisible = prototypeLoaded || bridgeReadyEpoch > epochAtRemount
+  const prototypeVisible = prototypeLoaded || bridgeReadyGeneration === frameGeneration
 
   /**
    * The port-unreachable watchdog's real signal: does the shell page's OWN
@@ -570,14 +586,14 @@ export function ReviewShell({
       controller.abort()
     }
   }, [project.mode, project.prototypeOrigin, project.bridgeAssetPath, watchdogMs])
-  // Codex round 7, Fix 5's `epochAtRemount` distinction does not apply here.
-  // This asks "has the loopback port EVER answered through a bridge
-  // handshake" — a fact a later remount cannot make untrue, because the
-  // question is about the PORT, not about any one frame. And nothing here
-  // re-arms on remount in the first place: the probe effect above depends on
+  // Codex round 7, Fix 5's per-frame distinction does not apply here. This
+  // asks "has the loopback port EVER answered through a bridge handshake" — a
+  // fact a later remount cannot make untrue, because the question is about the
+  // PORT, not about any one frame. And nothing here re-arms on remount in the
+  // first place: the probe effect above depends on
   // `project.mode`/`project.prototypeOrigin`/`project.bridgeAssetPath`/
-  // `watchdogMs`, never on `frameEpoch`. So this deliberately stays "ever
-  // ready" (`> 0`), unlike `prototypeVisible`.
+  // `watchdogMs`, never on the generation. So this deliberately reads the raw
+  // epoch (`> 0`), unlike `prototypeVisible`.
   const portWarning = shouldWarnPortUnreachable({
     mode: project.mode,
     bridgeReady: bridgeReadyEpoch > 0,
@@ -812,7 +828,7 @@ export function ReviewShell({
   // (including re-handshakes after an iframe reload) or the visible set
   // changes (new comment, resolve toggle, show-resolved filter).
   //
-  // Codex round 7, Fix 5's `epochAtRemount` distinction does not apply here
+  // Codex round 7, Fix 5's per-frame distinction does not apply here
   // either, for the opposite reason from `portWarning` above: this effect
   // needs "ready NOW", and it already has it. `bridgeReadyEpoch` — the raw
   // counter, not a derived boolean — is a dependency, so a fresh hello after
@@ -1213,14 +1229,15 @@ export function ReviewShell({
         {embed.kind === "embed" ? (
           <>
             <iframe
-              // `frameEpoch`, not the default reconciliation-by-position: a
-              // retryable crash bumps it (see `recoverFromEmbeddedCrash`
-              // above) specifically to force React to discard this DOM node
-              // and mount a fresh one, whose own request restarts the child.
-              // Changing `iframeProps.src` alone would not do that — React
-              // only re-navigates a frame when the string itself changes,
-              // and after a crash it has not.
-              key={frameEpoch}
+              // `frameGeneration`, not the default reconciliation-by-
+              // position: the process manager increments the generation on
+              // every spawn, so a new one forces React to discard this DOM
+              // node and mount a fresh one, whose own request is what the
+              // viewer restarts the child for. Changing `iframeProps.src`
+              // alone would not do that — React only re-navigates a frame
+              // when the string itself changes, and across a restart it has
+              // not.
+              key={frameGeneration}
               ref={iframeRef}
               {...iframeProps}
               className="h-full w-full border-0"

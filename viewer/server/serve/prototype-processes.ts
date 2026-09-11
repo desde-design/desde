@@ -150,12 +150,11 @@ export interface PrototypeProcesses {
    * timeout), so the next `ensure` restarts it under the normal budget.
    *
    * `stop()` was the wrong call for this (codex round 5, Fix 2): it leaves
-   * the entry `stopped`, and the review page's embedded poll
-   * (`shouldRefreshWhileEmbedded`) only reacts to `crashed` — a `stopped`
-   * entry never told the reader anything was wrong, and the 502 page in the
-   * frame makes no further request on its own, so the process was never
-   * restarted without a manual reload. Recording `crashed` instead is what
-   * gets the reader an iframe remount.
+   * the entry `stopped`, which says the viewer put the child away on purpose.
+   * It did not — the child stopped answering. The reader's frame is showing a
+   * 502 page that makes no further request on its own, so the difference is
+   * what the review page tells them: a `crashed` status carries a reason and
+   * a `retryable` verdict, where `stopped` carries neither.
    *
    * If the entry is already `crashed` (the exit handler beat the proxy to
    * it, or a previous `markUnreachable` already ran), this leaves the status

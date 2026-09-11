@@ -1,26 +1,26 @@
 // @vitest-environment jsdom
 
 /**
- * Codex round 5, Fix 1 — a retryable crash noticed while a server
- * prototype's iframe is embedded must reload the FRAME, not only the page.
+ * The review shell follows the process-state stream, and the iframe is keyed
+ * on the process generation.
  *
- * `useProcessRecovery({ mode: "embedded" })` used to call only
- * `router.refresh()` on a retryable crash. The server render still answers
- * `embed` (the crash is retryable, so `decidePrototypeEmbed` keeps showing
- * the frame), and the iframe's `src` and identity are unchanged, so React
- * keeps the SAME DOM node — the one already showing the proxy's error page.
- * No new request ever reaches the proxy, `ensure()` is never called, and the
- * poll keeps seeing `crashed` forever.
+ * What this replaces: the shell used to resolve the process ONCE, server-side,
+ * then poll the plain prototype-origin route, call `router.refresh()` on a
+ * crash, and bump its own `frameEpoch` counter to force the frame to remount
+ * (because a refresh alone left React holding the same DOM node — the one
+ * already showing the proxy's error page). Codex rounds 2, 4, 5 and 7 each
+ * found a defect in one of those pieces.
  *
- * The fix: the shell keeps a `frameEpoch` counter and renders the iframe
- * with `key={frameEpoch}`. The embedded poll's callback bumps the epoch
- * (forcing React to unmount the old iframe and mount a fresh one, whose own
- * request restarts the child) AND still calls the router refresh, so a crash
- * that is past the restart budget still lands on the crashed panel once the
- * server re-renders.
+ * Now the server pushes a new body and the page re-decides from it:
  *
- * This test fails against the pre-fix code: the iframe DOM node identity
- * never changes, because nothing keys it.
+ * - a new `generation` on a running process is a NEW child, so the frame is
+ *   keyed on it and React discards the stale DOM node by itself;
+ * - a crashed body shows the crashed panel with no page refresh at all;
+ * - a running body after that shows the frame again.
+ *
+ * The loading overlay follows the same key: the bridge hook records the
+ * generation it said hello under, so a freshly mounted frame is "not visible
+ * yet" even though the frame it replaced had already announced itself.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -33,20 +33,42 @@ import {
   type FetchOverrideResult,
 } from "@/components/gallery/fetch-override"
 import { ReviewShell, type ReviewShellProject } from "../[slug]/review-shell"
+import { installFakeEventSource, openEventSources } from "./fake-event-source"
 import type { ProcessStatus } from "../../../server/serve/prototype-processes"
 
-// `useRouterRefresh` falls back to a no-op when there is no real Next App
-// Router context around the tree (see its own doc comment) — which is
-// exactly this render harness. Mocked here so the test can observe the
-// SAME callback's other half: that a retryable crash still asks the router
-// to refresh, alongside remounting the frame. `vi.hoisted` because the
-// factory below runs before this module's own top-level `const`s exist.
+// Mocked so the test can assert the router is NOT asked to refresh any more.
+// `useRouterRefresh` falls back to a no-op with no App Router context around
+// the tree, which would make "never called" true for the wrong reason.
+// `vi.hoisted` because the factory below runs before this module's own
+// top-level `const`s exist.
 const { refresh } = vi.hoisted(() => ({ refresh: vi.fn() }))
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh }),
 }))
 
 const PROJECT_ID = "proj-embedded-crash"
+
+const RUNNING_GENERATION_1: ProcessStatus = {
+  state: "running",
+  port: 4321,
+  since: "2026-09-10T00:00:00.000Z",
+  generation: 1,
+}
+
+const RUNNING_GENERATION_2: ProcessStatus = {
+  state: "running",
+  port: 4321,
+  since: "2026-09-10T00:02:00.000Z",
+  generation: 2,
+}
+
+const PERMANENT_CRASH: ProcessStatus = {
+  state: "crashed",
+  exitCode: 1,
+  restarts: 3,
+  reason: "The server kept exiting.",
+  retryable: false,
+}
 
 const PROJECT: ReviewShellProject = {
   id: PROJECT_ID,
@@ -60,16 +82,8 @@ const PROJECT: ReviewShellProject = {
   prototypeOrigin: "http://127.0.0.1:4321",
   mode: "loopback",
   serve: "server",
-  process: { state: "running", port: 4321, since: "2026-09-10T00:00:00.000Z", generation: 1 },
+  process: RUNNING_GENERATION_1,
   range: null,
-}
-
-const RETRYABLE_CRASH: ProcessStatus = {
-  state: "crashed",
-  exitCode: 1,
-  restarts: 1,
-  reason: "The server exited.",
-  retryable: true,
 }
 
 function loopbackBody(process: ProcessStatus): unknown {
@@ -81,9 +95,6 @@ const ROUTES: Record<string, FetchOverrideResult | (() => FetchOverrideResult)> 
   [`GET /api/v1/projects/${PROJECT_ID}/members`]: ok({ members: [] }),
   [`GET /api/v1/projects/${PROJECT_ID}/participants`]: ok({ participants: [] }),
   [`GET /api/v1/projects/${PROJECT_ID}`]: ok({ project: { id: PROJECT_ID, name: PROJECT.name } }),
-  // The embedded poll's route. Every call reports the crash — the point of
-  // this test is what the FIRST poll does, not the cadence.
-  [`GET /api/v1/projects/${PROJECT_ID}/prototype-origin`]: () => ok(loopbackBody(RETRYABLE_CRASH)),
 }
 
 function Scenario({ children }: { children: ReactNode }): ReactNode {
@@ -91,99 +102,151 @@ function Scenario({ children }: { children: ReactNode }): ReactNode {
   return children
 }
 
-afterEach(() => {
-  cleanup()
-  vi.useRealTimers()
-})
+/** The shell's own origin stream, as this test drives it. */
+function stream() {
+  const [source] = openEventSources("/prototype-origin/stream")
+  if (!source) throw new Error("the review shell opened no prototype-origin stream")
+  return source
+}
 
-/**
- * The bridge protocol's `BRIDGE_READY` handshake, as the shell's own message
- * listener (`use-viewer-bridge.ts`) would see it arrive from the real
- * iframe. Dispatched on `window`, not the iframe element, because that is
- * where the listener is attached; `source` has to be the iframe's own
- * `contentWindow` (the listener's identity gate) and `origin` has to match
- * `PROJECT.prototypeOrigin` (its origin gate).
- */
-function sendBridgeReady(iframe: HTMLIFrameElement): void {
+/** Push one `origin` event, the way the route sends it. */
+function pushOrigin(process: ProcessStatus): void {
   act(() => {
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        data: { source: "desde-bridge", type: "BRIDGE_READY" },
-        origin: PROJECT.prototypeOrigin as string,
-        source: iframe.contentWindow,
-      }),
-    )
+    stream().dispatch("origin", loopbackBody(process))
   })
 }
 
-describe("review shell — an embedded server prototype's retryable crash", () => {
-  it("remounts the iframe and refreshes the router on the first poll", async () => {
-    vi.useFakeTimers()
+/**
+ * The bridge protocol's `BRIDGE_READY`, as the shell's own listener
+ * (`use-viewer-bridge.ts`) would see it arrive from the real iframe.
+ * Dispatched on `window`, where the listener is attached; `source` has to be
+ * the iframe's own `contentWindow` (the identity gate) and `origin` has to
+ * match the prototype's origin (the origin gate).
+ *
+ * `source` is defined onto the event rather than passed to the constructor
+ * because jsdom refuses anything but a real `WindowProxy` in the init dict.
+ */
+function sendBridgeReady(iframe: HTMLIFrameElement): void {
+  const event = new MessageEvent("message", {
+    data: { source: "desde-bridge", type: "BRIDGE_READY" },
+    origin: PROJECT.prototypeOrigin as string,
+  })
+  Object.defineProperty(event, "source", { value: iframe.contentWindow })
+  act(() => {
+    window.dispatchEvent(event)
+  })
+}
+
+function frame(): HTMLIFrameElement | null {
+  return document.querySelector("iframe")
+}
+
+afterEach(() => {
+  cleanup()
+})
+
+describe("review shell — following the process-state stream", () => {
+  it("remounts the iframe when the process comes back under a new generation", () => {
+    installFakeEventSource()
     render(
       <Scenario>
         <ReviewShell project={PROJECT} />
       </Scenario>,
     )
 
-    const before = document.querySelector("iframe")
+    const before = frame()
     expect(before, "no iframe rendered — the shell changed shape").not.toBeNull()
 
-    // The embedded poll's fast cadence (`EMBEDDED_FAST_POLL_MS` in
-    // `use-process-recovery.ts`) is 5s.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_000)
-    })
+    // The same generation the page rendered under: nothing has restarted, so
+    // the frame must be left alone.
+    pushOrigin(RUNNING_GENERATION_1)
+    expect(frame(), "the frame remounted for a body that changed nothing").toBe(before)
 
-    const after = document.querySelector("iframe")
-    expect(after, "no iframe rendered after the poll").not.toBeNull()
-    // The DOM node itself must be a different object — a `src` that merely
-    // stayed the same string would not have re-fetched anything.
+    // A new child. The DOM node itself has to be a different object — a `src`
+    // that merely stayed the same string would re-fetch nothing.
+    pushOrigin(RUNNING_GENERATION_2)
+    const after = frame()
+    expect(after, "no iframe rendered after the restart").not.toBeNull()
     expect(after).not.toBe(before)
-    expect(refresh).toHaveBeenCalled()
+  })
+
+  it("shows the crashed panel for a crashed body, without refreshing the page", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+    expect(frame()).not.toBeNull()
+
+    pushOrigin(PERMANENT_CRASH)
+
+    expect(document.querySelector('[data-testid="prototype-crashed"]')).not.toBeNull()
+    expect(frame(), "the frame stayed up next to the crashed panel").toBeNull()
+    // The whole point of the stream: the panel swaps in from client state, so
+    // nothing asks Next to re-render the page.
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it("shows the frame again once the process is running after a crash", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+
+    pushOrigin(PERMANENT_CRASH)
+    expect(document.querySelector('[data-testid="prototype-crashed"]')).not.toBeNull()
+
+    pushOrigin(RUNNING_GENERATION_2)
+    expect(document.querySelector('[data-testid="prototype-crashed"]')).toBeNull()
+    expect(frame(), "the frame did not come back for the restarted process").not.toBeNull()
+    expect(refresh).not.toHaveBeenCalled()
   })
 
   /**
-   * Codex round 7, Fix 5. `prototypeVisible` used to be `prototypeLoaded ||
-   * bridgeReadyEpoch > 0`. `bridgeReadyEpoch` only ever goes up — it is never
-   * reset — so once the ORIGINAL frame's bridge had said hello even once,
-   * the loading overlay was gone for good: after a round-5 remount the
-   * REPLACEMENT frame is a cold start with no bridge yet, but
-   * `bridgeReadyEpoch` was already positive from the old frame, and the
-   * overlay never came back to say so.
-   *
-   * This test fails against the pre-fix code: the overlay stays hidden after
-   * the remount even though the new frame has said nothing yet.
+   * Codex round 7, Fix 5, carried over to the generation. `prototypeVisible`
+   * used to read a bridge-ready counter that only ever went up, so once the
+   * ORIGINAL frame's bridge had said hello the overlay was gone for good —
+   * including over a replacement frame that was still cold-starting. The
+   * bridge hook now records WHICH generation it said hello under, and the
+   * shell compares that against the generation on screen.
    */
-  it("shows the loading overlay again after a remount, even though the old frame's bridge had already said hello", async () => {
-    vi.useFakeTimers()
+  it("brings the loading overlay back for the replacement frame", () => {
+    installFakeEventSource()
     render(
       <Scenario>
         <ReviewShell project={PROJECT} />
       </Scenario>,
     )
 
-    const before = document.querySelector("iframe")
-    expect(before, "no iframe rendered — the shell changed shape").not.toBeNull()
-    expect(document.querySelector('[data-testid="prototype-loader"]'), "loader missing before any signal").not.toBeNull()
+    const before = frame()
+    expect(before).not.toBeNull()
+    expect(
+      document.querySelector('[data-testid="prototype-loader"]'),
+      "loader missing before any signal",
+    ).not.toBeNull()
 
-    // The original frame's bridge says hello, clearing the overlay.
     sendBridgeReady(before as HTMLIFrameElement)
-    expect(document.querySelector('[data-testid="prototype-loader"]'), "loader did not clear on BRIDGE_READY").toBeNull()
+    expect(
+      document.querySelector('[data-testid="prototype-loader"]'),
+      "loader did not clear on BRIDGE_READY",
+    ).toBeNull()
 
-    // The embedded poll's first tick remounts the frame (same trigger as the
-    // first test above).
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_000)
-    })
-
-    const after = document.querySelector("iframe")
+    pushOrigin(RUNNING_GENERATION_2)
+    const after = frame()
     expect(after).not.toBe(before)
-    // The replacement frame is a fresh cold start: nothing has loaded it and
-    // its own bridge has not said hello yet, so the overlay must be back —
-    // not stuck hidden on the strength of the OLD frame's epoch.
     expect(
       document.querySelector('[data-testid="prototype-loader"]'),
       "loader did not come back for the remounted frame",
     ).not.toBeNull()
+
+    // And it clears again on the NEW frame's own handshake.
+    sendBridgeReady(after as HTMLIFrameElement)
+    expect(
+      document.querySelector('[data-testid="prototype-loader"]'),
+      "loader did not clear for the replacement frame's own handshake",
+    ).toBeNull()
   })
 })

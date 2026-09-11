@@ -935,15 +935,15 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
             //
             // `markUnreachable`, not `stop` (codex round 5, Fix 2). `stop` would
             // overwrite the entry with a plain `stopped` status even when the
-            // child's own exit handler had already recorded `crashed` — and the
-            // review page's embedded poll (`shouldRefreshWhileEmbedded`) only
-            // reacts to `crashed`, never to `stopped`. A `stopped` entry told the
-            // reader nothing was wrong while the 502 page sitting in their iframe
-            // made no further request on its own, so the process stayed down
-            // until someone reloaded by hand. `markUnreachable` records a
-            // RETRYABLE `crashed` instead, so the next request's `ensure` (the
-            // page's own poll-triggered iframe remount) restarts it under the
-            // normal budget.
+            // child's own exit handler had already recorded `crashed` — and
+            // `stopped` says the viewer put the child away on purpose, which it
+            // did not. The 502 page sitting in the reader's iframe makes no
+            // further request on its own, so what the review page can say about
+            // the state is the whole signal: a `crashed` status carries a reason
+            // and a `retryable` verdict, where `stopped` carries neither.
+            // `markUnreachable` records a RETRYABLE `crashed`, so the next
+            // request's `ensure` (the frame the page remounts when the status
+            // changes) restarts it under the normal budget.
             //
             // Best effort: a call that rejects must not become an unhandled
             // rejection (which would take the process down), and the next

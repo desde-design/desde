@@ -5,10 +5,11 @@ import { useRouter } from "next/navigation"
 /**
  * `useRouter().refresh`, guarded against a missing Next App Router context.
  *
- * Split out of `[slug]/prototype-unavailable.tsx` (codex round 4, Fix 2) so
- * `review-shell.tsx` can call the SAME guarded refresh for its own
- * `useProcessRecovery({ mode: "embedded" })` call, instead of a second copy
- * of this guard drifting from the first.
+ * Its own module since codex round 4, Fix 2, when two call sites needed the
+ * same guarded refresh. One caller is left: the crashed panel's Rebuild
+ * control, which lands a NEW deployment and needs the server component to
+ * re-resolve. Process state is no longer refreshed this way at all — the
+ * review page follows it live (`use-live-prototype-origin.ts`).
  *
  * The guard itself: the gallery's registry sweep (`gallery/registry.test.tsx`)
  * renders review fixtures directly through React Testing Library — there is

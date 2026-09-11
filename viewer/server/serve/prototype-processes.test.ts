@@ -604,11 +604,11 @@ describe("createPrototypeProcesses", () => {
   /**
    * Codex round 5, Fix 2. `serve-router.ts`'s `onUnreachable` used to call
    * `stop()`, which overwrote the manager's status with `stopped` even when
-   * the child was genuinely down — and the review page's embedded poll
-   * (`shouldRefreshWhileEmbedded`) only reacts to `crashed`, never
-   * `stopped`, so nothing told the reader the process needed restarting.
-   * `markUnreachable` records a RETRYABLE `crashed` instead, so the next
-   * `ensure` restarts it under the normal budget — same as any other exit.
+   * the child was genuinely down — and `stopped` says the viewer put the
+   * child away on purpose, carrying neither a reason nor a `retryable`
+   * verdict for the review page to show. `markUnreachable` records a
+   * RETRYABLE `crashed` instead, so the next `ensure` restarts it under the
+   * normal budget — same as any other exit.
    */
   describe("markUnreachable", () => {
     it("on a running server, stops it and records a retryable crash", async () => {

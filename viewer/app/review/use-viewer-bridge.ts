@@ -80,11 +80,29 @@ const OPAQUE_ORIGIN = "null"
  * (`app/prototype-origin.ts`) is the function that reconciles the two, and it
  * is what `review-shell.tsx` passes here.
  */
+/**
+ * What a caller may key its frame on. A number is a running server
+ * prototype's process generation; the string is everything else (a static
+ * prototype, or a server prototype that is not running), which never remounts
+ * on its own.
+ */
+export type BridgeGeneration = number | string
+
 export interface ViewerBridgeEmbed {
   /** The frame's real origin, or `null` when it has none this shell can name. */
   prototypeOrigin: string | null
   /** The mode the server reported. A second gate on top of the origin. */
   mode: OriginMode
+  /**
+   * Which frame the caller has on screen — the review shell's iframe `key`,
+   * which is the server prototype's process generation while it is running
+   * and a constant otherwise.
+   *
+   * Only used to STAMP the handshake (`bridgeReadyGeneration` below). This
+   * hook decides nothing from it; the shell asks "did the frame I am showing
+   * say hello", and it can only ask that if the answer carries a generation.
+   */
+  generation?: BridgeGeneration
 }
 
 /**
@@ -120,6 +138,19 @@ export interface PinClick {
 export interface UseViewerBridgeResult {
   /** Increments each time the bridge reports BRIDGE_READY. Starts at 0. */
   bridgeReadyEpoch: number
+  /**
+   * The `generation` the caller passed when the bridge last said hello, or
+   * `undefined` until one has.
+   *
+   * It answers the one question the epoch above cannot: is the frame ON SCREEN
+   * RIGHT NOW the one that announced itself. The epoch only ever goes up, so
+   * once any frame had said hello it stayed positive forever — including over
+   * a replacement frame that had not booted yet, which is how the review
+   * page's loading overlay came to sit permanently hidden over a cold start
+   * (codex round 7, Fix 5). A caller compares this against the generation it
+   * is currently rendering; they differ for a frame that has not spoken yet.
+   */
+  bridgeReadyGeneration: BridgeGeneration | undefined
   /** Set from the bridge's COMMENT_PIN_CLICKED. */
   pinClick: PinClick | null
   clearPinClick: () => void
@@ -168,6 +199,9 @@ export function useViewerBridge(
   embed: ViewerBridgeEmbed,
 ): UseViewerBridgeResult {
   const [bridgeReadyEpoch, setBridgeReadyEpoch] = useState(0)
+  const [bridgeReadyGeneration, setBridgeReadyGeneration] = useState<
+    BridgeGeneration | undefined
+  >(undefined)
   const [pinClick, setPinClick] = useState<PinClick | null>(null)
   const [draft, setDraft] = useState<NewCommentDraft | null>(null)
   const [page, setPage] = useState<{ url: string; sourceFile?: string } | null>(null)
@@ -180,7 +214,7 @@ export function useViewerBridge(
   // the effect below that attaches the message listener and sends the PING.
   // The listener would be torn down and re-attached, and a fresh PING sent,
   // on every single render.
-  const { prototypeOrigin, mode } = embed
+  const { prototypeOrigin, mode, generation } = embed
 
   /**
    * The origin to pin, or `null` when there is none to pin.
@@ -286,6 +320,9 @@ export function useViewerBridge(
       switch (data.type) {
         case "BRIDGE_READY":
           setBridgeReadyEpoch((n) => n + 1)
+          // Stamped with the generation this listener was attached under, so
+          // the caller can tell THIS frame's hello from the one before it.
+          setBridgeReadyGeneration(generation)
           return
         case "COMMENT_PIN_CLICKED":
           setPinClick(data.payload as PinClick)
@@ -361,10 +398,17 @@ export function useViewerBridge(
     // re-attach — otherwise a stale closure would keep admitting the origin
     // the frame used to be on. `post` already depends on it, so in practice
     // the two move together; it is listed for the closure, not for `post`.
-  }, [iframeRef, post, pinnedOrigin])
+    //
+    // `generation` is read by the listener too, and re-attaching on it is
+    // wanted rather than tolerated: the caller changes it precisely when it
+    // has swapped the frame, and a fresh frame needs the PING above for the
+    // same reason the first one did — its own `BRIDGE_READY` may have fired
+    // before this listener existed.
+  }, [iframeRef, post, pinnedOrigin, generation])
 
   return {
     bridgeReadyEpoch,
+    bridgeReadyGeneration,
     pageBackground,
     pinClick,
     clearPinClick: useCallback(() => setPinClick(null), []),

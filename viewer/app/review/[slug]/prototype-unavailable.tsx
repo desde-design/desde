@@ -23,7 +23,6 @@ import { fetchJson } from "../../api-client"
 import { shouldRefreshAfterRebuild } from "../rebuild-refresh"
 import { useBuildAccess } from "../use-build-access"
 import { useBuildControls } from "../use-build-controls"
-import { useProcessRecovery } from "../use-process-recovery"
 import { useRouterRefresh } from "../use-router-refresh"
 import type { PrototypeEmbed } from "./prototype-embed-decision"
 
@@ -46,29 +45,13 @@ export function PrototypeUnavailable({
   canManage,
   hasRepo,
 }: PrototypeUnavailableProps) {
-  // Codex round 2, item 2. `embed` was resolved server-side, once, in
-  // `page.tsx` — but `prototype-processes.ts`'s restart budget is a moving
-  // five-minute window, so a crash that was not retryable at render time can
-  // become retryable a minute later with nothing on this page aware of it.
-  // This polls the same route `page.tsx` reads server-side and refreshes the
-  // page the moment the manager's own answer changes, so a reader is never
-  // stuck looking at a stale crash panel for longer than one poll interval.
-  // `active` only while the crash panel is actually showing: hooks run on
-  // every render regardless of `embed.kind` (the rules of hooks forbid
-  // calling this conditionally), so the on/off switch has to be a parameter
-  // instead of a mount/unmount.
-  //
-  // Runs for every reader of this panel, not only a manager — the route is
-  // one any project reader may call, and `CrashedControls` below (Rebuild,
-  // the server log) is deliberately canManage-only, a narrower gate than
-  // this recovery poll needs.
-  const refreshRouter = useRouterRefresh()
-  useProcessRecovery({
-    active: embed.kind === "crashed",
-    projectId,
-    onShouldRefresh: refreshRouter,
-  })
-
+  // No recovery poll of its own any more. This panel used to poll the
+  // prototype-origin route while a crash was on screen and refresh the page
+  // when the manager's answer changed — because `embed` was resolved once,
+  // server-side, and the restart budget is a moving five-minute window that
+  // nothing on the page could see age out. `review-shell.tsx` now follows the
+  // process state over server-sent events and re-decides `embed` from it, so
+  // this panel gives way to a frame on its own, with no page refresh.
   switch (embed.kind) {
     case "needs-origin":
       return (

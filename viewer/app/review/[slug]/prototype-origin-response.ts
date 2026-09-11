@@ -7,9 +7,9 @@
  * much as a pure function from it would drag the whole file — and those two
  * modules — into the client bundle. Confirmed with `next build --webpack`:
  * "You're importing a module that depends on next/headers into a React
- * Client Component module." `use-process-recovery.ts` needs this exact
- * parser client-side (it polls the same route while a crashed panel is on
- * screen), so the parser lives here instead, with only TYPE imports —
+ * Client Component module." `use-live-prototype-origin.ts` needs this exact
+ * parser client-side (it reads the same body off the route's event stream),
+ * so the parser lives here instead, with only TYPE imports —
  * `OriginMode`, `ProcessStatus`, `DeploymentServe` — which TypeScript erases
  * entirely at compile time and cost the client bundle nothing.
  *

@@ -11,6 +11,7 @@ import {
   sampleRunningBuildSteps,
   sampleDeployment,
 } from "../harness/fixture-data"
+import { emitNamedEvent, hasOpenStream } from "../harness/fake-event-source"
 import { Scenario } from "../harness/scenario"
 import {
   fail,
@@ -111,7 +112,54 @@ const LOOPBACK_REVIEW_PROJECT: ReviewShellProject = {
   mode: "loopback",
 }
 
+/**
+ * A server prototype on its own loopback origin whose process has crashed and
+ * is past the restart budget, which is what makes the panel the honest answer
+ * rather than an embedded frame.
+ *
+ * Shared by two states: the crash itself, and the live recovery from it. They
+ * start identically on purpose, so the only difference a reviewer sees is what
+ * the stream does next.
+ */
+const CRASHED_SERVER_PROJECT: ReviewShellProject = {
+  ...REVIEW_PROJECT,
+  prototypeOrigin: "http://127.0.0.1:45001",
+  mode: "loopback",
+  serve: "server",
+  process: {
+    state: "crashed",
+    exitCode: 1,
+    restarts: 3,
+    reason: "The server kept exiting.",
+    retryable: false,
+  },
+}
+
 const COMMENTS_PATH = `/api/v1/projects/${PROJECT_ID}/comments`
+
+/**
+ * The process-state stream the review page follows, and the body one `origin`
+ * event on it carries — the same shape the plain prototype-origin route
+ * answers with.
+ *
+ * `generation: 2` is what makes the recovery visible: the review page keys its
+ * iframe on the generation, so a number the page has not seen before is a new
+ * child and a new frame.
+ */
+const PROTOTYPE_ORIGIN_STREAM = `/api/v1/projects/${PROJECT_ID}/prototype-origin/stream`
+
+const RESTARTED_SERVER_BODY = {
+  mode: "loopback",
+  origin: "http://127.0.0.1:45001",
+  serve: "server",
+  process: {
+    state: "running",
+    port: 45001,
+    since: "2026-09-11T09:14:00.000Z",
+    generation: 2,
+  },
+  range: { from: 45000, to: 45019 },
+}
 
 /** What the fake prototype reports as its current page. */
 const SAMPLE_ROUTE = {
@@ -411,6 +459,39 @@ async function openInspectTab(cancelled: () => boolean): Promise<void> {
   await clickTab(cancelled, /^Inspect$/)
 }
 
+/**
+ * The one state that is about the STREAM rather than about a single answer:
+ * a crashed server prototype whose process comes back, watched live.
+ *
+ * The review page follows `GET /projects/:id/prototype-origin/stream` and
+ * re-decides what to show from each `origin` event it receives. So this waits
+ * for the crashed panel, waits for the shell's own stream to open, pauses long
+ * enough for a person to read the panel, and then pushes one running body. The
+ * frame that appears is the product's whole recovery path: no reload, no poll,
+ * no refresh.
+ */
+async function flipCrashedProcessToRunning(cancelled: () => boolean): Promise<void> {
+  const panel = await waitForElement(
+    () => document.querySelector<HTMLElement>('[data-testid="prototype-crashed"]'),
+    { isCancelled: cancelled },
+  )
+  if (cancelled() || !panel) return
+  // The shell opens the stream from an effect, so it is not there at first
+  // paint. `waitForElement` polls for an ELEMENT, so "the stream is open" is
+  // expressed as one: the body once it is, `null` until then.
+  const streaming = await waitForElement(
+    () => (hasOpenStream(PROTOTYPE_ORIGIN_STREAM) ? document.body : null),
+    { isCancelled: cancelled },
+  )
+  if (cancelled() || !streaming) return
+  // Long enough that the swap reads as a change rather than as the state's
+  // first paint. Short enough to leave the registry sweep, whose arrival wait
+  // is 3s, most of its budget for a loaded machine.
+  await new Promise((resolve) => setTimeout(resolve, 700))
+  if (cancelled()) return
+  emitNamedEvent(PROTOTYPE_ORIGIN_STREAM, "origin", RESTARTED_SERVER_BODY)
+}
+
 async function openInspectTabWithSelection(cancelled: () => boolean): Promise<void> {
   await clickTab(cancelled, /^Inspect$/)
   if (cancelled()) return
@@ -641,26 +722,36 @@ export const REVIEW_SHELL_SURFACE: SurfaceEntry = {
             }),
           }}
         >
-          <ReviewShell
-            project={{
-              ...REVIEW_PROJECT,
-              prototypeOrigin: "http://127.0.0.1:45001",
-              mode: "loopback",
-              serve: "server",
-              process: {
-                state: "crashed",
-                exitCode: 1,
-                restarts: 3,
-                reason: "The server kept exiting.",
-                // Past the restart budget, which is what makes the panel the
-                // honest answer here rather than an embedded frame.
-                retryable: false,
-              },
-            }}
-          />
+          <ReviewShell project={CRASHED_SERVER_PROJECT} />
         </Scenario>
       ),
       readyWhen: '[data-testid="prototype-crashed"] pre',
+    },
+    {
+      // The recovery, watched live. The same crashed prototype as the state
+      // above, except that its process comes back a moment later and the page
+      // learns about it from the process-state stream rather than from a
+      // reload. Open this one and watch: the crashed panel gives way to the
+      // frame on its own.
+      //
+      // The frame stays blank afterwards — nothing serves that loopback port
+      // in the gallery, same as `review/loopback-embed`. The state is the
+      // SWAP, not what the prototype draws.
+      id: "review/prototype-crash-recovery",
+      label: "Prototype embed — a crashed server comes back, live",
+      render: () => (
+        <ReviewShellFixture
+          routes={{
+            [COMMENTS_PATH]: COMMENTS_OK,
+            "/api/v1/deployments/dep-401/server-log": ok({
+              log: "Error: listen EADDRINUSE",
+            }),
+          }}
+          project={CRASHED_SERVER_PROJECT}
+          run={(cancelled) => flipCrashedProcessToRunning(cancelled)}
+        />
+      ),
+      readyWhen: 'iframe[src^="http://127.0.0.1:45001/"]',
     },
     {
       // The port-unreachable watchdog: a loopback prototype that never
