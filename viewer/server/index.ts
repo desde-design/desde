@@ -18,6 +18,7 @@ import { readBridgeBundle } from "./serve/html-inject"
 import { assertNoTestHostRelaxation } from "./serve/host-allowlist"
 import { createLoopbackListenerApp } from "./serve/loopback-listener-app"
 import { createLoopbackListenerRegistry } from "./serve/loopback-listeners"
+import { createPrototypeProcesses } from "./serve/prototype-processes"
 import { bootBannerLines } from "./boot-banner"
 import { originModeBannerLines } from "./serve/origin-mode-banner"
 import { assertOriginConfig, assertPrototypeOriginConfig } from "./serve/prototype-origin-resolve"
@@ -86,6 +87,15 @@ async function main(): Promise<void> {
   // `github-runtime.ts`. Builds require the GitHub App (the runner clones
   // with an installation token), so an unconfigured deployment simply has no
   // queue and the trigger route 503s rather than the process failing to boot.
+  // THE process's one server-prototype process manager. A `serve: "server"`
+  // deployment runs out of the checkout its build kept, which is why this is
+  // built from the same `checkouts` root the build queue and the build runner
+  // use. Nothing starts at boot: the serve router starts a child on the first
+  // request that needs one, and the reaper below stops it once idle.
+  const prototypeProcesses = createPrototypeProcesses({
+    checkoutsRoot: join(config.dataDir, "checkouts"),
+  })
+
   const buildChangeBus = createBuildChangeBus()
   const github = createGithubRuntime({
     config,
@@ -94,6 +104,10 @@ async function main(): Promise<void> {
     // Every log flush and every status transition emits here, which is what
     // makes the SSE stream live rather than polled.
     onBuildChange: (deploymentId) => buildChangeBus.emit(deploymentId),
+    // A superseded deployment's checkout is deleted after a successful build.
+    // Stop any process still running out of that directory FIRST, or the
+    // delete races a live child that is reading from it.
+    beforeCheckoutRemove: (deploymentId) => prototypeProcesses.stop(deploymentId),
   })
 
   // No GitHub sign-in configured means nobody could otherwise obtain a
@@ -181,6 +195,9 @@ async function main(): Promise<void> {
         bridgeScript,
         bridgeVersion,
         prototypeCsp: config.prototypeCsp,
+        // The SAME manager the shell app gets — one child per deployment, not
+        // one per origin it is reviewed on.
+        prototypeProcesses,
       }),
     portRange: config.loopbackPortRange,
   })
@@ -195,6 +212,7 @@ async function main(): Promise<void> {
     // The process's ONE listener registry, built above. `AppDeps` requires it
     // so this wiring cannot be forgotten — see its doc comment.
     prototypeListeners,
+    prototypeProcesses,
     buildChangeBus,
     localOperatorToken,
     email,
@@ -217,6 +235,10 @@ async function main(): Promise<void> {
   // one runs every 6 hours, which cannot implement a 30-minute idle bound.
   // The timer is unref'd, so it never keeps the process alive on its own.
   const stopListenerReaper = prototypeListeners.startReaper()
+
+  // The same idea one layer down: a server prototype's child process is
+  // stopped once nobody has asked for it in 30 minutes. Also unref'd.
+  const stopProcessReaper = prototypeProcesses.startReaper()
 
   // Next 16's default dev bundler (Turbopack) refuses to start when
   // node_modules resolves through a symlink that points outside its
@@ -292,6 +314,13 @@ async function main(): Promise<void> {
     stopOutboxDrain()
     stopSessionSweep()
     stopListenerReaper()
+    stopProcessReaper()
+    // BEFORE the listeners close: a listener answering a request that is
+    // mid-proxy still needs the child on the other end, and a child is a
+    // detached process group that nothing else will ever reap — leaving one
+    // behind would hold its port against the next boot. `shutdown()` SIGTERMs
+    // each one and escalates to SIGKILL after 5s, so this cannot stall.
+    await prototypeProcesses.shutdown()
     // Before the main server: each prototype listener is a separate
     // `http.Server` holding its own port, and nothing else will ever close
     // them. `closeAll` destroys open connections rather than waiting on

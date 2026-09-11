@@ -1,6 +1,8 @@
 import express from "express"
+import { createServer, type Server } from "node:http"
+import type { AddressInfo } from "node:net"
 import request from "supertest"
-import { beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { loadConfig } from "../../config"
 import { sessionCookieName, signSessionId } from "../../auth/session-cookie"
 import { InMemoryStorage } from "../../storage/in-memory-storage"
@@ -9,6 +11,7 @@ import { readBridgeBundle } from "../html-inject"
 import { contentTypeFor } from "../mime"
 import { buildHostAllowlist, isAllowedHost } from "../host-allowlist"
 import { resolveOrigins } from "../prototype-origin-resolve"
+import { PrototypeProcessError, type PrototypeProcesses } from "../prototype-processes"
 import { createServeRouter, type PinnedDeploymentRequest } from "../serve-router"
 import type { SubdomainRequest } from "../subdomain"
 import type { PrototypeOriginHostRequest } from "../prototype-host-scope"
@@ -100,7 +103,36 @@ let subdomainMarker: string | null = null
  */
 let prototypeOriginMarker = false
 
-async function setup(overrides: { prototypeCsp?: string | null; config?: ReturnType<typeof loadConfig> } = {}) {
+/**
+ * A `PrototypeProcesses` (`serve/prototype-processes.ts`) that does nothing,
+ * with any method replaceable per test.
+ *
+ * The default `ensure` REJECTS rather than returning a port: every test in
+ * this file except the server-deployment block below serves a `static`
+ * deployment, so an `ensure` that quietly succeeded would hide a router that
+ * started forking on the wrong condition.
+ */
+function fakeProcesses(overrides: Partial<PrototypeProcesses> = {}): PrototypeProcesses {
+  return {
+    ensure: () =>
+      Promise.reject(new PrototypeProcessError({ state: "stopped" }, "No process manager in this test.")),
+    touch: () => {},
+    stop: () => Promise.resolve(),
+    status: () => ({ state: "stopped" }),
+    serverLog: () => "",
+    startReaper: () => () => {},
+    shutdown: () => Promise.resolve(),
+    ...overrides,
+  }
+}
+
+async function setup(
+  overrides: {
+    prototypeCsp?: string | null
+    config?: ReturnType<typeof loadConfig>
+    prototypeProcesses?: PrototypeProcesses
+  } = {},
+) {
   pinnedMarker = null
   subdomainMarker = null
   prototypeOriginMarker = false
@@ -122,6 +154,7 @@ async function setup(overrides: { prototypeCsp?: string | null; config?: ReturnT
       bridgeScript: BRIDGE,
       bridgeVersion: BRIDGE_VERSION,
       prototypeCsp: overrides.prototypeCsp ?? null,
+      prototypeProcesses: overrides.prototypeProcesses ?? fakeProcesses(),
     }),
   )
   stable.use(inner)
@@ -404,6 +437,7 @@ describe("createServeRouter", () => {
         bridgeScript: BRIDGE,
         bridgeVersion: BRIDGE_VERSION,
         prototypeCsp: null,
+        prototypeProcesses: fakeProcesses(),
       }),
     )
     // Built inline rather than via `setup()` (it needs the faulty asset store),
@@ -654,6 +688,7 @@ describe("createServeRouter", () => {
           bridgeScript: BRIDGE,
           bridgeVersion: BRIDGE_VERSION,
           prototypeCsp: null,
+          prototypeProcesses: fakeProcesses(),
         }),
       )
       stable.use(inner)
@@ -1052,6 +1087,7 @@ describe("createServeRouter", () => {
           bridgeScript: realBridgeScript,
           bridgeVersion: realVersion,
           prototypeCsp: null,
+          prototypeProcesses: fakeProcesses(),
         }),
       )
       // Built inline rather than via `setup()` (it needs the REAL bridge
@@ -1527,6 +1563,232 @@ describe("createServeRouter", () => {
       // Served because the listener's reachability is the credential.
       expect(res.text).toContain("secret")
       expect(res.headers["set-cookie"]).toBeUndefined()
+    })
+  })
+
+  /**
+   * A `serve: "server"` deployment is a PROCESS, not a folder. The router
+   * forks on it after the deployment id is known: it asks the process manager
+   * for a port and proxies, instead of reading the asset store.
+   *
+   * The fork only runs on an ISOLATED origin, and the path-mode refusal below
+   * is a security boundary rather than a convenience. `proxy-to-process.ts`
+   * passes the child's `set-cookie` through untouched, so in path mode — where
+   * the shell and the prototype share an origin — a prototype could write
+   * cookies onto the shell's origin. The 409 lands BEFORE any `ensure`, which
+   * is what keeps that from ever being reachable.
+   */
+  describe("server deployments", () => {
+    const servers: Server[] = []
+    afterEach(() => {
+      for (const s of servers.splice(0)) s.close()
+    })
+
+    /** A stand-in for the prototype's own server, on a real loopback port. */
+    async function child(handler: Parameters<typeof createServer>[1]): Promise<number> {
+      const s = createServer(handler)
+      servers.push(s)
+      await new Promise<void>((r) => s.listen(0, "127.0.0.1", () => r()))
+      return (s.address() as AddressInfo).port
+    }
+
+    /**
+     * A router whose storage holds ONE `serve: "server"` deployment at slug
+     * `srv`, with the given process manager.
+     *
+     * `pinned` is what a per-deployment loopback listener sets
+     * (`loopback-listener-app.ts`); leaving it false is ordinary path mode on
+     * the shell host, which is what the 409 test wants.
+     */
+    async function loopbackAppWith(opts: {
+      prototypeProcesses: PrototypeProcesses
+      pinned?: boolean
+    }) {
+      const c = await setup({ prototypeProcesses: opts.prototypeProcesses })
+      const project = await c.storage.createProject({ slug: "srv", name: "Srv", access: "public-link" })
+      const deployment = await c.storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await c.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
+      await c.storage.updateDeployment(deployment.id, { serve: "server", serverStart: ["node", "x.js"] })
+      if (opts.pinned !== false) pinnedMarker = { deploymentId: deployment.id, slug: "srv" }
+      return { app: c.app, storage: c.storage, deployment }
+    }
+
+    it("proxies a pinned server deployment on an isolated origin and injects the bridge", async () => {
+      const port = await child((_req, res) => {
+        res.setHeader("content-type", "text/html")
+        res.end("<html><body>srv</body></html>")
+      })
+      const ensured: string[] = []
+      const { app, deployment } = await loopbackAppWith({
+        prototypeProcesses: fakeProcesses({
+          ensure: (d) => {
+            ensured.push(d.id)
+            return Promise.resolve({ port })
+          },
+        }),
+      })
+
+      const res = await request(app).get("/p/srv/")
+      expect(res.status).toBe(200)
+      expect(res.text).toContain("srv")
+      expect(res.text).toContain("__DESDE_SHELL_ORIGIN__")
+      expect(res.text).toContain(`src="/__desde/bridge-${BRIDGE_VERSION}.js"`)
+      expect(ensured).toEqual([deployment.id])
+    })
+
+    it("gives the child the path with the prefix stripped and the query kept", async () => {
+      let seen: string | undefined
+      const port = await child((req, res) => {
+        seen = req.url
+        res.setHeader("content-type", "text/plain")
+        res.end("ok")
+      })
+      const { app } = await loopbackAppWith({
+        prototypeProcesses: fakeProcesses({ ensure: () => Promise.resolve({ port }) }),
+      })
+
+      await request(app).get("/p/srv/orders?page=2").expect(200)
+      expect(seen).toBe("/orders?page=2")
+    })
+
+    it("touches the deployment so an actively reviewed process is not reaped", async () => {
+      const port = await child((_req, res) => res.end("ok"))
+      const touched: string[] = []
+      const { app, deployment } = await loopbackAppWith({
+        prototypeProcesses: fakeProcesses({
+          ensure: () => Promise.resolve({ port }),
+          touch: (id) => {
+            touched.push(id)
+          },
+        }),
+      })
+
+      await request(app).get("/p/srv/").expect(200)
+      expect(touched).toEqual([deployment.id])
+    })
+
+    it("stops the process when the child gives no answer at all", async () => {
+      const stopped: string[] = []
+      const { app, deployment } = await loopbackAppWith({
+        prototypeProcesses: fakeProcesses({
+          // Nothing listens on port 1, so the proxy's `onUnreachable` fires.
+          ensure: () => Promise.resolve({ port: 1 }),
+          stop: (id) => {
+            stopped.push(id)
+            return Promise.resolve()
+          },
+        }),
+      })
+
+      await request(app).get("/p/srv/").expect(502)
+      expect(stopped).toEqual([deployment.id])
+    })
+
+    it("serves the bridge bundle itself, never proxying it to the child", async () => {
+      let hits = 0
+      const port = await child((_req, res) => {
+        hits += 1
+        res.end("child")
+      })
+      let ensures = 0
+      const { app } = await loopbackAppWith({
+        prototypeProcesses: fakeProcesses({
+          ensure: () => {
+            ensures += 1
+            return Promise.resolve({ port })
+          },
+        }),
+      })
+
+      const res = await request(app).get(`/p/srv/__desde/bridge-${BRIDGE_VERSION}.js`).expect(200)
+      expect(res.text).toBe(BRIDGE)
+      expect(hits).toBe(0)
+      expect(ensures).toBe(0)
+    })
+
+    it("refuses a server deployment in path mode with a page that names the fix", async () => {
+      let ensures = 0
+      const { app } = await loopbackAppWith({
+        pinned: false,
+        prototypeProcesses: fakeProcesses({
+          ensure: () => {
+            ensures += 1
+            return Promise.resolve({ port: 1 })
+          },
+        }),
+      })
+
+      const res = await request(app).get("/p/srv/")
+      expect(res.status).toBe(409)
+      expect(res.text).toContain("origin of its own")
+      // The refusal lands before the process manager is asked for anything —
+      // nothing is ever proxied on the shell's own origin.
+      expect(ensures).toBe(0)
+      // HTML on a `/p/**` URL, so it carries the same CSP and nosniff as
+      // every other response from this handler.
+      expect(res.headers["content-security-policy"]).toContain("connect-src")
+      expect(res.headers["x-content-type-options"]).toBe("nosniff")
+    })
+
+    /**
+     * The shared `VIEWER_PROTOTYPE_ORIGIN` host is cross-origin from the shell
+     * but PATH-NAMESPACED, so no prototype owns `/` on it and a proxied app's
+     * root-absolute assets would 404 with nothing to rewrite them. It is
+     * refused for that reason, not the cookie one — see the fork's comment in
+     * `serve-router.ts`.
+     */
+    it("refuses a server deployment on the shared prototype origin too", async () => {
+      let ensures = 0
+      const { app } = await loopbackAppWith({
+        pinned: false,
+        prototypeProcesses: fakeProcesses({
+          ensure: () => {
+            ensures += 1
+            return Promise.resolve({ port: 1 })
+          },
+        }),
+      })
+      prototypeOriginMarker = true
+
+      const res = await request(app).get("/p/srv/")
+      expect(res.status).toBe(409)
+      expect(res.text).toContain("origin of its own")
+      expect(ensures).toBe(0)
+    })
+
+    it("answers 503 with the crash reason when the process cannot start", async () => {
+      const { app } = await loopbackAppWith({
+        prototypeProcesses: fakeProcesses({
+          ensure: () =>
+            Promise.reject(
+              new PrototypeProcessError(
+                { state: "crashed", exitCode: 1, restarts: 3, reason: "The server kept exiting." },
+                "The server kept exiting.",
+              ),
+            ),
+        }),
+      })
+
+      const res = await request(app).get("/p/srv/")
+      expect(res.status).toBe(503)
+      expect(res.text).toContain("kept exiting")
+      expect(res.headers["content-security-policy"]).toContain("connect-src")
+      expect(res.headers["x-content-type-options"]).toBe("nosniff")
+    })
+
+    it("still serves a static deployment from the asset store", async () => {
+      const c = await setup({
+        prototypeProcesses: fakeProcesses({
+          ensure: () => Promise.reject(new Error("a static deployment must never start a process")),
+        }),
+      })
+      const project = await c.storage.createProject({ slug: "acme", name: "Acme", access: "public-link" })
+      const deployment = await c.storage.createDeployment({ projectId: project.id })
+      await c.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
+      await c.assets.put(deployment.id, "index.html", Buffer.from("<html><body>files</body></html>"))
+
+      const res = await request(c.app).get("/p/acme/").expect(200)
+      expect(res.text).toContain("files")
     })
   })
 })

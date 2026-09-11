@@ -20,7 +20,7 @@ import { loadConfig } from "../config"
 // shape — so building it as the real type is what keeps `prototypeListeners`
 // genuinely present rather than merely assigned to an optional field.
 import type { AppDeps } from "../create-app"
-import { createApp, createTestPrototypeListeners } from "../__tests__/test-app"
+import { createApp, createTestPrototypeListeners, nullPrototypeProcesses } from "../__tests__/test-app"
 import { createSwappableApp } from "../__tests__/swappable-app"
 import { tmpViewerDataDir } from "../__tests__/test-config"
 import { testGithubRuntime } from "../__tests__/test-github-runtime"
@@ -435,6 +435,7 @@ describe("prototype-host scoping in the real app", () => {
       bridgeScript: "// bridge",
       bridgeVersion: "test-1",
       github: testGithubRuntime(),
+      prototypeProcesses: nullPrototypeProcesses(),
       // Built explicitly rather than left to the test factory's default,
       // because the route-table walk below hands this same `deps` to the REAL
       // `createApiRouter`, whose `AppDeps` requires the field. Nothing here
@@ -604,6 +605,7 @@ describe("prototype-origin host scoping in the real app (VIEWER_PROTOTYPE_ORIGIN
       bridgeScript: "// bridge",
       bridgeVersion: "test-1",
       github: testGithubRuntime(),
+      prototypeProcesses: nullPrototypeProcesses(),
       // Never opens a listener: prototype-origin mode answers without one.
       prototypeListeners: createTestPrototypeListeners({
         storage,

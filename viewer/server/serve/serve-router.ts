@@ -25,6 +25,8 @@ import { allowPrototypeCors } from "./prototype-cors"
 import { PROTOTYPE_NOT_FOUND_BODY, type PrototypeOriginHostRequest } from "./prototype-host-scope"
 import { resolveIsolatedOriginCsp, type SubdomainRequest } from "./subdomain"
 import { isCss, isHtml } from "./mime"
+import { PrototypeProcessError, type PrototypeProcesses } from "./prototype-processes"
+import { proxyToProcess } from "./proxy-to-process"
 
 export interface ServeRouterDeps {
   storage: StorageAdapter
@@ -55,6 +57,22 @@ export interface ServeRouterDeps {
    * header; any other string is sent as-is.
    */
   prototypeCsp: string | null
+  /**
+   * The process manager for `serve: "server"` deployments
+   * (`prototype-processes.ts`). One per process, so a deployment has at most
+   * one child however many routers, listeners or origins reach it.
+   */
+  prototypeProcesses: PrototypeProcesses
+}
+
+/** Minimal HTML escaping for the two refusal pages below. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
 }
 
 /**
@@ -595,6 +613,102 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       deploymentId = project.activeDeploymentId
     } else {
       res.status(404).type("text/plain").send("Prototype has no deployment yet")
+      return
+    }
+
+    // Server prototypes: a process, not a folder. Everything above this line
+    // has already decided WHICH deployment answers and whether the caller may
+    // read it; this only changes where the bytes come from.
+    //
+    // Reached only AFTER the bridge-asset route above, which is what keeps the
+    // bridge bundle ours to serve — the child never sees that URL and so can
+    // never shadow it.
+    //
+    // `servesAtRoot` ONLY — a loopback listener or a `{slug}.{serveDomain}`
+    // subdomain — and the refusal is a boundary rather than a convenience.
+    //
+    // PATH mode is the security case. The shell and the prototype share an
+    // origin there, so a proxied `set-cookie` (which `proxy-to-process.ts`
+    // passes through untouched, by design) would write onto the SHELL's
+    // origin. Refusing here, before `ensure` is ever called, is what makes
+    // that unreachable rather than merely unlikely.
+    //
+    // The shared `VIEWER_PROTOTYPE_ORIGIN` host is refused too, and that is
+    // `servesAtRoot` rather than `isIsolatedOrigin` deciding. That origin is
+    // cross-origin from the shell (so the cookie hazard is absent) but it is
+    // PATH-NAMESPACED: every prototype lives under `/p/{slug}/`, so none owns
+    // `/`. A proxied app's own root-absolute asset URLs would resolve to that
+    // shared origin's root and 404, and unlike the static branch below there
+    // is no `rewriteRootRelativeUrls` pass on a proxied response to correct
+    // them. Serving a prototype whose scripts and styles cannot load is worse
+    // than saying it needs an origin of its own, which on a shared origin is
+    // exactly what it does not have. (The spec's §6 snippet writes this test
+    // as `isIsolatedOrigin`; its §5 prose says "loopback and subdomain mode
+    // (both `servesAtRoot`)". This follows the prose.)
+    const deployment = await deps.storage.getDeployment(deploymentId)
+    if (deployment?.serve === "server") {
+      // Both refusal pages below are HTML on a `/p/**` URL, so they take the
+      // same CSP and nosniff every other response from this handler takes —
+      // see the "applies to EVERY response" note where `csp` is resolved.
+      // `proxyToProcess` sets both itself on the paths it owns, including its
+      // own 502.
+      const refuse = (status: number, body: string): void => {
+        res.status(status).type("text/html")
+        res.setHeader("X-Content-Type-Options", "nosniff")
+        if (csp !== null) res.setHeader("Content-Security-Policy", csp)
+        res.send(body)
+      }
+      if (!servesAtRoot) {
+        refuse(
+          409,
+          "<!doctype html><title>Prototype needs an origin</title><p>This prototype runs as a server and needs an origin of its own. Open the viewer on localhost, or set VIEWER_SERVE_DOMAIN.</p>",
+        )
+        return
+      }
+      let port: number
+      try {
+        port = (await deps.prototypeProcesses.ensure(deployment)).port
+      } catch (error) {
+        // `PrototypeProcessError.message` is written as a plain sentence for a
+        // reader (`prototype-processes.ts`); anything else is an internal
+        // failure whose text is not safe to show.
+        const message =
+          error instanceof PrototypeProcessError
+            ? error.message
+            : "The prototype's server could not be started."
+        refuse(503, `<!doctype html><title>Prototype unavailable</title><p>${escapeHtml(message)}</p>`)
+        return
+      }
+      // After `ensure`, not before: this marks the deployment as in use so the
+      // idle reaper does not stop a process mid-review.
+      deps.prototypeProcesses.touch(deployment.id)
+      allowCors()
+      proxyToProcess(req, res, {
+        port,
+        // The child sees the app at its ROOT, with the query kept.
+        //
+        // `originalUrl`, not `url`, and the two branches are not
+        // interchangeable. Express fixes `originalUrl` before any middleware
+        // runs, so on a real isolated origin it is the path the browser asked
+        // for — `/orders?page=2` — while `req.url` is the `/p/{slug}/…` form
+        // the subdomain and pinned-listener rewrites produce for this router's
+        // benefit. On those origins `originalUrl` IS the child's path and is
+        // passed through unchanged. The strip branch covers the request that
+        // literally arrived in the `/p/{slug}/…` shape; `pathPrefix` ends in
+        // `/`, so slicing one character short of its length keeps the leading
+        // `/` the child needs.
+        path: req.originalUrl.startsWith(pathPrefix)
+          ? req.originalUrl.slice(pathPrefix.length - 1)
+          : req.originalUrl,
+        shellOrigin,
+        // The prototype owns `/` on this origin (`servesAtRoot` is the gate
+        // above), so this is the same bridge path the HTML branch below uses.
+        bridgeSrc: `/${bridgeAssetRelPath(deps.bridgeVersion)}`,
+        csp,
+        // Only fires when the child answered nothing at all, so the manager's
+        // record of "running" is wrong and the entry should be dropped.
+        onUnreachable: () => void deps.prototypeProcesses.stop(deployment.id),
+      })
       return
     }
 

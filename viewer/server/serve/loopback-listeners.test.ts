@@ -16,12 +16,19 @@
  * keeps a handle alive and hangs the run.
  */
 import express from "express"
-import { createServer, request as httpRequest, type IncomingHttpHeaders } from "node:http"
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingHttpHeaders,
+  type Server,
+} from "node:http"
 import { Server as NetServer, type AddressInfo } from "node:net"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AssetStore, StoredAsset } from "../assets/types"
 import { loadConfig } from "../config"
 import { InMemoryStorage } from "../storage/in-memory-storage"
+import { nullPrototypeProcesses } from "../__tests__/test-app"
+import type { PrototypeProcesses } from "./prototype-processes"
 import { tmpViewerDataDir } from "../__tests__/test-config"
 import { contentTypeFor } from "./mime"
 import { createLoopbackListenerApp } from "./loopback-listener-app"
@@ -101,14 +108,31 @@ function httpCall(options: {
 
 const openRegistries: LoopbackListenerRegistry[] = []
 const stopReapers: (() => void)[] = []
+/** Stand-ins for a server prototype's own process. Closed with the listeners. */
+const childServers: Server[] = []
 
 afterEach(async () => {
   for (const stop of stopReapers.splice(0)) stop()
   for (const registry of openRegistries.splice(0)) await registry.closeAll()
+  for (const child of childServers.splice(0)) child.close()
 })
 
-function makeRegistry(files: Files, options: { now?: () => number; idleMs?: number } = {}) {
-  const storage = new InMemoryStorage()
+function makeRegistry(
+  files: Files,
+  options: {
+    now?: () => number
+    idleMs?: number
+    /**
+     * A pre-seeded storage. Every other test here serves from the asset store
+     * and never needs a deployment ROW; a `serve: "server"` deployment is the
+     * one shape the router reads out of storage, so that test seeds its own.
+     */
+    storage?: InMemoryStorage
+    prototypeProcesses?: PrototypeProcesses
+  } = {},
+) {
+  const { storage: seeded, prototypeProcesses, ...registryOptions } = options
+  const storage = seeded ?? new InMemoryStorage()
   const registry = createLoopbackListenerRegistry({
     makeApp: (context) =>
       createLoopbackListenerApp({
@@ -119,8 +143,9 @@ function makeRegistry(files: Files, options: { now?: () => number; idleMs?: numb
         bridgeScript: BRIDGE,
         bridgeVersion: BRIDGE_VERSION,
         prototypeCsp: null,
+        prototypeProcesses: prototypeProcesses ?? nullPrototypeProcesses(),
       }),
-    ...options,
+    ...registryOptions,
   })
   openRegistries.push(registry)
   return registry
@@ -479,6 +504,50 @@ describe("createLoopbackListenerRegistry", () => {
       expect(res.headers["content-type"]).toMatch(/text\/css/)
       expect(res.body).toBe("body{color:red}")
       expect(res.headers["content-security-policy"]).toContain("worker-src 'none'")
+    })
+
+    /**
+     * A `serve: "server"` deployment, through a REAL listener socket.
+     *
+     * The router's own suite drives the fork with the rewritten `/p/{slug}/…`
+     * form. This is the shape that actually ships, and it is the one that
+     * proves the path handed to the child is right: the listener rewrites
+     * `req.url`, but `req.originalUrl` stays the path the caller asked for,
+     * which is exactly what the child should see.
+     */
+    it("proxies a server deployment to its process, at the path the caller asked for", async () => {
+      let seen: string | undefined
+      const child = createServer((req, res) => {
+        seen = req.url
+        res.setHeader("content-type", "text/html")
+        res.end("<html><body>from the child</body></html>")
+      })
+      childServers.push(child)
+      await new Promise<void>((r) => child.listen(0, "127.0.0.1", () => r()))
+      const childPort = (child.address() as AddressInfo).port
+
+      const storage = new InMemoryStorage()
+      const project = await storage.createProject({ slug: "one", name: "One" })
+      const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await storage.updateDeployment(dep.id, { serve: "server", serverStart: ["node", "x.js"] })
+      const registry = makeRegistry(
+        {},
+        {
+          storage,
+          prototypeProcesses: {
+            ...nullPrototypeProcesses(),
+            ensure: () => Promise.resolve({ port: childPort }),
+          },
+        },
+      )
+      const listener = await registry.ensure({ id: dep.id, slug: "one", projectId: project.id }, V4)
+
+      const res = await httpCall({ host: "127.0.0.1", port: listener.port, path: "/orders?page=2" })
+      expect(res.status).toBe(200)
+      expect(res.body).toContain("from the child")
+      expect(res.body).toContain(`data-shell-origin="${SHELL_ORIGIN}"`)
+      expect(res.body).toContain(`src="/__desde/bridge-${BRIDGE_VERSION}.js"`)
+      expect(seen).toBe("/orders?page=2")
     })
 
     /** Two ports, two deployments, no leakage between them. */

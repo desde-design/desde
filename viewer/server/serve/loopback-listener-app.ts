@@ -15,6 +15,7 @@ import {
   type PrototypeHostRegistry,
 } from "./prototype-host-scope"
 import { createServeRouter, type PinnedDeploymentRequest } from "./serve-router"
+import type { PrototypeProcesses } from "./prototype-processes"
 import type { LoopbackListenerAppContext } from "./loopback-listeners"
 
 /**
@@ -54,6 +55,13 @@ export interface LoopbackListenerAppDeps extends LoopbackListenerAppContext {
   bridgeScript: string
   bridgeVersion: string
   prototypeCsp: string | null
+  /**
+   * THE process's one process manager, passed straight through to the serve
+   * router. A listener must never build its own: a deployment reviewed on a
+   * listener and on the shell at once would otherwise get two children, two
+   * ports and two idle timers for one prototype.
+   */
+  prototypeProcesses: PrototypeProcesses
 }
 
 /**
@@ -146,6 +154,7 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
       bridgeScript: deps.bridgeScript,
       bridgeVersion: deps.bridgeVersion,
       prototypeCsp: deps.prototypeCsp,
+      prototypeProcesses: deps.prototypeProcesses,
     }),
   )
 

@@ -21,6 +21,7 @@ import {
   type PrototypeHostScopedRequest,
 } from "./serve/prototype-host-scope"
 import { resolveOrigins } from "./serve/prototype-origin-resolve"
+import type { PrototypeProcesses } from "./serve/prototype-processes"
 import { createRootAssetFallback } from "./serve/root-asset-fallback"
 import { createServeRouter } from "./serve/serve-router"
 import { createSubdomainRewrite } from "./serve/subdomain"
@@ -136,6 +137,19 @@ export interface AppDeps {
    * looking.
    */
   prototypeListeners: LoopbackListenerRegistry
+  /**
+   * The process's per-deployment server-prototype process manager
+   * (`serve/prototype-processes.ts`).
+   *
+   * REQUIRED for the same reason `prototypeListeners` is: there must be
+   * exactly ONE per process. It owns child processes, their ports and their
+   * idle timers, so a second instance would start a second child for a
+   * deployment the first one already has running, and neither would ever reap
+   * the other's. `server/index.ts` builds the one, hands it here AND to every
+   * loopback listener's app, and shuts it down on exit. Tests default it to
+   * `nullPrototypeProcesses()` through `__tests__/test-app.ts`.
+   */
+  prototypeProcesses: PrototypeProcesses
   /**
    * The boot-time local sign-in token, when one was generated. Absent means
    * `GET /auth/local` 404s — which is also what it does, at request time,
@@ -377,6 +391,7 @@ export function createApp(deps: AppDeps): express.Express {
       bridgeScript: deps.bridgeScript,
       bridgeVersion: deps.bridgeVersion ?? "dev",
       prototypeCsp: deps.config.prototypeCsp,
+      prototypeProcesses: deps.prototypeProcesses,
     }),
   )
   app.use(createRootAssetFallback({ storage: deps.storage, assets: deps.assets, config: deps.config }))
