@@ -36,6 +36,7 @@ function appFor(port: number, extra: Partial<Omit<ProxyOptions, "port" | "path">
       port,
       path: req.url,
       shellOrigin: "http://localhost:3100",
+      forwardedProto: "http",
       bridgeSrc: "/__desde/bridge-test.js",
       csp: "default-src 'self'",
       ...extra,
@@ -53,6 +54,7 @@ function unreachableApp(extra: Partial<Omit<ProxyOptions, "port" | "path">> = {}
       port: 1, // nothing listens here
       path: req.url,
       shellOrigin: "http://localhost:3100",
+      forwardedProto: "http",
       bridgeSrc: "/__desde/bridge-test.js",
       csp: null,
       ...extra,
@@ -62,23 +64,95 @@ function unreachableApp(extra: Partial<Omit<ProxyOptions, "port" | "path">> = {}
 }
 
 describe("proxyToProcess", () => {
-  it("forwards the path minus the prefix, and strips cookie and authorization", async () => {
-    let seen: { url?: string; cookie?: string; authorization?: string; host?: string } = {}
+  it("forwards the path minus the prefix, and strips authorization", async () => {
+    let seen: { url?: string; authorization?: string; host?: string } = {}
     const port = await child((req, res) => {
-      seen = { url: req.url, cookie: req.headers.cookie, authorization: req.headers.authorization, host: req.headers.host }
+      seen = { url: req.url, authorization: req.headers.authorization, host: req.headers.host }
       res.setHeader("content-type", "text/plain")
       res.end("ok")
     })
     const res = await request(appFor(port))
       .get("/p/acme/dashboard?x=1")
-      .set("Cookie", "viewer_session=secret")
       .set("Authorization", "Bearer dsv_x")
     expect(res.status).toBe(200)
     expect(res.text).toBe("ok")
     expect(seen.url).toBe("/dashboard?x=1")
-    expect(seen.cookie).toBeUndefined()
     expect(seen.authorization).toBeUndefined()
     expect(seen.host).toBe(`127.0.0.1:${port}`)
+  })
+
+  /**
+   * The prototype's own cookies are the point: the feature exists for apps
+   * that read a theme, a mock session or a locale off the jar. Only the
+   * Viewer's own capability cookie is removed, under both names it can have
+   * (`dsv_cap` on http, `__Host-dsv_cap` on https). The Viewer's SESSION
+   * cookie needs no case here: it is host-only on the shell, so a browser
+   * never sends it to a prototype origin at all.
+   */
+  it("forwards the prototype's own cookies and removes the viewer's capability cookie", async () => {
+    let cookie: string | undefined
+    const port = await child((req, res) => {
+      cookie = req.headers.cookie
+      res.end("ok")
+    })
+    await request(appFor(port))
+      .get("/p/acme/")
+      .set("Cookie", "dsv_cap=tok1; theme=dark; __Host-dsv_cap=tok2; locale=en-GB")
+    expect(cookie).toBe("theme=dark; locale=en-GB")
+  })
+
+  it("sends no cookie header at all when the viewer's was the only one", async () => {
+    let had = true
+    const port = await child((req, res) => {
+      had = "cookie" in req.headers
+      res.end("ok")
+    })
+    await request(appFor(port)).get("/p/acme/").set("Cookie", "dsv_cap=tok1")
+    expect(had).toBe(false)
+  })
+
+  /**
+   * Next's server-action handler compares the request's `Origin` against
+   * `x-forwarded-host` first and `host` second, and refuses the action on a
+   * mismatch. `host` is the child's own address, so without this a form post
+   * or a server action through the proxy answered 500. The client's own
+   * values are overwritten rather than merged: they are whatever the browser
+   * or an intermediary claimed, and this proxy knows the truth.
+   */
+  it("states the browser's host and scheme in X-Forwarded-Host and X-Forwarded-Proto", async () => {
+    let seen: { host?: string; fwdHost?: string; fwdProto?: string } = {}
+    const port = await child((req, res) => {
+      seen = {
+        host: req.headers.host,
+        fwdHost: req.headers["x-forwarded-host"] as string | undefined,
+        fwdProto: req.headers["x-forwarded-proto"] as string | undefined,
+      }
+      res.end("ok")
+    })
+    await request(appFor(port, { forwardedProto: "https" }))
+      .get("/p/acme/")
+      .set("Host", "acme.desde.test")
+      .set("X-Forwarded-Host", "attacker.example.com")
+      .set("X-Forwarded-Proto", "gopher")
+    expect(seen.host).toBe(`127.0.0.1:${port}`)
+    expect(seen.fwdHost).toBe("acme.desde.test")
+    expect(seen.fwdProto).toBe("https")
+  })
+
+  /**
+   * Framing policy is the viewer's. A Next template that sets
+   * `X-Frame-Options: DENY` would otherwise refuse to load in the review
+   * iframe wherever the prototype CSP is off (`VIEWER_PROTOTYPE_CSP=off`),
+   * where no `frame-ancestors` directive is there to supersede it.
+   */
+  it("drops the child's X-Frame-Options", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("x-frame-options", "DENY")
+      res.setHeader("content-type", "text/html; charset=utf-8")
+      res.end("<html><body>Hi</body></html>")
+    })
+    const res = await request(appFor(port)).get("/p/acme/")
+    expect(res.headers["x-frame-options"]).toBeUndefined()
   })
 
   it("injects the bridge into HTML, fixes content-length, and replaces the CSP", async () => {

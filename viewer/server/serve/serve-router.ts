@@ -887,6 +887,12 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
         ...(capabilityCookie !== null ? { setCookie: capabilityCookie } : {}),
         path: childPathFor(req.originalUrl, [pathPrefix, prototypePathPrefix(slug, null)]),
         shellOrigin,
+        // The scheme the BROWSER used to reach THIS origin, which is not
+        // always the shell's. A pinned loopback listener is always http (the
+        // registry refuses to pair one with an https shell), while a
+        // subdomain prototype is on the shell's own scheme. The child reads
+        // it as `X-Forwarded-Proto`.
+        forwardedProto: pinned !== null || !shellOrigin.startsWith("https:") ? "http" : "https",
         // The prototype owns `/` on this origin (`servesAtRoot` is the gate
         // above), so this is the same bridge path the HTML branch below uses.
         bridgeSrc: `/${bridgeAssetRelPath(deps.bridgeVersion)}`,

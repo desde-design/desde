@@ -1,6 +1,7 @@
 import type { Request, Response } from "express"
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http"
 import { injectBridge } from "./html-inject"
+import { capabilityCookieName } from "./prototype-capability-path"
 
 /**
  * Forwards one request to a server prototype's process and relays the
@@ -12,6 +13,16 @@ export interface ProxyOptions {
   /** The path the child sees: prefix removed, query kept. */
   path: string
   shellOrigin: string
+  /**
+   * The scheme the BROWSER used to reach the prototype origin, stated to the
+   * child as `X-Forwarded-Proto`.
+   *
+   * Not derived from `shellOrigin`: the two can differ. A loopback listener
+   * is always `http`, whatever the shell is, and it is the caller — the serve
+   * router, which knows whether this request arrived on a pinned listener —
+   * that can tell them apart.
+   */
+  forwardedProto: "http" | "https"
   bridgeSrc: string
   csp: string | null
   /** Overrides {@link MAX_REWRITTEN_HTML_BYTES}. Test-only escape hatch. */
@@ -44,7 +55,15 @@ export const MAX_REWRITTEN_HTML_BYTES = 5 * 1024 * 1024
 /** How long to wait for the child to say anything before giving up. */
 const UPSTREAM_TIMEOUT_MS = 60_000
 
-/** RFC 7230 hop-by-hop headers, plus the ones this proxy owns or strips. */
+/**
+ * RFC 7230 hop-by-hop headers, plus the ones this proxy owns or strips.
+ *
+ * `cookie` is NOT here: the prototype's own cookies are forwarded, minus the
+ * viewer's (see {@link forwardedCookieHeader}). The three `x-forwarded-*`
+ * names are dropped so the values this proxy sets below cannot end up
+ * alongside a client-supplied copy under a different letter case, which Node
+ * would send as two headers.
+ */
 const DROP_REQUEST = new Set([
   "connection",
   "keep-alive",
@@ -54,10 +73,11 @@ const DROP_REQUEST = new Set([
   "trailer",
   "transfer-encoding",
   "upgrade",
-  "cookie",
   "authorization",
   "accept-encoding",
   "host",
+  "x-forwarded-host",
+  "x-forwarded-proto",
 ])
 const DROP_RESPONSE = new Set([
   "connection",
@@ -66,7 +86,41 @@ const DROP_RESPONSE = new Set([
   "content-security-policy",
   "content-security-policy-report-only",
   "content-length",
+  // Framing policy is the viewer's, not the prototype's. Browsers ignore
+  // this header when a `frame-ancestors` CSP is present, but with
+  // `VIEWER_PROTOTYPE_CSP=off` there is no such directive, and an app that
+  // sets `X-Frame-Options: DENY` (a common template default) would then
+  // refuse to load in the review iframe.
+  "x-frame-options",
 ])
+
+/** The two names the viewer's read capability can have, http and https. */
+const VIEWER_COOKIE_NAMES = new Set([capabilityCookieName(false), capabilityCookieName(true)])
+
+/**
+ * The inbound `cookie` header minus the viewer's own capability cookie, or
+ * `undefined` when nothing is left to send.
+ *
+ * The prototype's own cookies are the point — a theme, a mock session, a
+ * locale — so everything else is passed through untouched, in order. The
+ * viewer's SESSION cookie needs no case here: it is host-only on the shell
+ * origin, so a browser never sends it to a prototype origin in the first
+ * place. The capability cookie IS sent (it is set on the prototype origin),
+ * and it is ours, so it stops here.
+ */
+function forwardedCookieHeader(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined
+  const kept = raw
+    .split(";")
+    .map((pair) => pair.trim())
+    .filter((pair) => {
+      if (pair === "") return false
+      const eq = pair.indexOf("=")
+      const name = eq === -1 ? pair : pair.slice(0, eq)
+      return !VIEWER_COOKIE_NAMES.has(name)
+    })
+  return kept.length > 0 ? kept.join("; ") : undefined
+}
 
 /** A `Set-Cookie` value's cookie NAME — everything before the first `=`. */
 function cookieNameOf(entry: string): string {
@@ -119,6 +173,26 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
   }
   headers["accept-encoding"] = "identity"
   headers.host = `127.0.0.1:${opts.port}`
+  const cookie = forwardedCookieHeader(req.headers.cookie)
+  if (cookie !== undefined) headers.cookie = cookie
+  else delete headers.cookie
+  // Set here, after the copy loop, and never merged with whatever the client
+  // claimed (both names are in `DROP_REQUEST`). A framework that checks a
+  // write's `Origin` against its own host reads `x-forwarded-host` FIRST and
+  // `host` second — Next's server-action handler does — and `host` is the
+  // child's internal address, which no browser `Origin` can ever equal. The
+  // same pair is what lets an app build absolute URLs (canonical links,
+  // `metadataBase`, OAuth redirects) that point at the prototype origin
+  // instead of the child's private port.
+  //
+  // A `Host` the request did not carry is impossible in practice (HTTP/1.1
+  // requires it), but an empty string here would be worse than no header at
+  // all, so it is simply left off.
+  const browserHost = req.headers.host
+  if (typeof browserHost === "string" && browserHost !== "") {
+    headers["x-forwarded-host"] = browserHost
+  }
+  headers["x-forwarded-proto"] = opts.forwardedProto
 
   const maxRewriteBytes = opts.maxRewriteBytes ?? MAX_REWRITTEN_HTML_BYTES
   // Whether the child sent a status line at all. Gates onUnreachable: once a
