@@ -255,7 +255,11 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
 
     try {
       const listener = await deps.prototypeListeners.ensure(
-        { id: deployment.id, slug: project.slug, projectId: project.id },
+        // `serve` travels with the deployment because this route already has
+        // the row in hand. A listener's write-method fence reads it once, at
+        // open time, rather than asking storage on every request — see
+        // `serve/loopback-listeners.ts`'s `LoopbackListenerAppContext.serve`.
+        { id: deployment.id, slug: project.slug, projectId: project.id, serve: deployment.serve },
         { bindHost: loopbackBindHostFor(prototypeHost), shellOrigin },
       )
       const body: PrototypeOriginResponse = {

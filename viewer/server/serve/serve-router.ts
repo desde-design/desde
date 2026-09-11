@@ -1,4 +1,4 @@
-import { Router, type Request } from "express"
+import { Router, type Request, type RequestHandler } from "express"
 import { extname } from "node:path"
 import {
   canReadProject,
@@ -383,23 +383,66 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
   // when a trailing slash is present — the two are mutually exclusive.
   const router = Router({ strict: true })
 
-  // No explicit `Request`/`Response` annotations on the handlers below:
-  // typing the params that way widens `req.params` to Express 5's generic
+  // No explicit `Request`/`Response` annotation on the handler below: typing
+  // the params that way widens `req.params` to Express 5's generic
   // `ParamsDictionary` (`string | string[]` for every key, since it must
   // cover repeated/wildcard params for ANY route). Leaving the callback
   // untyped lets TS infer the precise per-route params type from
   // `RouteParameters<Route>` instead — plain `string` for `:slug`,
-  // `string[] | undefined` for the optional `{*rest}` wildcard.
+  // `string[] | undefined` for the optional `{*rest}` wildcard. (The
+  // prototype route below is the exception: it is one handler shared by two
+  // registrations, so it has to be declared as a `RequestHandler` and reads
+  // its two params defensively.)
+  //
+  // GET (and so HEAD) only, deliberately. This route is a redirect, not the
+  // prototype route, and a write here has never reached it: on an isolated
+  // origin every rewrite ends in a trailing slash, so the bare-slug form only
+  // occurs in path mode — where a server prototype is refused anyway.
   router.get("/p/:slug", (req, res) => {
     // Without the trailing slash, relative asset URLs resolve one level too high.
     res.redirect(301, `/p/${encodeURIComponent(req.params.slug)}/`)
   })
 
-  // `{*rest}` (an optional wildcard group) is required, not `*rest`: a bare
-  // `*rest` demands at least one character after the slash, so it would
-  // never match `/p/acme/` (the trailing-slash, no-extra-path case).
-  router.get("/p/:slug/{*rest}", async (req, res) => {
-    const { slug } = req.params
+  /**
+   * The prototype route. Registered TWICE on one path, with one handler, and
+   * the duplication is load-bearing (task 8b).
+   *
+   * A server prototype takes form posts, server actions and API writes, so the
+   * handler has to see every method — hence the `all` registration. But a
+   * route registered ONLY with `all` contributes nothing to Express's
+   * automatic OPTIONS response: the router builds that `Allow` list from
+   * routes that do NOT handle the method, and `all` handles all of them. A
+   * static prototype's answer to `OPTIONS /p/{slug}/` would have silently
+   * changed from `200 Allow: GET, HEAD` to a fall-through. Keeping the `get`
+   * registration keeps that list, and the `all` registration below it is what
+   * carries every other method into the handler.
+   *
+   * Order matters: the `get` route is first, so a GET is dispatched once, by
+   * it. The handler never calls `next()` for GET or HEAD, so the `all` route
+   * is only ever reached by the methods the `get` route does not take.
+   *
+   * `{*rest}` (an optional wildcard group) is required, not `*rest`: a bare
+   * `*rest` demands at least one character after the slash, so it would
+   * never match `/p/acme/` (the trailing-slash, no-extra-path case).
+   */
+  const servePrototype: RequestHandler = async (req, res, next) => {
+    const slug = String(req.params.slug)
+    /**
+     * A method this handler did not answer before task 8b.
+     *
+     * The route was `router.get`, which Express also routes HEAD to, so GET
+     * and HEAD were the two that reached it; everything else fell straight
+     * through to whatever `create-app.ts` mounts next. That fall-through is
+     * preserved exactly, by `next()` at every exit below that is not the
+     * server-prototype fork — and it is preserved for a reason beyond
+     * fidelity. Answering a write HERE would make the difference between
+     * "this prototype exists and you may read it" and "it does not, or you
+     * may not" visible to anybody willing to send a POST, because a readable
+     * static prototype would fall through while an unknown or unreadable one
+     * got a 404 from this handler. The byte-identical-404 rule this file
+     * already keeps for GET has to hold for every other method too.
+     */
+    const writeMethod = req.method !== "GET" && req.method !== "HEAD"
     // Resolved ONCE per request and reused everywhere below (the CSP and
     // the bridge's `data-shell-origin` alike) — see
     // `ServeRouterDeps.resolveShellOrigin`. Calling it more than once per
@@ -475,6 +518,8 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     // slug-shaped existence oracle) on a path that has no use for either.
     const project = pinned ? null : await deps.storage.getProjectBySlug(slug)
     if (!pinned && !project) {
+      // `next()`, not the 404, for anything but a read — see `writeMethod`.
+      if (writeMethod) return next()
       res.status(404).type("text/plain").send("Prototype not found")
       return
     }
@@ -536,6 +581,9 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
         await loadProjectReadPolicy(deps.storage),
       )
       if (!readable) {
+        // Same `next()` as the unknown-slug branch above, and for the same
+        // reason: the two must stay indistinguishable for every method.
+        if (writeMethod) return next()
         res.status(404).type("text/plain").send("Prototype not found")
         return
       }
@@ -671,6 +719,12 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     // is no second route to keep in sync with this gate, and no ordering
     // question about which route matches first — it's the same match.
     if (relPath === bridgeAssetRelPath(deps.bridgeVersion)) {
+      // `__desde/` is the viewer's reserved namespace on the prototype's own
+      // origin. A read there is answered with the bundle; a write there is
+      // nobody's, and above all it must not reach the child — so it takes the
+      // same fall-through every other write does, BEFORE the server fork can
+      // proxy it.
+      if (writeMethod) return next()
       res.status(200)
       res.setHeader("Content-Type", "application/javascript; charset=utf-8")
       // `private`, not `public`: a shared cache (CDN/corporate proxy) that
@@ -699,6 +753,7 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     } else if (project?.activeDeploymentId) {
       deploymentId = project.activeDeploymentId
     } else {
+      if (writeMethod) return next()
       res.status(404).type("text/plain").send("Prototype has no deployment yet")
       return
     }
@@ -706,6 +761,13 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
     // Server prototypes: a process, not a folder. Everything above this line
     // has already decided WHICH deployment answers and whether the caller may
     // read it; this only changes where the bytes come from.
+    //
+    // It is also the ONLY branch of this handler that answers a method other
+    // than GET or HEAD. A process takes form posts, server actions and API
+    // writes; a folder of files never did, so everything below this fork
+    // hands a write straight back to the stack (see `writeMethod`). That
+    // includes OPTIONS, which for a server prototype is its own CORS
+    // preflight and only its process can answer.
     //
     // Reached only AFTER the bridge-asset route above, which is what keeps the
     // bridge bundle ours to serve — the child never sees that URL and so can
@@ -801,6 +863,13 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       return
     }
 
+    // A static deployment is a folder of files. There is nothing here for a
+    // write to do, so the request goes back to the stack exactly as it did
+    // when this route was registered for GET alone — on a prototype origin
+    // `createPrototypeHostTerminalFence` ends it with the shared not-found
+    // body, and on the shell host it falls through as it always has.
+    if (writeMethod) return next()
+
     let asset
     try {
       asset = await deps.assets.get(deploymentId, relPath)
@@ -879,7 +948,11 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       return
     }
     res.send(asset.body)
-  })
+  }
+
+  // See `servePrototype`'s doc comment for why this path is registered twice.
+  router.get("/p/:slug/{*rest}", servePrototype)
+  router.all("/p/:slug/{*rest}", servePrototype)
 
   return router
 }

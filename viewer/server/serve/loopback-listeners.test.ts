@@ -79,15 +79,24 @@ function httpCall(options: {
   path: string
   method?: string
   hostHeader?: string
+  /** Request body, sent as-is. `contentType` names it for the child. */
+  body?: string
+  contentType?: string
 }): Promise<HttpResult> {
   return new Promise((resolve, reject) => {
+    const headers: Record<string, string> = {}
+    if (options.hostHeader !== undefined) headers.Host = options.hostHeader
+    if (options.body !== undefined) {
+      headers["Content-Type"] = options.contentType ?? "application/json"
+      headers["Content-Length"] = String(Buffer.byteLength(options.body))
+    }
     const req = httpRequest(
       {
         host: options.host,
         port: options.port,
         path: options.path,
         method: options.method ?? "GET",
-        headers: options.hostHeader === undefined ? {} : { Host: options.hostHeader },
+        headers,
       },
       (res) => {
         const chunks: Buffer[] = []
@@ -102,7 +111,7 @@ function httpCall(options: {
       },
     )
     req.on("error", reject)
-    req.end()
+    req.end(options.body)
   })
 }
 
@@ -154,7 +163,7 @@ function makeRegistry(
 const V4 = { bindHost: "127.0.0.1", shellOrigin: SHELL_ORIGIN } as const
 
 function deployment(id: string, slug = "acme") {
-  return { id, slug, projectId: `project-${id}` }
+  return { id, slug, projectId: `project-${id}`, serve: "static" as const }
 }
 
 describe("createLoopbackListenerRegistry", () => {
@@ -368,7 +377,7 @@ describe("createLoopbackListenerRegistry", () => {
       })
       try {
         const listener = await registry.ensure(
-          { id: "dep-1", slug: "one", projectId: "p" },
+          { id: "dep-1", slug: "one", projectId: "p", serve: "static" },
           { bindHost: "127.0.0.1", shellOrigin: "http://localhost:3100" },
         )
         expect(listener.port).toBe(takenPort + 2)
@@ -402,7 +411,7 @@ describe("createLoopbackListenerRegistry", () => {
       })
       await expect(
         registry.ensure(
-          { id: "dep-1", slug: "one", projectId: "p" },
+          { id: "dep-1", slug: "one", projectId: "p", serve: "static" },
           { bindHost: "127.0.0.1", shellOrigin: "http://localhost:3100" },
         ),
       ).rejects.toBeInstanceOf(LoopbackPortsExhaustedError)
@@ -540,7 +549,10 @@ describe("createLoopbackListenerRegistry", () => {
           },
         },
       )
-      const listener = await registry.ensure({ id: dep.id, slug: "one", projectId: project.id }, V4)
+      const listener = await registry.ensure(
+        { id: dep.id, slug: "one", projectId: project.id, serve: "server" },
+        V4,
+      )
 
       const res = await httpCall({ host: "127.0.0.1", port: listener.port, path: "/orders?page=2" })
       expect(res.status).toBe(200)
@@ -548,6 +560,75 @@ describe("createLoopbackListenerRegistry", () => {
       expect(res.body).toContain(`data-shell-origin="${SHELL_ORIGIN}"`)
       expect(res.body).toContain(`src="/__desde/bridge-${BRIDGE_VERSION}.js"`)
       expect(seen).toBe("/orders?page=2")
+    })
+
+    /**
+     * A form post through a REAL listener socket (task 8b).
+     *
+     * The write-method fence on a listener runs BEFORE the path is rewritten,
+     * so it cannot ask "is this the prototype route?" of the path — every path
+     * on this origin is. What it asks instead is what the listener was OPENED
+     * for: a listener pinned to a `serve: "server"` deployment fronts a
+     * process that legitimately takes writes, and one pinned to a folder of
+     * files does not (the test in "what a listener refuses" below is that
+     * half). This is the shape that actually ships, through a socket, with a
+     * body on the wire.
+     */
+    it("carries a POST body through to a server deployment's process", async () => {
+      let seen: { method?: string; url?: string; contentType?: string; body: string } | null = null
+      const child = createServer((req, res) => {
+        const chunks: Buffer[] = []
+        req.on("data", (chunk: Buffer) => chunks.push(chunk))
+        req.on("end", () => {
+          seen = {
+            method: req.method,
+            url: req.url,
+            contentType: req.headers["content-type"],
+            body: Buffer.concat(chunks).toString("utf-8"),
+          }
+          res.statusCode = 201
+          res.setHeader("content-type", "application/json")
+          res.end('{"ok":true}')
+        })
+      })
+      childServers.push(child)
+      await new Promise<void>((r) => child.listen(0, "127.0.0.1", () => r()))
+      const childPort = (child.address() as AddressInfo).port
+
+      const storage = new InMemoryStorage()
+      const project = await storage.createProject({ slug: "one", name: "One" })
+      const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await storage.updateDeployment(dep.id, { serve: "server", serverStart: ["node", "x.js"] })
+      const registry = makeRegistry(
+        {},
+        {
+          storage,
+          prototypeProcesses: {
+            ...nullPrototypeProcesses(),
+            ensure: () => Promise.resolve({ port: childPort }),
+          },
+        },
+      )
+      const listener = await registry.ensure(
+        { id: dep.id, slug: "one", projectId: project.id, serve: "server" },
+        V4,
+      )
+
+      const res = await httpCall({
+        host: "127.0.0.1",
+        port: listener.port,
+        path: "/submit",
+        method: "POST",
+        body: '{"name":"ada"}',
+      })
+      expect(res.status).toBe(201)
+      expect(res.body).toBe('{"ok":true}')
+      expect(seen).toEqual({
+        method: "POST",
+        url: "/submit",
+        contentType: "application/json",
+        body: '{"name":"ada"}',
+      })
     })
 
     /** Two ports, two deployments, no leakage between them. */
@@ -623,6 +704,13 @@ describe("createLoopbackListenerRegistry", () => {
       expect(res.body).toContain("app")
     })
 
+    /**
+     * The static half of the write-method rule (task 8b). A listener fronting
+     * a folder of files has nothing that could accept a write, so its fence
+     * refuses one before the request is even rewritten — the same answer it
+     * gave before server prototypes existed. `deployment()` builds a
+     * `serve: "static"` deployment, which is what pins this listener.
+     */
     it("refuses a write method", async () => {
       const registry = makeRegistry({ d1: { "index.html": html } })
       const listener = await registry.ensure(deployment("d1"), V4)

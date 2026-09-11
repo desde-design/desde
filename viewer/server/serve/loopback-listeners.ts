@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
 import { assertIsolatedOrigins } from "./prototype-origin-resolve"
 import type { PrototypeHostRegistry } from "./prototype-host-scope"
+import type { DeploymentServe } from "../storage/types"
 
 /**
  * One `http.Server` per (deployment, shell origin), bound to a loopback
@@ -95,6 +96,19 @@ export interface LoopbackListener {
 export interface LoopbackListenerAppContext {
   deploymentId: string
   slug: string
+  /**
+   * How the pinned deployment is served, carried from the deployment row the
+   * caller already had in hand (`api/prototype-origin-routes.ts`).
+   *
+   * A listener fronts exactly ONE deployment for its whole life, so this is
+   * fixed at open time and no request on it ever needs a storage lookup to
+   * learn it. The write-method fence is what reads it: it runs before the path
+   * is rewritten, so it cannot ask whether a path is the prototype route —
+   * every path on this origin is — and what it asks instead is whether the
+   * deployment it fronts is a process that can take a write at all. See
+   * `loopback-listener-app.ts`.
+   */
+  serve: DeploymentServe
   /** The one acceptable `Host` value: `127.0.0.1:45001` or `[::1]:45001`. */
   hostPort: string
   shellOrigin: string
@@ -115,7 +129,7 @@ export interface LoopbackListenerRegistry extends PrototypeHostRegistry {
    * the prototype origin — see this module's header).
    */
   ensure(
-    deployment: { id: string; slug: string; projectId: string },
+    deployment: { id: string; slug: string; projectId: string; serve: DeploymentServe },
     target: { bindHost: LoopbackBindHost; shellOrigin: string },
   ): Promise<LoopbackListener>
   /** Marks the listener on this port as used just now. No-op for a dead port. */
@@ -208,7 +222,7 @@ export function createLoopbackListenerRegistry(
   }
 
   async function open(
-    deployment: { id: string; slug: string; projectId: string },
+    deployment: { id: string; slug: string; projectId: string; serve: DeploymentServe },
     target: { bindHost: LoopbackBindHost; shellOrigin: string },
     key: string,
   ): Promise<LoopbackListener> {
@@ -327,6 +341,7 @@ export function createLoopbackListenerRegistry(
       app = deps.makeApp({
         deploymentId: deployment.id,
         slug: deployment.slug,
+        serve: deployment.serve,
         hostPort: `${host}:${address.port}`,
         shellOrigin: target.shellOrigin,
         touch: () => {

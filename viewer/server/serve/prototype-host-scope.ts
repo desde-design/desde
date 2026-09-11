@@ -216,28 +216,84 @@ function sendPrototypeNotFound(res: Response): void {
 }
 
 /**
+ * Whether a non-GET on a prototype host is headed for the SERVE ROUTER's
+ * prototype route, and may therefore be passed to it instead of refused here.
+ *
+ * Built for `create-app.ts`'s two prototype-host shapes, and it answers by
+ * asking what ROUTING will do with this request, not what the path looks
+ * like:
+ *
+ * - A `{slug}.{serveDomain}` host. `createSubdomainRewrite` — mounted just
+ *   after the fence, and reading this same `serveDomain` through this same
+ *   `slugFromHost` — turns EVERY path on that host into `/p/{slug}/…`. So on
+ *   a slug host every path is the prototype route, including one spelled
+ *   `/api/v1/auth/logout`: after the rewrite it names a file inside the
+ *   prototype, and the shell's API is not mounted anywhere it could reach.
+ *   Sharing the one function with the rewrite is what makes "the rewrite will
+ *   fire" a fact rather than an assumption.
+ * - The single `VIEWER_PROTOTYPE_ORIGIN` host, which has no rewrite: a
+ *   request there already arrives as `/p/{slug}/…` or it is not prototype
+ *   content at all, so the prefix is the whole test.
+ *
+ * A loopback listener never reaches this rule — it is a separate server with
+ * its own app, and its fence asks a different question (see
+ * `loopback-listener-app.ts`: a listener is pinned to one deployment, so what
+ * it asks is whether THAT deployment is a server).
+ *
+ * Passing the request on is not the same as allowing the write. It hands the
+ * decision to the serve router, which refuses everything but a
+ * `serve: "server"` deployment on an origin of its own — and a refusal there
+ * falls through to `createPrototypeHostTerminalFence`, which answers with the
+ * same body this module would have.
+ */
+export function createPrototypeRouteWriteRule(
+  serveDomain: string | null,
+): (req: Request) => boolean {
+  return function writeReachesPrototypeRoute(req: Request): boolean {
+    if (req.url.startsWith("/p/")) return true
+    const host = typeof req.headers.host === "string" ? req.headers.host : undefined
+    return slugFromHost(host, serveDomain) !== null
+  }
+}
+
+/**
  * Mounted immediately after the Host allowlist and BEFORE the subdomain
- * rewrite: on a prototype host, refuse every method that could write, and
- * mark the request for the fence below.
+ * rewrite: on a prototype host, refuse every method that could write unless
+ * it is headed for the prototype route, and mark the request for the fence
+ * below.
  *
- * GET and HEAD only. Prototype content is a built static bundle — read-only
- * by construction — so a method that could mutate anything is a method aimed
- * at the shell. Refusing them here is what makes `POST /api/v1/auth/logout`,
- * and every other mutating route in the app, unreachable on a prototype
- * origin without naming a single one of them.
+ * The rule this enforces is "a write on a prototype origin can never be
+ * answered by a SHELL router". Until server prototypes (task 8b) that was
+ * stated as "GET and HEAD only", which was exact while prototype content was
+ * always a built static bundle — read-only by construction, so any other
+ * method was a method aimed at the shell. A `serve: "server"` deployment is a
+ * process, and a process takes form posts, server actions and API writes of
+ * its own, so the rule had to be stated as itself: `writeReachesPrototypeRoute`
+ * decides whether a write is going to the prototype, and the serve router then
+ * decides whether that particular prototype accepts one. Omit the predicate
+ * and the old blanket refusal is what you get.
  *
- * OPTIONS is refused with the rest, deliberately. Nothing in the serve layer
- * handles it — neither `serve-router.ts` (GET routes only) nor
- * `prototype-cors.ts` (which sets a response header and has no preflight
- * handler) — and nothing needs it to: the cross-origin reads this design
- * produces are `<script crossorigin>`/`<link>` fetches, which are simple GETs
- * and are never preflighted. Add it here if a real preflight ever appears,
- * not before.
+ * What did NOT change: a write whose path is not the prototype route is
+ * refused right here, before the shell's routers, its rate limiter or its body
+ * parser ever run — which is what keeps `POST /api/v1/auth/logout`, and every
+ * other mutating route in the app, unreachable on a prototype origin without
+ * naming a single one of them.
+ *
+ * OPTIONS travels with the other write methods, and for a server prototype
+ * that is the point: it is the app's own CORS preflight, which only its
+ * process can answer. On everything else the serve router hands it straight
+ * back, so Express answers it exactly as it did before.
  *
  * On the shell host this is a no-op: no marking, no behaviour change.
  */
 export function createPrototypeHostScope(deps: {
   registry: PrototypeHostRegistry
+  /**
+   * Whether a non-GET/HEAD request on a prototype host should be passed to
+   * the serve router rather than refused here. Omitted means "never", which
+   * is the pre-task-8b behaviour. See `createPrototypeRouteWriteRule`.
+   */
+  writeReachesPrototypeRoute?: (req: Request) => boolean
 }): RequestHandler {
   return function prototypeHostScope(req: Request, res: Response, next: NextFunction): void {
     const host = typeof req.headers.host === "string" ? req.headers.host.toLowerCase() : ""
@@ -246,8 +302,10 @@ export function createPrototypeHostScope(deps: {
       return
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
-      sendPrototypeNotFound(res)
-      return
+      if (deps.writeReachesPrototypeRoute?.(req) !== true) {
+        sendPrototypeNotFound(res)
+        return
+      }
     }
     ;(req as unknown as PrototypeHostScopedRequest).prototypeHostScoped = true
     next()

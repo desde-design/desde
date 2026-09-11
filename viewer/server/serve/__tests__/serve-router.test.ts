@@ -1904,5 +1904,248 @@ describe("createServeRouter", () => {
       const res = await request(c.app).get("/p/acme/").expect(200)
       expect(res.text).toContain("files")
     })
+
+    /**
+     * Every HTTP method, on both kinds of deployment (task 8b).
+     *
+     * A prototype that runs as a server takes form posts, server actions and
+     * API writes. A folder of files never did, and a static deployment's
+     * answer to a write must not move a single byte — see the doc comment on
+     * `staticPinnedApp` below for what that answer is and how it was
+     * measured.
+     */
+    describe("methods other than GET", () => {
+      /**
+       * A pinned loopback listener fronting a `serve: "static"` deployment —
+       * the control for every server-deployment assertion in this block.
+       */
+      async function staticPinnedApp(prototypeProcesses?: PrototypeProcesses) {
+        const c = await setup({
+          prototypeProcesses:
+            prototypeProcesses ??
+            fakeProcesses({
+              ensure: () =>
+                Promise.reject(new Error("a static deployment must never start a process")),
+            }),
+        })
+        const project = await c.storage.createProject({
+          slug: "acme",
+          name: "Acme",
+          access: "public-link",
+        })
+        const deployment = await c.storage.createDeployment({ projectId: project.id })
+        await c.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
+        await c.assets.put(deployment.id, "index.html", Buffer.from("<html><body>files</body></html>"))
+        pinnedMarker = { deploymentId: deployment.id, slug: "acme" }
+        return c
+      }
+
+      it("proxies a POST to the child with its method, body bytes and content-type", async () => {
+        let seen: { method?: string; contentType?: string; body: string } | null = null
+        const port = await child((req, res) => {
+          const chunks: Buffer[] = []
+          req.on("data", (chunk: Buffer) => chunks.push(chunk))
+          req.on("end", () => {
+            seen = {
+              method: req.method,
+              contentType: req.headers["content-type"],
+              body: Buffer.concat(chunks).toString("utf-8"),
+            }
+            res.statusCode = 201
+            res.setHeader("content-type", "application/json")
+            res.end('{"created":true}')
+          })
+        })
+        const { app } = await loopbackAppWith({
+          prototypeProcesses: fakeProcesses({ ensure: () => Promise.resolve({ port }) }),
+        })
+
+        const res = await request(app)
+          .post("/p/srv/orders")
+          .set("content-type", "application/json")
+          .send('{"qty":2}')
+
+        expect(res.status).toBe(201)
+        expect(res.text).toBe('{"created":true}')
+        expect(seen).toEqual({
+          method: "POST",
+          contentType: "application/json",
+          body: '{"qty":2}',
+        })
+      })
+
+      /**
+       * MEASURED against the pre-task-8b code, with a probe that drove this
+       * exact harness: `POST /p/acme/` was not matched by the router at all
+       * (the route was `router.get`), so it fell through to Express's own
+       * default handler — 404, `text/html`, body `<pre>Cannot POST
+       * /p/acme/</pre>` inside its boilerplate page. The router answering it
+       * itself would be a change, and a visible one: a 404 the router emits
+       * says "this prototype has no such thing", while a fall-through says
+       * "no route here at all". Keeping the fall-through is also what keeps a
+       * write from becoming an existence oracle, since an unknown slug and an
+       * unreadable project fall through in exactly the same way.
+       */
+      it("does not answer a POST to a static deployment — it still falls through", async () => {
+        const c = await staticPinnedApp()
+        const res = await request(c.app).post("/p/acme/")
+        expect(res.status).toBe(404)
+        expect(res.headers["content-type"]).toMatch(/^text\/html/)
+        expect(res.text).toContain("Cannot POST /p/acme/")
+      })
+
+      it("does not answer a PUT, PATCH or DELETE to a static deployment either", async () => {
+        const c = await staticPinnedApp()
+        for (const verb of ["put", "patch", "delete"] as const) {
+          const res = await request(c.app)[verb]("/p/acme/")
+          expect(res.status, verb).toBe(404)
+          expect(res.text, verb).toContain(`Cannot ${verb.toUpperCase()} /p/acme/`)
+        }
+      })
+
+      /**
+       * MEASURED the same way: `OPTIONS /p/acme/` was answered by Express's
+       * own automatic OPTIONS response — 200, `Allow: GET, HEAD`, with that
+       * string as the body. It still is. This is the reason the route is
+       * registered TWICE in `serve-router.ts` (see the comment there): a route
+       * registered only with `router.all` contributes nothing to that `Allow`
+       * list, and a static prototype's answer would silently change.
+       */
+      it("leaves OPTIONS on a static deployment to Express's own Allow response", async () => {
+        const c = await staticPinnedApp()
+        const res = await request(c.app).options("/p/acme/")
+        expect(res.status).toBe(200)
+        expect(res.headers["allow"]).toBe("GET, HEAD")
+        expect(res.text).toBe("GET, HEAD")
+      })
+
+      it("still serves GET and HEAD on a static deployment", async () => {
+        const c = await staticPinnedApp()
+        await request(c.app).get("/p/acme/").expect(200)
+        const head = await request(c.app).head("/p/acme/")
+        expect(head.status).toBe(200)
+        expect(head.headers["content-type"]).toMatch(/text\/html/)
+      })
+
+      /** A prototype's own CORS preflight is the child's to answer, not ours. */
+      it("proxies OPTIONS to a server deployment", async () => {
+        let seenMethod: string | undefined
+        const port = await child((req, res) => {
+          seenMethod = req.method
+          res.statusCode = 204
+          res.setHeader("access-control-allow-methods", "GET, POST")
+          res.end()
+        })
+        const { app } = await loopbackAppWith({
+          prototypeProcesses: fakeProcesses({ ensure: () => Promise.resolve({ port }) }),
+        })
+
+        const res = await request(app).options("/p/srv/api/orders")
+        expect(res.status).toBe(204)
+        expect(seenMethod).toBe("OPTIONS")
+        expect(res.headers["access-control-allow-methods"]).toBe("GET, POST")
+      })
+
+      it("proxies HEAD to a server deployment, like GET", async () => {
+        let seenMethod: string | undefined
+        const port = await child((req, res) => {
+          seenMethod = req.method
+          res.setHeader("content-type", "text/html")
+          res.end("<html><body>srv</body></html>")
+        })
+        const { app } = await loopbackAppWith({
+          prototypeProcesses: fakeProcesses({ ensure: () => Promise.resolve({ port }) }),
+        })
+
+        const res = await request(app).head("/p/srv/")
+        expect(res.status).toBe(200)
+        expect(seenMethod).toBe("HEAD")
+      })
+
+      /**
+       * Rule 4 of the task: the path-mode refusal is a security boundary and a
+       * write must not be the way around it. `proxy-to-process.ts` passes the
+       * child's `set-cookie` through untouched, and in path mode the shell and
+       * the prototype share an origin.
+       */
+      it("refuses a POST to a server deployment in path mode with the same 409, before any ensure", async () => {
+        let ensures = 0
+        const { app } = await loopbackAppWith({
+          pinned: false,
+          prototypeProcesses: fakeProcesses({
+            ensure: () => {
+              ensures += 1
+              return Promise.resolve({ port: 1 })
+            },
+          }),
+        })
+
+        const res = await request(app).post("/p/srv/").send("x=1")
+        expect(res.status).toBe(409)
+        expect(res.text).toContain("origin of its own")
+        expect(ensures).toBe(0)
+      })
+
+      it("refuses a POST to a server deployment on the shared prototype origin too", async () => {
+        let ensures = 0
+        const { app } = await loopbackAppWith({
+          pinned: false,
+          prototypeProcesses: fakeProcesses({
+            ensure: () => {
+              ensures += 1
+              return Promise.resolve({ port: 1 })
+            },
+          }),
+        })
+        prototypeOriginMarker = true
+
+        const res = await request(app).post("/p/srv/").send("x=1")
+        expect(res.status).toBe(409)
+        expect(ensures).toBe(0)
+      })
+
+      /**
+       * `__desde/` is the viewer's reserved namespace on the prototype's
+       * origin. A GET there is answered with the bridge bundle; a write there
+       * is nobody's — least of all the child's, which must never see the URL.
+       */
+      it("never hands a write on the bridge path to the child", async () => {
+        let hits = 0
+        const port = await child((_req, res) => {
+          hits += 1
+          res.end("child")
+        })
+        const { app } = await loopbackAppWith({
+          prototypeProcesses: fakeProcesses({ ensure: () => Promise.resolve({ port }) }),
+        })
+
+        const res = await request(app).post(`/p/srv/__desde/bridge-${BRIDGE_VERSION}.js`)
+        expect(res.status).toBe(404)
+        expect(res.text).toContain("Cannot POST")
+        expect(hits).toBe(0)
+      })
+
+      /**
+       * A write against a slug that does not exist, or one the caller cannot
+       * read, falls through exactly as a write against a readable static
+       * prototype does. If it did not, the difference between the two answers
+       * would be a working existence oracle for anybody willing to send a
+       * POST.
+       */
+      it("falls through identically for an unknown slug and an unreadable project", async () => {
+        const c = await setup({ config: authedConfig })
+        const locked = await c.storage.createProject({ slug: "locked", name: "L", access: "invited" })
+        const dep = await c.storage.createDeployment({ projectId: locked.id, status: "deployed" })
+        await c.storage.updateProject(locked.id, { activeDeploymentId: dep.id })
+
+        const unknown = await request(c.app).post("/p/nosuch/")
+        const unreadable = await request(c.app).post("/p/locked/")
+        expect(unknown.status).toBe(404)
+        expect(unreadable.status).toBe(404)
+        expect(unreadable.headers["content-type"]).toBe(unknown.headers["content-type"])
+        // Only the path differs inside Express's own "Cannot POST <path>" body.
+        expect(unreadable.text.replace("/p/locked/", "/p/nosuch/")).toBe(unknown.text)
+      })
+    })
   })
 })

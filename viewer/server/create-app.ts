@@ -17,6 +17,7 @@ import {
   createPrototypeHostTerminalFence,
   createPrototypeOriginMark,
   createPrototypeOriginRegistry,
+  createPrototypeRouteWriteRule,
   createServeDomainRegistry,
   type PrototypeHostScopedRequest,
 } from "./serve/prototype-host-scope"
@@ -317,6 +318,14 @@ export function createApp(deps: AppDeps): express.Express {
         createServeDomainRegistry(deps.config.serveDomain),
         createPrototypeOriginRegistry(deps.config.prototypeOrigin),
       ),
+      // A server prototype takes writes; a folder of files does not. The rule
+      // only decides whether a write is HEADED for the serve router — the
+      // router itself refuses one for anything but a `serve: "server"`
+      // deployment on an origin of its own, and a refusal lands on the
+      // terminal fence below. `serveDomain` is the same value the rewrite
+      // mounted just after this one reads, which is what makes "the rewrite
+      // will put this under /p/" true rather than merely likely.
+      writeReachesPrototypeRoute: createPrototypeRouteWriteRule(deps.config.serveDomain),
     }),
   )
 

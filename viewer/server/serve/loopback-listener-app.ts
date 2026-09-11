@@ -109,16 +109,30 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
   // isolation depend on which name the browser happened to use.
   app.use(createHostAllowlistMiddleware(buildSingleHostAllowlist(hostPort), null))
 
-  // SECOND: this origin is a prototype origin, so refuse every method that
-  // could write and mark the request for the fences below. The predicate
-  // answers for this listener's own host only, comparing the same normalized
-  // string the allowlist admits. `createPrototypeHostScope` lowercases the
-  // inbound `Host` before asking, which is the form `normalizeHostPort`
-  // produces.
+  // SECOND: this origin is a prototype origin, so refuse a write that nothing
+  // here could answer, and mark the request for the fences below. The
+  // predicate answers for this listener's own host only, comparing the same
+  // normalized string the allowlist admits. `createPrototypeHostScope`
+  // lowercases the inbound `Host` before asking, which is the form
+  // `normalizeHostPort` produces.
   const registry: PrototypeHostRegistry = {
     isPrototypeHost: (hostHeader: string) => hostHeader === hostPort,
   }
-  app.use(createPrototypeHostScope({ registry }))
+  app.use(
+    createPrototypeHostScope({
+      registry,
+      // A listener is pinned to ONE deployment for its whole life, and the
+      // rewrite below turns every path on this origin into `/p/{slug}/…` — so
+      // the question "is this write headed for the prototype route?" has one
+      // answer here for every path, and it is decided by what this listener
+      // fronts rather than by the URL. A `serve: "server"` deployment is a
+      // process that takes form posts, server actions and API writes; a folder
+      // of files is not, and a write to one is refused exactly where it always
+      // was. `serve` rides in on the listener context (`loopback-listeners.ts`)
+      // so this costs no storage lookup per request.
+      writeReachesPrototypeRoute: () => deps.serve === "server",
+    }),
+  )
 
   // Every request is use, which is what keeps an actively reviewed prototype
   // from being reaped mid-review. Placed after the two refusals above so a
