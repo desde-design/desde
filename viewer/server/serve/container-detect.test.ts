@@ -69,6 +69,20 @@ describe("isLikelyBridgedNamespace", () => {
     expect(isLikelyBridgedNamespace(() => BRIDGED_NET_DEV)).toBe(true)
   })
 
+  it("is true for lo + eth0 beside the kernel's fallback tunnel devices (MEASURED, live run 2026-09-11, Docker Desktop)", () => {
+    const listing =
+      NET_DEV_HEADER +
+      ["lo", "tunl0", "gre0", "gretap0", "erspan0", "ip_vti0", "ip6_vti0", "sit0", "ip6tnl0", "ip6gre0", "eth0"]
+        .map(netDevLine)
+        .join("")
+    expect(isLikelyBridgedNamespace(() => listing)).toBe(true)
+  })
+
+  it("is still false when a host-side bridge sits beside the kernel's tunnel devices", () => {
+    const listing = NET_DEV_HEADER + ["lo", "tunl0", "sit0", "eth0", "docker0"].map(netDevLine).join("")
+    expect(isLikelyBridgedNamespace(() => listing)).toBe(false)
+  })
+
   it("is true for lo + eth0 + eth1 (a multi-network Compose container)", () => {
     const listing = NET_DEV_HEADER + netDevLine("lo") + netDevLine("eth0") + netDevLine("eth1")
     expect(isLikelyBridgedNamespace(() => listing)).toBe(true)

@@ -346,8 +346,18 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
 
     // The client walked away before the child answered: nothing left to relay
     // to, so stop asking the child for it.
+    // Remembered so the error handler below can tell OUR abort from the
+    // child's failure (live run, 2026-09-11): when the review page remounts
+    // the frame while its previous request is still waiting on a cold
+    // start, this abort destroys the upstream request before any headers
+    // came back, and reading that as "the child is unreachable" killed a
+    // healthy child and charged its restart budget.
+    let clientAborted = false
     res.on("close", () => {
-      if (!res.writableFinished) upstream.destroy()
+      if (!res.writableFinished) {
+        clientAborted = true
+        upstream.destroy()
+      }
     })
     res.on("error", () => upstream.destroy())
     // `destroy()` with no argument does not itself raise `upstream`'s "error"
@@ -362,6 +372,9 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
         res.destroy()
         return
       }
+      // Our own abort is not the child's failure: nothing was learned about
+      // the child, so nothing is reported and nothing is killed.
+      if (clientAborted) return
       opts.onUnreachable?.()
       if (res.headersSent) {
         res.destroy()

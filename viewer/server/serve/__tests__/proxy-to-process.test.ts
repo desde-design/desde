@@ -498,6 +498,34 @@ describe("proxyToProcess", () => {
     expect(reported).toBe(true)
   })
 
+  /**
+   * Live run, 2026-09-11. The review page remounts its frame while the
+   * previous frame's request may still be waiting on a cold start. That
+   * abort destroyed the upstream request before any headers came back, and
+   * the error handler read it as "the child is unreachable": a healthy child
+   * was killed and charged a restart. Our own abort says nothing about the
+   * child, so it must not be reported.
+   */
+  it("does not report the child unreachable when the client aborts before it answered", async () => {
+    let reported = false
+    const port = await child(() => {
+      // Never answers: the client gives up first.
+    })
+    const req = request(
+      appFor(port, {
+        upstreamTimeoutMs: 2000,
+        onUnreachable: () => {
+          reported = true
+        },
+      }),
+    ).get("/p/acme/")
+    req.end(() => {})
+    await new Promise((r) => setTimeout(r, 50))
+    req.abort()
+    await new Promise((r) => setTimeout(r, 150))
+    expect(reported).toBe(false)
+  })
+
   it("carries the configured CSP on the 502 page too", async () => {
     const res = await request(unreachableApp({ csp: "default-src 'self'" })).get("/p/acme/")
     expect(res.status).toBe(502)

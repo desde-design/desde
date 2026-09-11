@@ -89,6 +89,9 @@ export function isLikelyContainerized(fileExists: (path: string) => boolean = ex
  * documentation, not measured against a live container. See the codex-r6 and
  * codex-r10 reports.
  */
+/** Kernel-created fallback devices that exist in any namespace; never evidence of anything. */
+const KERNEL_PSEUDO_DEVICE = /^(tunl|gre|gretap|erspan|ip_vti|ip6_vti|sit|ip6tnl|ip6gre|dummy|teql|ifb|bond)\d+$/
+
 export function isLikelyBridgedNamespace(
   readNetDev: (path: string) => string = (path) => readFileSync(path, "utf8"),
 ): boolean {
@@ -99,7 +102,14 @@ export function isLikelyBridgedNamespace(
     return false
   }
   const interfaceNames = [...contents.matchAll(/^\s*([^:\s]+):/gm)].map((match) => match[1])
-  const nonLoopback = interfaceNames.filter((name) => name !== "lo")
+  // The kernel creates fallback tunnel devices (`tunl0`, `gre0`, `sit0`,
+  // `ip6tnl0` and their siblings) in every network namespace once the
+  // matching module is loaded on the host. They say nothing about how the
+  // namespace is attached, and a real Docker Desktop container lists nine of
+  // them beside `lo` and `eth0` (MEASURED, live run 2026-09-11; `os
+  // .networkInterfaces()` shows only `lo` and `eth0` because they carry no
+  // address). Ignored here for the same reason `lo` is.
+  const nonLoopback = interfaceNames.filter((name) => name !== "lo" && !KERNEL_PSEUDO_DEVICE.test(name))
   if (nonLoopback.length === 0) return false
   const hostSideName = /^(docker0|br-|veth|podman|cni|virbr)/
   return nonLoopback.every((name) => /^eth\d+$/.test(name) && !hostSideName.test(name))
