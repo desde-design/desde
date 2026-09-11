@@ -109,7 +109,14 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
       res.status(up.statusCode ?? 502)
       for (const [k, v] of Object.entries(up.headers)) {
         if (DROP_RESPONSE.has(k.toLowerCase()) || v === undefined) continue
-        res.setHeader(k, v)
+        // `set-cookie` is APPENDED, everything else replaced. The caller may
+        // have already put a cookie on this response — the serve router
+        // promotes a `?~c=` read capability to a `dsv_cap` cookie on a
+        // subdomain document load — and `setHeader` would silently drop it the
+        // moment the prototype set a cookie of its own. Both belong on the
+        // response: they are different names on the same origin.
+        if (k.toLowerCase() === "set-cookie") res.append(k, v)
+        else res.setHeader(k, v)
       }
       setOwnHeaders(res, opts.csp)
 

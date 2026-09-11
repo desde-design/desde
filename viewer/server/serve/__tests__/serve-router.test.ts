@@ -13,7 +13,7 @@ import { buildHostAllowlist, isAllowedHost } from "../host-allowlist"
 import { resolveOrigins } from "../prototype-origin-resolve"
 import { PrototypeProcessError, type PrototypeProcesses } from "../prototype-processes"
 import { createServeRouter, type PinnedDeploymentRequest } from "../serve-router"
-import type { SubdomainRequest } from "../subdomain"
+import { resolveIsolatedOriginCsp, type SubdomainRequest } from "../subdomain"
 import type { PrototypeOriginHostRequest } from "../prototype-host-scope"
 import { mintPrototypeCapability } from "../prototype-capability"
 import { createSwappableApp } from "../../__tests__/swappable-app"
@@ -1634,6 +1634,90 @@ describe("createServeRouter", () => {
       expect(res.text).toContain("__DESDE_SHELL_ORIGIN__")
       expect(res.text).toContain(`src="/__desde/bridge-${BRIDGE_VERSION}.js"`)
       expect(ensured).toEqual([deployment.id])
+      // A proxied response is contained by exactly the policy a static
+      // response on the same origin would be — byte-for-byte, not merely "a
+      // CSP is present". Any policy the CHILD sent is dropped on the way
+      // through (`proxy-to-process.ts`), so this is the only one.
+      expect(res.headers["content-security-policy"]).toBe(
+        resolveIsolatedOriginCsp(null, "https://viewer.example.com"),
+      )
+      expect(res.headers["x-content-type-options"]).toBe("nosniff")
+    })
+
+    /**
+     * A PRIVATE server prototype on a subdomain, authorized by the `?~c=`
+     * capability the review page mints.
+     *
+     * The promotion to a `dsv_cap` cookie is what makes the SECOND request
+     * work. The token rides the query on the document load only; every asset
+     * the app then asks for carries nothing but cookies, so a proxied document
+     * that skipped the promotion would render once and then 404 everything it
+     * referenced. The static HTML branch has done this since task 11 — this
+     * proves the proxy branch does the same thing, through the same function.
+     */
+    it("promotes the `?~c=` capability to a cookie on a proxied document, and hides `~c` from the child", async () => {
+      let seen: string | undefined
+      const port = await child((req, res) => {
+        seen = req.url
+        res.setHeader("content-type", "text/html")
+        // The child sets a cookie of its own, which must NOT displace ours.
+        res.setHeader("set-cookie", "app_sid=1; Path=/")
+        res.end("<html><body>private srv</body></html>")
+      })
+      const c = await setup({
+        config: authedConfig,
+        prototypeProcesses: fakeProcesses({ ensure: () => Promise.resolve({ port }) }),
+      })
+      const project = await c.storage.createProject({ slug: "srv", name: "Srv", access: "invited" })
+      const dep = await c.storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await c.storage.updateProject(project.id, { activeDeploymentId: dep.id })
+      await c.storage.updateDeployment(dep.id, { serve: "server", serverStart: ["node", "x.js"] })
+      const token = mintPrototypeCapability({ secret: "sesh-secret", slug: "srv", deploymentId: dep.id })
+      subdomainMarker = "srv"
+
+      const res = await request(c.app).get(`/p/srv/?~c=${token}`).expect(200)
+      expect(res.text).toContain("private srv")
+
+      const cookies = (res.headers["set-cookie"] as unknown as string[]) ?? []
+      // `authedConfig`'s publicUrl is https, so the name carries the `__Host-`
+      // prefix — the same name, and the same attributes, the static HTML
+      // branch sets for this config (see the capability-cookie block below).
+      // Both branches call one function, so the http spelling is covered there.
+      const ours = cookies.find((v) => v.includes("dsv_cap="))
+      expect(ours).toBeDefined()
+      expect(ours?.startsWith(`__Host-dsv_cap=${token}`)).toBe(true)
+      expect(ours).toContain("Path=/")
+      expect(ours).toContain("HttpOnly")
+      expect(ours).toContain("SameSite=Lax")
+      expect(ours).toMatch(/Secure/i)
+      // The child's own cookie survives alongside it.
+      expect(cookies.some((v) => v.startsWith("app_sid=1"))).toBe(true)
+
+      // The capability is the viewer's channel. The child sees its own root
+      // with no trace of it.
+      expect(seen).toBe("/")
+      expect(seen).not.toContain("~c")
+    })
+
+    it("keeps the child's own query parameters while dropping `~c`", async () => {
+      let seen: string | undefined
+      const port = await child((req, res) => {
+        seen = req.url
+        res.end("ok")
+      })
+      const c = await setup({
+        config: authedConfig,
+        prototypeProcesses: fakeProcesses({ ensure: () => Promise.resolve({ port }) }),
+      })
+      const project = await c.storage.createProject({ slug: "srv", name: "Srv", access: "invited" })
+      const dep = await c.storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await c.storage.updateProject(project.id, { activeDeploymentId: dep.id })
+      await c.storage.updateDeployment(dep.id, { serve: "server", serverStart: ["node", "x.js"] })
+      const token = mintPrototypeCapability({ secret: "sesh-secret", slug: "srv", deploymentId: dep.id })
+      subdomainMarker = "srv"
+
+      await request(c.app).get(`/p/srv/?~c=${token}&page=2`).expect(200)
+      expect(seen).toBe("/?page=2")
     })
 
     it("gives the child the path with the prefix stripped and the query kept", async () => {

@@ -65,6 +65,54 @@ export interface ServeRouterDeps {
   prototypeProcesses: PrototypeProcesses
 }
 
+/**
+ * The path a server prototype's own process should see, given the URL this
+ * request arrived on and the prefixes the viewer may have put in front of it.
+ *
+ * Two transformations, both about handing the child ITS url rather than ours.
+ *
+ * **The prefix.** `originalUrl`, not `req.url`, is the input. Express fixes
+ * `originalUrl` before any middleware runs, so on a real isolated origin it is
+ * already the path the browser asked for (`/orders?page=2`) — the
+ * `/p/{slug}/…` form in `req.url` is what the subdomain and pinned-listener
+ * rewrites produce for the ROUTER's benefit. So the common case is to pass it
+ * through untouched. `prefixes` covers the request that genuinely arrived in
+ * the `/p/{slug}/…` shape, longest first: the capability-bearing
+ * `/p/{slug}/~c/{token}/` and the bare `/p/{slug}/`. Each ends in `/`, so
+ * slicing one character short of its length keeps the leading `/` the child
+ * needs.
+ *
+ * **The capability.** `~c` is dropped from the query. On a subdomain it
+ * arrives as `?~c=<token>` on the document load (see
+ * `readSubdomainCapability`). That is the viewer's channel, not the
+ * prototype's: forwarding it would put a read credential into the app's own
+ * request log, its analytics, and any link it builds out of
+ * `location.search`. Every other parameter survives, and the `?` goes with the
+ * last one.
+ *
+ * The query is returned UNCHANGED when there is no `~c` in it, which is the
+ * overwhelmingly common case. That early return is deliberate: re-serializing
+ * through `URLSearchParams` normalizes encodings (a space becomes `+`, `%7E`
+ * becomes `~`), and a proxy should hand the child exactly the bytes it was
+ * given unless it has an actual reason not to.
+ */
+export function childPathFor(originalUrl: string, prefixes: string[]): string {
+  let path = originalUrl
+  for (const prefix of prefixes) {
+    if (path.startsWith(prefix)) {
+      path = path.slice(prefix.length - 1)
+      break
+    }
+  }
+  const mark = path.indexOf("?")
+  if (mark === -1) return path
+  const params = new URLSearchParams(path.slice(mark + 1))
+  if (!params.has(CAPABILITY_SEGMENT)) return path
+  params.delete(CAPABILITY_SEGMENT)
+  const rest = params.toString()
+  return rest === "" ? path.slice(0, mark) : `${path.slice(0, mark)}?${rest}`
+}
+
 /** Minimal HTML escaping for the two refusal pages below. */
 function escapeHtml(text: string): string {
   return text
@@ -575,6 +623,32 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       ? resolveIsolatedOriginCsp(deps.prototypeCsp, shellOrigin)
       : resolvePrototypeCsp(deps.prototypeCsp, shellOrigin, slug)
 
+    /**
+     * Promotes a verified `?~c=` document-load capability to a host-only
+     * `dsv_cap` cookie, so the frame's own same-site subresource requests
+     * carry it without the query being repeated in every relative URL.
+     *
+     * Set ONLY when: this is a subdomain host (`onSubdomain`), the capability
+     * VERIFIED (`capabilityGranted`), and it arrived on the QUERY
+     * (`capabilityFromQuery`). It is therefore never set on the shell host or
+     * a loopback listener (neither is `onSubdomain`), never for a token that
+     * arrived in the cookie (no need to re-set it), and never for one that
+     * failed to verify. `capabilityToken` is non-null on this path — a
+     * query-sourced token is what `capabilityFromQuery` means — but the guard
+     * states it for the type checker too.
+     *
+     * ONE function because there are now TWO document responses that must do
+     * this: the static HTML branch below, and the server-prototype proxy. A
+     * server prototype on a subdomain that skipped it would load its first
+     * page and then 404 every asset, because each subsequent request would
+     * arrive with no capability at all and be judged anonymously.
+     */
+    const promoteCapabilityCookie = (): void => {
+      if (onSubdomain && capabilityGranted && capabilityFromQuery && capabilityToken !== null) {
+        res.append("Set-Cookie", serializeCapabilityCookie(capabilityToken, secureCookies))
+      }
+    }
+
     // The bridge bundle, served as its own resource under the prototype's
     // own path prefix — same `canReadProject` gate as everything else under
     // `/p/:slug/**` (computed once, above), same path-scoped CSP. Checked
@@ -683,23 +757,18 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       // idle reaper does not stop a process mid-review.
       deps.prototypeProcesses.touch(deployment.id)
       allowCors()
+      // Same promotion the static HTML branch does, for the same reason: on a
+      // subdomain the token rides the document's `?~c=` query, and every
+      // request after that has only the cookie to carry it. Without this a
+      // private server prototype would render its first page and then 404
+      // every asset it asked for.
+      //
+      // Before `proxyToProcess`, which is safe because the proxy APPENDS the
+      // child's own `set-cookie` rather than replacing the header.
+      promoteCapabilityCookie()
       proxyToProcess(req, res, {
         port,
-        // The child sees the app at its ROOT, with the query kept.
-        //
-        // `originalUrl`, not `url`, and the two branches are not
-        // interchangeable. Express fixes `originalUrl` before any middleware
-        // runs, so on a real isolated origin it is the path the browser asked
-        // for — `/orders?page=2` — while `req.url` is the `/p/{slug}/…` form
-        // the subdomain and pinned-listener rewrites produce for this router's
-        // benefit. On those origins `originalUrl` IS the child's path and is
-        // passed through unchanged. The strip branch covers the request that
-        // literally arrived in the `/p/{slug}/…` shape; `pathPrefix` ends in
-        // `/`, so slicing one character short of its length keeps the leading
-        // `/` the child needs.
-        path: req.originalUrl.startsWith(pathPrefix)
-          ? req.originalUrl.slice(pathPrefix.length - 1)
-          : req.originalUrl,
+        path: childPathFor(req.originalUrl, [pathPrefix, prototypePathPrefix(slug, null)]),
         shellOrigin,
         // The prototype owns `/` on this origin (`servesAtRoot` is the gate
         // above), so this is the same bridge path the HTML branch below uses.
@@ -707,7 +776,12 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
         csp,
         // Only fires when the child answered nothing at all, so the manager's
         // record of "running" is wrong and the entry should be dropped.
-        onUnreachable: () => void deps.prototypeProcesses.stop(deployment.id),
+        // Best effort: a `stop` that rejects must not become an unhandled
+        // rejection (which would take the process down), and the next request
+        // starts the child again either way.
+        onUnreachable: () => {
+          deps.prototypeProcesses.stop(deployment.id).catch(() => {})
+        },
       })
       return
     }
@@ -762,20 +836,7 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       res.setHeader("X-Content-Type-Options", "nosniff")
       allowCors()
       if (csp !== null) res.setHeader("Content-Security-Policy", csp)
-      // Promote a verified `?~c=` document-load capability to a host-only
-      // `dsv_cap` cookie, so the frame's own same-site subresource requests
-      // carry it without the query being repeated in every relative URL. Set
-      // ONLY here, and ONLY when: this is a subdomain host (`onSubdomain`), the
-      // capability VERIFIED (`capabilityGranted`), and it arrived on the QUERY
-      // (`capabilityFromQuery`). It is therefore never set on the shell host or
-      // a loopback listener (neither is `onSubdomain`), never for a token that
-      // arrived in the cookie (no need to re-set it), and never for one that
-      // failed to verify. `capabilityToken` is non-null on this path — a
-      // query-sourced token is what `capabilityFromQuery` means — but the guard
-      // states it for the type checker too.
-      if (onSubdomain && capabilityGranted && capabilityFromQuery && capabilityToken !== null) {
-        res.append("Set-Cookie", serializeCapabilityCookie(capabilityToken, secureCookies))
-      }
+      promoteCapabilityCookie()
       res.send(html)
       return
     }
