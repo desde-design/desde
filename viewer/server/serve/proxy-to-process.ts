@@ -187,172 +187,190 @@ function setOwnHeaders(res: Response, csp: string | null): void {
 const NOT_ANSWERING_PAGE =
   "<!doctype html><title>Prototype unavailable</title><p>The prototype's server is not answering. Reload in a moment; if this keeps happening, rebuild the prototype.</p>"
 
-export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions): void {
-  const headers: IncomingHttpHeaders = {}
-  for (const [k, v] of Object.entries(req.headers)) {
-    if (!DROP_REQUEST.has(k.toLowerCase()) && v !== undefined) headers[k] = v
-  }
-  headers["accept-encoding"] = "identity"
-  headers.host = `127.0.0.1:${opts.port}`
-  const cookie = forwardedCookieHeader(req.headers.cookie)
-  if (cookie !== undefined) headers.cookie = cookie
-  else delete headers.cookie
-  // Set here, after the copy loop, and never merged with whatever the client
-  // claimed (both names are in `DROP_REQUEST`). A framework that checks a
-  // write's `Origin` against its own host reads `x-forwarded-host` FIRST and
-  // `host` second — Next's server-action handler does — and `host` is the
-  // child's internal address, which no browser `Origin` can ever equal. The
-  // same pair is what lets an app build absolute URLs (canonical links,
-  // `metadataBase`, OAuth redirects) that point at the prototype origin
-  // instead of the child's private port.
-  //
-  // A `Host` the request did not carry is impossible in practice (HTTP/1.1
-  // requires it), but an empty string here would be worse than no header at
-  // all, so it is simply left off.
-  const browserHost = req.headers.host
-  if (typeof browserHost === "string" && browserHost !== "") {
-    headers["x-forwarded-host"] = browserHost
-  }
-  headers["x-forwarded-proto"] = opts.forwardedProto
+/**
+ * Forwards `req` to the child on `opts.port` and relays its answer onto
+ * `res`. The returned promise resolves once `res` closes — normal
+ * completion, a client abort, or an upstream failure all count — and never
+ * rejects; every failure this function can hit is already turned into a
+ * response (a 502 page) or a destroyed connection. A caller that holds a
+ * resource for the lifetime of the response (the serve router's process
+ * lease, see `prototype-processes.ts`'s `withLease`) awaits this promise
+ * to know when it is safe to let go.
+ */
+export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions): Promise<void> {
+  return new Promise<void>((resolve) => {
+    // Settles the promise the caller awaits, so a lease scope built on
+    // this function outlives the whole response, not just the call that
+    // started it. Registered first, before any of the body below, so it
+    // catches a close from any path (normal completion, client abort,
+    // upstream failure).
+    res.once("close", () => resolve())
+    const headers: IncomingHttpHeaders = {}
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (!DROP_REQUEST.has(k.toLowerCase()) && v !== undefined) headers[k] = v
+    }
+    headers["accept-encoding"] = "identity"
+    headers.host = `127.0.0.1:${opts.port}`
+    const cookie = forwardedCookieHeader(req.headers.cookie)
+    if (cookie !== undefined) headers.cookie = cookie
+    else delete headers.cookie
+    // Set here, after the copy loop, and never merged with whatever the client
+    // claimed (both names are in `DROP_REQUEST`). A framework that checks a
+    // write's `Origin` against its own host reads `x-forwarded-host` FIRST and
+    // `host` second — Next's server-action handler does — and `host` is the
+    // child's internal address, which no browser `Origin` can ever equal. The
+    // same pair is what lets an app build absolute URLs (canonical links,
+    // `metadataBase`, OAuth redirects) that point at the prototype origin
+    // instead of the child's private port.
+    //
+    // A `Host` the request did not carry is impossible in practice (HTTP/1.1
+    // requires it), but an empty string here would be worse than no header at
+    // all, so it is simply left off.
+    const browserHost = req.headers.host
+    if (typeof browserHost === "string" && browserHost !== "") {
+      headers["x-forwarded-host"] = browserHost
+    }
+    headers["x-forwarded-proto"] = opts.forwardedProto
 
-  const maxRewriteBytes = opts.maxRewriteBytes ?? MAX_REWRITTEN_HTML_BYTES
-  const upstreamTimeoutMs = opts.upstreamTimeoutMs ?? UPSTREAM_TIMEOUT_MS
-  // Whether the child sent a status line at all. Gates onUnreachable: once a
-  // response has started, a later failure is not "the child is unreachable" —
-  // it already answered.
-  let responded = false
+    const maxRewriteBytes = opts.maxRewriteBytes ?? MAX_REWRITTEN_HTML_BYTES
+    const upstreamTimeoutMs = opts.upstreamTimeoutMs ?? UPSTREAM_TIMEOUT_MS
+    // Whether the child sent a status line at all. Gates onUnreachable: once a
+    // response has started, a later failure is not "the child is unreachable" —
+    // it already answered.
+    let responded = false
 
-  const upstream = httpRequest(
-    {
-      host: "127.0.0.1",
-      port: opts.port,
-      method: req.method,
-      path: opts.path,
-      headers,
-      timeout: upstreamTimeoutMs,
-    },
-    (up) => {
-      responded = true
-      // The timeout above bounds the WAIT FOR HEADERS only. Once the child
-      // has answered, `setTimeout(0)` clears the socket's inactivity timer
-      // so a quiet stream (SSE, a slow download) is never destroyed on its
-      // account — a quiet body is the child's own business, and the in-flight
-      // request lease (`withLease` in `prototype-processes.ts`) is already
-      // what keeps the process itself alive for as long as this response is
-      // open. Deliberately no SEPARATE body-phase timeout is added in its
-      // place (codex round 7, Fix 2).
-      upstream.setTimeout(0)
-      // Attached FIRST, before the rewrite/stream branch below, so both
-      // paths have it. `pipe()` (the non-rewrite path, right below) does not
-      // forward errors — before this was hoisted here, a child that started
-      // a non-HTML response and then reset the connection mid-stream emitted
-      // "error" on `up` with no listener at all, which Node turns into an
-      // uncaught exception that ends the whole Viewer process (codex round
-      // 7, Fix 1).
-      up.on("error", () => res.destroy())
-      // A child that ignores `accept-encoding: identity` and answers encoded
-      // anyway cannot be safely rewritten — decoding it is out of scope, and
-      // treating the compressed bytes as UTF-8 HTML would corrupt them. Fall
-      // back to a byte-for-byte stream instead of guessing.
-      const encoding = up.headers["content-encoding"]
-      const childEncoded = typeof encoding === "string" && encoding.toLowerCase() !== "identity"
-      // HEAD answers, and 204/304, carry no body by definition — rewriting
-      // (or even claiming a Content-Length for) a body that must not exist
-      // would violate HTTP, so those always take the streaming path.
-      const bodiless = req.method === "HEAD" || up.statusCode === 204 || up.statusCode === 304
-      const rewrite = isHtml(up.headers["content-type"]) && !childEncoded && !bodiless
+    const upstream = httpRequest(
+      {
+        host: "127.0.0.1",
+        port: opts.port,
+        method: req.method,
+        path: opts.path,
+        headers,
+        timeout: upstreamTimeoutMs,
+      },
+      (up) => {
+        responded = true
+        // The timeout above bounds the WAIT FOR HEADERS only. Once the child
+        // has answered, `setTimeout(0)` clears the socket's inactivity timer
+        // so a quiet stream (SSE, a slow download) is never destroyed on its
+        // account — a quiet body is the child's own business, and the in-flight
+        // request lease (`withLease` in `prototype-processes.ts`) is already
+        // what keeps the process itself alive for as long as this response is
+        // open. Deliberately no SEPARATE body-phase timeout is added in its
+        // place (codex round 7, Fix 2).
+        upstream.setTimeout(0)
+        // Attached FIRST, before the rewrite/stream branch below, so both
+        // paths have it. `pipe()` (the non-rewrite path, right below) does not
+        // forward errors — before this was hoisted here, a child that started
+        // a non-HTML response and then reset the connection mid-stream emitted
+        // "error" on `up` with no listener at all, which Node turns into an
+        // uncaught exception that ends the whole Viewer process (codex round
+        // 7, Fix 1).
+        up.on("error", () => res.destroy())
+        // A child that ignores `accept-encoding: identity` and answers encoded
+        // anyway cannot be safely rewritten — decoding it is out of scope, and
+        // treating the compressed bytes as UTF-8 HTML would corrupt them. Fall
+        // back to a byte-for-byte stream instead of guessing.
+        const encoding = up.headers["content-encoding"]
+        const childEncoded = typeof encoding === "string" && encoding.toLowerCase() !== "identity"
+        // HEAD answers, and 204/304, carry no body by definition — rewriting
+        // (or even claiming a Content-Length for) a body that must not exist
+        // would violate HTTP, so those always take the streaming path.
+        const bodiless = req.method === "HEAD" || up.statusCode === 204 || up.statusCode === 304
+        const rewrite = isHtml(up.headers["content-type"]) && !childEncoded && !bodiless
 
-      res.status(up.statusCode ?? 502)
-      for (const [k, v] of Object.entries(up.headers)) {
-        // `set-cookie` is held back and merged below — see `mergeSetCookies`
-        // for why the viewer's own value has to go last, and why a child value
-        // sharing its name is dropped.
-        if (DROP_RESPONSE.has(k.toLowerCase()) || v === undefined) continue
-        if (k.toLowerCase() === "set-cookie") continue
-        res.setHeader(k, v)
-      }
-      // Before the rewrite/stream split below, so both answer shapes carry the
-      // same cookies. (The 502 path never gets here and sets none.)
-      const cookies = mergeSetCookies(up.headers["set-cookie"], opts.setCookie)
-      if (cookies.length > 0) res.setHeader("Set-Cookie", cookies)
-      setOwnHeaders(res, opts.csp)
-
-      if (!rewrite) {
-        // The general header filter above dropped `Content-Length`
-        // (`DROP_RESPONSE`) so it can be recomputed for a rewritten body —
-        // this branch has no rewritten body to recompute one FROM, so it is
-        // restored from upstream instead where that is still meaningful
-        // (codex round 11, Fix 4). A HEAD answer legitimately carries the
-        // length of the GET representation, and clients use it; a 304 may
-        // carry one for the same reason. A 204 must never carry one at all,
-        // so it is left dropped even when upstream sent it.
-        if (!bodiless || req.method === "HEAD" || up.statusCode === 304) {
-          if (up.headers["content-length"]) res.setHeader("Content-Length", up.headers["content-length"])
+        res.status(up.statusCode ?? 502)
+        for (const [k, v] of Object.entries(up.headers)) {
+          // `set-cookie` is held back and merged below — see `mergeSetCookies`
+          // for why the viewer's own value has to go last, and why a child value
+          // sharing its name is dropped.
+          if (DROP_RESPONSE.has(k.toLowerCase()) || v === undefined) continue
+          if (k.toLowerCase() === "set-cookie") continue
+          res.setHeader(k, v)
         }
-        up.pipe(res)
-        return
-      }
+        // Before the rewrite/stream split below, so both answer shapes carry the
+        // same cookies. (The 502 path never gets here and sets none.)
+        const cookies = mergeSetCookies(up.headers["set-cookie"], opts.setCookie)
+        if (cookies.length > 0) res.setHeader("Set-Cookie", cookies)
+        setOwnHeaders(res, opts.csp)
 
-      const chunks: Buffer[] = []
-      let bytes = 0
-
-      // Named so the over-cap branch can unhook both before handing the rest
-      // of the stream to `up.pipe(res)` — piping ends `res` itself, so `onEnd`
-      // must never run after that handoff, or `res.end()` would be called twice.
-      function onData(chunk: Buffer): void {
-        chunks.push(chunk)
-        bytes += chunk.length
-        if (bytes > maxRewriteBytes) {
-          // Too big to rewrite: flush what we have unmodified, then let a
-          // real pipe take over so backpressure is respected for the rest.
-          up.off("data", onData)
-          up.off("end", onEnd)
-          for (const c of chunks) res.write(c)
-          chunks.length = 0
+        if (!rewrite) {
+          // The general header filter above dropped `Content-Length`
+          // (`DROP_RESPONSE`) so it can be recomputed for a rewritten body —
+          // this branch has no rewritten body to recompute one FROM, so it is
+          // restored from upstream instead where that is still meaningful
+          // (codex round 11, Fix 4). A HEAD answer legitimately carries the
+          // length of the GET representation, and clients use it; a 304 may
+          // carry one for the same reason. A 204 must never carry one at all,
+          // so it is left dropped even when upstream sent it.
+          if (!bodiless || req.method === "HEAD" || up.statusCode === 304) {
+            if (up.headers["content-length"]) res.setHeader("Content-Length", up.headers["content-length"])
+          }
           up.pipe(res)
-        }
-      }
-      function onEnd(): void {
-        if (bytes === 0) {
-          // Nothing to inject into — an empty body stays empty.
-          res.end()
           return
         }
-        const body = injectBridge(Buffer.concat(chunks).toString("utf8"), opts.shellOrigin, opts.bridgeSrc)
-        res.setHeader("Content-Length", Buffer.byteLength(body))
-        res.end(body)
+
+        const chunks: Buffer[] = []
+        let bytes = 0
+
+        // Named so the over-cap branch can unhook both before handing the rest
+        // of the stream to `up.pipe(res)` — piping ends `res` itself, so `onEnd`
+        // must never run after that handoff, or `res.end()` would be called twice.
+        function onData(chunk: Buffer): void {
+          chunks.push(chunk)
+          bytes += chunk.length
+          if (bytes > maxRewriteBytes) {
+            // Too big to rewrite: flush what we have unmodified, then let a
+            // real pipe take over so backpressure is respected for the rest.
+            up.off("data", onData)
+            up.off("end", onEnd)
+            for (const c of chunks) res.write(c)
+            chunks.length = 0
+            up.pipe(res)
+          }
+        }
+        function onEnd(): void {
+          if (bytes === 0) {
+            // Nothing to inject into — an empty body stays empty.
+            res.end()
+            return
+          }
+          const body = injectBridge(Buffer.concat(chunks).toString("utf8"), opts.shellOrigin, opts.bridgeSrc)
+          res.setHeader("Content-Length", Buffer.byteLength(body))
+          res.end(body)
+        }
+        up.on("data", onData)
+        up.on("end", onEnd)
+      },
+    )
+
+    // The client walked away before the child answered: nothing left to relay
+    // to, so stop asking the child for it.
+    res.on("close", () => {
+      if (!res.writableFinished) upstream.destroy()
+    })
+    res.on("error", () => upstream.destroy())
+    // `destroy()` with no argument does not itself raise `upstream`'s "error"
+    // event, so an explicit Error is passed to route a timeout through the
+    // same handler as every other upstream failure.
+    upstream.on("timeout", () => upstream.destroy(new Error("proxy upstream timeout")))
+
+    upstream.on("error", () => {
+      if (responded) {
+        // The child answered and then the connection failed mid-response. It
+        // was reachable; only the in-flight response is lost.
+        res.destroy()
+        return
       }
-      up.on("data", onData)
-      up.on("end", onEnd)
-    },
-  )
-
-  // The client walked away before the child answered: nothing left to relay
-  // to, so stop asking the child for it.
-  res.on("close", () => {
-    if (!res.writableFinished) upstream.destroy()
+      opts.onUnreachable?.()
+      if (res.headersSent) {
+        res.destroy()
+        return
+      }
+      res.status(502)
+      setOwnHeaders(res, opts.csp)
+      res.type("text/html").send(NOT_ANSWERING_PAGE)
+    })
+    req.pipe(upstream)
   })
-  res.on("error", () => upstream.destroy())
-  // `destroy()` with no argument does not itself raise `upstream`'s "error"
-  // event, so an explicit Error is passed to route a timeout through the
-  // same handler as every other upstream failure.
-  upstream.on("timeout", () => upstream.destroy(new Error("proxy upstream timeout")))
-
-  upstream.on("error", () => {
-    if (responded) {
-      // The child answered and then the connection failed mid-response. It
-      // was reachable; only the in-flight response is lost.
-      res.destroy()
-      return
-    }
-    opts.onUnreachable?.()
-    if (res.headersSent) {
-      res.destroy()
-      return
-    }
-    res.status(502)
-    setOwnHeaders(res, opts.csp)
-    res.type("text/html").send(NOT_ANSWERING_PAGE)
-  })
-  req.pipe(upstream)
 }

@@ -855,8 +855,9 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
         return
       }
       // Taken BEFORE the cold start, not after (codex round 11, Fix 1), and
-      // released on `close` in the same breath. Taking it later left two
-      // gaps open for as long as a cold start took:
+      // released when the response closes, whichever way that happens:
+      // normal completion, a client abort, or an upstream failure. Taking it
+      // later left two gaps open for as long as a cold start took:
       //
       // A client that gave up while `ensure()` was still starting the
       // process ended the response before `res.once("close", ...)` was ever
@@ -877,92 +878,97 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       // before: the idle reaper (`prototype-processes.ts`'s `startReaper`)
       // must not stop a process answering a long SSE stream or a large
       // streamed download just because the idle bound passed mid-response
-      // (codex round 2, item 3). The lease is a SCOPE now, so what holds it
-      // open to the end of the response is this function not returning until
-      // the response closes.
-      await deps.prototypeProcesses.withLease(deployment.id, async () => {
-        let closedBeforeReady = false
-        const responseClosed = new Promise<void>((resolve) => {
-          res.once("close", () => {
-            closedBeforeReady = true
-            resolve()
+      // (codex round 2, item 3). The lease is a SCOPE: `proxyToProcess`
+      // returns a promise that settles once the response closes, and
+      // awaiting it below is what keeps the scope open for the whole
+      // response — there is no separate `res.once("close", ...)` wait of
+      // its own any more.
+      //
+      // `clientGone` is registered BEFORE `withLease`, not inside it: it has
+      // to be listening from the moment this request starts, so that if the
+      // client leaves during `ensure()`, the scope can notice as soon as
+      // control returns from that await, rather than proxy a response
+      // nobody is there to read.
+      let clientGone = false
+      res.once("close", () => {
+        clientGone = true
+      })
+      try {
+        await deps.prototypeProcesses.withLease(deployment.id, async () => {
+          const { port } = await deps.prototypeProcesses.ensure(deployment)
+          // The client can have gone away while `ensure()` was still
+          // working. Proxying to a response nobody is listening to would
+          // just fail partway through, so stop here instead — `withLease`'s
+          // own `finally` still releases the lease this scope holds.
+          if (clientGone) return
+          // After `ensure`, not before: this marks the deployment as in use so the
+          // idle reaper does not stop a process mid-review.
+          deps.prototypeProcesses.touch(deployment.id)
+          allowCors()
+          // Same promotion the static HTML branch does, for the same reason: on a
+          // subdomain the token rides the document's `?~c=` query, and every
+          // request after that has only the cookie to carry it. Without this a
+          // private server prototype would render its first page and then 404
+          // every asset it asked for.
+          //
+          // Handed to the proxy rather than appended here, so it lands AFTER the
+          // child's own cookies and displaces a child value that shares its name.
+          // See `ProxyOptions.setCookie`.
+          const capabilityCookie = capabilityCookieToSet()
+          await proxyToProcess(req, res, {
+            port,
+            ...(capabilityCookie !== null ? { setCookie: capabilityCookie } : {}),
+            path: childPathFor(req.originalUrl),
+            shellOrigin,
+            // The scheme the BROWSER used to reach THIS origin, which is not
+            // always the shell's. A pinned loopback listener is always http (the
+            // registry refuses to pair one with an https shell), while a
+            // subdomain prototype is on the shell's own scheme. The child reads
+            // it as `X-Forwarded-Proto`.
+            forwardedProto: pinned !== null || !shellOrigin.startsWith("https:") ? "http" : "https",
+            // The prototype owns `/` on this origin (`servesAtRoot` is the gate
+            // above), so this is the same bridge path the HTML branch below uses.
+            bridgeSrc: `/${bridgeAssetRelPath(deps.bridgeVersion)}`,
+            csp,
+            // Only fires when the child answered nothing at all, so the manager's
+            // record of "running" is wrong and the entry should be corrected.
+            //
+            // `markUnreachable`, not `stop` (codex round 5, Fix 2). `stop` would
+            // overwrite the entry with a plain `stopped` status even when the
+            // child's own exit handler had already recorded `crashed` — and the
+            // review page's embedded poll (`shouldRefreshWhileEmbedded`) only
+            // reacts to `crashed`, never to `stopped`. A `stopped` entry told the
+            // reader nothing was wrong while the 502 page sitting in their iframe
+            // made no further request on its own, so the process stayed down
+            // until someone reloaded by hand. `markUnreachable` records a
+            // RETRYABLE `crashed` instead, so the next request's `ensure` (the
+            // page's own poll-triggered iframe remount) restarts it under the
+            // normal budget.
+            //
+            // Best effort: a call that rejects must not become an unhandled
+            // rejection (which would take the process down), and the next
+            // request tries `ensure` again either way.
+            onUnreachable: () => {
+              deps.prototypeProcesses.markUnreachable(deployment.id).catch(() => {})
+            },
           })
         })
-        let port: number
-        try {
-          port = (await deps.prototypeProcesses.ensure(deployment)).port
-        } catch (error) {
-          // `PrototypeProcessError.message` is written as a plain sentence for a
-          // reader (`prototype-processes.ts`); anything else is an internal
-          // failure whose text is not safe to show.
-          const message =
-            error instanceof PrototypeProcessError
-              ? error.message
-              : "The prototype's server could not be started."
-          refuse(503, `<!doctype html><title>Prototype unavailable</title><p>${escapeHtml(message)}</p>`)
-          return
-        }
-        // The client can have gone away while `ensure()` was still working.
-        // Proxying to a response nobody is listening to would just fail
-        // partway through, so stop here instead.
-        if (closedBeforeReady || res.writableEnded || res.destroyed) return
-        // After `ensure`, not before: this marks the deployment as in use so the
-        // idle reaper does not stop a process mid-review.
-        deps.prototypeProcesses.touch(deployment.id)
-        allowCors()
-        // Same promotion the static HTML branch does, for the same reason: on a
-        // subdomain the token rides the document's `?~c=` query, and every
-        // request after that has only the cookie to carry it. Without this a
-        // private server prototype would render its first page and then 404
-        // every asset it asked for.
+      } catch (error) {
+        // The only thing inside the scope that can reject is `ensure()` —
+        // `proxyToProcess` never rejects (its own doc comment says so) — so
+        // reaching here always means the cold start itself failed. The
+        // lease is already gone: `withLease`'s `finally` releases it before
+        // this rejection propagates out to this `catch`.
         //
-        // Handed to the proxy rather than appended here, so it lands AFTER the
-        // child's own cookies and displaces a child value that shares its name.
-        // See `ProxyOptions.setCookie`.
-        const capabilityCookie = capabilityCookieToSet()
-        proxyToProcess(req, res, {
-        port,
-          ...(capabilityCookie !== null ? { setCookie: capabilityCookie } : {}),
-          path: childPathFor(req.originalUrl),
-          shellOrigin,
-          // The scheme the BROWSER used to reach THIS origin, which is not
-          // always the shell's. A pinned loopback listener is always http (the
-          // registry refuses to pair one with an https shell), while a
-          // subdomain prototype is on the shell's own scheme. The child reads
-          // it as `X-Forwarded-Proto`.
-          forwardedProto: pinned !== null || !shellOrigin.startsWith("https:") ? "http" : "https",
-          // The prototype owns `/` on this origin (`servesAtRoot` is the gate
-          // above), so this is the same bridge path the HTML branch below uses.
-          bridgeSrc: `/${bridgeAssetRelPath(deps.bridgeVersion)}`,
-          csp,
-          // Only fires when the child answered nothing at all, so the manager's
-          // record of "running" is wrong and the entry should be corrected.
-          //
-          // `markUnreachable`, not `stop` (codex round 5, Fix 2). `stop` would
-          // overwrite the entry with a plain `stopped` status even when the
-          // child's own exit handler had already recorded `crashed` — and the
-          // review page's embedded poll (`shouldRefreshWhileEmbedded`) only
-          // reacts to `crashed`, never to `stopped`. A `stopped` entry told the
-          // reader nothing was wrong while the 502 page sitting in their iframe
-          // made no further request on its own, so the process stayed down
-          // until someone reloaded by hand. `markUnreachable` records a
-          // RETRYABLE `crashed` instead, so the next request's `ensure` (the
-          // page's own poll-triggered iframe remount) restarts it under the
-          // normal budget.
-          //
-          // Best effort: a call that rejects must not become an unhandled
-          // rejection (which would take the process down), and the next
-          // request tries `ensure` again either way.
-          onUnreachable: () => {
-            deps.prototypeProcesses.markUnreachable(deployment.id).catch(() => {})
-          },
-        })
-        // `proxyToProcess` does not say when it has finished, so the scope
-        // waits on the response's own `close` — the same event the release
-        // used to be registered on. Task 4 replaces this with the promise
-        // the proxy itself returns.
-        await responseClosed
-      })
+        // `PrototypeProcessError.message` is written as a plain sentence for a
+        // reader (`prototype-processes.ts`); anything else is an internal
+        // failure whose text is not safe to show.
+        const message =
+          error instanceof PrototypeProcessError
+            ? error.message
+            : "The prototype's server could not be started."
+        refuse(503, `<!doctype html><title>Prototype unavailable</title><p>${escapeHtml(message)}</p>`)
+      }
       return
     }
 

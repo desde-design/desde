@@ -1858,7 +1858,12 @@ describe("createServeRouter", () => {
      * "lease held only after".
      */
     describe("the in-flight lease is taken before the cold start, not after", () => {
-      it("is already held while ensure() is still pending, and is released when the client closes first", async () => {
+      it("ends with zero open leases once ensure() resolves, and never reaches the child, when the client closes first", async () => {
+        let childHits = 0
+        const port = await child((_req, res) => {
+          childHits += 1
+          res.end("should not happen")
+        })
         const gate = deferred<{ port: number }>()
         let ensureCalled = false
         const tracked = trackedLease()
@@ -1904,14 +1909,23 @@ describe("createServeRouter", () => {
         expect(tracked.count()).toBe(1)
 
         // Resolving late must not throw or double-release: the handler
-        // resumes, sees the response already closed, and returns, which ends
-        // the scope and releases the lease.
-        gate.resolve({ port: 1 })
+        // resumes, sees `clientGone` already set, and returns without
+        // proxying anywhere — which ends the scope and releases the lease.
+        gate.resolve({ port })
         await vi.waitFor(() => expect(tracked.count()).toBe(0))
+        // Give a stray proxy call a beat to have reached the child, if the
+        // "return before proxying" check had been skipped.
+        await new Promise((r) => setTimeout(r, 20))
+        expect(childHits).toBe(0)
       })
 
-      it("holds the lease until the response closes, for a request that completes normally", async () => {
-        const port = await child((_req, res) => res.end("ok"))
+      it("holds the lease from before ensure() resolves until the response closes, for a request that completes normally", async () => {
+        const bodyGate = deferred<void>()
+        const port = await child((_req, res) => {
+          res.writeHead(200, { "content-type": "text/plain" })
+          res.write("start")
+          void bodyGate.promise.then(() => res.end("end"))
+        })
         const gate = deferred<{ port: number }>()
         let ensureCalled = false
         const tracked = trackedLease()
@@ -1925,29 +1939,43 @@ describe("createServeRouter", () => {
           }),
         })
 
-        // Kicked off with `.end(cb)`, not `await`/`.then()`: superagent warns
-        // and re-sends the request if both are used on the same Test object,
-        // and this test needs to inspect the lease WHILE the request is still
-        // in flight, before it is allowed to complete.
-        let finished: { status: number } | undefined
-        const completion = new Promise<void>((resolve, reject) => {
-          request(app)
-            .get("/p/srv/")
-            .end((err, res) => {
-              if (err && !res) {
-                reject(err)
-                return
-              }
-              finished = { status: res!.status }
-              resolve()
-            })
+        // A direct client, so the test can see the response mid-body (a
+        // first chunk through, but not yet closed) instead of only its
+        // final, fully-read state — see the comment on the previous test
+        // for why supertest cannot give it that.
+        const direct = createServer(app)
+        servers.push(direct)
+        await new Promise<void>((r) => direct.listen(0, "127.0.0.1", () => r()))
+        const directPort = (direct.address() as AddressInfo).port
+
+        let firstChunkSeen = false
+        let finishedStatus: number | undefined
+        const completion = new Promise<void>((resolve) => {
+          const clientReq = nodeHttpRequest(
+            { host: "127.0.0.1", port: directPort, path: "/p/srv/", method: "GET" },
+            (up) => {
+              finishedStatus = up.statusCode
+              up.on("data", () => {
+                firstChunkSeen = true
+              })
+              up.on("end", () => resolve())
+            },
+          )
+          clientReq.end()
         })
+
         await vi.waitFor(() => expect(ensureCalled).toBe(true))
         expect(tracked.count()).toBe(1)
 
         gate.resolve({ port })
+        await vi.waitFor(() => expect(firstChunkSeen).toBe(true))
+        // ensure() has resolved and the child is answering, but its body is
+        // still open — the lease must still be held.
+        expect(tracked.count()).toBe(1)
+
+        bodyGate.resolve()
         await completion
-        expect(finished?.status).toBe(200)
+        expect(finishedStatus).toBe(200)
         expect(tracked.count()).toBe(0)
       })
 

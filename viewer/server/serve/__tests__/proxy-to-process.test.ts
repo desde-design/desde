@@ -7,12 +7,21 @@
  * a port that is (believed to be) already listening.
  */
 import express from "express"
-import { createServer, type Server } from "node:http"
+import { createServer, request as nodeHttpRequest, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
 import { gzipSync } from "node:zlib"
 import request from "supertest"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { proxyToProcess, type ProxyOptions } from "../proxy-to-process"
+
+/** A promise this test controls the settlement of, standing in for a real, slow event. */
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
 
 const servers: Server[] = []
 afterEach(() => {
@@ -493,5 +502,70 @@ describe("proxyToProcess", () => {
     const res = await request(unreachableApp({ csp: "default-src 'self'" })).get("/p/acme/")
     expect(res.status).toBe(502)
     expect(res.headers["content-security-policy"]).toBe("default-src 'self'")
+  })
+
+  /**
+   * Task 4: `proxyToProcess` returns a promise that settles once `res`
+   * closes, so a caller that holds a resource for the response's whole
+   * lifetime (the serve router's process lease) can await it instead of
+   * registering its own `res.once("close", ...)`. The child here holds its
+   * body open on `bodyGate` so the test can observe the promise mid-response
+   * — still pending after headers and a first chunk are through — before
+   * letting the body finish and checking it settles.
+   */
+  it("stays pending while the upstream is mid-body, and settles once the response closes", async () => {
+    const bodyGate = deferred<void>()
+    const port = await child((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" })
+      res.write("start")
+      void bodyGate.promise.then(() => res.end("end"))
+    })
+
+    let settled = false
+    // desde-allow-own-server: this test drives a raw node:http client so it
+    // can observe the response mid-body, before supertest would ever hand
+    // control back — see the comment on the client below.
+    const app = express()
+    app.use("/p/acme", (req, res) => {
+      void proxyToProcess(req, res, {
+        port,
+        path: req.url,
+        shellOrigin: "http://localhost:3100",
+        forwardedProto: "http",
+        bridgeSrc: "/__desde/bridge-test.js",
+        csp: null,
+      }).then(() => {
+        settled = true
+      })
+    })
+
+    // A real listening server and a raw node:http client, not supertest —
+    // supertest's request only resolves once the WHOLE response has been
+    // read, which is exactly the moment this test needs to look past (the
+    // mid-body window) before it happens.
+    const server = createServer(app)
+    servers.push(server)
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()))
+    const serverPort = (server.address() as AddressInfo).port
+
+    let firstChunkSeen = false
+    const completion = new Promise<void>((resolve) => {
+      const clientReq = nodeHttpRequest({ host: "127.0.0.1", port: serverPort, path: "/p/acme/x", method: "GET" }, (up) => {
+        up.on("data", () => {
+          firstChunkSeen = true
+        })
+        up.on("end", () => resolve())
+      })
+      clientReq.end()
+    })
+
+    await vi.waitFor(() => expect(firstChunkSeen).toBe(true))
+    // Headers and the first chunk are through, but the child is still
+    // holding the body open — the promise must not have settled yet.
+    expect(settled).toBe(false)
+
+    bodyGate.resolve()
+    await completion
+    await vi.waitFor(() => expect(settled).toBe(true))
   })
 })
