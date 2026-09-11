@@ -25,6 +25,7 @@ import { InMemoryStorage } from "../../storage/in-memory-storage"
 import type { AssetStore, StoredAsset } from "../../assets/types"
 import type { ViewerConfig } from "../../config"
 import { LoopbackPortsExhaustedError, type LoopbackListenerRegistry } from "../../serve/loopback-listeners"
+import type { PrototypeProcesses, ProcessStatus } from "../../serve/prototype-processes"
 import type { Project } from "../../storage/types"
 
 const SHELL_ORIGIN_HEADER = "X-Viewer-Shell-Origin"
@@ -150,6 +151,54 @@ function refusingListeners(): LoopbackListenerRegistry {
     closeAll: () => Promise.resolve(),
     startReaper: () => () => {},
     isPrototypeHost: () => false,
+  }
+}
+
+/**
+ * A `PrototypeProcesses` whose `subscribe` is real enough to drive from a
+ * test: it keeps every live listener in a `Map<deploymentId, Set<listener>>`
+ * and exposes `emit` to fire one by hand. `subscribers` is asserted on
+ * directly (task 6, test (e)) rather than inferred from a callback count, so
+ * "unsubscribed" means the set is actually empty, not just "stopped being
+ * called yet".
+ */
+interface FakePrototypeProcesses extends PrototypeProcesses {
+  subscribers: Map<string, Set<(status: ProcessStatus) => void>>
+  emit(deploymentId: string, status: ProcessStatus): void
+}
+
+function fakePrototypeProcesses(): FakePrototypeProcesses {
+  const subscribers = new Map<string, Set<(status: ProcessStatus) => void>>()
+  const statusFor = new Map<string, ProcessStatus>()
+  return {
+    ensure: () => Promise.reject(new Error("not used by this route")),
+    touch: () => {},
+    withLease: (_id, fn) => fn(),
+    stop: () => Promise.resolve(),
+    forget: () => Promise.resolve(),
+    retire: () => Promise.resolve(),
+    markUnreachable: () => Promise.resolve(),
+    status: (id) => statusFor.get(id) ?? { state: "stopped" },
+    subscribe(id, listener) {
+      let set = subscribers.get(id)
+      if (!set) {
+        set = new Set()
+        subscribers.set(id, set)
+      }
+      set.add(listener)
+      return () => {
+        set?.delete(listener)
+        if (set?.size === 0) subscribers.delete(id)
+      }
+    },
+    serverLog: () => "",
+    startReaper: () => () => {},
+    shutdown: () => Promise.resolve(),
+    subscribers,
+    emit(id, status) {
+      statusFor.set(id, status)
+      for (const listener of subscribers.get(id) ?? []) listener(status)
+    },
   }
 }
 
@@ -975,6 +1024,182 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body.error).toBe(thrown.message)
       expect(res.body.serve).toBe("server")
       expect(res.body.range).toEqual({ from: 3101, to: 3120 })
+    })
+  })
+})
+
+/**
+ * `GET /projects/:id/prototype-origin/stream` — the SSE follow to the plain
+ * route above. It answers with the same body, in an `event: origin` frame,
+ * once on connect and again whenever the active deployment's process status
+ * changes (task 6, `docs/superpowers/specs/2026-09-11-server-prototypes-rework-design.md` § 3).
+ *
+ * A helper below (`readUntil`) reads raw SSE bytes off a real socket the
+ * same way `comments-routes.test.ts`'s stream tests do: `supertest`
+ * buffers nothing here (`.buffer(false)` + a custom `.parse`), because the
+ * stream response never ends and a normal `await request(...)` would hang
+ * forever waiting for a body.
+ */
+describe("GET /projects/:id/prototype-origin/stream", () => {
+  const DISCONNECT_ERROR = /aborted|socket hang up|ECONNRESET/i
+
+  /**
+   * Connects to the stream and resolves once `predicate(receivedSoFar)` is
+   * true, with a handle to close the connection. Rejects if the predicate
+   * never becomes true within `timeoutMs` — a stuck predicate is a test bug
+   * or a real regression, not a thing to hang the suite over.
+   */
+  function readUntil(
+    app: ReturnType<typeof createApp>,
+    project: Project,
+    predicate: (received: string) => boolean,
+    options: { onFirstByte?: () => void; timeoutMs?: number } = {},
+  ): Promise<{ received: string; destroy: () => void }> {
+    const { onFirstByte, timeoutMs = 3000 } = options
+    let sawFirstByte = false
+    return new Promise((resolve, reject) => {
+      const chunks: string[] = []
+      let destroyed = false
+      const timer = setTimeout(() => {
+        if (!destroyed) reject(new Error(`predicate never matched; received: ${chunks.join("")}`))
+      }, timeoutMs)
+      request(app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin/stream`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .buffer(false)
+        .parse((res, cb) => {
+          res.on("data", (chunk: Buffer) => {
+            if (!sawFirstByte) {
+              sawFirstByte = true
+              onFirstByte?.()
+            }
+            chunks.push(chunk.toString("utf-8"))
+            const received = chunks.join("")
+            if (predicate(received)) {
+              clearTimeout(timer)
+              const rawRes = res as unknown as { destroy(): void }
+              resolve({
+                received,
+                destroy: () => {
+                  destroyed = true
+                  rawRes.destroy()
+                },
+              })
+            }
+          })
+          res.on("error", () => cb(null, Buffer.from("")))
+        })
+        .end((err) => {
+          if (err && !destroyed && !DISCONNECT_ERROR.test(err.message)) reject(err)
+        })
+    })
+  }
+
+  /** Parses every `event: origin\ndata: <json>\n\n` frame, in order. */
+  function originFrames(received: string): unknown[] {
+    return [...received.matchAll(/event: origin\ndata: (.+)\n\n/g)].map((m) => JSON.parse(m[1] as string))
+  }
+
+  it("sends one origin event on connect whose JSON equals the plain route's body", async () => {
+    const ctx = setup()
+    const project = await seedProject(ctx.storage)
+
+    const plain = await request(ctx.app)
+      .get(`/api/v1/projects/${project.id}/prototype-origin`)
+      .set(auth)
+      .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+      .expect(200)
+
+    const { received, destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 1)
+    destroy()
+
+    expect(originFrames(received)).toEqual([plain.body])
+  })
+
+  it("sends a second origin event when a subscriber callback reports a changed status", async () => {
+    const fake = fakePrototypeProcesses()
+    const ctx = setup({ prototypeProcesses: fake })
+    const project = await seedProject(ctx.storage)
+    await ctx.storage.updateDeployment(project.activeDeploymentId as string, {
+      serve: "server",
+      serverStart: ["node", "server.js"],
+    })
+    const deploymentId = project.activeDeploymentId as string
+    const runningStatus: ProcessStatus = {
+      state: "running",
+      port: 4321,
+      since: "2026-09-11T00:00:00.000Z",
+      generation: 1,
+    }
+
+    const { received, destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 2, {
+      onFirstByte: () => {
+        // Fired once the connect event's bytes have arrived, at which point
+        // the route has already subscribed (no awaits happen between
+        // `send(current)` and `subscribeToProcess` in the handler).
+        fake.emit(deploymentId, runningStatus)
+      },
+    })
+    destroy()
+
+    const frames = originFrames(received) as { process?: ProcessStatus }[]
+    expect(frames).toHaveLength(2)
+    expect(frames[0]?.process).toEqual({ state: "stopped" })
+    expect(frames[1]?.process).toEqual(runningStatus)
+  })
+
+  it("answers the byte-identical 404 the plain route sends for an unreadable project", async () => {
+    const ctx = setup()
+    const project = await seedProject(ctx.storage, { access: "invited" })
+
+    const plain = await request(ctx.app)
+      .get(`/api/v1/projects/${project.id}/prototype-origin`)
+      .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+    const stream = await request(ctx.app)
+      .get(`/api/v1/projects/${project.id}/prototype-origin/stream`)
+      .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+
+    expect(stream.status).toBe(404)
+    expect(stream.text).toBe(plain.text)
+  })
+
+  it("refuses the 21st concurrent stream from one client with the same 429 the comment stream sends", async () => {
+    const ctx = setup()
+    const project = await seedProject(ctx.storage)
+    const open: { destroy: () => void }[] = []
+    try {
+      for (let i = 0; i < 20; i++) {
+        open.push(await readUntil(ctx.app, project, () => true))
+      }
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin/stream`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(429)
+      expect(res.body).toEqual({ error: "Too many open connections from this client" })
+      expect(res.headers["retry-after"]).toBe("5")
+    } finally {
+      for (const s of open) s.destroy()
+    }
+  })
+
+  it("unsubscribes from the process manager when the client disconnects", async () => {
+    const fake = fakePrototypeProcesses()
+    const ctx = setup({ prototypeProcesses: fake })
+    const project = await seedProject(ctx.storage)
+    await ctx.storage.updateDeployment(project.activeDeploymentId as string, {
+      serve: "server",
+      serverStart: ["node", "server.js"],
+    })
+    const deploymentId = project.activeDeploymentId as string
+
+    const { destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 1)
+    expect(fake.subscribers.get(deploymentId)?.size).toBe(1)
+    destroy()
+
+    await vi.waitFor(() => {
+      expect(fake.subscribers.get(deploymentId)?.size ?? 0).toBe(0)
     })
   })
 })

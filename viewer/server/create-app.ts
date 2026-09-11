@@ -221,6 +221,12 @@ export interface AppDeps {
    * `assertNoTestHostRelaxation`.
    */
   allowAnyLoopbackPort?: boolean
+  /**
+   * TESTS ONLY: overrides the prototype-origin SSE stream's heartbeat
+   * interval (`api/prototype-origin-routes.ts`), 25 seconds in production.
+   * Lets a test see a `: ping\n\n` without a 25-second wait.
+   */
+  prototypeOriginStreamPingMs?: number
 }
 
 /** Carries the unparsed request body for signature verification. */
