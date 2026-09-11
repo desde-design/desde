@@ -258,8 +258,9 @@ describe("originModeBannerLines", () => {
    */
   describe("loopback: the wide-bind-but-unrecognised warning line (VIEWER_LOOPBACK_BIND=all)", () => {
     const WIDE_BIND_UNRECOGNIZED_LINE =
-      "[viewer] Prototype ports bind every interface but the network layout does not look like a " +
-      "bridged container. On --network host or Podman, set VIEWER_LOOPBACK_BIND=loopback."
+      "[viewer] Prototype ports bind every interface (VIEWER_LOOPBACK_BIND=all) and the network " +
+      "layout was not recognised. With -p published ports that is right. On --network host set " +
+      "VIEWER_LOOPBACK_BIND=loopback."
 
     it("prints the warning when the bind is wide and the namespace is not recognised as bridged", () => {
       const { lines } = originModeBannerLines({

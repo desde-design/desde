@@ -71,10 +71,19 @@ const NETWORK_LAYOUT_UNRECOGNIZED_LINE =
  * (Podman) the heuristic does not recognise either way. Printed instead of
  * (never alongside) the plain wide-bind line below, and instead of (never
  * alongside) `NETWORK_LAYOUT_UNRECOGNIZED_LINE` above — see `pickBindLine`.
+ *
+ * It names the CONDITION, not the runtime. The line used to tell anyone on an
+ * unrecognised layout to set `loopback`, Podman included — and a rootless
+ * Podman container's interface is `tap0`, so a perfectly correct
+ * `podman run -p 127.0.0.1:3101-3120:3101-3120` lands here. An operator who
+ * followed that advice broke every published port, and the README three
+ * lines from the run command said the opposite (round 12, I5). Published
+ * ports need the wide bind; only host networking does not.
  */
 const WIDE_BIND_NETWORK_UNRECOGNIZED_LINE =
-  "[viewer] Prototype ports bind every interface but the network layout does not look like a " +
-  "bridged container. On --network host or Podman, set VIEWER_LOOPBACK_BIND=loopback."
+  "[viewer] Prototype ports bind every interface (VIEWER_LOOPBACK_BIND=all) and the network " +
+  "layout was not recognised. With -p published ports that is right. On --network host set " +
+  "VIEWER_LOOPBACK_BIND=loopback."
 
 /**
  * The one line, if any, about `loopbackBindAllInterfaces` /
