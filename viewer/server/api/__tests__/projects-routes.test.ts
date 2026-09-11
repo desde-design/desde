@@ -5,6 +5,7 @@ import request from "supertest"
 import { beforeEach, describe, expect, it } from "vitest"
 import { createBuildQueue } from "../../build/build-queue"
 import { createApp, type AppDeps } from "../../__tests__/test-app"
+import { tmpViewerDataDir } from "../../__tests__/test-config"
 import { InMemoryStorage } from "../../storage/in-memory-storage"
 import { DiskAssetStore } from "../../assets/disk-asset-store"
 import type { AssetStore, StoredAsset } from "../../assets/types"
@@ -1351,6 +1352,7 @@ describe("projects API", () => {
         const buildQueue = createBuildQueue({
           storage,
           assets: new NullAssetStore(),
+          checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
           // Never resolves on its own — `queue.start()` resolves as soon as
           // the lock section is done, well before `run()` is ever awaited.
           runner: { run: () => new Promise<never>(() => {}) },
@@ -1412,6 +1414,7 @@ describe("projects API", () => {
         const buildQueue = createBuildQueue({
           storage,
           assets: new NullAssetStore(),
+          checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
           runner: { run: () => new Promise<never>(() => {}) },
         })
         stable.use(

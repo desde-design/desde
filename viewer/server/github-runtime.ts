@@ -14,6 +14,7 @@
  * a real network client mid-suite.
  */
 
+import { join } from "node:path"
 import { createGitHubAuthProvider } from "./auth/github-auth-provider"
 import { createBuildQueue, type BuildQueue } from "./build/build-queue"
 import { createInProcessBuildRunner } from "./build/in-process-build-runner"
@@ -166,10 +167,12 @@ export function createGithubRuntime(args: CreateGithubRuntimeArgs): GithubRuntim
             ? createBuildQueue({
                 storage: args.storage,
                 assets: args.assets,
+                checkoutsRoot: join(config.dataDir, "checkouts"),
                 onChange: args.onBuildChange,
                 runner: createInProcessBuildRunner({
                   assets: args.assets,
                   githubApp: appClient,
+                  checkoutsRoot: join(config.dataDir, "checkouts"),
                   ...(config.githubApp.apiBaseUrl !== undefined
                     ? { apiBaseUrl: config.githubApp.apiBaseUrl }
                     : {}),

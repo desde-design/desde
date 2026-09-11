@@ -7,6 +7,7 @@
  * `signSessionId`, `loadConfig({...})` as the config factory.
  */
 import { generateKeyPairSync } from "node:crypto"
+import { join } from "node:path"
 import express from "express"
 import request from "supertest"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -668,6 +669,7 @@ describe("GitHub connect/disconnect API (Phase 3c-1 Task 4)", () => {
         return createBuildQueue({
           storage,
           assets: nullAssets,
+          checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
           runner: { run: () => new Promise<never>(() => {}) },
         })
       }
