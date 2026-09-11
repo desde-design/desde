@@ -81,11 +81,23 @@ describe("React Router adapter", () => {
       reason: "React Router framework mode with a server build",
     })
   })
-  it("prefers server build when both exist", async () => {
+  /**
+   * Codex round 11, Fix 2. `ssr: false` still writes `build/server/index.js`
+   * (React Router uses it at build time for pre-rendering), right next to
+   * `build/client/index.html`. Reading the server file FIRST used to treat
+   * every SPA build as a server prototype — an isolated origin and a process
+   * slot for a build that has no server to run. `build/client/index.html`
+   * is checked first now, so a build that wrote both is read as static.
+   */
+  it("prefers the static client build when both exist (ssr: false still writes a server bundle)", async () => {
     const shape = await REACT_ROUTER_ADAPTER.inspectBuild(
       await checkout({ serverBuild: true, clientHtml: true }),
     )
-    expect(shape?.kind).toBe("server")
+    expect(shape).toEqual({
+      kind: "static",
+      outputDir: "build/client",
+      reason: "React Router SPA mode",
+    })
   })
   it("answers null when the build wrote neither", async () => {
     expect(await REACT_ROUTER_ADAPTER.inspectBuild(await checkout({}))).toBeNull()
