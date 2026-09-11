@@ -1218,6 +1218,48 @@ describe("projects API", () => {
       }
     })
 
+    /**
+     * Round 2, minor (c): the two cleanups were sequential `await`s, so a
+     * `forget` that rejects — a child that will not die, say — skipped the
+     * `rm` entirely and left hundreds of megabytes behind that nothing else
+     * will ever reclaim. They are ordered, not conditional, so the `rm` now
+     * runs in a `finally`. The route still answers 204 either way: the DB
+     * delete has already committed, and these cleanups are best-effort.
+     */
+    it("removes the checkout even when forgetting the process fails", async () => {
+      const storage = new InMemoryStorage()
+      const dataDir = mkdtempSync(join(tmpdir(), "viewer-checkouts-forget-fail-"))
+      try {
+        const project = await storage.createProject({ slug: "acme", name: "Acme" })
+        const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+        const checkout = join(dataDir, "checkouts", dep.id)
+        mkdirSync(join(checkout, "node_modules"), { recursive: true })
+        writeFileSync(join(checkout, "package.json"), "{}")
+
+        stable.use(
+          createApp({
+            storage,
+            assets: new NullAssetStore(),
+            config: { ...authConfig, dataDir },
+            bridgeScript: "// bridge",
+            github: testGithubRuntime(),
+            prototypeProcesses: {
+              ...nullPrototypeProcesses(),
+              forget: async () => {
+                throw new Error("the child would not stop")
+              },
+            },
+          }),
+        )
+
+        await request(stable.app).delete(`/api/v1/projects/${project.id}`).set(auth).expect(204)
+
+        expect(existsSync(checkout)).toBe(false)
+      } finally {
+        rmSync(dataDir, { recursive: true, force: true })
+      }
+    })
+
     // Wave 2, codex round 2: the route used to reclaim the deployment ASSET
     // directories on disk BEFORE calling `storage.deleteProject`. If that DB
     // call then threw (a lock, an IO error), the project row survived with

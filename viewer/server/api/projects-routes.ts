@@ -700,8 +700,18 @@ export function createProjectsRoutes(
           done: (async () => {
             // Stop before remove: deleting a directory out from under a
             // running server is how a child ends up logging ENOENT forever.
-            await deps.prototypeProcesses.forget(deployment.id)
-            await rm(checkoutDirFor(checkoutsRoot, deployment.id), { recursive: true, force: true })
+            //
+            // `finally`, so a `forget` that rejects (a child that will not
+            // die, say) cannot take the `rm` with it. The two are ordered,
+            // not conditional: the checkout is hundreds of megabytes and this
+            // route is the only thing that will ever reclaim it, so a failure
+            // to stop the child must not also leak the disk. Whatever `forget`
+            // threw still propagates and is logged by name below.
+            try {
+              await deps.prototypeProcesses.forget(deployment.id)
+            } finally {
+              await rm(checkoutDirFor(checkoutsRoot, deployment.id), { recursive: true, force: true })
+            }
           })(),
         })
       }

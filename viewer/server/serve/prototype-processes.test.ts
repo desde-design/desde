@@ -66,13 +66,21 @@ describe("createPrototypeProcesses", () => {
   })
 
   it("marks a missing checkout as crashed with a reason, without spawning", async () => {
-    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot([]) })
+    let now = 1_000_000
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot([]), now: () => now })
     managers.push(procs)
     await expect(procs.ensure({ id: "gone", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
     const status = procs.status("gone")
     expect(status.state === "crashed" && /checkout/i.test(status.reason)).toBe(true)
     // Nothing a retry could fix: the files are not there.
     expect(status.state === "crashed" && status.retryable).toBe(false)
+    // And time does not fix it either. `retryable` is computed from the
+    // CURRENT restart window, so a crash that ages out of that window becomes
+    // retryable again — but this is not a budget failure, and it must stay
+    // non-retryable however long ago it happened.
+    now += 60 * 60_000
+    const later = procs.status("gone")
+    expect(later.state === "crashed" && later.retryable).toBe(false)
   })
 
   it("marks a malformed id as crashed without echoing the id in the reason", async () => {
@@ -214,9 +222,11 @@ describe("createPrototypeProcesses", () => {
    * The rule is the manager's own restart budget, not a second copy of it.
    */
   it("marks a transient crash retryable and an over-budget one not", async () => {
-    // A frozen clock, so all four crashes fall inside one restart window and
-    // the budget verdict is the thing under test rather than wall-clock luck.
-    const now = 1_000_000
+    // A driven clock, held still while the crashes happen so all four fall
+    // inside one restart window (the budget verdict is the thing under test,
+    // not wall-clock luck), then moved forward at the end to show the verdict
+    // is read from the window rather than frozen at crash time.
+    let now = 1_000_000
     const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]), now: () => now })
     managers.push(procs)
     const { port } = await procs.ensure({ id: "d1", serverStart: start() })
@@ -233,6 +243,15 @@ describe("createPrototypeProcesses", () => {
     await expect(procs.ensure({ id: "d1", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
     const spent = procs.status("d1")
     expect(spent.state === "crashed" && spent.retryable).toBe(false)
+
+    // The budget is a five-minute window, and `status()` answers "would the
+    // next ensure try again?" as of NOW. Once the four crashes are outside
+    // the window the next ensure WOULD try again, so the same crash reports
+    // retryable again — the page stops offering a rebuild as the only way
+    // out of a prototype that has been sitting there for an hour.
+    now += 6 * 60_000
+    const aged = procs.status("d1")
+    expect(aged.state === "crashed" && aged.retryable).toBe(true)
   })
 
   it("refuses to ensure after shutdown, and spawns nothing", async () => {

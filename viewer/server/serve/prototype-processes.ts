@@ -28,7 +28,7 @@ export type ProcessStatus =
       /**
        * Whether the NEXT `ensure` would try again.
        *
-       * `false` for a missing checkout, a malformed id, and once the restart
+       * `false` for a missing checkout, a malformed id, and while the restart
        * budget is spent; `true` otherwise. It exists so the review page does
        * not turn one transient exit into a dead end: a retryable crash is
        * embedded, and the iframe's own request restarts the process in
@@ -36,6 +36,14 @@ export type ProcessStatus =
        *
        * It states the manager's own budget rather than inviting a second
        * copy of that rule to be written on the page.
+       *
+       * COMPUTED when the status is read, not frozen when the crash
+       * happened. The budget is "at most 3 restarts in 5 minutes", so the
+       * answer changes with time on its own: a crash that has aged out of
+       * that window would be retried, and a status that still said `false`
+       * an hour later would send the page on offering a rebuild nobody
+       * needs. The two reasons that no amount of waiting fixes (the checkout
+       * is gone, the id is malformed) stay `false` regardless.
        */
       retryable: boolean
     }
@@ -119,6 +127,19 @@ export function substitutePort(argv: string[], port: number): { file: string; ar
 }
 
 /**
+ * What an entry RECORDS: `ProcessStatus` with the crashed variant's
+ * `retryable` left out, because that field is computed when the status is
+ * read (see `exposedStatus`). Storing it was the defect: the budget is a
+ * moving five-minute window, so a value written at crash time is stale from
+ * the next tick onward.
+ */
+type StoredStatus =
+  | { state: "stopped" }
+  | { state: "starting" }
+  | { state: "running"; port: number; since: string }
+  | { state: "crashed"; exitCode: number | null; restarts: number; reason: string }
+
+/**
  * A `crashed` status's own reason, or `fallback` otherwise.
  *
  * Pulled out as a function (rather than an inline `status.state === "crashed"
@@ -130,12 +151,12 @@ export function substitutePort(argv: string[], port: number): { file: string; ar
  * full declared union on every call, which is what makes the check safe to
  * write at all right after an `await`.
  */
-function reasonOrFallback(status: ProcessStatus, fallback: string): string {
+function reasonOrFallback(status: StoredStatus, fallback: string): string {
   return status.state === "crashed" ? status.reason : fallback
 }
 
 interface Entry {
-  status: ProcessStatus
+  status: StoredStatus
   child: ChildProcess | null
   port: number | null
   lastUsedAt: number
@@ -165,6 +186,17 @@ interface Entry {
    * all, which is the part `e.child` cannot.
    */
   generation: number
+  /**
+   * The last crash was one no restart can clear: the checkout is missing, or
+   * the deployment id is malformed.
+   *
+   * Kept on the ENTRY rather than in the status because `retryable` is
+   * computed from the restart window at read time, and this is the one input
+   * to that answer which the passing of time must not change. Cleared at the
+   * top of every `start()`, so a later attempt decides afresh whatever its
+   * outcome.
+   */
+  permanentFailure: boolean
 }
 
 export function createPrototypeProcesses(deps: PrototypeProcessesDeps): PrototypeProcesses {
@@ -194,7 +226,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const entryFor = (id: string): Entry => {
     let e = entries.get(id)
     if (!e) {
-      e = { status: { state: "stopped" }, child: null, port: null, lastUsedAt: now(), recency: recencyCounter++, log: "", restartsAt: [], opening: null, generation: 0 }
+      e = { status: { state: "stopped" }, child: null, port: null, lastUsedAt: now(), recency: recencyCounter++, log: "", restartsAt: [], opening: null, generation: 0, permanentFailure: false }
       entries.set(id, e)
     }
     return e
@@ -221,6 +253,19 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    */
   const withinRestartBudget = (e: Entry): boolean =>
     e.restartsAt.filter((t) => now() - t < RESTART_WINDOW_MS).length <= RESTART_BUDGET
+
+  /**
+   * The entry's status as callers see it: the stored one, plus the computed
+   * `retryable` on a crash.
+   *
+   * The single place `retryable` is decided, and it is decided at READ time
+   * on purpose — see `ProcessStatus`. `permanentFailure` is the only thing
+   * that can veto the budget's own answer.
+   */
+  const exposedStatus = (e: Entry): ProcessStatus =>
+    e.status.state === "crashed"
+      ? { ...e.status, retryable: !e.permanentFailure && withinRestartBudget(e) }
+      : e.status
 
   /** The refusal `ensure` gives once `shutdown()` has run. */
   const closedError = (): PrototypeProcessError =>
@@ -276,6 +321,9 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // SINCE this attempt began, and a value re-read later would answer a
     // different question.
     const generation = e.generation
+    // This attempt decides the verdict afresh: a previous "no restart can fix
+    // this" must not outlive the attempt that recorded it.
+    e.permanentFailure = false
     let cwd: string
     try {
       // Inside the try: a malformed id makes `checkoutDirFor` throw
@@ -286,10 +334,12 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       cwd = checkoutDirFor(deps.checkoutsRoot, id)
       if (!(await stat(cwd)).isDirectory()) throw new Error("not a directory")
     } catch {
-      // Not retryable: no number of restarts puts the files back. Only a
+      // Not retryable, and not by the budget's reckoning either: no number of
+      // restarts puts the files back, and no amount of waiting does. Only a
       // rebuild does, which is what the review page then offers.
-      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The checkout for this deployment is missing. Rebuild it.", retryable: false }
-      throw new PrototypeProcessError(e.status, e.status.reason)
+      e.permanentFailure = true
+      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The checkout for this deployment is missing. Rebuild it." }
+      throw new PrototypeProcessError(exposedStatus(e), e.status.reason)
     }
     const recent = e.restartsAt.filter((t) => now() - t < RESTART_WINDOW_MS)
     e.restartsAt = recent
@@ -297,8 +347,13 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // restart, so this refuses once a 4th crash (the would-be 4th restart)
     // is already on record, not on the 3rd.
     if (recent.length > RESTART_BUDGET) {
-      e.status = { state: "crashed", exitCode: e.status.state === "crashed" ? e.status.exitCode : null, restarts: recent.length, reason: "The server kept exiting. See the server log.", retryable: false }
-      throw new PrototypeProcessError(e.status, e.status.reason)
+      // No `retryable` written here either: `exposedStatus` asks
+      // `withinRestartBudget` the same question this branch just asked, so
+      // the status says `false` now and says `true` again once these crashes
+      // age out of the window — which is exactly when the next `ensure`
+      // would start trying again.
+      e.status = { state: "crashed", exitCode: e.status.state === "crashed" ? e.status.exitCode : null, restarts: recent.length, reason: "The server kept exiting. See the server log." }
+      throw new PrototypeProcessError(exposedStatus(e), e.status.reason)
     }
     // Make room. Never evict one that is starting.
     while (running().length >= maxRunning) {
@@ -319,7 +374,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // because the manager has already forgotten it is coming.
     if (closed) throw closedError()
     if (e.generation !== generation) {
-      throw new PrototypeProcessError(e.status, "The server was stopped before it finished starting.")
+      throw new PrototypeProcessError(exposedStatus(e), "The server was stopped before it finished starting.")
     }
     e.status = { state: "starting" }
     e.log = ""
@@ -341,10 +396,12 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     })
-    // And immediately after it. `spawn` itself does not await, but the check
-    // above and this one bracket it so a stop cannot land in the gap between
-    // "we decided to spawn" and "we recorded the child": a child spawned
-    // across a stop is killed here rather than left running.
+    // And immediately after it. DEFENCE, not a window: every line between the
+    // check above and `spawn` is synchronous, so no stop can land in between
+    // and this branch is unreachable as the code stands. It is kept because
+    // one `await` added above `spawn` would open that window silently, and
+    // this is what would already be here to close it. A child spawned across
+    // a stop is killed rather than left running.
     if (closed || e.generation !== generation) {
       killTree(child, "SIGKILL")
       // The group kill can lose a race with the child's own `setsid` (spawn
@@ -352,7 +409,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // directly as well. Either call is a no-op once the other has landed.
       child.kill("SIGKILL")
       if (closed) throw closedError()
-      throw new PrototypeProcessError(e.status, "The server was stopped before it finished starting.")
+      throw new PrototypeProcessError(exposedStatus(e), "The server was stopped before it finished starting.")
     }
     e.child = child
     child.stdout?.on("data", (b: Buffer) => append(e, b.toString("utf8")))
@@ -364,7 +421,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       e.child = null
       e.port = null
       e.restartsAt.push(now())
-      e.status = { state: "crashed", exitCode: code, restarts: e.restartsAt.length, reason: "The server exited.", retryable: withinRestartBudget(e) }
+      e.status = { state: "crashed", exitCode: code, restarts: e.restartsAt.length, reason: "The server exited." }
     })
     child.once("error", (error) => {
       // Node emits `error` (never `exit`) for a spawn-time failure like
@@ -376,7 +433,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       e.child = null
       e.port = null
       e.restartsAt.push(now())
-      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: `The server could not be started: ${error.message}`, retryable: withinRestartBudget(e) }
+      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: `The server could not be started: ${error.message}` }
     })
 
     const deadline = now() + readyTimeoutMs
@@ -389,7 +446,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
         // flight. Bail rather than declare a dead child "running" — this is
         // the same identity guard the exit handler uses.
         if (e.child !== child) {
-          throw new PrototypeProcessError(e.status, reasonOrFallback(e.status, "The server was stopped before it finished starting."))
+          throw new PrototypeProcessError(exposedStatus(e), reasonOrFallback(e.status, "The server was stopped before it finished starting."))
         }
         e.port = port
         e.status = { state: "running", port, since: new Date(now()).toISOString() }
@@ -402,9 +459,9 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // Timed out on our own clock, not stopped or exited elsewhere.
       await stopEntry(e)
       e.restartsAt.push(now())
-      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The server did not answer in time.", retryable: withinRestartBudget(e) }
+      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The server did not answer in time." }
     }
-    throw new PrototypeProcessError(e.status, reasonOrFallback(e.status, "The server did not start."))
+    throw new PrototypeProcessError(exposedStatus(e), reasonOrFallback(e.status, "The server did not start."))
   }
 
   return {
@@ -445,7 +502,8 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       entries.delete(id)
     },
     status(id) {
-      return entries.get(id)?.status ?? { state: "stopped" }
+      const e = entries.get(id)
+      return e ? exposedStatus(e) : { state: "stopped" }
     },
     serverLog(id) {
       return entries.get(id)?.log ?? ""
