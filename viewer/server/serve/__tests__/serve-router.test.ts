@@ -119,6 +119,7 @@ function fakeProcesses(overrides: Partial<PrototypeProcesses> = {}): PrototypePr
     touch: () => {},
     stop: () => Promise.resolve(),
     forget: () => Promise.resolve(),
+    retire: () => Promise.resolve(),
     status: () => ({ state: "stopped" }),
     serverLog: () => "",
     startReaper: () => () => {},

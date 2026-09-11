@@ -951,6 +951,36 @@ describe("loadConfig", () => {
       )
       expect(config.loopbackAvailable).toBe(false)
     })
+
+    /**
+     * The default range is `PORT+1` to `PORT+20`. A `PORT` near the top of
+     * the valid port space (65535 is itself a legal port) can push that
+     * past 65535, which no listener could ever bind — the derivation needs
+     * the same ceiling an explicit `VIEWER_LOOPBACK_PORT_RANGE` is already
+     * held to.
+     */
+    it("derives a default range right up against 65535 when there's exactly enough room", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "65515" },
+        { isLikelyContainerized: () => true },
+      )
+      expect(config.loopbackPortRange).toEqual({ from: 65516, to: 65535 })
+    })
+    it("refuses to derive a default range that would exceed 65535, naming PORT and VIEWER_LOOPBACK_PORT_RANGE", () => {
+      expect(() =>
+        loadConfig({ VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "65520" }, { isLikelyContainerized: () => true }),
+      ).toThrow(/PORT/)
+      expect(() =>
+        loadConfig({ VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "65520" }, { isLikelyContainerized: () => true }),
+      ).toThrow(/VIEWER_LOOPBACK_PORT_RANGE/)
+    })
+    it("a PORT that would overflow the default range is fine outside a container, since no default range is derived there", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "65535" },
+        { isLikelyContainerized: () => false },
+      )
+      expect(config.loopbackPortRange).toBeNull()
+    })
   })
 })
 

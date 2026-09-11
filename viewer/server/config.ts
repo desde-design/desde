@@ -484,6 +484,25 @@ function parseLoopbackPortRange(raw: string, port: number): { from: number; to: 
 }
 
 /**
+ * The container default range: the twenty ports above `PORT`.
+ *
+ * Held to the same 65535 ceiling an explicit `VIEWER_LOOPBACK_PORT_RANGE`
+ * already is (`parseLoopbackPortRange`). Without this, a `PORT` near the
+ * top of the valid port space — 65535 is itself a legal port — silently
+ * derives a range like `65536-65555`, ports that do not exist and that no
+ * listener could ever bind.
+ */
+function defaultLoopbackPortRange(port: number): { from: number; to: number } {
+  if (port + 20 > 65535) {
+    throw new Error(
+      `PORT ${port} leaves no room for the twenty loopback prototype ports above it. ` +
+        `Set VIEWER_LOOPBACK_PORT_RANGE or a lower PORT.`,
+    )
+  }
+  return { from: port + 1, to: port + 20 }
+}
+
+/**
  * `overrides.isLikelyContainerized` exists ONLY for tests: the real default
  * is the real `isLikelyContainerized` (`server/serve/container-detect.ts`),
  * which touches the actual filesystem. Injecting a stub here is what lets
@@ -545,7 +564,7 @@ export function loadConfig(
   const loopbackPortRange = env.VIEWER_LOOPBACK_PORT_RANGE
     ? parseLoopbackPortRange(env.VIEWER_LOOPBACK_PORT_RANGE, port)
     : inContainer
-      ? { from: port + 1, to: port + 20 }
+      ? defaultLoopbackPortRange(port)
       : null
   // A container now gets loopback mode too, on a range it can publish.
   const loopbackAvailable =

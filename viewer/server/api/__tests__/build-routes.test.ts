@@ -386,6 +386,7 @@ describe("GET /deployments/:id/server-log (same gate as the build log)", () => {
       touch: () => {},
       stop: () => Promise.resolve(),
       forget: () => Promise.resolve(),
+      retire: () => Promise.resolve(),
       status: () => fakeStatus,
       serverLog: () => "hello",
       startReaper: () => () => {},

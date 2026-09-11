@@ -76,4 +76,36 @@ describe("pruneSupersededCheckouts", () => {
     await storage.createDeployment({ projectId: project.id })
     await expect(pruneSupersededCheckouts(storage, root, project.id, a.id)).resolves.toBeUndefined()
   })
+
+  /**
+   * `beforeRemove` is awaited BEFORE the directory is removed, for every
+   * stale deployment (the loop is sequential, not concurrent) — this is
+   * what makes it safe for `server/index.ts` to wire `beforeRemove` to the
+   * process manager's `retire()` instead of `stop()`. `retire` stops the
+   * process AND leaves a permanent, non-retryable crash behind
+   * synchronously before this function ever reaches `rm`, so a request
+   * that calls `ensure` on that deployment id — even one landing in the
+   * gap between this `beforeRemove` and the `rm` below — finds the entry
+   * already refusing, rather than racing to spawn a fresh child into a
+   * directory that is about to disappear. See
+   * `prototype-processes.test.ts`'s "retire" tests for that half.
+   */
+  it("awaits beforeRemove, with the directory still present, before removing it", async () => {
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    const root = await tmp()
+    const ids: string[] = []
+    for (let i = 0; i < 4; i++) {
+      const d = await storage.createDeployment({ projectId: project.id })
+      ids.push(d.id)
+      await mkdir(checkoutDirFor(root, d.id), { recursive: true })
+    }
+    const sawDirDuring: boolean[] = []
+    await pruneSupersededCheckouts(storage, root, project.id, ids[0]!, async (id) => {
+      sawDirDuring.push(await exists(checkoutDirFor(root, id)))
+    })
+    // Two deployments get pruned (same fixture shape as the test above);
+    // `beforeRemove` observed the directory present for both, every time.
+    expect(sawDirDuring).toEqual([true, true])
+  })
 })

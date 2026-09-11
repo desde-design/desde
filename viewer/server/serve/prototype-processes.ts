@@ -72,6 +72,21 @@ export interface PrototypeProcesses {
    * something that no longer exists.
    */
   forget(deploymentId: string): Promise<void>
+  /**
+   * Stops the process, like `forget`, but does NOT drop the entry —
+   * instead it leaves a permanent, non-retryable `crashed` status behind,
+   * so every `ensure` for this id is refused until a later `forget` (project
+   * delete) or a fresh id (a new build).
+   *
+   * For a deployment whose checkout `pruneSupersededCheckouts` is about to
+   * delete: between stopping the process and removing the directory, a
+   * request can still land and call `ensure`. `stop` alone would leave the
+   * entry `stopped`, which `ensure` treats as "safe to start again" — that
+   * is exactly the race (a fresh child spawned into a directory that is
+   * mid-delete). `retire` closes it by making the SAME entry refuse, before
+   * the directory is ever touched.
+   */
+  retire(deploymentId: string): Promise<void>
   status(deploymentId: string): ProcessStatus
   serverLog(deploymentId: string): string
   startReaper(): () => void
@@ -155,6 +170,24 @@ function reasonOrFallback(status: StoredStatus, fallback: string): string {
   return status.state === "crashed" ? status.reason : fallback
 }
 
+/**
+ * A `crashed` status's own `exitCode`, or `null` otherwise.
+ *
+ * Same reason as `reasonOrFallback` above, and now needed for the same
+ * cause: `start()` assigns `e.status = { state: "starting" }` synchronously
+ * near its top (to reserve the entry's slot against the concurrency cap),
+ * so by the time the restart-budget check reads `e.status.state ===
+ * "crashed"` further down, TypeScript narrows the FIELD to the literal
+ * `{ state: "starting" }` it last saw assigned along this function's own
+ * synchronous path — it has no way to know the intervening `await` let a
+ * concurrent `stop()`/`retire()` on this same entry reassign it. Taking
+ * `status: StoredStatus` as a plain parameter resets that narrowing to the
+ * full declared union, which is what makes the check safe to write at all.
+ */
+function crashedExitCodeOrNull(status: StoredStatus): number | null {
+  return status.state === "crashed" ? status.exitCode : null
+}
+
 interface Entry {
   status: StoredStatus
   child: ChildProcess | null
@@ -197,6 +230,14 @@ interface Entry {
    * outcome.
    */
   permanentFailure: boolean
+  /**
+   * Set by `retire()` and never cleared by `start()` (unlike
+   * `permanentFailure`, which every fresh attempt resets). `ensure` checks
+   * this BEFORE calling `start()` at all, so a retired entry stays refused
+   * regardless of how many restart-budget windows pass. Only `forget`
+   * (deleting the entry outright) or a brand new deployment id clears it.
+   */
+  retired: boolean
 }
 
 export function createPrototypeProcesses(deps: PrototypeProcessesDeps): PrototypeProcesses {
@@ -226,7 +267,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const entryFor = (id: string): Entry => {
     let e = entries.get(id)
     if (!e) {
-      e = { status: { state: "stopped" }, child: null, port: null, lastUsedAt: now(), recency: recencyCounter++, log: "", restartsAt: [], opening: null, generation: 0, permanentFailure: false }
+      e = { status: { state: "stopped" }, child: null, port: null, lastUsedAt: now(), recency: recencyCounter++, log: "", restartsAt: [], opening: null, generation: 0, permanentFailure: false, retired: false }
       entries.set(id, e)
     }
     return e
@@ -242,6 +283,16 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     }
   }
   const running = (): [string, Entry][] => [...entries].filter(([, e]) => e.status.state === "running")
+  /**
+   * `running` PLUS `starting` — every entry that currently occupies a slot
+   * against `maxRunning`. `start()` reserves its own slot by setting its
+   * status to `starting` synchronously before its first `await` (see
+   * there), so by the time any concurrent `start()` reaches the room-making
+   * loop below, every entry racing it is already counted here — that is
+   * what closes the concurrent-cold-start cap bypass.
+   */
+  const occupied = (): [string, Entry][] =>
+    [...entries].filter(([, e]) => e.status.state === "running" || e.status.state === "starting")
 
   /**
    * Would the next `ensure` start this entry again?
@@ -324,6 +375,14 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // This attempt decides the verdict afresh: a previous "no restart can fix
     // this" must not outlive the attempt that recorded it.
     e.permanentFailure = false
+    // Reserves this entry's slot for the cap check below, SYNCHRONOUSLY,
+    // before the first `await` in this function. Without this, several
+    // concurrent `ensure()`s for different stopped deployments could each
+    // read the cap as "not yet full" before any of them had a chance to
+    // record that it was starting — spawning more children than
+    // `maxRunning` allows. See the "make room" loop, which now counts this
+    // status too.
+    e.status = { state: "starting" }
     let cwd: string
     try {
       // Inside the try: a malformed id makes `checkoutDirFor` throw
@@ -352,13 +411,42 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // the status says `false` now and says `true` again once these crashes
       // age out of the window — which is exactly when the next `ensure`
       // would start trying again.
-      e.status = { state: "crashed", exitCode: e.status.state === "crashed" ? e.status.exitCode : null, restarts: recent.length, reason: "The server kept exiting. See the server log." }
+      e.status = { state: "crashed", exitCode: crashedExitCodeOrNull(e.status), restarts: recent.length, reason: "The server kept exiting. See the server log." }
       throw new PrototypeProcessError(exposedStatus(e), e.status.reason)
     }
-    // Make room. Never evict one that is starting.
-    while (running().length >= maxRunning) {
-      const [victimId] = running().sort((a, b) => a[1].recency - b[1].recency)[0]!
-      await stopEntry(entryFor(victimId))
+    // Make room. `occupied()` counts this entry too (it just reserved its
+    // own `starting` slot above), so the condition is `> maxRunning`, not
+    // `>=`: this entry alone is allowed to fill the last slot.
+    //
+    // Never evict a `starting` entry — it may have no child yet, or one
+    // mid-spawn. When every occupied slot is `starting` (nothing `running`
+    // to evict), the entry that reserved its slot FIRST — stable Map
+    // insertion order — is always let through, and every other `starting`
+    // entry waits on THAT ONE specifically. That fixed, single leader is
+    // what keeps this from deadlocking: two `starting` entries can never end
+    // up waiting on each other, because only the earliest one is ever a
+    // wait target, and the earliest one never waits (it always sees itself
+    // as the leader and proceeds). Once the leader settles (running or
+    // crashed) the waiters re-check from scratch.
+    while (occupied().length > maxRunning) {
+      const runningNow = running()
+      if (runningNow.length > 0) {
+        const [victimId] = runningNow.sort((a, b) => a[1].recency - b[1].recency)[0]!
+        await stopEntry(entryFor(victimId))
+        continue
+      }
+      const leaderId = [...entries].find(([, oe]) => oe.status.state === "starting")?.[0]
+      if (!leaderId || leaderId === id) break
+      const leaderOpening = entries.get(leaderId)?.opening
+      if (leaderOpening) {
+        await leaderOpening.catch(() => {})
+      } else {
+        // Should be unreachable — a `starting` entry's `opening` is set in
+        // the same synchronous turn as its status (see above), so this is
+        // only a defensive yield against ever spinning the event loop if
+        // that invariant is somehow violated.
+        await Promise.resolve()
+      }
     }
 
     const port = await pickPort()
@@ -474,6 +562,12 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
         throw new PrototypeProcessError({ state: "stopped" }, "This deployment is served as files, not as a server.")
       }
       const e = entryFor(deployment.id)
+      // Checked before the running/opening fast paths: a retired entry is
+      // never running and never mid-open (`retire` stops it first), but
+      // this order also makes the refusal explicit rather than incidental.
+      if (e.retired) {
+        throw new PrototypeProcessError(exposedStatus(e), reasonOrFallback(e.status, "The checkout for this deployment was removed. Rebuild it."))
+      }
       if (e.status.state === "running" && e.port !== null) {
         touchEntry(e)
         return { port: e.port }
@@ -500,6 +594,22 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // to be deleted; this way the child is down before the record goes.
       await stopEntry(e)
       entries.delete(id)
+    },
+    async retire(id) {
+      // `entryFor`, not `entries.get`: a deployment can be pruned before it
+      // was ever `ensure`d, and the refusal must still be recorded — a later
+      // `ensure` for this same id must never fall through to `start()` and
+      // find an inviting empty slot.
+      const e = entryFor(id)
+      await stopEntry(e)
+      e.retired = true
+      e.permanentFailure = true
+      e.status = {
+        state: "crashed",
+        exitCode: null,
+        restarts: e.restartsAt.length,
+        reason: "The checkout for this deployment was removed. Rebuild it.",
+      }
     },
     status(id) {
       const e = entries.get(id)

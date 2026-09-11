@@ -313,4 +313,93 @@ describe("createPrototypeProcesses", () => {
     expect(procs.status("d1").state).toBe("stopped")
     await expect(get(port)).rejects.toThrow()
   })
+
+  /**
+   * The cap only ever counted `running` entries, so several `ensure()`s for
+   * DIFFERENT stopped deployments, fired without awaiting between them,
+   * could all pass the "is there room" check before any of them had
+   * actually finished starting — spawning more children than `maxRunning`
+   * allows. `FAKE_DELAY_MS` widens the starting window so a bug here would
+   * reliably show more than two `running` entries at once, not just on a
+   * lucky fast machine.
+   */
+  it("caps concurrent COLD starts, not just already-running servers", async () => {
+    const ids = ["a", "b", "c", "d"]
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(ids),
+      maxRunning: 2,
+      spawnEnv: { FAKE_DELAY_MS: "80" },
+    })
+    managers.push(procs)
+    let peak = 0
+    let polling = true
+    const poll = (async () => {
+      while (polling) {
+        const runningCount = ids.filter((id) => procs.status(id).state === "running").length
+        peak = Math.max(peak, runningCount)
+        await new Promise((r) => setTimeout(r, 5))
+      }
+    })()
+    const results = await Promise.allSettled(ids.map((id) => procs.ensure({ id, serverStart: start() })))
+    polling = false
+    await poll
+    // Never more than the cap alive at once, at any point this test looked.
+    expect(peak).toBeLessThanOrEqual(2)
+    // Every caller gets an answer — none of the four is left hanging just
+    // because it lost the race for a slot.
+    expect(results.every((r) => r.status === "fulfilled")).toBe(true)
+    // Exactly two end up running, and it's the later two: they reserved
+    // their slot after a and b, so a and b are the ones that get evicted to
+    // make room as the manager converges on the cap.
+    const runningIds = ids.filter((id) => procs.status(id).state === "running")
+    expect(runningIds).toEqual(["c", "d"])
+    expect(procs.status("a").state).toBe("stopped")
+    expect(procs.status("b").state).toBe("stopped")
+  })
+
+  /**
+   * Closes the prune race in `checkouts.ts`: `pruneSupersededCheckouts`
+   * stops the process (`beforeRemove`) and THEN deletes the checkout
+   * directory, but a request can still land in between and call `ensure`,
+   * spawning a fresh child into a directory that is about to vanish.
+   * `retire` is what `beforeRemove` calls instead of `stop` — it leaves a
+   * permanent, non-retryable crash behind so that window is refused rather
+   * than raced.
+   */
+  it("retire stops the server and permanently refuses ensure until forget", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+    managers.push(procs)
+    const { port } = await procs.ensure({ id: "d1", serverStart: start() })
+    await procs.retire("d1")
+    await expect(get(port)).rejects.toThrow()
+    const status = procs.status("d1")
+    expect(status.state).toBe("crashed")
+    if (status.state === "crashed") {
+      expect(status.retryable).toBe(false)
+      expect(status.reason).toMatch(/removed/i)
+    }
+    await expect(procs.ensure({ id: "d1", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+    // Still crashed and non-retryable — an `ensure` must not have been
+    // allowed to try again and overwrite the retired status.
+    const after = procs.status("d1")
+    expect(after.state).toBe("crashed")
+    if (after.state === "crashed") expect(after.retryable).toBe(false)
+  })
+
+  it("retire on a deployment with no entry yet still leaves it permanently refused", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot([]) })
+    managers.push(procs)
+    await procs.retire("never-started")
+    const status = procs.status("never-started")
+    expect(status.state).toBe("crashed")
+    if (status.state === "crashed") expect(status.retryable).toBe(false)
+  })
+
+  it("forget clears a retired entry, so the id (or a fresh one) can start again", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+    managers.push(procs)
+    await procs.retire("d1")
+    await procs.forget("d1")
+    expect(procs.status("d1").state).toBe("stopped")
+  })
 })

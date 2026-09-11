@@ -67,7 +67,10 @@ export interface CreateGithubRuntimeArgs {
    * Awaited before a superseded deployment's checkout directory is deleted
    * (`build/build-queue.ts`), so a server prototype still running out of that
    * directory is stopped first. `server/index.ts` passes
-   * `prototypeProcesses.stop`.
+   * `prototypeProcesses.retire` — not `.stop` — so the deployment also stays
+   * permanently refused afterward: a request landing between this hook and
+   * the actual delete must not be able to spawn a fresh child into a
+   * directory that is about to disappear.
    *
    * Optional: a deployment whose checkout is pruned while nothing runs from it
    * needs no hook at all, which is every test and every static-only

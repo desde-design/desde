@@ -105,9 +105,12 @@ async function main(): Promise<void> {
     // makes the SSE stream live rather than polled.
     onBuildChange: (deploymentId) => buildChangeBus.emit(deploymentId),
     // A superseded deployment's checkout is deleted after a successful build.
-    // Stop any process still running out of that directory FIRST, or the
-    // delete races a live child that is reading from it.
-    beforeCheckoutRemove: (deploymentId) => prototypeProcesses.stop(deploymentId),
+    // `retire`, not `stop`: stop alone would leave the entry `stopped`,
+    // which `ensure` treats as safe to start again — a request landing in
+    // the gap between this hook and the actual delete could then spawn a
+    // fresh child into a directory that is mid-delete. `retire` stops the
+    // process AND leaves it permanently refusing, closing that window.
+    beforeCheckoutRemove: (deploymentId) => prototypeProcesses.retire(deploymentId),
   })
 
   // No GitHub sign-in configured means nobody could otherwise obtain a
