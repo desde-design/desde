@@ -208,56 +208,6 @@ export function ReviewShell({
   })
 
   /**
-   * Codex round 4, Fix 2. `embed` above is resolved SERVER-SIDE, once, in
-   * `page.tsx` — so on a normal first visit to a server prototype, the
-   * server-rendered `process` is `stopped`, and the iframe's OWN request is
-   * what triggers `ensure()` on the viewer. If that start fails, or the
-   * child crashes later, the proxy's 503 response lands INSIDE the iframe:
-   * nothing in this shell notices, `project.process` never changes, and
-   * `PrototypeUnavailable`'s own recovery poll (below, `mode:
-   * "crashed-panel"`) is not even mounted, because no crashed panel is
-   * showing — the reader is left looking at a broken frame until they
-   * reload by hand.
-   *
-   * This is the other `useProcessRecovery` call site: active only while a
-   * SERVER deployment is actually embedded as a frame, polling the same
-   * route and refreshing the moment the polled status says the process has
-   * crashed — `shouldRefreshWhileEmbedded`, not `shouldRefreshAfterPoll`, so
-   * an unrecognised body does nothing instead of refreshing in a loop. The
-   * server-rendered page then re-resolves `decidePrototypeEmbed` from the
-   * fresh process status and shows the crashed panel (or a fresh working
-   * frame, if the crash already cleared).
-   *
-   * Codex round 5, Fix 1. `router.refresh()` alone was not enough for a
-   * RETRYABLE crash: the server render still answers `embed` (a retryable
-   * crash keeps `decidePrototypeEmbed` on the embed branch), so the iframe's
-   * `src` and identity stay unchanged and React keeps the same DOM node —
-   * the one already showing the proxy's error page. No new request ever
-   * reached the proxy, `ensure()` was never called again, and the poll kept
-   * seeing `crashed` forever.
-   *
-   * `frameEpoch` fixes that: it is bumped on every embedded crash and passed
-   * to the iframe as `key`, so React unmounts the stale frame and mounts a
-   * fresh one — a brand new DOM node, whose own request is what calls
-   * `ensure()` and restarts the child within the budget. The router refresh
-   * still runs alongside it, for the crash that is past the budget: that one
-   * needs the SERVER render to swap in the crashed panel, which a remounted
-   * iframe alone cannot do.
-   */
-  const [frameEpoch, setFrameEpoch] = useState(0)
-  const refreshRouterOnEmbeddedCrash = useRouterRefresh()
-  const recoverFromEmbeddedCrash = useCallback(() => {
-    setFrameEpoch((epoch) => epoch + 1)
-    refreshRouterOnEmbeddedCrash()
-  }, [refreshRouterOnEmbeddedCrash])
-  useProcessRecovery({
-    active: embed.kind === "embed" && project.serve === "server",
-    projectId: project.id,
-    onShouldRefresh: recoverFromEmbeddedCrash,
-    mode: "embedded",
-  })
-
-  /**
    * The one resolved answer to "where is this prototype, and how contained".
    *
    * Everything about the embed comes from this single target: the iframe's
@@ -314,6 +264,68 @@ export function ReviewShell({
     activateInspector,
     deactivateInspector,
   } = useViewerBridge(iframeRef, { prototypeOrigin: bridgeOrigin, mode: project.mode })
+
+  /**
+   * Codex round 4, Fix 2. `embed` above is resolved SERVER-SIDE, once, in
+   * `page.tsx` — so on a normal first visit to a server prototype, the
+   * server-rendered `process` is `stopped`, and the iframe's OWN request is
+   * what triggers `ensure()` on the viewer. If that start fails, or the
+   * child crashes later, the proxy's 503 response lands INSIDE the iframe:
+   * nothing in this shell notices, `project.process` never changes, and
+   * `PrototypeUnavailable`'s own recovery poll (below, `mode:
+   * "crashed-panel"`) is not even mounted, because no crashed panel is
+   * showing — the reader is left looking at a broken frame until they
+   * reload by hand.
+   *
+   * This is the other `useProcessRecovery` call site: active only while a
+   * SERVER deployment is actually embedded as a frame, polling the same
+   * route and refreshing the moment the polled status says the process has
+   * crashed — `shouldRefreshWhileEmbedded`, not `shouldRefreshAfterPoll`, so
+   * an unrecognised body does nothing instead of refreshing in a loop. The
+   * server-rendered page then re-resolves `decidePrototypeEmbed` from the
+   * fresh process status and shows the crashed panel (or a fresh working
+   * frame, if the crash already cleared).
+   *
+   * Codex round 5, Fix 1. `router.refresh()` alone was not enough for a
+   * RETRYABLE crash: the server render still answers `embed` (a retryable
+   * crash keeps `decidePrototypeEmbed` on the embed branch), so the iframe's
+   * `src` and identity stay unchanged and React keeps the same DOM node —
+   * the one already showing the proxy's error page. No new request ever
+   * reached the proxy, `ensure()` was never called again, and the poll kept
+   * seeing `crashed` forever.
+   *
+   * `frameEpoch` fixes that: it is bumped on every embedded crash and passed
+   * to the iframe as `key`, so React unmounts the stale frame and mounts a
+   * fresh one — a brand new DOM node, whose own request is what calls
+   * `ensure()` and restarts the child within the budget. The router refresh
+   * still runs alongside it, for the crash that is past the budget: that one
+   * needs the SERVER render to swap in the crashed panel, which a remounted
+   * iframe alone cannot do.
+   *
+   * Codex round 7, Fix 5. `frameEpoch` alone fixed the STALE FRAME, not the
+   * LOADING OVERLAY. `prototypeVisible` (below) also reads `bridgeReadyEpoch`,
+   * and that counter only ever goes up — it is never reset. So after a
+   * remount the REPLACEMENT frame is a cold start with no bridge yet, but
+   * `bridgeReadyEpoch` was already positive from the OLD frame, and the
+   * overlay never came back to say so. `epochAtRemount` records what the
+   * epoch WAS at the moment of THIS remount, so `prototypeVisible` can ask
+   * "has the epoch grown PAST that point" instead of merely "is it
+   * positive".
+   */
+  const [frameEpoch, setFrameEpoch] = useState(0)
+  const [epochAtRemount, setEpochAtRemount] = useState(0)
+  const refreshRouterOnEmbeddedCrash = useRouterRefresh()
+  const recoverFromEmbeddedCrash = useCallback(() => {
+    setFrameEpoch((epoch) => epoch + 1)
+    setEpochAtRemount(bridgeReadyEpoch)
+    refreshRouterOnEmbeddedCrash()
+  }, [refreshRouterOnEmbeddedCrash, bridgeReadyEpoch])
+  useProcessRecovery({
+    active: embed.kind === "embed" && project.serve === "server",
+    projectId: project.id,
+    onShouldRefresh: recoverFromEmbeddedCrash,
+    mode: "embedded",
+  })
 
   /**
    * Reads from the server always; writes go to the server only when this caller
@@ -483,8 +495,15 @@ export function ReviewShell({
    * whose bridge never boots (a strict CSP, an older bundle) still clears the
    * overlay on `onLoad`, and a frame whose load event was missed still clears
    * on the handshake.
+   *
+   * `bridgeReadyEpoch > epochAtRemount`, not `> 0` (codex round 7, Fix 5).
+   * The epoch only ever goes up, so `> 0` stayed true forever once ANY frame
+   * had ever said hello — including the frame a round-5 remount just
+   * replaced. Comparing against the epoch AT the remount asks "has the epoch
+   * grown past that point", which is false for a freshly remounted, not yet
+   * booted frame and true again the moment its own bridge says hello.
    */
-  const prototypeVisible = prototypeLoaded || bridgeReadyEpoch > 0
+  const prototypeVisible = prototypeLoaded || bridgeReadyEpoch > epochAtRemount
 
   /**
    * The port-unreachable watchdog's real signal: does the shell page's OWN
@@ -551,6 +570,14 @@ export function ReviewShell({
       controller.abort()
     }
   }, [project.mode, project.prototypeOrigin, project.bridgeAssetPath, watchdogMs])
+  // Codex round 7, Fix 5's `epochAtRemount` distinction does not apply here.
+  // This asks "has the loopback port EVER answered through a bridge
+  // handshake" — a fact a later remount cannot make untrue, because the
+  // question is about the PORT, not about any one frame. And nothing here
+  // re-arms on remount in the first place: the probe effect above depends on
+  // `project.mode`/`project.prototypeOrigin`/`project.bridgeAssetPath`/
+  // `watchdogMs`, never on `frameEpoch`. So this deliberately stays "ever
+  // ready" (`> 0`), unlike `prototypeVisible`.
   const portWarning = shouldWarnPortUnreachable({
     mode: project.mode,
     bridgeReady: bridgeReadyEpoch > 0,
@@ -784,6 +811,15 @@ export function ReviewShell({
   // Push the current comment list into the bridge whenever it's ready
   // (including re-handshakes after an iframe reload) or the visible set
   // changes (new comment, resolve toggle, show-resolved filter).
+  //
+  // Codex round 7, Fix 5's `epochAtRemount` distinction does not apply here
+  // either, for the opposite reason from `portWarning` above: this effect
+  // needs "ready NOW", and it already has it. `bridgeReadyEpoch` — the raw
+  // counter, not a derived boolean — is a dependency, so a fresh hello after
+  // a remount (the epoch's VALUE changing, not merely crossing zero) reruns
+  // this effect and resyncs the comment list into the NEW frame. The `> 0`
+  // guard only skips the one state (never ready yet) where there is nothing
+  // to sync.
   useEffect(() => {
     if (bridgeReadyEpoch > 0) syncComments(visibleComments)
   }, [bridgeReadyEpoch, visibleComments, syncComments])

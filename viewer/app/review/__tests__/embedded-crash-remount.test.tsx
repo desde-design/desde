@@ -96,6 +96,26 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+/**
+ * The bridge protocol's `BRIDGE_READY` handshake, as the shell's own message
+ * listener (`use-viewer-bridge.ts`) would see it arrive from the real
+ * iframe. Dispatched on `window`, not the iframe element, because that is
+ * where the listener is attached; `source` has to be the iframe's own
+ * `contentWindow` (the listener's identity gate) and `origin` has to match
+ * `PROJECT.prototypeOrigin` (its origin gate).
+ */
+function sendBridgeReady(iframe: HTMLIFrameElement): void {
+  act(() => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { source: "desde-bridge", type: "BRIDGE_READY" },
+        origin: PROJECT.prototypeOrigin as string,
+        source: iframe.contentWindow,
+      }),
+    )
+  })
+}
+
 describe("review shell — an embedded server prototype's retryable crash", () => {
   it("remounts the iframe and refreshes the router on the first poll", async () => {
     vi.useFakeTimers()
@@ -120,5 +140,50 @@ describe("review shell — an embedded server prototype's retryable crash", () =
     // stayed the same string would not have re-fetched anything.
     expect(after).not.toBe(before)
     expect(refresh).toHaveBeenCalled()
+  })
+
+  /**
+   * Codex round 7, Fix 5. `prototypeVisible` used to be `prototypeLoaded ||
+   * bridgeReadyEpoch > 0`. `bridgeReadyEpoch` only ever goes up — it is never
+   * reset — so once the ORIGINAL frame's bridge had said hello even once,
+   * the loading overlay was gone for good: after a round-5 remount the
+   * REPLACEMENT frame is a cold start with no bridge yet, but
+   * `bridgeReadyEpoch` was already positive from the old frame, and the
+   * overlay never came back to say so.
+   *
+   * This test fails against the pre-fix code: the overlay stays hidden after
+   * the remount even though the new frame has said nothing yet.
+   */
+  it("shows the loading overlay again after a remount, even though the old frame's bridge had already said hello", async () => {
+    vi.useFakeTimers()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+
+    const before = document.querySelector("iframe")
+    expect(before, "no iframe rendered — the shell changed shape").not.toBeNull()
+    expect(document.querySelector('[data-testid="prototype-loader"]'), "loader missing before any signal").not.toBeNull()
+
+    // The original frame's bridge says hello, clearing the overlay.
+    sendBridgeReady(before as HTMLIFrameElement)
+    expect(document.querySelector('[data-testid="prototype-loader"]'), "loader did not clear on BRIDGE_READY").toBeNull()
+
+    // The embedded poll's first tick remounts the frame (same trigger as the
+    // first test above).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+
+    const after = document.querySelector("iframe")
+    expect(after).not.toBe(before)
+    // The replacement frame is a fresh cold start: nothing has loaded it and
+    // its own bridge has not said hello yet, so the overlay must be back —
+    // not stuck hidden on the strength of the OLD frame's epoch.
+    expect(
+      document.querySelector('[data-testid="prototype-loader"]'),
+      "loader did not come back for the remounted frame",
+    ).not.toBeNull()
   })
 })
