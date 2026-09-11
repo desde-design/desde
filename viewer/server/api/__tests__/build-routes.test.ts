@@ -60,6 +60,7 @@ const authConfig: ViewerConfig = {
   loopbackPortRange: null,
   loopbackBindAllInterfaces: false,
   loopbackBindNetworkUnrecognized: false,
+  loopbackBind: "auto",
 }
 
 const admin = { Authorization: "Bearer admin-secret" }

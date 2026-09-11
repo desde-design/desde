@@ -198,7 +198,7 @@ describe("originModeBannerLines", () => {
       expect(lines).toContain(UNRECOGNIZED_LINE)
     })
 
-    it("prints the line when the layout was not recognised even under an explicit VIEWER_LOOPBACK_BIND=loopback (Task 5 widening)", () => {
+    it("does NOT print the line under an explicit VIEWER_LOOPBACK_BIND=loopback: the operator meant it (Task 5 review)", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
@@ -206,8 +206,9 @@ describe("originModeBannerLines", () => {
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: false,
         loopbackBindNetworkUnrecognized: true,
+        loopbackBind: "loopback",
       })
-      expect(lines).toContain(UNRECOGNIZED_LINE)
+      expect(lines).not.toContain(UNRECOGNIZED_LINE)
     })
 
     it("does NOT print the line when the layout was recognised as bridged (loopbackBindAllInterfaces: true)", () => {

@@ -18,7 +18,7 @@
  * exists.
  */
 
-import type { ViewerConfig } from "../config"
+import type { ViewerConfig, ViewerLoopbackBindMode } from "../config"
 import { pairedLoopbackHost, resolveOrigins, type OriginMode } from "./prototype-origin-resolve"
 
 export interface OriginModeBanner {
@@ -91,7 +91,11 @@ const WIDE_BIND_NETWORK_UNRECOGNIZED_LINE =
  *   have widened but didn't, because the check could not confirm it).
  * - narrow bind, layout recognised or no container at all → nothing to say.
  */
-function pickBindLine(bindAllInterfaces: boolean, networkUnrecognized: boolean): string[] {
+function pickBindLine(
+  bindAllInterfaces: boolean,
+  networkUnrecognized: boolean,
+  bind: ViewerLoopbackBindMode,
+): string[] {
   if (bindAllInterfaces && networkUnrecognized) {
     return [WIDE_BIND_NETWORK_UNRECOGNIZED_LINE]
   }
@@ -101,7 +105,10 @@ function pickBindLine(bindAllInterfaces: boolean, networkUnrecognized: boolean):
         "On --network host set VIEWER_LOOPBACK_BIND=loopback.",
     ]
   }
-  if (networkUnrecognized) {
+  // Only the DEFAULT's own choice is worth second-guessing: an operator who
+  // wrote `loopback` meant it, and telling them to set `all` would be noise
+  // on top of a deliberate decision (Task 5 review).
+  if (networkUnrecognized && bind === "auto") {
     return [NETWORK_LAYOUT_UNRECOGNIZED_LINE]
   }
   return []
@@ -131,6 +138,8 @@ export function originModeBannerLines(
     // widening this can now be `true` together with `loopbackBindAllInterfaces:
     // true` — see `pickBindLine` for which line each combination prints.
     loopbackBindNetworkUnrecognized?: boolean
+    /** The operator's bind mode; absent reads as the default, `auto`. */
+    loopbackBind?: ViewerLoopbackBindMode
   },
 ): OriginModeBanner {
   const resolved = resolveOrigins({
@@ -244,6 +253,7 @@ export function originModeBannerLines(
         ...pickBindLine(
           Boolean(config.loopbackBindAllInterfaces),
           Boolean(config.loopbackBindNetworkUnrecognized),
+          config.loopbackBind ?? "auto",
         ),
       ],
     }

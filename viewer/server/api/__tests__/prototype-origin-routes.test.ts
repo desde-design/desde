@@ -65,6 +65,7 @@ const baseConfig: ViewerConfig = {
   loopbackPortRange: null,
   loopbackBindAllInterfaces: false,
   loopbackBindNetworkUnrecognized: false,
+  loopbackBind: "auto",
 }
 
 /** A laptop: the shell is reached on a loopback name, no serve domain. */

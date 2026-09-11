@@ -98,6 +98,7 @@ describe("loadConfig", () => {
       loopbackPortRange: null,
       loopbackBindAllInterfaces: false,
       loopbackBindNetworkUnrecognized: false,
+      loopbackBind: "auto",
     })
   })
 

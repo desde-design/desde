@@ -355,6 +355,12 @@ export interface ViewerConfig {
    * detected at all (nothing to recognise or fail to recognise).
    */
   loopbackBindNetworkUnrecognized: boolean
+  /**
+   * The operator's `VIEWER_LOOPBACK_BIND` as given (`auto` when unset), so
+   * the banner can tell a deliberate `loopback` from the default's own
+   * choice: only the default deserves "set it to all if you meant to".
+   */
+  loopbackBind: ViewerLoopbackBindMode
 }
 
 const PROFILES: ViewerProfile[] = ["selfhost"]
@@ -823,6 +829,7 @@ export function loadConfig(
     loopbackPortRange,
     loopbackBindAllInterfaces,
     loopbackBindNetworkUnrecognized,
+    loopbackBind,
     /*
       Env first, stored settings as the fallback — `runtime-config.ts`'s rule,
       not a new one. An operator who has set `VIEWER_SMTP_HOST` in their
