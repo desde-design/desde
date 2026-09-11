@@ -64,7 +64,20 @@ export async function pruneSupersededCheckouts(
   beforeRemove?: (deploymentId: string) => Promise<void>,
   afterRemove?: (deploymentId: string) => Promise<void>,
 ): Promise<void> {
-  const deployments = await storage.listDeployments(projectId)
+  // The listing and the presence checks are best effort too, same as the
+  // removal loop below (codex round 11, Fix 3). Both callers of this
+  // function await it AFTER marking a deployment deployed and active, so a
+  // rejection here used to unwind a successful activation: the upload route
+  // marked the deployment failed and deleted the assets it had just
+  // published, and the build queue rewrote a successful build as failed. A
+  // transient storage error must not be able to do either.
+  let deployments: Awaited<ReturnType<StorageAdapter["listDeployments"]>>
+  try {
+    deployments = await storage.listDeployments(projectId)
+  } catch (error) {
+    console.error(`[viewer] failed to prune checkouts for project ${projectId}:`, error)
+    return
+  }
   // Only deployments that HAVE a checkout count toward the window (codex
   // round 9). A failed build or a static one has none, and when such a row
   // was newer than the previous server build it took the retained slot on
@@ -72,13 +85,18 @@ export async function pruneSupersededCheckouts(
   // it broke and there was nothing to roll back to. The stat here is the
   // same one the loop below used to do; it simply moved ahead of the slice.
   const rest: string[] = []
-  for (const d of deployments) {
-    if (d.id === keepActiveId) continue
-    const present = await stat(checkoutDirFor(checkoutsRoot, d.id)).then(
-      () => true,
-      () => false,
-    )
-    if (present) rest.push(d.id)
+  try {
+    for (const d of deployments) {
+      if (d.id === keepActiveId) continue
+      const present = await stat(checkoutDirFor(checkoutsRoot, d.id)).then(
+        () => true,
+        () => false,
+      )
+      if (present) rest.push(d.id)
+    }
+  } catch (error) {
+    console.error(`[viewer] failed to prune checkouts for project ${projectId}:`, error)
+    return
   }
   const stale = rest.slice(CHECKOUT_RETENTION_COUNT - 1)
   for (const id of stale) {

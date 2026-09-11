@@ -165,6 +165,29 @@ describe("pruneSupersededCheckouts", () => {
     expect(after).not.toContain(stale.id)
   })
 
+  /**
+   * Codex round 11, Fix 3. `pruneSupersededCheckouts` is documented and
+   * called as best-effort cleanup, but its `listDeployments` call used to sit
+   * OUTSIDE any try: a transient storage error rejected the whole function.
+   * Both callers (`build-queue.ts`, and the upload route in
+   * `viewer/server/api/`) await this AFTER marking the deployment deployed
+   * and active — so a rejection here used to unwind a successful activation:
+   * the upload route marked the deployment failed and deleted the assets it
+   * had just published, and the build queue rewrote a successful build as
+   * failed. A storage fault must not be able to do that.
+   */
+  it("resolves and removes nothing when listDeployments rejects", async () => {
+    const storage = { listDeployments: () => Promise.reject(new Error("storage is down")) }
+    const root = await tmp()
+    const before: string[] = []
+    await expect(
+      pruneSupersededCheckouts(storage, root, "proj-1", "active-id", async (id) => {
+        before.push(id)
+      }),
+    ).resolves.toBeUndefined()
+    expect(before).toEqual([])
+  })
+
   /** The companion case: a real directory triggers beforeRemove, then the removal, then afterRemove, in that order. */
   it("triggers beforeRemove then afterRemove, in that order, for a deployment with a real checkout directory", async () => {
     const storage = new InMemoryStorage()
