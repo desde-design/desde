@@ -86,6 +86,23 @@ function refuse(record: ProcessRecord, sentence: string): TransitionResult {
 }
 
 /**
+ * `forget` is "stop, and then forget", from EVERY state — never `drop`
+ * alone.
+ *
+ * A record that is `starting` (and a `retired` one that a cold start
+ * overtook) can still own a live child, so dropping the record without
+ * killing first left that child running with nothing left in the map to stop
+ * it: not `stop`, not the reaper, not `shutdown`. `kill` on a record whose
+ * child is already gone costs the runtime nothing — `applySync` reads a null
+ * handle and there is nothing to wait for — so one row for all five states is
+ * both the correct one and the one that cannot drift.
+ *
+ * The order matters and is the effect list's own: the child is down before
+ * the record disappears.
+ */
+const FORGET_EFFECTS: Effect[] = [{ kind: "kill" }, { kind: "drop" }]
+
+/**
  * Records one failed attempt at `now`, and drops attempts older than the
  * budget window while doing so: only the window is ever read, and a
  * prototype that keeps crashing for days would otherwise grow this list
@@ -165,7 +182,7 @@ export function transition(
         case "retire":
           return ok({ ...record, state: { kind: "retired" } })
         case "forget":
-          return ok(record, [{ kind: "drop" }])
+          return ok(record, FORGET_EFFECTS)
         case "lease-acquired":
           return ok(acquireLease(record, now))
         case "lease-released":
@@ -220,7 +237,7 @@ export function transition(
         case "retire":
           return ok({ ...record, state: { kind: "retired" } }, [{ kind: "kill" }])
         case "forget":
-          return ok(record, [{ kind: "drop" }])
+          return ok(record, FORGET_EFFECTS)
         case "lease-acquired":
           return ok(acquireLease(record, now))
         case "lease-released":
@@ -267,7 +284,7 @@ export function transition(
         case "retire":
           return ok({ ...record, state: { kind: "retired" } }, [{ kind: "kill" }])
         case "forget":
-          return ok(record, [{ kind: "kill" }, { kind: "drop" }])
+          return ok(record, FORGET_EFFECTS)
         case "lease-acquired":
           return ok(acquireLease(record, now))
         case "lease-released":
@@ -316,7 +333,7 @@ export function transition(
         case "retire":
           return ok({ ...record, state: { kind: "retired" } })
         case "forget":
-          return ok(record, [{ kind: "drop" }])
+          return ok(record, FORGET_EFFECTS)
         case "lease-acquired":
           return ok(acquireLease(record, now))
         case "lease-released":
@@ -336,9 +353,16 @@ export function transition(
         case "start-requested":
           return refuse(record, RETIRED_REFUSAL)
         case "forget":
-          return ok(record, [{ kind: "drop" }])
+          return ok(record, FORGET_EFFECTS)
+        // A cold start this record was retired out from under still carries
+        // its own `spawned` and `ready`. Absorbing them let the runtime go on
+        // to spawn a child into a checkout that is being deleted, and then
+        // hand a reader its port. Refusing is what makes `startChild` throw
+        // before the spawn, and kill the child when a `ready` is already in
+        // flight.
         case "spawned":
         case "ready":
+          return refuse(record, RETIRED_REFUSAL)
         case "exited":
         case "unreachable":
         case "start-failed":

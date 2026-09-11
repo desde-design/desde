@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   createPrototypeProcesses,
   pickLoopbackPort,
@@ -808,6 +808,92 @@ describe("createPrototypeProcesses", () => {
     const startingLines = procs.serverLog("d1").split("\n").filter((l) => l.includes("fake server: starting"))
     expect(startingLines).toHaveLength(1)
     await retiring
+    const status = procs.status("d1")
+    expect(status.state).toBe("crashed")
+    if (status.state === "crashed") {
+      expect(status.retryable).toBe(false)
+      expect(status.reason).toMatch(/removed/i)
+    }
+  })
+
+  /**
+   * The round-12 critical, runtime half. `retire` used to land on a record
+   * that was still `starting` and leave the cold start free to continue: the
+   * machine ABSORBED the `spawned` and `ready` that start was carrying, so
+   * `apply` never threw, a child was spawned into a checkout
+   * `pruneSupersededCheckouts` was about to delete, and `ensure` resolved
+   * with its port. `forget` then dropped the record without killing, and the
+   * child outlived the viewer.
+   *
+   * `pickPort` is parked on a gate here so the `retire` lands inside exactly
+   * the window that start is in — before the spawn — rather than by timing
+   * luck. The fixture's first act is to log "fake server: starting", so an
+   * empty log is proof no child was ever spawned, not merely that none
+   * answered.
+   */
+  it("a retire that lands between pickPort and spawn never spawns a child at all", async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      pickPort: async () => {
+        await gate
+        return await pickLoopbackPort()
+      },
+    })
+    managers.push(procs)
+    const ensuring = procs.ensure({ id: "d1", serverStart: start() })
+    await procs.retire("d1")
+    release()
+
+    await expect(ensuring).rejects.toBeInstanceOf(PrototypeProcessError)
+    expect(procs.serverLog("d1")).toBe("")
+    const status = procs.status("d1")
+    expect(status.state).toBe("crashed")
+    if (status.state === "crashed") {
+      expect(status.retryable).toBe(false)
+      expect(status.reason).toMatch(/removed/i)
+    }
+  })
+
+  /**
+   * The same critical's second variant: the `retire` lands while the
+   * readiness probe is already in flight against a child that HAS spawned.
+   * The kill effect stops that child, the probe still comes back with an
+   * answer, and the `ready` it produces used to be absorbed — so `ensure`
+   * resolved with the port of a process that was being torn down, and the
+   * reader got the proxy's 502 instead of the retired 503.
+   *
+   * Deterministic rather than timed: the fixture logs when the probe arrives
+   * and holds the response open for 200ms, and `FAKE_SIGTERM_DELAY_MS` keeps
+   * the child alive long enough to answer it. The lock does the rest — the
+   * `ready` transition queues behind `retire`'s own slow stop, so it is
+   * always applied to a record that is already `retired`.
+   */
+  it("a retire that lands while the readiness probe is in flight refuses the ready and leaves nothing listening", async () => {
+    let chosen = 0
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      spawnEnv: { FAKE_RESPONSE_DELAY_MS: "200", FAKE_SIGTERM_DELAY_MS: "500" },
+      pickPort: async () => {
+        chosen = await pickLoopbackPort()
+        return chosen
+      },
+    })
+    managers.push(procs)
+    const ensuring = procs.ensure({ id: "d1", serverStart: start() })
+    await vi.waitFor(
+      () => {
+        expect(procs.serverLog("d1")).toContain("fake server: probe received")
+      },
+      { timeout: 5000 },
+    )
+    await procs.retire("d1")
+
+    await expect(ensuring).rejects.toBeInstanceOf(PrototypeProcessError)
+    await expect(get(chosen)).rejects.toThrow()
     const status = procs.status("d1")
     expect(status.state).toBe("crashed")
     if (status.state === "crashed") {

@@ -28,19 +28,75 @@ describe("transition", () => {
     expect(s3.record.state).toEqual({ kind: "running", generation: s1.record.generation, port: 4321, since: t0 })
   })
 
-  it("retired absorbs everything except forget", () => {
+  /**
+   * A retired record REFUSES a late start — including the two events a cold
+   * start that `retire` overtook is still carrying (`spawned` and `ready`).
+   *
+   * Absorbing those two was the round-12 critical: the runtime only throws on
+   * a refusal, so an absorbed `spawned` let `startChild` go on to spawn a
+   * child into a checkout that is being deleted, and an absorbed `ready` made
+   * `ensure` resolve with that child's port.
+   */
+  it("retired refuses a late start, a late spawned and a late ready", () => {
     const r = after(newRecord(t0), [{ type: "retire" }])
     for (const e of [
       { type: "start-requested" },
+      { type: "spawned", generation: 1 },
       { type: "ready", port: 1, generation: 1 },
-      { type: "unreachable" },
-      { type: "reap", now: t0 + 1e9, idleMs: 1 },
     ] as ProcessEvent[]) {
       const out = transition(r, e, t0, limits)
+      expect(out.refused, `a retired record absorbed ${e.type}`).toBeDefined()
       expect(out.record.state.kind).toBe("retired")
       expect(out.effects).toEqual([])
     }
-    expect(transition(r, { type: "forget" }, t0, limits).effects).toEqual([{ kind: "drop" }])
+  })
+
+  it("retired absorbs every other event except forget", () => {
+    const r = after(newRecord(t0), [{ type: "retire" }])
+    for (const e of [
+      { type: "exited", code: 1 },
+      { type: "unreachable" },
+      { type: "start-failed", reason: "x", permanent: false },
+      { type: "timed-out" },
+      { type: "stop-requested" },
+      { type: "retire" },
+      { type: "reap", now: t0 + 1e9, idleMs: 1 },
+      { type: "evict" },
+    ] as ProcessEvent[]) {
+      const out = transition(r, e, t0, limits)
+      expect(out.refused, `a retired record refused ${e.type}`).toBeUndefined()
+      expect(out.record.state.kind).toBe("retired")
+      expect(out.effects).toEqual([])
+    }
+  })
+
+  /**
+   * `forget` is "stop, and then forget", from every state. It used to emit
+   * `drop` alone from `idle`, `starting`, `crashed` and `retired`, so a
+   * `forget` that landed on a record whose child was still alive dropped the
+   * record and left the child running with nobody left to stop it.
+   */
+  it("forget kills before it drops, from every state", () => {
+    const idle = newRecord(t0)
+    const starting = after(idle, [{ type: "start-requested" }])
+    const running = after(starting, [
+      { type: "spawned", generation: 1 },
+      { type: "ready", port: 1, generation: 1 },
+    ])
+    const crashed = after(starting, [{ type: "exited", code: 1 }])
+    const retired = after(idle, [{ type: "retire" }])
+    for (const [name, record] of [
+      ["idle", idle],
+      ["starting", starting],
+      ["running", running],
+      ["crashed", crashed],
+      ["retired", retired],
+    ] as const) {
+      expect(transition(record, { type: "forget" }, t0, limits).effects, `forget from ${name}`).toEqual([
+        { kind: "kill" },
+        { kind: "drop" },
+      ])
+    }
   })
 
   it("a record with leases is never reaped or evicted", () => {
@@ -167,6 +223,12 @@ describe("invariants over random sequences", () => {
     () => ({ type: "start-requested" }),
     (r) => ({ type: "spawned", generation: r.generation }),
     (r) => ({ type: "ready", port: 4000, generation: r.generation }),
+    // A cold start that something else has moved on from still carries the
+    // generation it was stamped with. Without these two the generator only
+    // ever produced a CURRENT generation, so "a stale one is refused" was
+    // never actually exercised here.
+    (r) => ({ type: "spawned", generation: r.generation - 1 }),
+    (r) => ({ type: "ready", port: 4000, generation: r.generation - 1 }),
     () => ({ type: "exited", code: 1 }),
     () => ({ type: "unreachable" }),
     () => ({ type: "start-failed", reason: "boom", permanent: false }),
@@ -194,9 +256,26 @@ describe("invariants over random sequences", () => {
         const result = transition(before, event, now, limits)
 
         // Invariant 1: no sequence reaches starting or running from retired
-        // without a forget in between.
+        // without a forget in between, and no sequence ever asks the runtime
+        // to spawn a child for a retired record.
         if (before.state.kind === "retired" && event.type !== "forget") {
           expect(result.record.state.kind).toBe("retired")
+        }
+        if (before.state.kind === "retired") {
+          expect(result.effects.some((eff) => eff.kind === "spawn")).toBe(false)
+        }
+
+        // Invariant 1b: `spawned` and `ready` are accepted ONLY by the
+        // `starting` record whose generation they carry. Anything else — a
+        // stale generation, or a record that has moved on — is refused, and
+        // a refusal is what makes the runtime kill the child rather than
+        // adopt it.
+        if (event.type === "spawned" || event.type === "ready") {
+          const current =
+            before.state.kind === "starting" && before.state.generation === event.generation
+          expect(result.refused === undefined, `${event.type} at generation ${event.generation}`).toBe(
+            current,
+          )
         }
 
         // Invariant 2: leases never goes negative, and a record with

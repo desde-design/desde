@@ -2,9 +2,12 @@
 // the test's env asks: FAKE_DELAY_MS before listening, FAKE_EXIT_CODE to die
 // instead of listening, FAKE_SIGTERM_DELAY_MS to hold off exiting on SIGTERM
 // (widens the window a `stop`/`retire` is actually waiting in, for tests that
-// need to land a concurrent call inside it), GET /exit to die while running,
-// and GET /env to answer with the child's own env (so the env-allowlist test
-// can see exactly what reached the process).
+// need to land a concurrent call inside it), FAKE_RESPONSE_DELAY_MS to hold
+// the manager's readiness probe open for that long (and log when it arrives,
+// so a test can land a concurrent call while the probe is in flight instead
+// of by timing luck), GET /exit to die while running, and GET /env to answer
+// with the child's own env (so the env-allowlist test can see exactly what
+// reached the process).
 import { createServer } from "node:http"
 const port = Number(process.env.PORT)
 if (process.env.FAKE_EXIT_CODE) {
@@ -31,6 +34,12 @@ setTimeout(() => {
       return
     }
     res.setHeader("content-type", "text/plain")
+    const probeDelay = Number(process.env.FAKE_RESPONSE_DELAY_MS ?? 0)
+    if (probeDelay > 0 && req.url === "/") {
+      console.log("fake server: probe received")
+      setTimeout(() => res.end(`hello from ${port} ${req.url}`), probeDelay)
+      return
+    }
     res.end(`hello from ${port} ${req.url}`)
   }).listen(port, "127.0.0.1", () => console.log("fake server: listening"))
 }, Number(process.env.FAKE_DELAY_MS ?? 0))
