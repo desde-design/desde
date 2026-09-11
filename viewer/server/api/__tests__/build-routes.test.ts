@@ -222,6 +222,27 @@ describe("GET /deployments/:id/log/stream (S7 — manage authority only)", () =>
     expect(res.status).toBe(404)
   })
 
+  // The repo-wide rule: a private project's 404 must be byte-identical to a
+  // nonexistent one. `denied` (a real deployment on a project this anonymous
+  // caller cannot read) and `missing` (a deployment id that does not exist at
+  // all) must be indistinguishable — status, body, AND content-type. This is
+  // the template `server-log`'s own paired test was copied from. ONE app
+  // instance for both requests, per `createSwappableApp`'s "last `use()`
+  // wins" rule.
+  it("answers a byte-identical 404 for an unreadable project and an unknown deployment id", async () => {
+    const { project } = await makeMembersProject(storage)
+    const dep = await storage.createDeployment({ projectId: project.id })
+    const requestApp = app()
+
+    const denied = await request(requestApp).get(`/api/v1/deployments/${dep.id}/log/stream`)
+    const missing = await request(requestApp).get("/api/v1/deployments/does-not-exist/log/stream")
+
+    expect(denied.status).toBe(404)
+    expect(denied.status).toBe(missing.status)
+    expect(denied.text).toBe(missing.text)
+    expect(denied.headers["content-type"]).toBe(missing.headers["content-type"])
+  })
+
   // Under Authorization v2 the log stream is `requireProjectManageRead`: the
   // caller must be able to READ the project (this one is `invited`, so a
   // membership row is what gets them in) AND hold a managing instance role.
@@ -388,16 +409,32 @@ describe("GET /deployments/:id/server-log (same gate as the build log)", () => {
   it("404s for an unknown deployment", async () => {
     const res = await request(app()).get("/api/v1/deployments/does-not-exist/server-log").set(admin)
     expect(res.status).toBe(404)
-    expect(res.body).toEqual({ error: "Deployment not found" })
+    expect(res.body).toEqual({ error: "Project not found" })
   })
 
-  it("404s for a non-readable project, same as an unreadable project", async () => {
+  // The repo-wide rule: a private project's 404 must be byte-identical to a
+  // nonexistent one, so a caller cannot learn a private deployment exists
+  // from the response body. `denied` (a real deployment on a project this
+  // anonymous caller cannot read) and `missing` (a deployment id that does
+  // not exist at all) must be indistinguishable — status, body, AND
+  // content-type. Same pattern as `prototype-origin-routes.test.ts`'s
+  // "answers a byte-identical 404 for an unreadable project and a missing
+  // id". ONE app instance for both requests — `createSwappableApp`'s "last
+  // `use()` wins" rule means a second `app()` call mid-test would swap the
+  // handler out from under the first request if issued afterward.
+  it("answers a byte-identical 404 for an unreadable project and an unknown deployment id", async () => {
     const { project } = await makeMembersProject(storage)
     const dep = await storage.createDeployment({ projectId: project.id })
+    const requestApp = app()
 
     // Anonymous caller against an `invited` project with no access-list row.
-    const res = await request(app()).get(`/api/v1/deployments/${dep.id}/server-log`)
-    expect(res.status).toBe(404)
+    const denied = await request(requestApp).get(`/api/v1/deployments/${dep.id}/server-log`)
+    const missing = await request(requestApp).get("/api/v1/deployments/does-not-exist/server-log")
+
+    expect(denied.status).toBe(404)
+    expect(denied.status).toBe(missing.status)
+    expect(denied.text).toBe(missing.text)
+    expect(denied.headers["content-type"]).toBe(missing.headers["content-type"])
   })
 
   it("403s a signed-in VIEWER on a project they can read", async () => {

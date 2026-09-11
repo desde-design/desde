@@ -126,7 +126,13 @@ export function createBuildRoutes(deps: AppDeps): Router {
       : null
     if (closed) return
     if (!deployment) {
-      res.status(404).json({ error: "Deployment not found" })
+      // The SAME body `requireProjectManageRead` sends for an unreadable
+      // project (`readableProjectWithPolicy` in `auth/authorize.ts`), not a
+      // distinct "Deployment not found" — a caller who cannot read the
+      // project this id belongs to must not be able to tell "wrong id" from
+      // "right id, no access" apart from the response body. See the paired
+      // `denied`/`missing` test below.
+      res.status(404).json({ error: "Project not found" })
       return
     }
     if (!project) return
@@ -182,7 +188,11 @@ export function createBuildRoutes(deps: AppDeps): Router {
       ? await requireProjectManageRead(deps, req, res, deployment.projectId, "view the server log")
       : null
     if (!deployment) {
-      res.status(404).json({ error: "Deployment not found" })
+      // Same body as the log-stream route above, and for the same reason:
+      // it must match whatever `requireProjectManageRead` sends for an
+      // unreadable project, so an unknown deployment id and a real one on a
+      // project the caller cannot manage are indistinguishable.
+      res.status(404).json({ error: "Project not found" })
       return
     }
     if (!project) return
