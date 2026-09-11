@@ -17,11 +17,9 @@ afterEach(async () => {
   await Promise.all(managers.splice(0).map((m) => m.shutdown()))
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })))
 })
-function start(extraEnv: Record<string, string> = {}): string[] {
-  // `node` from PATH; env pairs ride as `KEY=VALUE` argv entries the manager
-  // turns into env (see `startArgvEnv`), because the argv is the only thing
-  // a deployment records.
-  return ["node", FAKE, ...Object.entries(extraEnv).map(([k, v]) => `--env=${k}=${v}`)]
+/** `node` from PATH; fixture knobs (FAKE_DELAY_MS, FAKE_EXIT_CODE) ride the manager's `spawnEnv`, not the argv. */
+function start(): string[] {
+  return ["node", FAKE]
 }
 async function get(port: number, path = "/"): Promise<{ status: number; body: string }> {
   const res = await fetch(`http://127.0.0.1:${port}${path}`)
@@ -48,11 +46,13 @@ describe("createPrototypeProcesses", () => {
   })
 
   it("marks a server that exits before answering as crashed, with its log", async () => {
-    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]), readyTimeoutMs: 5000 })
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      readyTimeoutMs: 5000,
+      spawnEnv: { FAKE_EXIT_CODE: "3" },
+    })
     managers.push(procs)
-    await expect(procs.ensure({ id: "d1", serverStart: start({ FAKE_EXIT_CODE: "3" }) })).rejects.toBeInstanceOf(
-      PrototypeProcessError,
-    )
+    await expect(procs.ensure({ id: "d1", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
     const status = procs.status("d1")
     expect(status.state).toBe("crashed")
     if (status.state === "crashed") expect(status.exitCode).toBe(3)
@@ -67,11 +67,27 @@ describe("createPrototypeProcesses", () => {
     expect(status.state === "crashed" && /checkout/i.test(status.reason)).toBe(true)
   })
 
+  it("marks a malformed id as crashed without echoing the id in the reason", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot([]) })
+    managers.push(procs)
+    const badId = "../evil"
+    await expect(procs.ensure({ id: badId, serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+    const status = procs.status(badId)
+    expect(status.state).toBe("crashed")
+    if (status.state === "crashed") {
+      expect(status.reason).not.toContain(badId)
+      expect(status.reason).not.toContain("evil")
+    }
+  })
+
   it("restarts a crashed server on the next ensure, up to three times in five minutes", async () => {
     let now = 1_000_000
     const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]), now: () => now })
     managers.push(procs)
-    for (let i = 0; i < 3; i++) {
+    // The initial start is not itself a restart; four crash cycles here means
+    // the 3rd restart (the 4th attempt total) still succeeded, and the 5th
+    // attempt (a would-be 4th restart) is the one that should be refused.
+    for (let i = 0; i < 4; i++) {
       const { port } = await procs.ensure({ id: "d1", serverStart: start() })
       await get(port, "/exit")
       await new Promise((r) => setTimeout(r, 200))
@@ -107,10 +123,89 @@ describe("createPrototypeProcesses", () => {
 
   it("shutdown kills every server", async () => {
     const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["a", "b"]) })
+    managers.push(procs)
     const a = await procs.ensure({ id: "a", serverStart: start() })
     await procs.ensure({ id: "b", serverStart: start() })
     await procs.shutdown()
     await expect(get(a.port)).rejects.toThrow()
     expect(procs.status("a").state).toBe("stopped")
+  })
+
+  it("a stop that lands mid-poll never resurrects a dead child as running", async () => {
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      spawnEnv: { FAKE_DELAY_MS: "1500" },
+    })
+    managers.push(procs)
+    const ensuring = procs.ensure({ id: "d1", serverStart: start() })
+    await new Promise((r) => setTimeout(r, 200))
+    await procs.stop("d1")
+    await expect(ensuring).rejects.toBeInstanceOf(PrototypeProcessError)
+    expect(procs.status("d1").state).toBe("stopped")
+  })
+
+  it("a spawn failure (bad binary) fails fast with a crashed status naming the cause", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]), readyTimeoutMs: 5000 })
+    managers.push(procs)
+    await expect(procs.ensure({ id: "d1", serverStart: ["/nonexistent/binary"] })).rejects.toBeInstanceOf(PrototypeProcessError)
+    const status = procs.status("d1")
+    expect(status.state).toBe("crashed")
+    if (status.state === "crashed") expect(status.reason).toContain("could not be started")
+  })
+
+  it("never hands the child the viewer's own environment, only the allowlist plus spawnEnv", async () => {
+    process.env.VIEWER_TEST_SECRET = "must-not-leak"
+    try {
+      const procs = createPrototypeProcesses({
+        checkoutsRoot: await checkoutsRoot(["d1"]),
+        spawnEnv: { FAKE_DELAY_MS: "0" },
+      })
+      managers.push(procs)
+      const { port } = await procs.ensure({ id: "d1", serverStart: start() })
+      const body = JSON.parse((await get(port, "/env")).body) as Record<string, string>
+      expect(body.VIEWER_TEST_SECRET).toBeUndefined()
+      expect(body.PATH).toBeTruthy()
+      expect(body.PORT).toBe(String(port))
+      expect(body.HOSTNAME).toBe("127.0.0.1")
+      expect(body.HOST).toBe("127.0.0.1")
+      expect(body.NODE_ENV).toBe("production")
+    } finally {
+      delete process.env.VIEWER_TEST_SECRET
+    }
+  })
+
+  it("marks a server that never answers as crashed once the ready timeout elapses", async () => {
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      readyTimeoutMs: 500,
+      spawnEnv: { FAKE_DELAY_MS: "3000" },
+    })
+    managers.push(procs)
+    await expect(procs.ensure({ id: "d1", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+    const status = procs.status("d1")
+    expect(status.state).toBe("crashed")
+    if (status.state === "crashed") expect(status.reason).toContain("did not answer")
+  })
+
+  it("two concurrent ensure calls for the same id share one spawn", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+    managers.push(procs)
+    const [a, b] = await Promise.all([
+      procs.ensure({ id: "d1", serverStart: start() }),
+      procs.ensure({ id: "d1", serverStart: start() }),
+    ])
+    expect(a.port).toBe(b.port)
+    const startingLines = procs.serverLog("d1").split("\n").filter((l) => l.includes("fake server: starting"))
+    expect(startingLines).toHaveLength(1)
+  })
+
+  it("stop on a running server stops it and it no longer answers", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+    managers.push(procs)
+    const { port } = await procs.ensure({ id: "d1", serverStart: start() })
+    expect(procs.status("d1").state).toBe("running")
+    await procs.stop("d1")
+    expect(procs.status("d1").state).toBe("stopped")
+    await expect(get(port)).rejects.toThrow()
   })
 })

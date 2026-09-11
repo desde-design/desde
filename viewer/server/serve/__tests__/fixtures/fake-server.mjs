@@ -1,6 +1,8 @@
 // A stand-in for `next start`: listens on $PORT, answers HTTP, and does what
 // the test's env asks: FAKE_DELAY_MS before listening, FAKE_EXIT_CODE to die
-// instead of listening, and GET /exit to die while running.
+// instead of listening, GET /exit to die while running, and GET /env to
+// answer with the child's own env (so the env-allowlist test can see exactly
+// what reached the process).
 import { createServer } from "node:http"
 const port = Number(process.env.PORT)
 if (process.env.FAKE_EXIT_CODE) {
@@ -13,6 +15,11 @@ setTimeout(() => {
     if (req.url === "/exit") {
       res.end("bye")
       setTimeout(() => process.exit(0), 10)
+      return
+    }
+    if (req.url === "/env") {
+      res.setHeader("content-type", "application/json")
+      res.end(JSON.stringify(process.env))
       return
     }
     res.setHeader("content-type", "text/plain")

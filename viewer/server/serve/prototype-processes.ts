@@ -43,7 +43,9 @@ export interface PrototypeProcesses {
 }
 
 export const MAX_RUNNING_SERVER_PROTOTYPES = 4
-const LOG_BYTES = 64 * 1024
+/** The log ring buffer is measured in characters (`string.slice`), not bytes. */
+const LOG_CHARS = 64 * 1024
+/** At most this many restarts (crashes followed by another attempt) inside `RESTART_WINDOW_MS`. */
 const RESTART_BUDGET = 3
 const RESTART_WINDOW_MS = 5 * 60_000
 
@@ -55,6 +57,16 @@ export interface PrototypeProcessesDeps {
   reapIntervalMs?: number
   maxRunning?: number
   pickPort?: () => Promise<number>
+  /**
+   * Extra env merged into every spawned child, BEFORE `NODE_ENV`/`PORT`/
+   * `HOSTNAME`/`HOST` so it can never override them.
+   *
+   * This exists only so tests can drive the fixture child's own knobs
+   * (`FAKE_DELAY_MS`, `FAKE_EXIT_CODE`) without a second env channel riding
+   * inside the recorded argv, which a real deployment's `serverStart` never
+   * carries. Never wire this to anything request- or user-derived.
+   */
+  spawnEnv?: Record<string, string>
 }
 
 /** Binds an ephemeral loopback port and releases it, so the child can take it. */
@@ -70,22 +82,28 @@ export async function pickLoopbackPort(): Promise<number> {
   })
 }
 
-/**
- * The recorded argv may carry `--env=KEY=VALUE` entries, which become env
- * for the child rather than arguments. Nothing an adapter ships uses this
- * today; the test fixture does, and it keeps "one argv" as the whole record.
- */
-export function startArgvEnv(argv: string[], port: number): { file: string; args: string[]; env: Record<string, string> } {
-  const env: Record<string, string> = {}
-  const args: string[] = []
-  for (const a of argv) {
-    const m = /^--env=([A-Z0-9_]+)=(.*)$/.exec(a)
-    if (m) env[m[1]!] = m[2]!
-    else args.push(a.replaceAll("$PORT", String(port)))
-  }
-  const [file, ...rest] = args
+/** Substitutes `$PORT` in each argv entry. The first entry is the executable. */
+export function substitutePort(argv: string[], port: number): { file: string; args: string[] } {
+  const substituted = argv.map((a) => a.replaceAll("$PORT", String(port)))
+  const [file, ...args] = substituted
   if (!file) throw new Error("serverStart is empty")
-  return { file, args: rest, env }
+  return { file, args }
+}
+
+/**
+ * A `crashed` status's own reason, or `fallback` otherwise.
+ *
+ * Pulled out as a function (rather than an inline `status.state === "crashed"
+ * ? status.reason : fallback` at the call site) because TypeScript narrows
+ * `entry.status` to whatever literal it was last assigned along the
+ * SYNCHRONOUS path it can see — it does not know an `async` callback (the
+ * child's `exit`/`error` handlers) can reassign it during an `await`. Taking
+ * `status: ProcessStatus` as a plain parameter resets that narrowing to the
+ * full declared union on every call, which is what makes the check safe to
+ * write at all right after an `await`.
+ */
+function reasonOrFallback(status: ProcessStatus, fallback: string): string {
+  return status.state === "crashed" ? status.reason : fallback
 }
 
 interface Entry {
@@ -134,7 +152,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     return e
   }
   const append = (e: Entry, text: string): void => {
-    e.log = (e.log + text).slice(-LOG_BYTES)
+    e.log = (e.log + text).slice(-LOG_CHARS)
   }
   const killTree = (child: ChildProcess, sig: NodeJS.Signals): void => {
     try {
@@ -145,6 +163,15 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   }
   const running = (): [string, Entry][] => [...entries].filter(([, e]) => e.status.state === "running")
 
+  /**
+   * Stops an entry's child, if it has one, and marks it `stopped`.
+   *
+   * `e.child` is nulled and `e.status` becomes `stopped` SYNCHRONOUSLY,
+   * before anything is awaited. A concurrent `start()` for the same entry
+   * reads `e.child` every poll iteration precisely so it notices a stop
+   * landing mid-start without any separate flag: `e.child` IS that flag,
+   * and this is the moment it flips. See `start()`'s poll loop.
+   */
   async function stopEntry(e: Entry): Promise<void> {
     const child = e.child
     e.child = null
@@ -179,8 +206,14 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   }
 
   async function start(id: string, serverStart: string[], e: Entry): Promise<{ port: number }> {
-    const cwd = checkoutDirFor(deps.checkoutsRoot, id)
+    let cwd: string
     try {
+      // Inside the try: a malformed id makes `checkoutDirFor` throw
+      // synchronously, and that must land here too, not escape as an
+      // uncaught rejection. The reason string below is fixed and generic on
+      // purpose — `checkoutDirFor`'s own message echoes the id, which is not
+      // safe to hand back as a crash reason.
+      cwd = checkoutDirFor(deps.checkoutsRoot, id)
       if (!(await stat(cwd)).isDirectory()) throw new Error("not a directory")
     } catch {
       e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The checkout for this deployment is missing. Rebuild it." }
@@ -188,7 +221,10 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     }
     const recent = e.restartsAt.filter((t) => now() - t < RESTART_WINDOW_MS)
     e.restartsAt = recent
-    if (recent.length >= RESTART_BUDGET) {
+    // "At most 3 restarts in 5 minutes": the very first attempt is not a
+    // restart, so this refuses once a 4th crash (the would-be 4th restart)
+    // is already on record, not on the 3rd.
+    if (recent.length > RESTART_BUDGET) {
       e.status = { state: "crashed", exitCode: e.status.state === "crashed" ? e.status.exitCode : null, restarts: recent.length, reason: "The server kept exiting. See the server log." }
       throw new PrototypeProcessError(e.status, e.status.reason)
     }
@@ -199,14 +235,29 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     }
 
     const port = await pickPort()
-    const { file, args, env } = startArgvEnv(serverStart, port)
-    const home = join(cwd, "..", `${id}.home`)
+    const { file, args } = substitutePort(serverStart, port)
+    // Inside the checkout, not beside it: `pruneSupersededCheckouts` deletes
+    // `checkoutDirFor(...)` wholesale, so a home dir living inside it is
+    // pruned along with the checkout instead of leaking forever.
+    const home = join(cwd, ".desde-home")
     await mkdir(home, { recursive: true })
     e.status = { state: "starting" }
     e.log = ""
     const child = spawn(file, args, {
       cwd,
-      env: buildEnv(home, { NODE_ENV: "production", PORT: String(port), HOSTNAME: "127.0.0.1", ...env }) as NodeJS.ProcessEnv,
+      env: buildEnv(home, {
+        // `spawnEnv` first, so it can never shadow the four below — see its
+        // doc comment on `PrototypeProcessesDeps`.
+        ...deps.spawnEnv,
+        NODE_ENV: "production",
+        PORT: String(port),
+        HOSTNAME: "127.0.0.1",
+        // Nitro/Nuxt and react-router-serve read HOST where Next reads the
+        // `-H` flag; setting both is a hint, not enforcement — a server that
+        // ignores its env and binds elsewhere is a substrate bug, not one
+        // this manager can fix.
+        HOST: "127.0.0.1",
+      }) as NodeJS.ProcessEnv,
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     })
@@ -222,11 +273,31 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       e.restartsAt.push(now())
       e.status = { state: "crashed", exitCode: code, restarts: e.restartsAt.length, reason: "The server exited." }
     })
-    child.once("error", (error) => append(e, `\n${error.message}\n`))
+    child.once("error", (error) => {
+      // Node emits `error` (never `exit`) for a spawn-time failure like
+      // ENOENT — without setting `exited` here the poll loop would run all
+      // the way to `readyTimeoutMs` reporting a misleading "did not answer".
+      exited = true
+      append(e, `\n${error.message}\n`)
+      if (e.child !== child) return
+      e.child = null
+      e.port = null
+      e.restartsAt.push(now())
+      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: `The server could not be started: ${error.message}` }
+    })
 
     const deadline = now() + readyTimeoutMs
-    while (!exited && now() < deadline) {
+    // `e.child === child` is re-checked every iteration so a `stop()` (or an
+    // eviction) landing mid-poll ends this loop promptly instead of running
+    // to the timeout against a child that is already gone.
+    while (!exited && e.child === child && now() < deadline) {
       if (await answers(port)) {
+        // The request above can outlive a `stop()` that lands while it is in
+        // flight. Bail rather than declare a dead child "running" — this is
+        // the same identity guard the exit handler uses.
+        if (e.child !== child) {
+          throw new PrototypeProcessError(e.status, reasonOrFallback(e.status, "The server was stopped before it finished starting."))
+        }
         e.port = port
         e.status = { state: "running", port, since: new Date(now()).toISOString() }
         touchEntry(e)
@@ -234,12 +305,13 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       }
       await new Promise((r) => setTimeout(r, 250))
     }
-    if (!exited) {
+    if (!exited && e.child === child) {
+      // Timed out on our own clock, not stopped or exited elsewhere.
       await stopEntry(e)
       e.restartsAt.push(now())
-      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The server did not answer within a minute." }
+      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The server did not answer in time." }
     }
-    throw new PrototypeProcessError(e.status, e.status.state === "crashed" ? e.status.reason : "The server did not start.")
+    throw new PrototypeProcessError(e.status, reasonOrFallback(e.status, "The server did not start."))
   }
 
   return {
