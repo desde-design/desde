@@ -15,7 +15,9 @@
  * Every registry created here is closed in `afterEach`. A listener left open
  * keeps a handle alive and hangs the run.
  */
-import { request as httpRequest, type IncomingHttpHeaders } from "node:http"
+import express from "express"
+import { createServer, request as httpRequest, type IncomingHttpHeaders } from "node:http"
+import type { AddressInfo } from "node:net"
 import { afterEach, describe, expect, it } from "vitest"
 import type { AssetStore, StoredAsset } from "../assets/types"
 import { loadConfig } from "../config"
@@ -26,6 +28,7 @@ import { createLoopbackListenerApp } from "./loopback-listener-app"
 import { loopbackBindHostFor, pairedLoopbackHost } from "./prototype-origin-resolve"
 import {
   createLoopbackListenerRegistry,
+  LoopbackPortsExhaustedError,
   type LoopbackListenerRegistry,
 } from "./loopback-listeners"
 
@@ -302,6 +305,46 @@ describe("createLoopbackListenerRegistry", () => {
           shellOrigin: "https://viewer.example.com",
         }),
       ).rejects.toThrow(/scheme|https/i)
+    })
+  })
+
+  describe("binding from a configured port range", () => {
+    it("binds the first free port in the range and skips a taken one", async () => {
+      const taken = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => taken.listen(0, "127.0.0.1", () => r()))
+      const takenPort = (taken.address() as AddressInfo).port
+      const registry = createLoopbackListenerRegistry({
+        // desde-allow-own-server: this Express app is never handed to
+        // supertest — the registry wraps it in its own real http.Server, which
+        // is the thing under test here (see the module doc comment above).
+        makeApp: () => express(),
+        portRange: { from: takenPort, to: takenPort + 2 },
+      })
+      try {
+        const listener = await registry.ensure(
+          { id: "dep-1", slug: "one", projectId: "p" },
+          { bindHost: "127.0.0.1", shellOrigin: "http://localhost:3100" },
+        )
+        expect(listener.port).toBe(takenPort + 1)
+      } finally {
+        await registry.closeAll()
+        taken.close()
+      }
+    })
+
+    it("throws LoopbackPortsExhaustedError when every port in the range is taken", async () => {
+      const registry = createLoopbackListenerRegistry({
+        // desde-allow-own-server: same as above — wrapped in a real
+        // http.Server, never requested through supertest.
+        makeApp: () => express(),
+        portRange: { from: 0, to: -1 }, // empty range: nothing to try
+      })
+      await expect(
+        registry.ensure(
+          { id: "dep-1", slug: "one", projectId: "p" },
+          { bindHost: "127.0.0.1", shellOrigin: "http://localhost:3100" },
+        ),
+      ).rejects.toBeInstanceOf(LoopbackPortsExhaustedError)
     })
   })
 

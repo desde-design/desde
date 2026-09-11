@@ -135,6 +135,20 @@ export interface LoopbackListenerRegistryDeps {
   idleMs?: number
   /** Injected clock, so idle reaping is testable without real time. */
   now?: () => number
+  /**
+   * When set, `open()` tries each port in `[from, to]` in order, skipping any
+   * already in use, instead of asking the OS for an ephemeral one. `null` (or
+   * omitted) keeps the old `listen(0, ...)` behaviour.
+   */
+  portRange?: { from: number; to: number } | null
+}
+
+/** Every port in `VIEWER_LOOPBACK_PORT_RANGE` is bound. Surfaced to the review page by name. */
+export class LoopbackPortsExhaustedError extends Error {
+  readonly name = "LoopbackPortsExhaustedError"
+  constructor(range: { from: number; to: number }) {
+    super(`All ${range.to - range.from + 1} loopback prototype ports (${range.from}-${range.to}) are in use`)
+  }
 }
 
 /**
@@ -234,19 +248,37 @@ export function createLoopbackListenerRegistry(
       app(req, res)
     })
 
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error): void => {
-        server.removeListener("listening", onListening)
-        reject(error)
+    const listenOn = (port: number): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        const onError = (error: Error): void => {
+          server.removeListener("listening", onListening)
+          reject(error)
+        }
+        const onListening = (): void => {
+          server.removeListener("error", onError)
+          resolve()
+        }
+        server.once("error", onError)
+        server.once("listening", onListening)
+        server.listen(port, target.bindHost)
+      })
+
+    const range = deps.portRange ?? null
+    if (range === null) {
+      await listenOn(0)
+    } else {
+      let bound = false
+      for (let port = range.from; port <= range.to; port++) {
+        try {
+          await listenOn(port)
+          bound = true
+          break
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error
+        }
       }
-      const onListening = (): void => {
-        server.removeListener("error", onError)
-        resolve()
-      }
-      server.once("error", onError)
-      server.once("listening", onListening)
-      server.listen(0, target.bindHost)
-    })
+      if (!bound) throw new LoopbackPortsExhaustedError(range)
+    }
 
     // A socket error AFTER a successful bind (an ECONNRESET storm, say) is an
     // `error` event with no listener, which Node turns into an uncaught

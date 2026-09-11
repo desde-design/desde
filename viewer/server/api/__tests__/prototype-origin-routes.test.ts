@@ -24,7 +24,7 @@ import { testGithubRuntime } from "../../__tests__/test-github-runtime"
 import { InMemoryStorage } from "../../storage/in-memory-storage"
 import type { AssetStore, StoredAsset } from "../../assets/types"
 import type { ViewerConfig } from "../../config"
-import type { LoopbackListenerRegistry } from "../../serve/loopback-listeners"
+import { LoopbackPortsExhaustedError, type LoopbackListenerRegistry } from "../../serve/loopback-listeners"
 import type { Project } from "../../storage/types"
 
 const SHELL_ORIGIN_HEADER = "X-Viewer-Shell-Origin"
@@ -752,6 +752,27 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(logged).not.toContain(project.id)
       // What DOES reach it: enough to tell one failure class from another.
       expect(logged).toContain("Error")
+    })
+
+    it("answers 503 with reason ports-exhausted when the configured range is full", async () => {
+      const exhausted: LoopbackListenerRegistry = {
+        ensure: () => Promise.reject(new LoopbackPortsExhaustedError({ from: 3101, to: 3120 })),
+        touch: () => {},
+        reapIdle: () => Promise.resolve(0),
+        closeAll: () => Promise.resolve(),
+        startReaper: () => () => {},
+        isPrototypeHost: () => false,
+      }
+      const ctx = setup({ prototypeListeners: exhausted })
+      const project = await seedProject(ctx.storage)
+
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(503)
+
+      expect(res.body.reason).toBe("ports-exhausted")
     })
   })
 })

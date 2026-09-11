@@ -182,6 +182,7 @@ async function main(): Promise<void> {
         bridgeVersion,
         prototypeCsp: config.prototypeCsp,
       }),
+    portRange: config.loopbackPortRange,
   })
 
   const appDeps: AppDeps = {

@@ -2,6 +2,7 @@ import { Router } from "express"
 import type { AppDeps } from "../create-app"
 import { requireProjectReadWithPolicy } from "../auth/authorize"
 import { buildHostAllowlist, isAllowedHost } from "../serve/host-allowlist"
+import { LoopbackPortsExhaustedError } from "../serve/loopback-listeners"
 import {
   LOOPBACK_HOSTS,
   loopbackBindHostFor,
@@ -266,6 +267,10 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
       }
       res.json(body)
     } catch (error) {
+      if (error instanceof LoopbackPortsExhaustedError) {
+        res.status(503).json({ error: error.message, reason: "ports-exhausted" })
+        return
+      }
       // A constant plus the error's CLASS, never its message.
       //
       // Logging the error object was wrong, and not by a little: every
