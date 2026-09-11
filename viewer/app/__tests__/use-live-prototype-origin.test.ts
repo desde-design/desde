@@ -112,6 +112,46 @@ describe("useLivePrototypeOrigin", () => {
     expect(result.current).toBe(afterGoodEvent)
   })
 
+  /**
+   * A rebuild's `router.refresh()` re-renders the page with the NEW
+   * deployment's body in the server prop. Once the stream had delivered one
+   * event this hook answered `live` for ever, so that refreshed prop was
+   * never read and the page stayed on the old deployment — the crashed panel
+   * included, which is where a reader is most likely to press Rebuild.
+   *
+   * A new `initial` now drops the followed body and reconnects, so the fresh
+   * connection resolves the new deployment server-side straight away rather
+   * than waiting on the stream's own heartbeat to notice.
+   */
+  it("drops the followed body and reconnects when the server body changes identity", () => {
+    installFakeEventSource()
+    const { result, rerender } = renderHook(
+      ({ initial }: { initial: ReviewEmbedOrigin }) => useLivePrototypeOrigin(PROJECT_ID, initial),
+      { initialProps: { initial: INITIAL } },
+    )
+    const first = latestEventSource()
+
+    act(() => {
+      first?.dispatch(
+        "origin",
+        loopbackBody({ state: "crashed", exitCode: 1, restarts: 4, reason: "It exited.", retryable: false }),
+      )
+    })
+    expect(result.current.process?.state).toBe("crashed")
+
+    const rebuilt: ReviewEmbedOrigin = {
+      ...INITIAL,
+      origin: "http://127.0.0.1:4399",
+      process: { state: "stopped" },
+    }
+    rerender({ initial: rebuilt })
+
+    expect(result.current).toBe(rebuilt)
+    // One stream, not two: the old one was closed before the new one opened.
+    expect(openEventSources("/prototype-origin/stream")).toHaveLength(1)
+    expect(latestEventSource()).not.toBe(first)
+  })
+
   it("closes the stream when the component unmounts", () => {
     installFakeEventSource()
     const { unmount } = renderHook(() => useLivePrototypeOrigin(PROJECT_ID, INITIAL))

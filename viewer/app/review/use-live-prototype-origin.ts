@@ -49,6 +49,28 @@ export function useLivePrototypeOrigin(
    */
   const [live, setLive] = useState<ReviewEmbedOrigin | null>(null)
 
+  /**
+   * The server-rendered body the followed one is an update OF.
+   *
+   * A NEW `initial` means the page was re-rendered with something this hook
+   * has not seen — a rebuild's `router.refresh()`, whose whole point is that
+   * the active deployment changed. Whatever the stream delivered up to now
+   * describes the OLD deployment, so it is dropped, and the effect below
+   * reconnects: a fresh connection resolves the new deployment server-side
+   * at connect, ahead of the stream's own heartbeat noticing.
+   *
+   * Adjusted during render rather than in an effect, which is React's own
+   * answer for "a prop changed and some state derived from it is now stale":
+   * the stale body is never painted, and there is no second commit. Safe
+   * against a loop because `initial` is memoised on the project's own fields
+   * by the shell, so its identity changes only when one of them does.
+   */
+  const [followedFrom, setFollowedFrom] = useState<ReviewEmbedOrigin>(initial)
+  if (followedFrom !== initial) {
+    setFollowedFrom(initial)
+    setLive(null)
+  }
+
   useEffect(() => {
     if (typeof EventSource === "undefined") return
     const source = new EventSource(
@@ -80,7 +102,7 @@ export function useLivePrototypeOrigin(
       source.removeEventListener("origin", onOrigin)
       source.close()
     }
-  }, [projectId])
+  }, [projectId, initial])
 
   return live ?? initial
 }
