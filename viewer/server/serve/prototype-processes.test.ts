@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { createPrototypeProcesses, PrototypeProcessError } from "./prototype-processes"
+import { createPrototypeProcesses, pickLoopbackPort, PrototypeProcessError } from "./prototype-processes"
 
 const FAKE = resolve(__dirname, "__tests__/fixtures/fake-server.mjs")
 const roots: string[] = []
@@ -65,6 +65,8 @@ describe("createPrototypeProcesses", () => {
     await expect(procs.ensure({ id: "gone", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
     const status = procs.status("gone")
     expect(status.state === "crashed" && /checkout/i.test(status.reason)).toBe(true)
+    // Nothing a retry could fix: the files are not there.
+    expect(status.state === "crashed" && status.retryable).toBe(false)
   })
 
   it("marks a malformed id as crashed without echoing the id in the reason", async () => {
@@ -197,6 +199,82 @@ describe("createPrototypeProcesses", () => {
     expect(a.port).toBe(b.port)
     const startingLines = procs.serverLog("d1").split("\n").filter((l) => l.includes("fake server: starting"))
     expect(startingLines).toHaveLength(1)
+  })
+
+  /**
+   * The crashed status says whether the next `ensure` would try again, so the
+   * review page can embed the frame (and let that request restart the
+   * process) instead of showing a dead end that only a full rebuild clears.
+   * The rule is the manager's own restart budget, not a second copy of it.
+   */
+  it("marks a transient crash retryable and an over-budget one not", async () => {
+    let now = 1_000_000
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]), now: () => now })
+    managers.push(procs)
+    const { port } = await procs.ensure({ id: "d1", serverStart: start() })
+    await get(port, "/exit")
+    await new Promise((r) => setTimeout(r, 200))
+    const first = procs.status("d1")
+    expect(first.state === "crashed" && first.retryable).toBe(true)
+
+    for (let i = 0; i < 3; i++) {
+      const next = await procs.ensure({ id: "d1", serverStart: start() })
+      await get(next.port, "/exit")
+      await new Promise((r) => setTimeout(r, 200))
+    }
+    await expect(procs.ensure({ id: "d1", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+    const spent = procs.status("d1")
+    expect(spent.state === "crashed" && spent.retryable).toBe(false)
+  })
+
+  it("refuses to ensure after shutdown, and spawns nothing", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+    managers.push(procs)
+    await procs.shutdown()
+    await expect(procs.ensure({ id: "d1", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+    // The fixture's first act is to log "fake server: starting", so an empty
+    // log is proof no child was spawned — not merely that none answered.
+    expect(procs.serverLog("d1")).toBe("")
+    expect(procs.status("d1").state).toBe("stopped")
+  })
+
+  /**
+   * The window `stopEntry` cannot see: it nulls `e.child`, but a `start()`
+   * parked before `spawn` has no child yet, so the stop is a no-op and the
+   * spawn then proceeds into a process nobody is holding. `pickPort` is
+   * parked on a promise here so the stop lands inside exactly that window,
+   * rather than by timing luck.
+   */
+  it("a stop that lands between pickPort and spawn leaves no child behind", async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      pickPort: async () => {
+        await gate
+        return await pickLoopbackPort()
+      },
+    })
+    managers.push(procs)
+    const ensuring = procs.ensure({ id: "d1", serverStart: start() })
+    await procs.stop("d1")
+    release()
+    await expect(ensuring).rejects.toBeInstanceOf(PrototypeProcessError)
+    expect(procs.status("d1").state).toBe("stopped")
+    expect(procs.serverLog("d1")).toBe("")
+  })
+
+  it("forget stops the server and drops everything it knew about the deployment", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+    managers.push(procs)
+    const { port } = await procs.ensure({ id: "d1", serverStart: start() })
+    expect(procs.serverLog("d1")).toContain("fake server: listening")
+    await procs.forget("d1")
+    await expect(get(port)).rejects.toThrow()
+    expect(procs.status("d1").state).toBe("stopped")
+    expect(procs.serverLog("d1")).toBe("")
   })
 
   it("stop on a running server stops it and it no longer answers", async () => {

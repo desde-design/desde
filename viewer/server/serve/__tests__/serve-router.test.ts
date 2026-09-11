@@ -118,6 +118,7 @@ function fakeProcesses(overrides: Partial<PrototypeProcesses> = {}): PrototypePr
       Promise.reject(new PrototypeProcessError({ state: "stopped" }, "No process manager in this test.")),
     touch: () => {},
     stop: () => Promise.resolve(),
+    forget: () => Promise.resolve(),
     status: () => ({ state: "stopped" }),
     serverLog: () => "",
     startReaper: () => () => {},
@@ -1876,7 +1877,7 @@ describe("createServeRouter", () => {
           ensure: () =>
             Promise.reject(
               new PrototypeProcessError(
-                { state: "crashed", exitCode: 1, restarts: 3, reason: "The server kept exiting." },
+                { state: "crashed", exitCode: 1, restarts: 3, reason: "The server kept exiting.", retryable: false },
                 "The server kept exiting.",
               ),
             ),

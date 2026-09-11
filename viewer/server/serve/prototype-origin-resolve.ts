@@ -223,7 +223,14 @@ export type PrototypeProcessStatus =
   | { state: "stopped" }
   | { state: "starting" }
   | { state: "running"; port: number; since: string }
-  | { state: "crashed"; exitCode: number | null; restarts: number; reason: string }
+  | {
+      state: "crashed"
+      exitCode: number | null
+      restarts: number
+      reason: string
+      /** Whether the next request would start it again. See `ProcessStatus`. */
+      retryable: boolean
+    }
 
 /**
  * The body of `GET /api/v1/projects/:id/prototype-origin` — where the shell

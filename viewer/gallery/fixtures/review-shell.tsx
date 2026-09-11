@@ -611,6 +611,9 @@ export const REVIEW_SHELL_SURFACE: SurfaceEntry = {
                 exitCode: 1,
                 restarts: 3,
                 reason: "The server kept exiting.",
+                // Past the restart budget, which is what makes the panel the
+                // honest answer here rather than an embedded frame.
+                retryable: false,
               },
             }}
           />

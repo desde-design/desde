@@ -20,7 +20,25 @@ export type ProcessStatus =
   | { state: "stopped" }
   | { state: "starting" }
   | { state: "running"; port: number; since: string }
-  | { state: "crashed"; exitCode: number | null; restarts: number; reason: string }
+  | {
+      state: "crashed"
+      exitCode: number | null
+      restarts: number
+      reason: string
+      /**
+       * Whether the NEXT `ensure` would try again.
+       *
+       * `false` for a missing checkout, a malformed id, and once the restart
+       * budget is spent; `true` otherwise. It exists so the review page does
+       * not turn one transient exit into a dead end: a retryable crash is
+       * embedded, and the iframe's own request restarts the process in
+       * seconds, where the crashed panel offers only a multi-minute rebuild.
+       *
+       * It states the manager's own budget rather than inviting a second
+       * copy of that rule to be written on the page.
+       */
+      retryable: boolean
+    }
 
 export class PrototypeProcessError extends Error {
   readonly name = "PrototypeProcessError"
@@ -36,6 +54,16 @@ export interface PrototypeProcesses {
   ensure(deployment: Pick<Deployment, "id" | "serverStart">): Promise<{ port: number }>
   touch(deploymentId: string): void
   stop(deploymentId: string): Promise<void>
+  /**
+   * `stop`, and then forget the deployment entirely — its status, its log,
+   * its restart history.
+   *
+   * For a deployment that will never be asked for again: the project was
+   * deleted, so its checkout is about to be removed too. `stop` alone would
+   * leave the entry in the map forever, still reporting a crash reason for
+   * something that no longer exists.
+   */
+  forget(deploymentId: string): Promise<void>
   status(deploymentId: string): ProcessStatus
   serverLog(deploymentId: string): string
   startReaper(): () => void
@@ -126,6 +154,17 @@ interface Entry {
   log: string
   restartsAt: number[]
   opening: Promise<{ port: number }> | null
+  /**
+   * Bumped by every `stopEntry`. A `start()` reads it before and after
+   * `spawn` to notice a stop it could not otherwise see.
+   *
+   * `e.child` is the flag for a stop that lands while a child exists, but
+   * between `pickPort()` and `spawn()` there IS no child: `stopEntry` finds
+   * `e.child === null`, no-ops, and the spawn then proceeds into a process
+   * nobody is holding a handle to. A counter records that a stop happened at
+   * all, which is the part `e.child` cannot.
+   */
+  generation: number
 }
 
 export function createPrototypeProcesses(deps: PrototypeProcessesDeps): PrototypeProcesses {
@@ -137,6 +176,15 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const pickPort = deps.pickPort ?? pickLoopbackPort
   const entries = new Map<string, Entry>()
   let recencyCounter = 0
+  /**
+   * Set by `shutdown()` before it kills anything, and never cleared.
+   *
+   * `index.ts` awaits `shutdown()` BEFORE the listeners and the main server
+   * close, so a request can still land in that window. Without this it would
+   * call `ensure`, spawn a DETACHED child, and the process would then exit
+   * leaving that child holding a port with nobody to stop it.
+   */
+  let closed = false
   /** Bumps both the human-readable `lastUsedAt` and the tie-proof `recency`. */
   const touchEntry = (e: Entry): void => {
     e.lastUsedAt = now()
@@ -146,7 +194,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const entryFor = (id: string): Entry => {
     let e = entries.get(id)
     if (!e) {
-      e = { status: { state: "stopped" }, child: null, port: null, lastUsedAt: now(), recency: recencyCounter++, log: "", restartsAt: [], opening: null }
+      e = { status: { state: "stopped" }, child: null, port: null, lastUsedAt: now(), recency: recencyCounter++, log: "", restartsAt: [], opening: null, generation: 0 }
       entries.set(id, e)
     }
     return e
@@ -164,6 +212,21 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const running = (): [string, Entry][] => [...entries].filter(([, e]) => e.status.state === "running")
 
   /**
+   * Would the next `ensure` start this entry again?
+   *
+   * The same question `start()` asks of its own budget below, asked from the
+   * crash sites so the status can STATE the answer. Written once here rather
+   * than at each site, because a second copy of the budget rule is how the
+   * status and the behaviour would come to disagree.
+   */
+  const withinRestartBudget = (e: Entry): boolean =>
+    e.restartsAt.filter((t) => now() - t < RESTART_WINDOW_MS).length <= RESTART_BUDGET
+
+  /** The refusal `ensure` gives once `shutdown()` has run. */
+  const closedError = (): PrototypeProcessError =>
+    new PrototypeProcessError({ state: "stopped" }, "The viewer is shutting down.")
+
+  /**
    * Stops an entry's child, if it has one, and marks it `stopped`.
    *
    * `e.child` is nulled and `e.status` becomes `stopped` SYNCHRONOUSLY,
@@ -174,6 +237,9 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    */
   async function stopEntry(e: Entry): Promise<void> {
     const child = e.child
+    // Bumped for every stop, child or not — see `Entry.generation` for the
+    // window `e.child` cannot cover.
+    e.generation++
     e.child = null
     e.port = null
     e.status = { state: "stopped" }
@@ -206,6 +272,10 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   }
 
   async function start(id: string, serverStart: string[], e: Entry): Promise<{ port: number }> {
+    // Read once, at the top: every check below asks whether a stop has landed
+    // SINCE this attempt began, and a value re-read later would answer a
+    // different question.
+    const generation = e.generation
     let cwd: string
     try {
       // Inside the try: a malformed id makes `checkoutDirFor` throw
@@ -216,7 +286,9 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       cwd = checkoutDirFor(deps.checkoutsRoot, id)
       if (!(await stat(cwd)).isDirectory()) throw new Error("not a directory")
     } catch {
-      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The checkout for this deployment is missing. Rebuild it." }
+      // Not retryable: no number of restarts puts the files back. Only a
+      // rebuild does, which is what the review page then offers.
+      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The checkout for this deployment is missing. Rebuild it.", retryable: false }
       throw new PrototypeProcessError(e.status, e.status.reason)
     }
     const recent = e.restartsAt.filter((t) => now() - t < RESTART_WINDOW_MS)
@@ -225,7 +297,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // restart, so this refuses once a 4th crash (the would-be 4th restart)
     // is already on record, not on the 3rd.
     if (recent.length > RESTART_BUDGET) {
-      e.status = { state: "crashed", exitCode: e.status.state === "crashed" ? e.status.exitCode : null, restarts: recent.length, reason: "The server kept exiting. See the server log." }
+      e.status = { state: "crashed", exitCode: e.status.state === "crashed" ? e.status.exitCode : null, restarts: recent.length, reason: "The server kept exiting. See the server log.", retryable: false }
       throw new PrototypeProcessError(e.status, e.status.reason)
     }
     // Make room. Never evict one that is starting.
@@ -241,6 +313,14 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // pruned along with the checkout instead of leaking forever.
     const home = join(cwd, ".desde-home")
     await mkdir(home, { recursive: true })
+    // Immediately before the spawn. Everything above this line has awaited at
+    // least once, so a `stop()` or a `shutdown()` can have landed in between —
+    // and a spawn after either of those is a child nobody will ever stop,
+    // because the manager has already forgotten it is coming.
+    if (closed) throw closedError()
+    if (e.generation !== generation) {
+      throw new PrototypeProcessError(e.status, "The server was stopped before it finished starting.")
+    }
     e.status = { state: "starting" }
     e.log = ""
     const child = spawn(file, args, {
@@ -261,6 +341,19 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     })
+    // And immediately after it. `spawn` itself does not await, but the check
+    // above and this one bracket it so a stop cannot land in the gap between
+    // "we decided to spawn" and "we recorded the child": a child spawned
+    // across a stop is killed here rather than left running.
+    if (closed || e.generation !== generation) {
+      killTree(child, "SIGKILL")
+      // The group kill can lose a race with the child's own `setsid` (spawn
+      // has returned, the child may not have run yet), so the pid is killed
+      // directly as well. Either call is a no-op once the other has landed.
+      child.kill("SIGKILL")
+      if (closed) throw closedError()
+      throw new PrototypeProcessError(e.status, "The server was stopped before it finished starting.")
+    }
     e.child = child
     child.stdout?.on("data", (b: Buffer) => append(e, b.toString("utf8")))
     child.stderr?.on("data", (b: Buffer) => append(e, b.toString("utf8")))
@@ -271,7 +364,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       e.child = null
       e.port = null
       e.restartsAt.push(now())
-      e.status = { state: "crashed", exitCode: code, restarts: e.restartsAt.length, reason: "The server exited." }
+      e.status = { state: "crashed", exitCode: code, restarts: e.restartsAt.length, reason: "The server exited.", retryable: withinRestartBudget(e) }
     })
     child.once("error", (error) => {
       // Node emits `error` (never `exit`) for a spawn-time failure like
@@ -283,7 +376,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       e.child = null
       e.port = null
       e.restartsAt.push(now())
-      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: `The server could not be started: ${error.message}` }
+      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: `The server could not be started: ${error.message}`, retryable: withinRestartBudget(e) }
     })
 
     const deadline = now() + readyTimeoutMs
@@ -309,13 +402,17 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // Timed out on our own clock, not stopped or exited elsewhere.
       await stopEntry(e)
       e.restartsAt.push(now())
-      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The server did not answer in time." }
+      e.status = { state: "crashed", exitCode: null, restarts: e.restartsAt.length, reason: "The server did not answer in time.", retryable: withinRestartBudget(e) }
     }
     throw new PrototypeProcessError(e.status, reasonOrFallback(e.status, "The server did not start."))
   }
 
   return {
     async ensure(deployment) {
+      // Before anything else, including the entry lookup: after `shutdown()`
+      // there is nothing this manager can honestly promise, and a spawn here
+      // outlives the process (children are detached).
+      if (closed) throw closedError()
       if (!deployment.serverStart) {
         throw new PrototypeProcessError({ state: "stopped" }, "This deployment is served as files, not as a server.")
       }
@@ -338,6 +435,15 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       const e = entries.get(id)
       if (e) await stopEntry(e)
     },
+    async forget(id) {
+      const e = entries.get(id)
+      if (!e) return
+      // Stopped first, dropped second. Dropping first would let a concurrent
+      // `ensure` create a fresh entry and spawn into a checkout that is about
+      // to be deleted; this way the child is down before the record goes.
+      await stopEntry(e)
+      entries.delete(id)
+    },
     status(id) {
       return entries.get(id)?.status ?? { state: "stopped" }
     },
@@ -354,6 +460,10 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       return () => clearInterval(timer)
     },
     async shutdown() {
+      // First thing, before any await: from here on `ensure` refuses, so a
+      // request that lands while the children are being killed cannot start
+      // a new one behind us.
+      closed = true
       await Promise.all([...entries.values()].map((e) => stopEntry(e)))
     },
   }

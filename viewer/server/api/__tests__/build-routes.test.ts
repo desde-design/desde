@@ -385,6 +385,7 @@ describe("GET /deployments/:id/server-log (same gate as the build log)", () => {
       ensure: () => Promise.reject(new Error("not used by this route")),
       touch: () => {},
       stop: () => Promise.resolve(),
+      forget: () => Promise.resolve(),
       status: () => fakeStatus,
       serverLog: () => "hello",
       startReaper: () => () => {},
