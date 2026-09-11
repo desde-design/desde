@@ -82,6 +82,8 @@ const REVIEW_PROJECT: ReviewShellProject = {
   shellOrigin: "http://localhost:3100",
   prototypeOrigin: null,
   mode: "fallback",
+  serve: "static",
+  range: null,
 }
 
 /**
@@ -564,6 +566,91 @@ export const REVIEW_SHELL_SURFACE: SurfaceEntry = {
         </Scenario>
       ),
       readyWhen: 'iframe[src^="http://127.0.0.1:45001/"][sandbox~="allow-same-origin"]',
+    },
+    {
+      // A server prototype in path mode: the router can only proxy a
+      // process when the review iframe sits at an origin's root, which path
+      // mode never does. `decidePrototypeEmbed` shows this panel instead of
+      // a frame that would just 409.
+      id: "review/prototype-needs-origin",
+      label: "Prototype embed — a server prototype needs an origin of its own",
+      render: () => (
+        <Scenario routes={{ [COMMENTS_PATH]: COMMENTS_OK }}>
+          <ReviewShell project={{ ...REVIEW_PROJECT, mode: "fallback", serve: "server" }} />
+        </Scenario>
+      ),
+      readyWhen: '[data-testid="prototype-needs-origin"]',
+    },
+    {
+      // A server prototype ON its own loopback origin, whose process has
+      // crashed. The manager-only server log and Rebuild button both render
+      // (the default signed-in user, `ME_SIGNED_IN`, is an admin) — the log
+      // comes from its own route, separate from the process status carried
+      // on `project.process`.
+      id: "review/prototype-crashed",
+      label: "Prototype embed — the server crashed",
+      render: () => (
+        <Scenario
+          routes={{
+            [COMMENTS_PATH]: COMMENTS_OK,
+            "/api/v1/deployments/dep-401/server-log": ok({
+              log: "Error: listen EADDRINUSE",
+              status: { state: "crashed", exitCode: 1, restarts: 3, reason: "The server kept exiting." },
+            }),
+          }}
+        >
+          <ReviewShell
+            project={{
+              ...REVIEW_PROJECT,
+              prototypeOrigin: "http://127.0.0.1:45001",
+              mode: "loopback",
+              serve: "server",
+              process: {
+                state: "crashed",
+                exitCode: 1,
+                restarts: 3,
+                reason: "The server kept exiting.",
+              },
+            }}
+          />
+        </Scenario>
+      ),
+      readyWhen: '[data-testid="prototype-crashed"] pre',
+    },
+    {
+      // The port-unreachable watchdog: a loopback prototype that never
+      // loads (nothing serves the fake port either, same as
+      // `review/loopback-embed`), with its wait shrunk from the real 8s to
+      // 10ms through `watchdogMs` so the fixture does not have to actually
+      // wait 8 seconds.
+      id: "review/port-watchdog",
+      label: "Port-unreachable watchdog — the loopback port never answers",
+      render: () => (
+        <Scenario routes={{ [COMMENTS_PATH]: COMMENTS_OK }}>
+          <ReviewShell
+            project={{
+              ...REVIEW_PROJECT,
+              // NOT a loopback address. A real browser fires the iframe's
+              // own `onLoad` the moment a `127.0.0.1` connection is refused
+              // — often faster than any watchdog bound could be, which
+              // would clear `prototypeLoaded` before the banner ever had a
+              // chance to show. `192.0.2.1` is a reserved "TEST-NET"
+              // address (RFC 5737): it never has a real listener anywhere,
+              // and routers drop it rather than reset it, so the
+              // navigation hangs instead of failing — which is what lets
+              // this state actually reach the "nothing has loaded yet"
+              // condition it exists to show, in jsdom (no real network at
+              // all) and in a real browser alike.
+              prototypeOrigin: "http://192.0.2.1:45001",
+              mode: "loopback",
+              serve: "static",
+              range: { from: 45000, to: 45010 },
+            }}
+            watchdogMs={10}
+          />
+        </Scenario>
+      ),
+      readyWhen: '[data-testid="port-watchdog"]',
     },
     {
       // Folds two must-have states into one screenshot: the resolved row

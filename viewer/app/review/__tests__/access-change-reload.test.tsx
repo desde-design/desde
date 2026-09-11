@@ -49,6 +49,8 @@ const PROJECT: ReviewShellProject = {
   shellOrigin: "http://localhost:3100",
   prototypeOrigin: null,
   mode: "fallback",
+  serve: "static",
+  range: null,
 }
 
 const ROUTES: Record<string, FetchOverrideResult | (() => FetchOverrideResult)> = {

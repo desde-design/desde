@@ -95,6 +95,18 @@ export interface DeploymentView {
   buildLog?: string
   warnings: DeploymentWarning[] | null
   createdAt: string
+  /**
+   * Whether this deployment is a folder of files or a process the viewer
+   * runs and proxies to (server-prototypes work, 2026-09-10). Matches the
+   * server's `DeploymentServe` (`server/storage/types.ts`) — restated here
+   * rather than imported, same as every other server-shaped type in this
+   * file. Optional, like `steps`: absent from an older viewer's rows.
+   * Absent is read the same way `serve` reads everywhere else on the wire —
+   * as `"static"` — so an older row's detail dialog shows no "Runs as a
+   * server" line, which is correct for a row that predates the field
+   * entirely.
+   */
+  serve?: "static" | "server"
 }
 
 export function isDeploymentView(v: unknown): v is DeploymentView {
@@ -121,7 +133,8 @@ export function isDeploymentView(v: unknown): v is DeploymentView {
       d.steps === null ||
       (Array.isArray(d.steps) && d.steps.every(isBuildStepView))) &&
     (d.warnings === null || Array.isArray(d.warnings)) &&
-    typeof d.createdAt === "string"
+    typeof d.createdAt === "string" &&
+    (d.serve === undefined || d.serve === "static" || d.serve === "server")
   )
 }
 

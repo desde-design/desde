@@ -49,6 +49,8 @@ const PUBLIC_PROJECT: ReviewShellProject = {
   shellOrigin: "https://demo.desde.design",
   prototypeOrigin: PROTOTYPE_ORIGIN,
   mode: "loopback",
+  serve: "static",
+  range: null,
 }
 
 function signedInAs(role: "admin" | "editor" | "viewer") {

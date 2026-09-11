@@ -67,6 +67,11 @@ import { ProjectRepoPanel } from "../../project-repo-panel"
 import { GITHUB_APP_SETUP_INTRO, GithubAccessSetupStep } from "../../github-app-setup-card"
 import { RootAbsoluteWarningCallout } from "../../root-absolute-warning"
 import { shouldShowRootAbsoluteWarning } from "../../build-log-utils"
+import type { ProcessStatus } from "../../../server/serve/prototype-processes"
+import type { DeploymentServe } from "../../../server/storage/types"
+import { decidePrototypeEmbed } from "./prototype-embed-decision"
+import { PrototypeUnavailable } from "./prototype-unavailable"
+import { PORT_WATCHDOG_MS, shouldWarnPortUnreachable } from "../port-watchdog"
 
 export interface ReviewShellProject {
   id: string
@@ -113,6 +118,28 @@ export interface ReviewShellProject {
   prototypeOrigin: string | null
   /** The mode that answer came back in. Decides which embed rule applies. */
   mode: OriginMode
+  /**
+   * Whether the active deployment is a folder of files or a process the
+   * viewer runs and proxies to (server-prototypes work, 2026-09-10). Feeds
+   * `decidePrototypeEmbed`, below, alongside `process`, `mode` and
+   * `originReason`.
+   */
+  serve: DeploymentServe
+  /** The server deployment's process state, when `serve === "server"`. */
+  process?: ProcessStatus
+  /**
+   * The configured loopback port range (`VIEWER_LOOPBACK_PORT_RANGE`), or
+   * `null` when the server did not report one. Names the `-p` flag in the
+   * port-unreachable watchdog banner below.
+   */
+  range: { from: number; to: number } | null
+  /**
+   * The one 503 reason `page.tsx` reads off the prototype-origin route:
+   * every loopback port is already in use. Named `originReason`, not
+   * `reason`, so it cannot be confused with a crashed process's OWN
+   * `reason` — a different failure, read off `process` instead.
+   */
+  originReason?: "ports-exhausted"
 }
 
 const POPUP_WIDTH = 320
@@ -123,8 +150,45 @@ const POPUP_WIDTH = 320
  */
 type RailTab = "comments" | "inspect" | "deployments"
 
-export function ReviewShell({ project }: { project: ReviewShellProject }) {
+/**
+ * The port-unreachable watchdog banner's own sentence. Named the `-p` flag
+ * from `range`, the configured loopback port range, when the server sent
+ * one — a Docker operator publishes the WHOLE range, not just the one port
+ * this prototype happens to be on right now, because the next prototype
+ * they open gets a different ephemeral port inside it.
+ */
+function portWatchdogMessage(port: string, range: { from: number; to: number } | null): string {
+  const dockerHint = range
+    ? `start it with -p ${range.from}-${range.to}:${range.from}-${range.to}.`
+    : "publish the loopback port range with -p."
+  return `The prototype is served on port ${port} and your browser can't reach it. If the viewer runs in Docker, ${dockerHint}`
+}
+
+export function ReviewShell({
+  project,
+  /**
+   * How long the port-unreachable watchdog (below) waits with no signal
+   * before it warns. Defaults to the real bound; the gallery overrides it
+   * with a tiny value so its watchdog state does not need a real 8s wait.
+   */
+  watchdogMs = PORT_WATCHDOG_MS,
+}: {
+  project: ReviewShellProject
+  watchdogMs?: number
+}) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  /**
+   * What the iframe slot shows for THIS prototype right now — the frame
+   * itself, or a panel explaining why not. See `decidePrototypeEmbed`'s own
+   * doc comment for the three reasons a server prototype cannot be embedded.
+   */
+  const embed = decidePrototypeEmbed({
+    mode: project.mode,
+    serve: project.serve,
+    process: project.process,
+    reason: project.originReason,
+  })
 
   /**
    * The one resolved answer to "where is this prototype, and how contained".
@@ -344,6 +408,36 @@ export function ReviewShell({ project }: { project: ReviewShellProject }) {
    * on the handshake.
    */
   const prototypeVisible = prototypeLoaded || bridgeReadyEpoch > 0
+
+  /**
+   * The port-unreachable watchdog's own clock. One `setTimeout` on mount,
+   * for `watchdogMs` (the real bound in product, a tiny one in the gallery
+   * — see `ReviewShell`'s own prop doc). `shouldWarnPortUnreachable` below
+   * is a pure function tested against the REAL bound (`PORT_WATCHDOG_MS`),
+   * so firing this timer reports elapsed time AS that bound rather than as
+   * however long `watchdogMs` actually took — that is what lets the gallery
+   * accelerate the wait without changing what the pure function compares
+   * against.
+   */
+  const [watchdogFired, setWatchdogFired] = useState(false)
+  useEffect(() => {
+    const timer = setTimeout(() => setWatchdogFired(true), watchdogMs)
+    return () => clearTimeout(timer)
+  }, [watchdogMs])
+  const portWarning = shouldWarnPortUnreachable({
+    mode: project.mode,
+    bridgeReady: bridgeReadyEpoch > 0,
+    prototypeLoaded,
+    elapsedMs: watchdogFired ? PORT_WATCHDOG_MS : 0,
+  })
+  /**
+   * Component state, so the notice comes back on reload — same
+   * non-persistence reasoning as `rootAbsoluteWarningDismissed` below: an
+   * unreachable port is a standing condition, not an event, so a dismissal
+   * lasts the session rather than forever.
+   */
+  const [portWarningDismissed, setPortWarningDismissed] = useState(false)
+
   const [activeCommentId, setActiveCommentId] = useState<string | null>(null)
   const [accessOpen, setAccessOpen] = useState(false)
   /**
@@ -954,24 +1048,39 @@ export function ReviewShell({ project }: { project: ReviewShellProject }) {
           before any mode can reach that branch. Read
           `../../prototype-origin.ts` before changing any of it.
         */}
-        <iframe
-          ref={iframeRef}
-          {...iframeProps}
-          className="h-full w-full border-0"
-          onLoad={() => setPrototypeLoaded(true)}
-        />
+        {embed.kind === "embed" ? (
+          <>
+            <iframe
+              ref={iframeRef}
+              {...iframeProps}
+              className="h-full w-full border-0"
+              onLoad={() => setPrototypeLoaded(true)}
+            />
 
-        {/* Over the iframe, not in place of it: the frame has to be in the DOM
-            and loading for this to ever go away. `bg-background` rather than a
-            scrim — there is nothing underneath worth showing through yet. */}
-        {prototypeVisible ? null : (
-          /* Wrapped for a `data-testid` of its own. There are TWO loaders on
-             this screen, this one and the comment rail's, and `ProjectLoader`
-             hardcodes a single shared testid, so a test asking for "the
-             loader" got both and could not say which had cleared. */
-          <div data-testid="prototype-loader" className="absolute inset-0 z-10 bg-background">
-            <ProjectLoader label="Loading" className="h-full" />
-          </div>
+            {/* Over the iframe, not in place of it: the frame has to be in the DOM
+                and loading for this to ever go away. `bg-background` rather than a
+                scrim — there is nothing underneath worth showing through yet. */}
+            {prototypeVisible ? null : (
+              /* Wrapped for a `data-testid` of its own. There are TWO loaders on
+                 this screen, this one and the comment rail's, and `ProjectLoader`
+                 hardcodes a single shared testid, so a test asking for "the
+                 loader" got both and could not say which had cleared. */
+              <div data-testid="prototype-loader" className="absolute inset-0 z-10 bg-background">
+                <ProjectLoader label="Loading" className="h-full" />
+              </div>
+            )}
+          </>
+        ) : (
+          // No iframe at all, and no loading overlay: there is nothing being
+          // fetched for either of those to describe. `decidePrototypeEmbed`
+          // already ruled out "embed", so this is the explanation instead.
+          <PrototypeUnavailable
+            embed={embed}
+            projectId={project.id}
+            deploymentId={projectDetail?.activeDeploymentId ?? null}
+            canManage={canManageAccess}
+            hasRepo={projectDetail?.repoConfig != null}
+          />
         )}
 
         {/*
@@ -1355,6 +1464,27 @@ export function ReviewShell({ project }: { project: ReviewShellProject }) {
             className="flex-none shadow-xs"
             onDismiss={() => setRootAbsoluteWarningDismissed(true)}
           />
+        ) : null}
+
+        {/* Only while the iframe is actually the thing on screen: when the
+            embed decision already shows a panel (needs an origin, ports
+            exhausted, crashed), that panel is the explanation, and a second
+            banner about the same prototype not loading would be saying the
+            same thing twice. Also needs a prototype origin to name a port
+            from — loopback mode always has one once a deployment exists,
+            but the guard is cheap insurance against a malformed one. */}
+        {embed.kind === "embed" &&
+        portWarning &&
+        !portWarningDismissed &&
+        project.prototypeOrigin ? (
+          <Callout
+            tone="warning"
+            className="flex-none shadow-xs"
+            onDismiss={() => setPortWarningDismissed(true)}
+            data-testid="port-watchdog"
+          >
+            {portWatchdogMessage(new URL(project.prototypeOrigin).port, project.range)}
+          </Callout>
         ) : null}
 
         {/* Card two: the tabs and the panel they control. `overflow-hidden`

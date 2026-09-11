@@ -462,6 +462,18 @@ export default async function ReviewPage({
         shellOrigin,
         prototypeOrigin: embedOrigin.origin,
         mode: embedOrigin.mode,
+        // Server-prototypes work, 2026-09-10: what `decidePrototypeEmbed`
+        // needs to decide whether the iframe slot shows the prototype or a
+        // panel explaining why not, and what the port-unreachable watchdog
+        // banner needs to name the `-p` flag. `reason` is renamed
+        // `originReason` on the way in — this prop already carries other
+        // "why not" fields for OTHER failures (a crashed process's own
+        // `reason`, read by the shell off `embed`), and two same-named
+        // fields meaning different things invites reading the wrong one.
+        serve: embedOrigin.serve,
+        process: embedOrigin.process,
+        range: embedOrigin.range,
+        originReason: embedOrigin.reason,
       }}
     />
   )

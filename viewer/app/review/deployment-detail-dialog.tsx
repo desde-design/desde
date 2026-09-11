@@ -133,6 +133,16 @@ export function DeploymentDetailDialog({
           </DialogDescription>
         </DialogHeader>
 
+        {/* Only for a server deployment — a static one says nothing extra,
+            because "a folder of files" is the assumption everything else on
+            this dialog already makes. */}
+        {deployment.serve === "server" ? (
+          <p className="text-sm text-muted-foreground">
+            Runs as a server. The viewer starts it when someone opens the prototype and stops it
+            when idle.
+          </p>
+        ) : null}
+
         {deployment.steps && deployment.steps.length > 0 ? (
           <ul className="flex flex-col divide-y rounded-md border" data-testid="deployment-steps">
             {deployment.steps.map((step) => {
