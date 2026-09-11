@@ -1046,6 +1046,72 @@ describe("loadConfig", () => {
       )
       expect(config.loopbackPortRange).toBeNull()
     })
+
+    /**
+     * Codex round 5, Fix 3. `VIEWER_LOOPBACK_LISTENERS=on` used to force
+     * `inContainer` to `false` outright, so with no explicit
+     * `VIEWER_LOOPBACK_PORT_RANGE` the default range was `null` — while
+     * `loopbackBindAllInterfaces` (a separate probe) still correctly bound
+     * every interface, because Docker forwards a published port to the
+     * container's external interface only. The result: every loopback
+     * listener bound `0.0.0.0` on a random ephemeral port Docker could never
+     * publish, so no prototype origin was reachable from the host. Both
+     * fields now come from ONE `actuallyInContainer` check that runs for
+     * "on" as well as "auto" — never for "off", where no listener opens.
+     */
+    it("defaults the range (and binds every interface) for VIEWER_LOOPBACK_LISTENERS=on inside an actually-detected container", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_LISTENERS: "on" },
+        { isLikelyContainerized: () => true },
+      )
+      expect(config.loopbackPortRange).toEqual({ from: 3101, to: 3120 })
+      expect(config.loopbackBindAllInterfaces).toBe(true)
+    })
+
+    it("leaves the range null (and does not bind every interface) for VIEWER_LOOPBACK_LISTENERS=on when the container check says no", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_LISTENERS: "on" },
+        { isLikelyContainerized: () => false },
+      )
+      expect(config.loopbackPortRange).toBeNull()
+      expect(config.loopbackBindAllInterfaces).toBe(false)
+    })
+
+    it("never probes the container check at all for VIEWER_LOOPBACK_LISTENERS=off", () => {
+      let probed = false
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_LISTENERS: "off" },
+        {
+          isLikelyContainerized: () => {
+            probed = true
+            return true
+          },
+        },
+      )
+      expect(probed).toBe(false)
+      expect(config.loopbackPortRange).toBeNull()
+      expect(config.loopbackBindAllInterfaces).toBe(false)
+    })
+
+    // "auto" is unchanged by this fix — both fields already read the real
+    // container check under "auto" before it, and still do.
+    it("auto: still defaults the range (and binds every interface) inside a container", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_LISTENERS: "auto" },
+        { isLikelyContainerized: () => true },
+      )
+      expect(config.loopbackPortRange).toEqual({ from: 3101, to: 3120 })
+      expect(config.loopbackBindAllInterfaces).toBe(true)
+    })
+
+    it("auto: still leaves the range null (and does not bind every interface) outside a container", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_LISTENERS: "auto" },
+        { isLikelyContainerized: () => false },
+      )
+      expect(config.loopbackPortRange).toBeNull()
+      expect(config.loopbackBindAllInterfaces).toBe(false)
+    })
   })
 })
 

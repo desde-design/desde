@@ -578,31 +578,46 @@ export function loadConfig(
         `${LOOPBACK_LISTENERS_MODES.join(", ")}`,
     )
   }
-  // "on"/"off" are a forced answer and never touch the container check at
-  // all — not even to skip calling it, but semantically: an operator who
-  // says "on" or "off" is stating the answer, not asking us to detect it.
-  // Only "auto" (the default) asks `isLikelyContainerized`.
+  // `inContainer` (below) is a forced answer for "on"/"off" and never touches
+  // the container check for them — not even to skip calling it, but
+  // semantically: an operator who says "on" or "off" is stating the
+  // AVAILABILITY answer, not asking us to detect it. Only "auto" (the
+  // default) asks `isLikelyContainerized` for that decision.
+  //
+  // `actuallyInContainer` is a different question, asked regardless of the
+  // requested mode: is the process REALLY in a container. The port-range
+  // default and the wildcard bind both depend on the real answer, not the
+  // operator's requested mode — `VIEWER_LOOPBACK_LISTENERS=on` inside a
+  // container still needs the default range and the wide bind, because
+  // Docker only forwards a published port to the container's external
+  // interface, never to its loopback (codex round 5, Fix 3: MEASURED, `on`
+  // forced `inContainer` to `false`, so a container with no explicit range
+  // got `null` and bound loopback-only — every prototype origin was
+  // unreachable from the host). Never probed for "off": no listener opens
+  // either way, so the answer would never be used.
   const detectContainer = overrides.isLikelyContainerized ?? isLikelyContainerized
-  const inContainer = loopbackListeners === "auto" ? detectContainer() : false
+  const actuallyInContainer = loopbackListeners === "off" ? false : detectContainer()
+  const inContainer = loopbackListeners === "auto" ? actuallyInContainer : false
   const loopbackPortRange = env.VIEWER_LOOPBACK_PORT_RANGE
     ? parseLoopbackPortRange(env.VIEWER_LOOPBACK_PORT_RANGE, port)
-    : inContainer
+    : actuallyInContainer
       ? defaultLoopbackPortRange(port)
       : null
-  // A container now gets loopback mode too, on a range it can publish.
+  // A container now gets loopback mode too, on a range it can publish. Reads
+  // `inContainer` — the AUTO-only answer — deliberately, not
+  // `actuallyInContainer`: an operator who forced "on" has already stated
+  // loopback mode is available, so this decision must not be re-derived from
+  // whether a container was actually detected. See `ViewerConfig.loopbackAvailable`.
   const loopbackAvailable =
     loopbackListeners === "on" ? true : loopbackListeners === "off" ? false : !inContainer || loopbackPortRange !== null
 
-  // Whether to widen the bind to every interface. Deliberately a SEPARATE
-  // probe from `inContainer` above, which is forced to `false` for "on"/"off"
-  // and never calls `detectContainer()` for them: this question is "is the
-  // process actually in a container", independent of the operator's
-  // requested mode, so "off" is answered without probing (no listener opens
-  // either way) and "on" probes fresh rather than reusing the forced `false`.
+  // Whether to widen the bind to every interface — the SAME "actually in a
+  // container" question `actuallyInContainer` answers above, for the same
+  // reason: a published range only reaches the host once the listener also
+  // binds every interface, and that has to hold under BOTH "auto" and "on".
   // See `ViewerConfig.loopbackBindAllInterfaces` for why this must not simply
   // be "is a port range configured".
-  const loopbackBindAllInterfaces =
-    loopbackListeners === "off" ? false : loopbackListeners === "auto" ? inContainer : detectContainer()
+  const loopbackBindAllInterfaces = actuallyInContainer
 
   const dataDir = env.VIEWER_DATA_DIR ?? ".desde-viewer"
   // Fallback source for `sessionSecret` and, when neither GitHub sign-in nor
