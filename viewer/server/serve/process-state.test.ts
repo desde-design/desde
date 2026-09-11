@@ -214,9 +214,12 @@ describe("invariants over random sequences", () => {
           result.record.state.kind === "crashed" &&
           !result.refused
         ) {
+          // Counted within the budget window: recording an attempt also
+          // drops attempts that have fallen out of it (review addition).
+          const inWindow = (r: typeof before) => r.attempts.filter((t) => now - t < limits.restartWindowMs).length
           const permanentStartFailed = event.type === "start-failed" && event.permanent
           const expectedDelta = permanentStartFailed ? 0 : 1
-          expect(result.record.attempts.length).toBe(before.attempts.length + expectedDelta)
+          expect(inWindow(result.record)).toBe(inWindow(before) + expectedDelta)
         }
 
         // Invariant 4: generation is monotonic.
@@ -225,5 +228,27 @@ describe("invariants over random sequences", () => {
         record = result.record
       }
     }
+  })
+})
+
+describe("review additions", () => {
+  const limits = { restartBudget: 3, restartWindowMs: 5 * 60_000 }
+  const t0 = 1_000_000
+  it("a permanent crash refuses a restart with its own reason, not the budget sentence", () => {
+    const starting = transition(newRecord(t0), { type: "start-requested" }, t0, limits).record
+    const crashed = transition(starting, { type: "start-failed", reason: "The checkout is missing. Rebuild it.", permanent: true }, t0, limits).record
+    expect(transition(crashed, { type: "start-requested" }, t0 + 1e9, limits).refused).toBe("The checkout is missing. Rebuild it.")
+  })
+  it("recording an attempt drops attempts that fell out of the budget window", () => {
+    let r = newRecord(t0)
+    for (let i = 0; i < 3; i++) {
+      r = transition(r, { type: "start-requested" }, t0 + i, limits).record
+      r = transition(r, { type: "start-failed", reason: "x", permanent: false }, t0 + i, limits).record
+    }
+    expect(r.attempts).toHaveLength(3)
+    const later = t0 + 10 * 60_000
+    r = transition(r, { type: "start-requested" }, later, limits).record
+    r = transition(r, { type: "start-failed", reason: "x", permanent: false }, later, limits).record
+    expect(r.attempts).toEqual([later])
   })
 })

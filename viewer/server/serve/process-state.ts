@@ -85,8 +85,15 @@ function refuse(record: ProcessRecord, sentence: string): TransitionResult {
   return { record, effects: [], refused: sentence }
 }
 
-function withAttempt(record: ProcessRecord, now: number): ProcessRecord {
-  return { ...record, attempts: [...record.attempts, now] }
+/**
+ * Records one failed attempt at `now`, and drops attempts older than the
+ * budget window while doing so: only the window is ever read, and a
+ * prototype that keeps crashing for days would otherwise grow this list
+ * without bound.
+ */
+function withAttempt(record: ProcessRecord, now: number, limits: Limits): ProcessRecord {
+  const recent = record.attempts.filter((t) => now - t < limits.restartWindowMs)
+  return { ...record, attempts: [...recent, now] }
 }
 
 function releaseLease(record: ProcessRecord, now: number): ProcessRecord {
@@ -189,7 +196,7 @@ export function transition(
             state: { kind: "running", generation: state.generation, port: event.port, since: now },
           })
         case "exited":
-          return ok(withAttempt({ ...record, state: { kind: "crashed", exitCode: event.code, reason: EXITED_REASON, permanent: false } }, now))
+          return ok(withAttempt({ ...record, state: { kind: "crashed", exitCode: event.code, reason: EXITED_REASON, permanent: false } }, now, limits))
         case "unreachable":
           return ok(record)
         case "start-failed": {
@@ -197,13 +204,14 @@ export function transition(
             ...record,
             state: { kind: "crashed", exitCode: null, reason: event.reason, permanent: event.permanent },
           }
-          return ok(event.permanent ? crashed : withAttempt(crashed, now), [])
+          return ok(event.permanent ? crashed : withAttempt(crashed, now, limits), [])
         }
         case "timed-out":
           return ok(
             withAttempt(
               { ...record, state: { kind: "crashed", exitCode: null, reason: TIMED_OUT_REASON, permanent: false } },
               now,
+              limits,
             ),
             [{ kind: "kill" }],
           )
@@ -239,6 +247,7 @@ export function transition(
             withAttempt(
               { ...record, state: { kind: "crashed", exitCode: event.code, reason: EXITED_REASON, permanent: false } },
               now,
+              limits,
             ),
           )
         case "unreachable":
@@ -246,6 +255,7 @@ export function transition(
             withAttempt(
               { ...record, state: { kind: "crashed", exitCode: null, reason: UNREACHABLE_REASON, permanent: false } },
               now,
+              limits,
             ),
             [{ kind: "kill" }],
           )
@@ -281,6 +291,10 @@ export function transition(
     case "crashed": {
       switch (event.type) {
         case "start-requested": {
+          // A permanent failure (a missing checkout, say) refuses with its
+          // own reason, which names the way out; only a spent budget says
+          // the server kept exiting.
+          if (record.state.permanent) return refuse(record, record.state.reason)
           if (!retryable(record, now, limits)) return refuse(record, BUDGET_REFUSAL)
           const generation = record.generation + 1
           return ok({ ...record, generation, state: { kind: "starting", generation } }, [{ kind: "spawn" }])
