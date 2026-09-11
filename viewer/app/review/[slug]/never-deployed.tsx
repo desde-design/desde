@@ -15,8 +15,10 @@
  * connect starts building on the server, and the Add dialog sends the reader
  * here. This page is the only place that can show that build: the review
  * screen and its Deploy button need a FINISHED build to open. So a manager
- * sees the build running with its log, a failure with the log open and a way
- * to try again, or Deploy for a connected repository that has no build. When
+ * sees the build running, a failure with a way to try again, or Deploy for a
+ * connected repository that has no build. Both build states offer the log as
+ * a button beside the other actions, and it opens in a modal (Mo,
+ * 2026-09-11); it used to sit under them as a collapsible block. When
  * the build this page watched succeeds, the page reloads into the review
  * screen. Which of those shows is `decideNeverDeployedView`, pure and tested.
  *
@@ -33,10 +35,17 @@
  */
 
 import { useEffect, useState, type ReactNode } from "react"
-import { ChevronDown, Plug, Rocket } from "lucide-react"
+import { Plug, Rocket, ScrollText } from "lucide-react"
 import { AppHeader, Callout, EmptyState, ProjectLoader } from "@/components/blocks"
 import { Button } from "@/components/ui/button"
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { AccountMenu } from "../../account-menu"
 import { GithubAppUnreachableBanner } from "../../github-app-unreachable-banner"
 import { canManageProjects } from "../../instance-role"
@@ -155,21 +164,17 @@ function FirstBuild({ project }: { project: ProjectSummary }) {
       /* The spinning cat in a box (Mo, 2026-09-10), the same wait every
          other surface shows, rather than the empty state's still picture:
          something is happening. No label under it (Mo, same day): the
-         sentence below already says what is happening. The log sits under
-         that, closed. */
+         sentence below already says what is happening. The log button sits
+         under that, alone on the action row. */
       return (
         <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 pb-20">
           <ProjectLoader size={80} />
           <p className="max-w-md text-center text-sm text-muted-foreground">
             The first build is running. The prototype opens here when it finishes.
           </p>
-          {/* Keyed on the state, here and below: the log's open/closed
-              choice is read once on mount, and without the key a build that
-              fails after running keeps the closed log it started with
-              (codex review, 2026-09-10). */}
           {build.log ? (
-            <div className="w-full max-w-2xl">
-              <BuildLog key="building" log={build.log} defaultOpen={false} />
+            <div className="flex items-center gap-2">
+              <BuildLogButton log={build.log} />
             </div>
           ) : null}
         </div>
@@ -181,9 +186,9 @@ function FirstBuild({ project }: { project: ProjectSummary }) {
           title="Build failed"
           description="The build did not finish. The log shows why."
           notice={build.error ? <Callout tone="destructive">{build.error}</Callout> : null}
-          below={build.log ? <BuildLog key="failed" log={build.log} defaultOpen /> : null}
         >
           <DeployButton label="Try again" build={build} />
+          {build.log ? <BuildLogButton log={build.log} /> : null}
         </PageMessage>
       )
     case "deployed":
@@ -201,21 +206,19 @@ function FirstBuild({ project }: { project: ProjectSummary }) {
 
 /**
  * The page's one message, centred, with an action row. `notice` sits above
- * the actions, and `below` under them, where the log goes.
+ * the actions.
  */
 function PageMessage({
   title,
   description,
   tone,
   notice,
-  below,
   children,
 }: {
   title: string
   description?: string
   tone?: "empty" | "failure"
   notice?: ReactNode
-  below?: ReactNode
   children: ReactNode
 }) {
   return (
@@ -227,7 +230,6 @@ function PageMessage({
       <div className="flex w-full max-w-2xl flex-col items-center gap-4">
         {notice ? <div className="w-full">{notice}</div> : null}
         <div className="flex items-center gap-2">{children}</div>
-        {below ? <div className="w-full">{below}</div> : null}
       </div>
     </EmptyState>
   )
@@ -270,24 +272,37 @@ function DeployButton({
 }
 
 /**
- * The build's log. Closed while a build runs, open once it has failed, for
- * the reason `DeploymentDetailDialog` gives: after a failure the log is the
- * only place the reason exists.
+ * The build's log, behind an outline button on the action row that opens it
+ * in a modal (Mo, 2026-09-11). Outline, not primary: Try again is the
+ * action on the failed screen, and the log is what you read before taking
+ * it. The modal reads `log` on every render, so it keeps up with a build
+ * that is still writing while it is open. Same `pre` as the deployment
+ * detail dialog, so a log looks the same in both places it can be read.
  */
-function BuildLog({ log, defaultOpen }: { log: string; defaultOpen: boolean }) {
+function BuildLogButton({ log }: { log: string }) {
+  const [open, setOpen] = useState(false)
   return (
-    <Collapsible defaultOpen={defaultOpen} className="group/log flex flex-col items-center gap-2">
-      <CollapsibleTrigger asChild>
-        <Button variant="ghost" size="sm" className="w-fit gap-1.5 px-2 aria-expanded:bg-transparent">
-          Build log
-          <ChevronDown className="transition-transform group-data-[state=open]/log:rotate-180" aria-hidden />
-        </Button>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="w-full">
-        <pre className="max-h-96 overflow-auto rounded-md border border-border bg-muted p-2 text-left font-mono text-code whitespace-pre-wrap break-words text-foreground">
-          {log}
-        </pre>
-      </CollapsibleContent>
-    </Collapsible>
+    <>
+      <Button variant="outline" size="sm" onClick={() => setOpen(true)} data-testid="build-log-button">
+        <ScrollText />
+        Build log
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent size="2xl" data-testid="build-log-dialog">
+          <DialogHeader>
+            <DialogTitle>Build log</DialogTitle>
+            <DialogDescription>Everything the build printed, newest at the bottom.</DialogDescription>
+          </DialogHeader>
+          <pre className="max-h-96 overflow-auto rounded-md border border-border bg-muted p-2 text-left font-mono text-code whitespace-pre-wrap break-words text-foreground">
+            {log}
+          </pre>
+          <DialogFooter>
+            <Button size="sm" onClick={() => setOpen(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }

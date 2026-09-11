@@ -25,8 +25,9 @@ import type { SurfaceEntry } from "@/components/gallery/types"
  *
  * Since 2026-09-10 the page also shows the FIRST BUILD (Mo). A first connect
  * starts building on the server and the Add dialog sends the reader here, so
- * this is where that build is watched: running with its log, failed with the
- * log open, or Deploy for a connected repository with no build. The states
+ * this is where that build is watched: running, failed with Try again, or
+ * Deploy for a connected repository with no build; both build states put the
+ * log behind a button that opens a modal. The states
  * below are every answer `decideNeverDeployedView` can give, plus the Viewer,
  * who gets a way back and nothing else. That is honest rather than grudging:
  * there is genuinely nothing for them to do here.
@@ -123,7 +124,7 @@ export const REVIEW_NEVER_DEPLOYED_SURFACE: SurfaceEntry = {
     },
     {
       id: "review-never-deployed/building",
-      label: "Editor — the first build is running (the loader, not a still picture), log closed",
+      label: "Editor — the first build is running (the loader, not a still picture), log behind a button",
       render: () =>
         state(
           managerRoutes({
@@ -142,7 +143,7 @@ export const REVIEW_NEVER_DEPLOYED_SURFACE: SurfaceEntry = {
     },
     {
       id: "review-never-deployed/failed",
-      label: "Editor — the first build failed, log open, offered Try again",
+      label: "Editor — the first build failed, offered Try again and the log",
       readyWhen: '[data-testid="first-deploy-button"]',
       render: () =>
         state(
