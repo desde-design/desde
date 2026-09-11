@@ -101,6 +101,36 @@ describe("SqliteStorage — corrupt machine_tokens.scopes degrades instead of th
 })
 
 /**
+ * `parseServerStart` mirrors `parseDeploymentSteps`: a malformed
+ * `server_start` value degrades to `null` instead of throwing, so a corrupt
+ * row (a hand-edited DB, a future writer that bypasses `serializeServerStart`)
+ * still reads back and lists instead of failing `getDeployment` /
+ * `listDeployments` outright.
+ */
+describe("SqliteStorage — corrupt deployments.server_start degrades instead of throwing", () => {
+  it("getDeployment reads serverStart back as null when the column holds invalid JSON", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "viewer-sqlite-"))
+    const store = new SqliteStorage(join(dir, "viewer.db"))
+    try {
+      const project = await store.createProject({ slug: "corrupt-srv", name: "Corrupt Srv" })
+      const deployment = await store.createDeployment({ projectId: project.id })
+      // Reach past the adapter to corrupt the column the way a hand edit or
+      // a future writer that skips `serializeServerStart` would.
+      ;(store as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): void } } }).db
+        .prepare(`UPDATE deployments SET server_start = ? WHERE id = ?`)
+        .run("{not json", deployment.id)
+
+      const readBack = await store.getDeployment(deployment.id)
+      expect(readBack).not.toBeNull()
+      expect(readBack?.serverStart).toBeNull()
+    } finally {
+      await store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+/**
  * M3. `createUser`'s pre-insert SELECT checks (email, then provider
  * identity) are what make a refusal LEGIBLE — the address or identity named
  * in the message — but they are not atomic with the INSERT that follows,

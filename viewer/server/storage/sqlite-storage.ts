@@ -257,10 +257,20 @@ function parseDeploymentSteps(raw: string | null): BuildStep[] | null {
   }
 }
 
+/**
+ * Reads `deployments.server_start`. Mirrors `parseDeploymentSteps`: malformed
+ * or non-string-array JSON degrades to `null` rather than throwing, so a
+ * corrupt row still lists instead of failing `getDeployment`/`listDeployments`
+ * outright.
+ */
 function parseServerStart(raw: string | null): string[] | null {
   if (raw === null) return null
-  const parsed: unknown = JSON.parse(raw)
-  return Array.isArray(parsed) && parsed.every((v) => typeof v === "string") ? parsed : null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "string") ? parsed : null
+  } catch {
+    return null
+  }
 }
 function serializeServerStart(argv: string[] | null): string | null {
   return argv === null ? null : JSON.stringify(argv)
