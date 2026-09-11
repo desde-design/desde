@@ -384,6 +384,43 @@ describe("proxyToProcess", () => {
     expect(uncaught).toBeUndefined()
   })
 
+  /**
+   * Codex round 7, Fix 2. `timeout` on `httpRequest` is a socket inactivity
+   * timeout for the WHOLE exchange unless something clears it once headers
+   * arrive — so a response merely quiet for a while (an SSE stream between
+   * events) used to be destroyed by the same timer meant only to bound the
+   * wait for headers. `upstreamTimeoutMs` is a test-only override of the
+   * real 60s bound, so this can be proven without an actual 60s wait.
+   */
+  describe("the upstream timeout bounds only the wait for headers", () => {
+    it("answers 502 within the timeout when the child never sends headers", async () => {
+      const port = await child(() => {
+        // Never responds at all.
+      })
+      const started = Date.now()
+      const res = await request(appFor(port, { upstreamTimeoutMs: 100 })).get("/p/acme/")
+      expect(res.status).toBe(502)
+      expect(Date.now() - started).toBeLessThan(2000)
+    })
+
+    it("does not destroy a response that is quiet after its headers, past where the timeout would have fired", async () => {
+      const port = await child((_req, res) => {
+        res.setHeader("content-type", "text/event-stream")
+        res.write("data: first\n\n")
+        // The second chunk lands well after the (tiny, injected) timeout
+        // would have fired had it still covered the body.
+        setTimeout(() => {
+          res.write("data: second\n\n")
+          res.end()
+        }, 300)
+      })
+      const res = await request(appFor(port, { upstreamTimeoutMs: 100 })).get("/p/acme/stream")
+      expect(res.status).toBe(200)
+      expect(res.text).toContain("data: first")
+      expect(res.text).toContain("data: second")
+    })
+  })
+
   it("answers 502 with an HTML page, its own headers, and reports it when the child is unreachable", async () => {
     let reported = false
     const res = await request(

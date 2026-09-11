@@ -48,11 +48,25 @@ export interface ProxyOptions {
    * response, because the manager already knows the child was up.
    */
   onUnreachable?: () => void
+  /**
+   * Overrides {@link UPSTREAM_TIMEOUT_MS}. Test-only escape hatch, so a test
+   * can prove the bound without an actual 60s wait.
+   */
+  upstreamTimeoutMs?: number
 }
 
 export const MAX_REWRITTEN_HTML_BYTES = 5 * 1024 * 1024
 
-/** How long to wait for the child to say anything before giving up. */
+/**
+ * How long to wait for the child to say anything before giving up.
+ *
+ * This bounds the wait for HEADERS only, not the whole exchange — see where
+ * it is used below. `timeout` on `httpRequest` is a socket inactivity
+ * timeout that, left alone, covers the whole request/response lifetime, so an
+ * SSE stream (or any response merely quiet for a while after its headers)
+ * would be destroyed by this same timer even though the child answered
+ * promptly (codex round 7, Fix 2).
+ */
 const UPSTREAM_TIMEOUT_MS = 60_000
 
 /**
@@ -202,6 +216,7 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
   headers["x-forwarded-proto"] = opts.forwardedProto
 
   const maxRewriteBytes = opts.maxRewriteBytes ?? MAX_REWRITTEN_HTML_BYTES
+  const upstreamTimeoutMs = opts.upstreamTimeoutMs ?? UPSTREAM_TIMEOUT_MS
   // Whether the child sent a status line at all. Gates onUnreachable: once a
   // response has started, a later failure is not "the child is unreachable" —
   // it already answered.
@@ -214,10 +229,19 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
       method: req.method,
       path: opts.path,
       headers,
-      timeout: UPSTREAM_TIMEOUT_MS,
+      timeout: upstreamTimeoutMs,
     },
     (up) => {
       responded = true
+      // The timeout above bounds the WAIT FOR HEADERS only. Once the child
+      // has answered, `setTimeout(0)` clears the socket's inactivity timer
+      // so a quiet stream (SSE, a slow download) is never destroyed on its
+      // account — a quiet body is the child's own business, and the in-flight
+      // request count (`beginRequest` in `prototype-processes.ts`) is already
+      // what keeps the process itself alive for as long as this response is
+      // open. Deliberately no SEPARATE body-phase timeout is added in its
+      // place (codex round 7, Fix 2).
+      upstream.setTimeout(0)
       // Attached FIRST, before the rewrite/stream branch below, so both
       // paths have it. `pipe()` (the non-rewrite path, right below) does not
       // forward errors — before this was hoisted here, a child that started
