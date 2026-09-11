@@ -67,20 +67,27 @@ export interface ServeRouterDeps {
 
 /**
  * The path a server prototype's own process should see, given the URL this
- * request arrived on and the prefixes the viewer may have put in front of it.
+ * request arrived on.
  *
- * Two transformations, both about handing the child ITS url rather than ours.
+ * One transformation: the capability is dropped from the query, and
+ * everything else is passed through byte-for-byte.
  *
- * **The prefix.** `originalUrl`, not `req.url`, is the input. Express fixes
- * `originalUrl` before any middleware runs, so on a real isolated origin it is
- * already the path the browser asked for (`/orders?page=2`) — the
- * `/p/{slug}/…` form in `req.url` is what the subdomain and pinned-listener
- * rewrites produce for the ROUTER's benefit. So the common case is to pass it
- * through untouched. `prefixes` covers the request that genuinely arrived in
- * the `/p/{slug}/…` shape, longest first: the capability-bearing
- * `/p/{slug}/~c/{token}/` and the bare `/p/{slug}/`. Each ends in `/`, so
- * slicing one character short of its length keeps the leading `/` the child
- * needs.
+ * **No prefix stripping.** This function is called from exactly one place,
+ * the proxy branch below, and that branch only runs when `servesAtRoot` is
+ * true (the `!servesAtRoot` check refuses with a 409 first, before `ensure`
+ * is ever called — see the fork's own comment). In every `servesAtRoot`
+ * mode — a pinned loopback listener or a `{slug}.{serveDomain}` subdomain —
+ * the prototype OWNS `/` on its origin, so the browser's own request path
+ * already IS the app's path (`/orders?page=2`). `req.originalUrl` carries
+ * that path untouched: Express fixes `originalUrl` before any middleware
+ * runs, and `createPinnedDeploymentRewrite` / `createSubdomainRewrite` only
+ * ever mutate `req.url` (for the shared router's own route matching), never
+ * `req.originalUrl`. Stripping a `/p/{slug}/` prefix from `originalUrl` here
+ * used to be wrong for exactly that reason: it assumed `originalUrl` was in
+ * the router's internal `/p/{slug}/…` shape, but on an isolated origin it
+ * almost never is — and on the rare deployment whose OWN app route happens
+ * to start with that same text (`/p/acme/orders` on a project slugged
+ * `acme`), the old code silently mis-forwarded it to the child as `/orders`.
  *
  * **The capability.** `~c` is dropped from the query. On a subdomain it
  * arrives as `?~c=<token>` on the document load (see
@@ -96,21 +103,14 @@ export interface ServeRouterDeps {
  * becomes `~`), and a proxy should hand the child exactly the bytes it was
  * given unless it has an actual reason not to.
  */
-export function childPathFor(originalUrl: string, prefixes: string[]): string {
-  let path = originalUrl
-  for (const prefix of prefixes) {
-    if (path.startsWith(prefix)) {
-      path = path.slice(prefix.length - 1)
-      break
-    }
-  }
-  const mark = path.indexOf("?")
-  if (mark === -1) return path
-  const params = new URLSearchParams(path.slice(mark + 1))
-  if (!params.has(CAPABILITY_SEGMENT)) return path
+export function childPathFor(originalUrl: string): string {
+  const mark = originalUrl.indexOf("?")
+  if (mark === -1) return originalUrl
+  const params = new URLSearchParams(originalUrl.slice(mark + 1))
+  if (!params.has(CAPABILITY_SEGMENT)) return originalUrl
   params.delete(CAPABILITY_SEGMENT)
   const rest = params.toString()
-  return rest === "" ? path.slice(0, mark) : `${path.slice(0, mark)}?${rest}`
+  return rest === "" ? originalUrl.slice(0, mark) : `${originalUrl.slice(0, mark)}?${rest}`
 }
 
 /** Minimal HTML escaping for the two refusal pages below. */
@@ -893,7 +893,7 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       proxyToProcess(req, res, {
         port,
         ...(capabilityCookie !== null ? { setCookie: capabilityCookie } : {}),
-        path: childPathFor(req.originalUrl, [pathPrefix, prototypePathPrefix(slug, null)]),
+        path: childPathFor(req.originalUrl),
         shellOrigin,
         // The scheme the BROWSER used to reach THIS origin, which is not
         // always the shell's. A pinned loopback listener is always http (the

@@ -10,7 +10,7 @@ import { capabilityCookieName } from "./prototype-capability-path"
  */
 export interface ProxyOptions {
   port: number
-  /** The path the child sees: prefix removed, query kept. */
+  /** The path the child sees: the browser's own `originalUrl`, with only the `~c` capability query parameter removed. See `childPathFor` in `serve-router.ts`. */
   path: string
   shellOrigin: string
   /**

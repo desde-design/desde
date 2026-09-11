@@ -1706,9 +1706,15 @@ describe("createServeRouter", () => {
       expect(cookies.some((v) => v.includes("dsv_cap=evil"))).toBe(false)
       expect(cookies.some((v) => v.startsWith("app_sid=1"))).toBe(true)
 
-      // The capability is the viewer's channel. The child sees its own root
-      // with no trace of it.
-      expect(seen).toBe("/")
+      // The capability is the viewer's channel, dropped from what the child
+      // sees. `childPathFor` no longer strips a `/p/{slug}/` prefix (codex
+      // round 8, Fix 1) — this test harness sends the request AS the literal
+      // `/p/srv/…` router-internal form (it never runs the real
+      // `createSubdomainRewrite`/`createPinnedDeploymentRewrite` middleware,
+      // which in production only ever touches `req.url`, not
+      // `req.originalUrl` — see `childPathFor`'s doc comment), so the child
+      // sees that same literal form back, minus `~c`.
+      expect(seen).toBe("/p/srv/")
       expect(seen).not.toContain("~c")
     })
 
@@ -1730,22 +1736,61 @@ describe("createServeRouter", () => {
       subdomainMarker = "srv"
 
       await request(c.app).get(`/p/srv/?~c=${token}&page=2`).expect(200)
-      expect(seen).toBe("/?page=2")
+      expect(seen).toBe("/p/srv/?page=2")
     })
 
-    it("gives the child the path with the prefix stripped and the query kept", async () => {
+    /**
+     * Codex round 8, Fix 1. In a root-serving mode (a pinned loopback
+     * listener, or a subdomain) the browser's OWN path is the app's path —
+     * `req.originalUrl` is never in the router's internal `/p/{slug}/…`
+     * shape in production, because the rewrite that produces that shape
+     * only ever touches `req.url` (see `createPinnedDeploymentRewrite`).
+     * `childPathFor` used to strip a `/p/{slug}/` prefix from
+     * `originalUrl` anyway, which was harmless when the browser's path
+     * didn't happen to start with that text and silently wrong when it
+     * did: a project slugged `acme` whose app has its own `/orders` route
+     * would forward a browser request for `/p/acme/orders` to the child as
+     * `/orders`. These two tests use slug `acme` and an app path that
+     * collides with `/p/acme/` on purpose, to prove nothing is stripped.
+     */
+    it("passes the browser's own path straight through on a pinned loopback listener, even when it collides with the slug prefix", async () => {
       let seen: string | undefined
       const port = await child((req, res) => {
         seen = req.url
         res.setHeader("content-type", "text/plain")
         res.end("ok")
       })
-      const { app } = await loopbackAppWith({
+      const c = await setup({
         prototypeProcesses: fakeProcesses({ ensure: () => Promise.resolve({ port }) }),
       })
+      const project = await c.storage.createProject({ slug: "acme", name: "Acme", access: "public-link" })
+      const deployment = await c.storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await c.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
+      await c.storage.updateDeployment(deployment.id, { serve: "server", serverStart: ["node", "x.js"] })
+      pinnedMarker = { deploymentId: deployment.id, slug: "acme" }
 
-      await request(app).get("/p/srv/orders?page=2").expect(200)
-      expect(seen).toBe("/orders?page=2")
+      await request(c.app).get("/p/acme/orders?x=1").expect(200)
+      expect(seen).toBe("/p/acme/orders?x=1")
+    })
+
+    it("drops only `~c` from a browser path that collides with the slug prefix", async () => {
+      let seen: string | undefined
+      const port = await child((req, res) => {
+        seen = req.url
+        res.setHeader("content-type", "text/plain")
+        res.end("ok")
+      })
+      const c = await setup({
+        prototypeProcesses: fakeProcesses({ ensure: () => Promise.resolve({ port }) }),
+      })
+      const project = await c.storage.createProject({ slug: "acme", name: "Acme", access: "public-link" })
+      const deployment = await c.storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await c.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
+      await c.storage.updateDeployment(deployment.id, { serve: "server", serverStart: ["node", "x.js"] })
+      pinnedMarker = { deploymentId: deployment.id, slug: "acme" }
+
+      await request(c.app).get("/p/acme/orders?~c=some-token&x=1").expect(200)
+      expect(seen).toBe("/p/acme/orders?x=1")
     })
 
     it("touches the deployment so an actively reviewed process is not reaped", async () => {
