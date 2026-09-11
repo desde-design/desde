@@ -1,10 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import request from "supertest"
 import { beforeEach, describe, expect, it } from "vitest"
 import { createBuildQueue } from "../../build/build-queue"
-import { createApp, type AppDeps } from "../../__tests__/test-app"
+import { createApp, nullPrototypeProcesses, type AppDeps } from "../../__tests__/test-app"
 import { tmpViewerDataDir } from "../../__tests__/test-config"
 import { InMemoryStorage } from "../../storage/in-memory-storage"
 import { DiskAssetStore } from "../../assets/disk-asset-store"
@@ -1167,6 +1167,54 @@ describe("projects API", () => {
         expect(await storage.listDeployments(project.id)).toHaveLength(0)
       } finally {
         rmSync(assetsDir, { recursive: true, force: true })
+      }
+    })
+
+    /**
+     * The same leak one layer down, found in the final review of the
+     * server-prototypes branch. A server deployment keeps its CHECKOUT (with
+     * `node_modules`, hundreds of MB) at `<dataDir>/checkouts/<deployment>`,
+     * and may have a child process still serving it. Neither was touched by
+     * a project delete: `pruneSupersededCheckouts` is keyed on a project
+     * that no longer exists, so nothing would ever reclaim them.
+     */
+    it("cascades: each deployment's checkout is removed and its process forgotten", async () => {
+      const storage = new InMemoryStorage()
+      const dataDir = mkdtempSync(join(tmpdir(), "viewer-checkouts-delete-"))
+      try {
+        const project = await storage.createProject({ slug: "acme", name: "Acme" })
+        const dep1 = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+        const dep2 = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+        const checkoutFor = (id: string) => join(dataDir, "checkouts", id)
+        for (const id of [dep1.id, dep2.id]) {
+          mkdirSync(join(checkoutFor(id), "node_modules"), { recursive: true })
+          writeFileSync(join(checkoutFor(id), "package.json"), "{}")
+        }
+
+        const forgotten: string[] = []
+        stable.use(
+          createApp({
+            storage,
+            assets: new NullAssetStore(),
+            config: { ...authConfig, dataDir },
+            bridgeScript: "// bridge",
+            github: testGithubRuntime(),
+            prototypeProcesses: {
+              ...nullPrototypeProcesses(),
+              forget: async (id: string) => {
+                forgotten.push(id)
+              },
+            },
+          }),
+        )
+
+        await request(stable.app).delete(`/api/v1/projects/${project.id}`).set(auth).expect(204)
+
+        expect(forgotten.sort()).toEqual([dep1.id, dep2.id].sort())
+        expect(existsSync(checkoutFor(dep1.id))).toBe(false)
+        expect(existsSync(checkoutFor(dep2.id))).toBe(false)
+      } finally {
+        rmSync(dataDir, { recursive: true, force: true })
       }
     })
 
