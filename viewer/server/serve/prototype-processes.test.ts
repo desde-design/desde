@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { createPrototypeProcesses, pickLoopbackPort, PrototypeProcessError } from "./prototype-processes"
+import { createPrototypeProcesses, pickLoopbackPort, PrototypeProcessError, substitutePort } from "./prototype-processes"
 
 /**
  * The child this manager spawns. Under `__fixtures__/`, not `fixtures/`,
@@ -31,6 +31,44 @@ async function get(port: number, path = "/"): Promise<{ status: number; body: st
   const res = await fetch(`http://127.0.0.1:${port}${path}`)
   return { status: res.status, body: await res.text() }
 }
+
+/**
+ * Codex round 4, Fix 3. A standalone Next build's recorded `start` is
+ * `["node", "<distDir>/standalone/server.js"]` — a BARE `node`, never an
+ * absolute path, because the checkout has no `node` of its own and an
+ * absolute path baked in at build time would go stale the moment the
+ * Viewer's own image ships a Node binary in a different location (see
+ * `frameworks/next.ts`'s own note). This is where that bare `node` gets
+ * resolved — to `process.execPath`, the Node binary CURRENTLY running this
+ * manager — at spawn time, every time, so an image upgrade is picked up for
+ * every existing deployment automatically.
+ */
+describe("substitutePort", () => {
+  it("substitutes $PORT in every argv entry", () => {
+    expect(substitutePort(["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"], 4321)).toEqual({
+      file: "node_modules/.bin/next",
+      args: ["start", "-p", "4321", "-H", "127.0.0.1"],
+    })
+  })
+
+  it("resolves a bare 'node' first argv entry to the currently running Node binary", () => {
+    expect(substitutePort(["node", ".next/standalone/server.js"], 4321)).toEqual({
+      file: process.execPath,
+      args: [".next/standalone/server.js"],
+    })
+  })
+
+  it("does NOT resolve a first entry that merely starts with 'node' (e.g. the checkout's own next binary)", () => {
+    expect(substitutePort(["node_modules/.bin/next", "start"], 4321)).toEqual({
+      file: "node_modules/.bin/next",
+      args: ["start"],
+    })
+  })
+
+  it("throws on an empty serverStart", () => {
+    expect(() => substitutePort([], 4321)).toThrow("serverStart is empty")
+  })
+})
 
 describe("createPrototypeProcesses", () => {
   it("starts a deployment's server, resolves once it answers, and reuses it", async () => {

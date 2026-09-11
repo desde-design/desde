@@ -240,6 +240,12 @@ export function createInProcessBuildRunner(opts: InProcessBuildRunnerOptions): B
         const shape = await inspectBuild(checkout, repo.outputDir, opts.adapters)
         if (shape.kind === "server") {
           say(`\nPublishing as a server prototype (${shape.reason}). The output dir is not used.\n`)
+          // Awaited BEFORE `keepCheckout` moves the checkout into place, so
+          // whatever `prepare` writes (Next's standalone output copying
+          // `static/`/`public/` alongside the standalone server, say — see
+          // `frameworks/next.ts`) travels with the move instead of being
+          // written to a temp directory that is about to be discarded.
+          await shape.prepare?.(checkout)
           const dest = checkoutDirFor(opts.checkoutsRoot, deployment.id)
           // The scratch HOME is not kept; only the repo.
           await keepCheckout(checkout, dest)

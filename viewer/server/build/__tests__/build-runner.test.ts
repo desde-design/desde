@@ -182,6 +182,45 @@ describe("in-process build runner", () => {
     expect(await exists(join(checkoutsRoot, DEPLOYMENT.id, "package.json"))).toBe(true)
   })
 
+  /**
+   * Codex round 4, Fix 3. `BuildShape`'s server variant carries an optional
+   * `prepare(checkoutRoot)` (Next's standalone output uses it to copy
+   * `static/` and `public/` alongside the standalone server — see
+   * `frameworks/next.ts`). The runner must AWAIT it, and it must run before
+   * the checkout is kept, so `prepare`'s own writes land inside the checkout
+   * the process manager later runs — not lost, and not racing the move.
+   *
+   * Proven the same way the `checkoutsRoot`-existence assertion above
+   * proves the checkout itself survived: `prepare` writes a marker file,
+   * and this asserts the marker is present in the FINAL kept checkout
+   * location, not merely that `prepare` was called.
+   */
+  it("awaits the adapter's prepare() and keeps what it wrote, before the checkout is moved into place", async () => {
+    const src = await makeRepo({ "package.json": "{}" })
+    const checkoutsRoot = await tempDir("viewer-checkouts-")
+    let prepareCalledWith: string | null = null
+    const { result } = await build(src, repoConfig(), collectingAssets(), {
+      checkoutsRoot,
+      adapters: [
+        {
+          id: "fake",
+          inspectBuild: async () => ({
+            kind: "server",
+            start: ["node", "server.js"],
+            reason: "fake",
+            prepare: async (root: string) => {
+              prepareCalledWith = root
+              await fs.writeFile(join(root, "prepared.marker"), "ok")
+            },
+          }),
+        },
+      ],
+    })
+    expect(result.ok).toBe(true)
+    expect(prepareCalledWith).not.toBeNull()
+    expect(await exists(join(checkoutsRoot, DEPLOYMENT.id, "prepared.marker"))).toBe(true)
+  })
+
   it("fails a build whose output has no index.html at its root", async () => {
     const src = await makeRepo({ "dist/main.js": "x" })
     const { result } = await build(src, repoConfig())

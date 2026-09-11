@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, writeFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -11,8 +11,9 @@ import { inspectBuild, ADAPTERS } from "./index"
  * together mean a server build happened.
  *
  * Codex round 4, Fix 4: `buildId` no longer always means `.next` — pass
- * `distDir` to write it somewhere else, the way a checkout with `distDir:
- * "build"` in `next.config` would.
+ * `distDir` to write it (and, for standalone cases, the standalone server)
+ * somewhere else, the way a checkout with `distDir: "build"` in
+ * `next.config` would.
  */
 const roots: string[] = []
 async function checkout(opts: {
@@ -20,6 +21,9 @@ async function checkout(opts: {
   out?: boolean
   buildId?: boolean
   distDir?: string
+  standalone?: boolean
+  staticDir?: boolean
+  publicDir?: boolean
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "fw-next-"))
   roots.push(root)
@@ -34,11 +38,31 @@ async function checkout(opts: {
     await writeFile(join(root, distDir, "BUILD_ID"), "abc123")
     await writeFile(join(root, distDir, "required-server-files.json"), "{}")
   }
+  if (opts.standalone) {
+    await mkdir(join(root, distDir, "standalone"), { recursive: true })
+    await writeFile(join(root, distDir, "standalone", "server.js"), "// standalone server")
+  }
+  if (opts.staticDir) {
+    await mkdir(join(root, distDir, "static"), { recursive: true })
+    await writeFile(join(root, distDir, "static", "chunk.js"), "// static chunk")
+  }
+  if (opts.publicDir) {
+    await mkdir(join(root, "public"), { recursive: true })
+    await writeFile(join(root, "public", "favicon.ico"), "// favicon")
+  }
   return root
 }
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })))
 })
+async function exists(p: string): Promise<boolean> {
+  try {
+    await stat(p)
+    return true
+  } catch {
+    return false
+  }
+}
 
 describe("Next.js adapter", () => {
   it("ignores a checkout without next in its dependencies", async () => {
@@ -87,6 +111,83 @@ describe("Next.js adapter", () => {
       start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
       reason: "Next.js with server-rendered routes",
     })
+  })
+})
+
+/**
+ * Codex round 4, Fix 3. `output: "standalone"` writes `BUILD_ID` (and
+ * `required-server-files.json`) same as any server build, plus a
+ * self-contained `<distDir>/standalone/server.js` that `next start` refuses
+ * to run — so a standalone build used to be recorded as `next start` and
+ * failed to boot. Detected FIRST, ahead of the generic `next start` case.
+ */
+describe("Next.js adapter — output: \"standalone\"", () => {
+  it("detects the default .next/standalone/server.js and records it as the start command", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(await checkout({ buildId: true, standalone: true }))
+    expect(shape).toMatchObject({
+      kind: "server",
+      start: ["node", join(".next", "standalone", "server.js")],
+      reason: "Next.js standalone output",
+    })
+  })
+
+  it("detects a standalone server under a custom distDir (Fix 4 + Fix 3 together)", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(
+      await checkout({ buildId: true, standalone: true, distDir: "build" }),
+    )
+    expect(shape).toMatchObject({
+      kind: "server",
+      start: ["node", join("build", "standalone", "server.js")],
+      reason: "Next.js standalone output",
+    })
+  })
+
+  it("falls back to the generic next start recorded command when there is no standalone/server.js", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(await checkout({ buildId: true }))
+    expect(shape).toEqual({
+      kind: "server",
+      start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
+      reason: "Next.js with server-rendered routes",
+    })
+  })
+
+  /**
+   * Next's standalone output does not include `<distDir>/static` or the
+   * root `public/` — the framework's own docs say to copy both into the
+   * standalone dir, or the server starts but every asset 404s. `prepare` is
+   * the adapter's own copy step, run against a temp directory here (it is
+   * awaited by the build runner in production — see `build-runner.test.ts`).
+   */
+  it("prepare() copies both static and public into the standalone dir, skipping whichever is absent", async () => {
+    const root = await checkout({ buildId: true, standalone: true, staticDir: true, publicDir: true })
+    const shape = await NEXT_ADAPTER.inspectBuild(root)
+    if (shape?.kind !== "server" || !shape.prepare) throw new Error("expected a standalone server shape with prepare")
+
+    await shape.prepare(root)
+
+    expect(await exists(join(root, ".next", "standalone", ".next", "static", "chunk.js"))).toBe(true)
+    expect(await exists(join(root, ".next", "standalone", "public", "favicon.ico"))).toBe(true)
+  })
+
+  it("prepare() skips a missing static or public source without throwing", async () => {
+    const root = await checkout({ buildId: true, standalone: true })
+    const shape = await NEXT_ADAPTER.inspectBuild(root)
+    if (shape?.kind !== "server" || !shape.prepare) throw new Error("expected a standalone server shape with prepare")
+
+    await expect(shape.prepare(root)).resolves.toBeUndefined()
+    expect(await exists(join(root, ".next", "standalone", ".next", "static"))).toBe(false)
+    expect(await exists(join(root, ".next", "standalone", "public"))).toBe(false)
+  })
+
+  it("prepare() copies into a CUSTOM distDir's standalone dir too", async () => {
+    const root = await checkout({ buildId: true, standalone: true, distDir: "build", staticDir: true, publicDir: true })
+    const shape = await NEXT_ADAPTER.inspectBuild(root)
+    if (shape?.kind !== "server" || !shape.prepare) throw new Error("expected a standalone server shape with prepare")
+
+    await shape.prepare(root)
+
+    expect(await exists(join(root, "build", "standalone", "build", "static", "chunk.js"))).toBe(true)
+    expect(await exists(join(root, "build", "standalone", "public", "favicon.ico"))).toBe(true)
   })
 })
 

@@ -150,12 +150,27 @@ export async function pickLoopbackPort(): Promise<number> {
   })
 }
 
-/** Substitutes `$PORT` in each argv entry. The first entry is the executable. */
+/**
+ * Substitutes `$PORT` in each argv entry. The first entry is the executable.
+ *
+ * A bare `"node"` first entry (codex round 4, Fix 3 — a standalone Next
+ * build's recorded `start`, see `frameworks/next.ts`) is resolved to
+ * `process.execPath`, THIS manager's own currently-running Node binary,
+ * rather than left for a PATH lookup at spawn time. The checkout has no
+ * `node` of its own to invoke, and the adapter deliberately records the bare
+ * string rather than an absolute path baked in at build time: resolving it
+ * HERE, fresh on every spawn, means a Viewer image upgrade (Node moving to a
+ * new absolute path in a later version) is picked up for every existing
+ * deployment automatically, instead of every deployment's `serverStart` row
+ * going stale until it happens to be rebuilt. Checked with `===`, not
+ * `startsWith`, so `node_modules/.bin/next` (the generic `next start` case's
+ * own first entry) is never mistaken for it.
+ */
 export function substitutePort(argv: string[], port: number): { file: string; args: string[] } {
   const substituted = argv.map((a) => a.replaceAll("$PORT", String(port)))
   const [file, ...args] = substituted
   if (!file) throw new Error("serverStart is empty")
-  return { file, args }
+  return { file: file === "node" ? process.execPath : file, args }
 }
 
 /**
