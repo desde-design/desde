@@ -345,6 +345,12 @@ export function createApp(deps: AppDeps): express.Express {
       // mounted just after this one reads, which is what makes "the rewrite
       // will put this under /p/" true rather than merely likely.
       writeReachesPrototypeRoute: createPrototypeRouteWriteRule(deps.config.serveDomain),
+      // Fixed for the whole app, from config, never from the request (see
+      // `createPrototypeHostScope`'s own doc comment on this field). Serves
+      // BOTH registries above: subdomain mode inherits `publicUrl`'s scheme
+      // by construction (`resolveOrigins`), and so does `prototypeOrigin`
+      // (`assertPrototypeOriginConfig` refuses a scheme mismatch at boot).
+      originScheme: new URL(deps.config.publicUrl).protocol,
     }),
   )
 

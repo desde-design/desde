@@ -216,6 +216,113 @@ function sendPrototypeNotFound(res: Response): void {
 }
 
 /**
+ * The two headers `writeOriginAllowed` reads, pulled out of a request so the
+ * decision itself stays a plain function with no `Request` in its signature.
+ * Both are `undefined` when the header was absent, never an array: Express
+ * only produces an array for a header that is allowed to repeat, and neither
+ * of these is.
+ */
+export interface WriteOriginHeaders {
+  secFetchSite?: string
+  origin?: string
+}
+
+function writeOriginHeadersOf(req: Request): WriteOriginHeaders {
+  const secFetchSite = req.headers["sec-fetch-site"]
+  const origin = req.headers.origin
+  return {
+    secFetchSite: typeof secFetchSite === "string" ? secFetchSite : undefined,
+    origin: typeof origin === "string" ? origin : undefined,
+  }
+}
+
+/**
+ * `scheme://host`, lowercased and stripped of an explicit scheme-default
+ * port, or `null` for a value that does not parse as a URL. Origin headers
+ * and the `ownOrigin` this module builds are both run through this before
+ * comparison, so `http://x:80` and `http://x` agree without a second rule
+ * for the default-port spelling `prototypeOriginHostSpellings` already has to
+ * carry elsewhere.
+ */
+function normalizedOrigin(origin: string): string | null {
+  try {
+    const url = new URL(origin)
+    return `${url.protocol}//${url.host}`
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether a WRITE method reaching a prototype origin came from somewhere this
+ * origin should trust, decided from fetch metadata alone — never from the
+ * body, the path, or which deployment is behind the origin. Pure, so the
+ * table below is the whole spec and is testable with no Express, no request,
+ * no server.
+ *
+ * ## Why this exists
+ *
+ * A prototype origin's Host is pinned by an allowlist (`host-allowlist.ts`),
+ * but the allowlist only checks what Host a request CLAIMS to be for — a
+ * browser sends the right Host for any request it makes, cross-site or not.
+ * `writeReachesPrototypeRoute` (the other half of the fence this function
+ * feeds into) then decides whether a write is headed for the serve router at
+ * all. Neither asks WHO sent the request. A page on any other origin can
+ * still submit a form, or fire a `no-cors` POST, at
+ * `http://localhost:<port>/…` — the fixed container port range makes the
+ * port guessable even without a form on the actual origin — and the browser
+ * attaches the matching Host on its own. Without this check that request
+ * reaches a `serve: "server"` deployment's own process unauthenticated: a
+ * classic CSRF against the prototype's server actions and API routes, one
+ * level below whatever CSRF defenses the prototype's OWN framework might
+ * apply, because from the prototype's point of view this looks like any other
+ * same-origin form post.
+ *
+ * ## The three cases, in the order they are checked
+ *
+ * 1. **`Sec-Fetch-Site` present** — the strongest signal, sent by every
+ *    fetch-metadata browser (everything but very old Safari) on every
+ *    request, including a plain form post. Admit only `"same-origin"` (a
+ *    fetch/form/link FROM this exact origin) and `"none"` (the user typed the
+ *    URL, followed a bookmark, or the browser itself navigated here — there
+ *    is no initiating document to be hostile). Refuse `"cross-site"` and
+ *    `"same-site"` — the latter matters because two prototypes on sibling
+ *    subdomains (`a.proto.test`, `b.proto.test`) are same-site with each
+ *    other, and one must not be able to forge a write against another's
+ *    server process.
+ * 2. **No `Sec-Fetch-Site`, but `Origin` present** — the fallback every
+ *    browser has sent on a cross-origin-shaped write for over a decade, still
+ *    sent even by the old-Safari case `Sec-Fetch-Site` cannot reach. Admit
+ *    only when it names the exact same origin as `ownOrigin`, compared
+ *    through `normalizedOrigin` so a default port spelled out explicitly does
+ *    not read as a mismatch.
+ * 3. **Neither header** — no browser omits both on a real cross-origin write,
+ *    so a request with neither is not a browser page acting cross-origin. It
+ *    is `curl`, a webhook, or any other script — the documented machine-access
+ *    path (`dsv_` tokens, CI, the editor's `viewer-proxy.ts`), which sends
+ *    neither header and must keep working. Admitting here is not a gap this
+ *    check could close anyway: a non-browser client can set any header it
+ *    likes, including a fabricated `Sec-Fetch-Site: same-origin` — what stops
+ *    IT is authentication inside the prototype's own process, the same as any
+ *    request that reaches that process by other means.
+ *
+ * `ownOrigin` is never read off the request — see `createPrototypeHostScope`,
+ * which builds it from a fixed per-app scheme and the SAME validated `host`
+ * the registry already confirmed is a prototype host.
+ */
+export function writeOriginAllowed(headers: WriteOriginHeaders, ownOrigin: string): boolean {
+  if (headers.secFetchSite !== undefined) {
+    const site = headers.secFetchSite.toLowerCase()
+    return site === "same-origin" || site === "none"
+  }
+  if (headers.origin !== undefined) {
+    const origin = normalizedOrigin(headers.origin)
+    return origin !== null && origin === normalizedOrigin(ownOrigin)
+  }
+  return true
+}
+
+/**
  * Whether a non-GET on a prototype host is headed for the SERVE ROUTER's
  * prototype route, and may therefore be passed to it instead of refused here.
  *
@@ -325,6 +432,20 @@ export function createPrototypeHostScope(deps: {
    * is the pre-task-8b behaviour. See `createPrototypeRouteWriteRule`.
    */
   writeReachesPrototypeRoute?: (req: Request) => boolean
+  /**
+   * The scheme this app's prototype origins are reached over — `"http:"` or
+   * `"https:"`, fixed for the life of the app and NEVER derived from the
+   * request (there is no reliable per-request scheme behind a proxy, and
+   * trusting one would let a spoofed scheme defeat `writeOriginAllowed`'s
+   * Origin comparison). A loopback listener always passes `"http:"`: it
+   * binds a raw ephemeral port with no certificate
+   * (`loopback-listener-app.ts`). The main app passes
+   * `deps.config.publicUrl`'s own scheme — subdomain mode and
+   * `VIEWER_PROTOTYPE_ORIGIN` both inherit it by construction
+   * (`resolveOrigins`, `assertPrototypeOriginConfig`), so one value serves
+   * both registries `create-app.ts` composes.
+   */
+  originScheme: string
 }): RequestHandler {
   return function prototypeHostScope(req: Request, res: Response, next: NextFunction): void {
     const host = typeof req.headers.host === "string" ? req.headers.host.toLowerCase() : ""
@@ -333,6 +454,14 @@ export function createPrototypeHostScope(deps: {
       return
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
+      // Who sent this, before where it's headed: a forged write must be
+      // refused the same way whether or not it happens to name the
+      // prototype route, and checking this first means the two refusals
+      // never have to be told apart by the caller.
+      if (!writeOriginAllowed(writeOriginHeadersOf(req), `${deps.originScheme}//${host}`)) {
+        sendPrototypeNotFound(res)
+        return
+      }
       if (deps.writeReachesPrototypeRoute?.(req) !== true) {
         sendPrototypeNotFound(res)
         return

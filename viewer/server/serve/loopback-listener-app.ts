@@ -150,6 +150,10 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
       // was. `serve` rides in on the listener context (`loopback-listeners.ts`)
       // so this costs no storage lookup per request.
       writeReachesPrototypeRoute: () => deps.serve === "server",
+      // A listener is a raw `http.Server` on an ephemeral port with no
+      // certificate (see the class doc comment above) — it is always http,
+      // and that is never a request-derived fact.
+      originScheme: "http:",
     }),
   )
 

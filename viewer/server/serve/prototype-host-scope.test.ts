@@ -37,6 +37,7 @@ import {
   createPrototypeRouteWriteRule,
   createServeDomainRegistry,
   prototypeOriginHostSpellings,
+  writeOriginAllowed,
   type PrototypeHostRegistry,
 } from "./prototype-host-scope"
 import { createSubdomainRewrite } from "./subdomain"
@@ -157,6 +158,61 @@ describe("createPrototypeRouteWriteRule", () => {
 })
 
 /**
+ * The CSRF check, as a table (codex round 10, Fix 1). Pure, so every case is
+ * one assertion with no Express, no request, no server — the fence's own
+ * wiring test below just proves this function is actually consulted.
+ */
+describe("writeOriginAllowed", () => {
+  const OWN_ORIGIN = "http://srv.proto.test:3100"
+
+  it("admits Sec-Fetch-Site: same-origin", () => {
+    expect(writeOriginAllowed({ secFetchSite: "same-origin" }, OWN_ORIGIN)).toBe(true)
+  })
+
+  it("admits Sec-Fetch-Site: none (a direct navigation)", () => {
+    expect(writeOriginAllowed({ secFetchSite: "none" }, OWN_ORIGIN)).toBe(true)
+  })
+
+  it("refuses Sec-Fetch-Site: cross-site", () => {
+    expect(writeOriginAllowed({ secFetchSite: "cross-site" }, OWN_ORIGIN)).toBe(false)
+  })
+
+  it("refuses Sec-Fetch-Site: same-site", () => {
+    expect(writeOriginAllowed({ secFetchSite: "same-site" }, OWN_ORIGIN)).toBe(false)
+  })
+
+  it("reads Sec-Fetch-Site even when Origin also happens to match", () => {
+    // Sec-Fetch-Site is the stronger signal and is checked first; a matching
+    // Origin never rescues a cross-site request that also carries it.
+    expect(writeOriginAllowed({ secFetchSite: "cross-site", origin: OWN_ORIGIN }, OWN_ORIGIN)).toBe(
+      false,
+    )
+  })
+
+  it("admits a matching Origin when Sec-Fetch-Site is absent", () => {
+    expect(writeOriginAllowed({ origin: OWN_ORIGIN }, OWN_ORIGIN)).toBe(true)
+  })
+
+  it("refuses a foreign Origin when Sec-Fetch-Site is absent", () => {
+    expect(writeOriginAllowed({ origin: "http://evil.example" }, OWN_ORIGIN)).toBe(false)
+  })
+
+  it("admits when neither header is present (a non-browser client)", () => {
+    expect(writeOriginAllowed({}, OWN_ORIGIN)).toBe(true)
+  })
+
+  it("does not let an explicit default port in Origin read as a mismatch", () => {
+    expect(
+      writeOriginAllowed({ origin: "http://proto.example.net:80" }, "http://proto.example.net"),
+    ).toBe(true)
+  })
+
+  it("refuses an Origin that does not even parse as a URL", () => {
+    expect(writeOriginAllowed({ origin: "not a url" }, OWN_ORIGIN)).toBe(false)
+  })
+})
+
+/**
  * The middleware chain in the order `create-app.ts` mounts it — scope →
  * subdomain rewrite → API fence → shell API → serve router → terminal fence —
  * plus the Next.js catch-all that `server/index.ts` mounts after `createApp`
@@ -184,6 +240,7 @@ describe("createPrototypeHostScope + the two fences", () => {
       // before server prototypes existed — and this chain would then prove
       // nothing about the shape that actually ships.
       writeReachesPrototypeRoute: createPrototypeRouteWriteRule(DOMAIN),
+      originScheme: "http:",
     }),
   )
   inner.use(createSubdomainRewrite(DOMAIN))
@@ -854,6 +911,82 @@ describe("a server prototype on a subdomain takes writes (task 8b)", () => {
     expect(res.status).toBe(201)
     expect(res.body).toEqual({ method: "POST", url: "/api/v1/auth/logout", body: "" })
     expect(res.headers["set-cookie"]).toBeUndefined()
+  })
+
+  /**
+   * Codex round 10, Fix 1: the fence's own answer, over the REAL app, so a
+   * forged write is shown never reaching the child process at all — not the
+   * child answering and this suite merely declining to look at the response.
+   * `orders` is the same path `writeReachesPrototypeRoute` would otherwise
+   * wave through, which is what makes this the case that mattered before the
+   * fix: a request landing here used to run whether or not it came from this
+   * origin.
+   */
+  describe("the write-origin check (a browser CSRF against the child's process)", () => {
+    const SRV_HOST = `srv.${DOMAIN}:3100`
+    const OWN_ORIGIN = `http://${SRV_HOST}`
+
+    it("refuses a write with Sec-Fetch-Site: cross-site", async () => {
+      const res = await request(stable.app)
+        .post("/orders")
+        .set("Host", SRV_HOST)
+        .set("Sec-Fetch-Site", "cross-site")
+        .send('{"qty":2}')
+      expect(res.status).toBe(404)
+      expect(res.text).toBe(PROTOTYPE_NOT_FOUND_BODY)
+    })
+
+    it("admits a write with Sec-Fetch-Site: same-origin", async () => {
+      const res = await request(stable.app)
+        .post("/orders")
+        .set("Host", SRV_HOST)
+        .set("Sec-Fetch-Site", "same-origin")
+        .set("content-type", "application/json")
+        .send('{"qty":2}')
+      expect(res.status).toBe(201)
+    })
+
+    it("refuses a write with a foreign Origin and no fetch metadata", async () => {
+      const res = await request(stable.app)
+        .post("/orders")
+        .set("Host", SRV_HOST)
+        .set("Origin", "http://evil.example")
+        .send('{"qty":2}')
+      expect(res.status).toBe(404)
+      expect(res.text).toBe(PROTOTYPE_NOT_FOUND_BODY)
+    })
+
+    it("admits a write with an Origin matching this origin", async () => {
+      const res = await request(stable.app)
+        .post("/orders")
+        .set("Host", SRV_HOST)
+        .set("Origin", OWN_ORIGIN)
+        .set("content-type", "application/json")
+        .send('{"qty":2}')
+      expect(res.status).toBe(201)
+    })
+
+    it("admits a write with neither header (a non-browser client)", async () => {
+      const res = await request(stable.app)
+        .post("/orders")
+        .set("Host", SRV_HOST)
+        .set("content-type", "application/json")
+        .send('{"qty":2}')
+      expect(res.status).toBe(201)
+    })
+
+    it("still serves a GET with Sec-Fetch-Site: cross-site — reads are untouched", async () => {
+      // The stub child in this block's beforeEach answers every method with
+      // 201 and an echo body, GET included — 201 here is proof the request
+      // reached the child at all, which is the only thing a write-origin
+      // check could have prevented.
+      const res = await request(stable.app)
+        .get("/orders")
+        .set("Host", SRV_HOST)
+        .set("Sec-Fetch-Site", "cross-site")
+      expect(res.status).toBe(201)
+      expect(res.body).toEqual({ method: "GET", url: "/orders", body: "" })
+    })
   })
 })
 

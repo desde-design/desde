@@ -83,9 +83,11 @@ function httpCall(options: {
   /** Request body, sent as-is. `contentType` names it for the child. */
   body?: string
   contentType?: string
+  /** Extra request headers — `Sec-Fetch-Site` / `Origin` for the write-origin suite. */
+  extraHeaders?: Record<string, string>
 }): Promise<HttpResult> {
   return new Promise((resolve, reject) => {
-    const headers: Record<string, string> = {}
+    const headers: Record<string, string> = { ...options.extraHeaders }
     if (options.hostHeader !== undefined) headers.Host = options.hostHeader
     if (options.body !== undefined) {
       headers["Content-Type"] = options.contentType ?? "application/json"
@@ -791,6 +793,102 @@ describe("createLoopbackListenerRegistry", () => {
         contentType: "application/json",
         body: '{"name":"ada"}',
       })
+    })
+
+    /**
+     * Codex round 10, Fix 1, on the listener's own socket. A listener is
+     * always `http:` (`loopback-listener-app.ts`'s `originScheme`), never
+     * derived from the request — this is the test that would catch a
+     * regression to trusting a request-supplied scheme, since a real socket
+     * has no scheme of its own to hand the fence at all.
+     */
+    it("refuses a POST with Sec-Fetch-Site: cross-site, on a server deployment's own listener", async () => {
+      const child = createServer((_req, res) => {
+        res.statusCode = 201
+        res.end("{}")
+      })
+      childServers.push(child)
+      await new Promise<void>((r) => child.listen(0, "127.0.0.1", () => r()))
+      const childPort = (child.address() as AddressInfo).port
+
+      const storage = new InMemoryStorage()
+      const project = await storage.createProject({ slug: "one", name: "One" })
+      const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await storage.updateDeployment(dep.id, { serve: "server", serverStart: ["node", "x.js"] })
+      const registry = makeRegistry(
+        {},
+        {
+          storage,
+          prototypeProcesses: {
+            ...nullPrototypeProcesses(),
+            ensure: () => Promise.resolve({ port: childPort }),
+          },
+        },
+      )
+      const listener = await registry.ensure(
+        { id: dep.id, slug: "one", projectId: project.id, serve: "server" },
+        V4,
+      )
+
+      const res = await httpCall({
+        host: "127.0.0.1",
+        port: listener.port,
+        path: "/submit",
+        method: "POST",
+        body: "{}",
+        extraHeaders: { "Sec-Fetch-Site": "cross-site" },
+      })
+      expect(res.status).toBe(404)
+      expect(res.body).toBe("Not found")
+    })
+
+    /**
+     * The matching-Origin case, over the SAME real socket: `http://127.0.0.1:
+     * <port>` is this listener's own origin, built from the fixed `http:`
+     * scheme and the exact `Host` the allowlist already admitted — so a
+     * write whose `Origin` names that same origin is let through to the
+     * child, same as one with no fetch metadata at all (the earlier test in
+     * this block).
+     */
+    it("admits a POST whose Origin names this listener's own http origin", async () => {
+      const child = createServer((_req, res) => {
+        res.statusCode = 201
+        res.setHeader("content-type", "application/json")
+        res.end('{"ok":true}')
+      })
+      childServers.push(child)
+      await new Promise<void>((r) => child.listen(0, "127.0.0.1", () => r()))
+      const childPort = (child.address() as AddressInfo).port
+
+      const storage = new InMemoryStorage()
+      const project = await storage.createProject({ slug: "one", name: "One" })
+      const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await storage.updateDeployment(dep.id, { serve: "server", serverStart: ["node", "x.js"] })
+      const registry = makeRegistry(
+        {},
+        {
+          storage,
+          prototypeProcesses: {
+            ...nullPrototypeProcesses(),
+            ensure: () => Promise.resolve({ port: childPort }),
+          },
+        },
+      )
+      const listener = await registry.ensure(
+        { id: dep.id, slug: "one", projectId: project.id, serve: "server" },
+        V4,
+      )
+
+      const res = await httpCall({
+        host: "127.0.0.1",
+        port: listener.port,
+        path: "/submit",
+        method: "POST",
+        body: "{}",
+        extraHeaders: { Origin: `http://127.0.0.1:${listener.port}` },
+      })
+      expect(res.status).toBe(201)
+      expect(res.body).toBe('{"ok":true}')
     })
 
     /** Two ports, two deployments, no leakage between them. */
