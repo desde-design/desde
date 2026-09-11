@@ -89,8 +89,14 @@ export function isLikelyContainerized(fileExists: (path: string) => boolean = ex
  * documentation, not measured against a live container. See the codex-r6 and
  * codex-r10 reports.
  */
-/** Kernel-created fallback devices that exist in any namespace; never evidence of anything. */
-const KERNEL_PSEUDO_DEVICE = /^(tunl|gre|gretap|erspan|ip_vti|ip6_vti|sit|ip6tnl|ip6gre|dummy|teql|ifb|bond)\d+$/
+/**
+ * The kernel's fallback tunnel devices, created in every namespace once the
+ * module is loaded on the host; never evidence of anything. Only those:
+ * `dummy`, `bond`, `ifb` and the like are host-namespace devices, and
+ * ignoring them would read a host-network container on a bonded host as
+ * bridged (final review, N2).
+ */
+const KERNEL_PSEUDO_DEVICE = /^(tunl|gre|gretap|erspan|ip_vti|ip6_vti|sit|ip6tnl|ip6gre)\d+$/
 
 export function isLikelyBridgedNamespace(
   readNetDev: (path: string) => string = (path) => readFileSync(path, "utf8"),

@@ -508,21 +508,39 @@ describe("proxyToProcess", () => {
    */
   it("does not report the child unreachable when the client aborts before it answered", async () => {
     let reported = false
-    const port = await child(() => {
-      // Never answers: the client gives up first.
+    let sawClose!: () => void
+    const childSawClose = new Promise<void>((r) => {
+      sawClose = r
     })
-    const req = request(
-      appFor(port, {
-        upstreamTimeoutMs: 2000,
-        onUnreachable: () => {
-          reported = true
-        },
-      }),
-    ).get("/p/acme/")
-    req.end(() => {})
-    await new Promise((r) => setTimeout(r, 50))
-    req.abort()
-    await new Promise((r) => setTimeout(r, 150))
+    let arrived!: () => void
+    const childSawRequest = new Promise<void>((r) => {
+      arrived = r
+    })
+    const port = await child((req) => {
+      // Never answers: the client gives up first. The child records the
+      // abort reaching it, so the assertion below is not a timing guess.
+      arrived()
+      req.on("close", () => sawClose())
+    })
+    // A raw client, not supertest: the abort has to be a real socket
+    // teardown the proxy's `res` sees as `close`, which superagent's
+    // `abort()` does not reliably produce once `end()` has run.
+    const proxy = appFor(port, {
+      upstreamTimeoutMs: 5000,
+      onUnreachable: () => {
+        reported = true
+      },
+    }).listen(0, "127.0.0.1")
+    servers.push(proxy)
+    await new Promise<void>((r) => proxy.once("listening", () => r()))
+    const proxyPort = (proxy.address() as AddressInfo).port
+    const clientReq = nodeHttpRequest({ host: "127.0.0.1", port: proxyPort, path: "/p/acme/", method: "GET" })
+    clientReq.on("error", () => {})
+    clientReq.end()
+    await childSawRequest
+    clientReq.destroy()
+    await childSawClose
+    await new Promise((r) => setTimeout(r, 20))
     expect(reported).toBe(false)
   })
 

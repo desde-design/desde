@@ -73,6 +73,7 @@ import { decidePrototypeEmbed } from "./prototype-embed-decision"
 import { PrototypeUnavailable } from "./prototype-unavailable"
 import { PORT_WATCHDOG_MS, shouldWarnPortUnreachable } from "../port-watchdog"
 import { useLivePrototypeOrigin } from "../use-live-prototype-origin"
+import { INITIAL_FRAME_KEY, nextFrameKey } from "../frame-key"
 import type { ReviewEmbedOrigin } from "./prototype-origin-response"
 
 export interface ReviewShellProject {
@@ -272,16 +273,15 @@ export function ReviewShell({
    * running process with no generation on it: without it the key would be
    * `undefined`, which React silently replaces with the child's index.
    */
-  // A retryable crash keys the frame on the generation the NEXT start will
-  // have: the remount is what sends the request that restarts the child,
-  // and `starting` then `running` arrive under that same generation, so a
-  // restart remounts the frame exactly once (final review, minor).
-  const frameGeneration: BridgeGeneration =
-    liveOrigin.serve === "server" && liveProcess && "generation" in liveProcess
-      ? liveProcess.state === "crashed"
-        ? liveProcess.generation + 1
-        : liveProcess.generation
-      : "static"
+  // When the key changes is `nextFrameKey`'s table (`../frame-key.ts`):
+  // only a retryable crash or a generation another tab started. Derived
+  // during render from the previous answer, React's own shape for state
+  // that follows a prop; never in an effect, which would paint one frame
+  // with the stale key first.
+  const [frameKey, setFrameKey] = useState(INITIAL_FRAME_KEY)
+  const nextKey = nextFrameKey(frameKey, liveOrigin.serve, liveProcess)
+  if (nextKey !== frameKey) setFrameKey(nextKey)
+  const frameGeneration: BridgeGeneration = nextKey.key
 
   /**
    * The one resolved answer to "where is this prototype, and how contained".

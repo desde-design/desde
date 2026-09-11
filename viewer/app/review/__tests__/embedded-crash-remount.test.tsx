@@ -238,6 +238,25 @@ describe("review shell — following the process-state stream", () => {
     expect(refresh).not.toHaveBeenCalled()
   })
 
+  /**
+   * The idle reaper stops a child on purpose. A remount here would send a
+   * request that starts it again, so an open tab would rotate cold starts
+   * for ever and the reaper would never win (final review, N1). The frame
+   * keeps its document; the next click in it restarts the child.
+   */
+  it("keeps the frame when the process is stopped by the reaper", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+    const before = frame()
+    pushOrigin({ state: "stopped" })
+    expect(frame(), "the frame remounted for a stopped body, which would restart the child").toBe(before)
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
   it("shows the crashed panel for a crashed body, without refreshing the page", () => {
     installFakeEventSource()
     render(
