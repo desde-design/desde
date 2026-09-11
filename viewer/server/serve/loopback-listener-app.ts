@@ -43,10 +43,28 @@ import type { LoopbackListenerAppContext } from "./loopback-listeners"
  *
  * `pinnedDeployment` tells the router two things: read assets by THIS
  * deployment id, and skip the project lookup entirely. Skipping is safe
- * because reaching this socket is the credential — the listener is bound to
- * loopback only, its port is ephemeral, and the API route that opened it
- * already required project read. See the spec's "Loopback mode, in detail"
- * and the comment at the `pinned` read in `serve-router.ts`.
+ * because reaching this socket is what stands in for a credential, and the
+ * API route that opened it already required project read. See the spec's
+ * "Loopback mode, in detail" and the comment at the `pinned` read in
+ * `serve-router.ts`.
+ *
+ * How much that is worth depends on where the viewer runs, and it is worth
+ * saying plainly:
+ *
+ * - On a laptop the port IS the credential: the socket is bound to loopback
+ *   only and the port is ephemeral, so only a process on that machine can
+ *   reach it at all.
+ * - In a container (a configured port range) the socket is on every one of
+ *   the container's interfaces, because a published port never reaches the
+ *   container's own loopback. The one-entry Host allowlist below stops a
+ *   BROWSER from reaching it cross-origin — a browser always sends the Host
+ *   of the URL it was given — but not a non-browser client that sends the
+ *   right Host itself. What keeps that client off is the documented run
+ *   line, which publishes the range to the Docker host's loopback
+ *   (`-p 127.0.0.1:<from>-<to>:<from>-<to>`). A peer on the same Docker
+ *   network can still reach it, which is the same trust a laptop already
+ *   extends to another local process. See `loopback-listeners.ts`'s
+ *   `open()`.
  */
 export interface LoopbackListenerAppDeps extends LoopbackListenerAppContext {
   storage: StorageAdapter
@@ -91,9 +109,10 @@ function createPinnedDeploymentRewrite(pinned: { deploymentId: string; slug: str
 export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): express.Express {
   const app = express()
 
-  // Express's `trust proxy` stays at its default (off). A listener is
-  // reachable from this machine only, so there is no proxy in front of it
-  // whose forwarded headers could be believed.
+  // Express's `trust proxy` stays at its default (off). Nothing ever fronts
+  // a listener: it is its own socket, reached directly by the browser (or,
+  // in a container, through a published port, which rewrites no headers), so
+  // there is no proxy whose forwarded headers could be believed.
 
   // Normalized ONCE, and both rules below are fed from this one string. They
   // are two comparisons of the same `Host` against the same value, so they

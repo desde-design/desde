@@ -52,13 +52,26 @@ import type { DeploymentServe } from "../storage/types"
  * the bind widens to `0.0.0.0`. Docker forwards a published port to the
  * container's EXTERNAL interface and never to the container's own loopback,
  * so a `127.0.0.1` bind inside a container answers nothing from the host,
- * whatever `-p` says (MEASURED on Docker Desktop, 2026-09-11). The origin
- * handed to the browser is unchanged either way: it always names the loopback
- * spelling paired with the shell, never the bind address. See `open()`.
+ * whatever `-p` says (MEASURED on Docker Desktop, 2026-09-11). What that
+ * costs, and what the documented `-p 127.0.0.1:...` run line buys back, is
+ * written out at the bind in `open()`.
+ *
+ * The origin handed to the browser is never the bind address: it always
+ * names the loopback spelling paired with the shell
+ * (`pairedLoopbackHost`). With a range configured that pairing never
+ * chooses `[::1]`, because an IPv4 wildcard cannot answer there.
  */
 
-/** The literal addresses a listener may bind. Never `0.0.0.0`, never a name. */
-export type LoopbackBindHost = "127.0.0.1" | "::1"
+/**
+ * What a listener may be told to bind.
+ *
+ * Two literal addresses, plus the NAME `localhost`, which occurs only in the
+ * container case: with a port range configured the socket goes on the
+ * wildcard, so the name is used for the display spelling and never passed to
+ * `listen()`. `open()` refuses `localhost` without a range. Never `0.0.0.0`
+ * from a caller — widening the bind is this module's own decision.
+ */
+export type LoopbackBindHost = "127.0.0.1" | "::1" | "localhost"
 
 /** Default idle bound: a listener unused for this long is reaped. */
 const DEFAULT_IDLE_MS = 30 * 60 * 1000
@@ -75,8 +88,11 @@ export interface LoopbackListener {
   deploymentId: string
   projectId: string
   slug: string
-  /** The `Host` and URL spelling: `127.0.0.1`, or `[::1]` with brackets. */
-  host: "127.0.0.1" | "[::1]"
+  /**
+   * The `Host` and URL spelling: `127.0.0.1`, `[::1]` with brackets, or
+   * `localhost` (the port-range pairing only).
+   */
+  host: "127.0.0.1" | "[::1]" | "localhost"
   port: number
   /** `http://127.0.0.1:45001`. Always `http` — a loopback shell is http. */
   origin: string
@@ -184,7 +200,7 @@ export class LoopbackPortsExhaustedError extends Error {
 }
 
 /**
- * `[::1]` from `::1`; `127.0.0.1` unchanged.
+ * `[::1]` from `::1`; `127.0.0.1` and `localhost` unchanged.
  *
  * The display-spelling INVERSE of `loopbackBindHostFor`
  * (`prototype-origin-resolve.ts`), which strips the same brackets in the
@@ -197,8 +213,8 @@ export class LoopbackPortsExhaustedError extends Error {
  * outputs agree on the two loopback addresses that occur in practice, not
  * that one calls the other.
  */
-function hostSpellingFor(bindHost: LoopbackBindHost): "127.0.0.1" | "[::1]" {
-  return bindHost === "::1" ? "[::1]" : "127.0.0.1"
+function hostSpellingFor(bindHost: LoopbackBindHost): "127.0.0.1" | "[::1]" | "localhost" {
+  return bindHost === "::1" ? "[::1]" : bindHost
 }
 
 /**
@@ -271,6 +287,21 @@ export function createLoopbackListenerRegistry(
     // shell here, and the placeholder answers 503 rather than falling
     // through to anything.
     const range = deps.portRange ?? null
+    if (range === null && target.bindHost === "localhost") {
+      // `localhost` is a NAME, and this branch would pass it to `listen()`.
+      // It is only ever a legitimate listener host when the socket is on the
+      // wildcard, which is exactly the case a range signals — see
+      // `pairedLoopbackHost`, which only produces it when told a range is
+      // configured. Two modules reading the same config have to agree for
+      // that to hold, so the contradiction is refused here rather than
+      // trusted.
+      throw new Error(
+        `A loopback prototype listener cannot bind "localhost" with no port range configured. ` +
+          `"localhost" is a name a browser may resolve to either address family, so it does not ` +
+          `name one origin unless the socket is on every interface, which is what a configured ` +
+          `port range does. This is a bug in the caller's pairing, not in config.`,
+      )
+    }
     /**
      * What the socket binds. The loopback address on a laptop; every
      * interface in a container.
@@ -282,14 +313,32 @@ export function createLoopbackListenerRegistry(
      * loopback bind there is unreachable from the host's browser with the
      * range published and without it alike (MEASURED, Task 14, 2026-09-11).
      *
-     * Widening the bind does not widen what the listener will ANSWER. Its
-     * Express app pins a one-entry Host allowlist to exactly this
-     * `host:port` (`loopback-listener-app.ts`), so a request that arrives on
-     * another interface carrying any other `Host` is refused before it can
-     * reach a prototype. The cookie-isolation argument at the top of this
-     * module is untouched too: it rests on the HOST SPELLING the browser
-     * uses, which is still the paired loopback name, not on which interface
-     * the socket listens on.
+     * ## What that costs, stated honestly
+     *
+     * Inside a container the socket is then on ALL of the container's
+     * interfaces, and a listener carries no credential of its own — on a
+     * laptop the port WAS the credential, because it was loopback-only and
+     * ephemeral, and in a container it is neither.
+     *
+     * The one-entry Host allowlist (`loopback-listener-app.ts`) pins this
+     * listener to exactly one `host:port`, which stops a browser-driven
+     * cross-origin request: a browser always sends the `Host` of the URL it
+     * was given, so it cannot reach this socket under some other name. It
+     * does NOT stop a non-browser client that simply sends the right `Host`
+     * itself.
+     *
+     * What keeps that out of reach is the published port: every documented
+     * run line publishes the range to the DOCKER HOST'S LOOPBACK
+     * (`-p 127.0.0.1:<from>-<to>:<from>-<to>`), so nothing off the machine
+     * can connect at all. What remains is a peer on the same Docker network,
+     * and that is the same trust a laptop already extends to another local
+     * process — which is what the "loopback boundary" section of
+     * `viewer/README.md` says out loud.
+     *
+     * The cookie-isolation argument at the top of this module is untouched
+     * either way: it rests on the HOST SPELLING the browser uses, which is
+     * still the paired loopback name, not on which interface the socket
+     * listens on.
      */
     const bindAddress: string = range === null ? target.bindHost : "0.0.0.0"
 

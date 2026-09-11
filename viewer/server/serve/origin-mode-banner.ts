@@ -116,7 +116,12 @@ export function originModeBannerLines(
     // here is never null — asserted below rather than silently emitting
     // "null" into the banner if that contract were ever broken.
     const shellHostname = new URL(resolved.shellOrigin).hostname
-    const prototypeHost = pairedLoopbackHost(shellHostname)
+    // The same pairing the route makes, told the same port-range fact — with
+    // a range the listener binds the IPv4 wildcard, so the pairing never
+    // names `[::1]` and neither may this line.
+    const prototypeHost = pairedLoopbackHost(shellHostname, {
+      portRangeConfigured: Boolean(config.loopbackPortRange),
+    })
     if (!prototypeHost) {
       throw new Error(
         `originModeBannerLines: resolveOrigins reported loopback mode for a non-loopback ` +
@@ -135,12 +140,23 @@ export function originModeBannerLines(
       lines: [
         `[viewer] prototypes are served from the other loopback name on ${portPhrase} ` +
           `(shell=${resolved.shellOrigin} prototypes=${scheme}//${prototypeHost}:${portSpelling})`,
-        `[viewer] Loopback prototype listeners are reachable only from a browser on this same host. ` +
-          `A containerized or remote deployment should set VIEWER_SERVE_DOMAIN, or a non-loopback VIEWER_PUBLIC_URL.`,
+        // This line used to say listeners are "reachable only from a browser
+        // on this same host". Inside a container that is not true: the socket
+        // is on every interface there (see `loopback-listeners.ts`'s
+        // `open()`), and what keeps the published ports off the network is
+        // the `127.0.0.1:` prefix on the -p flag the next line prints.
+        range
+          ? `[viewer] Loopback prototype listeners are meant for a browser on this same machine. ` +
+            `Inside a container the socket is on every interface, so publish the ports to this machine's ` +
+            `loopback, as the next line shows. A remote deployment should set VIEWER_SERVE_DOMAIN, or a ` +
+            `non-loopback VIEWER_PUBLIC_URL.`
+          : `[viewer] Loopback prototype listeners are meant for a browser on this same machine. ` +
+            `A containerized or remote deployment should set VIEWER_SERVE_DOMAIN, or a non-loopback VIEWER_PUBLIC_URL.`,
         ...(range
           ? [
               `[viewer] Loopback prototype ports: ${range.from}-${range.to}. ` +
-                `In Docker, publish them: -p ${range.from}-${range.to}:${range.from}-${range.to}`,
+                `In Docker, publish them to this machine's loopback: ` +
+                `-p 127.0.0.1:${range.from}-${range.to}:${range.from}-${range.to}`,
             ]
           : []),
       ],

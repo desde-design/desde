@@ -14,7 +14,7 @@ describe("originModeBannerLines", () => {
       lines: [
         "[viewer] prototypes are served from the other loopback name on an ephemeral port " +
           "(shell=http://localhost:3100 prototypes=http://127.0.0.1:<ephemeral>)",
-        "[viewer] Loopback prototype listeners are reachable only from a browser on this same host. " +
+        "[viewer] Loopback prototype listeners are meant for a browser on this same machine. " +
           "A containerized or remote deployment should set VIEWER_SERVE_DOMAIN, or a non-loopback VIEWER_PUBLIC_URL.",
       ],
     })
@@ -36,11 +36,35 @@ describe("originModeBannerLines", () => {
         // about the same port (live acceptance finding, 2026-09-11).
         "[viewer] prototypes are served from the other loopback name on a port from the range below " +
           "(shell=http://localhost:3100 prototypes=http://127.0.0.1:<3101-3120>)",
-        "[viewer] Loopback prototype listeners are reachable only from a browser on this same host. " +
-          "A containerized or remote deployment should set VIEWER_SERVE_DOMAIN, or a non-loopback VIEWER_PUBLIC_URL.",
-        "[viewer] Loopback prototype ports: 3101-3120. In Docker, publish them: -p 3101-3120:3101-3120",
+        // Inside a container the socket is on every interface, so the line
+        // that used to say "reachable only from a browser on this same host"
+        // was not true there. What keeps the published ports private is the
+        // `127.0.0.1:` prefix on the -p flag below.
+        "[viewer] Loopback prototype listeners are meant for a browser on this same machine. " +
+          "Inside a container the socket is on every interface, so publish the ports to this machine's " +
+          "loopback, as the next line shows. A remote deployment should set VIEWER_SERVE_DOMAIN, or a " +
+          "non-loopback VIEWER_PUBLIC_URL.",
+        "[viewer] Loopback prototype ports: 3101-3120. In Docker, publish them to this machine's " +
+          "loopback: -p 127.0.0.1:3101-3120:3101-3120",
       ],
     })
+  })
+
+  /**
+   * With a range configured the pairing never chooses `[::1]` — the listener
+   * binds the IPv4 wildcard, so an IPv6 origin would refuse the connection.
+   * The banner reads the same pairing the route does, so it names `localhost`
+   * here where the no-range case below names `[::1]`.
+   */
+  it("loopback: a 127.0.0.1 shell with a range configured names localhost, not [::1]", () => {
+    const { lines } = originModeBannerLines({
+      publicUrl: "http://127.0.0.1:3100",
+      serveDomain: null,
+      loopbackAvailable: true,
+      loopbackPortRange: { from: 3101, to: 3120 },
+    })
+    expect(lines[0]).toContain("prototypes=http://localhost:<3101-3120>")
+    expect(lines[0]).not.toContain("[::1]")
   })
 
   it("loopback: no port-range line when loopbackPortRange is unset", () => {
@@ -64,7 +88,7 @@ describe("originModeBannerLines", () => {
       lines: [
         "[viewer] prototypes are served from the other loopback name on an ephemeral port " +
           "(shell=http://127.0.0.1:3100 prototypes=http://[::1]:<ephemeral>)",
-        "[viewer] Loopback prototype listeners are reachable only from a browser on this same host. " +
+        "[viewer] Loopback prototype listeners are meant for a browser on this same machine. " +
           "A containerized or remote deployment should set VIEWER_SERVE_DOMAIN, or a non-loopback VIEWER_PUBLIC_URL.",
       ],
     })

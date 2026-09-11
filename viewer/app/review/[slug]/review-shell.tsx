@@ -162,10 +162,16 @@ type RailTab = "comments" | "inspect" | "deployments"
  * one — a Docker operator publishes the WHOLE range, not just the one port
  * this prototype happens to be on right now, because the next prototype
  * they open gets a different ephemeral port inside it.
+ *
+ * The `127.0.0.1:` prefix is part of the flag on purpose: it keeps the
+ * published prototype ports on the operator's own machine. Without it Docker
+ * publishes on `0.0.0.0` and the ports are reachable from the network, which
+ * is not what a loopback listener promises. Same form as the boot banner's
+ * (`server/serve/origin-mode-banner.ts`).
  */
 function portWatchdogMessage(port: string, range: { from: number; to: number } | null): string {
   const dockerHint = range
-    ? `start it with -p ${range.from}-${range.to}:${range.from}-${range.to}.`
+    ? `start it with -p 127.0.0.1:${range.from}-${range.to}:${range.from}-${range.to}.`
     : "publish the loopback port range with -p."
   return `The prototype is served on port ${port} and your browser can't reach it. If the viewer runs in Docker, ${dockerHint}`
 }

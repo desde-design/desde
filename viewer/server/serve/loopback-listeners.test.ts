@@ -138,6 +138,8 @@ function makeRegistry(
      */
     storage?: InMemoryStorage
     prototypeProcesses?: PrototypeProcesses
+    /** The container case: fixed ports, and a wildcard bind. See `open()`. */
+    portRange?: { from: number; to: number } | null
   } = {},
 ) {
   const { storage: seeded, prototypeProcesses, ...registryOptions } = options
@@ -213,6 +215,70 @@ describe("createLoopbackListenerRegistry", () => {
         throw error
       }
       expect(listener.host).toBe("[::1]")
+    })
+
+    /**
+     * The container pairing, end to end against a real socket.
+     *
+     * With a port range configured the bind widens to `0.0.0.0`, which is
+     * IPv4 only, so an origin naming `[::1]` would be one the socket cannot
+     * answer on — `pairedLoopbackHost` therefore hands back `localhost` for
+     * a shell on `127.0.0.1` once it is told a range is set. This drives the
+     * full derivation and then actually fetches the origin, because the
+     * defect this closes was exactly an origin that parsed fine and refused
+     * the connection.
+     *
+     * The request carries the origin's own `Host` (`localhost:<port>`, which
+     * is the only value the listener's one-entry allowlist admits) and
+     * connects over IPv4, which is the path a browser takes once its
+     * resolver maps `localhost` to `127.0.0.1`. No `::1` anywhere.
+     */
+    it("a shell on 127.0.0.1 pairs to a localhost listener that answers, when a range is configured", async () => {
+      const paired = pairedLoopbackHost("127.0.0.1", { portRangeConfigured: true })
+      expect(paired).toBe("localhost")
+      const bindHost = loopbackBindHostFor(paired as "127.0.0.1" | "[::1]" | "localhost")
+      expect(bindHost).toBe("localhost")
+
+      // A free port to start the range at, found and released the same way
+      // the container test below does it.
+      const probe = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()))
+      const free = (probe.address() as AddressInfo).port
+      await new Promise<void>((r) => probe.close(() => r()))
+
+      const registry = makeRegistry(
+        { d1: { "index.html": "<html><body>range</body></html>" } },
+        { portRange: { from: free, to: free + 3 } },
+      )
+      const listener = await registry.ensure(deployment("d1"), {
+        bindHost,
+        shellOrigin: "http://127.0.0.1:3100",
+      })
+      expect(listener.host).toBe("localhost")
+      expect(listener.origin).toBe(`http://localhost:${listener.port}`)
+      expect(listener.boundAddress).toBe("0.0.0.0")
+
+      const res = await httpCall({ host: "127.0.0.1", port: listener.port, path: "/", hostHeader: `localhost:${listener.port}` })
+      expect(res.status).toBe(200)
+      expect(res.body).toContain("range")
+    })
+
+    /**
+     * The inverse, stated as a refusal rather than trusted: `localhost` is a
+     * name a browser may resolve to either family, so it is only ever a
+     * legitimate listener host when the socket is on the wildcard — which is
+     * exactly when a range is configured. With no range it would have to be
+     * passed to `listen()`, and a listener reachable under a name whose
+     * family the OS picks is not one origin.
+     */
+    it("refuses a localhost bind host when no range is configured", async () => {
+      const registry = makeRegistry({ d1: {} })
+      await expect(
+        registry.ensure(deployment("d1"), {
+          bindHost: "localhost",
+          shellOrigin: "http://127.0.0.1:3100",
+        }),
+      ).rejects.toThrow(/localhost/i)
     })
   })
 
