@@ -156,6 +156,25 @@ export interface LoopbackListenerAppContext {
   shellOrigin: string
   /** Called on every request the listener serves. */
   touch: () => void
+  /**
+   * Marks a request as in-flight against this listener, so the idle reaper
+   * leaves it alone for as long as the response is still open.
+   *
+   * Call it right when a request starts and call the returned function when
+   * the response ends (`res.once("close", release)` in
+   * `loopback-listener-app.ts`). Mirrors `PrototypeProcesses.beginRequest`
+   * (`prototype-processes.ts`) — without this, `touch()` at request-start
+   * alone is not enough: a response that outlives the idle bound while it is
+   * still being answered (an SSE stream, a large streamed download) would be
+   * cut out from under the client by the reaper (codex round 7, Fix 3, the
+   * same defect `beginRequest` closed for the process itself in codex round
+   * 2, item 3).
+   *
+   * The returned release function also touches the listener, so the idle
+   * clock restarts from the moment the response actually ends rather than
+   * from whenever it started.
+   */
+  beginRequest: () => () => void
 }
 
 export interface LoopbackListenerRegistry extends PrototypeHostRegistry {
@@ -252,6 +271,17 @@ function keyFor(deploymentId: string, shellOrigin: string): string {
 interface MutableListener extends LoopbackListener {
   server: Server
   key: string
+  /**
+   * How many requests `beginRequest` has opened against this listener that
+   * have not yet called their release function. The reaper skips any
+   * listener with `inFlight > 0`, whatever `lastUsedAt` says — see
+   * `beginRequest` on `LoopbackListenerAppContext`.
+   *
+   * A counter, not a flag, for the same reason `prototype-processes.ts`'s
+   * `Entry.inFlight` is one: more than one request can be open against a
+   * listener at once, and it stays protected until the LAST one releases.
+   */
+  inFlight: number
 }
 
 export function createLoopbackListenerRegistry(
@@ -449,6 +479,7 @@ export function createLoopbackListenerRegistry(
       lastUsedAt: now(),
       server,
       key,
+      inFlight: 0,
       close: async () => {
         // Dropped from the map FIRST, so a concurrent `ensure` opens a fresh
         // listener rather than handing out one that is closing.
@@ -466,6 +497,20 @@ export function createLoopbackListenerRegistry(
         shellOrigin: target.shellOrigin,
         touch: () => {
           record.lastUsedAt = now()
+        },
+        beginRequest: () => {
+          record.inFlight++
+          let released = false
+          return () => {
+            // Idempotent, same reason as `prototype-processes.ts`'s
+            // `beginRequest`: `res.once("close", release)` fires at most
+            // once, but a caller that also invokes the returned function
+            // directly must not double-decrement.
+            if (released) return
+            released = true
+            record.inFlight--
+            record.lastUsedAt = now()
+          }
         },
       })
     } catch (error) {
@@ -487,7 +532,14 @@ export function createLoopbackListenerRegistry(
    */
   async function reapIdle(at: number, idleMs?: number): Promise<number> {
     const bound = idleMs ?? defaultIdleMs
-    const stale = [...listeners.values()].filter((listener) => listener.lastUsedAt + bound <= at)
+    // `inFlight > 0` is checked here too, not only in the re-check below: a
+    // listener with an open response (an SSE stream, say) must never be
+    // scheduled for closing in the first place, whatever `lastUsedAt` says
+    // (codex round 7, Fix 3 — mirrors `prototype-processes.ts`'s own
+    // `startReaper`).
+    const stale = [...listeners.values()].filter(
+      (listener) => listener.inFlight === 0 && listener.lastUsedAt + bound <= at,
+    )
     // Sequential, not `Promise.all`: `close()` mutates `listeners`, and there
     // are only ever a handful of these.
     //
@@ -495,12 +547,13 @@ export function createLoopbackListenerRegistry(
     // filter above and its own turn in this loop — the `await` on the
     // previous iteration's `close()` is exactly the gap a request needs.
     // That request calls `touch()`, which bumps `lastUsedAt` on the SAME
-    // record this loop is about to close, so re-reading `lastUsedAt` right
-    // before closing (rather than trusting the value captured by the
-    // filter) is what keeps an active review from being interrupted.
+    // record this loop is about to close, so re-reading `lastUsedAt` (and
+    // `inFlight`) right before closing (rather than trusting the values
+    // captured by the filter) is what keeps an active review from being
+    // interrupted.
     let closed = 0
     for (const listener of stale) {
-      if (listener.lastUsedAt + bound <= at) {
+      if (listener.inFlight === 0 && listener.lastUsedAt + bound <= at) {
         await listener.close()
         closed++
       }

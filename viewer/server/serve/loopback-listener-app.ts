@@ -156,8 +156,18 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
   // Every request is use, which is what keeps an actively reviewed prototype
   // from being reaped mid-review. Placed after the two refusals above so a
   // rejected Host cannot keep a listener alive.
-  app.use((_req, _res, next) => {
+  //
+  // `touch()` alone only covers the START of a request. A response that
+  // outlives the idle bound while it is still being answered — an SSE
+  // stream, a large streamed download — needs to stay protected for its
+  // whole life, which is what `beginRequest`/`release` are for (codex round
+  // 7, Fix 3, mirroring `prototypeProcesses.beginRequest`). `release` also
+  // touches the listener again, so the idle clock restarts from when the
+  // response actually ends.
+  app.use((_req, res, next) => {
     deps.touch()
+    const release = deps.beginRequest()
+    res.once("close", release)
     next()
   })
 

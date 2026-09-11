@@ -20,6 +20,7 @@ import {
   createServer,
   request as httpRequest,
   type IncomingHttpHeaders,
+  type IncomingMessage,
   type Server,
 } from "node:http"
 import { Server as NetServer, type AddressInfo } from "node:net"
@@ -1022,6 +1023,96 @@ describe("createLoopbackListenerRegistry", () => {
       const res = await httpCall({ host: "127.0.0.1", port: second.port, path: "/" })
       expect(res.status).toBe(200)
       expect(registry.isPrototypeHost(`127.0.0.1:${second.port}`)).toBe(true)
+    })
+
+    /**
+     * Codex round 7, Fix 3. `touch()` at request-start alone was not enough
+     * for a response that outlives the idle bound while it is still being
+     * answered — an SSE stream, say. The listener now tracks in-flight
+     * requests the way `prototype-processes.ts` tracks them for the process
+     * itself: a listener with an open response is never reaped, whatever
+     * `lastUsedAt` says, and closing the response touches the listener again
+     * so the idle clock restarts from the moment it actually went idle.
+     *
+     * The open response comes from a `serve: "server"` deployment proxied to
+     * a real child that writes a first chunk and then holds the connection
+     * open — the same shape "proxies a server deployment to its process"
+     * above uses, but never ending the response until the test says so.
+     */
+    it("does not reap a listener with a response still open, and reaps it once the response closes", async () => {
+      // An object, not a bare `let`: TypeScript's control-flow narrowing does
+      // not track a reassignment that happens only inside a nested callback,
+      // so a bare `let endResponse: (() => void) | null = null` reassigned
+      // only inside `createServer`'s handler stays narrowed to the literal
+      // `null` at every later read, and `endResponse?.()` then fails to
+      // typecheck ("Type 'never' has no call signatures") even though the
+      // runtime value is set. A property on an object is not narrowed the
+      // same way.
+      const held: { endResponse: (() => void) | null } = { endResponse: null }
+      // Only `/stream` hangs open — the "still answering other requests"
+      // probe below hits `/` on the SAME listener and must get an ordinary,
+      // immediate reply, not overwrite `held.endResponse` with its own.
+      const child = createServer((req, res) => {
+        if (req.url === "/stream") {
+          res.setHeader("content-type", "text/event-stream")
+          res.write("data: hello\n\n")
+          held.endResponse = () => res.end()
+          return
+        }
+        res.end("ok")
+      })
+      childServers.push(child)
+      await new Promise<void>((r) => child.listen(0, "127.0.0.1", () => r()))
+      const childPort = (child.address() as AddressInfo).port
+
+      const storage = new InMemoryStorage()
+      const project = await storage.createProject({ slug: "one", name: "One" })
+      const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+      await storage.updateDeployment(dep.id, { serve: "server", serverStart: ["node", "x.js"] })
+
+      let clock = 1_000
+      const registry = makeRegistry(
+        {},
+        {
+          now: () => clock,
+          storage,
+          prototypeProcesses: {
+            ...nullPrototypeProcesses(),
+            ensure: () => Promise.resolve({ port: childPort }),
+          },
+        },
+      )
+      const listener = await registry.ensure(
+        { id: dep.id, slug: "one", projectId: project.id, serve: "server" },
+        V4,
+      )
+
+      // Opened, not awaited to completion: the request stays in flight until
+      // `endResponse()` is called below.
+      const openResponse = await new Promise<IncomingMessage>((resolve, reject) => {
+        const req = httpRequest({ host: "127.0.0.1", port: listener.port, path: "/stream" })
+        req.on("response", resolve)
+        req.on("error", reject)
+        req.end()
+      })
+      // Wait for the first chunk, so the request has genuinely reached the
+      // listener (and touched it) before the clock moves.
+      await new Promise<void>((resolve) => openResponse.once("data", () => resolve()))
+
+      clock += 60_000 // well past any idle bound this test uses below
+      expect(await registry.reapIdle(clock, 30_000)).toBe(0)
+      // Still answering: the listener's own socket was not closed either.
+      const stillUp = await httpCall({ host: "127.0.0.1", port: listener.port, path: "/" })
+      expect(stillUp.status).toBe(200)
+
+      held.endResponse?.()
+      await new Promise<void>((resolve) => openResponse.once("close", () => resolve()))
+
+      // The release touched the listener, so it is not stale YET…
+      expect(await registry.reapIdle(clock, 30_000)).toBe(0)
+      // …but it is once the idle bound passes from that touch.
+      clock += 60_000
+      expect(await registry.reapIdle(clock, 30_000)).toBe(1)
     })
 
     /**
