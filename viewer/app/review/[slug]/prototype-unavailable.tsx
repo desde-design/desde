@@ -21,6 +21,7 @@ import { Callout, EmptyState } from "@/components/blocks"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { fetchJson } from "../../api-client"
+import { shouldRefreshAfterRebuild } from "../rebuild-refresh"
 import { useBuildAccess } from "../use-build-access"
 import { useBuildControls } from "../use-build-controls"
 import type { PrototypeEmbed } from "./prototype-embed-decision"
@@ -167,15 +168,38 @@ function CrashedControls({
   // deployment's process status and swap this panel for the iframe (or a
   // fresh failure) without the reader reloading the page themselves.
   //
-  // `refreshedRef` guards against calling `refresh()` more than once for the
-  // SAME transition: `refreshRouter` is a fresh closure every render (it is
-  // not memoized), so keying the effect on it alone would re-fire on every
-  // render while `status` stays `"deployed"` — and `router.refresh()` itself
-  // causes a re-render, which is exactly the shape of an infinite loop.
-  const refreshedRef = useRef(false)
+  // NOT just "the deployment is deployed" — see `shouldRefreshAfterRebuild`'s
+  // own doc comment. This panel mounts on an already-crashed prototype, and
+  // its latest deployment (what `useBuildControls` reads on mount) is
+  // usually ALREADY `"deployed"`: the build succeeded, the process died
+  // later. Refreshing on that alone would fire the moment this panel mounts,
+  // before anyone has clicked anything, and never again for a REAL rebuild.
+  // So refreshing requires a transition this panel itself caused:
+  // `rebuildRequestedRef` is set in the Rebuild button's own click handler,
+  // before `startBuild()`, and `sawBuildingRef` is set once this panel has
+  // actually observed `status === "building"` — proof the deployment
+  // reaching `"deployed"` is the NEW attempt, not the stale one it mounted
+  // with.
+  const rebuildRequestedRef = useRef(false)
+  const sawBuildingRef = useRef(false)
   useEffect(() => {
-    if (build.deployment?.status !== "deployed" || refreshedRef.current) return
-    refreshedRef.current = true
+    if (build.deployment?.status === "building") sawBuildingRef.current = true
+  }, [build.deployment?.status])
+  useEffect(() => {
+    if (
+      !shouldRefreshAfterRebuild({
+        requested: rebuildRequestedRef.current,
+        sawBuilding: sawBuildingRef.current,
+        status: build.deployment?.status,
+      })
+    ) {
+      return
+    }
+    // Reset both, rather than a permanent one-shot: a reader can crash a
+    // SECOND time (the same repo can fail the same way twice) and click
+    // Rebuild again, and that attempt deserves its own refresh.
+    rebuildRequestedRef.current = false
+    sawBuildingRef.current = false
     refreshRouter()
   }, [build.deployment?.status, refreshRouter])
 
@@ -183,7 +207,10 @@ function CrashedControls({
     <div className="flex w-full max-w-2xl flex-col items-center gap-3">
       <Button
         size="sm"
-        onClick={() => void build.startBuild()}
+        onClick={() => {
+          rebuildRequestedRef.current = true
+          void build.startBuild()
+        }}
         disabled={Boolean(build.blocked)}
         busy={build.starting}
         title={build.blocked ?? undefined}
