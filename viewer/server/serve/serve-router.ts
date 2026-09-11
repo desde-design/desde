@@ -854,10 +854,41 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
         )
         return
       }
+      // Taken BEFORE the cold start, not after (codex round 11, Fix 1), and
+      // released on `close` in the same breath. Taking it later left two
+      // gaps open for as long as a cold start took:
+      //
+      // A client that gave up while `ensure()` was still starting the
+      // process ended the response before `res.once("close", ...)` was ever
+      // registered, so the lease was never released. That entry then stayed
+      // exempt from the idle reaper and from eviction forever.
+      //
+      // With no lease held during the cold start, a concurrent cold start on
+      // another entry could evict this one's just-ready process before this
+      // request got to reserve it, and the proxy below would then be handed
+      // a dead port. (Eviction already never picks a `starting` entry on its
+      // own, so that half of the race was never the gap — the gap was the
+      // window with no lease at all.)
+      //
+      // `beginRequest` works even for a deployment with no entry yet: it goes
+      // through `entryFor`, which creates the record on demand.
+      //
+      // The lease still covers the whole response after this point, same as
+      // before: the idle reaper (`prototype-processes.ts`'s `startReaper`)
+      // must not stop a process answering a long SSE stream or a large
+      // streamed download just because the idle bound passed mid-response
+      // (codex round 2, item 3).
+      const releaseInFlight = deps.prototypeProcesses.beginRequest(deployment.id)
+      let closedBeforeReady = false
+      res.once("close", () => {
+        closedBeforeReady = true
+        releaseInFlight()
+      })
       let port: number
       try {
         port = (await deps.prototypeProcesses.ensure(deployment)).port
       } catch (error) {
+        releaseInFlight()
         // `PrototypeProcessError.message` is written as a plain sentence for a
         // reader (`prototype-processes.ts`); anything else is an internal
         // failure whose text is not safe to show.
@@ -866,6 +897,14 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
             ? error.message
             : "The prototype's server could not be started."
         refuse(503, `<!doctype html><title>Prototype unavailable</title><p>${escapeHtml(message)}</p>`)
+        return
+      }
+      // The client can have gone away while `ensure()` was still working —
+      // the `close` handler above already released the lease when that
+      // happened. Proxying to a response nobody is listening to would just
+      // fail partway through, so stop here instead.
+      if (closedBeforeReady || res.writableEnded || res.destroyed) {
+        releaseInFlight()
         return
       }
       // After `ensure`, not before: this marks the deployment as in use so the
@@ -882,14 +921,6 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       // child's own cookies and displaces a child value that shares its name.
       // See `ProxyOptions.setCookie`.
       const capabilityCookie = capabilityCookieToSet()
-      // Marks this deployment in-flight for as long as this response stays
-      // open, so the idle reaper (`prototype-processes.ts`'s `startReaper`)
-      // does not stop a process answering a long SSE stream or a large
-      // streamed download just because the idle bound passed mid-response
-      // (codex round 2, item 3). `touch()` above only covers the MOMENT the
-      // request begins; a response can easily outlive that.
-      const releaseInFlight = deps.prototypeProcesses.beginRequest(deployment.id)
-      res.once("close", releaseInFlight)
       proxyToProcess(req, res, {
         port,
         ...(capabilityCookie !== null ? { setCookie: capabilityCookie } : {}),

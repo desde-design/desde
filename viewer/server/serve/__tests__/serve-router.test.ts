@@ -1,8 +1,8 @@
 import express from "express"
-import { createServer, type Server } from "node:http"
+import { createServer, request as nodeHttpRequest, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
 import request from "supertest"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { loadConfig } from "../../config"
 import { sessionCookieName, signSessionId } from "../../auth/session-cookie"
 import { InMemoryStorage } from "../../storage/in-memory-storage"
@@ -1597,6 +1597,42 @@ describe("createServeRouter", () => {
     }
 
     /**
+     * A promise this test controls the settlement of, to hold `ensure()` open
+     * for as long as the test needs — standing in for a real cold start.
+     */
+    function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
+      let resolve!: (value: T) => void
+      let reject!: (error: unknown) => void
+      const promise = new Promise<T>((res, rej) => {
+        resolve = res
+        reject = rej
+      })
+      return { promise, resolve, reject }
+    }
+
+    /**
+     * A `beginRequest` fake with the same idempotent-release shape as the
+     * real one in `prototype-processes.ts` (`res.once("close", release)`
+     * firing, plus a caller invoking the returned function directly, must
+     * not double-decrement). `count()` reads the live in-flight number.
+     */
+    function trackedBeginRequest(): { beginRequest: PrototypeProcesses["beginRequest"]; count: () => number } {
+      let inFlight = 0
+      return {
+        count: () => inFlight,
+        beginRequest: () => {
+          inFlight++
+          let released = false
+          return () => {
+            if (released) return
+            released = true
+            inFlight--
+          }
+        },
+      }
+    }
+
+    /**
      * A router whose storage holds ONE `serve: "server"` deployment at slug
      * `srv`, with the given process manager.
      *
@@ -1807,6 +1843,145 @@ describe("createServeRouter", () => {
 
       await request(app).get("/p/srv/").expect(200)
       expect(touched).toEqual([deployment.id])
+    })
+
+    /**
+     * Codex round 11, Fix 1. The lease used to be taken AFTER `ensure()`
+     * resolved. That left a window, for as long as a cold start took, where
+     * nothing marked the entry in use: a client that gave up during that
+     * window ended the response before `res.once("close", ...)` was ever
+     * registered, so the lease was never released, and a concurrent cold
+     * start elsewhere could evict this entry's just-ready process before
+     * this request got to reserve it. These three tests hold `ensure()` open
+     * on a controllable promise and read the fake's own in-flight count, so
+     * they can tell "lease held before the cold start finishes" apart from
+     * "lease held only after".
+     */
+    describe("the in-flight lease is taken before the cold start, not after", () => {
+      it("is already held while ensure() is still pending, and is released when the client closes first", async () => {
+        const gate = deferred<{ port: number }>()
+        let ensureCalled = false
+        const tracked = trackedBeginRequest()
+        const { app } = await loopbackAppWith({
+          prototypeProcesses: fakeProcesses({
+            ensure: () => {
+              ensureCalled = true
+              return gate.promise
+            },
+            beginRequest: tracked.beginRequest,
+          }),
+        })
+
+        // A direct http client on its OWN listener, bypassing both stock
+        // supertest (which opens and closes a server per call) and this
+        // file's `supertest-reuse` wrapper (whose `.abort()` is a no-op — it
+        // records "abort" as just another chained builder call and replays
+        // it against a Test that has, by then, already been read and sent;
+        // see that file's `Step`/`Proxy` design). This test needs a REAL
+        // client disconnect while the server is still mid-request, which
+        // neither of those gives it.
+        const direct = createServer(app)
+        servers.push(direct)
+        await new Promise<void>((r) => direct.listen(0, "127.0.0.1", () => r()))
+        const directPort = (direct.address() as AddressInfo).port
+        const clientReq = nodeHttpRequest({ host: "127.0.0.1", port: directPort, path: "/p/srv/", method: "GET" })
+        clientReq.on("error", () => {
+          /* expected once destroyed below */
+        })
+        clientReq.end()
+
+        await vi.waitFor(() => expect(ensureCalled).toBe(true))
+        // The lease is already held even though `ensure()` has not resolved —
+        // this is the assertion that fails under the old "lease after ensure"
+        // order, where the count would still read 0 here.
+        expect(tracked.count()).toBe(1)
+
+        clientReq.destroy()
+        await vi.waitFor(() => expect(tracked.count()).toBe(0))
+
+        // Resolving late must not throw or double-release: the handler
+        // resumes, sees the response already closed, and returns.
+        gate.resolve({ port: 1 })
+        await new Promise((r) => setTimeout(r, 20))
+        expect(tracked.count()).toBe(0)
+      })
+
+      it("holds the lease until the response closes, for a request that completes normally", async () => {
+        const port = await child((_req, res) => res.end("ok"))
+        const gate = deferred<{ port: number }>()
+        let ensureCalled = false
+        const tracked = trackedBeginRequest()
+        const { app } = await loopbackAppWith({
+          prototypeProcesses: fakeProcesses({
+            ensure: () => {
+              ensureCalled = true
+              return gate.promise
+            },
+            beginRequest: tracked.beginRequest,
+          }),
+        })
+
+        // Kicked off with `.end(cb)`, not `await`/`.then()`: superagent warns
+        // and re-sends the request if both are used on the same Test object,
+        // and this test needs to inspect the lease WHILE the request is still
+        // in flight, before it is allowed to complete.
+        let finished: { status: number } | undefined
+        const completion = new Promise<void>((resolve, reject) => {
+          request(app)
+            .get("/p/srv/")
+            .end((err, res) => {
+              if (err && !res) {
+                reject(err)
+                return
+              }
+              finished = { status: res!.status }
+              resolve()
+            })
+        })
+        await vi.waitFor(() => expect(ensureCalled).toBe(true))
+        expect(tracked.count()).toBe(1)
+
+        gate.resolve({ port })
+        await completion
+        expect(finished?.status).toBe(200)
+        expect(tracked.count()).toBe(0)
+      })
+
+      it("releases the lease when ensure() rejects", async () => {
+        const gate = deferred<{ port: number }>()
+        let ensureCalled = false
+        const tracked = trackedBeginRequest()
+        const { app } = await loopbackAppWith({
+          prototypeProcesses: fakeProcesses({
+            ensure: () => {
+              ensureCalled = true
+              return gate.promise
+            },
+            beginRequest: tracked.beginRequest,
+          }),
+        })
+
+        let finished: { status: number } | undefined
+        const completion = new Promise<void>((resolve, reject) => {
+          request(app)
+            .get("/p/srv/")
+            .end((err, res) => {
+              if (err && !res) {
+                reject(err)
+                return
+              }
+              finished = { status: res!.status }
+              resolve()
+            })
+        })
+        await vi.waitFor(() => expect(ensureCalled).toBe(true))
+        expect(tracked.count()).toBe(1)
+
+        gate.reject(new PrototypeProcessError({ state: "stopped" }, "boom"))
+        await completion
+        expect(finished?.status).toBe(503)
+        expect(tracked.count()).toBe(0)
+      })
     })
 
     it("marks the process unreachable when the child gives no answer at all", async () => {
