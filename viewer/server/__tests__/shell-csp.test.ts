@@ -1,5 +1,7 @@
 /**
- * The shell's own `frame-ancestors 'none'`.
+ * The shell's own `Content-Security-Policy`: `frame-ancestors 'none'`
+ * always, plus `connect-src` (loopback only — see the second `describe`
+ * below).
  *
  * Before this, `http://localhost:PORT/` (the dashboard) carried no framing
  * protection at all — no `X-Frame-Options`, no `frame-ancestors` (grep-
@@ -95,5 +97,65 @@ describe("shell frame-ancestors 'none'", () => {
     expect(csp).toBeDefined()
     expect(csp).not.toContain("frame-ancestors 'none'")
     expect(csp).toContain("frame-ancestors 'self'")
+  })
+})
+
+/**
+ * `connect-src`, loopback only. The port-unreachable watchdog
+ * (`review-shell.tsx`'s reachability probe) `fetch()`es a loopback
+ * listener's own ephemeral origin from the shell page; without an explicit
+ * `connect-src` naming that origin family, the BROWSER's own CSP would
+ * block the probe's fetch outright — a worse failure than the one the probe
+ * exists to catch, because it would look identical to the port genuinely
+ * being unreachable, in every configuration, not just the Docker one.
+ *
+ * `'self'` has to be present too. Once any `connect-src` is on the page,
+ * it governs every fetch FROM that page, same-origin `/api/v1/*` calls
+ * included — the two rows below both assert `'self'` alongside the
+ * loopback origins, not as a separate case, because a `connect-src` that
+ * named the loopback origins but dropped `'self'` would pass a narrower
+ * assertion while silently breaking the entire app.
+ *
+ * `VIEWER_LOOPBACK_LISTENERS` is forced explicitly in both rows (`"on"` /
+ * `"off"`) rather than left at its default `"auto"`, which resolves
+ * `loopbackAvailable` from whether the CURRENT machine looks containerized
+ * (`isLikelyContainerized`, filesystem-based) — a nondeterministic input
+ * this test has no reason to depend on.
+ */
+describe("shell connect-src (the port-unreachable probe, loopback only)", () => {
+  function appWithLoopback(loopbackListeners: "on" | "off"): ReturnType<typeof createSwappableApp> {
+    const storage = new InMemoryStorage()
+    const stable = createSwappableApp()
+    const withStubNext = express()
+    withStubNext.use(
+      createApp({
+        storage,
+        assets: assetsWith({}),
+        config: loadConfig({
+          VIEWER_PUBLIC_URL: "http://localhost:3100",
+          VIEWER_DATA_DIR: tmpViewerDataDir(),
+          VIEWER_LOOPBACK_LISTENERS: loopbackListeners,
+        }),
+        bridgeScript: "// bridge",
+        bridgeVersion: "test-1",
+        github: testGithubRuntime(),
+      }),
+    )
+    withStubNext.use((_req, res) => res.status(200).send("shell page"))
+    stable.use(withStubNext)
+    return stable
+  }
+
+  it("adds the loopback connect-src (with 'self') on a shell page when loopback is available", async () => {
+    const res = await request(appWithLoopback("on").app).get("/")
+    const csp = res.headers["content-security-policy"]
+    expect(csp).toContain("connect-src 'self' http://localhost:* http://127.0.0.1:* http://[::1]:*")
+  })
+
+  it("adds no connect-src at all when loopback is not available", async () => {
+    const res = await request(appWithLoopback("off").app).get("/")
+    const csp = res.headers["content-security-policy"]
+    expect(csp).toBeDefined()
+    expect(csp).not.toContain("connect-src")
   })
 })

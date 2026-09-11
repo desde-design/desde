@@ -410,25 +410,71 @@ export function ReviewShell({
   const prototypeVisible = prototypeLoaded || bridgeReadyEpoch > 0
 
   /**
-   * The port-unreachable watchdog's own clock. One `setTimeout` on mount,
-   * for `watchdogMs` (the real bound in product, a tiny one in the gallery
-   * — see `ReviewShell`'s own prop doc). `shouldWarnPortUnreachable` below
-   * is a pure function tested against the REAL bound (`PORT_WATCHDOG_MS`),
-   * so firing this timer reports elapsed time AS that bound rather than as
-   * however long `watchdogMs` actually took — that is what lets the gallery
-   * accelerate the wait without changing what the pure function compares
-   * against.
+   * The port-unreachable watchdog's real signal: does the shell page's OWN
+   * `fetch()` reach the loopback origin at all.
+   *
+   * This is NOT the iframe's `onLoad`, and that is deliberate — an earlier
+   * version of this used `onLoad`/`prototypeLoaded` and it was wrong.
+   * MEASURED: when the loopback port genuinely has nothing listening on it
+   * (the exact Docker-without-`-p` case this banner exists to catch), the
+   * browser refuses the connection almost instantly, and Chromium still
+   * fires the iframe's `load` event for the failed navigation's own error
+   * page — a load event means "the browser finished attempting to navigate
+   * there," not "a document arrived." So `prototypeLoaded` went true right
+   * away in exactly the case that should have warned, and the banner never
+   * showed. Do not put `prototypeLoaded` (or `onLoad`) back into this
+   * signal; see `port-watchdog.ts`'s own doc comment for the same note.
+   *
+   * `mode: "no-cors"` is required: the loopback origin has no CORS headers
+   * for the shell's origin, and a normal `fetch` would reject on the CORS
+   * failure just as loudly as on a real connection refusal, making the two
+   * indistinguishable. An opaque `no-cors` response cannot be READ, but its
+   * PROMISE still resolves for any completed HTTP round trip and rejects
+   * for a network-level failure or an aborted request — which is exactly
+   * the "did anything answer" signal this needs, independent of status code
+   * or CORS.
+   *
+   * Probes `/` rather than a specific bridge asset path: the served bridge
+   * bundle's version is resolved server-side (`server/create-app.ts`'s
+   * `bridgeVersion`) and is not threaded down into `ReviewShellProject`
+   * today, so there is no asset path this component can name. A loopback
+   * listener's root (its `index.html`) needs no capability either — see
+   * `prototype-origin.ts`'s module doc, "the listener is the credential" —
+   * so it is an equally honest, unauthenticated probe target.
+   *
+   * State is set from the fetch's own `.then`/`.catch`, never from the
+   * effect body — the effect only starts the race and cleans it up.
    */
-  const [watchdogFired, setWatchdogFired] = useState(false)
+  const [probe, setProbe] = useState<"pending" | "reachable" | "unreachable">("pending")
   useEffect(() => {
-    const timer = setTimeout(() => setWatchdogFired(true), watchdogMs)
-    return () => clearTimeout(timer)
-  }, [watchdogMs])
+    if (project.mode !== "loopback" || !project.prototypeOrigin) return
+    let cancelled = false
+    const controller = new AbortController()
+    // Races the fetch against `watchdogMs`: aborting makes the fetch
+    // promise reject, which the `.catch` below reports the same way it
+    // reports a real connection refusal.
+    const timer = setTimeout(() => controller.abort(), watchdogMs)
+    fetch(`${project.prototypeOrigin}/`, {
+      mode: "no-cors",
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(() => {
+        if (!cancelled) setProbe("reachable")
+      })
+      .catch(() => {
+        if (!cancelled) setProbe("unreachable")
+      })
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [project.mode, project.prototypeOrigin, watchdogMs])
   const portWarning = shouldWarnPortUnreachable({
     mode: project.mode,
     bridgeReady: bridgeReadyEpoch > 0,
-    prototypeLoaded,
-    elapsedMs: watchdogFired ? PORT_WATCHDOG_MS : 0,
+    probe,
   })
   /**
    * Component state, so the notice comes back on reload — same

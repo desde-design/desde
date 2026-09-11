@@ -14,6 +14,7 @@ import {
 import { Scenario } from "../harness/scenario"
 import {
   fail,
+  NETWORK_ERROR,
   ok,
   PENDING,
   type FetchOverrideResult,
@@ -626,22 +627,32 @@ export const REVIEW_SHELL_SURFACE: SurfaceEntry = {
       id: "review/port-watchdog",
       label: "Port-unreachable watchdog — the loopback port never answers",
       render: () => (
-        <Scenario routes={{ [COMMENTS_PATH]: COMMENTS_OK }}>
+        <Scenario
+          routes={{
+            [COMMENTS_PATH]: COMMENTS_OK,
+            // The reachability probe (`review-shell.tsx`'s `probe` state)
+            // fetches this exact URL — the loopback origin's root — and this
+            // stub makes it REJECT, the same outcome a real refused
+            // connection produces. That is the honest case this state
+            // demonstrates: on the HOST machine, an unpublished Docker port
+            // is refused almost instantly (not a hang), and — measured —
+            // Chromium still fires the iframe's OWN `onLoad` for that failed
+            // navigation's error page, which is exactly why the banner does
+            // not key off `onLoad`/`prototypeLoaded` any more. The probe's
+            // `fetch` is the only signal that tells "nothing answered" apart
+            // from "the browser already gave up and rendered its own page",
+            // and stubbing it with `NETWORK_ERROR` is what makes this state
+            // an automated test of that wiring, not just a picture: the
+            // registry sweep's `readyWhen` below only passes if
+            // `review-shell.tsx` actually calls this fetch, actually reads
+            // its rejection, and actually renders the banner because of it.
+            "http://127.0.0.1:45001/": NETWORK_ERROR,
+          }}
+        >
           <ReviewShell
             project={{
               ...REVIEW_PROJECT,
-              // NOT a loopback address. A real browser fires the iframe's
-              // own `onLoad` the moment a `127.0.0.1` connection is refused
-              // — often faster than any watchdog bound could be, which
-              // would clear `prototypeLoaded` before the banner ever had a
-              // chance to show. `192.0.2.1` is a reserved "TEST-NET"
-              // address (RFC 5737): it never has a real listener anywhere,
-              // and routers drop it rather than reset it, so the
-              // navigation hangs instead of failing — which is what lets
-              // this state actually reach the "nothing has loaded yet"
-              // condition it exists to show, in jsdom (no real network at
-              // all) and in a real browser alike.
-              prototypeOrigin: "http://192.0.2.1:45001",
+              prototypeOrigin: "http://127.0.0.1:45001",
               mode: "loopback",
               serve: "static",
               range: { from: 45000, to: 45010 },

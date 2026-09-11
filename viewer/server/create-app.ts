@@ -30,18 +30,38 @@ import { createApiRateLimit } from "./rate-limit"
 import type { StorageAdapter } from "./storage/types"
 
 /**
- * `Content-Security-Policy: frame-ancestors 'none'` on every response that
- * is NOT a `/p/**` prototype response — the dashboard, every API route,
- * every sign-in route.
+ * The shell's own `Content-Security-Policy`, on every response that is NOT a
+ * `/p/**` prototype response — the dashboard, every API route, every
+ * sign-in route.
  *
- * Before this, a shell page carried no framing protection at all: no
- * `X-Frame-Options`, no `frame-ancestors`. A hosted prototype could
- * `<iframe src="http://localhost:PORT/">` the shell as a clickjacking
- * surface inside the reviewer's own review page. `frame-src 'none'` on the
- * PROTOTYPE's own CSP stops the prototype nesting a frame of ITS OWN, which
- * is a different thing — it says nothing about whether the shell can be
- * embedded BY something else. This closes that permanently rather than
- * depending on `frame-src` never being relaxed.
+ * Two directives, both APPENDED onto whatever is already on the response
+ * (nothing sets one this early today, but a future addition might) rather
+ * than replacing it:
+ *
+ * - `frame-ancestors 'none'`. Before this, a shell page carried no framing
+ *   protection at all: no `X-Frame-Options`, no `frame-ancestors`. A hosted
+ *   prototype could `<iframe src="http://localhost:PORT/">` the shell as a
+ *   clickjacking surface inside the reviewer's own review page. `frame-src
+ *   'none'` on the PROTOTYPE's own CSP stops the prototype nesting a frame
+ *   of ITS OWN, which is a different thing — it says nothing about whether
+ *   the shell can be embedded BY something else. This closes that
+ *   permanently rather than depending on `frame-src` never being relaxed.
+ * - `connect-src 'self' http://localhost:* http://127.0.0.1:* http://[::1]:*`,
+ *   ONLY when `config.loopbackAvailable` — the port-unreachable watchdog
+ *   (`review-shell.tsx`'s `probeReachable`) probes a loopback listener's
+ *   ephemeral origin with `fetch(...)` from the shell page, and without this
+ *   the browser's own CSP would block that fetch before it ever left the
+ *   page, which is a strictly worse failure than the one the probe exists to
+ *   detect (a silent, permanent "pending"). `'self'` has to be named
+ *   explicitly: once ANY `connect-src` is present, it governs every fetch
+ *   from the page, including the shell's own same-origin `/api/v1/*` calls —
+ *   omitting `'self'` here would not merely fail to help the probe, it would
+ *   break the whole app. Any PORT is allowed (`:*`) because a loopback
+ *   listener's port is ephemeral and chosen at open time; the HOST allowlist
+ *   is what bounds this, not the port. Absent when loopback is unavailable
+ *   (a container without `VIEWER_LOOPBACK_LISTENERS=on`) — there is no
+ *   listener to probe, and a `connect-src` this build does not need is a
+ *   restriction with no benefit, only a new way to break some future fetch.
  *
  * Skips a request twice over, redundantly on purpose: `req.url` starting
  * with `/p/` covers subdomain mode, where `createSubdomainRewrite` (mounted
@@ -53,13 +73,12 @@ import type { StorageAdapter } from "./storage/types"
  * (`resolvePrototypeCsp/resolveIsolatedOriginCsp`, `frame-ancestors 'self'` or
  * the shell's origin), and that must stay the only CSP on a prototype
  * response.
- *
- * If a CSP is already on the response (nothing sets one this early today,
- * but a future addition might), the directive is APPENDED, never replacing
- * whatever is already there.
  */
-function createShellFrameAncestorsGuard(): RequestHandler {
-  return function shellFrameAncestorsGuard(req: Request, res: Response, next: NextFunction): void {
+function createShellCspGuard(config: Pick<ViewerConfig, "loopbackAvailable">): RequestHandler {
+  const directives = config.loopbackAvailable
+    ? ["frame-ancestors 'none'", "connect-src 'self' http://localhost:* http://127.0.0.1:* http://[::1]:*"]
+    : ["frame-ancestors 'none'"]
+  return function shellCspGuard(req: Request, res: Response, next: NextFunction): void {
     if (req.url.startsWith("/p/")) {
       next()
       return
@@ -75,13 +94,13 @@ function createShellFrameAncestorsGuard(): RequestHandler {
     // Joining with "; " is the same separator `Content-Security-Policy`
     // itself uses between directives, so an array-valued header still
     // appends correctly rather than silently losing the array branch.
-    if (typeof existing === "string" && existing.length > 0) {
-      res.setHeader("Content-Security-Policy", `${existing}; frame-ancestors 'none'`)
-    } else if (Array.isArray(existing) && existing.length > 0) {
-      res.setHeader("Content-Security-Policy", `${existing.join("; ")}; frame-ancestors 'none'`)
-    } else {
-      res.setHeader("Content-Security-Policy", "frame-ancestors 'none'")
-    }
+    const existingDirectives =
+      typeof existing === "string" && existing.length > 0
+        ? [existing]
+        : Array.isArray(existing) && existing.length > 0
+          ? [existing.join("; ")]
+          : []
+    res.setHeader("Content-Security-Policy", [...existingDirectives, ...directives].join("; "))
     next()
   }
 }
@@ -348,9 +367,10 @@ export function createApp(deps: AppDeps): express.Express {
 
   // After the rewrite (so a prototype-host request already starts with
   // `/p/`) and before every shell router below: refuse to let the shell's
-  // own responses be framed. See `createShellFrameAncestorsGuard`'s doc
-  // comment for what this closes and why it is safe on a `/p/**` response.
-  app.use(createShellFrameAncestorsGuard())
+  // own responses be framed, and (loopback only) allow the port-watchdog
+  // probe's fetch. See `createShellCspGuard`'s doc comment for what this
+  // closes and why it is safe on a `/p/**` response.
+  app.use(createShellCspGuard(deps.config))
 
   // Immediately before the API mount: a prototype-host request whose path is
   // not under `/p/` never reaches a shell router. On a subdomain the rewrite

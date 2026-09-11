@@ -14,15 +14,39 @@
  * centre" layout, same as the comment rail's own empty/failure states.
  */
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 import { ChevronDown } from "lucide-react"
-import { EmptyState } from "@/components/blocks"
+import { Callout, EmptyState } from "@/components/blocks"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { fetchJson } from "../../api-client"
 import { useBuildAccess } from "../use-build-access"
 import { useBuildControls } from "../use-build-controls"
 import type { PrototypeEmbed } from "./prototype-embed-decision"
+
+/**
+ * `useRouter().refresh`, guarded against a missing Next App Router context.
+ *
+ * The gallery's registry sweep (`gallery/registry.test.tsx`) renders this
+ * panel directly through React Testing Library — there is no real Next app
+ * around it, no `<AppRouterContext>`, nothing `useRouter()` can read — and
+ * it throws synchronously there ("invariant expected app router to be
+ * mounted"). The real review page always has the context (it is rendered by
+ * the actual Next app), so the catch below is a gallery-only path, never a
+ * product one. The `try` wraps a single unconditional call, in the same
+ * position on every render — it changes what `useRouter()` DOES, not
+ * whether or how many times this component calls it, so it does not trip
+ * the hook-order rule the way a real conditional hook call would.
+ */
+function useRouterRefresh(): () => void {
+  try {
+    const router = useRouter()
+    return () => router.refresh()
+  } catch {
+    return () => {}
+  }
+}
 
 export interface PrototypeUnavailableProps {
   /** Never `{ kind: "embed" }` — the caller only renders this panel otherwise. */
@@ -100,24 +124,34 @@ function CrashedControls({
   hasRepo: boolean
 }) {
   const [log, setLog] = useState<string | null>(null)
+  /** True only after a fetch actually failed — distinct from "not loaded yet". */
+  const [logFailed, setLogFailed] = useState(false)
 
   useEffect(() => {
     if (!deploymentId) return
     let cancelled = false
-    fetchJson<{ log: string }>(`/api/v1/deployments/${deploymentId}/server-log`)
-      .then((body) => {
-        if (!cancelled) setLog(body.log)
-      })
-      .catch(() => {
+    async function loadLog(): Promise<void> {
+      try {
+        const body = await fetchJson<{ log: string }>(`/api/v1/deployments/${deploymentId}/server-log`)
+        if (cancelled) return
+        setLog(body.log)
+        setLogFailed(false)
+      } catch {
         // The log is a courtesy, not the point of this panel — a failed
-        // fetch just leaves Rebuild on its own, same as no log at all.
-        if (!cancelled) setLog(null)
-      })
+        // fetch leaves Rebuild on its own, with a one-line note rather than
+        // silently showing nothing where a log might have been.
+        if (cancelled) return
+        setLog(null)
+        setLogFailed(true)
+      }
+    }
+    void loadLog()
     return () => {
       cancelled = true
     }
   }, [deploymentId])
 
+  const refreshRouter = useRouterRefresh()
   const access = useBuildAccess()
   const build = useBuildControls({
     projectId,
@@ -125,6 +159,25 @@ function CrashedControls({
     canManage: true,
     buildsEnabled: access.buildsEnabled,
   })
+
+  // Rebuild lands a NEW deployment; this page's `embed` decision was resolved
+  // server-side, in `page.tsx`, from the OLD one. Once the rebuild actually
+  // finishes (not merely starts — `deployed`, not `building`), re-resolving
+  // the server component is what lets `decidePrototypeEmbed` see the new
+  // deployment's process status and swap this panel for the iframe (or a
+  // fresh failure) without the reader reloading the page themselves.
+  //
+  // `refreshedRef` guards against calling `refresh()` more than once for the
+  // SAME transition: `refreshRouter` is a fresh closure every render (it is
+  // not memoized), so keying the effect on it alone would re-fire on every
+  // render while `status` stays `"deployed"` — and `router.refresh()` itself
+  // causes a re-render, which is exactly the shape of an infinite loop.
+  const refreshedRef = useRef(false)
+  useEffect(() => {
+    if (build.deployment?.status !== "deployed" || refreshedRef.current) return
+    refreshedRef.current = true
+    refreshRouter()
+  }, [build.deployment?.status, refreshRouter])
 
   return (
     <div className="flex w-full max-w-2xl flex-col items-center gap-3">
@@ -138,10 +191,17 @@ function CrashedControls({
       >
         Rebuild
       </Button>
+      {build.error ? (
+        <div className="w-full">
+          <Callout tone="destructive">{build.error}</Callout>
+        </div>
+      ) : null}
       {log ? (
         <div className="w-full">
           <ServerLog log={log} />
         </div>
+      ) : logFailed ? (
+        <p className="text-sm text-muted-foreground">The server log could not be loaded.</p>
       ) : null}
     </div>
   )
