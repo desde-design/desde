@@ -187,7 +187,18 @@ export async function pruneSupersededDeploymentAssets(
   keepActiveId: string,
 ): Promise<void> {
   // Documented newest-first — see `StorageAdapter.listDeployments`.
-  const deployments: Pick<Deployment, "id">[] = await storage.listDeployments(projectId)
+  //
+  // Inside the best-effort boundary, like the removals below (codex round
+  // 11, the checkout sibling had the same gap): both callers run this AFTER
+  // the deployment is marked deployed and active, so a rejected listing
+  // here used to rewrite a successful activation as failed.
+  let deployments: Pick<Deployment, "id">[]
+  try {
+    deployments = await storage.listDeployments(projectId)
+  } catch (error) {
+    console.error(`[viewer] failed to prune superseded deployments for project ${projectId}:`, error)
+    return
+  }
   const rest = deployments.filter((d) => d.id !== keepActiveId)
   const stale = rest.slice(DEPLOYMENT_RETENTION_COUNT - 1)
   for (const d of stale) {
