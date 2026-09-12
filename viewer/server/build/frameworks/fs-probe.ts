@@ -81,21 +81,26 @@ async function owningPackageDir(
     self?: boolean
   } = {},
 ): Promise<string | null> {
-  // The directory itself counts only when its `package.json` names a
-  // package: a Next dist dir carries a generated `{"type":"commonjs"}`
-  // (codex round 42), and reading `.next` as the app sent the scan under it.
-  if (options.self && (await isNamedPackage(join(checkoutRoot, rel)))) return rel === "." ? null : rel
+  // The directory itself counts only when its `package.json` is one someone
+  // wrote: a Next dist dir carries a generated `{"type":"commonjs"}` (codex
+  // round 42), and reading `.next` as the app sent the scan under it.
+  if (options.self && (await isAuthoredPackage(join(checkoutRoot, rel)))) return rel === "." ? null : rel
   for (let dir = dirname(rel); dir !== "." && dir !== "/" && dir !== ""; dir = dirname(dir)) {
     if (await isFile(join(checkoutRoot, dir, "package.json"))) return dir
   }
   return null
 }
 
-/** `<dir>/package.json` exists and has a string `name`: a package someone wrote, not a build's generated manifest. */
-async function isNamedPackage(dir: string): Promise<boolean> {
+/**
+ * `<dir>/package.json` exists and says more than `type`: a package someone
+ * wrote, not a build's generated manifest. `name` alone would not do (codex
+ * round 45): a private workspace package may omit it, while a generated
+ * `{"type":"commonjs"}` is the whole of what a build writes.
+ */
+async function isAuthoredPackage(dir: string): Promise<boolean> {
   try {
-    const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as { name?: unknown }
-    return typeof pkg.name === "string" && pkg.name !== ""
+    const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as Record<string, unknown>
+    return Object.keys(pkg).some((key) => key !== "type")
   } catch {
     return false
   }

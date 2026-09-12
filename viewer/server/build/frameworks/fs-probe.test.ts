@@ -365,6 +365,13 @@ describe("owningPackageDir", () => {
     expect(await owningPackageDir(r, "apps/web", { self: true })).toBe(join("apps", "web"))
   })
 
+  it("counts an authored package that omits name, such as a private workspace app (codex round 45)", async () => {
+    const r = await root()
+    await mkdir(join(r, "apps", "web"), { recursive: true })
+    await writeFile(join(r, "apps", "web", "package.json"), JSON.stringify({ private: true, dependencies: { next: "^16.0.0" } }))
+    expect(await owningPackageDir(r, "apps/web", { self: true })).toBe(join("apps", "web"))
+  })
+
   it("does not take a build output's generated package.json for the app (codex round 42)", async () => {
     const r = await root()
     await writePackage(r, "apps/web")
