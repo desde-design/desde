@@ -285,12 +285,15 @@ export function storageAdapterContract(
       expect(created.serve).toBe("static")
       expect(created.serverStart).toBeNull()
       expect(created.serverCwd).toBeNull()
+      expect(created.activatedAt).toBeNull()
 
       const updated = await store.updateDeployment(created.id, {
         serve: "server",
         serverStart: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
         serverCwd: "apps/web",
+        activatedAt: "2026-09-12T00:00:00.000Z",
       })
+      expect(updated.activatedAt).toBe("2026-09-12T00:00:00.000Z")
       expect(updated.serve).toBe("server")
       expect(updated.serverStart).toEqual(["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"])
       expect(updated.serverCwd).toBe("apps/web")
@@ -299,6 +302,7 @@ export function storageAdapterContract(
       expect(readBack?.serve).toBe("server")
       expect(readBack?.serverStart).toEqual(["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"])
       expect(readBack?.serverCwd).toBe("apps/web")
+      expect(readBack?.activatedAt).toBe("2026-09-12T00:00:00.000Z")
       const listed = await store.listDeployments(project.id)
       expect(listed[0]?.serve).toBe("server")
 

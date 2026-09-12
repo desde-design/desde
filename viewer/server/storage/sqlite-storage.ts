@@ -65,6 +65,7 @@ interface DeploymentRow {
   serve: string
   server_start: string | null
   server_cwd: string | null
+  activated_at: string | null
   created_at: string
 }
 
@@ -585,6 +586,7 @@ export class SqliteStorage implements StorageAdapter {
       serve: row.serve === "server" ? "server" : "static",
       serverStart: parseServerStart(row.server_start),
       serverCwd: row.server_cwd,
+      activatedAt: row.activated_at,
       createdAt: row.created_at,
     }
   }
@@ -913,6 +915,7 @@ export class SqliteStorage implements StorageAdapter {
       serve: "static",
       serverStart: null,
       serverCwd: null,
+      activatedAt: null,
       createdAt: new Date().toISOString(),
     }
     this.db
@@ -996,7 +999,7 @@ export class SqliteStorage implements StorageAdapter {
     const next: Deployment = { ...existing, ...omitUndefined(patch) }
     this.db
       .prepare(
-        `UPDATE deployments SET status = ?, build_log = ?, commit_sha = ?, commit_message = ?, warnings = ?, steps = ?, serve = ?, server_start = ?, server_cwd = ? WHERE id = ?`,
+        `UPDATE deployments SET status = ?, build_log = ?, commit_sha = ?, commit_message = ?, warnings = ?, steps = ?, serve = ?, server_start = ?, server_cwd = ?, activated_at = ? WHERE id = ?`,
       )
       .run(
         next.status,
@@ -1008,6 +1011,7 @@ export class SqliteStorage implements StorageAdapter {
         next.serve,
         serializeServerStart(next.serverStart),
         next.serverCwd,
+        next.activatedAt,
         id,
       )
     return next

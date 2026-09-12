@@ -79,8 +79,11 @@ describe("reconcileCheckouts", () => {
     const project = await storage.createProject({ slug: "p", name: "P" })
     const root = await tmp()
     const previous = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    // The durable fact that it once went live (codex round 48).
+    await storage.updateDeployment(previous.id, { activatedAt: "2026-09-12T00:00:00.000Z" })
     const active = await storage.createDeployment({ projectId: project.id, status: "deployed" })
     const interrupted = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    // Active but not yet stamped: a kill between the two activation writes. It IS live.
     await storage.updateProject(project.id, { activeDeploymentId: active.id })
     for (const id of [previous.id, active.id, interrupted.id]) {
       await mkdir(checkoutDirFor(root, id), { recursive: true })
@@ -92,6 +95,27 @@ describe("reconcileCheckouts", () => {
     const row = await storage.getDeployment(interrupted.id)
     expect(row?.status).toBe("failed")
     expect(row?.buildLog).toContain("stopped before this build went live")
+  })
+
+  /**
+   * Codex round 48. Creation order cannot say whether a row went live: an
+   * upload can become active while an older build is still running, and a
+   * Viewer killed as that build was marked deployed leaves a row OLDER
+   * than the active one that never went live. Only the activation stamp,
+   * or being the current active deployment, says so.
+   */
+  it("removes an older deployed checkout that was never stamped as activated", async () => {
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    const root = await tmp()
+    const olderBuild = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const upload = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await storage.updateProject(project.id, { activeDeploymentId: upload.id })
+    await storage.updateDeployment(upload.id, { activatedAt: "2026-09-12T00:00:00.000Z" })
+    await mkdir(checkoutDirFor(root, olderBuild.id), { recursive: true })
+    expect(await reconcileCheckouts(storage, root)).toBe(1)
+    expect(await exists(checkoutDirFor(root, olderBuild.id))).toBe(false)
+    expect((await storage.getDeployment(olderBuild.id))?.status).toBe("failed")
   })
 
   it("removes a deployed checkout under a project that never activated anything", async () => {

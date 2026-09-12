@@ -79,23 +79,19 @@ export async function reconcileCheckouts(
 }
 
 /**
- * Whether a `deployed` row ever became its project's active deployment. The
- * activation writes the row `deployed` first and the project's
- * `activeDeploymentId` second, so a row newer than the project's active
- * deployment, or one under a project with none, is a build the Viewer was
- * killed in the middle of. An OLDER deployed row is a real previous
- * checkout, the rollback target retention keeps.
+ * Whether a `deployed` row ever became its project's active deployment: it
+ * is the current one, or it carries the `activatedAt` stamp activation
+ * writes right after the project's `activeDeploymentId` (codex round 48).
+ * Creation order cannot say (round 43's rule): an upload can go live while
+ * an older build is still running, and a Viewer killed as that build was
+ * marked `deployed` left a row older than the active one that never went
+ * live. A row that is active but not yet stamped is a kill between the two
+ * activation writes, and it IS live.
  */
-async function wentLive(
-  storage: Pick<StorageAdapter, "getDeployment" | "getProject">,
-  row: Deployment,
-): Promise<boolean> {
+async function wentLive(storage: Pick<StorageAdapter, "getProject">, row: Deployment): Promise<boolean> {
+  if (row.activatedAt !== null) return true
   const project = await storage.getProject(row.projectId)
-  const activeId = project?.activeDeploymentId ?? null
-  if (activeId === null) return false
-  if (activeId === row.id) return true
-  const active = await storage.getDeployment(activeId)
-  return active !== null && row.createdAt <= active.createdAt
+  return (project?.activeDeploymentId ?? null) === row.id
 }
 
 /**

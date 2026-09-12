@@ -426,6 +426,20 @@ const deploymentServerCwd: Migration = {
 }
 
 /**
+ * When a deployment became its project's active one (codex round 48).
+ * Nullable: every row written before this migration reads as never
+ * activated, which boot's checkout reconcile treats as "keep only if it is
+ * the current active deployment".
+ */
+const deploymentActivatedAt: Migration = {
+  version: 10,
+  description: "deployments: activated_at column",
+  up(db) {
+    db.exec(`ALTER TABLE deployments ADD COLUMN activated_at TEXT;`)
+  },
+}
+
+/**
  * The real migration list, applied on every boot after the baseline schema
  * `exec` in `SqliteStorage`'s constructor. See the comment above
  * `project_repo_configs` in sqlite-storage.ts for why a versioned mechanism
@@ -445,6 +459,7 @@ export const MIGRATIONS: Migration[] = [
   deploymentCommitMessage,
   deploymentServe,
   deploymentServerCwd,
+  deploymentActivatedAt,
 ]
 
 /**

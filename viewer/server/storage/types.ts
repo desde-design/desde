@@ -227,6 +227,15 @@ export interface Deployment {
    * anything else.
    */
   serverCwd: string | null
+  /**
+   * When this deployment became its project's active one, or `null` if it
+   * never did (codex round 48). Written right after the project's
+   * `activeDeploymentId`, so a `deployed` row without it (and not the
+   * current active) is a build the Viewer was killed in the middle of
+   * activating, whatever its position in creation order: an upload can go
+   * live while an older build is still running.
+   */
+  activatedAt: string | null
   /** ISO-8601 UTC timestamp. Not guaranteed unique; `createdAt` has millisecond resolution. */
   createdAt: string
 }
@@ -263,6 +272,7 @@ export interface DeploymentUpdatePatch {
   serve?: DeploymentServe
   serverStart?: string[] | null
   serverCwd?: string | null
+  activatedAt?: string | null
 }
 
 /** Input for creating a comment. The author snapshot is denormalized — no user table exists until Phase 3. */

@@ -815,6 +815,7 @@ describe("a very old deployment: the FULL pre-branch schema, all five migrations
       serve: "static",
       serverStart: null,
       serverCwd: null,
+      activatedAt: null,
       createdAt: "2026-02-02T02:00:00.000Z",
     })
 
@@ -912,6 +913,7 @@ describe("migration 5 — deployments gains a nullable warnings column", () => {
       serve: "static",
       serverStart: null,
       serverCwd: null,
+      activatedAt: null,
       createdAt: "2026-02-01T00:00:00.000Z",
     })
 

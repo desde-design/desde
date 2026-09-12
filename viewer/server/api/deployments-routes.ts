@@ -476,6 +476,8 @@ export function createDeploymentsRoutes(
       await deps.storage.updateProject(project.id, {
         activeDeploymentId: deployment.id,
       })
+      // Same durable activation fact the build queue writes (codex round 48).
+      await deps.storage.updateDeployment(deployment.id, { activatedAt: new Date().toISOString() })
       await rm(workDir, { recursive: true, force: true })
 
       // S5: this project just got a new active deployment — reclaim
