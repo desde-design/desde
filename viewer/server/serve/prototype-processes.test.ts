@@ -878,6 +878,58 @@ describe("createPrototypeProcesses", () => {
   })
 
   /**
+   * Codex round 20, item 5. A child being stopped is still a child.
+   *
+   * Eviction clears the victim's handle and marks its record idle in the same
+   * synchronous step the kill starts in, and only THEN waits for the process
+   * to go. A cold start racing that window saw a free slot and spawned, so
+   * the machine ran `maxRunning + 1` prototype servers at once: the new child
+   * and the victim, which was still listening on its own port through its
+   * whole SIGTERM grace.
+   *
+   * `FAKE_SIGTERM_DELAY_MS` holds the victim open for a second, which makes
+   * that window wide enough to land the second cold start inside it on
+   * purpose rather than by timing luck. `pickPort` is the evidence: it is
+   * called once per spawn, so a port taken while the victim is still
+   * answering IS the extra child.
+   */
+  it("counts a child being stopped against the cap, so a racing cold start waits for it", async () => {
+    const ports: number[] = []
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["a", "b", "c"]),
+      maxRunning: 1,
+      spawnEnv: { FAKE_SIGTERM_DELAY_MS: "1000" },
+      pickPort: async () => {
+        const port = await pickLoopbackPort()
+        ports.push(port)
+        return port
+      },
+    })
+    managers.push(procs)
+    await procs.ensure({ id: "a", serverStart: start() })
+    expect(ports).toHaveLength(1)
+
+    // b takes a's slot: the record goes idle at once, the process does not.
+    const b = procs.ensure({ id: "b", serverStart: start() })
+    await vi.waitFor(() => {
+      expect(procs.status("a").state).toBe("stopped")
+    })
+    const victimPort = ports[0]
+    if (victimPort === undefined) throw new Error("expected a port for the victim")
+    expect((await get(victimPort)).status).toBe(200)
+
+    // c arrives inside that grace. It must not spawn while the victim is up.
+    const c = procs.ensure({ id: "c", serverStart: start() })
+    await new Promise((r) => setTimeout(r, 200))
+    expect((await get(victimPort)).status).toBe(200)
+    expect(ports).toHaveLength(1)
+
+    await Promise.all([b, c])
+    const states = ["a", "b", "c"].map((id) => procs.status(id).state)
+    expect(states.filter((s) => s === "running")).toHaveLength(1)
+  }, 20_000)
+
+  /**
    * Codex round 14, Fix 2. A slot a cold start is merely WAITING for is not
    * an occupied slot.
    *

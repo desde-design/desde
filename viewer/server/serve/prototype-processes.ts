@@ -502,7 +502,9 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    *
    * The `kill` effect's own wait (SIGTERM, then SIGKILL after five seconds)
    * is returned rather than performed, so the only async step is the
-   * caller's. The `spawn` effect is NOT performed here: starting a child
+   * caller's. `apply` is that caller, and it hands the child to
+   * `killAndWaitTracked`, which is what keeps the slot counted until the
+   * process is actually gone. The `spawn` effect is NOT performed here: starting a child
    * needs the checkout, the cap, a port and a home directory, all of which
    * are async and belong outside a synchronous transition. `ensure` reads
    * the effect and does the work; see `startChild`.
@@ -576,6 +578,48 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   }
 
   /**
+   * One entry per child that has left its record but not yet the machine: the
+   * `kill` effect has run, so nothing points at the process any more, and it
+   * is still alive until its `killAndWait` resolves.
+   *
+   * Counted against the cap, and waited on by the room-making loop (codex
+   * round 20, item 5). Eviction marks the victim idle in the same synchronous
+   * step the kill starts in, so before this set existed a cold start racing
+   * that window saw a free slot and spawned while the victim was still
+   * listening on its own port — `maxRunning + 1` servers at once, for the
+   * whole SIGTERM grace.
+   *
+   * A set of promises rather than a plain number because the loop needs
+   * something to WAIT on: a dying child occupies a slot that nothing else can
+   * free and that `chooseVictim` will never name, so counting it without
+   * being able to wait for it would turn an ordinary eviction into a busy
+   * refusal. Every entry settles (`killAndWait` SIGKILLs after five seconds
+   * and resolves on the child's exit), so a waiter always makes progress.
+   */
+  const dying = new Set<Promise<void>>()
+
+  /**
+   * `killAndWait`, holding a slot against the cap until the child is gone.
+   *
+   * The entry is added in the same synchronous step the kill starts in — this
+   * function is called with no await between it and `applySync`'s `kill`
+   * effect — and removed before the promise waiters see settles.
+   */
+  const killAndWaitTracked = async (child: ChildProcess): Promise<void> => {
+    let release: () => void = () => {}
+    const slot = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    dying.add(slot)
+    try {
+      await killAndWait(child)
+    } finally {
+      dying.delete(slot)
+      release()
+    }
+  }
+
+  /**
    * `applySync`, plus the kill effect's wait and the refusal.
    *
    * MUST be called inside `lock.run(id, …)` — the two lease events are the
@@ -585,7 +629,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    */
   const apply = async (id: string, event: ProcessEvent): Promise<TransitionResult> => {
     const { result, killing } = applySync(id, event)
-    if (killing) await killAndWait(killing)
+    if (killing) await killAndWaitTracked(killing)
     if (result.refused) throw new PrototypeProcessError(statusOf(id), result.refused)
     return result
   }
@@ -659,9 +703,9 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    * Reserves a slot for a record that has already transitioned to `starting`,
    * and marks it ADMITTED once it has one.
    *
-   * The rule is `running + admittedStarting < maxRunning`. This record is not
-   * in either count — it is `starting` and not yet admitted — so the strict
-   * `<` is what leaves the last slot for it.
+   * The rule is `running + admittedStarting + dying < maxRunning`. This
+   * record is not in any of the three counts — it is `starting` and not yet
+   * admitted — so the strict `<` is what leaves the last slot for it.
    *
    * Admission is the whole of codex round 14, Fix 2. The count used to be
    * every `starting` record, admitted or not: fire more concurrent cold
@@ -672,20 +716,23 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    * When there is no room, in order: evict the least recently used `running`
    * record with no open lease (`chooseVictim`, which never returns a leased
    * or a `starting` one) and re-check; else wait for an admitted start to
-   * finish and re-check; else refuse as busy, releasing the slot this attempt
-   * reserved.
+   * finish and re-check; else wait for a child that is already being killed
+   * to actually go and re-check; else refuse as busy, releasing the slot this
+   * attempt reserved.
    *
-   * **Why this cannot deadlock.** A waiter only ever waits on an ADMITTED
-   * start, and an admitted start never waits: it has already left this loop,
-   * and every path out of `starting` is one it reaches on its own (it
-   * becomes `running`, it crashes, it times out, something stops it). So the
-   * wait graph is a set of waiters pointing at records that are making
-   * progress — it has no cycles, and no waiter can be pointing at another
+   * **Why this cannot deadlock.** A waiter only ever waits on something that
+   * is making progress on its own. An admitted start never waits: it has
+   * already left this loop, and every path out of `starting` is one it
+   * reaches by itself (it becomes `running`, it crashes, it times out,
+   * something stops it). A dying child never waits either: its
+   * `killAndWait` SIGKILLs after five seconds and resolves on the exit. So
+   * the wait graph has no cycles, and no waiter can be pointing at another
    * waiter. The "nothing to wait on" case is not a special case either: if
-   * `running + admittedStarting >= maxRunning` while `running < maxRunning`,
-   * then `admittedStarting > 0` and there IS something to wait on; and if
-   * `running >= maxRunning` with nothing evictable, every slot is held by a
-   * record answering a request, which is the busy refusal.
+   * `running + admittedStarting + dying >= maxRunning` while
+   * `running < maxRunning`, then one of the other two counts is above zero
+   * and there IS something to wait on; and if `running >= maxRunning` with
+   * nothing evictable, every slot is held by a record answering a request,
+   * which is the busy refusal.
    *
    * A `running` record with an open lease (a response still being streamed)
    * is never a victim (codex round 8, Fix 2) — that rule is `chooseVictim`'s,
@@ -699,7 +746,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    * the id (codex round 19).
    */
   async function makeRoom(id: string, stillOurs: () => boolean): Promise<void> {
-    while (runningCount() + admittedStarts().length >= maxRunning) {
+    while (runningCount() + admittedStarts().length + dying.size >= maxRunning) {
       const victimId = chooseVictim(recordsById())
       if (victimId !== null) {
         await lock.run(victimId, () => applyAllowingRefusal(victimId, { type: "evict" }))
@@ -711,6 +758,14 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       const waitFor = admittedStarts().find(([otherId]) => otherId !== id)?.[1].opening
       if (waitFor) {
         await waitFor.catch(() => {})
+        continue
+      }
+      // A slot held by a child that is on its way out: nothing else will
+      // free it, and `chooseVictim` cannot name it (its record is already
+      // idle), so this waits for the process itself rather than refusing a
+      // reader over a server that is seconds from gone.
+      if (dying.size > 0) {
+        await Promise.race([...dying])
         continue
       }
       // Every slot is held by a running record that is actively answering a
