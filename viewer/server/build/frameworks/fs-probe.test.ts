@@ -358,6 +358,13 @@ describe("owningPackageDir", () => {
     expect(await owningPackageDir(r, "apps/web/.next")).toBe(join("apps", "web"))
   })
 
+  it("counts the directory itself only when asked, for a configured output dir that IS the app (codex round 41)", async () => {
+    const r = await root()
+    await writePackage(r, "apps/web")
+    expect(await owningPackageDir(r, "apps/web")).toBeNull()
+    expect(await owningPackageDir(r, "apps/web", { self: true })).toBe(join("apps", "web"))
+  })
+
   it("answers null when no ancestor below the root holds a package.json (the root owns it)", async () => {
     const r = await root()
     await writePackage(r, ".")

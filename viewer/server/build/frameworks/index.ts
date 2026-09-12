@@ -16,7 +16,7 @@ export async function inspectBuild(
 ): Promise<BuildShape> {
   // The configured output dir says which app the prototype is: its owning
   // package is where every adapter looks first (codex round 34).
-  const target: BuildTarget = { within: await owningPackageDir(checkoutRoot, fallbackOutputDir) }
+  const target: BuildTarget = { within: await owningPackageDir(checkoutRoot, fallbackOutputDir, { self: true }) }
   for (const adapter of adapters) {
     const shape = await adapter.inspectBuild(checkoutRoot, target)
     if (shape) return shape

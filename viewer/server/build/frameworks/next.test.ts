@@ -675,6 +675,10 @@ describe("inspectBuild", () => {
 
     const rootApp = await inspectBuild(root, "out")
     expect(rootApp).toMatchObject({ kind: "server", start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"] })
+
+    // The configured output dir can be the app directory itself (codex
+    // round 41); that names the app just as well.
+    expect(await inspectBuild(root, join("apps", "web"))).toMatchObject({ kind: "server", cwd: join("apps", "web") })
   })
 
   /**

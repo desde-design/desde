@@ -68,8 +68,20 @@ async function dependsOn(checkoutRoot: string, name: string): Promise<boolean> {
  * dir too (`apps/web/build/next`): round 29 took the output's parent, which
  * named `apps/web/build`, a directory that owns nothing.
  */
-async function owningPackageDir(checkoutRoot: string, rel: string): Promise<string | null> {
-  for (let dir = dirname(rel); dir !== "." && dir !== "/" && dir !== ""; dir = dirname(dir)) {
+async function owningPackageDir(
+  checkoutRoot: string,
+  rel: string,
+  options: {
+    /**
+     * Also consider `rel` itself (codex round 41). A build OUTPUT is never
+     * its own package, so the scans start at its parent; the prototype's
+     * configured output dir can be the app directory itself (`apps/web`),
+     * and starting at its parent read that as the root's.
+     */
+    self?: boolean
+  } = {},
+): Promise<string | null> {
+  for (let dir = options.self ? rel : dirname(rel); dir !== "." && dir !== "/" && dir !== ""; dir = dirname(dir)) {
     if (await isFile(join(checkoutRoot, dir, "package.json"))) return dir
   }
   return null
