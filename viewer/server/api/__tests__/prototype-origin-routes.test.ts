@@ -895,6 +895,24 @@ describe("GET /projects/:id/prototype-origin", () => {
       })
     })
 
+    /**
+     * Codex round 37. Fallback mode answered `capabilityRequired: true`
+     * whatever the access, so a public-link project's page acted on it once
+     * for nothing and then could not notice the project turning private.
+     */
+    it("needs no capability in fallback mode for an anonymously readable prototype", async () => {
+      const ctx = setup({ config: containerConfig, prototypeListeners: refusingListeners() })
+      const project = await seedProject(ctx.storage, { access: "public-link" })
+
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(200)
+
+      expect(res.body).toMatchObject({ mode: "fallback", origin: null, capabilityRequired: false })
+    })
+
     it("downgrades even when the request Host itself is the loopback shell (no header)", async () => {
       const ctx = setup({ config: containerConfig, prototypeListeners: refusingListeners() })
       const project = await seedProject(ctx.storage)

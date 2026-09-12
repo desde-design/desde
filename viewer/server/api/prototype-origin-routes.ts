@@ -324,7 +324,12 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
       body: {
         mode: "fallback",
         origin: null,
-        capabilityRequired: true,
+        // From the project's access, like every other branch (codex round
+        // 37). A fixed `true` for an anonymously readable project had the
+        // page act on it once, uselessly, and then hold a fingerprint that
+        // an admin making the project private could no longer change, so
+        // the re-render that mints the capability never came.
+        capabilityRequired: !prototypeAnonymouslyReadable(project.access, policy.allowPublicLinks),
         ...(deploymentId ? { deploymentId } : {}),
         serve,
         ...(processStatus ? { process: processStatus } : {}),

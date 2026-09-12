@@ -363,7 +363,8 @@ export type PrototypeOriginResponse = PrototypeDeployment &
     | {
         mode: "fallback"
         origin: null
-        capabilityRequired: true
+        /** From the project's access, like every other mode (codex round 37); it used to be pinned `true`. */
+        capabilityRequired: boolean
         serve: PrototypeServeMode
         process?: PrototypeProcessStatus
       }
