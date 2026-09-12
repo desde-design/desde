@@ -43,6 +43,12 @@ describe("findNextDistDir", () => {
     expect(await findNextDistDir(r)).toBe("build")
   })
 
+  it("finds a workspace app's dist dir three segments down (apps/web/.next)", async () => {
+    const r = await root()
+    await writeDistDir(r, "apps/web/.next")
+    expect(await findNextDistDir(r)).toBe("apps/web/.next")
+  })
+
   it("finds a custom nested distDir (distDir: \"build/next\")", async () => {
     const r = await root()
     await writeDistDir(r, "build/next")
@@ -111,6 +117,12 @@ describe("findReactRouterBuildDir", () => {
     const r = await root()
     await writeReactRouterBuild(r, "dist")
     expect(await findReactRouterBuildDir(r)).toEqual({ dir: "dist", serverFile: "index.js" })
+  })
+
+  it("finds a workspace app's build three segments down (apps/web/build)", async () => {
+    const r = await root()
+    await writeReactRouterBuild(r, "apps/web/build")
+    expect(await findReactRouterBuildDir(r)).toEqual({ dir: "apps/web/build", serverFile: "index.js" })
   })
 
   it("finds a configured buildDirectory at depth 2", async () => {
@@ -193,6 +205,12 @@ describe("findNitroOutputDir", () => {
     const r = await root()
     await writeNitroOutput(r, "dist")
     expect(await findNitroOutputDir(r)).toBe("dist")
+  })
+
+  it("finds a workspace app's output three segments down (apps/web/.output)", async () => {
+    const r = await root()
+    await writeNitroOutput(r, "apps/web/.output")
+    expect(await findNitroOutputDir(r)).toBe("apps/web/.output")
   })
 
   it("finds a configured output.dir at depth 2", async () => {

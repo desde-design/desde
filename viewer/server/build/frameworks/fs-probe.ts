@@ -86,7 +86,7 @@ async function listDirs(p: string, excluded: Set<string>): Promise<string[]> {
 
 /**
  * Walks the same ground {@link findNextDistDir} does — the preferred name
- * first, then depth 1, then depth 2 — and hands each candidate to `qualifies`,
+ * first, then depth 1, then depth 2, then depth 3 (the workspace layout) — and hands each candidate to `qualifies`,
  * which answers what that framework's scan wants to know about it.
  *
  * The preferred name is checked first so the answer never depends on
@@ -112,6 +112,16 @@ async function scanForOutputDir<T>(
       if (found !== null) return found
     }
   }
+  // Depth 3 is the workspace layout, `apps/web/<output>` (codex round 29
+  // review): the app is two segments down and its output one more.
+  for (const name of depth1) {
+    for (const name2 of await listDirs(join(checkoutRoot, name), EXCLUDED_OUTPUT_DIR_NAMES)) {
+      for (const name3 of await listDirs(join(checkoutRoot, name, name2), EXCLUDED_OUTPUT_DIR_NAMES)) {
+        const found = await qualifies(join(name, name2, name3))
+        if (found !== null) return found
+      }
+    }
+  }
   return null
 }
 
@@ -135,7 +145,7 @@ async function isNextDistDir(checkoutRoot: string, rel: string): Promise<boolean
  * `BUILD_ID` can survive a switch to `output: "export"`, and only the pair
  * together is specific to a server-capable build.
  *
- * Scans depth 1 and depth 2 under `checkoutRoot`, skipping `node_modules`,
+ * Scans depth 1 to 3 under `checkoutRoot`, skipping `node_modules`,
  * `.git`, `out` and `public` — none of those is ever a Next dist dir, and
  * `node_modules` alone can hold thousands of directories worth walking into
  * for nothing. `.next` is checked FIRST and preferred when it qualifies,
@@ -158,6 +168,16 @@ export async function findNextDistDir(checkoutRoot: string): Promise<string | nu
     for (const name2 of depth2) {
       const rel = join(name, name2)
       if (await isNextDistDir(checkoutRoot, rel)) return rel
+    }
+  }
+  // Depth 3 is the workspace layout, `apps/web/.next` (codex round 29
+  // review): the app is two segments down and its dist dir one more.
+  for (const name of depth1) {
+    for (const name2 of await listDirs(join(checkoutRoot, name), EXCLUDED_DIST_DIR_NAMES)) {
+      for (const name3 of await listDirs(join(checkoutRoot, name, name2), EXCLUDED_DIST_DIR_NAMES)) {
+        const rel = join(name, name2, name3)
+        if (await isNextDistDir(checkoutRoot, rel)) return rel
+      }
     }
   }
   return null
@@ -212,7 +232,7 @@ async function soleServerBundle(serverDir: string): Promise<string | null> {
  * enough name in a repo that either one alone would match something that is
  * not a build at all.
  *
- * Scans depth 1 and depth 2 under `checkoutRoot`, skipping `node_modules`,
+ * Scans depth 1 to 3 under `checkoutRoot`, skipping `node_modules`,
  * `.git` and `public`, and prefers `build` (the default) when it qualifies.
  */
 export async function findReactRouterBuildDir(checkoutRoot: string): Promise<ReactRouterBuild | null> {
@@ -237,7 +257,7 @@ export async function findReactRouterBuildDir(checkoutRoot: string): Promise<Rea
  * plausible file name in a source tree, and a `public/` directory is an
  * ordinary thing for a repo to have.
  *
- * Scans depth 1 and depth 2 under `checkoutRoot`, skipping `node_modules`,
+ * Scans depth 1 to 3 under `checkoutRoot`, skipping `node_modules`,
  * `.git` and `public`, and prefers `.output` (the default) when it qualifies.
  * Returns the output dir relative to `checkoutRoot`, or `null`.
  */
