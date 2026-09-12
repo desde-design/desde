@@ -477,6 +477,38 @@ describe("review shell — following the process-state stream", () => {
     expect(refresh).toHaveBeenCalledTimes(1)
   })
 
+  /**
+   * Codex round 31. The page fetches the project (which mints the
+   * capability) and then the prototype-origin body; access can turn private
+   * in between, so the body already says a capability is needed while the
+   * page holds none. That answer is now seeded into the live origin, and
+   * the shell asks for the re-render on its first paint rather than only
+   * once the stream's first event happens to arrive.
+   */
+  it("asks the router to re-render at once when the page was rendered without a capability the server already said it needs", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={{ ...PROJECT, capabilityRequired: true }} />
+      </Scenario>,
+    )
+    expect(refresh).toHaveBeenCalledTimes(1)
+
+    // The stream's first event repeats the same answer: no second refresh.
+    pushOrigin(RUNNING_GENERATION_1, { capabilityRequired: true })
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not re-render on first paint when the server said no capability is needed", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={{ ...PROJECT, capabilityRequired: false }} />
+      </Scenario>,
+    )
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
   it("does not re-render when the page already holds a capability", () => {
     installFakeEventSource()
     render(

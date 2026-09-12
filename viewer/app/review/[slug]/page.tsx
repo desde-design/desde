@@ -365,6 +365,11 @@ export default async function ReviewPage({
         // whether a deploy-time root-absolute-asset warning applies.
         serveDomain: config.serveDomain,
         capability,
+        // Whether the prototype-origin route said a capability is needed, so
+        // the shell can act on a render whose project fetch minted none
+        // (access turned private between the two fetches) without waiting
+        // for the stream's first event (codex round 31).
+        ...(embedOrigin.capabilityRequired === undefined ? {} : { capabilityRequired: embedOrigin.capabilityRequired }),
         // The three per-request origin fields. All resolved server-side:
         // nothing downstream may recompute any of this from `window.location`,
         // because the `<iframe>` is part of the server-rendered HTML and the

@@ -106,6 +106,17 @@ export interface ReviewShellProject {
    */
   capability: string | null
   /**
+   * Whether the server said this prototype's assets need that capability,
+   * from the same render that minted (or did not mint) it; absent when the
+   * body did not say (codex round 31). Seeds the live origin below so the
+   * capability check can act on the FIRST render: access can turn private
+   * between the page's project fetch, which minted no capability, and its
+   * prototype-origin fetch, which says one is needed. Before this the first
+   * frame requested private assets bare, and only the stream's first event
+   * could ask for the re-render, if it arrived at all.
+   */
+  capabilityRequired?: boolean
+  /**
    * The origin THIS shell is on for this request, resolved server-side from
    * the allowlisted `Host` (`page.tsx`'s `reviewShellOrigin`).
    *
@@ -222,6 +233,7 @@ export function ReviewShell({
       ...(project.originReason ? { reason: project.originReason } : {}),
       ...(project.bridgeAssetPath ? { bridgeAssetPath: project.bridgeAssetPath } : {}),
       ...(project.deploymentId ? { deploymentId: project.deploymentId } : {}),
+      ...(project.capabilityRequired === undefined ? {} : { capabilityRequired: project.capabilityRequired }),
     }),
     [
       project.mode,
@@ -232,6 +244,7 @@ export function ReviewShell({
       project.originReason,
       project.bridgeAssetPath,
       project.deploymentId,
+      project.capabilityRequired,
     ],
   )
 
