@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createApp, createTestPrototypeListeners, type AppDeps } from "../../__tests__/test-app"
 import { createSwappableApp } from "../../__tests__/swappable-app"
 import { testGithubRuntime } from "../../__tests__/test-github-runtime"
+import { ALLOW_PUBLIC_LINKS_KEY, invalidateInstanceSettingsCache } from "../../instance-settings"
 import { InMemoryStorage } from "../../storage/in-memory-storage"
 import type { AssetStore, StoredAsset } from "../../assets/types"
 import type { ViewerConfig } from "../../config"
@@ -1073,7 +1074,7 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     app: ReturnType<typeof createApp>,
     project: Project,
     predicate: (received: string) => boolean,
-    options: { onFirstByte?: () => void; timeoutMs?: number } = {},
+    options: { onFirstByte?: () => void; timeoutMs?: number; anonymous?: boolean } = {},
   ): Promise<{ received: string; destroy: () => void }> {
     const { onFirstByte, timeoutMs = 3000 } = options
     let sawFirstByte = false
@@ -1083,9 +1084,11 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
       const timer = setTimeout(() => {
         if (!destroyed) reject(new Error(`predicate never matched; received: ${chunks.join("")}`))
       }, timeoutMs)
-      request(app)
-        .get(`/api/v1/projects/${project.id}/prototype-origin/stream`)
-        .set(auth)
+      const pending = request(app).get(`/api/v1/projects/${project.id}/prototype-origin/stream`)
+      // The admin bearer reads every project, so a test about LOSING access
+      // has to send no credential at all — see `streamUntilClosed`.
+      if (!options.anonymous) pending.set(auth)
+      pending
         .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
         .buffer(false)
         .parse((res, cb) => {
@@ -1119,6 +1122,76 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
   /** Parses every `event: origin\ndata: <json>\n\n` frame, in order. */
   function originFrames(received: string): unknown[] {
     return [...received.matchAll(/event: origin\ndata: (.+)\n\n/g)].map((m) => JSON.parse(m[1] as string))
+  }
+
+  /**
+   * Connects ANONYMOUSLY and resolves with everything received once the
+   * SERVER closes the response.
+   *
+   * `readUntil` above cannot answer the question these tests ask. It resolves
+   * on a predicate and then destroys the connection from the client side, so
+   * it can prove a frame arrived but never that the server ended the stream
+   * by itself. Here the whole assertion is that it did: the promise only
+   * settles on the response's own `end`, so a stream that stays open fails
+   * the test by timing out rather than passing quietly.
+   *
+   * Anonymous on purpose. The admin bearer every other test sends reads any
+   * project by `hasAdminAuthority`, so a caller holding it can never lose
+   * access.
+   */
+  function streamUntilClosed(
+    app: ReturnType<typeof createApp>,
+    project: Project,
+    options: { onFirstByte?: () => void; timeoutMs?: number } = {},
+  ): Promise<string> {
+    const { onFirstByte, timeoutMs = 3000 } = options
+    let sawFirstByte = false
+    return new Promise((resolve, reject) => {
+      const chunks: string[] = []
+      let settled = false
+      const timer = setTimeout(() => {
+        if (!settled) reject(new Error(`the server never closed the stream; received: ${chunks.join("")}`))
+      }, timeoutMs)
+      const settle = (): void => {
+        settled = true
+        clearTimeout(timer)
+        resolve(chunks.join(""))
+      }
+      request(app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin/stream`)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .buffer(false)
+        .parse((res, cb) => {
+          res.on("data", (chunk: Buffer) => {
+            if (!sawFirstByte) {
+              sawFirstByte = true
+              onFirstByte?.()
+            }
+            chunks.push(chunk.toString("utf-8"))
+          })
+          // The response's OWN end, which is the assertion. Superagent calls
+          // the `.end()` callback below as soon as the parser is installed
+          // when buffering is off, so that callback says nothing about
+          // whether the stream is still open — only this does.
+          res.on("end", () => {
+            settle()
+            cb(null, Buffer.from(""))
+          })
+          res.on("error", () => cb(null, Buffer.from("")))
+        })
+        .end((err) => {
+          if (err && !settled && !DISCONNECT_ERROR.test(err.message)) reject(err)
+        })
+    })
+  }
+
+  /** Flips the instance-wide public-link kill switch and drops its cache. */
+  async function setPublicLinks(storage: InMemoryStorage, allowed: boolean): Promise<void> {
+    await storage.setInstanceSetting(ALLOW_PUBLIC_LINKS_KEY, String(allowed))
+    // The settings cache is keyed by storage instance and only invalidated by
+    // the route that writes it, so a test that writes directly must do this
+    // itself — see `server/instance-settings.ts`.
+    invalidateInstanceSettingsCache(storage)
   }
 
   it("sends one origin event on connect whose JSON equals the plain route's body", async () => {
@@ -1361,6 +1434,100 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     // process — not a patch of the old body.
     expect(frames[1]?.origin).not.toBe(frames[0]?.origin)
     expect(frames[1]?.process).toEqual(running)
+  })
+
+  /**
+   * The read check runs at CONNECT and again on every tick, and this is the
+   * control for the three tests below it: an anonymous reader of a
+   * `public-link` project keeps every update for as long as that stays true.
+   * Without it, "the stream closed" would be evidence of nothing — a re-check
+   * that refused everyone would pass the revocation tests too.
+   */
+  it("keeps streaming for an anonymous reader while the project is still readable", async () => {
+    const fake = fakePrototypeProcesses()
+    const ctx = setup({ prototypeProcesses: fake, prototypeOriginStreamPingMs: 20 })
+    const project = await seedProject(ctx.storage, { access: "public-link" })
+    const deploymentId = await makeServerDeployment(ctx, project)
+    const running: ProcessStatus = {
+      state: "running",
+      port: 4321,
+      since: "2026-09-11T00:00:00.000Z",
+      generation: 1,
+    }
+
+    const { received, destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 2, {
+      anonymous: true,
+      onFirstByte: () => fake.emit(deploymentId, running),
+    })
+    destroy()
+
+    const frames = originFrames(received) as { process?: ProcessStatus }[]
+    expect(frames[1]?.process).toEqual(running)
+  })
+
+  /**
+   * The stream used to check the read policy once, at connect, and reuse that
+   * verdict for the rest of the connection. So an anonymous visitor whose
+   * access the admin had just withdrawn kept the stream — and the next active
+   * deployment opened a fresh loopback listener for them and sent its origin.
+   *
+   * The tick re-runs the same check the plain route runs, against the same
+   * request, and ends the response when it no longer passes.
+   */
+  it("ends the stream on the next tick once the caller may no longer read the project", async () => {
+    const ctx = setup({ prototypeOriginStreamPingMs: 20 })
+    const project = await seedProject(ctx.storage, { access: "public-link" })
+
+    const received = await streamUntilClosed(ctx.app, project, {
+      onFirstByte: () => {
+        void (async () => {
+          await setPublicLinks(ctx.storage, false)
+          // A rebuild, which is exactly what the old code would have followed
+          // into a new listener for a caller who may no longer read anything.
+          const deployment = await ctx.storage.createDeployment({
+            projectId: project.id,
+            status: "deployed",
+          })
+          await ctx.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
+        })()
+      },
+    })
+
+    // The connect event, and nothing after it. A second frame would be the
+    // new deployment's origin — a live listener handed to a caller who lost
+    // access.
+    expect(originFrames(received)).toHaveLength(1)
+  })
+
+  /**
+   * The same check covers the callback path. A process transition can arrive
+   * at any moment, so a revocation that only the heartbeat noticed would
+   * leave a window in which a status callback still sent a body.
+   */
+  it("sends nothing for a process callback that lands after the caller lost access", async () => {
+    const fake = fakePrototypeProcesses()
+    // No ping override: the default heartbeat is 25s, so nothing but the
+    // callback below can end this stream within the test's own timeout.
+    const ctx = setup({ prototypeProcesses: fake })
+    const project = await seedProject(ctx.storage, { access: "public-link" })
+    const deploymentId = await makeServerDeployment(ctx, project)
+    const running: ProcessStatus = {
+      state: "running",
+      port: 4321,
+      since: "2026-09-11T00:00:00.000Z",
+      generation: 1,
+    }
+
+    const received = await streamUntilClosed(ctx.app, project, {
+      onFirstByte: () => {
+        void (async () => {
+          await setPublicLinks(ctx.storage, false)
+          fake.emit(deploymentId, running)
+        })()
+      },
+    })
+
+    expect(originFrames(received)).toHaveLength(1)
   })
 
   it("unsubscribes from the process manager when the client disconnects", async () => {

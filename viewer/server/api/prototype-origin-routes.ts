@@ -1,6 +1,10 @@
 import { Router, type Request } from "express"
 import type { AppDeps } from "../create-app"
-import { requireProjectReadWithPolicy, type ProjectReadPolicy } from "../auth/authorize"
+import {
+  requireProjectReadWithPolicy,
+  resolveProjectReadAccess,
+  type ProjectReadPolicy,
+} from "../auth/authorize"
 import { buildHostAllowlist, isAllowedHost, type HostAllowlist } from "../serve/host-allowlist"
 import { LoopbackPortsExhaustedError } from "../serve/loopback-listeners"
 import {
@@ -478,7 +482,9 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
    * Follows `comments-routes.ts`'s stream handler exactly for the connection
    * lifecycle (the `closed` flag registered before the first `await`, the
    * idempotent `cleanup`, the concurrency cap acquired only after the read
-   * gate passes). What is new here is what happens AFTER the stream opens:
+   * gate passes). The read gate runs again before every update this
+   * connection sends, not only at connect — see `readableProjectNow`. What
+   * is new here is what happens AFTER the stream opens:
    * `buildPrototypeOriginBody` runs once, at connect, and its `ensure` side
    * effect runs then and only then. Every later event either patches a
    * `process` status straight into the body already in hand (same
@@ -524,7 +530,16 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     const access = await requireProjectReadWithPolicy(deps, req, res, String(req.params.id))
     if (closed) return
     if (!access) return
-    const { project, policy } = access
+    const { project } = access
+    /**
+     * The policy the CURRENT body was built against, replaced on every
+     * re-check below.
+     *
+     * It used to be the one captured at connect, reused for the life of the
+     * connection — so a body sent an hour later could still be stating the
+     * `capabilityRequired` that applied when the stream opened.
+     */
+    let policy: ProjectReadPolicy = access.policy
 
     // Bound how many of these one client may hold open — see `rate-limit.ts`.
     // Acquired here, after the read gate, so a refused read (404) never
@@ -640,10 +655,54 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     }
 
     /**
+     * Ends this connection for good: no further bytes, no body, just the
+     * close. Used by the read re-check below, which has no status line left
+     * to refuse with.
+     *
+     * `closed` is set BEFORE `res.end()` so anything already queued behind an
+     * await sees it and sends nothing.
+     */
+    const endStream = (): void => {
+      if (closed) return
+      closed = true
+      cleanup()
+      res.end()
+    }
+
+    /**
+     * Re-runs the read gate against the CURRENT identity, and hands back the
+     * project as it is right now — or `null`, having ended the stream,
+     * when the caller may no longer read it.
+     *
+     * Every update path goes through this, and that is the whole fix. The
+     * stream used to check the read policy once, at connect, and reuse that
+     * verdict: a member removed from a project, or an anonymous public-link
+     * visitor after an admin turned public links off, kept the connection,
+     * and the next active deployment opened a fresh loopback listener for
+     * them and sent its origin. A listener is the credential in loopback
+     * mode, so that is a live prototype handed to someone who had just lost
+     * access to it.
+     *
+     * It also replaces the two `getProject` reads the update paths used to
+     * do: the gate loads the project anyway, so re-reading it separately
+     * would be a second round trip AND a second answer to "what does the
+     * project look like now".
+     */
+    const readableProjectNow = async (): Promise<Project | null> => {
+      const outcome = await resolveProjectReadAccess(deps, req, project.id)
+      if (!outcome.ok) {
+        endStream()
+        return null
+      }
+      policy = outcome.access.policy
+      return outcome.access.project
+    }
+
+    /**
      * Runs on every process-status change for whichever deployment this
      * stream is currently subscribed to.
      *
-     * Re-reads the project's active deployment id FIRST, because the
+     * Re-checks the read gate and re-reads the project FIRST, because the
      * subscription this callback fired from may no longer be the active
      * one — a build can have published a new deployment since connect. When
      * it has, `refollowActiveDeployment` above takes over. When the active
@@ -652,7 +711,7 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
      */
     const handleProcessStatus = async (fromDeploymentId: string, status: ProcessStatus): Promise<void> => {
       if (closed) return
-      const freshProject = await deps.storage.getProject(project.id)
+      const freshProject = await readableProjectNow()
       if (closed) return
       if (!freshProject) return
       if ((freshProject.activeDeploymentId ?? null) !== current.deploymentId) {
@@ -722,10 +781,16 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
      *
      * Runs through the same queue the status callbacks do, so a tick and a
      * callback can never both be half way through a deployment change.
+     *
+     * A third thing can change, and it is checked before either of those:
+     * whether the caller may still read this project at all. See
+     * `readableProjectNow`.
      */
     const pollForChanges = async (): Promise<void> => {
       if (closed) return
-      const freshProject = await deps.storage.getProject(project.id)
+      // The read gate first, on every tick: a stream must not outlive the
+      // access that opened it. See `readableProjectNow`.
+      const freshProject = await readableProjectNow()
       if (closed || !freshProject) return
       if ((freshProject.activeDeploymentId ?? null) !== current.deploymentId) {
         await refollowActiveDeployment(freshProject)

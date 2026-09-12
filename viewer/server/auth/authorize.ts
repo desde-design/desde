@@ -705,15 +705,57 @@ export async function requireProjectReadWithPolicy(
   res: Response,
   projectId: string,
 ): Promise<ProjectReadAccess | null> {
-  const ctx = await resolveReadContext(deps, req)
-  if ("error" in ctx) {
-    res.status(401).json({ error: ctx.error })
+  const outcome = await resolveProjectReadAccess(deps, req, projectId)
+  if (!outcome.ok) {
+    res.status(outcome.status).json(outcome.body)
     return null
   }
-  const readable = await readableProjectWithPolicy(deps, res, ctx, projectId)
-  if (!readable) return null
-  setRequestContext(res, ctx)
-  return { project: readable.project, ctx, policy: readable.policy }
+  setRequestContext(res, outcome.access.ctx)
+  return outcome.access
+}
+
+/**
+ * What `resolveProjectReadAccess` answers: the admitted access, or the
+ * refusal `requireProjectReadWithPolicy` would have written.
+ *
+ * The refusal carries its status and body rather than a bare `null` so the
+ * writing guard above stays a pure projection of this — one rule, one set of
+ * refusal shapes, and no chance of the two drifting into different answers
+ * for the same request.
+ */
+export type ProjectReadOutcome =
+  | { ok: true; access: ProjectReadAccess }
+  | { ok: false; status: 401 | 404; body: { error: string } }
+
+/**
+ * The read gate with NO response of its own: same 401, same byte-identical
+ * 404, handed back instead of sent.
+ *
+ * It exists for a caller that has already answered — the prototype-origin SSE
+ * stream (`api/prototype-origin-routes.ts`). That route flushes a 200 and
+ * then holds the connection open for minutes, re-reading the project on every
+ * heartbeat. Re-running the gate there is the only thing that stops a stream
+ * outliving the access that opened it, and it cannot use the writing guard
+ * above: the status line is long gone, so a 404 written onto that response
+ * would be appended to the event stream as body bytes rather than refusing
+ * anything. The stream closes the connection instead.
+ *
+ * The identity is resolved FRESH from the request every time, exactly as at
+ * connect. That is the point: a session whose user was removed, and a machine
+ * token whose owner was deactivated, both stop resolving, and the project's
+ * own readability is then re-decided against a freshly loaded policy — so the
+ * public-link kill switch reaches a live stream too.
+ */
+export async function resolveProjectReadAccess(
+  deps: AuthorizeDeps,
+  req: Pick<Request, "headers" | "get">,
+  projectId: string,
+): Promise<ProjectReadOutcome> {
+  const ctx = await resolveReadContext(deps, req)
+  if ("error" in ctx) return { ok: false, status: 401, body: { error: ctx.error } }
+  const readable = await readProjectForContext(deps, ctx, projectId)
+  if (!readable) return { ok: false, status: 404, body: { ...PROJECT_NOT_FOUND } }
+  return { ok: true, access: { project: readable.project, ctx, policy: readable.policy } }
 }
 
 /**
@@ -741,15 +783,41 @@ async function readableProjectWithPolicy(
   ctx: AuthorityContext,
   projectId: string,
 ): Promise<{ project: Project; policy: ProjectReadPolicy } | null> {
+  const readable = await readProjectForContext(deps, ctx, projectId)
+  if (!readable) {
+    res.status(404).json({ ...PROJECT_NOT_FOUND })
+    return null
+  }
+  return readable
+}
+
+/**
+ * The 404 body both refusals send. One object, spread at each use, so the
+ * "byte-identical" claim above is a fact about the code rather than about two
+ * string literals that happen to match today.
+ */
+const PROJECT_NOT_FOUND = { error: "Project not found" } as const
+
+/**
+ * The rule itself, with no response and no request: load the project, load
+ * the policy, ask `canReadProject`. `null` means "not readable, or not there"
+ * — deliberately the same answer for both, since that is what makes the two
+ * indistinguishable from outside.
+ *
+ * Every gate in this file goes through here, including the non-writing
+ * `resolveProjectReadAccess` the SSE stream re-runs.
+ */
+async function readProjectForContext(
+  deps: AuthorizeDeps,
+  ctx: AuthorityContext,
+  projectId: string,
+): Promise<{ project: Project; policy: ProjectReadPolicy } | null> {
   const project = await deps.storage.getProject(projectId)
   const policy = await loadProjectReadPolicy(deps.storage)
   const readable = project
     ? await canReadProject(ctx, project, makeProjectMembership(deps.storage), policy)
     : false
-  if (!project || !readable) {
-    res.status(404).json({ error: "Project not found" })
-    return null
-  }
+  if (!project || !readable) return null
   return { project, policy }
 }
 
