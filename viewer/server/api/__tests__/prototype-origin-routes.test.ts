@@ -978,6 +978,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         error: "Prototype origin unavailable",
         reason: "listener-failed",
         serve: "static",
+        deploymentId: project.activeDeploymentId,
       })
     })
 
@@ -1000,6 +1001,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         error: "Prototype origin unavailable",
         reason: "listener-failed",
         serve: "server",
+        deploymentId: project.activeDeploymentId,
       })
     })
 
@@ -1070,6 +1072,47 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body.serve).toBe("server")
       expect(res.body.range).toEqual({ from: 3101, to: 3120 })
     })
+
+    /**
+     * A 503 names the deployment the same way a 200 does.
+     *
+     * The review page compares that id against the deployment it was rendered
+     * with, and asks Next to re-render when they differ — a new deployment
+     * needs a capability only the server can mint, and it has to remount the
+     * frame. A rebuild that lands while the origin is unavailable used to say
+     * nothing at all, so the page went on believing the previous build was
+     * live and never re-rendered for the new one, even once the origin came
+     * back.
+     */
+    it("names the deployment on both 503 bodies", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {})
+      const range = { from: 3101, to: 3120 }
+      const exhausted: LoopbackListenerRegistry = {
+        ...refusingListeners(),
+        ensure: () => Promise.reject(new LoopbackPortsExhaustedError(range)),
+      }
+      const withPorts = setup({
+        prototypeListeners: exhausted,
+        config: { ...loopbackConfig, loopbackPortRange: range },
+      })
+      const first = await seedProject(withPorts.storage)
+      const portsBody = await request(withPorts.app)
+        .get(`/api/v1/projects/${first.id}/prototype-origin`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(503)
+      expect(portsBody.body.deploymentId).toBe(first.activeDeploymentId)
+
+      const refusing = setup({ prototypeListeners: refusingListeners() })
+      const second = await seedProject(refusing.storage)
+      const failedBody = await request(refusing.app)
+        .get(`/api/v1/projects/${second.id}/prototype-origin`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(503)
+      expect(failedBody.body.deploymentId).toBe(second.activeDeploymentId)
+    })
+
   })
 })
 
@@ -1612,6 +1655,24 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     await vi.waitFor(() => {
       expect(fake.subscribers.get(deploymentId)?.size ?? 0).toBe(1)
     })
+  })
+
+  /**
+   * The stream's 503 has to name the deployment too, for the same reason the
+   * plain route's does: this is the body the page follows, and a rebuild that
+   * lands while the origin is unavailable is otherwise invisible to it.
+   */
+  it("names the deployment on the 503 it sends", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    const ctx = setup({ prototypeListeners: refusingListeners() })
+    const project = await seedProject(ctx.storage)
+
+    const { received, destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 1)
+    destroy()
+
+    const frames = originFrames(received) as { reason?: string; deploymentId?: string }[]
+    expect(frames[0]?.reason).toBe("listener-failed")
+    expect(frames[0]?.deploymentId).toBe(project.activeDeploymentId)
   })
 
   /** A 503 that keeps saying the same thing sends nothing: the page already shows it. */

@@ -125,10 +125,24 @@ function acceptableShellOrigins(config: { publicUrl: string; port: number }): Re
  * `ports-exhausted` additionally carries the configured `range`, the same
  * one the loopback success shape carries, so the page can count how many
  * ports there are.
+ *
+ * Both also name `deploymentId`, the way the 200 bodies do, and omit it when
+ * there is none. The review page compares it against the deployment it was
+ * rendered with and re-renders when they differ (a new deployment needs a
+ * capability only the server can mint, and a new frame). Without it on these
+ * bodies, a rebuild that landed while the origin was unavailable was invisible
+ * to an open page, which went on believing the previous build was the live one
+ * even after the origin came back.
  */
 export type PrototypeOriginErrorBody =
-  | { error: string; reason: "ports-exhausted"; serve: DeploymentServe; range: { from: number; to: number } | null }
-  | { error: string; reason: "listener-failed"; serve: DeploymentServe }
+  | {
+      error: string
+      reason: "ports-exhausted"
+      serve: DeploymentServe
+      range: { from: number; to: number } | null
+      deploymentId?: string
+    }
+  | { error: string; reason: "listener-failed"; serve: DeploymentServe; deploymentId?: string }
 
 /**
  * What `buildPrototypeOriginBody` hands back: the HTTP status the plain
@@ -366,6 +380,7 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
           reason: "ports-exhausted",
           serve,
           range: deps.config.loopbackPortRange,
+          ...(deploymentId ? { deploymentId } : {}),
         },
       }
     }
@@ -399,7 +414,7 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
     return {
       status: 503,
       deploymentId,
-      body: { ...ORIGIN_UNAVAILABLE, reason: "listener-failed", serve },
+      body: { ...ORIGIN_UNAVAILABLE, reason: "listener-failed", serve, ...(deploymentId ? { deploymentId } : {}) },
     }
   }
 }
