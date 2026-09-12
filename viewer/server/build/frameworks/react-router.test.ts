@@ -18,6 +18,8 @@ async function checkout(opts: {
   clientHtml?: boolean
   /** Whether `node_modules/.bin/react-router-serve` exists in this checkout. */
   serveBinary?: boolean
+  /** Whether `<parent of buildDir>/node_modules/.bin/react-router-serve` exists (codex round 30). */
+  appServeBinary?: boolean
   /** What `react-router.config`'s `buildDirectory` was set to, if anything. */
   buildDir?: string
   /** What `react-router.config`'s `serverBuildFile` was set to, if anything. */
@@ -70,6 +72,11 @@ async function checkout(opts: {
   if (opts.serveBinary) {
     await mkdir(join(root, "node_modules", ".bin"), { recursive: true })
     await writeFile(join(root, "node_modules", ".bin", "react-router-serve"), "#!/usr/bin/env node\n")
+  }
+  if (opts.appServeBinary) {
+    const appDir = dirname(buildDir)
+    await mkdir(join(root, appDir, "node_modules", ".bin"), { recursive: true })
+    await writeFile(join(root, appDir, "node_modules", ".bin", "react-router-serve"), "#!/usr/bin/env node\n")
   }
   if (opts.appPackageJson) {
     const appDir = dirname(buildDir)
@@ -259,5 +266,55 @@ describe("React Router adapter", () => {
       await checkout({ reactRouter: false, serverBuild: true, clientHtml: true, serveBinary: true, buildDir: "apps/web" }),
     )
     expect(shape).toBeNull()
+  })
+
+  /**
+   * Codex round 30. A workspace installs `@react-router/serve` under the app
+   * package, so the launcher lives at `apps/web/node_modules/.bin/...`; the
+   * root-only check reported `unsupported` for a build that runs fine.
+   */
+  it("prefers the app package's own react-router-serve in a workspace", async () => {
+    const shape = await REACT_ROUTER_ADAPTER.inspectBuild(
+      await checkout({
+        reactRouter: false,
+        serverBuild: true,
+        clientHtml: true,
+        appServeBinary: true,
+        buildDir: "apps/web/build",
+        appPackageJson: { "react-router": "^6.0.0" },
+      }),
+    )
+    expect(shape).toEqual({
+      kind: "server",
+      start: [join("apps", "web", "node_modules", ".bin", "react-router-serve"), join("apps", "web", "build", "server", "index.js")],
+      reason: "React Router framework mode with a server build",
+    })
+  })
+
+  it("falls back to the root react-router-serve when the app package has none", async () => {
+    const shape = await REACT_ROUTER_ADAPTER.inspectBuild(
+      await checkout({
+        reactRouter: false,
+        serverBuild: true,
+        clientHtml: true,
+        serveBinary: true,
+        buildDir: "apps/web/build",
+        appPackageJson: { "react-router": "^6.0.0" },
+      }),
+    )
+    expect(shape).toMatchObject({ kind: "server", start: ["node_modules/.bin/react-router-serve", join("apps", "web", "build", "server", "index.js")] })
+  })
+
+  it("reports unsupported when neither the app package nor the root has react-router-serve", async () => {
+    const shape = await REACT_ROUTER_ADAPTER.inspectBuild(
+      await checkout({
+        reactRouter: false,
+        serverBuild: true,
+        clientHtml: true,
+        buildDir: "apps/web/build",
+        appPackageJson: { "react-router": "^6.0.0" },
+      }),
+    )
+    expect(shape?.kind).toBe("unsupported")
   })
 })

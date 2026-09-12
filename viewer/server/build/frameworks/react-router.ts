@@ -69,8 +69,20 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
       // custom server, and never have this binary at all. Recording the
       // `start` command without checking it exists marked such a checkout
       // `deployed` and then ENOENT'd on every cold start.
-      const hasServeBinary = await isFile(join(checkoutRoot, "node_modules", ".bin", "react-router-serve"))
-      if (!hasServeBinary) {
+      //
+      // Codex round 30: in a workspace the launcher is installed under the
+      // app package (`apps/web/node_modules/.bin/react-router-serve`), not
+      // the root, so the app's own copy is preferred and the root's is the
+      // fallback; the recorded argv names whichever one exists.
+      const appDir = parentAppDir(found.dir)
+      const appServeBinaryRel = appDir !== null ? join(appDir, "node_modules", ".bin", "react-router-serve") : null
+      const serveBinaryRel =
+        appServeBinaryRel !== null && (await isFile(join(checkoutRoot, appServeBinaryRel)))
+          ? appServeBinaryRel
+          : (await isFile(join(checkoutRoot, "node_modules", ".bin", "react-router-serve")))
+            ? "node_modules/.bin/react-router-serve"
+            : null
+      if (serveBinaryRel === null) {
         return {
           kind: "unsupported",
           reason:
@@ -80,7 +92,7 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
       return {
         kind: "server",
         // react-router-serve reads PORT from the environment, which the process manager sets.
-        start: ["node_modules/.bin/react-router-serve", serverBundleRel],
+        start: [serveBinaryRel, serverBundleRel],
         reason: "React Router framework mode with a server build",
       }
     }
