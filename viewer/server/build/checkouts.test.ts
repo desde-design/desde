@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { InMemoryStorage } from "../storage/in-memory-storage"
-import { checkoutDirFor, keepCheckout, pruneSupersededCheckouts, reconcileCheckouts } from "./checkouts"
+import { checkoutDirFor, keepCheckout, pruneSupersededCheckouts, reconcileActivations, reconcileCheckouts } from "./checkouts"
 
 const roots: string[] = []
 async function tmp(): Promise<string> {
@@ -130,6 +130,35 @@ describe("reconcileCheckouts", () => {
 
   it("answers 0 for a checkouts root that does not exist yet", async () => {
     expect(await reconcileCheckouts(new InMemoryStorage(), join(await tmp(), "checkouts"))).toBe(0)
+  })
+})
+
+/**
+ * Codex round 56. A kill between marking a build deployed and activating it
+ * leaves a deployed row with no stamp, which the sweeps leave alone as an
+ * activation in flight; at boot nothing is in flight, so such a row is
+ * marked failed and its assets can be swept.
+ */
+describe("reconcileActivations", () => {
+  it("marks a deployed, unstamped, non-active row failed and leaves every other row alone", async () => {
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    const stamped = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await storage.updateDeployment(stamped.id, { activatedAt: "2026-09-12T00:00:00.000Z" })
+    const active = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await storage.updateProject(project.id, { activeDeploymentId: active.id })
+    const abandoned = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const failed = await storage.createDeployment({ projectId: project.id, status: "failed" })
+
+    expect(await reconcileActivations(storage)).toBe(1)
+    expect((await storage.getDeployment(stamped.id))?.status).toBe("deployed")
+    expect((await storage.getDeployment(active.id))?.status).toBe("deployed")
+    expect((await storage.getDeployment(failed.id))?.status).toBe("failed")
+    const row = await storage.getDeployment(abandoned.id)
+    expect(row?.status).toBe("failed")
+    expect(row?.buildLog).toContain("stopped before this build went live")
+    // Nothing left to do on the next boot.
+    expect(await reconcileActivations(storage)).toBe(0)
   })
 })
 

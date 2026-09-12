@@ -913,10 +913,46 @@ describe("migration 5 — deployments gains a nullable warnings column", () => {
       serve: "static",
       serverStart: null,
       serverCwd: null,
-      activatedAt: null,
+      // Stamped by migration 11 with the row's own creation time: a
+      // `deployed` row from before the stamp existed went live the old way.
+      activatedAt: "2026-02-01T00:00:00.000Z",
       createdAt: "2026-02-01T00:00:00.000Z",
     })
 
+    await store.close()
+  })
+
+  /**
+   * Codex round 56. The sweeps read a `deployed` row without an activation
+   * stamp as an activation in flight and leave its assets alone, so every
+   * row from before the stamp existed has to carry one.
+   */
+  it("migration 11 stamps every pre-existing deployed row and leaves a failed one unstamped", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "viewer-migration-11-"))
+    dirs.push(dir)
+    const dbPath = join(dir, "viewer.db")
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE deployments (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        commit_sha TEXT,
+        build_log TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `)
+    db.prepare(
+      `INSERT INTO deployments (id, project_id, status, commit_sha, build_log, created_at)
+       VALUES ('was-live', 'proj-1', 'deployed', 'abc123', 'ok', '2026-02-01T00:00:00.000Z'),
+              ('never', 'proj-1', 'failed', null, 'boom', '2026-02-02T00:00:00.000Z')`,
+    ).run()
+    db.exec(`PRAGMA user_version = 4;`)
+    db.close()
+
+    const store = new SqliteStorage(dbPath)
+    expect((await store.getDeployment("was-live"))?.activatedAt).toBe("2026-02-01T00:00:00.000Z")
+    expect((await store.getDeployment("never"))?.activatedAt).toBeNull()
     await store.close()
   })
 

@@ -79,6 +79,43 @@ export async function reconcileCheckouts(
 }
 
 /**
+ * Marks failed every `deployed` row that never went live and is not its
+ * project's active deployment, and answers how many (codex round 56). A
+ * kill between the build queue marking a row deployed and activating it
+ * leaves such a row; the sweeps read a `deployed` row without a stamp as
+ * an activation still in flight and leave its assets alone, so without
+ * this pass those assets stayed for ever. Runs at boot, when nothing can
+ * be in flight. Best effort per row.
+ */
+export async function reconcileActivations(
+  storage: Pick<StorageAdapter, "listProjects" | "listDeployments" | "updateDeployment">,
+): Promise<number> {
+  let marked = 0
+  let projects: Awaited<ReturnType<StorageAdapter["listProjects"]>>
+  try {
+    projects = await storage.listProjects()
+  } catch (error) {
+    console.error("[viewer] failed to list projects to reconcile activations:", error)
+    return 0
+  }
+  for (const project of projects) {
+    try {
+      for (const row of await storage.listDeployments(project.id)) {
+        if (row.status !== "deployed" || row.activatedAt !== null || row.id === project.activeDeploymentId) continue
+        await storage.updateDeployment(row.id, {
+          status: "failed",
+          buildLog: `${row.buildLog}\nThe Viewer stopped before this build went live. Rebuild it.\n`,
+        })
+        marked++
+      }
+    } catch (error) {
+      console.error(`[viewer] failed to reconcile activations for project ${project.id}:`, error)
+    }
+  }
+  return marked
+}
+
+/**
  * Whether a `deployed` row ever became its project's active deployment: it
  * is the current one, or it carries the `activatedAt` stamp activation
  * writes right after the project's `activeDeploymentId` (codex round 48).

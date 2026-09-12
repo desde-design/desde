@@ -24,7 +24,7 @@ import { originModeBannerLines } from "./serve/origin-mode-banner"
 import { assertOriginConfig, assertPrototypeOriginConfig } from "./serve/prototype-origin-resolve"
 import { SqliteStorage } from "./storage/sqlite-storage"
 import { createBuildChangeBus } from "./build/build-change-bus"
-import { reconcileCheckouts } from "./build/checkouts"
+import { reconcileActivations, reconcileCheckouts } from "./build/checkouts"
 import { createGithubRuntime } from "./github-runtime"
 import type { StorageAdapter } from "./storage/types"
 import type { AssetStore } from "./assets/types"
@@ -62,6 +62,13 @@ async function main(): Promise<void> {
     console.log(
       `[viewer] marked ${interrupted} build${interrupted === 1 ? "" : "s"} left "building" by a previous crash/restart as failed`,
     )
+  }
+  // The same for a build the crash interrupted one write later, between
+  // marking it deployed and activating it (codex round 56): its assets
+  // would otherwise be left alone by every sweep for ever.
+  const abandoned = await reconcileActivations(storage)
+  if (abandoned > 0) {
+    console.log(`[viewer] marked ${abandoned} build${abandoned === 1 ? "" : "s"} left deployed but never activated as failed`)
   }
 
   // One-way conversion of `VIEWER_ALLOWED_EMAIL_DOMAINS` into stored domain

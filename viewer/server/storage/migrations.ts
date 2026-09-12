@@ -440,6 +440,23 @@ const deploymentActivatedAt: Migration = {
 }
 
 /**
+ * Every `deployed` row written before the activation stamp existed went
+ * live the old way, with nothing to say so (codex round 56): the sweeps
+ * now read a `deployed` row without a stamp as an activation still in
+ * flight and leave its assets alone for ever. Stamped here with the row's
+ * own creation time, the closest fact there is; a row left unstamped
+ * after this is one the Viewer was killed in the middle of activating,
+ * which boot marks failed (`reconcileActivations`).
+ */
+const deploymentActivationBackfill: Migration = {
+  version: 11,
+  description: "deployments: stamp every pre-existing deployed row as activated",
+  up(db) {
+    db.exec(`UPDATE deployments SET activated_at = created_at WHERE status = 'deployed' AND activated_at IS NULL;`)
+  },
+}
+
+/**
  * The real migration list, applied on every boot after the baseline schema
  * `exec` in `SqliteStorage`'s constructor. See the comment above
  * `project_repo_configs` in sqlite-storage.ts for why a versioned mechanism
@@ -460,6 +477,7 @@ export const MIGRATIONS: Migration[] = [
   deploymentServe,
   deploymentServerCwd,
   deploymentActivatedAt,
+  deploymentActivationBackfill,
 ]
 
 /**

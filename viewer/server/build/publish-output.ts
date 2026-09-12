@@ -218,7 +218,9 @@ export async function pruneSupersededDeploymentAssets(
   // round 21 for the same reason. A `deployed` row that has not been
   // activated yet is the same build one write later (codex round 55): the
   // queue marks it deployed, then activates it, and an upload's sweep in
-  // that gap must leave it alone too.
+  // that gap must leave it alone too. Bounded: a row left that way by a
+  // crash is marked failed at the next boot (`reconcileActivations`), and
+  // every row from before the stamp existed was stamped by migration 11.
   const rest = deployments.filter(
     (d) => d.id !== keepActiveId && d.status !== "building" && !(d.status === "deployed" && d.activatedAt === null),
   )
