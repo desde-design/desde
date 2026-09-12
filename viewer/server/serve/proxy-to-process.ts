@@ -424,7 +424,7 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
         // same cookies. (The 502 path never gets here and sets none.)
         // With a jar the child's cookies stay here; only the viewer's own
         // capability cookie, if any, reaches the browser (codex round 60).
-        if (opts.cookieJar !== undefined) opts.cookieJar.absorb(up.headers["set-cookie"])
+        if (opts.cookieJar !== undefined) opts.cookieJar.absorb(up.headers["set-cookie"], opts.path)
         const cookies = mergeSetCookies(opts.cookieJar !== undefined ? undefined : up.headers["set-cookie"], opts.setCookie)
         if (cookies.length > 0) res.setHeader("Set-Cookie", cookies)
         setOwnHeaders(res, opts.csp)
