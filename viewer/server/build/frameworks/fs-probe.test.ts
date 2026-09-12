@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { findNextDistDir, findReactRouterBuildDir } from "./fs-probe"
+import { findNextDistDir, findNitroOutputDir, findReactRouterBuildDir } from "./fs-probe"
 
 /**
  * Codex round 4, Fix 4. `BUILD_ID` alone used to be hard-coded under `.next`
@@ -161,5 +161,63 @@ describe("findReactRouterBuildDir", () => {
   it("answers null when nothing qualifies", async () => {
     const r = await root()
     expect(await findReactRouterBuildDir(r)).toBeNull()
+  })
+})
+
+/**
+ * Codex round 20, item 3. `.output/server/index.mjs` and `.output/public`
+ * were hard-coded in `nuxt.ts`, so a project whose Nitro config sets
+ * `output.dir` was not recognised as a server build. The markers are the pair
+ * Nitro writes together: `server/index.mjs` and a `public/` directory.
+ */
+async function writeNitroOutput(base: string, rel: string, opts: { publicDir?: boolean } = {}): Promise<void> {
+  await mkdir(join(base, rel, "server"), { recursive: true })
+  await writeFile(join(base, rel, "server", "index.mjs"), "export default null")
+  if (opts.publicDir !== false) await mkdir(join(base, rel, "public"), { recursive: true })
+}
+
+describe("findNitroOutputDir", () => {
+  it("finds the default .output directory", async () => {
+    const r = await root()
+    await writeNitroOutput(r, ".output")
+    expect(await findNitroOutputDir(r)).toBe(".output")
+  })
+
+  it("finds a configured output.dir at depth 1", async () => {
+    const r = await root()
+    await writeNitroOutput(r, "dist")
+    expect(await findNitroOutputDir(r)).toBe("dist")
+  })
+
+  it("finds a configured output.dir at depth 2", async () => {
+    const r = await root()
+    await writeNitroOutput(r, join("build", "nitro"))
+    expect(await findNitroOutputDir(r)).toBe(join("build", "nitro"))
+  })
+
+  it("prefers .output when it qualifies, even alongside another qualifying directory", async () => {
+    const r = await root()
+    await writeNitroOutput(r, ".output")
+    await writeNitroOutput(r, "dist")
+    expect(await findNitroOutputDir(r)).toBe(".output")
+  })
+
+  it("ignores a directory with a server bundle but no public directory", async () => {
+    const r = await root()
+    await writeNitroOutput(r, "dist", { publicDir: false })
+    expect(await findNitroOutputDir(r)).toBeNull()
+  })
+
+  it("does not descend into node_modules, .git or public", async () => {
+    const r = await root()
+    await writeNitroOutput(r, join("node_modules", ".output"))
+    await writeNitroOutput(r, join(".git", ".output"))
+    await writeNitroOutput(r, join("public", ".output"))
+    expect(await findNitroOutputDir(r)).toBeNull()
+  })
+
+  it("answers null when nothing qualifies", async () => {
+    const r = await root()
+    expect(await findNitroOutputDir(r)).toBeNull()
   })
 })

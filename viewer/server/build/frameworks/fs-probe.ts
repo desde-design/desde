@@ -197,4 +197,29 @@ export async function findReactRouterBuildDir(checkoutRoot: string): Promise<Rea
   })
 }
 
+/**
+ * Finds a Nitro server build's output directory (codex round 20, item 3).
+ *
+ * `nuxt.ts` used to hard-code `.output`, so a project whose Nitro config sets
+ * `output.dir` was not recognised as a server build and fell through to
+ * static publishing.
+ *
+ * The markers are the pair Nitro writes together: `server/index.mjs` and a
+ * `public/` directory. Both, not either — `server/index.mjs` on its own is a
+ * plausible file name in a source tree, and a `public/` directory is an
+ * ordinary thing for a repo to have.
+ *
+ * Scans depth 1 and depth 2 under `checkoutRoot`, skipping `node_modules`,
+ * `.git` and `public`, and prefers `.output` (the default) when it qualifies.
+ * Returns the output dir relative to `checkoutRoot`, or `null`.
+ */
+export async function findNitroOutputDir(checkoutRoot: string): Promise<string | null> {
+  return await scanForOutputDir(checkoutRoot, ".output", async (rel) => {
+    const dir = join(checkoutRoot, rel)
+    if (!(await isFile(join(dir, "server", "index.mjs")))) return null
+    if (!(await isDir(join(dir, "public")))) return null
+    return rel
+  })
+}
+
 export { isDir, isFile, dependsOn }

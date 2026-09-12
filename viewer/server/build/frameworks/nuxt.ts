@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { dependsOn, isFile } from "./fs-probe"
+import { dependsOn, findNitroOutputDir, isFile } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
 /**
@@ -15,22 +15,41 @@ import type { FrameworkAdapter } from "./types"
  * `react-router.ts`), so the safe reading is the one that never breaks an
  * app: Nitro serves a client-only build correctly, at the cost of a
  * process slot for a prototype that did not strictly need one.
+ *
+ * `.output` is where Nitro writes by default, but `output.dir` moves it, so
+ * the default location is checked by name first and a scan
+ * (`findNitroOutputDir`, codex round 20, item 3) answers for everything else.
+ * The default is checked first and separately because the scan needs a
+ * `public/` directory beside the server bundle to be sure a directory is a
+ * Nitro output at all, and a server build does not strictly have to have
+ * written one.
+ *
+ * The STATIC case stays on `.output` alone. A `public/` directory with no
+ * server bundle beside it is far too ordinary a thing for a repo to hold to
+ * go scanning for, so a static generation into a configured `output.dir` is
+ * left to the generic static default, which publishes the output dir the
+ * prototype itself names.
  */
+const DEFAULT_OUTPUT_DIR = ".output"
+
 export const NUXT_ADAPTER: FrameworkAdapter = {
   id: "nuxt",
   async inspectBuild(checkoutRoot) {
     if (!(await dependsOn(checkoutRoot, "nuxt"))) return null
-    if (await isFile(join(checkoutRoot, ".output", "server", "index.mjs"))) {
+    const outputDir = (await isFile(join(checkoutRoot, DEFAULT_OUTPUT_DIR, "server", "index.mjs")))
+      ? DEFAULT_OUTPUT_DIR
+      : await findNitroOutputDir(checkoutRoot)
+    if (outputDir !== null) {
       return {
         kind: "server",
-        start: ["node", ".output/server/index.mjs"],
+        start: ["node", join(outputDir, "server", "index.mjs")],
         reason: "Nuxt with a server build",
       }
     }
-    if (await isFile(join(checkoutRoot, ".output", "public", "index.html"))) {
+    if (await isFile(join(checkoutRoot, DEFAULT_OUTPUT_DIR, "public", "index.html"))) {
       return {
         kind: "static",
-        outputDir: ".output/public",
+        outputDir: join(DEFAULT_OUTPUT_DIR, "public"),
         reason: "Nuxt static generation",
       }
     }

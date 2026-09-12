@@ -13,6 +13,10 @@ async function checkout(opts: {
   nuxt?: boolean
   serverBuild?: boolean
   staticHtml?: boolean
+  /** A `public/` directory in the output, with no `index.html` in it. */
+  publicDir?: boolean
+  /** What Nitro's `output.dir` was set to, if anything. */
+  outputDir?: string
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "fw-nuxt-"))
   roots.push(root)
@@ -20,13 +24,15 @@ async function checkout(opts: {
     join(root, "package.json"),
     JSON.stringify({ name: "x", dependencies: opts.nuxt === false ? {} : { nuxt: "^3.0.0" } }),
   )
+  const outputDir = opts.outputDir ?? ".output"
   if (opts.serverBuild) {
-    await mkdir(join(root, ".output", "server"), { recursive: true })
-    await writeFile(join(root, ".output", "server", "index.mjs"), "export default null")
+    await mkdir(join(root, outputDir, "server"), { recursive: true })
+    await writeFile(join(root, outputDir, "server", "index.mjs"), "export default null")
   }
+  if (opts.publicDir) await mkdir(join(root, outputDir, "public"), { recursive: true })
   if (opts.staticHtml) {
-    await mkdir(join(root, ".output", "public"), { recursive: true })
-    await writeFile(join(root, ".output", "public", "index.html"), "<html></html>")
+    await mkdir(join(root, outputDir, "public"), { recursive: true })
+    await writeFile(join(root, outputDir, "public", "index.html"), "<html></html>")
   }
   return root
 }
@@ -58,5 +64,42 @@ describe("Nuxt adapter", () => {
   })
   it("answers null when the build wrote neither", async () => {
     expect(await NUXT_ADAPTER.inspectBuild(await checkout({}))).toBeNull()
+  })
+
+  /**
+   * Codex round 20, item 3. `.output` was hard-coded, so a project whose
+   * Nitro config sets `output.dir` was not recognised as a server build and
+   * the deployment fell through to the generic static default.
+   */
+  it("follows a configured output.dir", async () => {
+    expect(
+      await NUXT_ADAPTER.inspectBuild(await checkout({ serverBuild: true, publicDir: true, outputDir: "dist" })),
+    ).toEqual({
+      kind: "server",
+      start: ["node", join("dist", "server", "index.mjs")],
+      reason: "Nuxt with a server build",
+    })
+  })
+
+  it("follows a configured output.dir nested one level down", async () => {
+    expect(
+      await NUXT_ADAPTER.inspectBuild(
+        await checkout({ serverBuild: true, publicDir: true, outputDir: join("build", "nitro") }),
+      ),
+    ).toEqual({
+      kind: "server",
+      start: ["node", join("build", "nitro", "server", "index.mjs")],
+      reason: "Nuxt with a server build",
+    })
+  })
+
+  it("prefers the server build in a configured output.dir when that build pre-rendered pages too", async () => {
+    expect(
+      await NUXT_ADAPTER.inspectBuild(await checkout({ serverBuild: true, staticHtml: true, outputDir: "dist" })),
+    ).toEqual({
+      kind: "server",
+      start: ["node", join("dist", "server", "index.mjs")],
+      reason: "Nuxt with a server build",
+    })
   })
 })
