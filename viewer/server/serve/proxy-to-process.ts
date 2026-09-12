@@ -222,6 +222,37 @@ function isHtml(contentType: string | undefined): boolean {
   return typeof contentType === "string" && /^text\/html\b/i.test(contentType)
 }
 
+/** The `charset` parameter of a Content-Type, lower-cased, or `null` when it names none. */
+export function htmlCharset(contentType: string | undefined): string | null {
+  const match = typeof contentType === "string" ? /;\s*charset\s*=\s*"?([^";\s]+)"?/i.exec(contentType) : null
+  return match?.[1]?.toLowerCase() ?? null
+}
+
+/** Labels that already mean UTF-8: the body is read as it is and the header stays. */
+const UTF8_LABELS = new Set(["utf-8", "utf8", "unicode-1-1-utf-8"])
+
+/**
+ * The HTML body as text, plus whether the response has to be re-labelled
+ * UTF-8 because the bytes were something else (codex round 38). The
+ * injected body is always written back as UTF-8, and a child that declared
+ * `iso-8859-1` or `utf-16` used to have its bytes read as UTF-8 anyway and
+ * sent on under the original label: every non-ASCII character came out
+ * wrong, and a UTF-16 page came out as noise. `null` means the label is one
+ * this runtime cannot decode; the caller passes the bytes through untouched
+ * rather than guess.
+ */
+export function decodeHtml(raw: Buffer, contentType: string | undefined): { text: string; relabel: boolean } | null {
+  const charset = htmlCharset(contentType)
+  if (charset === null || UTF8_LABELS.has(charset)) return { text: raw.toString("utf8"), relabel: false }
+  let decoder: TextDecoder
+  try {
+    decoder = new TextDecoder(charset)
+  } catch {
+    return null
+  }
+  return { text: decoder.decode(raw), relabel: true }
+}
+
 /** The two headers this proxy always owns, plus the CSP it decides (not the child's). */
 function setOwnHeaders(res: Response, csp: string | null): void {
   res.setHeader("Cache-Control", "no-store")
@@ -421,7 +452,19 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
             res.end()
             return
           }
-          const body = injectBridge(Buffer.concat(chunks).toString("utf8"), opts.shellOrigin, opts.bridgeSrc)
+          const raw = Buffer.concat(chunks)
+          const decoded = decodeHtml(raw, up.headers["content-type"])
+          if (decoded === null) {
+            // A charset this runtime cannot decode: the page keeps its bytes
+            // and loses the bridge, rather than the other way round.
+            res.setHeader("Content-Length", raw.length)
+            res.end(raw)
+            return
+          }
+          // The body below is UTF-8 whatever the child sent, so the label
+          // says so; a browser reads the header's charset over a `<meta>`.
+          if (decoded.relabel) res.setHeader("Content-Type", "text/html; charset=utf-8")
+          const body = injectBridge(decoded.text, opts.shellOrigin, opts.bridgeSrc)
           res.setHeader("Content-Length", Buffer.byteLength(body))
           res.end(body)
         }

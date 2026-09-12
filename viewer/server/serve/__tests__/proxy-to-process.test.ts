@@ -329,6 +329,48 @@ describe("proxyToProcess", () => {
     expect(res.headers["x-content-type-options"]).toBe("nosniff")
   })
 
+  /**
+   * Codex round 38. The body was always read as UTF-8 and sent on under the
+   * child's own label, so a page declared `iso-8859-1` had every non-ASCII
+   * character corrupted, and a UTF-16 page came out as noise.
+   */
+  it("decodes a non-UTF-8 HTML body by its declared charset and re-labels the injected body UTF-8", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("content-type", "text/html; charset=iso-8859-1")
+      res.end(Buffer.from("<html><body>caf\u00e9</body></html>", "latin1"))
+    })
+    const res = await request(appFor(port)).get("/p/acme/")
+    expect(res.status).toBe(200)
+    expect(res.headers["content-type"]).toBe("text/html; charset=utf-8")
+    expect(res.text).toContain("caf\u00e9")
+    expect(res.text).toContain('src="/__desde/bridge-test.js"')
+    expect(Number(res.headers["content-length"])).toBe(Buffer.byteLength(res.text))
+  })
+
+  it("decodes a UTF-16 HTML body the same way", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("content-type", "text/html; charset=utf-16le")
+      res.end(Buffer.from("<html><body>caf\u00e9</body></html>", "utf16le"))
+    })
+    const res = await request(appFor(port)).get("/p/acme/")
+    expect(res.status).toBe(200)
+    expect(res.headers["content-type"]).toBe("text/html; charset=utf-8")
+    expect(res.text).toContain("caf\u00e9")
+    expect(res.text).toContain('src="/__desde/bridge-test.js"')
+  })
+
+  it("passes an HTML body through untouched, bridge and all, when the charset cannot be decoded", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("content-type", "text/html; charset=x-no-such-charset")
+      res.end("<html><body>Hi</body></html>")
+    })
+    const res = await request(appFor(port)).get("/p/acme/")
+    expect(res.status).toBe(200)
+    expect(res.headers["content-type"]).toBe("text/html; charset=x-no-such-charset")
+    expect(res.text).toBe("<html><body>Hi</body></html>")
+    expect(res.headers["content-length"]).toBe(String(Buffer.byteLength("<html><body>Hi</body></html>")))
+  })
+
   it("drops the CSP entirely on a successful response when csp is null", async () => {
     const port = await child((_req, res) => {
       res.setHeader("content-type", "text/html; charset=utf-8")
