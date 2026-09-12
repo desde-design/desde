@@ -212,6 +212,9 @@ export interface PrototypeProcesses {
 }
 
 export const MAX_RUNNING_SERVER_PROTOTYPES = 4
+
+/** How many times a cold start asks the port picker before giving up, when every answer is a port another child already holds. */
+const PORT_PICK_ATTEMPTS = 10
 /** The log ring buffer is measured in characters (`string.slice`), not bytes. */
 const LOG_CHARS = 64 * 1024
 /**
@@ -357,6 +360,27 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const reapIntervalMs = deps.reapIntervalMs ?? 5 * 60_000
   const maxRunning = deps.maxRunning ?? MAX_RUNNING_SERVER_PROTOTYPES
   const pickPort = deps.pickPort ?? pickLoopbackPort
+  /**
+   * Every port a child of this manager has been handed and not yet given
+   * back (codex round 32). `pickLoopbackPort` binds an ephemeral port and
+   * RELEASES it for the child to take, so two cold starts under way at once
+   * could be handed the same number: the first child to bind it answered
+   * both readiness probes, and the other deployment was marked running and
+   * proxied to that child until its own failed child exited. A port is
+   * reserved from the pick until the child's exit (or its spawn failure, or
+   * a setup failure before spawn), and a pick that repeats a reserved port
+   * is simply made again.
+   */
+  const reservedPorts = new Set<number>()
+  async function reservePort(): Promise<number> {
+    for (let attempt = 0; attempt < PORT_PICK_ATTEMPTS; attempt++) {
+      const port = await pickPort()
+      if (reservedPorts.has(port)) continue
+      reservedPorts.add(port)
+      return port
+    }
+    throw new Error(`no free port after ${PORT_PICK_ATTEMPTS} picks`)
+  }
   const limits: Limits = { restartBudget: RESTART_BUDGET_ATTEMPTS, restartWindowMs: RESTART_WINDOW_MS }
   const entries = new Map<string, Entry>()
   /**
@@ -853,8 +877,10 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     let file: string
     let args: string[]
     let home: string
+    let reserved: number | null = null
     try {
-      port = await pickPort()
+      port = await reservePort()
+      reserved = port
       ;({ file, args } = substitutePort(serverStart, port))
       // Inside the checkout, not beside it: `pruneSupersededCheckouts`
       // deletes `checkoutDirFor(...)` wholesale, so a home dir living inside
@@ -872,6 +898,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // retryable for ever, and the review page remounted the frame every
       // five seconds without end. The machine charges it, because the
       // `permanent` flag below is false.
+      if (reserved !== null) reservedPorts.delete(reserved)
       console.error("[viewer] prototype process setup failed:", error)
       await lock.run(id, () => {
         if (!stillOurs()) throw abandonedBeforeSpawn()
@@ -939,6 +966,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // group that already has nothing left in it costs nothing.
     child.once("exit", (code) => {
       exited = true
+      reservedPorts.delete(port)
       killTree(child, "SIGKILL")
       void lock.run(id, async () => {
         if (entries.get(id) !== entry || entry.child !== child) return
@@ -968,6 +996,8 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
         // running. The ring buffer above has the message either way; only a
         // start that has not finished acts on it.
         if (entry.record.state.kind !== "starting") return
+        // A child that never spawned emits no `exit`, so its port comes back here.
+        reservedPorts.delete(port)
         entry.child = null
         await applyAllowingRefusal(id, { type: "start-failed", reason: SETUP_FAILED_REASON, permanent: false })
       })

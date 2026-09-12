@@ -551,6 +551,51 @@ describe("createPrototypeProcesses", () => {
   })
 
   /**
+   * Codex round 32. `pickLoopbackPort` binds and releases an ephemeral port,
+   * so two cold starts under way at once could be handed the SAME port: the
+   * first child to bind it answered both readiness probes, and the other
+   * deployment was marked running and proxied to that child. The manager
+   * keeps every port a live child holds and picks again on a repeat; the
+   * port comes back once that child is gone.
+   */
+  it("hands concurrent cold starts distinct ports even when the picker repeats one", async () => {
+    const first = await pickLoopbackPort()
+    const second = await pickLoopbackPort()
+    const offered = [first, first, second]
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["a", "b"]),
+      pickPort: async () => {
+        const port = offered.shift()
+        if (port === undefined) throw new Error("picker exhausted")
+        return port
+      },
+    })
+    managers.push(procs)
+    const [a, b] = await Promise.all([
+      procs.ensure({ id: "a", serverStart: start() }),
+      procs.ensure({ id: "b", serverStart: start() }),
+    ])
+    expect(new Set([a.port, b.port])).toEqual(new Set([first, second]))
+    expect(offered).toHaveLength(0)
+
+    await procs.stop("a")
+    offered.push(first)
+    expect((await procs.ensure({ id: "a", serverStart: start() })).port).toBe(first)
+  })
+
+  it("gives up a cold start whose picker only ever repeats a held port", async () => {
+    const held = await pickLoopbackPort()
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["a", "b"]),
+      pickPort: async () => held,
+    })
+    managers.push(procs)
+    expect((await procs.ensure({ id: "a", serverStart: start() })).port).toBe(held)
+    await expect(procs.ensure({ id: "b", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+    expect(procs.status("b").state).toBe("crashed")
+  })
+
+  /**
    * The crashed status says whether the next `ensure` would try again, so the
    * review page can embed the frame (and let that request restart the
    * process) instead of showing a dead end that only a full rebuild clears.
