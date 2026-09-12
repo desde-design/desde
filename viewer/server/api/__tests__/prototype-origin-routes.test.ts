@@ -1394,6 +1394,31 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
   })
 
   /**
+   * Codex round 16. The listener registry reaps a loopback port after 30
+   * quiet minutes, and the stream never touched it: a reader sitting on the
+   * page kept an origin nothing answered on. Every heartbeat now counts as
+   * use of the listener the body names.
+   */
+  it("touches the loopback listener on every heartbeat while the stream is open", async () => {
+    const ctx = setup({ prototypeOriginStreamPingMs: 20 })
+    const touch = vi.spyOn(ctx.listeners, "touch")
+    const project = await seedProject(ctx.storage)
+    await makeServerDeployment(ctx, project)
+
+    const { received, destroy } = await readUntil(
+      ctx.app,
+      project,
+      (r) => r.split(": ping").length >= 3 && touch.mock.calls.length >= 2,
+    )
+    destroy()
+
+    const [first] = originFrames(received) as { origin: string }[]
+    const port = Number(new URL(first!.origin).port)
+    expect(port).toBeGreaterThan(0)
+    expect(touch).toHaveBeenCalledWith(port)
+  })
+
+  /**
    * Two status callbacks in flight across a deployment change used to leave
    * a listener behind for ever. Both re-read the project, both saw the new
    * deployment, and each subscribed to it — the second overwriting the

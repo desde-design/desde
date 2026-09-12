@@ -915,6 +915,26 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         return
       }
       resendIfProcessChanged(freshProject)
+      keepListenerAlive()
+    }
+
+    /**
+     * An open review is use. The listener registry reaps a loopback port
+     * that saw no prototype request for 30 minutes, and this stream checked
+     * the deployment, the access and the process on every tick without ever
+     * touching the listener, so a reader who sat on the page that long kept
+     * an origin nothing answered on: the next click failed at the socket and
+     * never reached `ensure` (codex round 16).
+     */
+    const keepListenerAlive = (): void => {
+      if (current.status !== 200 || current.body.mode !== "loopback" || !current.body.origin) return
+      let port = 0
+      try {
+        port = Number(new URL(current.body.origin).port)
+      } catch {
+        return
+      }
+      if (port > 0) deps.prototypeListeners.touch(port)
     }
 
     if (current.deploymentId && current.body.serve === "server") {
