@@ -14,6 +14,7 @@ import { upsertTestUser } from "../../__tests__/user-fixtures"
 import type { AuthProvider } from "../../auth/types"
 import type { InstanceRole } from "../../storage/types"
 import type { LoopbackListenerRegistry } from "../../serve/loopback-listeners"
+import { getAllowPublicLinks } from "../../instance-settings"
 
 /** Minimal fake — only its presence on `deps.github.authProvider` is exercised here. */
 const fakeAuthProvider: AuthProvider = {
@@ -1937,6 +1938,41 @@ describe("instance admin API (viewer-membership Task 6)", () => {
   })
 
   describe("GET/PATCH /instance/settings", () => {
+    /**
+     * Codex round 53. The rotation ran while the settings cache still said
+     * public links were on, so a request landing during it could pass the
+     * read gate and open a listener the rotation never saw. The cache is
+     * invalidated before the listeners rotate.
+     */
+    it("invalidates the public-links cache before rotating the listeners", async () => {
+      const seenDuringRotation: boolean[] = []
+      const listeners: LoopbackListenerRegistry = {
+        ensure: () => Promise.reject(new Error("not used by this test")),
+        touch: () => {},
+        touchOrigin: () => {},
+        reapIdle: () => Promise.resolve(0),
+        closeAll: () => Promise.resolve(),
+        closeForDeployment: () => Promise.resolve(),
+        rotateForDeployment: () => Promise.resolve(),
+        rotateForProject: () => Promise.resolve(),
+        rotateAll: async () => {
+          seenDuringRotation.push(await getAllowPublicLinks(storage))
+        },
+        hasOrigin: () => true,
+        rotateOrigin: () => Promise.resolve(),
+        startReaper: () => () => {},
+        isPrototypeHost: () => false,
+      }
+      stableRevocationFailure.use(
+        createApp({ storage, assets: nullAssets, config, bridgeScript: "// bridge", github: testGithubRuntime(), prototypeListeners: listeners }),
+      )
+      const watched = stableRevocationFailure.app
+      // Warm the cache with the current value, as any read path would have.
+      expect(await getAllowPublicLinks(storage)).toBe(true)
+      await request(watched).patch("/api/v1/instance/settings").set(adminAuth).send({ allowPublicLinks: false }).expect(200)
+      expect(seenDuringRotation).toEqual([false])
+    })
+
     it("defaults allowPublicLinks to true when unset", async () => {
       const res = await request(app).get("/api/v1/instance/settings").set(adminAuth).expect(200)
       expect(res.body).toEqual({

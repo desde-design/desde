@@ -913,6 +913,11 @@ function emailSettingsView(deps: AppDeps): {
     if (allowPublicLinks !== undefined) {
       const before = await getAllowPublicLinks(deps.storage)
       await deps.storage.setInstanceSetting(ALLOW_PUBLIC_LINKS_KEY, String(allowPublicLinks))
+      // The cache first, BEFORE the rotation below (codex round 53): while
+      // the listeners were closing, an anonymous request could still pass
+      // the read gate on the cached `true` and open a fresh listener the
+      // rotation's snapshot never saw.
+      invalidateInstanceSettingsCache(deps.storage)
       // Anonymous readers of every public-link project may hold a loopback
       // origin with no stream open (codex round 46). Only turning links OFF
       // revokes anyone; turning them on must not spend a slot of a fixed
