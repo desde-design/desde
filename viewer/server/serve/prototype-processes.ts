@@ -641,7 +641,10 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    * behind.
    */
   const killAndWait = async (child: ChildProcess): Promise<void> => {
-    if (child.exitCode !== null || child.signalCode !== null) {
+    // A child whose spawn failed never got a pid, and once its `error` has
+    // fired Node has recorded the errno as its exit code: nothing to wait
+    // for either way.
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
       killTree(child, "SIGKILL")
       return
     }
@@ -649,11 +652,18 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       const timer = setTimeout(() => {
         killTree(child, "SIGKILL")
       }, 5000)
-      child.once("exit", () => {
+      const settle = (): void => {
         clearTimeout(timer)
         killTree(child, "SIGKILL")
         resolve()
-      })
+      }
+      child.once("exit", settle)
+      // A spawn that fails (ENOENT, EACCES) emits `error` and `close` but
+      // never `exit` (codex round 34). A stop, a retire or a shutdown that
+      // raced such a failure waited here for ever, past its own SIGKILL
+      // timer, and a project delete or a graceful shutdown hung on it.
+      child.once("close", settle)
+      child.once("error", settle)
       killTree(child, "SIGTERM")
     })
   }

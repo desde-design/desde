@@ -453,6 +453,37 @@ describe("createPrototypeProcesses", () => {
   })
 
   /**
+   * Codex round 34. A spawn that fails (ENOENT) emits `error` and `close`,
+   * never `exit`. A stop queued while the spawn lock was held ran before
+   * the failure's own handler, saw a child handle, and `killAndWait`
+   * waited for an exit that never came: the stop, the cold start's own
+   * settlement, and anything else queued on that id's lock hung for ever.
+   * The stop is queued from inside the spawn's own env spread, which runs
+   * under the lock, so it lands in exactly that window rather than by
+   * timing luck.
+   */
+  it("a stop racing a spawn failure settles instead of waiting for an exit that never comes", async () => {
+    let stopping: Promise<void> | null = null
+    const spawnEnv: Record<string, string> = {}
+    Object.defineProperty(spawnEnv, "FAKE_RACE", {
+      enumerable: true,
+      get() {
+        // Runs at spawn time, long after `procs` below exists.
+        stopping ??= procs.stop("d1")
+        return "1"
+      },
+    })
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]), spawnEnv })
+    managers.push(procs)
+    const hung = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("hung")), 4000).unref())
+    const ensuring = procs.ensure({ id: "d1", serverStart: ["/nonexistent/binary"] })
+    await expect(Promise.race([ensuring, hung])).rejects.toBeInstanceOf(PrototypeProcessError)
+    expect(stopping).not.toBeNull()
+    await expect(Promise.race([stopping, hung])).resolves.toBeUndefined()
+    expect(procs.status("d1").state).toBe("stopped")
+  })
+
+  /**
    * Codex round 7, Fix 4. A failure BEFORE spawn (here, the `.desde-home`
    * `mkdir`) used to put the raw Node error's message into `reason` — and
    * that message carries the full path, absolute and including the
