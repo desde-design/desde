@@ -1114,6 +1114,16 @@ describe("loadConfig", () => {
         loadConfig({ VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "65520" }, { isLikelyContainerized: () => true }),
       ).toThrow(/VIEWER_LOOPBACK_PORT_RANGE/)
     })
+    it("derives no default range in a container whose prototypes go to a serve domain or a prototype origin (codex round 63)", () => {
+      for (const extra of [{ VIEWER_SERVE_DOMAIN: "proto.example.com" }, { VIEWER_PROTOTYPE_ORIGIN: "http://proto.example.com" }]) {
+        const config = loadConfig(
+          { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "65530", VIEWER_PUBLIC_URL: "https://viewer.example.com", ...extra },
+          { isLikelyContainerized: () => true },
+        )
+        expect(config.loopbackPortRange).toBeNull()
+      }
+    })
+
     it("a PORT that would overflow the default range is fine outside a container, since no default range is derived there", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "65535" },

@@ -646,9 +646,14 @@ export function loadConfig(
   const detectContainer = overrides.isLikelyContainerized ?? isLikelyContainerized
   const actuallyInContainer = loopbackListeners === "off" ? false : detectContainer()
   const inContainer = loopbackListeners === "auto" ? actuallyInContainer : false
+  // The default range only where loopback mode can actually be selected
+  // (codex round 63): under `VIEWER_SERVE_DOMAIN` or `VIEWER_PROTOTYPE_ORIGIN`
+  // those modes win and no listener ever opens, and deriving the range
+  // anyway refused a `PORT` near 65535 for twenty ports nothing would use.
+  const loopbackModePossible = !env.VIEWER_SERVE_DOMAIN?.trim() && !env.VIEWER_PROTOTYPE_ORIGIN?.trim()
   const loopbackPortRange = env.VIEWER_LOOPBACK_PORT_RANGE
     ? parseLoopbackPortRange(env.VIEWER_LOOPBACK_PORT_RANGE, port)
-    : actuallyInContainer
+    : actuallyInContainer && loopbackModePossible
       ? defaultLoopbackPortRange(port)
       : null
   // A container now gets loopback mode too, on a range it can publish. Reads
