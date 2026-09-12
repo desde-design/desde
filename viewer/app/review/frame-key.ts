@@ -72,7 +72,15 @@ export function nextFrameKey(
   const followed = previous.deployment ?? deployment
   const kept = followed === previous.deployment ? previous : { ...previous, deployment: followed }
 
-  if (!server) return kept
+  if (!server) {
+    // A `stopped` body (the idle reaper, an eviction) keeps the key AND
+    // forgets the generation it was following: the child that comes back
+    // will be a NEW generation, started by this frame's own next click or
+    // form post, and remounting on it would throw away that very request
+    // (codex round 23). The next `starting`/`running` only records again.
+    if (status?.state === "stopped" && kept.generation !== null) return { ...kept, generation: null }
+    return kept
+  }
   if (status.state === "crashed") {
     if (!status.retryable) return kept
     const next = status.generation + 1

@@ -49,6 +49,12 @@ describe("nextFrameKey", () => {
     const keys = run([running(2), stopped, stopped]).map((s) => s.key)
     expect(keys).toEqual(["static", "static", "static"])
   })
+  it("keeps the key when the frame's own request restarts a reaped child under a new generation (codex round 23)", () => {
+    // running(2) → the reaper stops it → a click in the frame starts
+    // generation 3. Remounting on 3 would discard that click.
+    const keys = run([running(2), stopped, starting(3), running(3)]).map((s) => s.key)
+    expect(keys).toEqual(["static", "static", "static", "static"])
+  })
   it("changes the key once for a retryable crash and the restart that follows", () => {
     const keys = run([running(1), crashed(1, true), starting(2), running(2)]).map((s) => s.key)
     expect(keys).toEqual(["static", 2, 2, 2])
