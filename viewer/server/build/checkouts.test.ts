@@ -57,6 +57,7 @@ describe("reconcileCheckouts", () => {
     const project = await storage.createProject({ slug: "p", name: "P" })
     const root = await tmp()
     const live = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await storage.updateProject(project.id, { activeDeploymentId: live.id })
     const failed = await storage.createDeployment({ projectId: project.id, status: "failed" })
     for (const id of [live.id, failed.id, "no-such-row"]) {
       await mkdir(join(checkoutDirFor(root, id), "node_modules"), { recursive: true })
@@ -65,6 +66,42 @@ describe("reconcileCheckouts", () => {
     expect(await exists(checkoutDirFor(root, live.id))).toBe(true)
     expect(await exists(checkoutDirFor(root, failed.id))).toBe(false)
     expect(await exists(checkoutDirFor(root, "no-such-row"))).toBe(false)
+  })
+
+  /**
+   * Codex round 43. Activation writes the row `deployed` first and the
+   * project's `activeDeploymentId` second. A Viewer killed between the two
+   * left a `deployed` row that never went live, and the next prune took its
+   * checkout for the retained previous one and displaced the real one.
+   */
+  it("removes a deployed checkout newer than the active deployment and marks its row failed; keeps an older one", async () => {
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    const root = await tmp()
+    const previous = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const active = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const interrupted = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await storage.updateProject(project.id, { activeDeploymentId: active.id })
+    for (const id of [previous.id, active.id, interrupted.id]) {
+      await mkdir(checkoutDirFor(root, id), { recursive: true })
+    }
+    expect(await reconcileCheckouts(storage, root)).toBe(1)
+    expect(await exists(checkoutDirFor(root, previous.id))).toBe(true)
+    expect(await exists(checkoutDirFor(root, active.id))).toBe(true)
+    expect(await exists(checkoutDirFor(root, interrupted.id))).toBe(false)
+    const row = await storage.getDeployment(interrupted.id)
+    expect(row?.status).toBe("failed")
+    expect(row?.buildLog).toContain("stopped before this build went live")
+  })
+
+  it("removes a deployed checkout under a project that never activated anything", async () => {
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    const root = await tmp()
+    const interrupted = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await mkdir(checkoutDirFor(root, interrupted.id), { recursive: true })
+    expect(await reconcileCheckouts(storage, root)).toBe(1)
+    expect((await storage.getDeployment(interrupted.id))?.status).toBe("failed")
   })
 
   it("answers 0 for a checkouts root that does not exist yet", async () => {

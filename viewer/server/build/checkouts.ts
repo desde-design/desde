@@ -1,6 +1,6 @@
 import { cp, mkdir, readdir, rename, rm, stat } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
-import type { StorageAdapter } from "../storage/types"
+import type { Deployment, StorageAdapter } from "../storage/types"
 
 /**
  * Where a server deployment's checkout lives: `<dataDir>/checkouts/<id>/`.
@@ -44,7 +44,7 @@ export async function keepCheckout(from: string, to: string): Promise<void> {
  * out of a directory this removes. Best effort per directory.
  */
 export async function reconcileCheckouts(
-  storage: Pick<StorageAdapter, "getDeployment">,
+  storage: Pick<StorageAdapter, "getDeployment" | "getProject" | "updateDeployment">,
   checkoutsRoot: string,
 ): Promise<number> {
   let names: string[]
@@ -58,14 +58,44 @@ export async function reconcileCheckouts(
     try {
       const dir = checkoutDirFor(checkoutsRoot, name)
       const row = await storage.getDeployment(name)
-      if (row !== null && row.status === "deployed") continue
+      if (row !== null && row.status === "deployed" && (await wentLive(storage, row))) continue
       await rm(dir, { recursive: true, force: true })
       removed++
+      if (row !== null && row.status === "deployed") {
+        // Marked `deployed` but never activated (codex round 43): the Viewer
+        // stopped between the two writes. Left as `deployed`, it read as the
+        // retained previous checkout at the next prune and displaced the
+        // real one.
+        await storage.updateDeployment(row.id, {
+          status: "failed",
+          buildLog: `${row.buildLog}\nThe Viewer stopped before this build went live. Rebuild it.\n`,
+        })
+      }
     } catch (error) {
       console.error(`[viewer] failed to reconcile the checkout for ${name}:`, error)
     }
   }
   return removed
+}
+
+/**
+ * Whether a `deployed` row ever became its project's active deployment. The
+ * activation writes the row `deployed` first and the project's
+ * `activeDeploymentId` second, so a row newer than the project's active
+ * deployment, or one under a project with none, is a build the Viewer was
+ * killed in the middle of. An OLDER deployed row is a real previous
+ * checkout, the rollback target retention keeps.
+ */
+async function wentLive(
+  storage: Pick<StorageAdapter, "getDeployment" | "getProject">,
+  row: Deployment,
+): Promise<boolean> {
+  const project = await storage.getProject(row.projectId)
+  const activeId = project?.activeDeploymentId ?? null
+  if (activeId === null) return false
+  if (activeId === row.id) return true
+  const active = await storage.getDeployment(activeId)
+  return active !== null && row.createdAt <= active.createdAt
 }
 
 /**
