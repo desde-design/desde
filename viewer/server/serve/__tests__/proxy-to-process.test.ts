@@ -234,6 +234,22 @@ describe("proxyToProcess", () => {
    * iframe wherever the prototype CSP is off (`VIEWER_PROTOTYPE_CSP=off`),
    * where no `frame-ancestors` directive is there to supersede it.
    */
+  it("strips the headers a Connection header nominates, in both directions (codex round 24)", async () => {
+    let seen: Record<string, unknown> = {}
+    const port = await child((req, res) => {
+      seen = { ...req.headers }
+      res.setHeader("connection", "bar")
+      res.setHeader("bar", "1")
+      res.setHeader("x-kept", "1")
+      res.end("x")
+    })
+    const res = await request(appFor(port)).get("/p/acme/").set("Connection", "foo").set("foo", "1").set("x-also-kept", "1")
+    expect(seen.foo).toBeUndefined()
+    expect(seen["x-also-kept"]).toBe("1")
+    expect(res.headers.bar).toBeUndefined()
+    expect(res.headers["x-kept"]).toBe("1")
+  })
+
   it("drops the child's Clear-Site-Data, which would clear the shell's cookies on a shared domain", async () => {
     const port = await child((_req, res) => {
       res.setHeader("clear-site-data", '"cookies", "storage"')

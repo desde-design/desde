@@ -199,6 +199,17 @@ export function mergeSetCookies(
   return ours === undefined ? withoutOurNames : [...withoutOurNames, ours]
 }
 
+/** The header names a `Connection` value nominates as hop-by-hop, lowercased. */
+function hopByHopNamedBy(connection: string | string[] | undefined): Set<string> {
+  const value = Array.isArray(connection) ? connection.join(",") : (connection ?? "")
+  return new Set(
+    value
+      .split(",")
+      .map((token) => token.trim().toLowerCase())
+      .filter((token) => token !== ""),
+  )
+}
+
 function isHtml(contentType: string | undefined): boolean {
   return typeof contentType === "string" && /^text\/html\b/i.test(contentType)
 }
@@ -232,8 +243,13 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
     // upstream failure).
     res.once("close", () => resolve())
     const headers: IncomingHttpHeaders = {}
+    // Hop-by-hop headers are the static list plus whatever `Connection`
+    // names for this one hop (`Connection: foo` means `foo` too), in both
+    // directions (codex round 24).
+    const requestHopByHop = hopByHopNamedBy(req.headers.connection)
     for (const [k, v] of Object.entries(req.headers)) {
-      if (!DROP_REQUEST.has(k.toLowerCase()) && v !== undefined) headers[k] = v
+      const name = k.toLowerCase()
+      if (!DROP_REQUEST.has(name) && !requestHopByHop.has(name) && v !== undefined) headers[k] = v
     }
     headers["accept-encoding"] = "identity"
     const cookie = forwardedCookieHeader(req.headers.cookie)
@@ -334,11 +350,12 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
         const rewrite = isHtml(up.headers["content-type"]) && !childEncoded && !bodiless && !partial
 
         res.status(up.statusCode ?? 502)
+        const responseHopByHop = hopByHopNamedBy(up.headers.connection)
         for (const [k, v] of Object.entries(up.headers)) {
           // `set-cookie` is held back and merged below — see `mergeSetCookies`
           // for why the viewer's own value has to go last, and why a child value
           // sharing its name is dropped.
-          if (DROP_RESPONSE.has(k.toLowerCase()) || v === undefined) continue
+          if (DROP_RESPONSE.has(k.toLowerCase()) || responseHopByHop.has(k.toLowerCase()) || v === undefined) continue
           if (k.toLowerCase() === "set-cookie") continue
           res.setHeader(k, v)
         }
