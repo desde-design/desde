@@ -1,6 +1,7 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process"
+import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process"
 import { connect as netConnect, createServer } from "node:net"
-import { mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
+import { readFileSync, renameSync, writeFileSync } from "node:fs"
+import { mkdir, readdir, readFile, realpath, rm, stat } from "node:fs/promises"
 import { basename, join, resolve, sep } from "node:path"
 import { promisify } from "node:util"
 import { buildEnv } from "../build/exec"
@@ -259,6 +260,38 @@ export interface ProcessIdentity {
   startedAt: string
 }
 
+/**
+ * `processIdentity`, synchronously, for the record written right after a
+ * spawn (codex round 60): the parent can be killed at any moment, and every
+ * await between the spawn and the record was a window in which the child
+ * outlived its parent with nothing a later boot could find. `/proc` reads
+ * and a `ps` call are both quick enough to hold the event loop for.
+ */
+function processIdentitySync(pid: number): ProcessIdentity | null {
+  if (process.platform === "linux") {
+    try {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8")
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+      const commandLine = cmdline.split("\0").filter(Boolean).join(" ")
+      const startedAt = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? ""
+      return commandLine === "" || startedAt === "" ? null : { commandLine, startedAt }
+    } catch {
+      return null
+    }
+  }
+  const psColumn = (column: string): string | null => {
+    try {
+      const line = execFileSync("ps", ["-o", `${column}=`, "-p", String(pid)], { encoding: "utf8" }).trim()
+      return line === "" ? null : line
+    } catch {
+      return null
+    }
+  }
+  const commandLine = psColumn("args")
+  const startedAt = psColumn("lstart")
+  return commandLine === null || startedAt === null ? null : { commandLine, startedAt }
+}
+
 async function processIdentity(pid: number): Promise<ProcessIdentity | null> {
   if (process.platform === "linux") {
     try {
@@ -364,8 +397,8 @@ export interface PrototypeProcessesDeps {
   reapIntervalMs?: number
   maxRunning?: number
   pickPort?: () => Promise<number>
-  /** Overrides how a child's identity (command line and start time) is read for its pid record. Tests only. */
-  processIdentity?: (pid: number) => Promise<ProcessIdentity | null>
+  /** Overrides how a child's identity (command line and start time) is read for its pid record, synchronously. Tests only. */
+  processIdentity?: (pid: number) => ProcessIdentity | null
   /**
    * Extra env merged into every spawned child, BEFORE `NODE_ENV`/`PORT`/
    * `HOSTNAME`/`HOST` so it can never override them.
@@ -452,7 +485,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const reapIntervalMs = deps.reapIntervalMs ?? 5 * 60_000
   const maxRunning = deps.maxRunning ?? MAX_RUNNING_SERVER_PROTOTYPES
   const pickPort = deps.pickPort ?? pickLoopbackPort
-  const readIdentity = deps.processIdentity ?? processIdentity
+  const readIdentity = deps.processIdentity ?? processIdentitySync
   /**
    * Every port a child of this manager has been handed and not yet given
    * back (codex round 32). `pickLoopbackPort` binds an ephemeral port and
@@ -1075,6 +1108,34 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       entry.child = spawned
       spawned.stdout?.on("data", (b: Buffer) => append(entry, b.toString("utf8")))
       spawned.stderr?.on("data", (b: Buffer) => append(entry, b.toString("utf8")))
+      // The pid record, synchronously and atomically, before this function
+      // yields (codex round 60): no await sits between the spawn and the
+      // record, and a temp file renamed into place means a later boot never
+      // reads half of one. A child that cannot be recorded is stopped here
+      // and the start fails, since no later boot could find it (round 50).
+      if (spawned.pid !== undefined) {
+        const identity = readIdentity(spawned.pid)
+        let recorded = false
+        if (identity !== null) {
+          try {
+            const target = join(home, pidFileName(generation))
+            writeFileSync(`${target}.tmp`, JSON.stringify({ pid: spawned.pid, command: [file, ...args], startedAt: identity.startedAt }))
+            renameSync(`${target}.tmp`, target)
+            recorded = true
+          } catch (error) {
+            console.error("[viewer] could not record a prototype server's pid:", error)
+          }
+        }
+        if (!recorded) {
+          console.error("[viewer] a prototype server could not be recorded for reaping; stopping it")
+          killTree(spawned, "SIGKILL")
+          spawned.kill("SIGKILL")
+          reservedPorts.delete(port)
+          entry.child = null
+          await applyAllowingRefusal(id, { type: "start-failed", reason: SETUP_FAILED_REASON, permanent: false })
+          throw new PrototypeProcessError(statusOf(id), SETUP_FAILED_REASON)
+        }
+      }
       return { entry, child: spawned }
     })
 
@@ -1134,46 +1195,6 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
         await applyAllowingRefusal(id, { type: "start-failed", reason: SETUP_FAILED_REASON, permanent: false })
       })
     })
-
-    // The pid record, durable BEFORE the start counts as established (codex
-    // round 45): a Viewer killed between the spawn and this write left a
-    // child the next boot could not find. The handlers above are wired
-    // first, so a child that dies meanwhile is still seen, and a record of
-    // a child that has already exited is removed again here. The start time
-    // is read now, while the pid is certainly still this child, so a later
-    // boot can tell it from whatever reuses the number (codex round 35); a
-    // record without one is never acted on.
-    if (child.pid !== undefined) {
-      const pid = child.pid
-      const identity = await readIdentity(pid).catch(() => null)
-      let recorded = false
-      if (identity !== null) {
-        try {
-          await writeFile(
-            join(home, pidFileName(generation)),
-            JSON.stringify({ pid, command: [file, ...args], startedAt: identity.startedAt }),
-          )
-          recorded = true
-        } catch (error) {
-          console.error("[viewer] could not record a prototype server's pid:", error)
-        }
-      }
-      if (exited) void rm(join(home, pidFileName(generation)), { force: true }).catch(() => {})
-      // No usable record means no later boot could ever find this child
-      // (codex round 50): a start that cannot be recorded is a failed start,
-      // and the child is stopped rather than left to outlive a crash.
-      if (!recorded && !exited) {
-        console.error("[viewer] a prototype server could not be recorded for reaping; stopping it")
-        killTree(child, "SIGKILL")
-        child.kill("SIGKILL")
-        await lock.run(id, async () => {
-          if (entries.get(id) !== entry || entry.child !== child) return
-          entry.child = null
-          await applyAllowingRefusal(id, { type: "start-failed", reason: SETUP_FAILED_REASON, permanent: false })
-        })
-        throw new PrototypeProcessError(statusOf(id), SETUP_FAILED_REASON)
-      }
-    }
 
     const deadline = now() + readyTimeoutMs
     // `entry.child === child` is re-checked every iteration so a stop (or an

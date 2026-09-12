@@ -699,7 +699,7 @@ describe("createPrototypeProcesses", () => {
      */
     it("fails the start and stops the child when its identity cannot be read for the record", async () => {
       const root = await checkoutsRoot(["d1"])
-      const procs = createPrototypeProcesses({ checkoutsRoot: root, processIdentity: async () => null })
+      const procs = createPrototypeProcesses({ checkoutsRoot: root, processIdentity: () => null })
       managers.push(procs)
       const errors = vi.spyOn(console, "error").mockImplementation(() => {})
       try {
