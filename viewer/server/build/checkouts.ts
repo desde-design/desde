@@ -1,4 +1,4 @@
-import { cp, mkdir, rename, rm, stat } from "node:fs/promises"
+import { cp, mkdir, readdir, rename, rm, stat } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import type { StorageAdapter } from "../storage/types"
 
@@ -29,6 +29,43 @@ export async function keepCheckout(from: string, to: string): Promise<void> {
     await cp(from, to, { recursive: true, verbatimSymlinks: true })
     await rm(from, { recursive: true, force: true })
   }
+}
+
+/**
+ * Removes every checkout under `checkoutsRoot` whose deployment never went
+ * live, and answers how many (codex round 33). The runner moves a server
+ * build's checkout into place BEFORE the deployment and project rows are
+ * written; a Viewer killed between the two leaves a directory, `node_modules`
+ * and all, under a row that boot marks `failed` (or under no row at all),
+ * and nothing revisited it: `pruneSupersededCheckouts` runs only when that
+ * project next activates, which a project nobody builds again never does.
+ * `server/index.ts` awaits this at boot, after `markInterruptedBuildsFailed`
+ * and after the process manager's orphan reap, so no child can be running
+ * out of a directory this removes. Best effort per directory.
+ */
+export async function reconcileCheckouts(
+  storage: Pick<StorageAdapter, "getDeployment">,
+  checkoutsRoot: string,
+): Promise<number> {
+  let names: string[]
+  try {
+    names = await readdir(checkoutsRoot)
+  } catch {
+    return 0
+  }
+  let removed = 0
+  for (const name of names) {
+    try {
+      const dir = checkoutDirFor(checkoutsRoot, name)
+      const row = await storage.getDeployment(name)
+      if (row !== null && row.status === "deployed") continue
+      await rm(dir, { recursive: true, force: true })
+      removed++
+    } catch (error) {
+      console.error(`[viewer] failed to reconcile the checkout for ${name}:`, error)
+    }
+  }
+  return removed
 }
 
 /**

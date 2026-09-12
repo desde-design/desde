@@ -24,6 +24,7 @@ import { originModeBannerLines } from "./serve/origin-mode-banner"
 import { assertOriginConfig, assertPrototypeOriginConfig } from "./serve/prototype-origin-resolve"
 import { SqliteStorage } from "./storage/sqlite-storage"
 import { createBuildChangeBus } from "./build/build-change-bus"
+import { reconcileCheckouts } from "./build/checkouts"
 import { createGithubRuntime } from "./github-runtime"
 import type { StorageAdapter } from "./storage/types"
 import type { AssetStore } from "./assets/types"
@@ -102,6 +103,12 @@ async function main(): Promise<void> {
   const orphans = await prototypeProcesses.reapOrphans()
   if (orphans > 0) {
     console.log(`[viewer] stopped ${orphans} prototype server${orphans === 1 ? "" : "s"} left running by a previous Viewer`)
+  }
+  // A checkout moved into place by a build the crash interrupted before its
+  // row went live is nobody's rollback target and nothing else revisits it.
+  const stray = await reconcileCheckouts(storage, join(config.dataDir, "checkouts"))
+  if (stray > 0) {
+    console.log(`[viewer] removed ${stray} checkout${stray === 1 ? "" : "s"} left by builds that never went live`)
   }
 
   const buildChangeBus = createBuildChangeBus()

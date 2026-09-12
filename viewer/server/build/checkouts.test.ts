@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { InMemoryStorage } from "../storage/in-memory-storage"
-import { checkoutDirFor, keepCheckout, pruneSupersededCheckouts } from "./checkouts"
+import { checkoutDirFor, keepCheckout, pruneSupersededCheckouts, reconcileCheckouts } from "./checkouts"
 
 const roots: string[] = []
 async function tmp(): Promise<string> {
@@ -42,6 +42,33 @@ describe("keepCheckout", () => {
   })
   it("rejects a deployment id that would escape the root", () => {
     expect(() => checkoutDirFor("/data/checkouts", "../etc")).toThrow()
+  })
+})
+
+/**
+ * Codex round 33. A Viewer killed after the runner moved a checkout into
+ * place but before the deployment row went live left that directory,
+ * `node_modules` and all, for ever: boot marks the row failed, and the
+ * prune only runs when the project next activates.
+ */
+describe("reconcileCheckouts", () => {
+  it("removes a checkout whose row failed, or has no row, and keeps a deployed one", async () => {
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    const root = await tmp()
+    const live = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const failed = await storage.createDeployment({ projectId: project.id, status: "failed" })
+    for (const id of [live.id, failed.id, "no-such-row"]) {
+      await mkdir(join(checkoutDirFor(root, id), "node_modules"), { recursive: true })
+    }
+    expect(await reconcileCheckouts(storage, root)).toBe(2)
+    expect(await exists(checkoutDirFor(root, live.id))).toBe(true)
+    expect(await exists(checkoutDirFor(root, failed.id))).toBe(false)
+    expect(await exists(checkoutDirFor(root, "no-such-row"))).toBe(false)
+  })
+
+  it("answers 0 for a checkouts root that does not exist yet", async () => {
+    expect(await reconcileCheckouts(new InMemoryStorage(), join(await tmp(), "checkouts"))).toBe(0)
   })
 })
 
