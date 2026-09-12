@@ -310,6 +310,26 @@ export function storageAdapterContract(
       await opts.cleanup?.()
     })
 
+    it("activateDeployment sets the project's active deployment and stamps the row in one change (codex round 49)", async () => {
+      const store = await fresh()
+      const project = await store.createProject({ slug: "act", name: "Act" })
+      const other = await store.createProject({ slug: "other", name: "Other" })
+      const deployment = await store.createDeployment({ projectId: project.id, status: "deployed" })
+      const stranger = await store.createDeployment({ projectId: other.id, status: "deployed" })
+
+      const stamped = await store.activateDeployment(project.id, deployment.id)
+      expect(stamped.activatedAt).toBeTypeOf("string")
+      expect((await store.getProject(project.id))?.activeDeploymentId).toBe(deployment.id)
+      expect((await store.getDeployment(deployment.id))?.activatedAt).toBe(stamped.activatedAt)
+
+      await expect(store.activateDeployment(project.id, stranger.id)).rejects.toThrow(/does not belong/)
+      await expect(store.activateDeployment(project.id, "no-such-deployment")).rejects.toThrow()
+      expect((await store.getProject(project.id))?.activeDeploymentId).toBe(deployment.id)
+
+      await store.close()
+      await opts.cleanup?.()
+    })
+
     it("updates deployment status and build log", async () => {
       const store = await fresh()
       const project = await store.createProject({ slug: "a", name: "A" })

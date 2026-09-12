@@ -243,11 +243,11 @@ export function createBuildQueue(deps: BuildQueueDeps): BuildQueue {
               serverStart: result.serverStart,
               serverCwd: result.serverCwd ?? null,
             })
-            await deps.storage.updateProject(projectId, { activeDeploymentId: deployment.id })
-            // The durable fact that this build went live (codex round 48):
-            // boot's checkout reconcile keeps a deployed checkout only for a
-            // row that carries it, or that is the current active deployment.
-            await deps.storage.updateDeployment(deployment.id, { activatedAt: new Date().toISOString() })
+            // The pointer and the durable "went live" stamp, as one change
+            // (codex rounds 48 and 49): boot's checkout reconcile keeps a
+            // deployed checkout only for a stamped row or the current active
+            // deployment, and two writes could fail or be killed in between.
+            await deps.storage.activateDeployment(projectId, deployment.id)
             // S5: the build lane leaked identically to the upload lane —
             // every push-triggered rebuild strands the previous deployment's
             // assets forever. Same asset-only, best-effort sweep as the

@@ -180,6 +180,20 @@ export class InMemoryStorage implements StorageAdapter {
     return this.cloneProject(updated)
   }
 
+  async activateDeployment(projectId: string, deploymentId: string): Promise<Deployment> {
+    const project = this.projects.get(projectId)
+    if (!project) throw new NotFoundError("Project", projectId)
+    const deployment = this.deployments.get(deploymentId)
+    if (!deployment) throw new NotFoundError("Deployment", deploymentId)
+    if (deployment.projectId !== projectId) {
+      throw new Error(`Deployment ${deploymentId} does not belong to project ${projectId}`)
+    }
+    const stamped: Deployment = { ...deployment, activatedAt: this.nextTimestamp() }
+    this.projects.set(projectId, { ...project, activeDeploymentId: deploymentId })
+    this.deployments.set(deploymentId, stamped)
+    return { ...stamped }
+  }
+
   async deleteProject(id: string): Promise<void> {
     this.projects.delete(id)
     for (const [key, deployment] of this.deployments) {

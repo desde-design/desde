@@ -574,6 +574,15 @@ export interface StorageAdapter {
   listProjects(): Promise<Project[]>
   updateProject(id: string, patch: ProjectUpdatePatch): Promise<Project>
   /**
+   * Makes a deployment its project's active one and stamps the deployment's
+   * `activatedAt`, as ONE change (codex round 49): the two used to be
+   * separate writes, and a failure or a kill between them left a project
+   * pointing at a row boot would later treat as never activated. Throws
+   * `NotFoundError` for an unknown project or deployment, and refuses a
+   * deployment of another project. Returns the stamped deployment.
+   */
+  activateDeployment(projectId: string, deploymentId: string): Promise<Deployment>
+  /**
    * Cascades to every row this project owns, atomically (M4 — SqliteStorage
    * wraps the whole cascade in one transaction, so a mid-delete crash can
    * never leave the project half-gone): `comments`, `deployments`,

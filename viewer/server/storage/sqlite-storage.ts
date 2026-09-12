@@ -779,6 +779,29 @@ export class SqliteStorage implements StorageAdapter {
     return next
   }
 
+  async activateDeployment(projectId: string, deploymentId: string): Promise<Deployment> {
+    const project = await this.getProject(projectId)
+    if (!project) throw new NotFoundError("Project", projectId)
+    const deployment = await this.getDeployment(deploymentId)
+    if (!deployment) throw new NotFoundError("Deployment", deploymentId)
+    if (deployment.projectId !== projectId) {
+      throw new Error(`Deployment ${deploymentId} does not belong to project ${projectId}`)
+    }
+    const activatedAt = new Date().toISOString()
+    // One transaction, same `BEGIN IMMEDIATE` pattern as `deleteProject`:
+    // the pointer and the stamp land together or not at all.
+    this.db.exec("BEGIN IMMEDIATE")
+    try {
+      this.db.prepare(`UPDATE projects SET active_deployment_id = ? WHERE id = ?`).run(deploymentId, projectId)
+      this.db.prepare(`UPDATE deployments SET activated_at = ? WHERE id = ?`).run(activatedAt, deploymentId)
+      this.db.exec("COMMIT")
+    } catch (error) {
+      this.db.exec("ROLLBACK")
+      throw error
+    }
+    return { ...deployment, activatedAt }
+  }
+
   async deleteProject(id: string): Promise<void> {
     // M4: wrapped in a transaction, same `BEGIN IMMEDIATE` pattern
     // `setUserInstallations` uses. Nine DELETEs across eight tables with no

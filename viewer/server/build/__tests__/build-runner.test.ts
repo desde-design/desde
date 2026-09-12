@@ -585,7 +585,7 @@ describe("build queue", () => {
     const checkoutsRoot = await tempDir("viewer-checkouts-")
     // The second of the two activation writes: the deployment row is already
     // `deployed` when this rejects, which is the worse half of the window.
-    storage.updateProject = () => Promise.reject(new Error("storage is down"))
+    storage.activateDeployment = () => Promise.reject(new Error("storage is down"))
 
     const forgotten: string[] = []
     const errors = vi.spyOn(console, "error").mockImplementation(() => {})
