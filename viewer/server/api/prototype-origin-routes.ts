@@ -141,6 +141,11 @@ export type PrototypeOriginErrorBody =
  * patch) is needed. A discriminated union on `status` rather than one
  * looser shape, so a caller narrowing on `status === 200` gets `body`
  * typed as `PrototypeOriginResponse`, not the error shape.
+ *
+ * A 200 body states the same id to the client (`PrototypeOriginResponse`'s
+ * `deploymentId`), which is how the review page notices a rebuild it was not
+ * rendered for. It stays here as well because a 503 body carries no such
+ * field and the stream still has to follow the deployment behind it.
  */
 export type PrototypeOriginResult =
   | { status: 200; body: PrototypeOriginResponse; deploymentId: string | null }
@@ -229,6 +234,7 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
       body: {
         mode: "subdomain",
         origin: prototypeOriginFor(project.slug, serveDomain, deps.config.publicUrl),
+        ...(deploymentId ? { deploymentId } : {}),
         // A subdomain prototype takes no capability when its assets need no
         // credential at all. Otherwise the caller must mint one: the session
         // cookie is host-only, so it is never sent to `{slug}.{serveDomain}`
@@ -256,6 +262,7 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
       body: {
         mode: "prototype-origin",
         origin: resolved.prototypeOrigin,
+        ...(deploymentId ? { deploymentId } : {}),
         capabilityRequired: !prototypeAnonymouslyReadable(project.access, policy.allowPublicLinks),
         serve,
         ...(processStatus ? { process: processStatus } : {}),
@@ -296,6 +303,7 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
         mode: "fallback",
         origin: null,
         capabilityRequired: true,
+        ...(deploymentId ? { deploymentId } : {}),
         serve,
         ...(processStatus ? { process: processStatus } : {}),
       },
@@ -334,6 +342,7 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
       body: {
         mode: "loopback",
         origin: listener.origin,
+        deploymentId: deployment.id,
         // Reaching an ephemeral loopback socket IS the credential, and this
         // route only opens one for a project the caller may already read.
         capabilityRequired: false,

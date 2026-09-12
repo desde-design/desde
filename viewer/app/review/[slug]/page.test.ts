@@ -263,6 +263,31 @@ describe("readPrototypeOrigin", () => {
     ).toEqual({ from: 3101, to: 3120 })
   })
 
+  /**
+   * The shell compares this against the deployment the page was rendered
+   * with, and asks Next to re-render when they differ — a new deployment
+   * needs a capability only the server can mint. An older server's body says
+   * nothing, so the field is OMITTED rather than nulled: such a body has to
+   * parse to exactly the object it used to, or every page would look like a
+   * deployment change to the shell.
+   */
+  it("carries the active deployment id, and omits it when the body names none", () => {
+    expect(
+      readPrototypeOrigin({
+        mode: "loopback",
+        origin: "http://127.0.0.1:45001",
+        capabilityRequired: false,
+        serve: "static",
+        range: null,
+        deploymentId: "dep-7",
+      }).deploymentId,
+    ).toBe("dep-7")
+    expect(
+      "deploymentId" in
+        readPrototypeOrigin({ mode: "loopback", origin: "http://127.0.0.1:45001", serve: "static" }),
+    ).toBe(false)
+  })
+
   it("carries the bridge asset path the port watchdog probes", () => {
     expect(
       readPrototypeOrigin({

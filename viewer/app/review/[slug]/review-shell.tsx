@@ -73,6 +73,7 @@ import { decidePrototypeEmbed } from "./prototype-embed-decision"
 import { PrototypeUnavailable } from "./prototype-unavailable"
 import { PORT_WATCHDOG_MS, shouldWarnPortUnreachable } from "../port-watchdog"
 import { useLivePrototypeOrigin } from "../use-live-prototype-origin"
+import { useRouterRefresh } from "../use-router-refresh"
 import { INITIAL_FRAME_KEY, nextFrameKey } from "../frame-key"
 import type { ReviewEmbedOrigin } from "./prototype-origin-response"
 
@@ -151,6 +152,17 @@ export interface ReviewShellProject {
    * watchdog below probes it. Absent means probe the origin root instead.
    */
   bridgeAssetPath?: string | null
+  /**
+   * The deployment every other field here was resolved for — the capability
+   * above most of all, which is minted against one deployment id. Absent when
+   * the project has nothing built.
+   *
+   * The shell watches the live stream for a DIFFERENT one and asks Next to
+   * re-render, because a new deployment is the one change client state cannot
+   * absorb: only the server can mint the next capability, and the document in
+   * the frame belongs to the previous build.
+   */
+  deploymentId?: string
 }
 
 const POPUP_WIDTH = 320
@@ -209,6 +221,7 @@ export function ReviewShell({
       range: project.range,
       ...(project.originReason ? { reason: project.originReason } : {}),
       ...(project.bridgeAssetPath ? { bridgeAssetPath: project.bridgeAssetPath } : {}),
+      ...(project.deploymentId ? { deploymentId: project.deploymentId } : {}),
     }),
     [
       project.mode,
@@ -218,6 +231,7 @@ export function ReviewShell({
       project.range,
       project.originReason,
       project.bridgeAssetPath,
+      project.deploymentId,
     ],
   )
 
@@ -246,6 +260,37 @@ export function ReviewShell({
     reason: liveOrigin.reason,
     range: liveOrigin.range,
   })
+
+  /**
+   * A new deployment is the one change this page cannot absorb on its own.
+   *
+   * Everything else the stream reports — a crash, a restart, a recovery, a new
+   * listener port — is a fact about the same build, and the decision above is
+   * simply recomputed from it. A new deployment is not: the capability in the
+   * frame's URL was minted server-side for the PREVIOUS deployment id, and
+   * only the server can mint the next one. On a private prototype the frame
+   * would otherwise keep loading assets under a capability for a build that is
+   * no longer active.
+   *
+   * So this asks Next to re-render the page. The server re-mints, the props
+   * come back naming the new deployment, and `useLivePrototypeOrigin` reopens
+   * on the fresh `initial` (see its `followedFrom`).
+   *
+   * ONCE per deployment. The stream keeps sending bodies for the new
+   * deployment while Next is re-rendering, and every one of them still differs
+   * from the `initial` this page was built with, so the ref is what stops each
+   * of them asking again.
+   */
+  const refreshRouter = useRouterRefresh()
+  const refreshedDeployment = useRef<string | null>(null)
+  const initialDeployment = initialOrigin.deploymentId ?? null
+  const liveDeployment = liveOrigin.deploymentId ?? null
+  useEffect(() => {
+    if (liveDeployment === null || liveDeployment === initialDeployment) return
+    if (refreshedDeployment.current === liveDeployment) return
+    refreshedDeployment.current = liveDeployment
+    refreshRouter()
+  }, [liveDeployment, initialDeployment, refreshRouter])
 
   // Named `liveProcess`, not `process` — this component is server-rendered
   // too, where `process` is the Node global.

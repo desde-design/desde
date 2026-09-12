@@ -54,6 +54,19 @@ export interface ReviewEmbedOrigin {
    * on a cold `next start`.
    */
   bridgeAssetPath?: string | null
+  /**
+   * Which deployment this answer was computed against. ABSENT when the body
+   * named none — the project has nothing built, or the answer came from a
+   * server old enough not to say.
+   *
+   * The shell compares it against the deployment the page was rendered with,
+   * and asks Next to re-render when they differ: a new deployment needs a
+   * capability only the server can mint, and the document in the frame is the
+   * previous build's. Nothing else in the body can stand in for it — a static
+   * rebuild has no process, two server builds can both be at generation 1,
+   * and a subdomain origin is the same string for every deployment.
+   */
+  deploymentId?: string
 }
 
 /** What every unusable answer resolves to. See `readPrototypeOrigin`. */
@@ -89,6 +102,7 @@ export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
     range: rawRange,
     reason: rawReason,
     bridgeAssetPath: rawBridgeAssetPath,
+    deploymentId: rawDeploymentId,
   } = value as {
     mode?: unknown
     origin?: unknown
@@ -97,6 +111,7 @@ export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
     range?: unknown
     reason?: unknown
     bridgeAssetPath?: unknown
+    deploymentId?: unknown
   }
 
   // Read before the shape checks below can bail out: neither 503 body (ports
@@ -121,12 +136,18 @@ export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
     typeof (rawRange as { to?: unknown }).to === "number"
       ? (rawRange as { from: number; to: number })
       : null
+  // Omitted rather than nulled when the body named none, so an older
+  // server's answer parses to exactly the object it used to — see
+  // `ReviewEmbedOrigin.deploymentId`. Read here, alongside `serve` and
+  // `reason`, so it survives a body that fails the shape checks below too.
+  const deploymentId = typeof rawDeploymentId === "string" ? rawDeploymentId : null
   /** What every unusable body falls back to, carrying what it did say. */
   const fallback: ReviewEmbedOrigin = {
     ...FALLBACK_EMBED_ORIGIN,
     serve,
     range,
     ...(reason ? { reason } : {}),
+    ...(deploymentId ? { deploymentId } : {}),
   }
 
   if (
@@ -167,5 +188,6 @@ export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
     range,
     ...(bridgeAssetPath ? { bridgeAssetPath } : {}),
     ...(reason ? { reason } : {}),
+    ...(deploymentId ? { deploymentId } : {}),
   }
 }

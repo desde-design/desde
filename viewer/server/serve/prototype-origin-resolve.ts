@@ -322,47 +322,71 @@ export type PrototypeProcessStatus = ProcessStatus
  * shell's port probe only runs in loopback mode: it fetches that path to ask
  * whether the PORT answers at all, which the serve router decides before it
  * would ever start a server prototype's process.
+ *
+ * `deploymentId` names which deployment the body was computed against, on
+ * every mode — see `PrototypeDeployment` below.
  */
-export type PrototypeOriginResponse =
-  | {
-      mode: "loopback"
-      origin: string
-      capabilityRequired: false
-      serve: PrototypeServeMode
-      process?: PrototypeProcessStatus
-      range: { from: number; to: number } | null
-      bridgeAssetPath: string
-    }
-  | {
-      mode: "loopback"
-      origin: null
-      capabilityRequired: false
-      reason: "no-deployment"
-      serve: "static"
-      range: { from: number; to: number } | null
-      bridgeAssetPath: string
-    }
-  | {
-      mode: "subdomain"
-      origin: string
-      capabilityRequired: boolean
-      serve: PrototypeServeMode
-      process?: PrototypeProcessStatus
-    }
-  | {
-      mode: "prototype-origin"
-      origin: string
-      capabilityRequired: boolean
-      serve: PrototypeServeMode
-      process?: PrototypeProcessStatus
-    }
-  | {
-      mode: "fallback"
-      origin: null
-      capabilityRequired: true
-      serve: PrototypeServeMode
-      process?: PrototypeProcessStatus
-    }
+export type PrototypeOriginResponse = PrototypeDeployment &
+  (
+    | {
+        mode: "loopback"
+        origin: string
+        capabilityRequired: false
+        serve: PrototypeServeMode
+        process?: PrototypeProcessStatus
+        range: { from: number; to: number } | null
+        bridgeAssetPath: string
+      }
+    | {
+        mode: "loopback"
+        origin: null
+        capabilityRequired: false
+        reason: "no-deployment"
+        serve: "static"
+        range: { from: number; to: number } | null
+        bridgeAssetPath: string
+      }
+    | {
+        mode: "subdomain"
+        origin: string
+        capabilityRequired: boolean
+        serve: PrototypeServeMode
+        process?: PrototypeProcessStatus
+      }
+    | {
+        mode: "prototype-origin"
+        origin: string
+        capabilityRequired: boolean
+        serve: PrototypeServeMode
+        process?: PrototypeProcessStatus
+      }
+    | {
+        mode: "fallback"
+        origin: null
+        capabilityRequired: true
+        serve: PrototypeServeMode
+        process?: PrototypeProcessStatus
+      }
+  )
+
+/**
+ * The active deployment this answer describes, carried by every shape above.
+ *
+ * The review page holds it to notice a deployment it has not been rendered
+ * for. Nothing else in the body can stand in: a static rebuild has no process
+ * to change generation, two server builds can both be at generation 1, and in
+ * subdomain mode the origin is the same string for every deployment of a
+ * project. On a private prototype the difference is load-bearing rather than
+ * cosmetic, because the capability in the iframe's URL was minted for one
+ * deployment id.
+ *
+ * OMITTED, never `null`, when the project has nothing built. A body that
+ * names no deployment then parses to exactly the object it did before this
+ * field existed, which is what keeps an older server's answer readable.
+ */
+interface PrototypeDeployment {
+  deploymentId?: string
+}
 
 /**
  * Decides which origin mode is in play for one request, and the shell

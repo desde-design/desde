@@ -409,6 +409,20 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body.process).toEqual({ state: "stopped" })
     })
 
+    it("names the active deployment the answer was computed against", async () => {
+      const project = await seedProject(ctx.storage)
+
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(200)
+
+      // The page compares this against the one the live stream sends, which
+      // is how it notices a rebuild it has to re-render for.
+      expect(res.body.deploymentId).toBe(project.activeDeploymentId)
+    })
+
     it("carries the configured loopback port range", async () => {
       const withRange = setup({
         config: { ...loopbackConfig, loopbackPortRange: { from: 4100, to: 4110 } },
@@ -623,6 +637,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body).toEqual({
         mode: "subdomain",
         origin: "https://acme.desde.test",
+        deploymentId: project.activeDeploymentId,
         capabilityRequired: true,
         serve: "static",
       })
@@ -640,6 +655,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body).toEqual({
         mode: "subdomain",
         origin: "https://acme.desde.test",
+        deploymentId: project.activeDeploymentId,
         capabilityRequired: false,
         serve: "static",
       })
@@ -676,6 +692,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body).toEqual({
         mode: "prototype-origin",
         origin: "https://proto.example.net",
+        deploymentId: project.activeDeploymentId,
         capabilityRequired: true,
         serve: "static",
       })
@@ -693,6 +710,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body).toEqual({
         mode: "prototype-origin",
         origin: "https://proto.example.net",
+        deploymentId: project.activeDeploymentId,
         capabilityRequired: false,
         serve: "static",
       })
@@ -751,6 +769,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body).toEqual({
         mode: "fallback",
         origin: null,
+        deploymentId: project.activeDeploymentId,
         capabilityRequired: true,
         serve: "static",
       })
@@ -777,6 +796,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body).toEqual({
         mode: "fallback",
         origin: null,
+        deploymentId: project.activeDeploymentId,
         capabilityRequired: true,
         serve: "server",
         process: { state: "stopped" },
@@ -829,6 +849,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body).toEqual({
         mode: "fallback",
         origin: null,
+        deploymentId: project.activeDeploymentId,
         capabilityRequired: true,
         serve: "static",
       })
@@ -864,6 +885,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body).toEqual({
         mode: "fallback",
         origin: null,
+        deploymentId: project.activeDeploymentId,
         capabilityRequired: true,
         serve: "static",
       })
@@ -882,6 +904,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body).toEqual({
         mode: "fallback",
         origin: null,
+        deploymentId: project.activeDeploymentId,
         capabilityRequired: true,
         serve: "static",
       })
@@ -923,6 +946,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       expect(res.body).toEqual({
         mode: "subdomain",
         origin: "https://acme.desde.test",
+        deploymentId: project.activeDeploymentId,
         capabilityRequired: true,
         serve: "static",
       })

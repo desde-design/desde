@@ -379,6 +379,11 @@ export default async function ReviewPage({
         range: embedOrigin.range,
         originReason: embedOrigin.reason,
         bridgeAssetPath: embedOrigin.bridgeAssetPath,
+        // Which deployment everything above was resolved for, capability
+        // included. The shell watches the live stream for a different one and
+        // asks the router to re-render, which is what re-mints the capability
+        // and re-renders this page for the new build.
+        deploymentId: embedOrigin.deploymentId,
       }}
     />
   )

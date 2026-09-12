@@ -47,6 +47,8 @@ vi.mock("next/navigation", () => ({
 }))
 
 const PROJECT_ID = "proj-embedded-crash"
+/** The deployment the page below was server-rendered against. */
+const DEPLOYMENT_ID = "dep-1"
 
 const RUNNING_GENERATION_1: ProcessStatus = {
   state: "running",
@@ -98,10 +100,26 @@ const PROJECT: ReviewShellProject = {
   serve: "server",
   process: RUNNING_GENERATION_1,
   range: null,
+  deploymentId: DEPLOYMENT_ID,
 }
 
-function loopbackBody(process: ProcessStatus, origin: string | null = PROJECT.prototypeOrigin): unknown {
-  return { mode: "loopback", origin, serve: "server", process, range: null }
+/**
+ * One `origin` body, the way the route sends it. `origin` and `deploymentId`
+ * both default to what the page was server-rendered with, so a test only
+ * states the one it is about.
+ */
+function loopbackBody(
+  process: ProcessStatus,
+  body: { origin?: string | null; deploymentId?: string } = {},
+): unknown {
+  return {
+    mode: "loopback",
+    origin: body.origin === undefined ? PROJECT.prototypeOrigin : body.origin,
+    serve: "server",
+    process,
+    range: null,
+    deploymentId: body.deploymentId ?? DEPLOYMENT_ID,
+  }
 }
 
 const ROUTES: Record<string, FetchOverrideResult | (() => FetchOverrideResult)> = {
@@ -124,9 +142,12 @@ function stream() {
 }
 
 /** Push one `origin` event, the way the route sends it. */
-function pushOrigin(process: ProcessStatus, origin?: string): void {
+function pushOrigin(
+  process: ProcessStatus,
+  body: { origin?: string | null; deploymentId?: string } = {},
+): void {
   act(() => {
-    stream().dispatch("origin", loopbackBody(process, origin))
+    stream().dispatch("origin", loopbackBody(process, body))
   })
 }
 
@@ -157,6 +178,9 @@ function frame(): HTMLIFrameElement | null {
 
 afterEach(() => {
   cleanup()
+  // One mock for the whole file, so a test that expects no refresh must not
+  // inherit a call from the test before it.
+  refresh.mockClear()
 })
 
 describe("review shell — following the process-state stream", () => {
@@ -253,7 +277,7 @@ describe("review shell — following the process-state stream", () => {
     )
     expect(frame()?.getAttribute("src")).toBe(`${PROJECT.prototypeOrigin}/`)
 
-    pushOrigin(RUNNING_GENERATION_2, "http://127.0.0.1:4499")
+    pushOrigin(RUNNING_GENERATION_2, { origin: "http://127.0.0.1:4499" })
 
     expect(frame()?.getAttribute("src")).toBe("http://127.0.0.1:4499/")
   })
@@ -310,6 +334,67 @@ describe("review shell — following the process-state stream", () => {
     expect(document.querySelector('[data-testid="prototype-crashed"]')).toBeNull()
     expect(frame(), "the frame did not come back for the restarted process").not.toBeNull()
     expect(refresh).not.toHaveBeenCalled()
+  })
+
+  /**
+   * A NEW DEPLOYMENT is the one thing client state cannot absorb.
+   *
+   * Everything else the stream reports is a fact about the same build, and the
+   * page re-decides from it with no server round trip — that is the whole
+   * point of the stream, and the tests above assert `refresh` is never called
+   * for any of it. A new deployment is different: on a private prototype the
+   * capability in the iframe's URL was minted server-side for the PREVIOUS
+   * deployment, and only the server can mint the next one. Two server builds
+   * can also both be at generation 1, and a static rebuild has no process at
+   * all, so neither the generation nor the origin can stand in for the
+   * deployment's identity.
+   */
+  it("asks the router to re-render once when the live body names a new deployment", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+
+    pushOrigin(RUNNING_GENERATION_1, { deploymentId: "dep-2" })
+
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not re-render for a body naming the deployment the page was rendered with", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+
+    pushOrigin(RUNNING_GENERATION_1)
+    pushOrigin(RUNNING_GENERATION_2)
+
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  /**
+   * The stream keeps sending bodies for the new deployment — a heartbeat
+   * re-resolve, every later process transition — and the page goes on
+   * rendering with the old `initial` until Next hands it a new one. Without a
+   * guard, each of those bodies would ask for another refresh.
+   */
+  it("does not re-render again for a repeat of the same new deployment", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+
+    pushOrigin(RUNNING_GENERATION_1, { deploymentId: "dep-2" })
+    pushOrigin(RUNNING_GENERATION_2, { deploymentId: "dep-2" })
+    pushOrigin(RUNNING_GENERATION_2, { deploymentId: "dep-2" })
+
+    expect(refresh).toHaveBeenCalledTimes(1)
   })
 
   /**
