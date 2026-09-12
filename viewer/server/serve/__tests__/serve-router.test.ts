@@ -2382,8 +2382,13 @@ describe("createServeRouter", () => {
         expect(head.headers["content-type"]).toMatch(/text\/html/)
       })
 
-      /** A prototype's own CORS preflight is the child's to answer, not ours. */
-      it("proxies OPTIONS to a server deployment", async () => {
+      /**
+       * A prototype's own CORS preflight reaches the child, but whatever the
+       * child grants never leaves the proxy (codex round 27): a pinned
+       * loopback origin authorises by reachability, so a grant would let any
+       * page read a private prototype.
+       */
+      it("proxies OPTIONS to a server deployment and drops the grant it answers with", async () => {
         let seenMethod: string | undefined
         const port = await child((req, res) => {
           seenMethod = req.method
@@ -2398,7 +2403,7 @@ describe("createServeRouter", () => {
         const res = await request(app).options("/p/srv/api/orders")
         expect(res.status).toBe(204)
         expect(seenMethod).toBe("OPTIONS")
-        expect(res.headers["access-control-allow-methods"]).toBe("GET, POST")
+        expect(res.headers["access-control-allow-methods"]).toBeUndefined()
       })
 
       it("proxies HEAD to a server deployment, like GET", async () => {
