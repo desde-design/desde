@@ -200,6 +200,8 @@ export interface PrototypeProcesses {
    */
   subscribe(deploymentId: string, listener: (status: ProcessStatus) => void): () => void
   startReaper(): () => void
+  /** How many deployment records the manager holds. For tests and diagnostics; a forgotten deployment must not count. */
+  recordCount(): number
   shutdown(): Promise<void>
 }
 
@@ -729,6 +731,16 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    * something else has moved the record on.
    */
   async function startChild(id: string, serverStart: string[], generation: number): Promise<{ port: number }> {
+    // The record this start was granted on. `forget` (a prune, a project
+    // delete) can drop it while the awaits below are pending, and every
+    // apply after an await goes through `entryFor`, which would CREATE a
+    // fresh record for a deployment the manager was just told to forget:
+    // a phantom nothing ever drops (codex round 17). So each post-await
+    // apply first checks the record is still this one.
+    const startEntry = entries.get(id)
+    const stillOurs = (): boolean => startEntry !== undefined && entries.get(id) === startEntry
+    const abandonedBeforeSpawn = (): PrototypeProcessError =>
+      new PrototypeProcessError({ state: "stopped" }, RETIRED_REFUSAL)
     let cwd: string
     try {
       // Inside the try: a malformed id makes `checkoutDirFor` throw
@@ -740,9 +752,10 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // Permanent: no number of restarts puts the files back, and no amount
       // of waiting does. Only a rebuild does, which is what the review page
       // then offers.
-      await lock.run(id, () =>
-        apply(id, { type: "start-failed", reason: MISSING_CHECKOUT_REASON, permanent: true }),
-      )
+      await lock.run(id, () => {
+        if (!stillOurs()) throw abandonedBeforeSpawn()
+        return apply(id, { type: "start-failed", reason: MISSING_CHECKOUT_REASON, permanent: true })
+      })
       throw new PrototypeProcessError(statusOf(id), MISSING_CHECKOUT_REASON)
     }
 
@@ -781,7 +794,10 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // five seconds without end. The machine charges it, because the
       // `permanent` flag below is false.
       console.error("[viewer] prototype process setup failed:", error)
-      await lock.run(id, () => apply(id, { type: "start-failed", reason: SETUP_FAILED_REASON, permanent: false }))
+      await lock.run(id, () => {
+        if (!stillOurs()) throw abandonedBeforeSpawn()
+        return apply(id, { type: "start-failed", reason: SETUP_FAILED_REASON, permanent: false })
+      })
       throw new PrototypeProcessError(statusOf(id), SETUP_FAILED_REASON)
     }
 
@@ -796,6 +812,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // "spawned and cleaned up". Nothing between that refusal point and the
     // handlers being wired is async, so no stop can land inside this block.
     const { entry, child } = await lock.run(id, async () => {
+      if (!stillOurs()) throw abandonedBeforeSpawn()
       await apply(id, { type: "spawned", generation })
       if (closed) throw closedError()
       const entry = entryFor(id)
@@ -1067,6 +1084,9 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
         current.delete(listener)
         if (current.size === 0) listeners.delete(id)
       }
+    },
+    recordCount() {
+      return entries.size
     },
     startReaper() {
       const timer = setInterval(() => {

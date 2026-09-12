@@ -56,6 +56,7 @@ export function nullPrototypeProcesses(): PrototypeProcesses {
     subscribe: () => () => {},
     serverLog: () => "",
     startReaper: () => () => {},
+    recordCount: () => 0,
     shutdown: () => Promise.resolve(),
   }
 }

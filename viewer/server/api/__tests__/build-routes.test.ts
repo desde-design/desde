@@ -396,6 +396,7 @@ describe("GET /deployments/:id/server-log (same gate as the build log)", () => {
       subscribe: () => () => {},
       serverLog: () => "hello",
       startReaper: () => () => {},
+      recordCount: () => 0,
       shutdown: () => Promise.resolve(),
     }
   }

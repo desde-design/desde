@@ -201,6 +201,7 @@ function fakePrototypeProcesses(): FakePrototypeProcesses {
     },
     serverLog: () => "",
     startReaper: () => () => {},
+    recordCount: () => 0,
     shutdown: () => Promise.resolve(),
     subscribers,
     emit(id, status) {

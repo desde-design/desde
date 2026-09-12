@@ -126,6 +126,7 @@ function fakeProcesses(overrides: Partial<PrototypeProcesses> = {}): PrototypePr
     subscribe: () => () => {},
     serverLog: () => "",
     startReaper: () => () => {},
+    recordCount: () => 0,
     shutdown: () => Promise.resolve(),
     ...overrides,
   }

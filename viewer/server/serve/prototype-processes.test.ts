@@ -611,6 +611,36 @@ describe("createPrototypeProcesses", () => {
    * parked on a promise here so the stop lands inside exactly that window,
    * rather than by timing luck.
    */
+  /**
+   * Codex round 17. `forget` (a prune, a project delete) landing while a cold
+   * start awaits `pickPort` dropped the record; the start's next apply went
+   * through `entryFor` and CREATED a fresh record for the forgotten
+   * deployment, which nothing ever dropped again. The start must notice its
+   * record is gone and stop without leaving one behind.
+   */
+  it("a forget that lands during a cold start leaves no record behind", async () => {
+    let releasePort!: () => void
+    const portHeld = new Promise<void>((r) => {
+      releasePort = r
+    })
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      pickPort: async () => {
+        await portHeld
+        return pickLoopbackPort()
+      },
+    })
+    managers.push(procs)
+    const starting = procs.ensure({ id: "d1", serverStart: start() })
+    await new Promise((r) => setTimeout(r, 20))
+    await procs.forget("d1")
+    expect(procs.recordCount()).toBe(0)
+    releasePort()
+    await expect(starting).rejects.toBeInstanceOf(PrototypeProcessError)
+    expect(procs.recordCount()).toBe(0)
+    expect(procs.status("d1")).toEqual({ state: "stopped" })
+  })
+
   it("a stop that lands between pickPort and spawn leaves no child behind", async () => {
     let release: () => void = () => {}
     const gate = new Promise<void>((r) => {
