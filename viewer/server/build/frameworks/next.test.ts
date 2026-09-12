@@ -466,6 +466,38 @@ describe("Next.js adapter — output: \"standalone\"", () => {
     expect(await exists(join(root, "build", "standalone", "build", "static", "chunk.js"))).toBe(true)
     expect(await exists(join(root, "build", "standalone", "public", "favicon.ico"))).toBe(true)
   })
+
+  /**
+   * Codex round 30. The standalone server resolves `/_next/static` under
+   * the FULL configured dist dir (`build/next`), so the copy has to land at
+   * `standalone/build/next/static`; the dist dir's last segment alone put
+   * it at `standalone/next/static` and every asset request answered 404.
+   */
+  it("prepare() keeps a nested custom distDir's full path under the standalone dir", async () => {
+    const root = await checkout({ buildId: true, standalone: true, distDir: "build/next", staticDir: true })
+    const shape = await NEXT_ADAPTER.inspectBuild(root)
+    if (shape?.kind !== "server" || !shape.prepare) throw new Error("expected a standalone server shape with prepare")
+    await shape.prepare(root)
+
+    expect(await exists(join(root, "build", "next", "standalone", "build", "next", "static", "chunk.js"))).toBe(true)
+    expect(await exists(join(root, "build", "next", "standalone", "next", "static"))).toBe(false)
+  })
+
+  it("prepare() copies a workspace app's static under its app-relative dist dir name", async () => {
+    const root = await checkout({
+      next: false,
+      distDir: "apps/web/.next",
+      buildId: true,
+      standalone: true,
+      staticDir: true,
+      appPackageJson: { next: "^16.0.0" },
+    })
+    const shape = await NEXT_ADAPTER.inspectBuild(root)
+    if (shape?.kind !== "server" || !shape.prepare) throw new Error("expected a standalone server shape with prepare")
+    await shape.prepare(root)
+
+    expect(await exists(join(root, "apps", "web", ".next", "standalone", ".next", "static", "chunk.js"))).toBe(true)
+  })
 })
 
 /**

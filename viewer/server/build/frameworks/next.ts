@@ -1,5 +1,5 @@
 import { cp, readFile, stat } from "node:fs/promises"
-import { basename, join } from "node:path"
+import { join, relative } from "node:path"
 import { dependsOn, dependsOnAt, findNextDistDir, findNextExportDir, isDir, isFile, parentAppDir } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
@@ -197,14 +197,18 @@ async function copyStandaloneStaticAssets(
   relativeAppDir: string,
   appDir: string | null,
 ): Promise<void> {
-  const distDirName = basename(distDir)
+  // The standalone server keeps the FULL app-relative dist dir (`build/next`
+  // for `distDir: "build/next"`), so the static copy has to land under that
+  // same path; the dist dir's last segment alone put it at `next/static`
+  // and every `/_next/static` request answered 404 (codex round 30).
+  const distDirWithinApp = appDir !== null ? relative(appDir, distDir) : distDir
   const standaloneAppDir = relativeAppDir
     ? join(checkoutRoot, distDir, "standalone", relativeAppDir)
     : join(checkoutRoot, distDir, "standalone")
 
   const staticSrc = join(checkoutRoot, distDir, "static")
   if (await isDir(staticSrc)) {
-    await cp(staticSrc, join(standaloneAppDir, distDirName, "static"), { recursive: true })
+    await cp(staticSrc, join(standaloneAppDir, distDirWithinApp, "static"), { recursive: true })
   }
 
   const publicSrc = appDir !== null ? join(checkoutRoot, appDir, "public") : join(checkoutRoot, "public")
