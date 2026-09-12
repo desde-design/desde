@@ -297,11 +297,16 @@ describe("proxyToProcess", () => {
    */
   it("strips a Domain attribute from a child cookie so it stays host-only", async () => {
     const port = await child((_req, res) => {
-      res.setHeader("set-cookie", ["a=1; Domain=example.com; Path=/", "b=2; Path=/; domain=.example.com; HttpOnly"])
+      res.setHeader("set-cookie", [
+        "a=1; Domain=example.com; Path=/",
+        "b=2; Path=/; domain=.example.com; HttpOnly",
+        // Whitespace around the `=` is legal and a browser trims it (codex round 18).
+        "c=3; Domain = example.com; Path=/",
+      ])
       res.end("x")
     })
     const res = await request(appFor(port)).get("/p/acme/")
-    expect(res.headers["set-cookie"]).toEqual(["a=1; Path=/", "b=2; Path=/; HttpOnly"])
+    expect(res.headers["set-cookie"]).toEqual(["a=1; Path=/", "b=2; Path=/; HttpOnly", "c=3; Path=/"])
   })
 
   /**

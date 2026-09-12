@@ -187,7 +187,9 @@ export function mergeSetCookies(
   // prototype's own host, which is the boundary the origin design rests on.
   const withoutOurNames = child
     .filter((entry) => !VIEWER_COOKIE_NAMES.has(cookieNameOf(entry)))
-    .map((entry) => entry.replace(/;\s*domain=[^;]*/gi, ""))
+    // Whitespace around the `=` is legal in the attribute grammar and a
+    // browser trims it, so the strip must too (codex round 18).
+    .map((entry) => entry.replace(/;\s*domain\s*=[^;]*/gi, ""))
   return ours === undefined ? withoutOurNames : [...withoutOurNames, ours]
 }
 
