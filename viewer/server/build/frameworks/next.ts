@@ -1,6 +1,6 @@
 import { cp, readFile, stat } from "node:fs/promises"
 import { basename, join } from "node:path"
-import { dependsOn, dependsOnAt, findNextDistDir, isDir, isFile, parentAppDir } from "./fs-probe"
+import { dependsOn, dependsOnAt, findNextDistDir, findNextExportDir, isDir, isFile, parentAppDir } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
 /**
@@ -25,13 +25,18 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
     // build and get the deployment published as static (codex round 16).
     // Both, not either: a committed `out/index.html` left over from an old
     // export beside a fresh server build is a server build (codex round 19).
-    const exportComplete =
-      (await isDir(join(checkoutRoot, "out", "_next"))) && (await isFile(join(checkoutRoot, "out", "index.html")))
+    // Wherever the export landed: the root's `out`, or a workspace app's
+    // `apps/web/out` (codex round 30).
+    const exportDir = await findNextExportDir(checkoutRoot)
 
     const distDir = await findNextDistDir(checkoutRoot)
     if (!distDir) {
-      if (!(await dependsOn(checkoutRoot, "next"))) return null
-      return exportComplete ? { kind: "static", outputDir: "out", reason: "Next.js static export" } : null
+      if (exportDir === null) return null
+      const exportApp = parentAppDir(exportDir)
+      const listed =
+        (await dependsOn(checkoutRoot, "next")) ||
+        (exportApp !== null && (await dependsOnAt(join(checkoutRoot, exportApp), "next")))
+      return listed ? { kind: "static", outputDir: exportDir, reason: "Next.js static export" } : null
     }
 
     // Codex round 29, item 1. `dependsOn` used to read only the workspace
@@ -65,11 +70,11 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
     // answer, static: an export that leaves its dist dir behind as scratch
     // writes both at about the same moment, and that is the case the
     // preference was written for.
-    if (exportComplete) {
-      const exportedAt = await modifiedAt(join(checkoutRoot, "out", "index.html"))
+    if (exportDir !== null) {
+      const exportedAt = await modifiedAt(join(checkoutRoot, exportDir, "index.html"))
       const builtAt = await modifiedAt(join(checkoutRoot, distDir, "BUILD_ID"))
       if (exportedAt === null || builtAt === null || exportedAt >= builtAt) {
-        return { kind: "static", outputDir: "out", reason: "Next.js static export" }
+        return { kind: "static", outputDir: exportDir, reason: "Next.js static export" }
       }
     }
 

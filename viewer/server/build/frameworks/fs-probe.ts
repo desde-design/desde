@@ -270,4 +270,21 @@ export async function findNitroOutputDir(checkoutRoot: string): Promise<string |
   })
 }
 
+/**
+ * Where a Next `output: "export"` landed: a directory named `out` holding
+ * both export markers (`_next/` and `index.html`), the root's first, then
+ * the same walk as the other scans, so a workspace app's `apps/web/out` is
+ * found (codex round 30: only the root `out` was checked, so an exported
+ * workspace app whose `.next` was found was recorded as a server and
+ * `next start` refused it). Relative to `checkoutRoot`, or `null`.
+ */
+export async function findNextExportDir(checkoutRoot: string): Promise<string | null> {
+  return scanForOutputDir(checkoutRoot, "out", async (rel) => {
+    if (rel.split("/").pop() !== "out") return null
+    const complete =
+      (await isDir(join(checkoutRoot, rel, "_next"))) && (await isFile(join(checkoutRoot, rel, "index.html")))
+    return complete ? rel : null
+  })
+}
+
 export { isDir, isFile, dependsOn, dependsOnAt, parentAppDir }

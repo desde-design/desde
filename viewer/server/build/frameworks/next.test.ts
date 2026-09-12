@@ -19,6 +19,8 @@ const roots: string[] = []
 async function checkout(opts: {
   next?: boolean
   out?: boolean
+  /** Where `out` (the `output: "export"` folder) is written; `out` at the root by default (codex round 30). */
+  exportDir?: string
   outBare?: boolean
   outIndexOnly?: boolean
   buildId?: boolean
@@ -65,8 +67,9 @@ async function checkout(opts: {
   // happen.
   if (opts.out) {
     // What `output: "export"` writes: the asset folder and a root page.
-    await mkdir(join(root, "out", "_next"), { recursive: true })
-    await writeFile(join(root, "out", "index.html"), "<html></html>")
+    const exportDir = opts.exportDir ?? "out"
+    await mkdir(join(root, exportDir, "_next"), { recursive: true })
+    await writeFile(join(root, exportDir, "index.html"), "<html></html>")
   }
   if (opts.standalone) {
     await mkdir(join(root, distDir, "standalone"), { recursive: true })
@@ -263,6 +266,59 @@ describe("Next.js adapter", () => {
       await checkout({ next: false, distDir: "apps/web", buildId: true, nextBinary: true }),
     )
     expect(shape).toBeNull()
+  })
+})
+
+/**
+ * Codex round 30. The export check read only the root `out/`, so a
+ * workspace app that exported (`apps/web/out`) beside its scratch
+ * `apps/web/.next` was recorded as a server and `next start` refused the
+ * export. The export is found wherever it landed, and the static answer
+ * names that folder.
+ */
+describe("Next.js adapter — export in a workspace app", () => {
+  it("reads apps/web/out beside apps/web/.next as a static export of that folder", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(
+      await checkout({
+        next: false,
+        distDir: "apps/web/.next",
+        buildId: true,
+        out: true,
+        exportDir: "apps/web/out",
+        nextBinary: true,
+        appPackageJson: { next: "^16.0.0" },
+      }),
+    )
+    expect(shape).toEqual({ kind: "static", outputDir: join("apps", "web", "out"), reason: "Next.js static export" })
+  })
+
+  it("reads apps/web/out with no dist dir at all as a static export when the app package lists next", async () => {
+    const root = await checkout({ next: false, out: true, exportDir: "apps/web/out" })
+    await writeFile(join(root, "apps", "web", "package.json"), JSON.stringify({ name: "web", dependencies: { next: "^16.0.0" } }))
+    expect(await NEXT_ADAPTER.inspectBuild(root)).toEqual({
+      kind: "static",
+      outputDir: join("apps", "web", "out"),
+      reason: "Next.js static export",
+    })
+  })
+
+  it("still answers null for apps/web/out when nothing lists next", async () => {
+    expect(await NEXT_ADAPTER.inspectBuild(await checkout({ next: false, out: true, exportDir: "apps/web/out" }))).toBeNull()
+  })
+
+  it("compares the nested export against the nested BUILD_ID, so a newer server build wins", async () => {
+    const root = await checkout({
+      next: false,
+      distDir: "apps/web/.next",
+      buildId: true,
+      out: true,
+      exportDir: "apps/web/out",
+      nextBinary: true,
+      appPackageJson: { next: "^16.0.0" },
+    })
+    await touch(join(root, "apps", "web", "out", "index.html"), 1_000_000)
+    await touch(join(root, "apps", "web", ".next", "BUILD_ID"), 2_000_000)
+    expect((await NEXT_ADAPTER.inspectBuild(root))?.kind).toBe("server")
   })
 })
 
