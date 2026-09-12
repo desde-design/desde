@@ -13,6 +13,7 @@ import { testGithubRuntime } from "../../__tests__/test-github-runtime"
 import { upsertTestUser } from "../../__tests__/user-fixtures"
 import type { AuthProvider } from "../../auth/types"
 import type { InstanceRole } from "../../storage/types"
+import type { LoopbackListenerRegistry } from "../../serve/loopback-listeners"
 
 /** Minimal fake — only its presence on `deps.github.authProvider` is exercised here. */
 const fakeAuthProvider: AuthProvider = {
@@ -755,6 +756,27 @@ describe("instance admin API (viewer-membership Task 6)", () => {
 
       const boom = new Error("simulated machine-token deletion failure")
       const failing = withThrowingMethod(storage, "deleteMachineTokensForUser", boom)
+      // Codex round 47: the loopback listeners are rotated right after the
+      // status write, BEFORE the credential sweep can answer an error, and
+      // exactly once for the active-to-removed transition.
+      let rotations = 0
+      const listeners: LoopbackListenerRegistry = {
+        ensure: () => Promise.reject(new Error("not used by this test")),
+        touch: () => {},
+        touchOrigin: () => {},
+        reapIdle: () => Promise.resolve(0),
+        closeAll: () => Promise.resolve(),
+        closeForDeployment: () => Promise.resolve(),
+        rotateForDeployment: () => Promise.resolve(),
+        rotateForProject: () => Promise.resolve(),
+        rotateAll: async () => {
+          rotations++
+        },
+        hasOrigin: () => true,
+        rotateOrigin: () => Promise.resolve(),
+        startReaper: () => () => {},
+        isPrototypeHost: () => false,
+      }
       stableRevocationFailure.use(
         createApp({
           storage: failing,
@@ -762,6 +784,7 @@ describe("instance admin API (viewer-membership Task 6)", () => {
           config,
           bridgeScript: "// bridge",
           github: testGithubRuntime(),
+          prototypeListeners: listeners,
         }),
       )
       const failingApp = stableRevocationFailure.app
@@ -787,6 +810,11 @@ describe("instance admin API (viewer-membership Task 6)", () => {
       expect(await storage.getSignInToken(emailLinkedSignIn.id)).toBeNull()
       // The one thing that actually failed to delete is still there.
       expect(await storage.listMachineTokensForUser(member.id)).toHaveLength(1)
+      // The listeners were rotated despite the 500, and a repeat DELETE of
+      // an already-removed member rotates nothing more.
+      expect(rotations).toBe(1)
+      await request(failingApp).delete(`/api/v1/instance/members/${member.id}`).set(adminAuth)
+      expect(rotations).toBe(1)
     })
 
     it("restore 500s when a revocation fails and does not reactivate", async () => {

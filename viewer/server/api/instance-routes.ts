@@ -405,9 +405,12 @@ export function createInstanceRoutes(deps: AppDeps): Router {
     }
 
     const updated = await deps.storage.updateUserRole(userId, role)
-    // A role decides what may be read, and a loopback listener is a
+    // Only a demotion away from admin narrows what may be read (an admin
+    // reads every project, roster or not), and a loopback listener is a
     // credential that outlives any one reader's stream (codex round 46).
-    await rotateAllListeners(deps)
+    // Any other change, a same-role save included, revokes nobody and must
+    // not spend a slot of a fixed range for every open review (round 47).
+    if (target.role === "admin" && role !== "admin") await rotateAllListeners(deps)
     res.json(toMemberView(updated))
   })
 
@@ -431,7 +434,14 @@ export function createInstanceRoutes(deps: AppDeps): Router {
       if (await refuseIfLastActiveAdmin(deps, res)) return
     }
 
+    const wasActive = target.status !== "removed"
     await deps.storage.setUserStatus(userId, "removed")
+    // The removed member may still hold a loopback origin, which no status
+    // check guards (codex round 46). Rotated HERE, right after the status
+    // write and before the credential sweep below can answer an error and
+    // return (codex round 47); only on the active-to-removed transition, so
+    // a repeat DELETE spends nothing.
+    if (wasActive) await rotateAllListeners(deps)
     // Kills the account's standing credentials IMMEDIATELY — a soft delete
     // that left live sessions/tokens running would remove someone from the
     // members list while their browser (or CI token) kept working. Fix wave
@@ -461,8 +471,6 @@ export function createInstanceRoutes(deps: AppDeps): Router {
       })
       return
     }
-    // The removed member may still hold a loopback origin (codex round 46).
-    await rotateAllListeners(deps)
     res.status(204).end()
   })
 
@@ -906,8 +914,10 @@ function emailSettingsView(deps: AppDeps): {
       const before = await getAllowPublicLinks(deps.storage)
       await deps.storage.setInstanceSetting(ALLOW_PUBLIC_LINKS_KEY, String(allowPublicLinks))
       // Anonymous readers of every public-link project may hold a loopback
-      // origin with no stream open (codex round 46).
-      if (before !== allowPublicLinks) await rotateAllListeners(deps)
+      // origin with no stream open (codex round 46). Only turning links OFF
+      // revokes anyone; turning them on must not spend a slot of a fixed
+      // range for every open review (round 47).
+      if (before && !allowPublicLinks) await rotateAllListeners(deps)
       // IMMEDIATELY after the write, and before the read below. The reader is
       // cached (`instance-settings.ts`) so that `serve-router.ts` does not hit
       // the database once per prototype asset; this call is what makes the
