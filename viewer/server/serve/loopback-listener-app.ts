@@ -1,3 +1,4 @@
+import { cookieScopeFor } from "./proxy-to-process"
 import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express"
 import type { AssetStore } from "../assets/types"
 import type { ViewerConfig } from "../config"
@@ -230,6 +231,10 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
       bridgeVersion: deps.bridgeVersion,
       prototypeCsp: deps.prototypeCsp,
       prototypeProcesses: deps.prototypeProcesses,
+      // Every listener on this host is `127.0.0.1:<port>` (or `[::1]`) and a
+      // browser scopes cookies by host, so a server prototype's cookies are
+      // stored under a scope of its own (codex round 42).
+      cookieScope: cookieScopeFor(deps.deploymentId),
     }),
   )
 

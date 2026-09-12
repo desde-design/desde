@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import type { Request, Response } from "express"
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http"
 import { injectBridge } from "./html-inject"
@@ -40,6 +41,18 @@ export interface ProxyOptions {
    * dependent on what the prototype does. See {@link mergeSetCookies}.
    */
   setCookie?: string
+  /**
+   * A name prefix that keeps this deployment's server cookies to itself on
+   * a host it shares with other deployments (codex round 42). Browsers
+   * scope cookies by host, not port, and in loopback mode every server
+   * prototype is `127.0.0.1:<port>`: one child's `Set-Cookie: session=…`
+   * reached every sibling's child, HttpOnly values included. With a scope,
+   * every cookie the child sets is stored under `<scope><name>`, and the
+   * child receives back only its own (unprefixed again) plus the unscoped
+   * cookies a page's own script may have set. Absent in subdomain mode,
+   * where every prototype has a host of its own. See `cookieScopeFor`.
+   */
+  cookieScope?: string
   /**
    * Called when the child gave no response at all — the connection to its
    * port could not be made or failed before any status line came back — so
@@ -136,6 +149,19 @@ const DROP_RESPONSE = new Set([
 const VIEWER_COOKIE_NAMES = new Set([capabilityCookieName(false), capabilityCookieName(true)])
 
 /**
+ * The cookie-name prefix for one deployment's server cookies on a shared
+ * host: `p<8 hex of the id's hash>_`. Stable for the deployment's life, so a
+ * session survives a listener being reaped and reopened. Every character is
+ * a cookie-name token character.
+ */
+export function cookieScopeFor(deploymentId: string): string {
+  return `p${createHash("sha256").update(deploymentId).digest("hex").slice(0, 8)}_`
+}
+
+/** Whether a cookie name carries SOME deployment's scope prefix (this one's or another's). */
+const SCOPED_NAME = /^p[0-9a-f]{8}_/
+
+/**
  * The inbound `cookie` header minus the viewer's own capability cookie, or
  * `undefined` when nothing is left to send.
  *
@@ -146,17 +172,28 @@ const VIEWER_COOKIE_NAMES = new Set([capabilityCookieName(false), capabilityCook
  * place. The capability cookie IS sent (it is set on the prototype origin),
  * and it is ours, so it stops here.
  */
-function forwardedCookieHeader(raw: string | undefined): string | undefined {
+function forwardedCookieHeader(raw: string | undefined, scope?: string): string | undefined {
   if (raw === undefined) return undefined
-  const kept = raw
-    .split(";")
-    .map((pair) => pair.trim())
-    .filter((pair) => {
-      if (pair === "") return false
-      const eq = pair.indexOf("=")
-      const name = eq === -1 ? pair : pair.slice(0, eq)
-      return !VIEWER_COOKIE_NAMES.has(name)
-    })
+  const kept: string[] = []
+  for (const pair of raw.split(";").map((p) => p.trim())) {
+    if (pair === "") continue
+    const eq = pair.indexOf("=")
+    const name = eq === -1 ? pair : pair.slice(0, eq)
+    if (VIEWER_COOKIE_NAMES.has(name)) continue
+    if (scope === undefined) {
+      kept.push(pair)
+    } else if (name.startsWith(scope)) {
+      // This deployment's own server cookie, under its stored name: handed
+      // back as the child set it.
+      kept.push(pair.slice(scope.length))
+    } else if (!SCOPED_NAME.test(name)) {
+      // Unscoped: a cookie a page's own script set on the shared host. The
+      // browser shows it to every page on that host anyway; the child
+      // reading it too takes nothing that was not already shared.
+      kept.push(pair)
+    }
+    // Another deployment's scoped cookie: never forwarded.
+  }
   return kept.length > 0 ? kept.join("; ") : undefined
 }
 
@@ -187,6 +224,7 @@ function cookieNameOf(entry: string): string {
 export function mergeSetCookies(
   fromChild: string | string[] | undefined,
   ours: string | undefined,
+  scope?: string,
 ): string[] {
   const child = fromChild === undefined ? [] : Array.isArray(fromChild) ? fromChild : [fromChild]
   // `ours`, when present, always carries one of these same two names (see
@@ -204,6 +242,9 @@ export function mergeSetCookies(
     // Whitespace around the `=` is legal in the attribute grammar and a
     // browser trims it, so the strip must too (codex round 18).
     .map((entry) => entry.replace(/;\s*domain\s*=[^;]*/gi, ""))
+    // Stored under this deployment's own scope on a shared host (codex
+    // round 42); `forwardedCookieHeader` strips it on the way back in.
+    .map((entry) => (scope === undefined ? entry : `${scope}${entry.trimStart()}`))
   return ours === undefined ? withoutOurNames : [...withoutOurNames, ours]
 }
 
@@ -291,7 +332,7 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
       if (!DROP_REQUEST.has(name) && !requestHopByHop.has(name) && v !== undefined) headers[k] = v
     }
     headers["accept-encoding"] = "identity"
-    const cookie = forwardedCookieHeader(req.headers.cookie)
+    const cookie = forwardedCookieHeader(req.headers.cookie, opts.cookieScope)
     if (cookie !== undefined) headers.cookie = cookie
     else delete headers.cookie
     // Set here, after the copy loop, and never merged with whatever the client
@@ -407,7 +448,7 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
         }
         // Before the rewrite/stream split below, so both answer shapes carry the
         // same cookies. (The 502 path never gets here and sets none.)
-        const cookies = mergeSetCookies(up.headers["set-cookie"], opts.setCookie)
+        const cookies = mergeSetCookies(up.headers["set-cookie"], opts.setCookie, opts.cookieScope)
         if (cookies.length > 0) res.setHeader("Set-Cookie", cookies)
         setOwnHeaders(res, opts.csp)
 

@@ -12,7 +12,7 @@ import { connect, type AddressInfo } from "node:net"
 import { gzipSync } from "node:zlib"
 import request from "supertest"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { proxyToProcess, type ProxyOptions } from "../proxy-to-process"
+import { proxyToProcess, type ProxyOptions, cookieScopeFor } from "../proxy-to-process"
 
 /** A promise this test controls the settlement of, standing in for a real, slow event. */
 function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -107,6 +107,40 @@ describe("proxyToProcess", () => {
       .get("/p/acme/")
       .set("Cookie", "dsv_cap=tok1; theme=dark; __Host-dsv_cap=tok2; locale=en-GB")
     expect(cookie).toBe("theme=dark; locale=en-GB")
+  })
+
+  /**
+   * Codex round 42. Loopback listeners share a host and differ by port, and
+   * a browser scopes cookies by host: one child's `Set-Cookie: session=…`
+   * reached every sibling's child. Under a scope the child's cookies are
+   * stored prefixed, and only its own (unprefixed again) plus unscoped
+   * page-set cookies go back to it.
+   */
+  it("hands the child only its own scoped cookies, unprefixed, plus unscoped ones", async () => {
+    let cookie: string | undefined
+    const port = await child((req, res) => {
+      cookie = req.headers.cookie
+      res.end("ok")
+    })
+    await request(appFor(port, { cookieScope: "p0a1b2c3d_" }))
+      .get("/p/acme/")
+      .set("Cookie", "p0a1b2c3d_session=mine; pffffffff_session=theirs; theme=dark; dsv_cap=tok")
+    expect(cookie).toBe("session=mine; theme=dark")
+  })
+
+  it("stores the child's cookies under the scope", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("set-cookie", ["session=abc; Path=/; HttpOnly", "seen=1"])
+      res.end("ok")
+    })
+    const res = await request(appFor(port, { cookieScope: "p0a1b2c3d_" })).get("/p/acme/")
+    expect(res.headers["set-cookie"]).toEqual(["p0a1b2c3d_session=abc; Path=/; HttpOnly", "p0a1b2c3d_seen=1"])
+  })
+
+  it("derives one stable scope per deployment id, in cookie-name characters", () => {
+    expect(cookieScopeFor("dep-1")).toMatch(/^p[0-9a-f]{8}_$/)
+    expect(cookieScopeFor("dep-1")).toBe(cookieScopeFor("dep-1"))
+    expect(cookieScopeFor("dep-1")).not.toBe(cookieScopeFor("dep-2"))
   })
 
   it("sends no cookie header at all when the viewer's was the only one", async () => {

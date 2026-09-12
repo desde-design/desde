@@ -63,6 +63,14 @@ export interface ServeRouterDeps {
    * one child however many routers, listeners or origins reach it.
    */
   prototypeProcesses: PrototypeProcesses
+  /**
+   * The cookie-name scope for a server prototype's own cookies, when this
+   * router serves ONE deployment on a host it shares with others (a
+   * loopback listener, `loopback-listener-app.ts`). Absent for the main app:
+   * in subdomain mode every prototype has a host of its own. See
+   * `ProxyOptions.cookieScope`.
+   */
+  cookieScope?: string
 }
 
 /**
@@ -944,6 +952,7 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
           await proxyToProcess(req, res, {
             port,
             ...(capabilityCookie !== null ? { setCookie: capabilityCookie } : {}),
+            ...(deps.cookieScope !== undefined ? { cookieScope: deps.cookieScope } : {}),
             path: childPathFor(req.originalUrl),
             shellOrigin,
             // The scheme the BROWSER used to reach THIS origin, which is not
