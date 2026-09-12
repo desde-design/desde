@@ -743,6 +743,50 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     }
 
     /**
+     * Re-runs the whole resolution while the answer this stream last sent was
+     * a 503, and sends the new one when it says something different.
+     *
+     * `ports-exhausted` and `listener-failed` both mean the resolution stopped
+     * before any listener existed, so there is no process, nothing ever
+     * transitions, and `resendIfProcessChanged` has no 200 body to read a
+     * deployment off. The connection would therefore sit on the unavailable
+     * panel for the rest of its life — including long after the port that was
+     * in the way was released. The tick is the only clock it has, so the retry
+     * belongs here, exactly as the `retryable` re-read does.
+     *
+     * `buildPrototypeOriginBody` is what opens a listener, and calling it
+     * again is the point: a retry that did not try to bind would learn
+     * nothing. A body that still fails the same way is NOT sent, so a
+     * deployment stuck at ports-exhausted costs one bind attempt per tick and
+     * no traffic at all.
+     */
+    const retryUnavailableOrigin = async (freshProject: Project): Promise<void> => {
+      const previous = current
+      const next = await buildPrototypeOriginBody({
+        deps,
+        allowlist,
+        bridgeAssetPath,
+        project: freshProject,
+        policy,
+        requestHost,
+        statedOrigin: stated.origin,
+      })
+      if (closed) return
+      if (next.status === 503 && previous.status === 503 && next.body.reason === previous.body.reason) return
+      current = next
+      send(next)
+      // Same rule the connect path and `refollowActiveDeployment` follow. A
+      // recovery that produced a server body has a child to follow now;
+      // anything else must leave no subscription behind.
+      if (next.deploymentId && next.body.serve === "server") {
+        subscribeToProcess(next.deploymentId)
+      } else if (unsubscribeProcess) {
+        unsubscribeProcess()
+        unsubscribeProcess = null
+      }
+    }
+
+    /**
      * The process status the last body carried, or `undefined` when it
      * carried none.
      *
@@ -794,6 +838,10 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
      * A third thing can change, and it is checked before either of those:
      * whether the caller may still read this project at all. See
      * `readableProjectNow`.
+     *
+     * And a fourth, when the last answer was a 503: the resolution itself can
+     * start succeeding, with nothing to announce it. See
+     * `retryUnavailableOrigin`.
      */
     const pollForChanges = async (): Promise<void> => {
       if (closed) return
@@ -803,6 +851,10 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
       if (closed || !freshProject) return
       if ((freshProject.activeDeploymentId ?? null) !== current.deploymentId) {
         await refollowActiveDeployment(freshProject)
+        return
+      }
+      if (current.status === 503) {
+        await retryUnavailableOrigin(freshProject)
         return
       }
       resendIfProcessChanged()

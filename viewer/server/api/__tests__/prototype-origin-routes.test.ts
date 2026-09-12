@@ -1554,6 +1554,83 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     expect(originFrames(received)).toHaveLength(1)
   })
 
+  /**
+   * A 503 is the one answer nothing ever moves off.
+   *
+   * `ports-exhausted` and `listener-failed` both mean the resolution never
+   * got as far as a listener, so no process exists and no process will ever
+   * transition — and the tick's only other job is `resendIfProcessChanged`,
+   * which needs a 200 body to read a deployment off. So the page sat on the
+   * unavailable panel for ever, even after the port that was in the way was
+   * released. The tick re-runs the whole resolution while the answer is a 503.
+   */
+  it("re-resolves on the heartbeat after a 503 and sends the origin once a port frees up", async () => {
+    const range = { from: 3101, to: 3120 }
+    let attempts = 0
+    const freeingUp: LoopbackListenerRegistry = {
+      ensure: (deployment, target) => {
+        attempts += 1
+        if (attempts === 1) return Promise.reject(new LoopbackPortsExhaustedError(range))
+        return Promise.resolve({
+          deploymentId: deployment.id,
+          projectId: deployment.projectId,
+          slug: deployment.slug,
+          host: "127.0.0.1" as const,
+          port: range.from,
+          origin: `http://127.0.0.1:${range.from}`,
+          shellOrigin: target.shellOrigin,
+          boundAddress: "127.0.0.1",
+          lastUsedAt: 0,
+          close: () => Promise.resolve(),
+        })
+      },
+      touch: () => {},
+      reapIdle: () => Promise.resolve(0),
+      closeAll: () => Promise.resolve(),
+      startReaper: () => () => {},
+      isPrototypeHost: () => false,
+    }
+    const fake = fakePrototypeProcesses()
+    const ctx = setup({
+      prototypeListeners: freeingUp,
+      prototypeProcesses: fake,
+      prototypeOriginStreamPingMs: 20,
+      config: { ...loopbackConfig, loopbackPortRange: range },
+    })
+    const project = await seedProject(ctx.storage)
+    const deploymentId = await makeServerDeployment(ctx, project)
+
+    const { received, destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 2)
+    destroy()
+
+    const frames = originFrames(received) as { reason?: string; origin?: string }[]
+    expect(frames[0]?.reason, "the first body was not the unavailable one").toBe("ports-exhausted")
+    expect(frames[1]?.origin).toBe(`http://127.0.0.1:${range.from}`)
+    expect(frames[1]?.reason).toBeUndefined()
+    // And the recovered body's process is followed, the same as a body that
+    // succeeded on connect.
+    await vi.waitFor(() => {
+      expect(fake.subscribers.get(deploymentId)?.size ?? 0).toBe(1)
+    })
+  })
+
+  /** A 503 that keeps saying the same thing sends nothing: the page already shows it. */
+  it("sends no repeat body while the 503 reason is unchanged", async () => {
+    const ctx = setup({
+      prototypeListeners: refusingListeners(),
+      prototypeOriginStreamPingMs: 20,
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    const project = await seedProject(ctx.storage)
+    await makeServerDeployment(ctx, project)
+
+    // Three ticks' worth of pings, and still only the connect body.
+    const { received, destroy } = await readUntil(ctx.app, project, (r) => r.split(": ping").length > 3)
+    destroy()
+
+    expect(originFrames(received)).toHaveLength(1)
+  })
+
   it("unsubscribes from the process manager when the client disconnects", async () => {
     const fake = fakePrototypeProcesses()
     const ctx = setup({ prototypeProcesses: fake })
