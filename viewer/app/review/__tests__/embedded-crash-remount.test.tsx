@@ -100,8 +100,8 @@ const PROJECT: ReviewShellProject = {
   range: null,
 }
 
-function loopbackBody(process: ProcessStatus): unknown {
-  return { mode: "loopback", origin: "http://127.0.0.1:4321", serve: "server", process, range: null }
+function loopbackBody(process: ProcessStatus, origin: string | null = PROJECT.prototypeOrigin): unknown {
+  return { mode: "loopback", origin, serve: "server", process, range: null }
 }
 
 const ROUTES: Record<string, FetchOverrideResult | (() => FetchOverrideResult)> = {
@@ -124,9 +124,9 @@ function stream() {
 }
 
 /** Push one `origin` event, the way the route sends it. */
-function pushOrigin(process: ProcessStatus): void {
+function pushOrigin(process: ProcessStatus, origin?: string): void {
   act(() => {
-    stream().dispatch("origin", loopbackBody(process))
+    stream().dispatch("origin", loopbackBody(process, origin))
   })
 }
 
@@ -236,6 +236,26 @@ describe("review shell — following the process-state stream", () => {
     pushOrigin(RUNNING_GENERATION_2)
     expect(frame(), "the frame remounted again when the restart finished").toBe(afterCrash)
     expect(refresh).not.toHaveBeenCalled()
+  })
+
+  /**
+   * The live body decides where the frame POINTS, not just whether there is
+   * one. `embedTarget` used to be built from the server-rendered prop, so a
+   * rebuild that opened a listener on a new port remounted the frame onto the
+   * old one — a port whose listener is gone.
+   */
+  it("points the frame at the origin the live body names", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+    expect(frame()?.getAttribute("src")).toBe(`${PROJECT.prototypeOrigin}/`)
+
+    pushOrigin(RUNNING_GENERATION_2, "http://127.0.0.1:4499")
+
+    expect(frame()?.getAttribute("src")).toBe("http://127.0.0.1:4499/")
   })
 
   /**

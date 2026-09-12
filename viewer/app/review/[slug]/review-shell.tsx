@@ -294,26 +294,40 @@ export function ReviewShell({
    * invisible: a message posted to an origin the frame is not on is dropped
    * with no error anywhere.
    *
-   * Deliberately reads `project.access` / `project.capability` and not
-   * `liveAccess` below. The capability was minted server-side once, at page
-   * load, against the access this page was rendered under; a client-side
-   * access change cannot re-mint it, which is why the access dialog reloads
-   * the page instead (see `handleAccessChange`).
+   * The ORIGIN half comes from the live body, not the server-rendered prop.
+   * It used to come from the prop, and that was a real defect: a rebuild
+   * opens a listener on a NEW ephemeral port, the stream says so, the frame
+   * remounts — and pointed at the old port, whose listener is gone. The
+   * decision above (`decidePrototypeEmbed`) and the frame's key already
+   * followed the live body; the frame's `src` did not.
+   *
+   * `resolvePrototypeEmbed` takes exactly the pair the server sends here
+   * (`mode` + `origin`, see `prototype-origin.ts`), so the live values need no
+   * adapting: its fail-closed check still refuses an origin equal to the
+   * shell's, and a `null` origin still lands on the path prefix.
+   *
+   * The CAPABILITY half deliberately stays on the props, alongside
+   * `project.access` rather than `liveAccess` below. The capability was minted
+   * server-side once, at page load, against the access this page was rendered
+   * under; a client-side change cannot re-mint it. That is why the access
+   * dialog reloads the page (`handleAccessChange`), and why a new deployment
+   * asks the router to re-render (`useEffect` on `liveOrigin.deploymentId`,
+   * further down).
    */
   const embedTarget: PrototypeEmbedTarget = useMemo(
     () => ({
       slug: project.slug,
       shellOrigin: project.shellOrigin,
-      prototypeOrigin: project.prototypeOrigin,
-      mode: project.mode,
+      prototypeOrigin: liveOrigin.origin,
+      mode: liveOrigin.mode,
       capability: project.capability,
       anonymouslyReadable: prototypeAnonymouslyReadable(project.access, project.publicLinksEnabled),
     }),
     [
       project.slug,
       project.shellOrigin,
-      project.prototypeOrigin,
-      project.mode,
+      liveOrigin.origin,
+      liveOrigin.mode,
       project.capability,
       project.access,
       project.publicLinksEnabled,
@@ -342,7 +356,11 @@ export function ReviewShell({
     deactivateInspector,
   } = useViewerBridge(iframeRef, {
     prototypeOrigin: bridgeOrigin,
-    mode: project.mode,
+    // The LIVE mode, because `bridgeOrigin` above is resolved from the live
+    // body. The hook gates its posts on the two together (see `pinnedOrigin`
+    // in `use-viewer-bridge.ts`), so a stale mode beside a live origin is a
+    // disagreement that shows up as messages silently going nowhere.
+    mode: liveOrigin.mode,
     // Stamps the handshake with the frame it belongs to, so the loading
     // overlay below can tell THIS frame's hello from the one it replaced.
     generation: frameGeneration,
@@ -570,42 +588,63 @@ export function ReviewShell({
    * State is set from the fetch's own `.then`/`.catch`, never from the
    * effect body — the effect only starts the race and cleans it up.
    */
-  const [probe, setProbe] = useState<"pending" | "reachable" | "unreachable">("pending")
+  /**
+   * The probe's outcome, STAMPED with the origin it was measured against.
+   *
+   * The origin can change now (a rebuild opens a listener on a new port), and
+   * a bare `"reachable" | "unreachable"` would carry the old port's verdict
+   * over to the new one: either a banner about a port that is fine, or
+   * silence about a port that is not. Reading the stamp back during render
+   * answers `"pending"` for an origin nothing has measured yet, which is
+   * exactly what it is — and it needs no state write in the effect body,
+   * which is what the note below forbids.
+   */
+  const [probeResult, setProbeResult] = useState<{
+    origin: string
+    outcome: "reachable" | "unreachable"
+  } | null>(null)
+  const probeOrigin = liveOrigin.mode === "loopback" ? liveOrigin.origin : null
+  const probe = probeResult && probeResult.origin === probeOrigin ? probeResult.outcome : "pending"
+  const bridgeAssetPath = liveOrigin.bridgeAssetPath
   useEffect(() => {
-    if (project.mode !== "loopback" || !project.prototypeOrigin) return
+    if (!probeOrigin) return
     let cancelled = false
     const controller = new AbortController()
     // Races the fetch against `watchdogMs`: aborting makes the fetch
     // promise reject, which the `.catch` below reports the same way it
     // reports a real connection refusal.
     const timer = setTimeout(() => controller.abort(), watchdogMs)
-    fetch(`${project.prototypeOrigin}/${project.bridgeAssetPath ?? ""}`, {
+    fetch(`${probeOrigin}/${bridgeAssetPath ?? ""}`, {
       mode: "no-cors",
       cache: "no-store",
       signal: controller.signal,
     })
       .then(() => {
-        if (!cancelled) setProbe("reachable")
+        if (!cancelled) setProbeResult({ origin: probeOrigin, outcome: "reachable" })
       })
       .catch(() => {
-        if (!cancelled) setProbe("unreachable")
+        if (!cancelled) setProbeResult({ origin: probeOrigin, outcome: "unreachable" })
       })
     return () => {
       cancelled = true
       clearTimeout(timer)
       controller.abort()
     }
-  }, [project.mode, project.prototypeOrigin, project.bridgeAssetPath, watchdogMs])
+  }, [probeOrigin, bridgeAssetPath, watchdogMs])
   // Codex round 7, Fix 5's per-frame distinction does not apply here. This
-  // asks "has the loopback port EVER answered through a bridge handshake" — a
-  // fact a later remount cannot make untrue, because the question is about the
-  // PORT, not about any one frame. And nothing here re-arms on remount in the
-  // first place: the probe effect above depends on
-  // `project.mode`/`project.prototypeOrigin`/`project.bridgeAssetPath`/
-  // `watchdogMs`, never on the generation. So this deliberately reads the raw
-  // epoch (`> 0`), unlike `prototypeVisible`.
+  // asks "has a loopback port EVER answered through a bridge handshake" — a
+  // fact a later remount cannot make untrue, because the question is about a
+  // PORT, not about any one frame. The probe beside it is per-origin now (a
+  // rebuild moves the prototype to a new port, and the old port's verdict
+  // says nothing about the new one), while this stays a page-lifetime fact,
+  // so it deliberately reads the raw epoch (`> 0`), unlike `prototypeVisible`.
+  // The one thing that asymmetry costs: a handshake on the previous port
+  // suppresses the banner for the next one. That is the safe direction — it
+  // withholds a warning, it never invents one — and the banner is about a
+  // misconfigured Docker deployment, where no port would have answered in the
+  // first place.
   const portWarning = shouldWarnPortUnreachable({
-    mode: project.mode,
+    mode: liveOrigin.mode,
     bridgeReady: bridgeReadyEpoch > 0,
     probe,
   })
@@ -1670,17 +1709,14 @@ export function ReviewShell({
             same thing twice. Also needs a prototype origin to name a port
             from — loopback mode always has one once a deployment exists,
             but the guard is cheap insurance against a malformed one. */}
-        {embed.kind === "embed" &&
-        portWarning &&
-        !portWarningDismissed &&
-        project.prototypeOrigin ? (
+        {embed.kind === "embed" && portWarning && !portWarningDismissed && liveOrigin.origin ? (
           <Callout
             tone="warning"
             className="flex-none shadow-xs"
             onDismiss={() => setPortWarningDismissed(true)}
             data-testid="port-watchdog"
           >
-            {portWatchdogMessage(new URL(project.prototypeOrigin).port, project.range)}
+            {portWatchdogMessage(new URL(liveOrigin.origin).port, liveOrigin.range)}
           </Callout>
         ) : null}
 
