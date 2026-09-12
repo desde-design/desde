@@ -115,6 +115,28 @@ function isDocumentRequest(req: Request): boolean {
   return typeof accept === "string" && /\btext\/html\b/.test(accept)
 }
 
+/**
+ * Attaches `Clear-Site-Data` to document responses until one of them has
+ * actually been delivered (codex round 44). Consuming the one shot at
+ * request entry lost it when the first document request was aborted before
+ * its headers went out, and every later document then inherited the previous
+ * deployment's storage. `finish` is the response fully flushed; a response
+ * that only got as far as its headers before the client left sends the
+ * header again next time, which clears an already-cleared origin at no cost.
+ */
+export function clearSiteDataUntilDelivered(): RequestHandler {
+  let delivered = false
+  return (req, res, next) => {
+    if (!delivered && isDocumentRequest(req)) {
+      res.setHeader("Clear-Site-Data", '"cache", "storage"')
+      res.once("finish", () => {
+        delivered = true
+      })
+    }
+    next()
+  }
+}
+
 export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): express.Express {
   const app = express()
 
@@ -193,16 +215,7 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
   // every load, so this deployment's own state survives its reloads. Sent
   // for a top-level or framed document, which is what the review page
   // asks for; a bare asset fetch is not the moment.
-  if (deps.recycledOrigin) {
-    let cleared = false
-    app.use((req, res, next) => {
-      if (!cleared && isDocumentRequest(req)) {
-        cleared = true
-        res.setHeader("Clear-Site-Data", '"cache", "storage"')
-      }
-      next()
-    })
-  }
+  if (deps.recycledOrigin) app.use(clearSiteDataUntilDelivered())
 
   app.use(createPinnedDeploymentRewrite({ deploymentId: deps.deploymentId, slug: deps.slug }))
 
