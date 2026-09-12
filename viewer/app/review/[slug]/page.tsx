@@ -306,13 +306,12 @@ export default async function ReviewPage({
   // mechanical `access === "public-link"` check would have skipped minting
   // here and sandboxed a member's iframe onto assets that still 404 without
   // the cookie.
-  const capability = prototypeAnonymouslyReadable(project.access, publicLinksEnabled)
-    ? null
-    : mintPrototypeCapability({
-        secret: config.sessionSecret,
-        slug: project.slug,
-        deploymentId: project.activeDeploymentId,
-      })
+  // Minted BELOW, once the prototype-origin route has said which deployment
+  // the frame is about to load (codex round 54): a rebuild can activate
+  // between the project list and that fetch, and a capability minted for
+  // the list's deployment is refused by the new one, with nothing on the
+  // page left to notice (the shell saw a non-null capability and the
+  // origin's deployment as its initial one).
 
   // Where to embed the prototype from. Over the SAME internal hop the project
   // list came from, and for the same reason: under the custom server, `app/**`
@@ -345,6 +344,17 @@ export default async function ReviewPage({
     embedOrigin = FALLBACK_EMBED_ORIGIN
   }
 
+  // The deployment the frame loads: the origin route's answer when it named
+  // one, the project list's otherwise (a 503 body still names it).
+  const embedDeploymentId = embedOrigin.deploymentId ?? project.activeDeploymentId
+  const capability = prototypeAnonymouslyReadable(project.access, publicLinksEnabled)
+    ? null
+    : mintPrototypeCapability({
+        secret: config.sessionSecret,
+        slug: project.slug,
+        deploymentId: embedDeploymentId,
+      })
+
   return (
     <ReviewShell
       // Keyed on the deployment: the shell asks the router to refresh when
@@ -353,7 +363,7 @@ export default async function ReviewPage({
       // panel, the live access) unless the element's key changes. With the
       // key, a new deployment remounts the shell and all of it starts from
       // the new server render (codex round 25).
-      key={project.activeDeploymentId ?? "no-deployment"}
+      key={embedDeploymentId ?? "no-deployment"}
       project={{
         id: project.id,
         slug: project.slug,
