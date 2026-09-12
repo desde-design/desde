@@ -230,8 +230,17 @@ export const MAX_RUNNING_SERVER_PROTOTYPES = 4
 /** How many times a cold start asks the port picker before giving up, when every answer is a port another child already holds. */
 const PORT_PICK_ATTEMPTS = 10
 
-/** Inside the child's scratch HOME, so it is pruned with the checkout. See `PrototypeProcesses.reapOrphans`. */
-const PID_FILE = "server.pid"
+/**
+ * Inside the child's scratch HOME, so it is pruned with the checkout, and
+ * named by GENERATION (codex round 43): a crashed child's unawaited write
+ * could land after its successor's and name the dead pid, and its exit
+ * handler could remove the successor's file, so a Viewer killed right then
+ * left the live child unreaped. Each generation writes and removes its own
+ * file; a stale one names a dead pid and the next boot's reap discards it.
+ * See `PrototypeProcesses.reapOrphans`.
+ */
+const pidFileName = (generation: number): string => `server.${generation}.pid`
+const PID_FILE_PATTERN = /^server\.\d+\.pid$/
 /** The scratch HOME a child gets, inside its checkout. */
 const HOME_DIR = ".desde-home"
 
@@ -1069,7 +1078,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
           .catch(() => null)
           .then((identity) =>
             writeFile(
-              join(home, PID_FILE),
+              join(home, pidFileName(generation)),
               JSON.stringify({ pid, command: [file, ...args], startedAt: identity?.startedAt ?? null }),
             ),
           )
@@ -1098,7 +1107,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     child.once("exit", (code) => {
       exited = true
       reservedPorts.delete(port)
-      void rm(join(home, PID_FILE), { force: true }).catch(() => {})
+      void rm(join(home, pidFileName(generation)), { force: true }).catch(() => {})
       killTree(child, "SIGKILL")
       void lock.run(id, async () => {
         if (entries.get(id) !== entry || entry.child !== child) return
@@ -1365,8 +1374,20 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
         return 0
       }
       let reaped = 0
+      const pidFiles: string[] = []
       for (const id of ids) {
-        const pidFile = join(deps.checkoutsRoot, id, HOME_DIR, PID_FILE)
+        let names: string[]
+        try {
+          names = await readdir(join(deps.checkoutsRoot, id, HOME_DIR))
+        } catch {
+          continue
+        }
+        for (const name of names) {
+          if (PID_FILE_PATTERN.test(name)) pidFiles.push(join(deps.checkoutsRoot, id, HOME_DIR, name))
+        }
+      }
+      for (const pidFile of pidFiles) {
+        const id = basename(join(pidFile, "..", ".."))
         let recorded: { pid: number; command: string[]; startedAt: string | null }
         try {
           const parsed = JSON.parse(await readFile(pidFile, "utf8")) as {

@@ -596,7 +596,7 @@ describe("createPrototypeProcesses", () => {
       // manager boots over the same checkouts.
       const previous = createPrototypeProcesses({ checkoutsRoot: root })
       await previous.ensure({ id: "d1", serverStart: start() })
-      const pidFile = join(root, "d1", ".desde-home", "server.pid")
+      const pidFile = join(root, "d1", ".desde-home", "server.1.pid")
       await vi.waitFor(async () => {
         expect(JSON.parse(await readFile(pidFile, "utf8")).pid).toBeTypeOf("number")
       })
@@ -629,7 +629,7 @@ describe("createPrototypeProcesses", () => {
       const procs = createPrototypeProcesses({ checkoutsRoot: root })
       managers.push(procs)
       await procs.ensure({ id: "d1", serverStart: start() })
-      const pidFile = join(root, "d1", ".desde-home", "server.pid")
+      const pidFile = join(root, "d1", ".desde-home", "server.1.pid")
       await vi.waitFor(async () => {
         expect(JSON.parse(await readFile(pidFile, "utf8")).startedAt).toBeTypeOf("string")
       })
@@ -652,7 +652,7 @@ describe("createPrototypeProcesses", () => {
       try {
         await mkdir(join(root, "d1", ".desde-home"), { recursive: true })
         await writeFile(
-          join(root, "d1", ".desde-home", "server.pid"),
+          join(root, "d1", ".desde-home", "server.1.pid"),
           JSON.stringify({ pid: bystander.pid, command: ["node", "not-this-program.js"] }),
         )
         const procs = createPrototypeProcesses({ checkoutsRoot: root })
@@ -664,7 +664,7 @@ describe("createPrototypeProcesses", () => {
           warn.mockRestore()
         }
         expect(alive(bystander.pid as number)).toBe(true)
-        await expect(readFile(join(root, "d1", ".desde-home", "server.pid"), "utf8")).rejects.toMatchObject({
+        await expect(readFile(join(root, "d1", ".desde-home", "server.1.pid"), "utf8")).rejects.toMatchObject({
           code: "ENOENT",
         })
       } finally {
@@ -679,15 +679,36 @@ describe("createPrototypeProcesses", () => {
       dead.kill("SIGKILL")
       await vi.waitFor(() => expect(alive(deadPid)).toBe(false), { timeout: 2000, interval: 25 })
       await mkdir(join(root, "gone", ".desde-home"), { recursive: true })
-      await writeFile(join(root, "gone", ".desde-home", "server.pid"), JSON.stringify({ pid: deadPid, command: ["node"] }))
+      await writeFile(join(root, "gone", ".desde-home", "server.1.pid"), JSON.stringify({ pid: deadPid, command: ["node"] }))
       await mkdir(join(root, "junk", ".desde-home"), { recursive: true })
-      await writeFile(join(root, "junk", ".desde-home", "server.pid"), "not json")
+      await writeFile(join(root, "junk", ".desde-home", "server.7.pid"), "not json")
       const procs = createPrototypeProcesses({ checkoutsRoot: root })
       managers.push(procs)
       expect(await procs.reapOrphans()).toBe(0)
       for (const id of ["gone", "junk"]) {
-        await expect(readFile(join(root, id, ".desde-home", "server.pid"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+        for (const name of ["server.1.pid", "server.7.pid"]) {
+          await expect(readFile(join(root, id, ".desde-home", name), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+        }
       }
+    })
+
+    /**
+     * Codex round 43. One file per generation: a crashed child's late write
+     * or its exit handler's removal cannot touch its successor's record.
+     */
+    it("keeps one pid file per generation, each removed by its own exit", async () => {
+      const root = await checkoutsRoot(["d1"])
+      const procs = createPrototypeProcesses({ checkoutsRoot: root })
+      managers.push(procs)
+      await procs.ensure({ id: "d1", serverStart: start() })
+      const home = join(root, "d1", ".desde-home")
+      await vi.waitFor(async () => expect(await readFile(join(home, "server.1.pid"), "utf8")).toContain("pid"))
+      await procs.stop("d1")
+      await procs.ensure({ id: "d1", serverStart: start() })
+      await vi.waitFor(async () => expect(await readFile(join(home, "server.2.pid"), "utf8")).toContain("pid"))
+      await vi.waitFor(async () => {
+        await expect(readFile(join(home, "server.1.pid"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+      })
     })
 
     it("answers 0 when the checkouts root does not exist yet", async () => {
@@ -724,7 +745,7 @@ describe("createPrototypeProcesses", () => {
     })
     expect((await get(port)).status).toBe(200)
     await vi.waitFor(async () => {
-      expect(JSON.parse(await readFile(join(root, "d1", ".desde-home", "server.pid"), "utf8")).pid).toBeTypeOf("number")
+      expect(JSON.parse(await readFile(join(root, "d1", ".desde-home", "server.1.pid"), "utf8")).pid).toBeTypeOf("number")
     })
   })
 
