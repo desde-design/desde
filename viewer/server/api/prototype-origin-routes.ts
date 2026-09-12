@@ -773,10 +773,13 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         // gate, so the port itself has to go. Rotated, not closed for good:
         // every reader still allowed gets the fresh port from their own
         // stream on its next tick.
-        const revoked = current.deploymentId
+        // Only the origin THIS stream handed out (codex round 47): a
+        // replacement another reader opened after an earlier rotation was
+        // never sent here, and retiring it too interrupted them.
+        const revoked = current.status === 200 && current.body.mode === "loopback" ? current.body.origin : null
         endStream()
         if (revoked !== null) {
-          void deps.prototypeListeners.rotateForDeployment(revoked).catch((error: unknown) => {
+          void deps.prototypeListeners.rotateOrigin(revoked).catch((error: unknown) => {
             console.error("[viewer] could not rotate a prototype listener after access was revoked:", error)
           })
         }

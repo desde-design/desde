@@ -422,6 +422,20 @@ describe("createLoopbackListenerRegistry", () => {
       expect(again.origin).not.toBe(b.origin)
     })
 
+    it("rotateOrigin retires exactly that origin, and nothing when it no longer answers (codex round 47)", async () => {
+      const registry = makeRegistry({ d1: {} })
+      const first = await registry.ensure(deployment("d1"), V4)
+      await registry.rotateForDeployment("d1")
+      const replacement = await registry.ensure(deployment("d1"), V4)
+      // The old origin is long gone: retiring it again must not touch the replacement.
+      await registry.rotateOrigin(first.origin)
+      expect(registry.hasOrigin(replacement.origin)).toBe(true)
+      await registry.rotateOrigin(replacement.origin)
+      expect(registry.hasOrigin(replacement.origin)).toBe(false)
+      const third = await registry.ensure(deployment("d1"), V4)
+      expect(third.origin).not.toBe(replacement.origin)
+    })
+
     it("rotateForDeployment closes the deployment's listeners and lets a fresh one open", async () => {
       const registry = makeRegistry({ d1: {} })
       const first = await registry.ensure(deployment("d1"), V4)

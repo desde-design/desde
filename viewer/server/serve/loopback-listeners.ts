@@ -240,6 +240,14 @@ export interface LoopbackListenerRegistry extends PrototypeHostRegistry {
   /** Whether a listener currently answers on this origin; a stream uses it to notice its origin was rotated away. */
   hasOrigin(origin: string): boolean
   /**
+   * `rotateForDeployment` for exactly the listener on this origin, if one
+   * still answers there (codex round 47). A revoked stream retires the
+   * origin IT handed out; a replacement another reader opened after an
+   * earlier rotation is theirs, and retiring it too interrupted them and
+   * spent one more slot of a fixed range for every stale tab.
+   */
+  rotateOrigin(origin: string): Promise<void>
+  /**
    * Closes every listener pinned to this deployment, on every shell origin.
    * A project delete calls it per deployment (codex round 23): a pinned
    * listener skips the project lookup and serves assets by deployment id,
@@ -773,6 +781,9 @@ export function createLoopbackListenerRegistry(
     hasOrigin(origin) {
       for (const listener of listeners.values()) if (listener.origin === origin) return true
       return false
+    },
+    async rotateOrigin(origin) {
+      await retireAndClose([...listeners.values()].filter((listener) => listener.origin === origin))
     },
     async closeForDeployment(deploymentId) {
       // Marked first, so an `ensure` that arrives from here on is refused

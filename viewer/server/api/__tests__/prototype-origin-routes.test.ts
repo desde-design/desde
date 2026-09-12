@@ -156,6 +156,7 @@ function refusingListeners(): LoopbackListenerRegistry {
     rotateForProject: () => Promise.resolve(),
     rotateAll: () => Promise.resolve(),
     hasOrigin: () => true,
+    rotateOrigin: () => Promise.resolve(),
     startReaper: () => () => {},
     isPrototypeHost: () => false,
   }
@@ -949,6 +950,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         rotateForProject: () => Promise.resolve(),
         rotateAll: () => Promise.resolve(),
         hasOrigin: () => true,
+        rotateOrigin: () => Promise.resolve(),
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
@@ -1090,6 +1092,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         rotateForProject: () => Promise.resolve(),
         rotateAll: () => Promise.resolve(),
         hasOrigin: () => true,
+        rotateOrigin: () => Promise.resolve(),
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
@@ -1668,13 +1671,16 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
       reapIdle: () => Promise.resolve(0),
       closeAll: () => Promise.resolve(),
       closeForDeployment: () => Promise.resolve(),
-      rotateForDeployment: (id) => {
-        rotated.push(id)
-        return Promise.resolve()
-      },
+      rotateForDeployment: () => Promise.resolve(),
       rotateForProject: () => Promise.resolve(),
       rotateAll: () => Promise.resolve(),
       hasOrigin: () => true,
+      // Only the origin this stream handed out (codex round 47), never the
+      // whole deployment: a replacement another reader opened is theirs.
+      rotateOrigin: (origin) => {
+        rotated.push(origin)
+        return Promise.resolve()
+      },
       startReaper: () => () => {},
       isPrototypeHost: () => false,
     }
@@ -1702,7 +1708,8 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     // access.
     expect(originFrames(received)).toHaveLength(1)
     // And the port the caller already had is gone.
-    await vi.waitFor(() => expect(rotated).toContain(firstDeployment))
+    expect(firstDeployment).toBeTruthy()
+    await vi.waitFor(() => expect(rotated).toEqual(["http://127.0.0.1:3101"]))
   })
 
   /**
@@ -1799,6 +1806,7 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
       rotateForProject: () => Promise.resolve(),
       rotateAll: () => Promise.resolve(),
       hasOrigin: () => true,
+      rotateOrigin: () => Promise.resolve(),
       startReaper: () => () => {},
       isPrototypeHost: () => false,
     }
