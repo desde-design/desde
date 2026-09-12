@@ -1065,25 +1065,6 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       entry.child = spawned
       spawned.stdout?.on("data", (b: Buffer) => append(entry, b.toString("utf8")))
       spawned.stderr?.on("data", (b: Buffer) => append(entry, b.toString("utf8")))
-      // Not awaited: the exit handler below must be wired before this
-      // function yields, or a child that dies at once is missed. A write
-      // that loses to the exit's own removal leaves a file naming a dead
-      // pid, which the next boot's reap reads and discards. The start time
-      // is read now, while the pid is certainly still this child, so a
-      // later boot can tell it from whatever reuses the number (codex
-      // round 35); a file without one is never acted on.
-      if (spawned.pid) {
-        const pid = spawned.pid
-        void processIdentity(pid)
-          .catch(() => null)
-          .then((identity) =>
-            writeFile(
-              join(home, pidFileName(generation)),
-              JSON.stringify({ pid, command: [file, ...args], startedAt: identity?.startedAt ?? null }),
-            ),
-          )
-          .catch((error: unknown) => console.error("[viewer] could not record a prototype server's pid:", error))
-      }
       return { entry, child: spawned }
     })
 
@@ -1143,6 +1124,28 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
         await applyAllowingRefusal(id, { type: "start-failed", reason: SETUP_FAILED_REASON, permanent: false })
       })
     })
+
+    // The pid record, durable BEFORE the start counts as established (codex
+    // round 45): a Viewer killed between the spawn and this write left a
+    // child the next boot could not find. The handlers above are wired
+    // first, so a child that dies meanwhile is still seen, and a record of
+    // a child that has already exited is removed again here. The start time
+    // is read now, while the pid is certainly still this child, so a later
+    // boot can tell it from whatever reuses the number (codex round 35); a
+    // record without one is never acted on.
+    if (child.pid !== undefined) {
+      const pid = child.pid
+      const identity = await processIdentity(pid).catch(() => null)
+      try {
+        await writeFile(
+          join(home, pidFileName(generation)),
+          JSON.stringify({ pid, command: [file, ...args], startedAt: identity?.startedAt ?? null }),
+        )
+      } catch (error) {
+        console.error("[viewer] could not record a prototype server's pid:", error)
+      }
+      if (exited) void rm(join(home, pidFileName(generation)), { force: true }).catch(() => {})
+    }
 
     const deadline = now() + readyTimeoutMs
     // `entry.child === child` is re-checked every iteration so a stop (or an

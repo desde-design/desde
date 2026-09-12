@@ -692,6 +692,19 @@ describe("createPrototypeProcesses", () => {
       }
     })
 
+    it("has recorded the pid before ensure resolves (codex round 45)", async () => {
+      const root = await checkoutsRoot(["d1"])
+      const procs = createPrototypeProcesses({ checkoutsRoot: root })
+      managers.push(procs)
+      await procs.ensure({ id: "d1", serverStart: start() })
+      const recorded = JSON.parse(await readFile(join(root, "d1", ".desde-home", "server.1.pid"), "utf8")) as {
+        pid: number
+        startedAt: string | null
+      }
+      expect(alive(recorded.pid)).toBe(true)
+      expect(recorded.startedAt).toBeTypeOf("string")
+    })
+
     /**
      * Codex round 43. One file per generation: a crashed child's late write
      * or its exit handler's removal cannot touch its successor's record.
