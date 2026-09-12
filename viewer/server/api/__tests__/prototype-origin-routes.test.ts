@@ -153,6 +153,9 @@ function refusingListeners(): LoopbackListenerRegistry {
     closeAll: () => Promise.resolve(),
     closeForDeployment: () => Promise.resolve(),
     rotateForDeployment: () => Promise.resolve(),
+    rotateForProject: () => Promise.resolve(),
+    rotateAll: () => Promise.resolve(),
+    hasOrigin: () => true,
     startReaper: () => () => {},
     isPrototypeHost: () => false,
   }
@@ -943,6 +946,9 @@ describe("GET /projects/:id/prototype-origin", () => {
         closeAll: () => Promise.resolve(),
         closeForDeployment: () => Promise.resolve(),
         rotateForDeployment: () => Promise.resolve(),
+        rotateForProject: () => Promise.resolve(),
+        rotateAll: () => Promise.resolve(),
+        hasOrigin: () => true,
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
@@ -1081,6 +1087,9 @@ describe("GET /projects/:id/prototype-origin", () => {
         closeAll: () => Promise.resolve(),
         closeForDeployment: () => Promise.resolve(),
         rotateForDeployment: () => Promise.resolve(),
+        rotateForProject: () => Promise.resolve(),
+        rotateAll: () => Promise.resolve(),
+        hasOrigin: () => true,
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
@@ -1663,6 +1672,9 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
         rotated.push(id)
         return Promise.resolve()
       },
+      rotateForProject: () => Promise.resolve(),
+      rotateAll: () => Promise.resolve(),
+      hasOrigin: () => true,
       startReaper: () => () => {},
       isPrototypeHost: () => false,
     }
@@ -1691,6 +1703,30 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     expect(originFrames(received)).toHaveLength(1)
     // And the port the caller already had is gone.
     await vi.waitFor(() => expect(rotated).toContain(firstDeployment))
+  })
+
+  /**
+   * Codex round 46. A rotation (a revoked reader, an access change) closes
+   * the listener a still-allowed reader's frame is on. Its stream used to
+   * compare only the deployment, the access and the process, so it never
+   * learned the new port and the frame sat on a dead socket.
+   */
+  it("sends a surviving stream the fresh origin once its listener was rotated away", async () => {
+    const ctx = setup({ prototypeOriginStreamPingMs: 20 })
+    const project = await seedProject(ctx.storage)
+
+    const { received, destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 2, {
+      onFirstByte: () => {
+        void ctx.listeners.rotateForDeployment(project.activeDeploymentId as string)
+      },
+    })
+    destroy()
+
+    const frames = originFrames(received) as { origin?: string | null }[]
+    expect(frames[0]?.origin).toBeTruthy()
+    expect(frames[1]?.origin).toBeTruthy()
+    expect(frames[1]?.origin).not.toBe(frames[0]?.origin)
+    expect(ctx.listeners.hasOrigin(frames[1]?.origin as string)).toBe(true)
   })
 
   /**
@@ -1760,6 +1796,9 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
       closeAll: () => Promise.resolve(),
       closeForDeployment: () => Promise.resolve(),
       rotateForDeployment: () => Promise.resolve(),
+      rotateForProject: () => Promise.resolve(),
+      rotateAll: () => Promise.resolve(),
+      hasOrigin: () => true,
       startReaper: () => () => {},
       isPrototypeHost: () => false,
     }

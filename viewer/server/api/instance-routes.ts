@@ -352,6 +352,15 @@ function isValidDomainParam(domain: string): boolean {
  * comment in `auth/authorize.ts` for the exact admission ladder (adminToken
  * bearer, or an active `admin`-role session/PAT).
  */
+/** Best effort, logged: a rotation that fails must not turn a completed change into an error response. */
+async function rotateAllListeners(deps: Pick<AppDeps, "prototypeListeners">): Promise<void> {
+  try {
+    await deps.prototypeListeners.rotateAll()
+  } catch (error) {
+    console.error("[viewer] could not rotate the prototype listeners:", error)
+  }
+}
+
 export function createInstanceRoutes(deps: AppDeps): Router {
   const router = Router()
 
@@ -396,6 +405,9 @@ export function createInstanceRoutes(deps: AppDeps): Router {
     }
 
     const updated = await deps.storage.updateUserRole(userId, role)
+    // A role decides what may be read, and a loopback listener is a
+    // credential that outlives any one reader's stream (codex round 46).
+    await rotateAllListeners(deps)
     res.json(toMemberView(updated))
   })
 
@@ -449,6 +461,8 @@ export function createInstanceRoutes(deps: AppDeps): Router {
       })
       return
     }
+    // The removed member may still hold a loopback origin (codex round 46).
+    await rotateAllListeners(deps)
     res.status(204).end()
   })
 
@@ -889,7 +903,11 @@ function emailSettingsView(deps: AppDeps): {
       invalidateInstanceSettingsCache(deps.storage)
     }
     if (allowPublicLinks !== undefined) {
+      const before = await getAllowPublicLinks(deps.storage)
       await deps.storage.setInstanceSetting(ALLOW_PUBLIC_LINKS_KEY, String(allowPublicLinks))
+      // Anonymous readers of every public-link project may hold a loopback
+      // origin with no stream open (codex round 46).
+      if (before !== allowPublicLinks) await rotateAllListeners(deps)
       // IMMEDIATELY after the write, and before the read below. The reader is
       // cached (`instance-settings.ts`) so that `serve-router.ts` does not hit
       // the database once per prototype asset; this call is what makes the

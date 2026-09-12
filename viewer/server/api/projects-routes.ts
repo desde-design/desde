@@ -297,6 +297,19 @@ async function addCreatorBeforeLockout(
 // `req.params` to Express 5's generic `ParamsDictionary` (`string |
 // string[]`), which fails strict typecheck. Leaving the callback untyped
 // lets TS infer the precise per-route params type instead.
+/**
+ * Best effort, logged: a rotation that fails must not turn a completed
+ * access change into an error response, and the idle reaper still closes
+ * the listener within its bound.
+ */
+async function rotateProjectListeners(deps: Pick<AppDeps, "prototypeListeners">, projectId: string): Promise<void> {
+  try {
+    await deps.prototypeListeners.rotateForProject(projectId)
+  } catch (error) {
+    console.error(`[viewer] could not rotate the prototype listeners of project ${projectId}:`, error)
+  }
+}
+
 export function createProjectsRoutes(
   deps: AppDeps,
   requireWrite: RequestHandler,
@@ -602,6 +615,11 @@ export function createProjectsRoutes(
         ...(repoUrl !== undefined ? { repoUrl: repoUrl === null ? null : String(repoUrl) } : {}),
         ...(access !== undefined ? { access } : {}),
       })
+      // Who may read just changed, and a loopback listener is a credential
+      // that outlives any one reader's stream (codex round 46): every port
+      // this project answers on is rotated, and each reader still allowed
+      // gets the fresh one from their own stream.
+      if (access !== undefined) await rotateProjectListeners(deps, id)
       // Manage-gated (`requireWrite` with an `:id` param routes to
       // `requireProjectManage`) — see the create route above for why this
       // still goes through the projection.

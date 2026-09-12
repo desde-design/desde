@@ -212,6 +212,13 @@ export function createMembersRoutes(deps: AppDeps): Router {
       member", so a DELETE is now one storage call.
     */
     await deps.storage.removeProjectMember(project.id, userId)
+    // The removed member may hold this project's loopback origin with no
+    // stream open (codex round 46): rotate every port the project answers on.
+    try {
+      await deps.prototypeListeners.rotateForProject(project.id)
+    } catch (error) {
+      console.error(`[viewer] could not rotate the prototype listeners of project ${project.id}:`, error)
+    }
     res.status(204).end()
   })
 

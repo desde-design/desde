@@ -405,6 +405,23 @@ describe("createLoopbackListenerRegistry", () => {
       expect([first.port, second.port]).toContain(other.port)
     })
 
+    it("rotateForProject retires only that project's listeners; rotateAll every one; hasOrigin says which answer (codex round 46)", async () => {
+      const registry = makeRegistry({ d1: {}, d2: {}, d3: {} })
+      const a = await registry.ensure(deployment("d1"), V4)
+      const b = await registry.ensure(deployment("d2"), V4)
+      const c = await registry.ensure({ id: "d3", slug: "other", projectId: "project-d1", serve: "static" }, V4)
+      expect(registry.hasOrigin(a.origin)).toBe(true)
+      await registry.rotateForProject("project-d1")
+      expect(registry.hasOrigin(a.origin)).toBe(false)
+      expect(registry.hasOrigin(c.origin)).toBe(false)
+      expect(registry.hasOrigin(b.origin)).toBe(true)
+      await registry.rotateAll()
+      expect(registry.hasOrigin(b.origin)).toBe(false)
+      // A retired origin stays retired for its deployment after rotateAll too.
+      const again = await registry.ensure(deployment("d2"), V4)
+      expect(again.origin).not.toBe(b.origin)
+    })
+
     it("rotateForDeployment closes the deployment's listeners and lets a fresh one open", async () => {
       const registry = makeRegistry({ d1: {} })
       const first = await registry.ensure(deployment("d1"), V4)

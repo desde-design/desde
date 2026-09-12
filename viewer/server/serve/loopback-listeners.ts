@@ -222,6 +222,24 @@ export interface LoopbackListenerRegistry extends PrototypeHostRegistry {
    */
   rotateForDeployment(deploymentId: string): Promise<void>
   /**
+   * `rotateForDeployment` for every deployment of a project (codex round
+   * 46): called from the paths that change who may read the project (its
+   * access setting, its member list), since a reader with no stream open,
+   * or holding an older deployment's origin, is never seen by a stream's
+   * own read gate.
+   */
+  rotateForProject(projectId: string): Promise<void>
+  /**
+   * `rotateForDeployment` for every listener there is (codex round 46):
+   * called when the instance-wide facts that decide reading change (a
+   * member removed or re-roled, public links turned off), where no project
+   * can be singled out. Every open review gets its fresh port from its own
+   * stream on the next tick.
+   */
+  rotateAll(): Promise<void>
+  /** Whether a listener currently answers on this origin; a stream uses it to notice its origin was rotated away. */
+  hasOrigin(origin: string): boolean
+  /**
    * Closes every listener pinned to this deployment, on every shell origin.
    * A project delete calls it per deployment (codex round 23): a pinned
    * listener skips the project lookup and serves assets by deployment id,
@@ -347,6 +365,18 @@ export function createLoopbackListenerRegistry(
   const retired = new Map<string, Set<string>>()
   const isRetiredFor = (origin: string, deploymentId: string): boolean => retired.get(origin)?.has(deploymentId) ?? false
   const deploymentOfKey = (key: string): string => (JSON.parse(key) as [string, string])[0]
+
+  /** Retires each listener's origin for its deployment, then closes it. See `rotateForDeployment`. */
+  async function retireAndClose(mine: MutableListener[]): Promise<void> {
+    for (const listener of mine) {
+      // Retired BEFORE the close, so an open racing this rotation cannot
+      // land on the origin being retired (codex round 45).
+      let ids = retired.get(listener.origin)
+      if (ids === undefined) retired.set(listener.origin, (ids = new Set()))
+      ids.add(listener.deploymentId)
+      await listener.close()
+    }
+  }
 
   function closeServer(server: Server): Promise<void> {
     return new Promise((resolve) => {
@@ -727,15 +757,22 @@ export function createLoopbackListenerRegistry(
     async rotateForDeployment(deploymentId) {
       const pending = [...opening].filter(([key]) => deploymentOfKey(key) === deploymentId).map(([, p]) => p)
       for (const p of pending) await p.catch(() => {})
-      const mine = [...listeners.values()].filter((listener) => listener.deploymentId === deploymentId)
-      for (const listener of mine) {
-        // Retired BEFORE the close, so an open racing this rotation cannot
-        // land on the origin being retired (codex round 45).
-        let ids = retired.get(listener.origin)
-        if (ids === undefined) retired.set(listener.origin, (ids = new Set()))
-        ids.add(deploymentId)
-        await listener.close()
-      }
+      await retireAndClose([...listeners.values()].filter((listener) => listener.deploymentId === deploymentId))
+    },
+    async rotateForProject(projectId) {
+      // Every open, not only this project's: a key names a deployment, not
+      // a project, and the listener it produces says which project once it
+      // exists.
+      for (const p of [...opening.values()]) await p.catch(() => {})
+      await retireAndClose([...listeners.values()].filter((listener) => listener.projectId === projectId))
+    },
+    async rotateAll() {
+      for (const p of [...opening.values()]) await p.catch(() => {})
+      await retireAndClose([...listeners.values()])
+    },
+    hasOrigin(origin) {
+      for (const listener of listeners.values()) if (listener.origin === origin) return true
+      return false
     },
     async closeForDeployment(deploymentId) {
       // Marked first, so an `ensure` that arrives from here on is refused

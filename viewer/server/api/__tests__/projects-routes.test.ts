@@ -1127,6 +1127,9 @@ describe("projects API", () => {
           closed.push(id)
         },
         rotateForDeployment: () => Promise.resolve(),
+        rotateForProject: () => Promise.resolve(),
+        rotateAll: () => Promise.resolve(),
+        hasOrigin: () => true,
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
@@ -1138,6 +1141,34 @@ describe("projects API", () => {
       await request(ctx.app).delete(`/api/v1/projects/${project.id}`).set(auth).expect(204)
 
       expect([...closed].sort()).toEqual([a.id, b.id].sort())
+    })
+
+    it("rotates every loopback listener of a project when its access changes (codex round 46)", async () => {
+      const rotated: string[] = []
+      const listeners: LoopbackListenerRegistry = {
+        ensure: () => Promise.reject(new Error("not used by this test")),
+        touch: () => {},
+        touchOrigin: () => {},
+        reapIdle: () => Promise.resolve(0),
+        closeAll: () => Promise.resolve(),
+        closeForDeployment: () => Promise.resolve(),
+        rotateForDeployment: () => Promise.resolve(),
+        rotateForProject: async (id) => {
+          rotated.push(id)
+        },
+        rotateAll: () => Promise.resolve(),
+        hasOrigin: () => true,
+        startReaper: () => () => {},
+        isPrototypeHost: () => false,
+      }
+      const ctx = setup({ prototypeListeners: listeners })
+      const project = await ctx.deps.storage.createProject({ slug: "acme", name: "Acme" })
+
+      await request(ctx.app).patch(`/api/v1/projects/${project.id}`).set(auth).send({ name: "Renamed" }).expect(200)
+      expect(rotated).toEqual([])
+
+      await request(ctx.app).patch(`/api/v1/projects/${project.id}`).set(auth).send({ access: "invited" }).expect(200)
+      expect(rotated).toEqual([project.id])
     })
 
     it("an editor with manage authority deletes a project — 204, then the project 404s", async () => {
