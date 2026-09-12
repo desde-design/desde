@@ -691,7 +691,14 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    * is never a victim (codex round 8, Fix 2) — that rule is `chooseVictim`'s,
    * which skips any record with `leases > 0`.
    */
-  async function makeRoom(id: string): Promise<void> {
+  /**
+   * `stillOurs` says whether the record this start was granted on is still
+   * the one in the map. The waits below can outlive a `forget`, and the busy
+   * refusal must not then apply by id: `entryFor` would recreate a record
+   * for a forgotten deployment, or stop a fresh start that already took
+   * the id (codex round 19).
+   */
+  async function makeRoom(id: string, stillOurs: () => boolean): Promise<void> {
     while (runningCount() + admittedStarts().length >= maxRunning) {
       const victimId = chooseVictim(recordsById())
       if (victimId !== null) {
@@ -710,7 +717,10 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // request, and nothing here will free one on its own. Waiting would
       // block indefinitely on a response that may not end soon, so this
       // attempt fails fast instead, releasing the slot it reserved.
-      await lock.run(id, () => apply(id, { type: "stop-requested" }))
+      await lock.run(id, () => {
+        if (!stillOurs()) throw new PrototypeProcessError({ state: "stopped" }, RETIRED_REFUSAL)
+        return apply(id, { type: "stop-requested" })
+      })
       throw new PrototypeProcessError(statusOf(id), BUSY_MESSAGE)
     }
     // In the same synchronous step as the check above, so two waiters cannot
@@ -759,7 +769,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       throw new PrototypeProcessError(statusOf(id), MISSING_CHECKOUT_REASON)
     }
 
-    await makeRoom(id)
+    await makeRoom(id, stillOurs)
 
     // Setup between the room-making above and the actual `spawn` below,
     // wrapped so a throw here cannot leave the record stuck `starting`
