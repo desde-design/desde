@@ -116,6 +116,12 @@ const DROP_RESPONSE = new Set([
   // sets `X-Frame-Options: DENY` (a common template default) would then
   // refuse to load in the review iframe.
   "x-frame-options",
+  // In subdomain mode the prototypes share a registrable domain with the
+  // shell, and `Clear-Site-Data: "cookies"` clears that whole domain: the
+  // viewer's session and every sibling prototype's cookies with it (codex
+  // round 22). The Set-Cookie rules keep a child from PLANTING cookies on
+  // the shell; this keeps it from erasing them.
+  "clear-site-data",
 ])
 
 /** The two names the viewer's read capability can have, http and https. */
@@ -320,7 +326,12 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
         // (or even claiming a Content-Length for) a body that must not exist
         // would violate HTTP, so those always take the streaming path.
         const bodiless = req.method === "HEAD" || up.statusCode === 204 || up.statusCode === 304
-        const rewrite = isHtml(up.headers["content-type"]) && !childEncoded && !bodiless
+        // A 206 is a slice of a document, not a document: injecting into it
+        // would put a script tag inside an arbitrary byte range and leave
+        // `Content-Range` describing bytes the body no longer holds (codex
+        // round 22). It streams through untouched.
+        const partial = up.statusCode === 206
+        const rewrite = isHtml(up.headers["content-type"]) && !childEncoded && !bodiless && !partial
 
         res.status(up.statusCode ?? 502)
         for (const [k, v] of Object.entries(up.headers)) {

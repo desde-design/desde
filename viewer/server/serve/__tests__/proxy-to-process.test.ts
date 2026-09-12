@@ -234,6 +234,29 @@ describe("proxyToProcess", () => {
    * iframe wherever the prototype CSP is off (`VIEWER_PROTOTYPE_CSP=off`),
    * where no `frame-ancestors` directive is there to supersede it.
    */
+  it("drops the child's Clear-Site-Data, which would clear the shell's cookies on a shared domain", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("clear-site-data", '"cookies", "storage"')
+      res.end("x")
+    })
+    const res = await request(appFor(port)).get("/p/acme/")
+    expect(res.status).toBe(200)
+    expect(res.headers["clear-site-data"]).toBeUndefined()
+  })
+
+  it("streams a 206 HTML slice through untouched, with its Content-Range", async () => {
+    const port = await child((_req, res) => {
+      res.statusCode = 206
+      res.setHeader("content-type", "text/html")
+      res.setHeader("content-range", "bytes 0-4/100")
+      res.end("<html")
+    })
+    const res = await request(appFor(port)).get("/p/acme/")
+    expect(res.status).toBe(206)
+    expect(res.headers["content-range"]).toBe("bytes 0-4/100")
+    expect(res.text).toBe("<html")
+  })
+
   it("drops the child's X-Frame-Options", async () => {
     const port = await child((_req, res) => {
       res.setHeader("x-frame-options", "DENY")
