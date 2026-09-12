@@ -768,7 +768,18 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     const readableProjectNow = async (): Promise<Project | null> => {
       const outcome = await resolveProjectReadAccess(deps, req, project.id)
       if (!outcome.ok) {
+        // Ending the stream is not enough (codex round 44): the page keeps
+        // the origin it last had, and a pinned loopback request skips this
+        // gate, so the port itself has to go. Rotated, not closed for good:
+        // every reader still allowed gets the fresh port from their own
+        // stream on its next tick.
+        const revoked = current.deploymentId
         endStream()
+        if (revoked !== null) {
+          void deps.prototypeListeners.rotateForDeployment(revoked).catch((error: unknown) => {
+            console.error("[viewer] could not rotate a prototype listener after access was revoked:", error)
+          })
+        }
         return null
       }
       policy = outcome.access.policy

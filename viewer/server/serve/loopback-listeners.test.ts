@@ -383,6 +383,16 @@ describe("createLoopbackListenerRegistry", () => {
       expect(fresh.status).toBe(200)
       expect(fresh.headers["clear-site-data"]).toBeUndefined()
     })
+
+    it("rotateForDeployment closes the deployment's listeners and lets a fresh one open", async () => {
+      const registry = makeRegistry({ d1: {} })
+      const first = await registry.ensure(deployment("d1"), V4)
+      await registry.rotateForDeployment("d1")
+      await expect(documentGet(first.port, {})).rejects.toBeTruthy()
+      const again = await registry.ensure(deployment("d1"), V4)
+      expect(again).not.toBe(first)
+      expect((await documentGet(again.port, {})).status).toBe(404)
+    })
   })
 
   describe("identity and keying", () => {

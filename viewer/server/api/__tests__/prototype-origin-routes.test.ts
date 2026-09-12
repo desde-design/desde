@@ -152,6 +152,7 @@ function refusingListeners(): LoopbackListenerRegistry {
     reapIdle: () => Promise.resolve(0),
     closeAll: () => Promise.resolve(),
     closeForDeployment: () => Promise.resolve(),
+    rotateForDeployment: () => Promise.resolve(),
     startReaper: () => () => {},
     isPrototypeHost: () => false,
   }
@@ -941,6 +942,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         reapIdle: () => Promise.resolve(0),
         closeAll: () => Promise.resolve(),
         closeForDeployment: () => Promise.resolve(),
+        rotateForDeployment: () => Promise.resolve(),
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
@@ -1078,6 +1080,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         reapIdle: () => Promise.resolve(0),
         closeAll: () => Promise.resolve(),
         closeForDeployment: () => Promise.resolve(),
+        rotateForDeployment: () => Promise.resolve(),
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
@@ -1633,9 +1636,39 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
    * The tick re-runs the same check the plain route runs, against the same
    * request, and ends the response when it no longer passes.
    */
-  it("ends the stream on the next tick once the caller may no longer read the project", async () => {
-    const ctx = setup({ prototypeOriginStreamPingMs: 20 })
+  it("ends the stream on the next tick once the caller may no longer read the project, and rotates the listener", async () => {
+    // Codex round 44: the page keeps the origin it last had and a pinned
+    // request skips the read gate, so the port itself has to go.
+    const rotated: string[] = []
+    const recording: LoopbackListenerRegistry = {
+      ensure: (deployment, target) =>
+        Promise.resolve({
+          deploymentId: deployment.id,
+          projectId: deployment.projectId,
+          slug: deployment.slug,
+          host: "127.0.0.1" as const,
+          port: 3101,
+          origin: "http://127.0.0.1:3101",
+          shellOrigin: target.shellOrigin,
+          boundAddress: "127.0.0.1",
+          lastUsedAt: 0,
+          close: () => Promise.resolve(),
+        }),
+      touch: () => {},
+      touchOrigin: () => {},
+      reapIdle: () => Promise.resolve(0),
+      closeAll: () => Promise.resolve(),
+      closeForDeployment: () => Promise.resolve(),
+      rotateForDeployment: (id) => {
+        rotated.push(id)
+        return Promise.resolve()
+      },
+      startReaper: () => () => {},
+      isPrototypeHost: () => false,
+    }
+    const ctx = setup({ prototypeOriginStreamPingMs: 20, prototypeListeners: recording })
     const project = await seedProject(ctx.storage, { access: "public-link" })
+    const firstDeployment = project.activeDeploymentId
 
     const received = await streamUntilClosed(ctx.app, project, {
       onFirstByte: () => {
@@ -1656,6 +1689,8 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     // new deployment's origin — a live listener handed to a caller who lost
     // access.
     expect(originFrames(received)).toHaveLength(1)
+    // And the port the caller already had is gone.
+    await vi.waitFor(() => expect(rotated).toContain(firstDeployment))
   })
 
   /**
@@ -1724,6 +1759,7 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
       reapIdle: () => Promise.resolve(0),
       closeAll: () => Promise.resolve(),
       closeForDeployment: () => Promise.resolve(),
+      rotateForDeployment: () => Promise.resolve(),
       startReaper: () => () => {},
       isPrototypeHost: () => false,
     }

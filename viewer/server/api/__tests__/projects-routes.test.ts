@@ -1126,6 +1126,7 @@ describe("projects API", () => {
         closeForDeployment: async (id) => {
           closed.push(id)
         },
+        rotateForDeployment: () => Promise.resolve(),
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }

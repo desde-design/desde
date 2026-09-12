@@ -213,6 +213,15 @@ export interface LoopbackListenerRegistry extends PrototypeHostRegistry {
   /** Closes every listener. Idempotent. */
   closeAll(): Promise<void>
   /**
+   * Closes every listener pinned to this deployment WITHOUT refusing later
+   * opens (codex round 44): the next `ensure` binds a fresh port. The
+   * listener is the credential in loopback mode, and a reader whose access
+   * was revoked kept the port they already had, since a pinned request
+   * skips the project's own read gate. Rotating the port ends that; every
+   * reader still allowed gets the new origin from their stream.
+   */
+  rotateForDeployment(deploymentId: string): Promise<void>
+  /**
    * Closes every listener pinned to this deployment, on every shell origin.
    * A project delete calls it per deployment (codex round 23): a pinned
    * listener skips the project lookup and serves assets by deployment id,
@@ -694,6 +703,12 @@ export function createLoopbackListenerRegistry(
       // Snapshot first: `close()` mutates the map it is iterating.
       const all = [...listeners.values()]
       for (const listener of all) await listener.close()
+    },
+    async rotateForDeployment(deploymentId) {
+      const pending = [...opening].filter(([key]) => deploymentOfKey(key) === deploymentId).map(([, p]) => p)
+      for (const p of pending) await p.catch(() => {})
+      const mine = [...listeners.values()].filter((listener) => listener.deploymentId === deploymentId)
+      for (const listener of mine) await listener.close()
     },
     async closeForDeployment(deploymentId) {
       // Marked first, so an `ensure` that arrives from here on is refused
