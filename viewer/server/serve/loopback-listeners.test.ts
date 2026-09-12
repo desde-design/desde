@@ -386,6 +386,25 @@ describe("createLoopbackListenerRegistry", () => {
       expect(fresh.headers["clear-site-data"]).toBe('"cache", "storage"')
     })
 
+    /**
+     * Codex round 45. The rotation exists because a revoked reader still
+     * knows the old origin; ranking it first for the same deployment gave it
+     * straight back on the next authorized open.
+     */
+    it("never hands a rotated origin back to the same deployment, and fails closed when none is left", async () => {
+      const range = await freeRange(2)
+      const registry = makeRegistry({ d1: {}, d2: {} }, { portRange: range, bindAllInterfaces: false })
+      const first = await registry.ensure(deployment("d1"), V4)
+      await registry.rotateForDeployment("d1")
+      const second = await registry.ensure(deployment("d1"), V4)
+      expect(second.port).not.toBe(first.port)
+      await registry.rotateForDeployment("d1")
+      await expect(registry.ensure(deployment("d1"), V4)).rejects.toBeInstanceOf(LoopbackPortsExhaustedError)
+      // Retired for that deployment only: another one may still use the port.
+      const other = await registry.ensure(deployment("d2"), V4)
+      expect([first.port, second.port]).toContain(other.port)
+    })
+
     it("rotateForDeployment closes the deployment's listeners and lets a fresh one open", async () => {
       const registry = makeRegistry({ d1: {} })
       const first = await registry.ensure(deployment("d1"), V4)

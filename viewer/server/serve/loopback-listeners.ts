@@ -336,6 +336,16 @@ export function createLoopbackListenerRegistry(
    */
   const originHistory = new Map<string, { deploymentId: string; releasedAt: number }>()
   const originFor = (host: string, port: number): string => `http://${host}:${port}`
+  /**
+   * Origins a deployment must never answer on again (codex round 45): the
+   * ones `rotateForDeployment` closed. A rotation exists because a reader
+   * whose access was revoked still knows that origin, so handing it back to
+   * the same deployment on the next authorized open would restore exactly
+   * the credential the rotation retired. With a fixed range this fails
+   * closed once every port has been retired for a deployment.
+   */
+  const retired = new Map<string, Set<string>>()
+  const isRetiredFor = (origin: string, deploymentId: string): boolean => retired.get(origin)?.has(deploymentId) ?? false
   const deploymentOfKey = (key: string): string => (JSON.parse(key) as [string, string])[0]
 
   function closeServer(server: Server): Promise<void> {
@@ -473,7 +483,15 @@ export function createLoopbackListenerRegistry(
       })
 
     if (range === null) {
-      await listenOn(0)
+      // The OS can hand back a port this deployment was rotated off; a few
+      // more asks find another, and past that the open fails closed.
+      for (let attempt = 0; ; attempt++) {
+        await listenOn(0)
+        const bound = server.address() as AddressInfo | null
+        if (bound === null || typeof bound === "string" || !isRetiredFor(originFor(host, bound.port), deployment.id)) break
+        await closeServer(server)
+        if (attempt >= 8) throw new Error("Every ephemeral port offered was one this deployment was rotated off.")
+      }
     } else {
       // Least-recently-released first, and this deployment's own previous
       // origin before anything else (codex round 41): the range is small,
@@ -482,7 +500,9 @@ export function createLoopbackListenerRegistry(
       // open. A port that never served anything comes before every
       // released one.
       const ports: number[] = []
-      for (let port = range.from; port <= range.to; port++) ports.push(port)
+      for (let port = range.from; port <= range.to; port++) {
+        if (!isRetiredFor(originFor(host, port), deployment.id)) ports.push(port)
+      }
       const rank = (port: number): [number, number] => {
         const previous = originHistory.get(originFor(host, port))
         if (previous === undefined) return [1, port]
@@ -708,7 +728,14 @@ export function createLoopbackListenerRegistry(
       const pending = [...opening].filter(([key]) => deploymentOfKey(key) === deploymentId).map(([, p]) => p)
       for (const p of pending) await p.catch(() => {})
       const mine = [...listeners.values()].filter((listener) => listener.deploymentId === deploymentId)
-      for (const listener of mine) await listener.close()
+      for (const listener of mine) {
+        // Retired BEFORE the close, so an open racing this rotation cannot
+        // land on the origin being retired (codex round 45).
+        let ids = retired.get(listener.origin)
+        if (ids === undefined) retired.set(listener.origin, (ids = new Set()))
+        ids.add(deploymentId)
+        await listener.close()
+      }
     },
     async closeForDeployment(deploymentId) {
       // Marked first, so an `ensure` that arrives from here on is refused
