@@ -19,6 +19,7 @@ const roots: string[] = []
 async function checkout(opts: {
   next?: boolean
   out?: boolean
+  outBare?: boolean
   buildId?: boolean
   distDir?: string
   standalone?: boolean
@@ -33,7 +34,13 @@ async function checkout(opts: {
     join(root, "package.json"),
     JSON.stringify({ name: "x", dependencies: opts.next === false ? {} : { next: "^16.0.0" } }),
   )
-  if (opts.out) await mkdir(join(root, "out"), { recursive: true })
+  if (opts.out) {
+    // What `output: "export"` writes: the asset folder and a root page.
+    await mkdir(join(root, "out", "_next"), { recursive: true })
+    await writeFile(join(root, "out", "index.html"), "<html></html>")
+  }
+  // A folder named `out` that some other tool left, with nothing Next wrote.
+  if (opts.outBare) await mkdir(join(root, "out"), { recursive: true })
   const distDir = opts.distDir ?? ".next"
   if (opts.buildId) {
     await mkdir(join(root, distDir), { recursive: true })
@@ -91,6 +98,10 @@ describe("Next.js adapter", () => {
   it("prefers out/ when both exist: a static export that also left .next behind", async () => {
     const shape = await NEXT_ADAPTER.inspectBuild(await checkout({ out: true, buildId: true }))
     expect(shape?.kind).toBe("static")
+  })
+  it("does not let a bare out/ folder with nothing Next wrote win over a server build (codex round 16)", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(await checkout({ outBare: true, buildId: true, nextBinary: true }))
+    expect(shape?.kind).toBe("server")
   })
   it("answers null when the build wrote neither", async () => {
     expect(await NEXT_ADAPTER.inspectBuild(await checkout({}))).toBeNull()

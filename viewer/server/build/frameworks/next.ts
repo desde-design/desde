@@ -20,7 +20,11 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
   id: "next",
   async inspectBuild(checkoutRoot) {
     if (!(await dependsOn(checkoutRoot, "next"))) return null
-    if (await isDir(join(checkoutRoot, "out"))) {
+    // An export is known by what it writes, not by the folder's name: every
+    // `output: "export"` build writes `out/_next/` and an `out/index.html`.
+    // A bare `out/` left by another tool used to win over a valid server
+    // build and get the deployment published as static (codex round 16).
+    if ((await isDir(join(checkoutRoot, "out", "_next"))) || (await isFile(join(checkoutRoot, "out", "index.html")))) {
       return { kind: "static", outputDir: "out", reason: "Next.js static export" }
     }
 
