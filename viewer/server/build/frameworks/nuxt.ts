@@ -46,8 +46,11 @@ export const NUXT_ADAPTER: FrameworkAdapter = {
     // Codex round 29, item 1. `dependsOn` used to read only the workspace
     // root's `package.json`. In an npm or pnpm workspace `nuxt` is declared
     // in the app package's own `package.json`, not the root's; the app
-    // directory is the package that owns the found output dir (round 31).
-    const appDir = outputDir !== null ? await owningPackageDir(checkoutRoot, outputDir) : null
+    // directory is the package that owns the found output dir (round 31),
+    // or the target app itself when nothing was found (codex round 53: a
+    // `nuxt generate` output has no server, and the app's own package is
+    // still where `nuxt` is declared).
+    const appDir = outputDir !== null ? await owningPackageDir(checkoutRoot, outputDir) : within
     const hasNuxt =
       (await dependsOnAt(checkoutRoot, "nuxt")) ||
       (appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "nuxt")))

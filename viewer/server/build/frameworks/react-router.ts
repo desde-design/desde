@@ -46,9 +46,10 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
     // root's `package.json`. In an npm or pnpm workspace the framework is
     // declared in the app package's own `package.json`, not the root's; the
     // app directory is the package that owns the found build dir (round
-    // 31; when any build was found at all — a bare client-only checkout has
-    // no app dir to check beyond the root).
-    const appDir = found ? await owningPackageDir(checkoutRoot, found.dir) : null
+    // 31), or the target app itself when no server bundle was found (codex
+    // round 53: a client-only SPA under `apps/web` declares `react-router`
+    // in its own package too).
+    const appDir = found ? await owningPackageDir(checkoutRoot, found.dir) : within
     const hasReactRouter =
       (await dependsOnAt(checkoutRoot, "react-router")) ||
       (appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "react-router")))

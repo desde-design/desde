@@ -84,6 +84,17 @@ describe("Nuxt adapter", () => {
       start: ["node", ".output/server/index.mjs"],
     })
   })
+  it("reads a workspace app's generated site as static when nuxt is declared only in the app package (codex round 53)", async () => {
+    const root = await checkout({ nuxt: false })
+    await mkdir(join(root, "apps", "web", ".output", "public"), { recursive: true })
+    await writeFile(join(root, "apps", "web", ".output", "public", "index.html"), "<html></html>")
+    await writeFile(join(root, "apps", "web", "package.json"), JSON.stringify({ name: "web", dependencies: { nuxt: "^3.0.0" } }))
+    expect(await NUXT_ADAPTER.inspectBuild(root, { within: join("apps", "web") })).toEqual({
+      kind: "static",
+      outputDir: join("apps", "web", ".output", "public"),
+      reason: "Nuxt static generation",
+    })
+  })
   it("reads .output/public/index.html with no server build as static", async () => {
     expect(await NUXT_ADAPTER.inspectBuild(await checkout({ staticHtml: true }))).toEqual({
       kind: "static",

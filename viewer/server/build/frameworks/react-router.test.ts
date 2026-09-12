@@ -268,6 +268,18 @@ describe("React Router adapter", () => {
     expect(shape).toBeNull()
   })
 
+  it("reads a workspace app's client-only build as static when react-router is declared only in the app package (codex round 53)", async () => {
+    const root = await checkout({ reactRouter: false })
+    await mkdir(join(root, "apps", "web", "build", "client"), { recursive: true })
+    await writeFile(join(root, "apps", "web", "build", "client", "index.html"), "<html></html>")
+    await writeFile(join(root, "apps", "web", "package.json"), JSON.stringify({ name: "web", dependencies: { "react-router": "^6.0.0" } }))
+    expect(await REACT_ROUTER_ADAPTER.inspectBuild(root, { within: join("apps", "web") })).toEqual({
+      kind: "static",
+      outputDir: join("apps", "web", "build", "client"),
+      reason: "React Router SPA mode",
+    })
+  })
+
   it("starts the app the configured output dir belongs to when a workspace built several (codex round 34)", async () => {
     const root = await checkout({ serverBuild: true, serveBinary: true })
     for (const rel of [join("apps", "web", "build", "server"), join("apps", "web", "build", "client")]) {
