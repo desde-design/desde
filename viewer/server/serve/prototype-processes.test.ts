@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -32,6 +32,19 @@ afterEach(async () => {
 /** `node` from PATH; fixture knobs (FAKE_DELAY_MS, FAKE_EXIT_CODE) ride the manager's `spawnEnv`, not the argv. */
 function start(): string[] {
   return ["node", FAKE]
+}
+/**
+ * Whether a pid names a live process. Signal 0 performs the permission and
+ * existence checks and delivers nothing, so this asks the kernel rather than
+ * inferring anything from a handle this test does not own.
+ */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
 }
 async function get(port: number, path = "/"): Promise<{ status: number; body: string }> {
   const res = await fetch(`http://127.0.0.1:${port}${path}`)
@@ -599,6 +612,39 @@ describe("createPrototypeProcesses", () => {
     await procs.stop("d1")
     expect(procs.status("d1").state).toBe("stopped")
     await expect(get(port)).rejects.toThrow()
+  })
+
+  /**
+   * Codex round 14, Fix 1. The whole process GROUP has to be gone, not just
+   * its leader.
+   *
+   * SIGTERM goes to the group, and the five second SIGKILL used to be
+   * cancelled the moment the LEADER exited. A prototype that forked a worker
+   * of its own — a Next server with `experimental.cpus`, a Nitro worker,
+   * anything the app spawns — whose worker ignores SIGTERM therefore left
+   * that worker alive in the detached group, holding its port, past retire,
+   * project delete and viewer shutdown.
+   *
+   * The fixture's worker exits by itself after five seconds regardless, so a
+   * failure here cannot leak a process; the poll below is far shorter than
+   * that, so the self-exit can never make a broken manager look fixed.
+   */
+  it("kills a worker the server forked, even one that ignores SIGTERM", async () => {
+    const root = await checkoutsRoot(["d1"])
+    const pidFile = join(root, "worker.pid")
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: root,
+      spawnEnv: { FAKE_FORK_WORKER: "1", FAKE_WORKER_PID_FILE: pidFile },
+    })
+    managers.push(procs)
+    await procs.ensure({ id: "d1", serverStart: start() })
+    const workerPid = Number(await readFile(pidFile, "utf8"))
+    expect(workerPid).toBeGreaterThan(0)
+    expect(alive(workerPid), "the fixture never forked a worker to kill").toBe(true)
+
+    await procs.stop("d1")
+
+    await vi.waitFor(() => expect(alive(workerPid)).toBe(false), { timeout: 2000, interval: 25 })
   })
 
   /**

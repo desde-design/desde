@@ -520,16 +520,35 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
 
   /**
    * Stops a child: SIGTERM to the whole group, SIGKILL five seconds later if
-   * it is still there.
+   * it is still there — and SIGKILL to the group as soon as the leader is
+   * gone, whether it went on its own or on the SIGTERM.
+   *
+   * That last kill is the point (codex round 14, Fix 1). What this manager
+   * spawns is a process GROUP, not a process: the child is `detached`, so it
+   * is the group leader, and anything it spawns for itself — a Next server
+   * with `experimental.cpus`, a Nitro worker, a sidecar the app starts —
+   * joins that group. A worker that ignores SIGTERM used to survive its own
+   * leader: the SIGKILL timer was cleared the moment the LEADER exited, so
+   * nothing ever reached the rest of the group, and that worker went on
+   * holding its port past retire, past project delete, past viewer shutdown.
+   *
+   * `killTree` swallows ESRCH, so a group that is already empty costs
+   * nothing. The already-exited case at the top gets the same kill for the
+   * same reason: the leader being gone says nothing about what it left
+   * behind.
    */
   const killAndWait = async (child: ChildProcess): Promise<void> => {
-    if (child.exitCode !== null || child.signalCode !== null) return
+    if (child.exitCode !== null || child.signalCode !== null) {
+      killTree(child, "SIGKILL")
+      return
+    }
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         killTree(child, "SIGKILL")
       }, 5000)
       child.once("exit", () => {
         clearTimeout(timer)
+        killTree(child, "SIGKILL")
         resolve()
       })
       killTree(child, "SIGTERM")
