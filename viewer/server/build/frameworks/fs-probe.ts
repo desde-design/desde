@@ -81,10 +81,24 @@ async function owningPackageDir(
     self?: boolean
   } = {},
 ): Promise<string | null> {
-  for (let dir = options.self ? rel : dirname(rel); dir !== "." && dir !== "/" && dir !== ""; dir = dirname(dir)) {
+  // The directory itself counts only when its `package.json` names a
+  // package: a Next dist dir carries a generated `{"type":"commonjs"}`
+  // (codex round 42), and reading `.next` as the app sent the scan under it.
+  if (options.self && (await isNamedPackage(join(checkoutRoot, rel)))) return rel === "." ? null : rel
+  for (let dir = dirname(rel); dir !== "." && dir !== "/" && dir !== ""; dir = dirname(dir)) {
     if (await isFile(join(checkoutRoot, dir, "package.json"))) return dir
   }
   return null
+}
+
+/** `<dir>/package.json` exists and has a string `name`: a package someone wrote, not a build's generated manifest. */
+async function isNamedPackage(dir: string): Promise<boolean> {
+  try {
+    const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as { name?: unknown }
+    return typeof pkg.name === "string" && pkg.name !== ""
+  } catch {
+    return false
+  }
 }
 
 /** Directory names never worth descending into while hunting for a Next dist dir. */

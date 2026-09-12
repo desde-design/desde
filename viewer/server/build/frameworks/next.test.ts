@@ -679,6 +679,16 @@ describe("inspectBuild", () => {
     // The configured output dir can be the app directory itself (codex
     // round 41); that names the app just as well.
     expect(await inspectBuild(root, join("apps", "web"))).toMatchObject({ kind: "server", cwd: join("apps", "web") })
+
+    // Or the dist dir, whose generated `package.json` names no package
+    // (codex round 42): still that app, not a scan under `.next`.
+    await writeFile(join(root, "apps", "web", ".next", "package.json"), JSON.stringify({ type: "commonjs" }))
+    expect(await inspectBuild(root, join("apps", "web", ".next"))).toMatchObject({ kind: "server", cwd: join("apps", "web") })
+    await writeFile(join(root, ".next", "package.json"), JSON.stringify({ type: "commonjs" }))
+    expect(await inspectBuild(root, ".next")).toMatchObject({
+      kind: "server",
+      start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
+    })
   })
 
   /**

@@ -365,6 +365,14 @@ describe("owningPackageDir", () => {
     expect(await owningPackageDir(r, "apps/web", { self: true })).toBe(join("apps", "web"))
   })
 
+  it("does not take a build output's generated package.json for the app (codex round 42)", async () => {
+    const r = await root()
+    await writePackage(r, "apps/web")
+    await mkdir(join(r, "apps", "web", ".next"), { recursive: true })
+    await writeFile(join(r, "apps", "web", ".next", "package.json"), JSON.stringify({ type: "commonjs" }))
+    expect(await owningPackageDir(r, "apps/web/.next", { self: true })).toBe(join("apps", "web"))
+  })
+
   it("answers null when no ancestor below the root holds a package.json (the root owns it)", async () => {
     const r = await root()
     await writePackage(r, ".")
