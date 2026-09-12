@@ -24,7 +24,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, render } from "@testing-library/react"
+import { act, cleanup, render, waitFor } from "@testing-library/react"
 import type { ReactNode } from "react"
 import {
   ok,
@@ -135,6 +135,53 @@ function Scenario({ children }: { children: ReactNode }): ReactNode {
   return children
 }
 
+/** Every server-log URL the manager scenario below was asked for, in order. */
+const serverLogRequests: string[] = []
+
+/**
+ * The same scenario, signed in as someone who may manage the project — the
+ * gate on the crashed panel's own controls — and with the project record the
+ * real route answers: flat, naming the deployment the PAGE was rendered
+ * against.
+ *
+ * Its own component rather than more rows in `ROUTES`, so the tests above go
+ * on running as a plain reader with no build hooks mounted.
+ */
+function ManagerScenario({ children }: { children: ReactNode }): ReactNode {
+  useFetchOverride(
+    routeTable({
+      ...ROUTES,
+      "GET /api/v1/me": ok({
+        user: {
+          id: "u-1",
+          provider: "email",
+          email: "admin@example.test",
+          displayName: "Admin",
+          avatarUrl: "",
+          role: "admin",
+          createdAt: "2026-09-11T00:00:00.000Z",
+        },
+        authEnabled: true,
+        signInUrl: null,
+      }),
+      [`GET /api/v1/projects/${PROJECT_ID}/deployments`]: ok({ deployments: [] }),
+      [`GET /api/v1/projects/${PROJECT_ID}`]: ok({
+        id: PROJECT_ID,
+        name: PROJECT.name,
+        activeDeploymentId: DEPLOYMENT_ID,
+      }),
+    }),
+  )
+  useFetchOverride({
+    match: (url) => url.includes("/server-log"),
+    respond: (url) => {
+      serverLogRequests.push(url)
+      return ok({ log: "the server exited" })
+    },
+  })
+  return children
+}
+
 /** The shell's own origin stream, as this test drives it. */
 function stream() {
   const [source] = openEventSources("/prototype-origin/stream")
@@ -182,6 +229,7 @@ afterEach(() => {
   // One mock for the whole file, so a test that expects no refresh must not
   // inherit a call from the test before it.
   refresh.mockClear()
+  serverLogRequests.length = 0
 })
 
 describe("review shell — following the process-state stream", () => {
@@ -493,6 +541,41 @@ describe("review shell — following the process-state stream", () => {
     const after = frame()
     expect(after, "no iframe rendered after the static rebuild").not.toBeNull()
     expect(after, "the frame kept the previous static build's DOM node").not.toBe(before)
+  })
+
+  /**
+   * Codex round 14, Fix 4. The crashed panel showed the WRONG process's log.
+   *
+   * Its controls took the deployment id from `useProjectDetail`, which is
+   * fetched once on mount and never refetched when the stream moves the page
+   * to a new deployment. A rebuild that then crashed therefore offered the
+   * PREVIOUS deployment's log — the one that was running fine — while the
+   * panel described the crash of the new one.
+   *
+   * `router.refresh()` is mocked here, which is exactly the state the real
+   * page is in between asking for a fresh render and getting one: new
+   * deployment on the stream, old detail in hand.
+   */
+  it("asks for the server log of the deployment the stream moved to", async () => {
+    installFakeEventSource()
+    render(
+      <ManagerScenario>
+        <ReviewShell project={PROJECT} />
+      </ManagerScenario>,
+    )
+
+    pushOrigin(RUNNING_GENERATION_1, { deploymentId: "dep-2" })
+    pushOrigin(PERMANENT_CRASH, { deploymentId: "dep-2" })
+
+    await waitFor(() => {
+      expect(
+        document.querySelector('[data-testid="prototype-crashed"]'),
+        "the crashed panel never rendered for a manager",
+      ).not.toBeNull()
+    })
+    await waitFor(() => {
+      expect(serverLogRequests).toEqual(["/api/v1/deployments/dep-2/server-log"])
+    })
   })
 
   /**

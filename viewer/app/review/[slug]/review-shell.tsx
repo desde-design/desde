@@ -1386,7 +1386,14 @@ export function ReviewShell({
           <PrototypeUnavailable
             embed={embed}
             projectId={project.id}
-            deploymentId={projectDetail?.activeDeploymentId ?? null}
+            // The LIVE deployment first, the fetched detail only as the
+            // fallback. `useProjectDetail` loads once on mount and never
+            // refetches, so after the stream moved this page to a new
+            // deployment it still names the previous one — and the crashed
+            // panel would offer the server log of the process that is running
+            // fine, next to a description of the one that died (codex round
+            // 14, Fix 4).
+            deploymentId={liveOrigin.deploymentId ?? projectDetail?.activeDeploymentId ?? null}
             canManage={canManageAccess}
             hasRepo={projectDetail?.repoConfig != null}
           />
