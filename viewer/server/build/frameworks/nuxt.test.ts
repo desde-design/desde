@@ -76,7 +76,8 @@ describe("Nuxt adapter", () => {
 
     expect(await NUXT_ADAPTER.inspectBuild(root, { within: join("apps", "web") })).toMatchObject({
       kind: "server",
-      start: ["node", join("apps", "web", ".output", "server", "index.mjs")],
+      start: ["node", join(".output", "server", "index.mjs")],
+      cwd: join("apps", "web"),
     })
     expect(await NUXT_ADAPTER.inspectBuild(root, { within: null })).toMatchObject({
       kind: "server",

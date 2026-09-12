@@ -351,9 +351,12 @@ describe("Next.js adapter — nested app directory", () => {
         appPackageJson: { next: "^16.0.0" },
       }),
     )
+    // Codex round 40: run FROM the app directory, paths relative to it,
+    // rather than from the root with the app directory as an argument.
     expect(shape).toEqual({
       kind: "server",
-      start: [join("apps", "node_modules", ".bin", "next"), "start", "-p", "$PORT", "-H", "127.0.0.1", "apps"],
+      start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
+      cwd: "apps",
       reason: "Next.js with server-rendered routes",
     })
   })
@@ -364,7 +367,8 @@ describe("Next.js adapter — nested app directory", () => {
     )
     expect(shape).toEqual({
       kind: "server",
-      start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1", "apps"],
+      start: [join("..", "node_modules", ".bin", "next"), "start", "-p", "$PORT", "-H", "127.0.0.1"],
+      cwd: "apps",
       reason: "Next.js with server-rendered routes",
     })
   })
@@ -406,7 +410,8 @@ describe("Next.js adapter — nested app directory", () => {
     )
     expect(shape).toMatchObject({
       kind: "server",
-      start: [join("apps", "web", "node_modules", ".bin", "next"), "start", "-p", "$PORT", "-H", "127.0.0.1", join("apps", "web")],
+      start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
+      cwd: join("apps", "web"),
     })
   })
 
@@ -596,6 +601,22 @@ describe("Next.js adapter — output: \"standalone\" with a tracing-root relativ
     expect(await exists(join(root, ".next", "standalone", "apps", "web", "public", "favicon.ico"))).toBe(true)
   })
 
+  it("runs a workspace app's standalone launcher from the app directory (codex round 40)", async () => {
+    const root = await checkout({
+      next: false,
+      distDir: "apps/web/.next",
+      buildId: true,
+      standalone: true,
+      appPackageJson: { next: "^16.0.0" },
+    })
+    expect(await NEXT_ADAPTER.inspectBuild(root)).toMatchObject({
+      kind: "server",
+      start: ["node", join(".next", "standalone", "server.js")],
+      cwd: join("apps", "web"),
+      reason: "Next.js standalone output",
+    })
+  })
+
   it("keeps the plain (no tracing root) case unchanged when relativeAppDir is present but empty", async () => {
     const root = await checkout({ buildId: true, standalone: true })
     await writeFile(join(root, ".next", "required-server-files.json"), JSON.stringify({ relativeAppDir: "" }))
@@ -646,7 +667,11 @@ describe("inspectBuild", () => {
     await writeFile(join(root, "apps", "web", "package.json"), JSON.stringify({ name: "web", dependencies: { next: "^16.0.0" } }))
 
     const web = await inspectBuild(root, join("apps", "web", "out"))
-    expect(web).toMatchObject({ kind: "server", start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1", join("apps", "web")] })
+    expect(web).toMatchObject({
+      kind: "server",
+      start: [join("..", "..", "node_modules", ".bin", "next"), "start", "-p", "$PORT", "-H", "127.0.0.1"],
+      cwd: join("apps", "web"),
+    })
 
     const rootApp = await inspectBuild(root, "out")
     expect(rootApp).toMatchObject({ kind: "server", start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"] })
@@ -673,7 +698,8 @@ describe("inspectBuild", () => {
 
     expect(await inspectBuild(root, join("apps", "site", "dist"), ADAPTERS)).toEqual({
       kind: "server",
-      start: ["node", join("apps", "site", ".output", "server", "index.mjs")],
+      start: ["node", join(".output", "server", "index.mjs")],
+      cwd: join("apps", "site"),
       reason: "Nuxt with a server build",
     })
     expect((await inspectBuild(root, join("apps", "web", "out"), ADAPTERS)).kind).toBe("server")

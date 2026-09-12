@@ -103,19 +103,28 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
         // absolute path here instead would go stale the moment the Viewer's
         // own image ships a new Node in a different location, for every
         // deployment built before that upgrade.
-        start: ["node", standaloneServerRel],
+        //
+        // A workspace app runs from its own directory, with the launcher's
+        // path relative to it (codex round 40): the app's server code may
+        // read `process.cwd()` or relative paths and expects its package,
+        // not the monorepo root.
+        start: ["node", nestedAppDir !== null ? relative(nestedAppDir, standaloneServerRel) : standaloneServerRel],
+        ...(nestedAppDir !== null ? { cwd: nestedAppDir } : {}),
         reason: "Next.js standalone output",
         prepare: (root) => copyStandaloneStaticAssets(root, distDir, relativeAppDir, nestedAppDir),
       }
     }
 
     // Codex round 29, item 2. `next start` with no directory argument reads
-    // the ROOT `next.config` and `.next` — started that way against a
-    // workspace app's dist dir it reads the wrong app's config, or none at
-    // all. The app directory is passed as the command's positional
-    // argument, and the binary preferred is the app's own
-    // `node_modules/.bin/next` when the workspace installed one there,
-    // falling back to the root's.
+    // the `next.config` and `.next` of its working directory — started from
+    // the checkout root against a workspace app's dist dir it reads the
+    // wrong app's config, or none at all. The app is therefore RUN FROM its
+    // own directory (codex round 40: the positional argument selected the
+    // build but left the working directory at the monorepo root, which the
+    // app's own server code may read), and the binary preferred is the
+    // app's own `node_modules/.bin/next` when the workspace installed one
+    // there, falling back to the root's, either way as a path relative to
+    // that directory.
     //
     // Codex round 15, Fix 3. `next` is a dependency (checked above), but a
     // dependency in `package.json` does not prove the binary actually got
@@ -136,12 +145,16 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
       kind: "server",
       // The checkout's own next, never one the Viewer bundles. `next start`
       // reads `next.config` itself — including a custom `distDir` — so the
-      // discovered dist dir does not change this recorded argv beyond the
-      // app directory appended below.
-      start:
-        nestedAppDir !== null
-          ? [nextBinaryRel, "start", "-p", "$PORT", "-H", "127.0.0.1", nestedAppDir]
-          : [nextBinaryRel, "start", "-p", "$PORT", "-H", "127.0.0.1"],
+      // discovered dist dir does not change this recorded argv.
+      start: [
+        nestedAppDir !== null ? relative(nestedAppDir, nextBinaryRel) : nextBinaryRel,
+        "start",
+        "-p",
+        "$PORT",
+        "-H",
+        "127.0.0.1",
+      ],
+      ...(nestedAppDir !== null ? { cwd: nestedAppDir } : {}),
       reason: "Next.js with server-rendered routes",
     }
   },

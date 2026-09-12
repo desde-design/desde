@@ -1,4 +1,4 @@
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { dependsOnAt, findNitroOutputDir, isFile, owningPackageDir } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
@@ -54,9 +54,15 @@ export const NUXT_ADAPTER: FrameworkAdapter = {
     if (!hasNuxt) return null
 
     if (outputDir !== null) {
+      // A workspace app runs from its own directory, with the launcher's
+      // path relative to it (codex round 40): Nitro and the app's own
+      // server code may read `process.cwd()` or relative runtime paths and
+      // expect the package, not the monorepo root.
+      const launcher = join(outputDir, "server", "index.mjs")
       return {
         kind: "server",
-        start: ["node", join(outputDir, "server", "index.mjs")],
+        start: ["node", appDir !== null ? relative(appDir, launcher) : launcher],
+        ...(appDir !== null ? { cwd: appDir } : {}),
         reason: "Nuxt with a server build",
       }
     }
