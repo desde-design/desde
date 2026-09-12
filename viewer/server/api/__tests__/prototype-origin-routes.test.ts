@@ -149,6 +149,7 @@ function refusingListeners(): LoopbackListenerRegistry {
   return {
     ensure: () => Promise.reject(new Error(ENSURE_FAILURE)),
     touch: () => {},
+    touchOrigin: () => {},
     reapIdle: () => Promise.resolve(0),
     closeAll: () => Promise.resolve(),
     closeForDeployment: () => Promise.resolve(),
@@ -918,6 +919,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       const listeners: LoopbackListenerRegistry = {
         ensure,
         touch: () => {},
+        touchOrigin: () => {},
         reapIdle: () => Promise.resolve(0),
         closeAll: () => Promise.resolve(),
         closeForDeployment: () => Promise.resolve(),
@@ -1050,6 +1052,7 @@ describe("GET /projects/:id/prototype-origin", () => {
       const exhausted: LoopbackListenerRegistry = {
         ensure: () => Promise.reject(thrown),
         touch: () => {},
+        touchOrigin: () => {},
         reapIdle: () => Promise.resolve(0),
         closeAll: () => Promise.resolve(),
         closeForDeployment: () => Promise.resolve(),
@@ -1430,7 +1433,10 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
    */
   it("touches the loopback listener on every heartbeat while the stream is open", async () => {
     const ctx = setup({ prototypeOriginStreamPingMs: 20 })
-    const touch = vi.spyOn(ctx.listeners, "touch")
+    // By origin, not port number (codex round 27): two loopback spellings can
+    // share a port under a fixed range, and a touch by number kept the wrong
+    // listener alive.
+    const touch = vi.spyOn(ctx.listeners, "touchOrigin")
     const project = await seedProject(ctx.storage)
     await makeServerDeployment(ctx, project)
 
@@ -1442,9 +1448,8 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     destroy()
 
     const [first] = originFrames(received) as { origin: string }[]
-    const port = Number(new URL(first!.origin).port)
-    expect(port).toBeGreaterThan(0)
-    expect(touch).toHaveBeenCalledWith(port)
+    expect(first!.origin).toMatch(/^http:\/\//)
+    expect(touch).toHaveBeenCalledWith(first!.origin)
   })
 
   /**
@@ -1693,6 +1698,7 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
         })
       },
       touch: () => {},
+      touchOrigin: () => {},
       reapIdle: () => Promise.resolve(0),
       closeAll: () => Promise.resolve(),
       closeForDeployment: () => Promise.resolve(),

@@ -937,13 +937,9 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
      */
     const keepListenerAlive = (): void => {
       if (current.status !== 200 || current.body.mode !== "loopback" || !current.body.origin) return
-      let port = 0
-      try {
-        port = Number(new URL(current.body.origin).port)
-      } catch {
-        return
-      }
-      if (port > 0) deps.prototypeListeners.touch(port)
+      // By origin, not port number: two loopback spellings can share a port
+      // under a fixed range (codex round 27).
+      deps.prototypeListeners.touchOrigin(current.body.origin)
     }
 
     if (current.deploymentId && current.body.serve === "server") {

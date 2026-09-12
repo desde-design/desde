@@ -195,6 +195,8 @@ export interface LoopbackListenerRegistry extends PrototypeHostRegistry {
   ): Promise<LoopbackListener>
   /** Marks the listener on this port as used just now. No-op for a dead port. */
   touch(port: number): void
+  /** `touch`, keyed by the listener's full origin; the review stream's heartbeat uses this one. */
+  touchOrigin(origin: string): void
   /** Closes every listener idle at `now`, and returns how many it closed. */
   reapIdle(now: number, idleMs?: number): Promise<number>
   /** Closes every listener. Idempotent. */
@@ -618,6 +620,18 @@ export function createLoopbackListenerRegistry(
     touch(port) {
       for (const listener of listeners.values()) {
         if (listener.port === port) {
+          listener.lastUsedAt = now()
+          return
+        }
+      }
+    },
+    touchOrigin(origin) {
+      // By the whole origin, not the port: with a fixed range on a laptop a
+      // `127.0.0.1` listener and a `[::1]` listener can share a port number,
+      // and touching by number kept the wrong one alive while the one the
+      // page used was reaped (codex round 27).
+      for (const listener of listeners.values()) {
+        if (listener.origin === origin) {
           listener.lastUsedAt = now()
           return
         }

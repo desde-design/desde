@@ -333,6 +333,25 @@ describe("createLoopbackListenerRegistry", () => {
      * still in flight finished afterwards and inserted one nothing would ever
      * close, serving the deleted deployment to anyone who knew the port.
      */
+    it("touchOrigin keeps exactly the listener whose origin it names (codex round 27)", async () => {
+      let clock = 1_000
+      const registry = makeRegistry(
+        { d1: { "index.html": "<html></html>" }, d2: { "index.html": "<html></html>" } },
+        { now: () => clock },
+      )
+      const one = await registry.ensure(deployment("d1"), V4)
+      const two = await registry.ensure(deployment("d2"), V4)
+      clock += 25_000
+      registry.touchOrigin(two.origin)
+      clock += 10_000
+      // d1 is 35s idle and d2 is 10s idle: only d1 is past a 30s bound.
+      expect(await registry.reapIdle(clock, 30_000)).toBe(1)
+      await expect(
+        httpCall({ host: "127.0.0.1", port: one.port, path: "/" }),
+      ).rejects.toMatchObject({ code: "ECONNREFUSED" })
+      expect((await httpCall({ host: "127.0.0.1", port: two.port, path: "/" })).status).toBe(200)
+    })
+
     it("closeForDeployment waits for an open in flight, closes it, and refuses the deployment from then on", async () => {
       const registry = makeRegistry({ d1: { "index.html": "<html></html>" } })
       const pending = registry.ensure(deployment("d1"), V4)

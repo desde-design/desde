@@ -1121,6 +1121,7 @@ describe("projects API", () => {
       const listeners: LoopbackListenerRegistry = {
         ensure: () => Promise.reject(new Error("not used by this test")),
         touch: () => {},
+        touchOrigin: () => {},
         reapIdle: () => Promise.resolve(0),
         closeAll: () => Promise.resolve(),
         closeForDeployment: async (id) => {
