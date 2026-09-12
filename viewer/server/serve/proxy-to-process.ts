@@ -179,7 +179,15 @@ export function mergeSetCookies(
   // `capabilityCookieName`), so one name-based filter closes both holes: a
   // child cookie sharing the viewer's name is always dropped, `ours` is
   // always appended last when it exists.
-  const withoutOurNames = child.filter((entry) => !VIEWER_COOKIE_NAMES.has(cookieNameOf(entry)))
+  // Host-only, always: a `Domain` attribute is stripped from every child
+  // cookie. In subdomain mode the shell and the prototypes are deliberately
+  // same-site, so a child that set `Domain=example.com` would have its
+  // cookie sent to the shell and to every sibling prototype (codex round
+  // 17). Without the attribute the browser scopes the cookie to the
+  // prototype's own host, which is the boundary the origin design rests on.
+  const withoutOurNames = child
+    .filter((entry) => !VIEWER_COOKIE_NAMES.has(cookieNameOf(entry)))
+    .map((entry) => entry.replace(/;\s*domain=[^;]*/gi, ""))
   return ours === undefined ? withoutOurNames : [...withoutOurNames, ours]
 }
 

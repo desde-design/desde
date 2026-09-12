@@ -290,6 +290,21 @@ describe("proxyToProcess", () => {
   })
 
   /**
+   * Codex round 17. In subdomain mode the shell and every prototype are
+   * same-site on purpose, so a child cookie carrying `Domain=example.com`
+   * would reach the shell and every sibling prototype. Child cookies are
+   * host-only: the attribute is stripped, whatever its case or position.
+   */
+  it("strips a Domain attribute from a child cookie so it stays host-only", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("set-cookie", ["a=1; Domain=example.com; Path=/", "b=2; Path=/; domain=.example.com; HttpOnly"])
+      res.end("x")
+    })
+    const res = await request(appFor(port)).get("/p/acme/")
+    expect(res.headers["set-cookie"]).toEqual(["a=1; Path=/", "b=2; Path=/; HttpOnly"])
+  })
+
+  /**
    * The viewer's own cookie must be the one the browser keeps, and a prototype
    * must not be able to take its name.
    *
