@@ -259,11 +259,13 @@ describe("createLoopbackListenerRegistry", () => {
         bindHost,
         shellOrigin: "http://127.0.0.1:3100",
       })
-      expect(listener.host).toBe("localhost")
-      expect(listener.origin).toBe(`http://localhost:${listener.port}`)
+      // A host of the deployment's own under `.localhost` (codex round 51),
+      // which Chrome and Firefox resolve to loopback without DNS.
+      expect(listener.host).toBe("d1.localhost")
+      expect(listener.origin).toBe(`http://d1.localhost:${listener.port}`)
       expect(listener.boundAddress).toBe("0.0.0.0")
 
-      const res = await httpCall({ host: "127.0.0.1", port: listener.port, path: "/", hostHeader: `localhost:${listener.port}` })
+      const res = await httpCall({ host: "127.0.0.1", port: listener.port, path: "/", hostHeader: `d1.localhost:${listener.port}` })
       expect(res.status).toBe(200)
       expect(res.body).toContain("range")
     })
@@ -318,6 +320,27 @@ describe("createLoopbackListenerRegistry", () => {
         req.end()
       })
     }
+
+    /**
+     * Codex round 51. Ports come back around; origins must not. A document
+     * of deployment A still open in a tab is not same-origin with deployment
+     * B on the port A had, so A's running script cannot reach B.
+     */
+    it("gives every deployment a host of its own on a shared port, so a recycled port is never a recycled origin", async () => {
+      const range = await freeRange(1)
+      const registry = makeRegistry({ d1: {}, d2: {} }, { portRange: range, bindAllInterfaces: true })
+      const target = { bindHost: "localhost" as const, shellOrigin: "http://127.0.0.1:3100" }
+      const a = await registry.ensure(deployment("d1"), target)
+      await a.close()
+      const b = await registry.ensure(deployment("d2"), target)
+      expect(b.port).toBe(a.port)
+      expect(b.origin).not.toBe(a.origin)
+      expect(a.origin).toBe(`http://d1.localhost:${a.port}`)
+      expect(b.origin).toBe(`http://d2.localhost:${b.port}`)
+      // The listener answers only its own host: A's spelling on B's port is refused.
+      const asA = await httpCall({ host: "127.0.0.1", port: b.port, path: "/", hostHeader: `d1.localhost:${b.port}` })
+      expect(asA.status).toBe(400)
+    })
 
     it("hands out the least recently released port, never-used ports first", async () => {
       const range = await freeRange(3)

@@ -97,10 +97,16 @@ export interface LoopbackListener {
   projectId: string
   slug: string
   /**
-   * The `Host` and URL spelling: `127.0.0.1`, `[::1]` with brackets, or
-   * `localhost` (the port-range pairing only).
+   * The `Host` and URL spelling: `127.0.0.1`, `[::1]` with brackets, or,
+   * for the port-range pairing, a host of the deployment's own,
+   * `<deploymentId>.localhost` (codex round 51). A fixed range brings the
+   * same port back around, and a document of the previous deployment still
+   * open in a tab was same-origin with the next one on that port, its
+   * running script included; a host per deployment means an origin never
+   * comes back around, whatever the port does. Chrome and Firefox resolve
+   * every `*.localhost` name to loopback without DNS.
    */
-  host: "127.0.0.1" | "[::1]" | "localhost"
+  host: string
   port: number
   /** `http://127.0.0.1:45001`. Always `http` — a loopback shell is http. */
   origin: string
@@ -314,6 +320,17 @@ function hostSpellingFor(bindHost: LoopbackBindHost): "127.0.0.1" | "[::1]" | "l
 }
 
 /**
+ * The host a listener answers on. The `localhost` bind (the port-range
+ * pairing, where the socket is on every interface and the browser reaches
+ * it through a published port) gets a name of the deployment's own, so an
+ * origin is never shared across deployments however ports are reused
+ * (codex round 51). A deployment id is storage's UUID: a valid DNS label.
+ */
+function listenerHostFor(deploymentId: string, bindHost: LoopbackBindHost): string {
+  return bindHost === "localhost" ? `${deploymentId.toLowerCase()}.localhost` : hostSpellingFor(bindHost)
+}
+
+/**
  * The registry key.
  *
  * A JSON array rather than a joined string: neither half is a controlled
@@ -402,7 +419,7 @@ export function createLoopbackListenerRegistry(
     target: { bindHost: LoopbackBindHost; shellOrigin: string },
     key: string,
   ): Promise<LoopbackListener> {
-    const host = hostSpellingFor(target.bindHost)
+    const host = listenerHostFor(deployment.id, target.bindHost)
     const shell = new URL(target.shellOrigin)
 
     if (shell.protocol !== "http:") {
@@ -708,7 +725,7 @@ export function createLoopbackListenerRegistry(
         // silent mismatch would hand back an origin on a host the caller did
         // not ask for, which is precisely the host-flip property this whole
         // mechanism rests on.
-        const wanted = hostSpellingFor(target.bindHost)
+        const wanted = listenerHostFor(deployment.id, target.bindHost)
         if (existing.host !== wanted) {
           throw new Error(
             `A prototype listener for deployment ${deployment.id} and shell origin ` +
