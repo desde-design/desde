@@ -238,20 +238,50 @@ const HOME_DIR = ".desde-home"
 const execFileAsync = promisify(execFile)
 
 /**
- * What `ps` prints for a pid's command line, or `null` when no such process
- * exists. Any other failure (no `ps` at all) rejects, so the caller can tell
- * "gone" from "could not look".
+ * What tells one process from another that later reused its pid: the
+ * command line AND the moment it started. On Linux both come from `/proc`
+ * (the shipped image has no `ps`, codex round 35); elsewhere from `ps`.
+ * `null` when no such process exists; any other failure rejects, so the
+ * caller can tell "gone" from "could not look".
  */
-async function commandLineOf(pid: number): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync("ps", ["-o", "args=", "-p", String(pid)])
-    const line = stdout.trim()
-    return line === "" ? null : line
-  } catch (error) {
-    // `ps` exits 1 for a pid that does not exist.
-    if (typeof (error as { code?: unknown }).code === "number") return null
-    throw error
+interface ProcessIdentity {
+  commandLine: string
+  /** Opaque: `/proc/<pid>/stat`'s start time in clock ticks, or `ps`'s `lstart` text. Only ever compared for equality. */
+  startedAt: string
+}
+
+async function processIdentity(pid: number): Promise<ProcessIdentity | null> {
+  if (process.platform === "linux") {
+    try {
+      const [cmdline, stat] = await Promise.all([
+        readFile(`/proc/${pid}/cmdline`, "utf8"),
+        readFile(`/proc/${pid}/stat`, "utf8"),
+      ])
+      const commandLine = cmdline.split("\0").filter(Boolean).join(" ")
+      // The command name sits in parentheses and may hold spaces, so the
+      // fields are counted from after it: `starttime` is the 22nd field of
+      // the line, the 20th after the name.
+      const startedAt = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? ""
+      return commandLine === "" || startedAt === "" ? null : { commandLine, startedAt }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === "ENOENT" || code === "ESRCH") return null
+      throw error
+    }
   }
+  const psColumn = async (column: string): Promise<string | null> => {
+    try {
+      const { stdout } = await execFileAsync("ps", ["-o", `${column}=`, "-p", String(pid)])
+      const line = stdout.trim()
+      return line === "" ? null : line
+    } catch (error) {
+      // `ps` exits 1 for a pid that does not exist.
+      if (typeof (error as { code?: unknown }).code === "number") return null
+      throw error
+    }
+  }
+  const [commandLine, startedAt] = await Promise.all([psColumn("args"), psColumn("lstart")])
+  return commandLine === null || startedAt === null ? null : { commandLine, startedAt }
 }
 
 /**
@@ -1008,11 +1038,21 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // Not awaited: the exit handler below must be wired before this
       // function yields, or a child that dies at once is missed. A write
       // that loses to the exit's own removal leaves a file naming a dead
-      // pid, which the next boot's reap reads and discards.
+      // pid, which the next boot's reap reads and discards. The start time
+      // is read now, while the pid is certainly still this child, so a
+      // later boot can tell it from whatever reuses the number (codex
+      // round 35); a file without one is never acted on.
       if (spawned.pid) {
-        void writeFile(join(home, PID_FILE), JSON.stringify({ pid: spawned.pid, command: [file, ...args] })).catch(
-          (error: unknown) => console.error("[viewer] could not record a prototype server's pid:", error),
-        )
+        const pid = spawned.pid
+        void processIdentity(pid)
+          .catch(() => null)
+          .then((identity) =>
+            writeFile(
+              join(home, PID_FILE),
+              JSON.stringify({ pid, command: [file, ...args], startedAt: identity?.startedAt ?? null }),
+            ),
+          )
+          .catch((error: unknown) => console.error("[viewer] could not record a prototype server's pid:", error))
       }
       return { entry, child: spawned }
     })
@@ -1306,9 +1346,13 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       let reaped = 0
       for (const id of ids) {
         const pidFile = join(deps.checkoutsRoot, id, HOME_DIR, PID_FILE)
-        let recorded: { pid: number; command: string[] }
+        let recorded: { pid: number; command: string[]; startedAt: string | null }
         try {
-          const parsed = JSON.parse(await readFile(pidFile, "utf8")) as { pid?: unknown; command?: unknown }
+          const parsed = JSON.parse(await readFile(pidFile, "utf8")) as {
+            pid?: unknown
+            command?: unknown
+            startedAt?: unknown
+          }
           if (
             typeof parsed.pid !== "number" ||
             !Array.isArray(parsed.command) ||
@@ -1316,7 +1360,11 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
           ) {
             throw new Error("malformed")
           }
-          recorded = { pid: parsed.pid, command: parsed.command as string[] }
+          recorded = {
+            pid: parsed.pid,
+            command: parsed.command as string[],
+            startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : null,
+          }
         } catch (error) {
           // No file is the common case; a malformed one is discarded.
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -1324,14 +1372,23 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
           }
           continue
         }
-        let commandLine: string | null
+        let identity: ProcessIdentity | null
         try {
-          commandLine = await commandLineOf(recorded.pid)
+          identity = await processIdentity(recorded.pid)
         } catch (error) {
           console.error(`[viewer] could not check the prototype server recorded for ${id}:`, error)
           continue
         }
-        if (commandLine !== null && isRecordedCommand(commandLine, recorded.command)) {
+        // Both halves, or nothing: a reused pid running the same generic
+        // command (`node .next/standalone/server.js` for another checkout)
+        // has a different start time, and a file that never got one cannot
+        // be told apart from that, so it is discarded unacted on.
+        const isOurs =
+          identity !== null &&
+          recorded.startedAt !== null &&
+          identity.startedAt === recorded.startedAt &&
+          isRecordedCommand(identity.commandLine, recorded.command)
+        if (isOurs) {
           // The whole group, then the leader itself, the way `killTree` and
           // the ready-refused path do for a child this manager spawned.
           for (const target of [-recorded.pid, recorded.pid]) {
@@ -1342,9 +1399,9 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
             }
           }
           reaped++
-        } else if (commandLine !== null) {
+        } else if (identity !== null) {
           console.warn(
-            `[viewer] pid ${recorded.pid} recorded for ${id} now runs something else; leaving it alone`,
+            `[viewer] pid ${recorded.pid} recorded for ${id} could not be confirmed as that server; leaving it alone`,
           )
         }
         await rm(pidFile, { force: true }).catch(() => {})

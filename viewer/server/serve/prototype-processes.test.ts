@@ -600,9 +600,14 @@ describe("createPrototypeProcesses", () => {
       await vi.waitFor(async () => {
         expect(JSON.parse(await readFile(pidFile, "utf8")).pid).toBeTypeOf("number")
       })
-      const { pid, command } = JSON.parse(await readFile(pidFile, "utf8")) as { pid: number; command: string[] }
+      const { pid, command, startedAt } = JSON.parse(await readFile(pidFile, "utf8")) as {
+        pid: number
+        command: string[]
+        startedAt: string | null
+      }
       expect(alive(pid)).toBe(true)
       expect(command).toEqual([process.execPath, FAKE])
+      expect(startedAt).toBeTypeOf("string")
 
       const next = createPrototypeProcesses({ checkoutsRoot: root })
       managers.push(next, previous)
@@ -611,6 +616,34 @@ describe("createPrototypeProcesses", () => {
       await expect(readFile(pidFile, "utf8")).rejects.toMatchObject({ code: "ENOENT" })
       // A second boot finds nothing.
       expect(await next.reapOrphans()).toBe(0)
+    })
+
+    /**
+     * Codex round 35. Another checkout's server runs the same generic
+     * command line (`node .next/standalone/server.js`), so the command
+     * alone cannot tell a reused pid apart: the recorded start time must
+     * match too, and a file that never got one is not acted on.
+     */
+    it("leaves a same-command process whose start time differs alone (a reused pid)", async () => {
+      const root = await checkoutsRoot(["d1"])
+      const procs = createPrototypeProcesses({ checkoutsRoot: root })
+      managers.push(procs)
+      await procs.ensure({ id: "d1", serverStart: start() })
+      const pidFile = join(root, "d1", ".desde-home", "server.pid")
+      await vi.waitFor(async () => {
+        expect(JSON.parse(await readFile(pidFile, "utf8")).startedAt).toBeTypeOf("string")
+      })
+      const recorded = JSON.parse(await readFile(pidFile, "utf8")) as { pid: number; command: string[] }
+      for (const startedAt of ["not-when-it-started", null]) {
+        await writeFile(pidFile, JSON.stringify({ ...recorded, startedAt }))
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+        try {
+          expect(await createPrototypeProcesses({ checkoutsRoot: root }).reapOrphans()).toBe(0)
+        } finally {
+          warn.mockRestore()
+        }
+        expect(alive(recorded.pid)).toBe(true)
+      }
     })
 
     it("leaves a pid that now runs something else alone, and discards the stale file", async () => {
