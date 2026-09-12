@@ -687,6 +687,41 @@ describe("createPrototypeProcesses", () => {
   })
 
   /**
+   * Codex round 15, Fix 1. A leader that exits ON ITS OWN — it crashes, or
+   * just decides to stop — used to take a different path than a leader we
+   * killed on purpose. Round 14 (the test right above this one) only fixed
+   * the path where OUR OWN `killAndWait` sends the signal. The natural-exit
+   * path, the child's own `exit` handler, only recorded the crash and
+   * dropped the handle: it never signalled the group, so a worker the leader
+   * forked for itself lived on in the detached group, keeping its port past
+   * the restart budget, past a later ensure, and past shutdown.
+   *
+   * `FAKE_EXIT_AFTER_MS` makes the fixture exit by itself shortly after it
+   * starts listening — nobody sends it a signal — so this test is exercising
+   * the exit handler, not `killAndWait`. The fixture's worker exits on its
+   * own after five seconds regardless, so a failure here cannot leak a
+   * process; the poll below is far shorter than that.
+   */
+  it("kills a worker the server forked even when the leader exits on its own", async () => {
+    const root = await checkoutsRoot(["d1"])
+    const pidFile = join(root, "worker.pid")
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: root,
+      spawnEnv: { FAKE_FORK_WORKER: "1", FAKE_WORKER_PID_FILE: pidFile, FAKE_EXIT_AFTER_MS: "600" },
+    })
+    managers.push(procs)
+    await procs.ensure({ id: "d1", serverStart: start() })
+    expect(procs.status("d1").state).toBe("running")
+    const workerPid = Number(await readFile(pidFile, "utf8"))
+    expect(workerPid).toBeGreaterThan(0)
+    expect(alive(workerPid), "the fixture never forked a worker to kill").toBe(true)
+
+    await vi.waitFor(() => expect(procs.status("d1").state).toBe("crashed"), { timeout: 3000, interval: 25 })
+
+    await vi.waitFor(() => expect(alive(workerPid)).toBe(false), { timeout: 2000, interval: 25 })
+  })
+
+  /**
    * Codex round 5, Fix 2. `serve-router.ts`'s `onUnreachable` used to call
    * `stop()`, which overwrote the manager's status with `stopped` even when
    * the child was genuinely down — and `stopped` says the viewer put the

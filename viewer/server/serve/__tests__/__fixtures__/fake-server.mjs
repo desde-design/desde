@@ -6,7 +6,10 @@
 // the manager's readiness probe open for that long (and log when it arrives,
 // so a test can land a concurrent call while the probe is in flight instead
 // of by timing luck), FAKE_FORK_WORKER to fork a worker of its own (see
-// below), GET /exit to die while running, and GET /env to answer with the
+// below), FAKE_EXIT_AFTER_MS to exit ON ITS OWN (not via SIGTERM or /exit)
+// that many ms after it starts listening — stands in for a leader that
+// crashes by itself once it is already running, rather than one the manager
+// stopped — GET /exit to die while running, and GET /env to answer with the
 // child's own env (so the env-allowlist test can see exactly what reached the
 // process).
 import { spawn } from "node:child_process"
@@ -72,5 +75,10 @@ setTimeout(() => {
       return
     }
     res.end(`hello from ${port} ${req.url}`)
-  }).listen(port, "127.0.0.1", () => console.log("fake server: listening"))
+  }).listen(port, "127.0.0.1", () => {
+    console.log("fake server: listening")
+    if (process.env.FAKE_EXIT_AFTER_MS) {
+      setTimeout(() => process.exit(7), Number(process.env.FAKE_EXIT_AFTER_MS))
+    }
+  })
 }, Number(process.env.FAKE_DELAY_MS ?? 0))

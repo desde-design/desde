@@ -829,8 +829,21 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // is only ever assigned or cleared under this id's lock, so a handler
     // that read it before queueing could act on a record a newer start had
     // already taken over.
+    //
+    // Codex round 15, Fix 1. This is the NATURAL-exit path: the leader
+    // crashed, or just stopped, on its own — nobody here sent it a signal.
+    // Round 14 (see `killAndWait`'s doc comment) only closed this gap for
+    // the path where OUR OWN kill sends SIGTERM/SIGKILL to the whole group.
+    // A leader that exits by itself was only ever recorded as crashed, with
+    // the handle dropped and nothing sent to the group it leads — so a
+    // worker that leader forked for itself (a Next server with
+    // `experimental.cpus`, a Nitro worker, anything the app spawns) lived on
+    // in the detached group, holding its port past the restart budget, past
+    // a later `ensure`, and past shutdown. `killTree` swallows ESRCH, so a
+    // group that already has nothing left in it costs nothing.
     child.once("exit", (code) => {
       exited = true
+      killTree(child, "SIGKILL")
       void lock.run(id, async () => {
         if (entries.get(id) !== entry || entry.child !== child) return
         entry.child = null
