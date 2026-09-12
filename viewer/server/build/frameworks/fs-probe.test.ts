@@ -75,10 +75,11 @@ describe("findNextDistDir", () => {
     expect(await findNextDistDir(r, null)).toBe(".next")
   })
 
-  it("falls back to the whole checkout when the target app has no dist dir", async () => {
+  it("answers null when the target app has no dist dir, even when a sibling has one (codex round 36)", async () => {
     const r = await root()
+    await writeDistDir(r, ".next")
     await writeDistDir(r, "apps/admin/.next")
-    expect(await findNextDistDir(r, "apps/web")).toBe(join("apps", "admin", ".next"))
+    expect(await findNextDistDir(r, "apps/web")).toBeNull()
   })
 
   it("does not follow a symlinked directory out of the checkout (codex round 31)", async () => {

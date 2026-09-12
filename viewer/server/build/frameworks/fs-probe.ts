@@ -148,16 +148,19 @@ async function scanForOutputDir<T>(
   excluded: Set<string> = EXCLUDED_OUTPUT_DIR_NAMES,
   within: string | null = null,
 ): Promise<T | null> {
-  // The target app first, when the caller named one (codex round 34): its
-  // own preferred name, then everything under it. Then the whole checkout
-  // in the usual order. Each candidate is asked once.
-  const candidates: string[] = []
-  if (within !== null) candidates.push(join(within, preferred), ...(await walkDirs(checkoutRoot, excluded, within)))
-  candidates.push(preferred, ...(await walkDirs(checkoutRoot, excluded)))
-  const asked = new Set<string>()
+  // Inside the target app and nowhere else, when the caller named one
+  // (codex round 34, narrowed in round 36): its own preferred name, then
+  // everything under it. Falling back to the whole checkout found a
+  // SIBLING app's output once the target had none of this framework's, and
+  // since the adapters run Next, then Nuxt, then React Router, a Nuxt or
+  // React Router target beside a Next app was deployed as that Next app.
+  // With no target (the root's own package owns the configured output dir)
+  // the whole checkout is scanned in the usual order.
+  const candidates =
+    within === null
+      ? [preferred, ...(await walkDirs(checkoutRoot, excluded))]
+      : [join(within, preferred), ...(await walkDirs(checkoutRoot, excluded, within))]
   for (const rel of candidates) {
-    if (asked.has(rel)) continue
-    asked.add(rel)
     if (!(await isRealDir(join(checkoutRoot, rel)))) continue
     const found = await qualifies(rel)
     if (found !== null) return found

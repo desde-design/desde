@@ -48,8 +48,8 @@ export type BuildShape =
  * write outputs for several apps, and each adapter used to take the first
  * one its scan met, so a prototype configured to publish `apps/web` could
  * start the root app or a sibling instead. Adapters look inside `within`
- * first and fall back to the whole checkout only when nothing there
- * qualifies.
+ * and nowhere else: a sibling package's output is another app, whatever
+ * framework it was built with (codex round 36).
  */
 export interface BuildTarget {
   within: string | null

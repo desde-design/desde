@@ -652,6 +652,34 @@ describe("inspectBuild", () => {
     expect(rootApp).toMatchObject({ kind: "server", start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"] })
   })
 
+  /**
+   * Codex round 36. The adapters run Next, then Nuxt, then React Router. A
+   * Nuxt app configured as the prototype, beside a sibling Next app in the
+   * same workspace, was deployed as that Next app: the Next adapter found
+   * nothing under the target and fell back to the whole checkout.
+   */
+  it("deploys the configured Nuxt app rather than a sibling Next app the scan would otherwise meet", async () => {
+    const root = await checkout({ next: false })
+    await mkdir(join(root, "apps", "web", ".next"), { recursive: true })
+    await writeFile(join(root, "apps", "web", ".next", "BUILD_ID"), "def456")
+    await writeFile(join(root, "apps", "web", ".next", "required-server-files.json"), "{}")
+    await writeFile(join(root, "apps", "web", "package.json"), JSON.stringify({ name: "web", dependencies: { next: "^16.0.0" } }))
+    await mkdir(join(root, "apps", "web", "node_modules", ".bin"), { recursive: true })
+    await writeFile(join(root, "apps", "web", "node_modules", ".bin", "next"), "#!/usr/bin/env node\n")
+    await mkdir(join(root, "apps", "site", ".output", "server"), { recursive: true })
+    await mkdir(join(root, "apps", "site", ".output", "public"), { recursive: true })
+    await writeFile(join(root, "apps", "site", ".output", "server", "index.mjs"), "export default null")
+    await writeFile(join(root, "apps", "site", "package.json"), JSON.stringify({ name: "site", dependencies: { nuxt: "^3.0.0" } }))
+
+    expect(await inspectBuild(root, join("apps", "site", "dist"), ADAPTERS)).toEqual({
+      kind: "server",
+      start: ["node", join("apps", "site", ".output", "server", "index.mjs")],
+      reason: "Nuxt with a server build",
+    })
+    expect((await inspectBuild(root, join("apps", "web", "out"), ADAPTERS)).kind).toBe("server")
+    expect(await inspectBuild(root, join("apps", "web", "out"), ADAPTERS)).toMatchObject({ reason: "Next.js with server-rendered routes" })
+  })
+
   it("recognises a Nuxt server checkout through the default ADAPTERS", async () => {
     const root = await mkdtemp(join(tmpdir(), "fw-nuxt-"))
     try {
