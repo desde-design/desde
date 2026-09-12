@@ -969,6 +969,19 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         await refollowActiveDeployment(freshProject)
         return
       }
+      // The listener this origin came from can be gone (codex round 46): a
+      // rotation for a revoked reader, or for an access change, closed it,
+      // and this reader's frame is on a dead socket until it hears the new
+      // port. `touchOrigin` alone ignored a missing origin silently.
+      if (
+        current.status === 200 &&
+        current.body.mode === "loopback" &&
+        current.body.origin !== null &&
+        !deps.prototypeListeners.hasOrigin(current.body.origin)
+      ) {
+        await refollowActiveDeployment(freshProject)
+        return
+      }
       resendIfProcessChanged(freshProject)
       keepListenerAlive()
     }
