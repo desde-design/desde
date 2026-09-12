@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { promises as fs } from "node:fs"
 import { DiskAssetStore } from "../../assets/disk-asset-store"
 import type { AssetStore, StoredAsset } from "../../assets/types"
-import { createApp, nullPrototypeProcesses, type AppDeps } from "../../__tests__/test-app"
+import { createApp, createTestPrototypeListeners, nullPrototypeProcesses, type AppDeps } from "../../__tests__/test-app"
 import { checkoutDirFor } from "../../build/checkouts"
 import type { PrototypeProcesses } from "../../serve/prototype-processes"
 import { createSwappableApp } from "../../__tests__/swappable-app"
@@ -296,13 +296,26 @@ describe("deployments API", () => {
   })
 
   it("S5: reclaims a superseded deployment's assets once it falls off the retention window", async () => {
-    const project = await createProject(ctx.app)
+    // Its own app, with a listener registry this test can watch: `setup()`
+    // leaves `prototypeListeners` for `createApp` to default, out of reach.
+    const listenerDeps: AppDeps = {
+      storage: new InMemoryStorage(),
+      assets: new DiskAssetStore(join(workDir, "assets")),
+      config,
+      bridgeScript: BRIDGE,
+      github: testGithubRuntime(),
+    }
+    const listeners = createTestPrototypeListeners(listenerDeps)
+    const close = vi.spyOn(listeners, "closeForDeployment")
+    stable.use(createApp({ ...listenerDeps, prototypeListeners: listeners }))
+    const local = { app: stable.app, deps: listenerDeps }
+    const project = await createProject(local.app)
 
     const ids: string[] = []
     // DEPLOYMENT_RETENTION_COUNT is 5 — the active deployment plus the 4
     // before it are kept; the 6th upload pushes the very first one out.
     for (let i = 0; i < 6; i++) {
-      const res = await request(ctx.app)
+      const res = await request(local.app)
         .post(`/api/v1/projects/${project.id}/deployments`)
         .set(auth)
         .set("Content-Type", "application/gzip")
@@ -312,22 +325,26 @@ describe("deployments API", () => {
     }
 
     // The oldest deployment's assets are gone from disk...
-    expect(await ctx.deps.assets.get(ids[0], "index.html")).toBeNull()
+    expect(await local.deps.assets.get(ids[0], "index.html")).toBeNull()
+    // ...and the listener pinned to it was closed first, the others left alone.
+    const closed = close.mock.calls.map(([id]) => id)
+    expect(closed).toContain(ids[0])
+    for (const id of ids.slice(1)) expect(closed).not.toContain(id)
     // ...but its ROW survives (asset-only reclamation — see
     // `pruneSupersededDeploymentAssets`'s doc comment for why row pruning is
     // a separate follow-up).
-    const list = await request(ctx.app)
+    const list = await request(local.app)
       .get(`/api/v1/projects/${project.id}/deployments`)
       .expect(200)
     expect(list.body.deployments.map((d: { id: string }) => d.id)).toContain(ids[0])
 
     // The 4 before the active one, and the active one itself, are retained.
     for (const id of ids.slice(1)) {
-      expect(await ctx.deps.assets.get(id, "index.html")).not.toBeNull()
+      expect(await local.deps.assets.get(id, "index.html")).not.toBeNull()
     }
 
     // The currently active deployment still serves correctly.
-    const page = await request(ctx.app).get("/p/acme/").expect(200)
+    const page = await request(local.app).get("/p/acme/").expect(200)
     expect(page.text).toContain("<body>5")
   })
 

@@ -97,6 +97,30 @@ async function main(): Promise<void> {
   })
 
   const buildChangeBus = createBuildChangeBus()
+  // Per-deployment loopback listeners: each one an `http.Server` on an
+  // ephemeral loopback port serving ONE deployment at `/`, so a prototype
+  // gets an origin of its own on a laptop without DNS. Nothing opens one at
+  // boot — the prototype-origin API opens one on first review and the reaper
+  // below closes it again once nobody is looking. See
+  // `serve/loopback-listeners.ts`.
+  const prototypeListeners = createLoopbackListenerRegistry({
+    makeApp: (context) =>
+      createLoopbackListenerApp({
+        ...context,
+        storage,
+        assets,
+        config,
+        bridgeScript,
+        bridgeVersion,
+        prototypeCsp: config.prototypeCsp,
+        // The SAME manager the shell app gets — one child per deployment, not
+        // one per origin it is reviewed on.
+        prototypeProcesses,
+      }),
+    portRange: config.loopbackPortRange,
+    bindAllInterfaces: config.loopbackBindAllInterfaces,
+  })
+
   const github = createGithubRuntime({
     config,
     storage,
@@ -110,12 +134,23 @@ async function main(): Promise<void> {
     // the gap between this hook and the actual delete could then spawn a
     // fresh child into a directory that is mid-delete. `retire` stops the
     // process AND leaves it permanently refusing, closing that window.
-    beforeCheckoutRemove: (deploymentId) => prototypeProcesses.retire(deploymentId),
+    // The listener pinned to that deployment closes first (codex round 32):
+    // a request landing after this hook is refused by the registry rather
+    // than proxied into a directory that is mid-delete.
+    beforeCheckoutRemove: async (deploymentId) => {
+      await prototypeListeners.closeForDeployment(deploymentId)
+      await prototypeProcesses.retire(deploymentId)
+    },
     // Once the directory `retire` was guarding is actually gone, drop the
     // permanent map entry it left behind — otherwise every id ever pruned
     // keeps occupying a live entry forever, and every later build re-visits
     // it for nothing (codex round 3, item 4).
     afterCheckoutRemove: (deploymentId) => prototypeProcesses.forget(deploymentId),
+    // A superseded deployment of EITHER kind loses its assets; the loopback
+    // listener pinned to it used to outlive them until the idle reap, and in
+    // a container that is one of the fixed range's twenty ports held for up
+    // to thirty minutes per superseded deployment (codex round 32).
+    beforeAssetsRemove: (deploymentId) => prototypeListeners.closeForDeployment(deploymentId),
   })
 
   // No GitHub sign-in configured means nobody could otherwise obtain a
@@ -186,30 +221,6 @@ async function main(): Promise<void> {
   // page while the process runs — a null captured here would stay null for
   // the life of the process. See `reloadable-email-provider.ts`.
   const email = createReloadableEmailProvider(config.email)
-
-  // Per-deployment loopback listeners: each one an `http.Server` on an
-  // ephemeral loopback port serving ONE deployment at `/`, so a prototype
-  // gets an origin of its own on a laptop without DNS. Nothing opens one at
-  // boot — the prototype-origin API opens one on first review and the reaper
-  // below closes it again once nobody is looking. See
-  // `serve/loopback-listeners.ts`.
-  const prototypeListeners = createLoopbackListenerRegistry({
-    makeApp: (context) =>
-      createLoopbackListenerApp({
-        ...context,
-        storage,
-        assets,
-        config,
-        bridgeScript,
-        bridgeVersion,
-        prototypeCsp: config.prototypeCsp,
-        // The SAME manager the shell app gets — one child per deployment, not
-        // one per origin it is reviewed on.
-        prototypeProcesses,
-      }),
-    portRange: config.loopbackPortRange,
-    bindAllInterfaces: config.loopbackBindAllInterfaces,
-  })
 
   const appDeps: AppDeps = {
     storage,

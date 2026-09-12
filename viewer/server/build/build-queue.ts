@@ -76,6 +76,13 @@ export interface BuildQueueDeps {
    * (codex round 3, item 4).
    */
   afterCheckoutRemove?: (deploymentId: string) => Promise<void>
+  /**
+   * Called before a superseded deployment's assets are deleted, whatever
+   * it was built as; `server/index.ts` passes the listener registry's
+   * `closeForDeployment`, so a loopback listener pinned to that deployment
+   * stops holding one of the fixed range's ports (codex round 32).
+   */
+  beforeAssetsRemove?: (deploymentId: string) => Promise<void>
   onChange?: (deploymentId: string) => void
 }
 
@@ -240,7 +247,13 @@ export function createBuildQueue(deps: BuildQueueDeps): BuildQueue {
             // every push-triggered rebuild strands the previous deployment's
             // assets forever. Same asset-only, best-effort sweep as the
             // upload route.
-            await pruneSupersededDeploymentAssets(deps.storage, deps.assets, projectId, deployment.id)
+            await pruneSupersededDeploymentAssets(
+              deps.storage,
+              deps.assets,
+              projectId,
+              deployment.id,
+              deps.beforeAssetsRemove,
+            )
             await pruneSupersededCheckouts(
               deps.storage,
               deps.checkoutsRoot,

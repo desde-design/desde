@@ -185,6 +185,17 @@ export async function pruneSupersededDeploymentAssets(
   assets: Pick<AssetStore, "deleteDeployment">,
   projectId: string,
   keepActiveId: string,
+  /**
+   * Awaited before each stale deployment's assets are deleted; `server/index.ts`
+   * passes the listener registry's `closeForDeployment` (codex round 32).
+   * A loopback listener pinned to a superseded deployment used to outlive
+   * its assets until the idle reap, and in a container each one holds one
+   * of the fixed range's ports, so enough rapid deployments left the
+   * current one with `ports-exhausted`. A rejection here skips that one
+   * deployment's delete (the next activation revisits it) and never stops
+   * the sweep.
+   */
+  beforeRemove?: (deploymentId: string) => Promise<void>,
 ): Promise<void> {
   // Documented newest-first — see `StorageAdapter.listDeployments`.
   //
@@ -203,6 +214,7 @@ export async function pruneSupersededDeploymentAssets(
   const stale = rest.slice(DEPLOYMENT_RETENTION_COUNT - 1)
   for (const d of stale) {
     try {
+      await beforeRemove?.(d.id)
       await assets.deleteDeployment(d.id)
     } catch (error) {
       console.error(`[viewer] failed to prune superseded deployment ${d.id}:`, error)

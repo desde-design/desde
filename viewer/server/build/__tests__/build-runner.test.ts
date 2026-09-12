@@ -762,10 +762,16 @@ describe("build queue", () => {
     // only, so track which deployment id is "current" to assert against —
     // simpler: just record every deploymentId `deleteDeployment` is called
     // with, which is what retention actually does.
+    // Codex round 32: the listener pinned to the pruned deployment is
+    // closed through this hook before its assets go.
+    const closed: string[] = []
     const queue = createBuildQueue({
       storage,
       assets,
       checkoutsRoot: join(tmpViewerDataDir(), "checkouts"),
+      beforeAssetsRemove: async (id) => {
+        closed.push(id)
+      },
       runner: {
         async run() {
           return { ok: true, commitSha: "abc", commitMessage: null, fileCount: 1, serve: "static", serverStart: null }
@@ -786,6 +792,8 @@ describe("build queue", () => {
     // retention window; the rest were not.
     expect(assets.deleted).toContain(ids[0])
     expect(assets.deleted).not.toContain(ids[ids.length - 1])
+    expect(closed).toContain(ids[0])
+    expect(closed).not.toContain(ids[ids.length - 1])
   })
 
   it("marks an interrupted build failed on shutdown rather than leaving it building forever", async () => {

@@ -87,6 +87,12 @@ export interface CreateGithubRuntimeArgs {
    * checkout is long gone.
    */
   afterCheckoutRemove?: (deploymentId: string) => Promise<void>
+  /**
+   * Awaited before a superseded deployment's assets are deleted, whatever
+   * it was built as. `server/index.ts` passes the listener registry's
+   * `closeForDeployment` (codex round 32).
+   */
+  beforeAssetsRemove?: (deploymentId: string) => Promise<void>
   /** Injected fakes. Each one pins its field permanently, including across `reload`. */
   overrides?: Partial<Pick<GithubRuntime, "authProvider" | "appClient" | "buildQueue">>
 }
@@ -199,6 +205,7 @@ export function createGithubRuntime(args: CreateGithubRuntimeArgs): GithubRuntim
                 ...(args.afterCheckoutRemove
                   ? { afterCheckoutRemove: args.afterCheckoutRemove }
                   : {}),
+                ...(args.beforeAssetsRemove ? { beforeAssetsRemove: args.beforeAssetsRemove } : {}),
                 runner: createInProcessBuildRunner({
                   assets: args.assets,
                   githubApp: appClient,

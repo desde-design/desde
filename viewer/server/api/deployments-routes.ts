@@ -483,7 +483,13 @@ export function createDeploymentsRoutes(
       // `pruneSupersededDeploymentAssets` for why this is asset-only and
       // best-effort (it never throws, so it can't turn a successful upload
       // into a failed response).
-      await pruneSupersededDeploymentAssets(deps.storage, deps.assets, project.id, deployment.id)
+      // The listener pinned to a pruned deployment closes with its assets
+      // (codex round 32): it held one of the fixed range's ports until the
+      // idle reap, and enough rapid uploads left the current deployment
+      // with `ports-exhausted`.
+      await pruneSupersededDeploymentAssets(deps.storage, deps.assets, project.id, deployment.id, (id) =>
+        deps.prototypeListeners.closeForDeployment(id),
+      )
       // Same follow-up the build-queue lane already makes (`build-queue.ts`):
       // a project that had SERVER builds before this upload keeps their
       // on-disk checkouts (`node_modules` and all) forever otherwise, since
@@ -495,7 +501,10 @@ export function createDeploymentsRoutes(
         join(deps.config.dataDir, "checkouts"),
         project.id,
         deployment.id,
-        (id) => deps.prototypeProcesses.retire(id),
+        async (id) => {
+          await deps.prototypeListeners.closeForDeployment(id)
+          await deps.prototypeProcesses.retire(id)
+        },
         (id) => deps.prototypeProcesses.forget(id),
       )
 
