@@ -1107,8 +1107,14 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       })
     },
     async markUnreachable(id) {
-      if (!entries.has(id)) return
-      await lock.run(id, () => applyAllowingRefusal(id, { type: "unreachable" }))
+      // Inside the lock, like `stop`'s guard: a `forget` already queued
+      // ahead of this call drops the record, and an apply after it would
+      // recreate one through `entryFor` that nothing ever drops again
+      // (codex round 21).
+      await lock.run(id, () => {
+        if (!entries.has(id)) return Promise.resolve()
+        return applyAllowingRefusal(id, { type: "unreachable" })
+      })
     },
     async forget(id) {
       if (!entries.has(id)) return
@@ -1163,7 +1169,13 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
         // unaffected: they kill regardless, because they are explicit "this
         // deployment is going away" actions, not the passive idle sweep.
         for (const id of [...entries.keys()]) {
-          void lock.run(id, () => applyAllowingRefusal(id, { type: "reap", now: now(), idleMs }))
+          // Same guard as `markUnreachable`: a `forget` queued ahead of this
+          // sweep drops the record, and a reap applied after it would
+          // recreate one (codex round 21).
+          void lock.run(id, () => {
+            if (!entries.has(id)) return Promise.resolve()
+            return applyAllowingRefusal(id, { type: "reap", now: now(), idleMs })
+          })
         }
       }, reapIntervalMs)
       timer.unref()

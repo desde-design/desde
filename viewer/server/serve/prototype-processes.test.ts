@@ -761,6 +761,19 @@ describe("createPrototypeProcesses", () => {
    * normal budget — same as any other exit.
    */
   describe("markUnreachable", () => {
+    it("queued behind a forget, it leaves no record behind (codex round 21)", async () => {
+      const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+      managers.push(procs)
+      await procs.ensure({ id: "d1", serverStart: start() })
+      // Called in this order without awaiting between them: the forget takes
+      // the lock first, and the mark's existence check passed while the
+      // record still existed. Inside the lock it must look again.
+      const forgetting = procs.forget("d1")
+      const marking = procs.markUnreachable("d1")
+      await Promise.all([forgetting, marking])
+      expect(procs.recordCount()).toBe(0)
+    })
+
     it("on a running server, stops it and records a retryable crash", async () => {
       const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
       managers.push(procs)
