@@ -473,11 +473,9 @@ export function createDeploymentsRoutes(
         buildLog: `Uploaded ${publishFiles.length} files${bundleRoot ? ` (bundle root: ${bundleRoot})` : ""}\n${warnings ? `Warning: ${warnings[0].summary}\n` : ""}`,
         warnings,
       })
-      await deps.storage.updateProject(project.id, {
-        activeDeploymentId: deployment.id,
-      })
-      // Same durable activation fact the build queue writes (codex round 48).
-      await deps.storage.updateDeployment(deployment.id, { activatedAt: new Date().toISOString() })
+      // The pointer and the durable "went live" stamp, as one change (codex
+      // rounds 48 and 49); the stamped row is what the response carries.
+      const activated = await deps.storage.activateDeployment(project.id, deployment.id)
       await rm(workDir, { recursive: true, force: true })
 
       // S5: this project just got a new active deployment — reclaim
@@ -510,7 +508,7 @@ export function createDeploymentsRoutes(
         (id) => deps.prototypeProcesses.forget(id),
       )
 
-      res.status(201).json({ ...deployed, fileCount: publishFiles.length })
+      res.status(201).json({ ...deployed, ...activated, fileCount: publishFiles.length })
     } catch (error) {
       // If we're already past a `fail()` call (the no-index.html branch
       // above, or a prior iteration of this same catch), `fail()` itself

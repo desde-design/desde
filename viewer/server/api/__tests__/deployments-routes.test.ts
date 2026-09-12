@@ -247,6 +247,9 @@ describe("deployments API", () => {
     expect(res.body.status).toBe("deployed")
     expect(res.body.commitSha).toBe("abc123")
     expect(res.body.fileCount).toBe(2)
+    // The response carries the activation stamp storage holds (codex round 49).
+    expect(res.body.activatedAt).toBeTypeOf("string")
+    expect((await ctx.deps.storage.getDeployment(res.body.id as string))?.activatedAt).toBe(res.body.activatedAt)
 
     const updated = await request(ctx.app).get(`/api/v1/projects/${project.id}`).expect(200)
     expect(updated.body.activeDeploymentId).toBe(res.body.id)
