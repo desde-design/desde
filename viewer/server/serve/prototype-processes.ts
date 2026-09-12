@@ -1009,9 +1009,16 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // "spawned and cleaned up". Nothing between that refusal point and the
     // handlers being wired is async, so no stop can land inside this block.
     const { entry, child } = await lock.run(id, async () => {
-      if (!stillOurs()) throw abandonedBeforeSpawn()
-      await apply(id, { type: "spawned", generation })
-      if (closed) throw closedError()
+      try {
+        if (!stillOurs()) throw abandonedBeforeSpawn()
+        await apply(id, { type: "spawned", generation })
+        if (closed) throw closedError()
+      } catch (error) {
+        // Refused before any child existed: no exit handler will ever give
+        // this port back (codex round 35).
+        reservedPorts.delete(port)
+        throw error
+      }
       const entry = entryFor(id)
       entry.log = ""
       const spawned = spawn(file, args, {

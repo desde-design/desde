@@ -841,6 +841,34 @@ describe("createPrototypeProcesses", () => {
     expect(procs.status("d1")).toEqual({ state: "stopped" })
   })
 
+  /**
+   * Codex round 35. A stop that lands while the port was being picked has
+   * the `spawned` acknowledgement refused before any child exists, so no
+   * exit handler ever gives the reserved port back. Enough of those and
+   * every later pick was refused as held.
+   */
+  it("gives the port back when a stop refuses the start before spawn", async () => {
+    const held = await pickLoopbackPort()
+    let release: () => void = () => {}
+    let gated = true
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      pickPort: async () => {
+        if (gated) await new Promise<void>((r) => (release = r))
+        return held
+      },
+    })
+    managers.push(procs)
+    const ensuring = procs.ensure({ id: "d1", serverStart: start() })
+    await new Promise((r) => setTimeout(r, 20))
+    await procs.stop("d1")
+    gated = false
+    release()
+    await expect(ensuring).rejects.toBeInstanceOf(PrototypeProcessError)
+    // The same port, offered again, is taken: nothing still holds it.
+    expect((await procs.ensure({ id: "d1", serverStart: start() })).port).toBe(held)
+  })
+
   it("a stop that lands between pickPort and spawn leaves no child behind", async () => {
     let release: () => void = () => {}
     const gate = new Promise<void>((r) => {
