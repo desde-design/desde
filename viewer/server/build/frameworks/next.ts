@@ -1,5 +1,5 @@
-import { cp, stat } from "node:fs/promises"
-import { join } from "node:path"
+import { cp, readFile, stat } from "node:fs/promises"
+import { basename, join } from "node:path"
 import { dependsOn, dependsOnAt, findNextDistDir, isDir, isFile, parentAppDir } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
@@ -73,7 +73,17 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
       }
     }
 
-    const standaloneServerRel = join(distDir, "standalone", "server.js")
+    // Codex round 29, item 3. With `output: "standalone"` AND
+    // `outputFileTracingRoot` set to the monorepo root, Next nests the
+    // launcher one level deeper: `<distDir>/standalone/<relativeAppDir>/server.js`,
+    // where `relativeAppDir` is the app's own directory relative to the
+    // tracing root. `required-server-files.json` (present — `findNextDistDir`
+    // requires it) carries that field; absent or empty means the app IS the
+    // tracing root, and the launcher sits directly under `standalone/` with
+    // no extra nesting — the plain case this replaces.
+    const relativeAppDir = await readRelativeAppDir(checkoutRoot, distDir)
+    const standaloneDirRel = relativeAppDir ? join(distDir, "standalone", relativeAppDir) : join(distDir, "standalone")
+    const standaloneServerRel = join(standaloneDirRel, "server.js")
     if (await isFile(join(checkoutRoot, standaloneServerRel))) {
       return {
         kind: "server",
@@ -86,7 +96,7 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
         // deployment built before that upgrade.
         start: ["node", standaloneServerRel],
         reason: "Next.js standalone output",
-        prepare: (root) => copyStandaloneStaticAssets(root, distDir),
+        prepare: (root) => copyStandaloneStaticAssets(root, distDir, relativeAppDir, nestedAppDir),
       }
     }
 
@@ -142,24 +152,58 @@ async function modifiedAt(path: string): Promise<number | null> {
 }
 
 /**
- * Next's standalone output does not include `<distDir>/static` or the root
- * `public/` — the framework's own docs say to copy both into the standalone
- * dir, or the server starts but every asset 404s. Copies build output into
- * build output, inside the checkout; never touches source.
+ * `required-server-files.json`'s `relativeAppDir`: the app's own directory
+ * relative to Next's `outputFileTracingRoot` (the monorepo root, when the
+ * project sets one). Absent, empty, or unreadable all mean the same thing —
+ * the app IS the tracing root, and the standalone launcher sits directly
+ * under `<distDir>/standalone/` with no extra nesting.
+ */
+async function readRelativeAppDir(checkoutRoot: string, distDir: string): Promise<string> {
+  try {
+    const raw = JSON.parse(
+      await readFile(join(checkoutRoot, distDir, "required-server-files.json"), "utf8"),
+    ) as { relativeAppDir?: string }
+    return raw.relativeAppDir ?? ""
+  } catch {
+    return ""
+  }
+}
+
+/**
+ * Next's standalone output does not include `<distDir>/static` or the app's
+ * own `public/` — the framework's own docs say to copy both into the
+ * standalone dir, or the server starts but every asset 404s. Copies build
+ * output into build output, inside the checkout; never touches source.
+ *
+ * With a tracing-root `relativeAppDir` (codex round 29, item 3), both land
+ * one level deeper, under the app's own directory inside `standalone/`:
+ * `<distDir>/standalone/<relativeAppDir>/<distDir's own name>/static` and
+ * `<distDir>/standalone/<relativeAppDir>/public`. `appDir` (the app
+ * directory from item 1, or `null` at the checkout root) is where the
+ * `public/` source is read from — the plain case still reads the
+ * checkout's own root `public/`.
  *
  * Skips whichever source is absent rather than throwing — a prototype with
  * no `public/` directory at all is ordinary, not an error.
  */
-async function copyStandaloneStaticAssets(checkoutRoot: string, distDir: string): Promise<void> {
-  const standaloneDir = join(checkoutRoot, distDir, "standalone")
+async function copyStandaloneStaticAssets(
+  checkoutRoot: string,
+  distDir: string,
+  relativeAppDir: string,
+  appDir: string | null,
+): Promise<void> {
+  const distDirName = basename(distDir)
+  const standaloneAppDir = relativeAppDir
+    ? join(checkoutRoot, distDir, "standalone", relativeAppDir)
+    : join(checkoutRoot, distDir, "standalone")
 
   const staticSrc = join(checkoutRoot, distDir, "static")
   if (await isDir(staticSrc)) {
-    await cp(staticSrc, join(standaloneDir, distDir, "static"), { recursive: true })
+    await cp(staticSrc, join(standaloneAppDir, distDirName, "static"), { recursive: true })
   }
 
-  const publicSrc = join(checkoutRoot, "public")
+  const publicSrc = appDir !== null ? join(checkoutRoot, appDir, "public") : join(checkoutRoot, "public")
   if (await isDir(publicSrc)) {
-    await cp(publicSrc, join(standaloneDir, "public"), { recursive: true })
+    await cp(publicSrc, join(standaloneAppDir, "public"), { recursive: true })
   }
 }

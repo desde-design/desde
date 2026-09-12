@@ -412,6 +412,67 @@ describe("Next.js adapter — output: \"standalone\"", () => {
   })
 })
 
+/**
+ * Codex round 29, item 3. With `output: "standalone"` and
+ * `outputFileTracingRoot` set to the monorepo root, Next writes the
+ * launcher one level deeper, at `<distDir>/standalone/<relativeAppDir>/server.js`
+ * — `relativeAppDir` is read out of `required-server-files.json`, and an
+ * absent or empty value means the app IS the tracing root (the plain case
+ * above). Verified against a live report of the real directory layout
+ * (github.com/vercel/next.js discussion #35437): `server.js`,
+ * `<distDir>/static`, and `public/` all end up nested under the app's own
+ * directory inside `standalone/`. The exact `relativeAppDir` field name in
+ * `required-server-files.json` is taken from this brief; it was not
+ * independently found in a primary source during this pass.
+ */
+describe("Next.js adapter — output: \"standalone\" with a tracing-root relativeAppDir", () => {
+  it("detects the launcher nested under relativeAppDir and records it as the start command", async () => {
+    const root = await checkout({ buildId: true })
+    await writeFile(
+      join(root, ".next", "required-server-files.json"),
+      JSON.stringify({ relativeAppDir: "apps/web" }),
+    )
+    await mkdir(join(root, ".next", "standalone", "apps", "web"), { recursive: true })
+    await writeFile(join(root, ".next", "standalone", "apps", "web", "server.js"), "// standalone server")
+
+    const shape = await NEXT_ADAPTER.inspectBuild(root)
+    expect(shape).toMatchObject({
+      kind: "server",
+      start: ["node", join(".next", "standalone", "apps", "web", "server.js")],
+      reason: "Next.js standalone output",
+    })
+  })
+
+  it("prepare() copies static and public under the relativeAppDir's own standalone subtree", async () => {
+    const root = await checkout({ buildId: true, staticDir: true, publicDir: true })
+    await writeFile(
+      join(root, ".next", "required-server-files.json"),
+      JSON.stringify({ relativeAppDir: "apps/web" }),
+    )
+    await mkdir(join(root, ".next", "standalone", "apps", "web"), { recursive: true })
+    await writeFile(join(root, ".next", "standalone", "apps", "web", "server.js"), "// standalone server")
+
+    const shape = await NEXT_ADAPTER.inspectBuild(root)
+    if (shape?.kind !== "server" || !shape.prepare) throw new Error("expected a standalone server shape with prepare")
+    await shape.prepare(root)
+
+    expect(await exists(join(root, ".next", "standalone", "apps", "web", ".next", "static", "chunk.js"))).toBe(true)
+    expect(await exists(join(root, ".next", "standalone", "apps", "web", "public", "favicon.ico"))).toBe(true)
+  })
+
+  it("keeps the plain (no tracing root) case unchanged when relativeAppDir is present but empty", async () => {
+    const root = await checkout({ buildId: true, standalone: true })
+    await writeFile(join(root, ".next", "required-server-files.json"), JSON.stringify({ relativeAppDir: "" }))
+
+    const shape = await NEXT_ADAPTER.inspectBuild(root)
+    expect(shape).toMatchObject({
+      kind: "server",
+      start: ["node", join(".next", "standalone", "server.js")],
+      reason: "Next.js standalone output",
+    })
+  })
+})
+
 describe("inspectBuild", () => {
   it("falls back to the static default with the user's output dir when no adapter answers", async () => {
     expect(await inspectBuild(await checkout({ next: false }), "dist")).toEqual({
