@@ -15,7 +15,7 @@ import { createApp } from "../../__tests__/test-app"
 import { createSwappableApp } from "../../__tests__/swappable-app"
 import { tmpViewerDataDir } from "../../__tests__/test-config"
 import { InMemoryStorage } from "../../storage/in-memory-storage"
-import { prototypeOriginFor, resolveIsolatedOriginCsp, slugFromHost } from "../subdomain"
+import { prototypeOriginFor, resolveIsolatedOriginCsp, resolveIsolatedOriginServerCsp, slugFromHost } from "../subdomain"
 import { mintPrototypeCapability } from "../prototype-capability"
 import { CAPABILITY_COOKIE_NAME } from "../prototype-capability-path"
 import { testGithubRuntime } from "../../__tests__/test-github-runtime"
@@ -148,6 +148,26 @@ describe("resolveIsolatedOriginCsp", () => {
   it("denies worker-src, same as path mode", () => {
     const csp = resolveIsolatedOriginCsp(null, "https://app.example.com") ?? ""
     expect(csp).toContain("worker-src 'none'")
+  })
+})
+
+// Codex round 15, Fix 2. A running server's own document has ordinary HTML
+// forms and unhydrated framework actions that post back to their own
+// origin — `resolveIsolatedOriginCsp`'s `form-action 'none'` blocked those
+// before the request ever reached the proxy. This is the SERVER-ONLY
+// variant `serve-router.ts` reaches for on the proxy call, and only there.
+describe("resolveIsolatedOriginServerCsp", () => {
+  it("is identical to resolveIsolatedOriginCsp except for form-action", () => {
+    const staticCsp = resolveIsolatedOriginCsp(null, "https://app.example.com") ?? ""
+    const serverCsp = resolveIsolatedOriginServerCsp(null, "https://app.example.com") ?? ""
+    expect(serverCsp).toContain("form-action 'self'")
+    expect(staticCsp).toContain("form-action 'none'")
+    expect(serverCsp.replace("form-action 'self'", "form-action 'none'")).toBe(staticCsp)
+  })
+
+  it("honours the off switch and a custom policy, same as the static variant", () => {
+    expect(resolveIsolatedOriginServerCsp("off", "https://app.example.com")).toBeNull()
+    expect(resolveIsolatedOriginServerCsp("default-src 'none'", "https://x")).toBe("default-src 'none'")
   })
 })
 

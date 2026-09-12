@@ -23,7 +23,7 @@ import { readCookie } from "../auth/session-cookie"
 import { isSecurePublicUrl } from "../api/state-cookie"
 import { allowPrototypeCors } from "./prototype-cors"
 import { PROTOTYPE_NOT_FOUND_BODY, type PrototypeOriginHostRequest } from "./prototype-host-scope"
-import { resolveIsolatedOriginCsp, type SubdomainRequest } from "./subdomain"
+import { resolveIsolatedOriginCsp, resolveIsolatedOriginServerCsp, type SubdomainRequest } from "./subdomain"
 import { isCss, isHtml } from "./mime"
 import { PrototypeProcessError, type PrototypeProcesses } from "./prototype-processes"
 import { proxyToProcess } from "./proxy-to-process"
@@ -712,6 +712,18 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
       : resolvePrototypeCsp(deps.prototypeCsp, shellOrigin, slug)
 
     /**
+     * {@link csp}, for the ONE response that is a running server's own
+     * document rather than a file on disk: the proxy call below. Codex round
+     * 15, Fix 2 — `csp`'s `form-action 'none'` blocks an ordinary
+     * `<form method="post">` and an unhydrated framework action before the
+     * request ever reaches the proxy, which contradicts the write support a
+     * server prototype exists to have. Path mode is unaffected (`csp` itself
+     * is reused there): the brief only asks the isolated-origin case to
+     * relax, and `resolvePrototypeCsp`'s policy stays the stricter one.
+     */
+    const serverProxyCsp = isIsolatedOrigin ? resolveIsolatedOriginServerCsp(deps.prototypeCsp, shellOrigin) : csp
+
+    /**
      * Promotes a verified `?~c=` document-load capability to a host-only
      * `dsv_cap` cookie, so the frame's own same-site subresource requests
      * carry it without the query being repeated in every relative URL.
@@ -929,7 +941,7 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
             // The prototype owns `/` on this origin (`servesAtRoot` is the gate
             // above), so this is the same bridge path the HTML branch below uses.
             bridgeSrc: `/${bridgeAssetRelPath(deps.bridgeVersion)}`,
-            csp,
+            csp: serverProxyCsp,
             // Only fires when the child answered nothing at all, so the manager's
             // record of "running" is wrong and the entry should be corrected.
             //

@@ -13,7 +13,7 @@ import { buildHostAllowlist, isAllowedHost } from "../host-allowlist"
 import { resolveOrigins } from "../prototype-origin-resolve"
 import { PrototypeProcessError, type PrototypeProcesses } from "../prototype-processes"
 import { createServeRouter, type PinnedDeploymentRequest } from "../serve-router"
-import { resolveIsolatedOriginCsp, type SubdomainRequest } from "../subdomain"
+import { resolveIsolatedOriginServerCsp, type SubdomainRequest } from "../subdomain"
 import type { PrototypeOriginHostRequest } from "../prototype-host-scope"
 import { mintPrototypeCapability } from "../prototype-capability"
 import { createSwappableApp } from "../../__tests__/swappable-app"
@@ -1245,6 +1245,20 @@ describe("createServeRouter", () => {
       expect(csp).not.toContain("/p/ghost/")
     })
 
+    // Codex round 15, Fix 2. A STATIC document has no forms of its own worth
+    // trusting with a same-origin post — it is a folder of files, not code
+    // that runs on the server — so it keeps the stricter default. Only a
+    // server document (below, in the "server deployments" describe) is
+    // allowed to relax this one directive.
+    it("keeps form-action 'none' on a static document on an isolated origin", async () => {
+      const deployment = await ctx.storage.createDeployment({ projectId: "ghost-project" })
+      await ctx.assets.put(deployment.id, "index.html", Buffer.from(HTML))
+      pinnedMarker = { deploymentId: deployment.id, slug: "ghost" }
+
+      const res = await request(ctx.app).get("/p/ghost/").expect(200)
+      expect(res.headers["content-security-policy"]).toContain("form-action 'none'")
+    })
+
     it("404s a missing file with the shared not-found body", async () => {
       const deployment = await ctx.storage.createDeployment({ projectId: "ghost-project" })
       await ctx.assets.put(deployment.id, "index.html", Buffer.from(HTML))
@@ -1643,8 +1657,9 @@ describe("createServeRouter", () => {
     async function loopbackAppWith(opts: {
       prototypeProcesses: PrototypeProcesses
       pinned?: boolean
+      prototypeCsp?: string | null
     }) {
-      const c = await setup({ prototypeProcesses: opts.prototypeProcesses })
+      const c = await setup({ prototypeProcesses: opts.prototypeProcesses, prototypeCsp: opts.prototypeCsp })
       const project = await c.storage.createProject({ slug: "srv", name: "Srv", access: "public-link" })
       const deployment = await c.storage.createDeployment({ projectId: project.id, status: "deployed" })
       await c.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
@@ -1674,14 +1689,39 @@ describe("createServeRouter", () => {
       expect(res.text).toContain("__DESDE_SHELL_ORIGIN__")
       expect(res.text).toContain(`src="/__desde/bridge-${BRIDGE_VERSION}.js"`)
       expect(ensured).toEqual([deployment.id])
-      // A proxied response is contained by exactly the policy a static
-      // response on the same origin would be — byte-for-byte, not merely "a
-      // CSP is present". Any policy the CHILD sent is dropped on the way
-      // through (`proxy-to-process.ts`), so this is the only one.
+      // A proxied response is contained by exactly the SERVER variant of the
+      // isolated-origin policy — byte-for-byte, not merely "a CSP is
+      // present". Any policy the CHILD sent is dropped on the way through
+      // (`proxy-to-process.ts`), so this is the only one. Codex round 15,
+      // Fix 2: this used to be `resolveIsolatedOriginCsp`, the STATIC
+      // variant, whose `form-action 'none'` blocked an ordinary
+      // `<form method="post">` before the request ever reached the proxy.
       expect(res.headers["content-security-policy"]).toBe(
-        resolveIsolatedOriginCsp(null, "https://viewer.example.com"),
+        resolveIsolatedOriginServerCsp(null, "https://viewer.example.com"),
       )
+      expect(res.headers["content-security-policy"]).toContain("form-action 'self'")
       expect(res.headers["x-content-type-options"]).toBe("nosniff")
+    })
+
+    // Codex round 15, Fix 2. The escape hatch (`VIEWER_PROTOTYPE_CSP`) must
+    // win over the server-vs-static split too — it is a full override, not a
+    // base policy the split layers onto.
+    it("keeps the VIEWER_PROTOTYPE_CSP escape hatch in charge of a proxied server document", async () => {
+      const off = await child((_req, res) => res.end("proxied"))
+      const offApp = await loopbackAppWith({
+        prototypeProcesses: fakeProcesses({ ensure: () => Promise.resolve({ port: off }) }),
+        prototypeCsp: "off",
+      })
+      const offRes = await request(offApp.app).get("/p/srv/").expect(200)
+      expect(offRes.headers["content-security-policy"]).toBeUndefined()
+
+      const custom = await child((_req, res) => res.end("proxied"))
+      const customApp = await loopbackAppWith({
+        prototypeProcesses: fakeProcesses({ ensure: () => Promise.resolve({ port: custom }) }),
+        prototypeCsp: "default-src 'none'",
+      })
+      const customRes = await request(customApp.app).get("/p/srv/").expect(200)
+      expect(customRes.headers["content-security-policy"]).toBe("default-src 'none'")
     })
 
     /**

@@ -111,10 +111,12 @@ export function slugFromHost(host: string | undefined, serveDomain: string | nul
  * the directive was correct for a topology the product did not yet
  * produce. Finding S8; the shell now does.)
  *
- * `frame-src`/`object-src`/`form-action` stay `'none'` for the same reason
- * as in path mode — they govern nested contexts and navigations that
- * `connect-src` does not — even though the cross-origin boundary already
- * makes them far less load-bearing here.
+ * `frame-src`/`object-src` stay `'none'` for the same reason as in path mode
+ * — they govern nested contexts and navigations that `connect-src` does not
+ * — even though the cross-origin boundary already makes them far less
+ * load-bearing here. `form-action` also stays `'none'` for a document served
+ * from disk (see {@link resolveIsolatedOriginServerCsp} for the one case
+ * that needs to relax it).
  *
  * `worker-src 'none'` is denied for the same reason as path mode's
  * `resolvePrototypeCsp` (see its doc comment): a real origin makes service
@@ -125,6 +127,40 @@ export function slugFromHost(host: string | undefined, serveDomain: string | nul
  * register at all, but a subdomain origin is real from the start.
  */
 export function resolveIsolatedOriginCsp(prototypeCsp: string | null, shellOrigin: string): string | null {
+  return resolveIsolatedOriginCspWithFormAction(prototypeCsp, shellOrigin, "'none'")
+}
+
+/**
+ * {@link resolveIsolatedOriginCsp}, with `form-action 'self'` instead of
+ * `form-action 'none'`.
+ *
+ * For a `serve: "server"` deployment's PROXIED document only (codex round
+ * 15, Fix 2) — a running server has ordinary HTML forms and unhydrated
+ * framework actions that post back to their own origin, and the stricter
+ * `'none'` blocked those before the request ever reached the proxy. A
+ * static deployment is a folder of files with no server-side action to
+ * receive such a post, so it keeps `resolveIsolatedOriginCsp`'s stricter
+ * default — as does every other response this router sends (the bridge
+ * bundle, the refusal pages), which is why this is a SEPARATE function
+ * rather than a change to the one above: only the proxy call site in
+ * `serve-router.ts` reaches for it.
+ *
+ * Shares its default policy string with `resolveIsolatedOriginCsp` through
+ * `resolveIsolatedOriginCspWithFormAction` on purpose — this policy is
+ * reached from more than one serving mode (subdomain, loopback), and the
+ * risk that matters here is the same one `resolveIsolatedOriginCsp`'s own
+ * doc comment names: two independently maintained copies of this string
+ * drifting apart from each other.
+ */
+export function resolveIsolatedOriginServerCsp(prototypeCsp: string | null, shellOrigin: string): string | null {
+  return resolveIsolatedOriginCspWithFormAction(prototypeCsp, shellOrigin, "'self'")
+}
+
+function resolveIsolatedOriginCspWithFormAction(
+  prototypeCsp: string | null,
+  shellOrigin: string,
+  formAction: "'none'" | "'self'",
+): string | null {
   if (prototypeCsp === "off") return null
   if (prototypeCsp !== null) return prototypeCsp
   return (
@@ -137,7 +173,7 @@ export function resolveIsolatedOriginCsp(prototypeCsp: string | null, shellOrigi
     `frame-src 'none'; ` +
     `object-src 'none'; ` +
     `worker-src 'none'; ` +
-    `form-action 'none'; ` +
+    `form-action ${formAction}; ` +
     `frame-ancestors ${shellOrigin}`
   )
 }
