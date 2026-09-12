@@ -361,6 +361,8 @@ export interface ViewerConfig {
    * choice: only the default deserves "set it to all if you meant to".
    */
   loopbackBind: ViewerLoopbackBindMode
+  /** A container was detected and listeners are not off; the banner's cue to name `VIEWER_LOOPBACK_BIND=all` under `auto`. */
+  loopbackInContainer: boolean
 }
 
 const PROFILES: ViewerProfile[] = ["selfhost"]
@@ -726,7 +728,13 @@ export function loadConfig(
         ? false
         : loopbackBind === "all"
           ? true
-          : actuallyInContainer && bridgedNamespace
+          : // `auto` never widens (codex round 18). The interface list cannot
+            // tell a bridged container from a host-network container on a
+            // host whose NIC is named `eth0`, and the wrong guess puts a
+            // credential-free port range on the LAN. The image, which IS
+            // the container case, says `all` itself; anyone else says so
+            // on the run line, and the banner tells them.
+            false
 
   // Widened by the server-prototypes rework (Task 5): a container was
   // detected and its network layout could not be confirmed as bridged, full
@@ -739,6 +747,10 @@ export function loadConfig(
   // to pick which of its two mutually exclusive lines to print.
   const loopbackBindNetworkUnrecognized =
     loopbackListeners !== "off" && actuallyInContainer && !bridgedNamespace
+  // A container under the default bind: the banner tells the operator that
+  // `-p` published ports need `VIEWER_LOOPBACK_BIND=all`, whatever the
+  // layout looks like, since `auto` no longer widens on its own.
+  const loopbackInContainer = loopbackListeners !== "off" && actuallyInContainer
 
   const dataDir = env.VIEWER_DATA_DIR ?? ".desde-viewer"
   // Fallback source for `sessionSecret` and, when neither GitHub sign-in nor
@@ -830,6 +842,7 @@ export function loadConfig(
     loopbackBindAllInterfaces,
     loopbackBindNetworkUnrecognized,
     loopbackBind,
+    loopbackInContainer,
     /*
       Env first, stored settings as the fallback — `runtime-config.ts`'s rule,
       not a new one. An operator who has set `VIEWER_SMTP_HOST` in their

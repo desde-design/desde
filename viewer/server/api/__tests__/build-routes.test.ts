@@ -61,6 +61,7 @@ const authConfig: ViewerConfig = {
   loopbackBindAllInterfaces: false,
   loopbackBindNetworkUnrecognized: false,
   loopbackBind: "auto",
+  loopbackInContainer: false,
 }
 
 const admin = { Authorization: "Bearer admin-secret" }

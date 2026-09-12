@@ -165,6 +165,7 @@ describe("originModeBannerLines", () => {
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
         loopbackBindNetworkUnrecognized: true,
+        loopbackInContainer: true,
       })
       expect(lines).not.toContain(WIDE_BIND_LINE)
     })
@@ -183,9 +184,8 @@ describe("originModeBannerLines", () => {
    */
   describe("loopback: the network-layout-unrecognised line (bind stayed narrow)", () => {
     const UNRECOGNIZED_LINE =
-      "[viewer] Prototype ports stay on the container's own loopback because the network layout " +
-      "was not recognised. If the viewer is in Docker with -p published ports, set " +
-      "VIEWER_LOOPBACK_BIND=all."
+      "[viewer] Prototype ports stay on the container's own loopback (VIEWER_LOOPBACK_BIND=auto). " +
+      "With -p published ports set VIEWER_LOOPBACK_BIND=all. On --network host this is right."
 
     it("prints the line when the layout was not recognised (VIEWER_LOOPBACK_BIND=auto)", () => {
       const { lines } = originModeBannerLines({
@@ -194,6 +194,19 @@ describe("originModeBannerLines", () => {
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindNetworkUnrecognized: true,
+        loopbackInContainer: true,
+      })
+      expect(lines).toContain(UNRECOGNIZED_LINE)
+    })
+
+    it("prints the line for a container whose layout WAS recognised too: auto never widens (codex round 18)", () => {
+      const { lines } = originModeBannerLines({
+        publicUrl: "http://localhost:3100",
+        serveDomain: null,
+        loopbackAvailable: true,
+        loopbackPortRange: { from: 3101, to: 3120 },
+        loopbackBindNetworkUnrecognized: false,
+        loopbackInContainer: true,
       })
       expect(lines).toContain(UNRECOGNIZED_LINE)
     })
@@ -206,6 +219,7 @@ describe("originModeBannerLines", () => {
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: false,
         loopbackBindNetworkUnrecognized: true,
+        loopbackInContainer: true,
         loopbackBind: "loopback",
       })
       expect(lines).not.toContain(UNRECOGNIZED_LINE)
@@ -231,6 +245,7 @@ describe("originModeBannerLines", () => {
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
         loopbackBindNetworkUnrecognized: true,
+        loopbackInContainer: true,
       })
       expect(lines).not.toContain(UNRECOGNIZED_LINE)
     })
@@ -270,6 +285,7 @@ describe("originModeBannerLines", () => {
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
         loopbackBindNetworkUnrecognized: true,
+        loopbackInContainer: true,
       })
       expect(lines).toContain(WIDE_BIND_UNRECOGNIZED_LINE)
     })
@@ -294,6 +310,7 @@ describe("originModeBannerLines", () => {
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: false,
         loopbackBindNetworkUnrecognized: true,
+        loopbackInContainer: true,
       })
       expect(lines).not.toContain(WIDE_BIND_UNRECOGNIZED_LINE)
     })
@@ -438,6 +455,7 @@ describe("originModeBannerLines", () => {
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindNetworkUnrecognized: true,
+        loopbackInContainer: true,
       },
     ]) {
       const { lines } = originModeBannerLines(config)

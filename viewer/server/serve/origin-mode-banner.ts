@@ -59,8 +59,8 @@ const LOOPBACK_DISABLED_LINE =
  * the fix it names is the opposite one. See `pickBindLine`.
  */
 const NETWORK_LAYOUT_UNRECOGNIZED_LINE =
-  "[viewer] Prototype ports stay on the container's own loopback because the network layout was " +
-  "not recognised. If the viewer is in Docker with -p published ports, set VIEWER_LOOPBACK_BIND=all."
+  "[viewer] Prototype ports stay on the container's own loopback (VIEWER_LOOPBACK_BIND=auto). " +
+  "With -p published ports set VIEWER_LOOPBACK_BIND=all. On --network host this is right."
 
 /**
  * Server-prototypes rework, Task 5. The Docker image now states its bind
@@ -104,6 +104,7 @@ function pickBindLine(
   bindAllInterfaces: boolean,
   networkUnrecognized: boolean,
   bind: ViewerLoopbackBindMode,
+  inContainer: boolean,
 ): string[] {
   if (bindAllInterfaces && networkUnrecognized) {
     return [WIDE_BIND_NETWORK_UNRECOGNIZED_LINE]
@@ -117,7 +118,10 @@ function pickBindLine(
   // Only the DEFAULT's own choice is worth second-guessing: an operator who
   // wrote `loopback` meant it, and telling them to set `all` would be noise
   // on top of a deliberate decision (Task 5 review).
-  if (networkUnrecognized && bind === "auto") {
+  // `auto` never widens (codex round 18), so every container under the
+  // default gets told how to publish its ports, whatever its layout looks
+  // like; `networkUnrecognized` only matters for the wide-bind warning.
+  if (inContainer && bind === "auto") {
     return [NETWORK_LAYOUT_UNRECOGNIZED_LINE]
   }
   return []
@@ -149,6 +153,8 @@ export function originModeBannerLines(
     loopbackBindNetworkUnrecognized?: boolean
     /** The operator's bind mode; absent reads as the default, `auto`. */
     loopbackBind?: ViewerLoopbackBindMode
+    /** A container was detected; absent reads as false (a laptop). */
+    loopbackInContainer?: boolean
   },
 ): OriginModeBanner {
   const resolved = resolveOrigins({
@@ -263,6 +269,7 @@ export function originModeBannerLines(
           Boolean(config.loopbackBindAllInterfaces),
           Boolean(config.loopbackBindNetworkUnrecognized),
           config.loopbackBind ?? "auto",
+          Boolean(config.loopbackInContainer),
         ),
       ],
     }

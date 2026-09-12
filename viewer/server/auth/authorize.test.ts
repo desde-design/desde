@@ -63,6 +63,7 @@ const baseConfig: ViewerConfig = {
   loopbackBindAllInterfaces: false,
   loopbackBindNetworkUnrecognized: false,
   loopbackBind: "auto",
+  loopbackInContainer: false,
 }
 
 function makeProject(overrides: Partial<Project> = {}): Project {

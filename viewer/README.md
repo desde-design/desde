@@ -45,7 +45,7 @@ If you run the container with `--network host` instead, add `-e VIEWER_LOOPBACK_
 
 Podman and other runtimes need nothing extra. The image sets `all` for every runtime, and published ports are what the wide bind is for. The boot log says so when it cannot recognise the network layout, which is normal for a rootless Podman container.
 
-Outside the image, the default is `auto`. It only widens the bind when it can positively recognise the container's network layout as Docker's ordinary bridge. A container runtime `auto` does not recognise (Podman included) stays on the narrow bind instead of guessing. If that is your case and you published ports with `-p`, set `VIEWER_LOOPBACK_BIND=all` to force the wide bind by hand. The boot log names this when it applies.
+Outside the image, the default is `auto`, and `auto` never widens the bind: the container's interface list cannot tell Docker's ordinary bridge from host networking on a machine whose network card happens to be named `eth0`, and the wrong guess would put the prototype ports on your LAN. So a container you built yourself stays on its own loopback until you say otherwise. If you published ports with `-p`, set `VIEWER_LOOPBACK_BIND=all`. The boot log says so whenever it starts in a container under `auto`.
 
 Then open http://localhost:3100 and follow the one-time sign-in link the
 container prints (`docker logs desde-viewer`). Everything below is the

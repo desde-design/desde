@@ -99,6 +99,7 @@ describe("loadConfig", () => {
       loopbackBindAllInterfaces: false,
       loopbackBindNetworkUnrecognized: false,
       loopbackBind: "auto",
+      loopbackInContainer: false,
     })
   })
 
@@ -924,7 +925,7 @@ describe("loadConfig", () => {
    * `VIEWER_LOOPBACK_LISTENERS` mode asked for listeners to open.
    */
   describe("loopbackBindAllInterfaces", () => {
-    it("is true for a container detected under auto", () => {
+    it("is false for a container detected under auto: auto never widens, the image sets all (codex round 18)", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir() },
         // A recognised bridged layout: pinned explicitly rather than left to
@@ -933,7 +934,7 @@ describe("loadConfig", () => {
         { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
       expect(config.loopbackListeners).toBe("auto")
-      expect(config.loopbackBindAllInterfaces).toBe(true)
+      expect(config.loopbackBindAllInterfaces).toBe(false)
     })
 
     it("is false on a laptop (not a container) with an explicit port range set by hand", () => {
@@ -953,12 +954,12 @@ describe("loadConfig", () => {
       expect(config.loopbackBindAllInterfaces).toBe(false)
     })
 
-    it("is true for VIEWER_LOOPBACK_LISTENERS=on inside an actually-detected container", () => {
+    it("is false for VIEWER_LOOPBACK_LISTENERS=on inside an actually-detected container: only VIEWER_LOOPBACK_BIND=all widens (codex round 18)", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_LISTENERS: "on" },
         { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
-      expect(config.loopbackBindAllInterfaces).toBe(true)
+      expect(config.loopbackBindAllInterfaces).toBe(false)
     })
 
     it("is false for VIEWER_LOOPBACK_LISTENERS=on forced on a laptop that is not a container", () => {
@@ -1000,13 +1001,17 @@ describe("loadConfig", () => {
       ).toThrow(/Unknown VIEWER_LOOPBACK_BIND/)
     })
 
-    it("auto: a container with a recognised bridged layout binds every interface", () => {
+    it("auto: even a container with a recognised bridged layout stays on loopback (codex round 18)", () => {
+      // `lo` + `eth0` is also what a host-network container on a host whose
+      // NIC is named `eth0` looks like, and the wrong guess puts the port
+      // range on the LAN. Only an explicit `all` widens; the image sets it.
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "auto" },
         { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
-      expect(config.loopbackBindAllInterfaces).toBe(true)
+      expect(config.loopbackBindAllInterfaces).toBe(false)
       expect(config.loopbackBindNetworkUnrecognized).toBe(false)
+      expect(config.loopbackInContainer).toBe(true)
     })
 
     it("auto: a container whose network layout is not recognised as bridged stays on loopback", () => {
@@ -1190,7 +1195,7 @@ describe("loadConfig", () => {
      * fields now come from ONE `actuallyInContainer` check that runs for
      * "on" as well as "auto" — never for "off", where no listener opens.
      */
-    it("defaults the range (and binds every interface) for VIEWER_LOOPBACK_LISTENERS=on inside an actually-detected container", () => {
+    it("defaults the range (but keeps the loopback bind) for VIEWER_LOOPBACK_LISTENERS=on inside an actually-detected container", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_LISTENERS: "on" },
         // A recognised bridged layout: pinned explicitly (codex round 10, Fix
@@ -1200,7 +1205,7 @@ describe("loadConfig", () => {
         { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
       expect(config.loopbackPortRange).toEqual({ from: 3101, to: 3120 })
-      expect(config.loopbackBindAllInterfaces).toBe(true)
+      expect(config.loopbackBindAllInterfaces).toBe(false)
     })
 
     it("leaves the range null (and does not bind every interface) for VIEWER_LOOPBACK_LISTENERS=on when the container check says no", () => {
@@ -1230,13 +1235,13 @@ describe("loadConfig", () => {
 
     // "auto" is unchanged by this fix — both fields already read the real
     // container check under "auto" before it, and still do.
-    it("auto: still defaults the range (and binds every interface) inside a container", () => {
+    it("auto: still defaults the range (but keeps the loopback bind) inside a container", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_LISTENERS: "auto" },
         { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
       )
       expect(config.loopbackPortRange).toEqual({ from: 3101, to: 3120 })
-      expect(config.loopbackBindAllInterfaces).toBe(true)
+      expect(config.loopbackBindAllInterfaces).toBe(false)
     })
 
     it("auto: still leaves the range null (and does not bind every interface) outside a container", () => {
