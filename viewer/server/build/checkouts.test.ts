@@ -162,6 +162,12 @@ describe("reconcileActivations", () => {
   })
 })
 
+/** A deployed row that went live: stamped as activation stamps it (codex rounds 48 and 59). */
+async function deployedAndLive(storage: InMemoryStorage, projectId: string) {
+  const d = await storage.createDeployment({ projectId, status: "deployed" })
+  return storage.updateDeployment(d.id, { activatedAt: "2026-09-12T00:00:00.000Z" })
+}
+
 describe("pruneSupersededCheckouts", () => {
   it("keeps the active checkout and the newest other one, removes the rest, and warns before each removal", async () => {
     const storage = new InMemoryStorage()
@@ -171,7 +177,7 @@ describe("pruneSupersededCheckouts", () => {
     for (let i = 0; i < 4; i++) {
       // `deployed`, stated rather than defaulted: only a build that finished
       // is a candidate for the retained slot. See the "did not finish" test.
-      const d = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+      const d = await deployedAndLive(storage, project.id)
       ids.push(d.id)
       await mkdir(checkoutDirFor(root, d.id), { recursive: true })
     }
@@ -190,11 +196,11 @@ describe("pruneSupersededCheckouts", () => {
     const storage = new InMemoryStorage()
     const project = await storage.createProject({ slug: "p", name: "P" })
     const root = await tmp()
-    const older = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const older = await deployedAndLive(storage, project.id)
     await mkdir(checkoutDirFor(root, older.id), { recursive: true })
-    const newer = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const newer = await deployedAndLive(storage, project.id)
     await mkdir(checkoutDirFor(root, newer.id), { recursive: true })
-    const upload = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const upload = await deployedAndLive(storage, project.id)
     const removed: string[] = []
     await pruneSupersededCheckouts(storage, root, project.id, upload.id, async (id) => {
       removed.push(id)
@@ -203,6 +209,21 @@ describe("pruneSupersededCheckouts", () => {
     expect(await exists(checkoutDirFor(root, older.id))).toBe(true)
     expect(await exists(checkoutDirFor(root, newer.id))).toBe(true)
   })
+  it("leaves a deployed row not yet activated alone, whether counting or pruning (codex round 59)", async () => {
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    const root = await tmp()
+    const older = await deployedAndLive(storage, project.id)
+    await mkdir(checkoutDirFor(root, older.id), { recursive: true })
+    const activating = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await mkdir(checkoutDirFor(root, activating.id), { recursive: true })
+    const upload = await deployedAndLive(storage, project.id)
+    await pruneSupersededCheckouts(storage, root, project.id, upload.id)
+    // Neither displaced the older checkout nor swept itself.
+    expect(await exists(checkoutDirFor(root, older.id))).toBe(true)
+    expect(await exists(checkoutDirFor(root, activating.id))).toBe(true)
+  })
+
   it("leaves a build in flight alone, whether counting or pruning (codex round 21)", async () => {
     // An upload activates while a server build has moved its checkout into
     // place but not yet flipped to deployed. That checkout is the build's;
@@ -211,13 +232,13 @@ describe("pruneSupersededCheckouts", () => {
     const storage = new InMemoryStorage()
     const project = await storage.createProject({ slug: "p", name: "P" })
     const root = await tmp()
-    const older = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const older = await deployedAndLive(storage, project.id)
     await mkdir(checkoutDirFor(root, older.id), { recursive: true })
-    const newer = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const newer = await deployedAndLive(storage, project.id)
     await mkdir(checkoutDirFor(root, newer.id), { recursive: true })
     const inFlight = await storage.createDeployment({ projectId: project.id, status: "building" })
     await mkdir(checkoutDirFor(root, inFlight.id), { recursive: true })
-    const upload = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const upload = await deployedAndLive(storage, project.id)
     const removed: string[] = []
     await pruneSupersededCheckouts(storage, root, project.id, upload.id, async (id) => {
       removed.push(id)
@@ -234,10 +255,10 @@ describe("pruneSupersededCheckouts", () => {
     const storage = new InMemoryStorage()
     const project = await storage.createProject({ slug: "p", name: "P" })
     const root = await tmp()
-    const previous = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const previous = await deployedAndLive(storage, project.id)
     await mkdir(checkoutDirFor(root, previous.id), { recursive: true })
     await storage.createDeployment({ projectId: project.id, status: "failed" }) // failed: no checkout
-    const active = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const active = await deployedAndLive(storage, project.id)
     await mkdir(checkoutDirFor(root, active.id), { recursive: true })
     const removed: string[] = []
     await pruneSupersededCheckouts(storage, root, project.id, active.id, async (id) => {
@@ -261,11 +282,11 @@ describe("pruneSupersededCheckouts", () => {
     const storage = new InMemoryStorage()
     const project = await storage.createProject({ slug: "p", name: "P" })
     const root = await tmp()
-    const previous = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const previous = await deployedAndLive(storage, project.id)
     await mkdir(checkoutDirFor(root, previous.id), { recursive: true })
     const failed = await storage.createDeployment({ projectId: project.id, status: "failed" })
     await mkdir(checkoutDirFor(root, failed.id), { recursive: true })
-    const active = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const active = await deployedAndLive(storage, project.id)
     await mkdir(checkoutDirFor(root, active.id), { recursive: true })
 
     const removed: string[] = []
@@ -307,7 +328,7 @@ describe("pruneSupersededCheckouts", () => {
     const root = await tmp()
     const ids: string[] = []
     for (let i = 0; i < 4; i++) {
-      const d = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+      const d = await deployedAndLive(storage, project.id)
       ids.push(d.id)
       await mkdir(checkoutDirFor(root, d.id), { recursive: true })
     }
@@ -388,9 +409,9 @@ describe("pruneSupersededCheckouts", () => {
     const storage = new InMemoryStorage()
     const project = await storage.createProject({ slug: "p", name: "P" })
     const root = await tmp()
-    const active = await storage.createDeployment({ projectId: project.id, status: "deployed" })
-    const stale = await storage.createDeployment({ projectId: project.id, status: "deployed" })
-    const newest = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const active = await deployedAndLive(storage, project.id)
+    const stale = await deployedAndLive(storage, project.id)
+    const newest = await deployedAndLive(storage, project.id)
     // The active deployment is a server one with a checkout, so it takes one
     // of the two retained slots; an active upload without one takes none
     // (codex round 18), and nothing here would be stale.

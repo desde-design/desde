@@ -391,7 +391,12 @@ describe("deployments API", () => {
     const older: string[] = []
     for (let i = 0; i < 3; i++) {
       const d = await deps.storage.createDeployment({ projectId: project.id, status: "deployed" })
-      await deps.storage.updateDeployment(d.id, { serve: "server", serverStart: ["node", "x.js"] })
+      // Builds that went live: stamped as activation stamps them (codex round 59).
+      await deps.storage.updateDeployment(d.id, {
+        serve: "server",
+        serverStart: ["node", "x.js"],
+        activatedAt: "2026-09-12T00:00:00.000Z",
+      })
       await fs.mkdir(checkoutDirFor(checkoutsRoot, d.id), { recursive: true })
       older.push(d.id)
     }

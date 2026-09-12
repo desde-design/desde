@@ -210,6 +210,11 @@ export async function pruneSupersededCheckouts(
       // checkout). Uploads do not go through the build queue, so the two
       // are not serialised; this is the rule that keeps them apart.
       if (d.status === "building") continue
+      // The same build one write later (codex round 59): marked deployed,
+      // not yet activated. Counted as retained, it displaced an older
+      // checkout that was then deleted, and if the activation failed the
+      // build's own checkout went too, leaving one version fewer.
+      if (d.status === "deployed" && d.activatedAt === null) continue
       if (d.status === "deployed") retainable.push(d.id)
       else unfinished.push(d.id)
     }
