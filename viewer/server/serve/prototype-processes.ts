@@ -253,7 +253,7 @@ const execFileAsync = promisify(execFile)
  * `null` when no such process exists; any other failure rejects, so the
  * caller can tell "gone" from "could not look".
  */
-interface ProcessIdentity {
+export interface ProcessIdentity {
   commandLine: string
   /** Opaque: `/proc/<pid>/stat`'s start time in clock ticks, or `ps`'s `lstart` text. Only ever compared for equality. */
   startedAt: string
@@ -364,6 +364,8 @@ export interface PrototypeProcessesDeps {
   reapIntervalMs?: number
   maxRunning?: number
   pickPort?: () => Promise<number>
+  /** Overrides how a child's identity (command line and start time) is read for its pid record. Tests only. */
+  processIdentity?: (pid: number) => Promise<ProcessIdentity | null>
   /**
    * Extra env merged into every spawned child, BEFORE `NODE_ENV`/`PORT`/
    * `HOSTNAME`/`HOST` so it can never override them.
@@ -450,6 +452,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const reapIntervalMs = deps.reapIntervalMs ?? 5 * 60_000
   const maxRunning = deps.maxRunning ?? MAX_RUNNING_SERVER_PROTOTYPES
   const pickPort = deps.pickPort ?? pickLoopbackPort
+  const readIdentity = deps.processIdentity ?? processIdentity
   /**
    * Every port a child of this manager has been handed and not yet given
    * back (codex round 32). `pickLoopbackPort` binds an ephemeral port and
@@ -1142,16 +1145,34 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     // record without one is never acted on.
     if (child.pid !== undefined) {
       const pid = child.pid
-      const identity = await processIdentity(pid).catch(() => null)
-      try {
-        await writeFile(
-          join(home, pidFileName(generation)),
-          JSON.stringify({ pid, command: [file, ...args], startedAt: identity?.startedAt ?? null }),
-        )
-      } catch (error) {
-        console.error("[viewer] could not record a prototype server's pid:", error)
+      const identity = await readIdentity(pid).catch(() => null)
+      let recorded = false
+      if (identity !== null) {
+        try {
+          await writeFile(
+            join(home, pidFileName(generation)),
+            JSON.stringify({ pid, command: [file, ...args], startedAt: identity.startedAt }),
+          )
+          recorded = true
+        } catch (error) {
+          console.error("[viewer] could not record a prototype server's pid:", error)
+        }
       }
       if (exited) void rm(join(home, pidFileName(generation)), { force: true }).catch(() => {})
+      // No usable record means no later boot could ever find this child
+      // (codex round 50): a start that cannot be recorded is a failed start,
+      // and the child is stopped rather than left to outlive a crash.
+      if (!recorded && !exited) {
+        console.error("[viewer] a prototype server could not be recorded for reaping; stopping it")
+        killTree(child, "SIGKILL")
+        child.kill("SIGKILL")
+        await lock.run(id, async () => {
+          if (entries.get(id) !== entry || entry.child !== child) return
+          entry.child = null
+          await applyAllowingRefusal(id, { type: "start-failed", reason: SETUP_FAILED_REASON, permanent: false })
+        })
+        throw new PrototypeProcessError(statusOf(id), SETUP_FAILED_REASON)
+      }
     }
 
     const deadline = now() + readyTimeoutMs

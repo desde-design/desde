@@ -692,6 +692,29 @@ describe("createPrototypeProcesses", () => {
       }
     })
 
+    /**
+     * Codex round 50. A child whose record cannot be written is one no later
+     * boot could find, so the start fails and the child is stopped rather
+     * than left to outlive a crash.
+     */
+    it("fails the start and stops the child when its identity cannot be read for the record", async () => {
+      const root = await checkoutsRoot(["d1"])
+      const procs = createPrototypeProcesses({ checkoutsRoot: root, processIdentity: async () => null })
+      managers.push(procs)
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        await expect(procs.ensure({ id: "d1", serverStart: start() })).rejects.toBeInstanceOf(PrototypeProcessError)
+      } finally {
+        errors.mockRestore()
+      }
+      const status = procs.status("d1")
+      expect(status.state).toBe("crashed")
+      if (status.state === "crashed") expect(status.reason).toContain("could not be started")
+      await expect(readFile(join(root, "d1", ".desde-home", "server.1.pid"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+      // Retryable: the next attempt reads the identity again.
+      await vi.waitFor(() => expect(procs.status("d1")).toMatchObject({ state: "crashed", retryable: true }))
+    })
+
     it("has recorded the pid before ensure resolves (codex round 45)", async () => {
       const root = await checkoutsRoot(["d1"])
       const procs = createPrototypeProcesses({ checkoutsRoot: root })
