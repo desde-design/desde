@@ -542,8 +542,14 @@ export function createLoopbackListenerRegistry(
         await closeServer(server)
       },
     }
+    // With a fixed range the browser's memory of this origin outlives the
+    // Viewer's own (codex round 42): a port first used in THIS process may
+    // have served another deployment before a restart, so the first use of
+    // every range port counts as recycled. An ephemeral port has no such
+    // past worth assuming.
     const previous = originHistory.get(origin)
-    const recycledOrigin = previous !== undefined && previous.deploymentId !== deployment.id
+    const recycledOrigin =
+      previous === undefined ? range !== null : previous.deploymentId !== deployment.id
 
     try {
       app = deps.makeApp({

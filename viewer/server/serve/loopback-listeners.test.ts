@@ -343,16 +343,19 @@ describe("createLoopbackListenerRegistry", () => {
       expect(again.origin).toBe(first.origin)
     })
 
-    it("clears a recycled origin's storage and cache on its first document load only, and never on a fresh one", async () => {
+    it("clears a recycled origin's storage and cache on its first document load only", async () => {
       const range = await freeRange(1)
       const registry = makeRegistry(
         { d1: { "index.html": "<html></html>" }, d2: { "index.html": "<html></html>" } },
         { portRange: range, bindAllInterfaces: false },
       )
       const a = await registry.ensure(deployment("d1"), V4)
+      // The first use of a range port in this process counts as recycled
+      // too (codex round 42): the browser's memory of the origin outlives a
+      // Viewer restart, and this registry cannot know what served here.
       const fresh = await documentGet(a.port, { "Sec-Fetch-Dest": "iframe" })
       expect(fresh.status).toBe(200)
-      expect(fresh.headers["clear-site-data"]).toBeUndefined()
+      expect(fresh.headers["clear-site-data"]).toBe('"cache", "storage"')
       await a.close()
 
       const b = await registry.ensure(deployment("d2"), V4)
@@ -371,6 +374,14 @@ describe("createLoopbackListenerRegistry", () => {
       const bAgain = await registry.ensure(deployment("d2"), V4)
       const back = await documentGet(bAgain.port, { Accept: "text/html,*/*" })
       expect(back.headers["clear-site-data"]).toBeUndefined()
+    })
+
+    it("never clears on an ephemeral port, which no previous deployment can have had", async () => {
+      const registry = makeRegistry({ d1: { "index.html": "<html></html>" } })
+      const a = await registry.ensure(deployment("d1"), V4)
+      const fresh = await documentGet(a.port, { "Sec-Fetch-Dest": "iframe" })
+      expect(fresh.status).toBe(200)
+      expect(fresh.headers["clear-site-data"]).toBeUndefined()
     })
   })
 
