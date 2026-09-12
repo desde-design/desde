@@ -199,6 +199,15 @@ export interface LoopbackListenerRegistry extends PrototypeHostRegistry {
   reapIdle(now: number, idleMs?: number): Promise<number>
   /** Closes every listener. Idempotent. */
   closeAll(): Promise<void>
+  /**
+   * Closes every listener pinned to this deployment, on every shell origin.
+   * A project delete calls it per deployment (codex round 23): a pinned
+   * listener skips the project lookup and serves assets by deployment id,
+   * so one left open kept a deleted prototype reachable to anyone who knew
+   * the port, for as long as the idle reaper took, and for ever when the
+   * asset delete had failed.
+   */
+  closeForDeployment(deploymentId: string): Promise<void>
   /** Starts the idle reaper on its own unref'd timer. Returns a stop function. */
   startReaper(options?: { intervalMs?: number; idleMs?: number }): () => void
 }
@@ -615,6 +624,10 @@ export function createLoopbackListenerRegistry(
       // Snapshot first: `close()` mutates the map it is iterating.
       const all = [...listeners.values()]
       for (const listener of all) await listener.close()
+    },
+    async closeForDeployment(deploymentId) {
+      const mine = [...listeners.values()].filter((listener) => listener.deploymentId === deploymentId)
+      for (const listener of mine) await listener.close()
     },
 
     startReaper(options = {}) {

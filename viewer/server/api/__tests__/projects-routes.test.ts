@@ -18,6 +18,7 @@ import { createSwappableApp } from "../../__tests__/swappable-app"
 import { testGithubRuntime } from "../../__tests__/test-github-runtime"
 import { upsertTestUser } from "../../__tests__/user-fixtures"
 import type { Deployment, InstanceRole, StorageAdapter } from "../../storage/types"
+import type { LoopbackListenerRegistry } from "../../serve/loopback-listeners"
 
 class NullAssetStore implements AssetStore {
   async put(): Promise<void> {}
@@ -1112,6 +1113,32 @@ describe("projects API", () => {
   })
 
   describe("DELETE /projects/:id (Task 11)", () => {
+    it("closes each deployment's loopback listener on delete, whatever the asset delete does (codex round 23)", async () => {
+      // A pinned listener serves by deployment id with no project lookup, so
+      // one left open kept a deleted prototype reachable to anyone who knew
+      // the port.
+      const closed: string[] = []
+      const listeners: LoopbackListenerRegistry = {
+        ensure: () => Promise.reject(new Error("not used by this test")),
+        touch: () => {},
+        reapIdle: () => Promise.resolve(0),
+        closeAll: () => Promise.resolve(),
+        closeForDeployment: async (id) => {
+          closed.push(id)
+        },
+        startReaper: () => () => {},
+        isPrototypeHost: () => false,
+      }
+      const ctx = setup({ prototypeListeners: listeners })
+      const project = await ctx.deps.storage.createProject({ slug: "acme", name: "Acme" })
+      const a = await ctx.deps.storage.createDeployment({ projectId: project.id, status: "deployed" })
+      const b = await ctx.deps.storage.createDeployment({ projectId: project.id, status: "deployed" })
+
+      await request(ctx.app).delete(`/api/v1/projects/${project.id}`).set(auth).expect(204)
+
+      expect([...closed].sort()).toEqual([a.id, b.id].sort())
+    })
+
     it("an editor with manage authority deletes a project — 204, then the project 404s", async () => {
       const created = await request(ctx.app)
         .post("/api/v1/projects")

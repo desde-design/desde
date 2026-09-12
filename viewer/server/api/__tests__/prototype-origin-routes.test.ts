@@ -151,6 +151,7 @@ function refusingListeners(): LoopbackListenerRegistry {
     touch: () => {},
     reapIdle: () => Promise.resolve(0),
     closeAll: () => Promise.resolve(),
+    closeForDeployment: () => Promise.resolve(),
     startReaper: () => () => {},
     isPrototypeHost: () => false,
   }
@@ -919,6 +920,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         touch: () => {},
         reapIdle: () => Promise.resolve(0),
         closeAll: () => Promise.resolve(),
+        closeForDeployment: () => Promise.resolve(),
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
@@ -1050,6 +1052,7 @@ describe("GET /projects/:id/prototype-origin", () => {
         touch: () => {},
         reapIdle: () => Promise.resolve(0),
         closeAll: () => Promise.resolve(),
+        closeForDeployment: () => Promise.resolve(),
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
@@ -1692,6 +1695,7 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
       touch: () => {},
       reapIdle: () => Promise.resolve(0),
       closeAll: () => Promise.resolve(),
+      closeForDeployment: () => Promise.resolve(),
       startReaper: () => () => {},
       isPrototypeHost: () => false,
     }

@@ -1027,6 +1027,20 @@ describe("createLoopbackListenerRegistry", () => {
   })
 
   describe("idle reaping", () => {
+    it("closeForDeployment closes that deployment's listener and leaves the others (codex round 23)", async () => {
+      const registry = makeRegistry({ d1: { "index.html": "<html></html>" }, d2: { "index.html": "<html></html>" } })
+      const one = await registry.ensure(deployment("d1"), V4)
+      const two = await registry.ensure(deployment("d2"), V4)
+
+      await registry.closeForDeployment("d1")
+
+      await expect(
+        httpCall({ host: "127.0.0.1", port: one.port, path: "/" }),
+      ).rejects.toMatchObject({ code: "ECONNREFUSED" })
+      const res = await httpCall({ host: "127.0.0.1", port: two.port, path: "/" })
+      expect(res.status).toBe(200)
+    })
+
     it("closes a listener idle past idleMs and reopens on a later ensure", async () => {
       let clock = 1_000
       const registry = makeRegistry({ d1: { "index.html": "<html></html>" } }, { now: () => clock })

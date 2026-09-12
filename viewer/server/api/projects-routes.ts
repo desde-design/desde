@@ -695,6 +695,13 @@ export function createProjectsRoutes(
           what: `assets for deployment ${deployment.id}`,
           done: deps.assets.deleteDeployment(deployment.id),
         })
+        // The pinned loopback listener serves by deployment id without a
+        // project lookup, so it outlived the rows (codex round 23). Closed
+        // here whatever the asset delete does.
+        cleanups.push({
+          what: `listener for deployment ${deployment.id}`,
+          done: deps.prototypeListeners.closeForDeployment(deployment.id),
+        })
         cleanups.push({
           what: `checkout for deployment ${deployment.id}`,
           done: (async () => {
