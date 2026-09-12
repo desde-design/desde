@@ -26,6 +26,20 @@ export type BuildShape =
        */
       prepare?: (checkoutRoot: string) => Promise<void>
     }
+  /**
+   * Codex round 15, Fix 3. The checkout IS a server build an adapter
+   * recognises, but the adapter also knows recording a `server` shape here
+   * would be a lie: something a `start` command needs to actually run is
+   * missing (a launcher binary that a bare `npm install` does not always
+   * pull in). Recording `server` anyway marks the deployment `deployed`
+   * and spends the restart budget on a cold start that ENOENTs every
+   * single time. `inspectBuild` (`frameworks/index.ts`) returns this
+   * straight through — an adapter that reaches it is DONE, not merely
+   * uninterested, so this must never fall through to the next adapter or
+   * to the generic static default the way `null` does. The build runner
+   * (`in-process-build-runner.ts`) turns it into an ordinary build failure.
+   */
+  | { kind: "unsupported"; reason: string }
 
 export interface FrameworkAdapter {
   readonly id: string

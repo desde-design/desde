@@ -44,6 +44,14 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
       }
     }
 
+    // Codex round 15, Fix 3. `next` is a dependency (checked above), but a
+    // dependency in `package.json` does not prove the binary actually got
+    // installed into THIS checkout's `node_modules/.bin` — recording the
+    // `start` command without checking it exists marked such a checkout
+    // `deployed` and then ENOENT'd on every cold start.
+    if (!(await isFile(join(checkoutRoot, "node_modules", ".bin", "next")))) {
+      return { kind: "unsupported", reason: "This Next.js build needs the next package installed to run." }
+    }
     return {
       kind: "server",
       // The checkout's own next, never one the Viewer bundles. `next start`

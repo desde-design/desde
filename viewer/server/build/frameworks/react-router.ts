@@ -37,6 +37,20 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
       if (clientHtml && (await isSpaModeBundle(serverBundle))) {
         return { kind: "static", outputDir: "build/client", reason: "React Router SPA mode" }
       }
+      // Codex round 15, Fix 3. `@react-router/serve` is a SEPARATE package
+      // from `react-router`/`@react-router/dev` — a checkout can build a
+      // server bundle with only the dev package installed, or run its own
+      // custom server, and never have this binary at all. Recording the
+      // `start` command without checking it exists marked such a checkout
+      // `deployed` and then ENOENT'd on every cold start.
+      const hasServeBinary = await isFile(join(checkoutRoot, "node_modules", ".bin", "react-router-serve"))
+      if (!hasServeBinary) {
+        return {
+          kind: "unsupported",
+          reason:
+            "This React Router build needs @react-router/serve to run. Add it to the project, or build a static (SPA) output.",
+        }
+      }
       return {
         kind: "server",
         // react-router-serve reads PORT from the environment, which the process manager sets.

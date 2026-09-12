@@ -221,6 +221,40 @@ describe("in-process build runner", () => {
     expect(await exists(join(checkoutsRoot, DEPLOYMENT.id, "prepared.marker"))).toBe(true)
   })
 
+  /**
+   * Codex round 15, Fix 3. An adapter that detected a server build it
+   * cannot actually RUN (its launcher binary is missing) reports `{ kind:
+   * "unsupported" }` instead of a `server` shape it knows is broken. The
+   * runner treats it as an ordinary build failure: the checkout is not
+   * kept, the reason is the last line of the build log, and the result is
+   * a failed build — not a `deployed` one that would ENOENT on its first
+   * cold start.
+   */
+  it("fails the build when the framework adapter reports an unsupported shape", async () => {
+    const src = await makeRepo({ "package.json": "{}" })
+    const checkoutsRoot = await tempDir("viewer-checkouts-")
+    const { result, log } = await build(src, repoConfig(), collectingAssets(), {
+      checkoutsRoot,
+      adapters: [
+        {
+          id: "fake",
+          inspectBuild: async () => ({
+            kind: "unsupported",
+            reason: "This fake framework build needs a binary this checkout does not have.",
+          }),
+        },
+      ],
+    })
+    expect(result.ok).toBe(false)
+    expect(result.failureReason).toBe("This fake framework build needs a binary this checkout does not have.")
+    // The reason is the LAST line of the build log — the same place every
+    // other failure's reason lands (`fail()`'s own `say`).
+    expect(log.trim().split("\n").pop()).toBe(
+      "This fake framework build needs a binary this checkout does not have.",
+    )
+    expect(await exists(join(checkoutsRoot, DEPLOYMENT.id))).toBe(false)
+  })
+
   it("fails a build whose output has no index.html at its root", async () => {
     const src = await makeRepo({ "dist/main.js": "x" })
     const { result } = await build(src, repoConfig())

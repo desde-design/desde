@@ -16,6 +16,8 @@ async function checkout(opts: {
   /** What `@react-router/dev` wrote into the server bundle for `isSpaMode`. */
   spaMode?: boolean
   clientHtml?: boolean
+  /** Whether `node_modules/.bin/react-router-serve` exists in this checkout. */
+  serveBinary?: boolean
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "fw-react-router-"))
   roots.push(root)
@@ -49,6 +51,10 @@ async function checkout(opts: {
     await mkdir(join(root, "build", "client"), { recursive: true })
     await writeFile(join(root, "build", "client", "index.html"), "<html></html>")
   }
+  if (opts.serveBinary) {
+    await mkdir(join(root, "node_modules", ".bin"), { recursive: true })
+    await writeFile(join(root, "node_modules", ".bin", "react-router-serve"), "#!/usr/bin/env node\n")
+  }
   return root
 }
 afterEach(async () => {
@@ -62,7 +68,9 @@ describe("React Router adapter", () => {
     ).toBeNull()
   })
   it("reads build/server/index.js as a server build", async () => {
-    expect(await REACT_ROUTER_ADAPTER.inspectBuild(await checkout({ serverBuild: true }))).toEqual({
+    expect(
+      await REACT_ROUTER_ADAPTER.inspectBuild(await checkout({ serverBuild: true, serveBinary: true })),
+    ).toEqual({
       kind: "server",
       start: ["node_modules/.bin/react-router-serve", "build/server/index.js"],
       reason: "React Router framework mode with a server build",
@@ -78,7 +86,12 @@ describe("React Router adapter", () => {
   it("recognises @react-router/dev in devDependencies", async () => {
     expect(
       await REACT_ROUTER_ADAPTER.inspectBuild(
-        await checkout({ reactRouter: "@react-router/dev", inDevDependencies: true, serverBuild: true }),
+        await checkout({
+          reactRouter: "@react-router/dev",
+          inDevDependencies: true,
+          serverBuild: true,
+          serveBinary: true,
+        }),
       ),
     ).toEqual({
       kind: "server",
@@ -106,11 +119,35 @@ describe("React Router adapter", () => {
   })
   it("keeps a server build that pre-rendered its root as a server (isSpaMode false)", async () => {
     const shape = await REACT_ROUTER_ADAPTER.inspectBuild(
-      await checkout({ serverBuild: true, spaMode: false, clientHtml: true }),
+      await checkout({ serverBuild: true, spaMode: false, clientHtml: true, serveBinary: true }),
     )
     expect(shape?.kind).toBe("server")
   })
   it("answers null when the build wrote neither", async () => {
     expect(await REACT_ROUTER_ADAPTER.inspectBuild(await checkout({}))).toBeNull()
+  })
+
+  /**
+   * Codex round 15, Fix 3. `node_modules/.bin/react-router-serve` used to be
+   * recorded as the start command without checking it exists. A checkout
+   * with a custom server, or only `@react-router/dev` installed (the
+   * `react-router-serve` package `@react-router/serve` ships is a SEPARATE
+   * dependency a project can omit), got marked `deployed` and then ENOENT'd
+   * on every cold start, spending the restart budget for nothing.
+   */
+  it("reports unsupported when the server bundle exists but @react-router/serve does not", async () => {
+    const shape = await REACT_ROUTER_ADAPTER.inspectBuild(await checkout({ serverBuild: true, serveBinary: false }))
+    expect(shape).toEqual({
+      kind: "unsupported",
+      reason:
+        "This React Router build needs @react-router/serve to run. Add it to the project, or build a static (SPA) output.",
+    })
+  })
+
+  it("still reports unsupported for a server build with @react-router/dev only, when the serve binary is missing", async () => {
+    const shape = await REACT_ROUTER_ADAPTER.inspectBuild(
+      await checkout({ reactRouter: "@react-router/dev", inDevDependencies: true, serverBuild: true }),
+    )
+    expect(shape?.kind).toBe("unsupported")
   })
 })

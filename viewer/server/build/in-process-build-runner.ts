@@ -238,28 +238,48 @@ export function createInProcessBuildRunner(opts: InProcessBuildRunnerOptions): B
 
         beginStep("Publish")
         const shape = await inspectBuild(checkout, repo.outputDir, opts.adapters)
-        if (shape.kind === "server") {
-          say(`\nPublishing as a server prototype (${shape.reason}). The output dir is not used.\n`)
-          // Awaited BEFORE `keepCheckout` moves the checkout into place, so
-          // whatever `prepare` writes (Next's standalone output copying
-          // `static/`/`public/` alongside the standalone server, say — see
-          // `frameworks/next.ts`) travels with the move instead of being
-          // written to a temp directory that is about to be discarded.
-          await shape.prepare?.(checkout)
-          const dest = checkoutDirFor(opts.checkoutsRoot, deployment.id)
-          // The scratch HOME is not kept; only the repo.
-          await keepCheckout(checkout, dest)
-          say(`Kept the checkout for ${shape.start.join(" ")}\n`)
-          closeOpenStep("succeeded")
-          publishSteps()
-          return {
-            ok: true,
-            commitSha,
-            commitMessage,
-            fileCount: 0,
-            warnings: null,
-            serve: "server",
-            serverStart: shape.start,
+        switch (shape.kind) {
+          case "server": {
+            say(`\nPublishing as a server prototype (${shape.reason}). The output dir is not used.\n`)
+            // Awaited BEFORE `keepCheckout` moves the checkout into place, so
+            // whatever `prepare` writes (Next's standalone output copying
+            // `static/`/`public/` alongside the standalone server, say — see
+            // `frameworks/next.ts`) travels with the move instead of being
+            // written to a temp directory that is about to be discarded.
+            await shape.prepare?.(checkout)
+            const dest = checkoutDirFor(opts.checkoutsRoot, deployment.id)
+            // The scratch HOME is not kept; only the repo.
+            await keepCheckout(checkout, dest)
+            say(`Kept the checkout for ${shape.start.join(" ")}\n`)
+            closeOpenStep("succeeded")
+            publishSteps()
+            return {
+              ok: true,
+              commitSha,
+              commitMessage,
+              fileCount: 0,
+              warnings: null,
+              serve: "server",
+              serverStart: shape.start,
+            }
+          }
+          case "unsupported":
+            // Codex round 15, Fix 3. An adapter that detected a server build
+            // it cannot actually RUN (its launcher binary is not installed)
+            // reports this instead of a `server` shape it already knows is
+            // broken. Treated as an ordinary build failure: `fail` writes
+            // the reason as the last line of the build log and ends the
+            // deployment `failed`, rather than spending the restart budget
+            // on a cold start that would ENOENT every time.
+            return await fail(shape.reason)
+          case "static":
+            break
+          default: {
+            // Unreachable for any `BuildShape` — which is the point. The
+            // annotation is the compile-time guard (a new kind stops
+            // assigning to `never`).
+            const _exhaustive: never = shape
+            return _exhaustive
           }
         }
         if (shape.outputDir !== repo.outputDir) {
