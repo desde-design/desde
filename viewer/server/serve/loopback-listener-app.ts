@@ -1,4 +1,3 @@
-import { cookieScopeFor } from "./proxy-to-process"
 import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express"
 import type { AssetStore } from "../assets/types"
 import type { ViewerConfig } from "../config"
@@ -262,12 +261,10 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
       bridgeVersion: deps.bridgeVersion,
       prototypeCsp: deps.prototypeCsp,
       prototypeProcesses: deps.prototypeProcesses,
-      // On a numeric loopback host every listener is `127.0.0.1:<port>` (or
-      // `[::1]`) and a browser scopes cookies by host, so a server
-      // prototype's cookies are stored under a scope of its own (codex round
-      // 42). On a host of the deployment's own the jar is already its own,
-      // and a scope would only rename what a page's script reads (round 57).
-      ...(deps.cookieHostShared ? { cookieScope: cookieScopeFor(deps.deploymentId) } : {}),
+      // A loopback prototype is a cross-site frame, so the browser will not
+      // keep the cookies its child sets; the proxy keeps them in this jar
+      // and replays them (codex round 60).
+      cookieJar: deps.cookieJar,
     }),
   )
 

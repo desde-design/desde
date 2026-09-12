@@ -1,3 +1,4 @@
+import type { ChildCookieJar } from "./child-cookie-jar"
 import { Router, type Request, type RequestHandler } from "express"
 import { extname } from "node:path"
 import {
@@ -64,13 +65,13 @@ export interface ServeRouterDeps {
    */
   prototypeProcesses: PrototypeProcesses
   /**
-   * The cookie-name scope for a server prototype's own cookies, when this
-   * router serves ONE deployment on a host it shares with others (a
-   * loopback listener, `loopback-listener-app.ts`). Absent for the main app:
-   * in subdomain mode every prototype has a host of its own. See
-   * `ProxyOptions.cookieScope`.
+   * The jar a loopback listener keeps a server prototype's cookies in, when
+   * this router serves ONE deployment inside a cross-site frame
+   * (`loopback-listener-app.ts`). Absent for the main app: in subdomain
+   * mode the prototype is same-site with the shell and real cookies work.
+   * See `ProxyOptions.cookieJar`.
    */
-  cookieScope?: string
+  cookieJar?: ChildCookieJar
 }
 
 /**
@@ -952,7 +953,7 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
           await proxyToProcess(req, res, {
             port,
             ...(capabilityCookie !== null ? { setCookie: capabilityCookie } : {}),
-            ...(deps.cookieScope !== undefined ? { cookieScope: deps.cookieScope } : {}),
+            ...(deps.cookieJar !== undefined ? { cookieJar: deps.cookieJar } : {}),
             path: childPathFor(req.originalUrl),
             shellOrigin,
             // The scheme the BROWSER used to reach THIS origin, which is not

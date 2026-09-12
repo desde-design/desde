@@ -1,3 +1,4 @@
+import { ChildCookieJar } from "./child-cookie-jar"
 import type express from "express"
 import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
@@ -172,15 +173,13 @@ export interface LoopbackListenerAppContext {
    */
   recycledOrigin: boolean
   /**
-   * This listener's host is a numeric loopback address shared with every
-   * other listener on it (`127.0.0.1`, `[::1]`), so a browser keeps ONE
-   * cookie jar for all of them and a server prototype's cookies need a
-   * scope of their own (codex round 42). False on a host of the
-   * deployment's own (`<deploymentId>.localhost`, the fixed-range pairing),
-   * where the jar is already the deployment's and a scope would only change
-   * the names a page's own script reads (codex round 57).
+   * The jar this deployment's child cookies live in (codex round 60). A
+   * loopback prototype is a cross-site frame, so the browser will not keep
+   * the cookies its child sets; the proxy keeps them here and replays them.
+   * One per deployment, held by the registry so a listener reaped and
+   * reopened keeps the prototype's session; dropped with the deployment.
    */
-  cookieHostShared: boolean
+  cookieJar: ChildCookieJar
   /** Called on every request the listener serves. */
   touch: () => void
   /**
@@ -392,6 +391,13 @@ export function createLoopbackListenerRegistry(
    * (`recycledOrigin`) so the app can clear what the last one left.
    */
   const originHistory = new Map<string, { deploymentId: string; releasedAt: number }>()
+  /** Each deployment's child cookies, replayed by its listeners' proxy. See `LoopbackListenerAppContext.cookieJar`. */
+  const cookieJars = new Map<string, ChildCookieJar>()
+  const cookieJarFor = (deploymentId: string): ChildCookieJar => {
+    let jar = cookieJars.get(deploymentId)
+    if (jar === undefined) cookieJars.set(deploymentId, (jar = new ChildCookieJar()))
+    return jar
+  }
   const originFor = (host: string, port: number): string => `http://${host}:${port}`
   /** When each port was last released, whichever deployment held it: the range's least-recently-used order. */
   const portReleasedAt = new Map<number, number>()
@@ -662,7 +668,7 @@ export function createLoopbackListenerRegistry(
         hostPort: `${host}:${address.port}`,
         shellOrigin: target.shellOrigin,
         recycledOrigin,
-        cookieHostShared: !host.endsWith(".localhost"),
+        cookieJar: cookieJarFor(deployment.id),
         touch: () => {
           record.lastUsedAt = now()
         },
@@ -823,6 +829,7 @@ export function createLoopbackListenerRegistry(
       await retireAndClose([...listeners.values()].filter((listener) => listener.origin === origin))
     },
     async closeForDeployment(deploymentId) {
+      cookieJars.delete(deploymentId)
       // Marked first, so an `ensure` that arrives from here on is refused
       // rather than opening a listener the delete has already swept. Then
       // any open still in flight for this deployment is awaited, so the

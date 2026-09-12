@@ -12,7 +12,8 @@ import { connect, type AddressInfo } from "node:net"
 import { gzipSync } from "node:zlib"
 import request from "supertest"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { proxyToProcess, type ProxyOptions, cookieScopeFor } from "../proxy-to-process"
+import { proxyToProcess, type ProxyOptions } from "../proxy-to-process"
+import { ChildCookieJar } from "../child-cookie-jar"
 
 /** A promise this test controls the settlement of, standing in for a real, slow event. */
 function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -110,49 +111,36 @@ describe("proxyToProcess", () => {
   })
 
   /**
-   * Codex round 42. Loopback listeners share a host and differ by port, and
-   * a browser scopes cookies by host: one child's `Set-Cookie: session=…`
-   * reached every sibling's child. Under a scope the child's cookies are
-   * stored prefixed, and only its own (unprefixed again) plus unscoped
-   * page-set cookies go back to it.
+   * Codex round 60. A loopback prototype is a cross-site frame, so the
+   * browser will not keep the cookies its child sets. With a jar the
+   * child's `Set-Cookie` headers are absorbed here and never forwarded, the
+   * child receives the jar's cookies on every later request, and the
+   * browser's own cookies (a sibling's stray on a shared host at most) are
+   * not forwarded at all.
    */
-  it("hands the child only its own scoped cookies, unprefixed, plus unscoped ones", async () => {
-    let cookie: string | undefined
+  it("keeps a child's cookies in the jar and replays them, showing the browser none of them", async () => {
+    const seen: (string | undefined)[] = []
     const port = await child((req, res) => {
-      cookie = req.headers.cookie
+      seen.push(req.headers.cookie)
+      if (req.url === "/login") res.setHeader("set-cookie", ["session=abc; Path=/; HttpOnly", "seen=1"])
       res.end("ok")
     })
-    await request(appFor(port, { cookieScope: "p0a1b2c3d_" }))
-      .get("/p/acme/")
-      .set("Cookie", "p0a1b2c3d_session=mine; pffffffff_session=theirs; theme=dark; dsv_cap=tok")
-    expect(cookie).toBe("session=mine; theme=dark")
+    const jar = new ChildCookieJar()
+    const app = appFor(port, { cookieJar: jar })
+    const login = await request(app).get("/p/acme/login").set("Cookie", "theme=dark; dsv_cap=tok")
+    expect(login.headers["set-cookie"]).toBeUndefined()
+    const next = await request(app).get("/p/acme/account")
+    expect(next.status).toBe(200)
+    expect(seen).toEqual([undefined, "session=abc; seen=1"])
   })
 
-  it("drops an unscoped cookie whose name this deployment's scoped cookie already supplies (codex round 57)", async () => {
-    let cookie: string | undefined
-    const port = await child((req, res) => {
-      cookie = req.headers.cookie
-      res.end("ok")
-    })
-    await request(appFor(port, { cookieScope: "p0a1b2c3d_" }))
-      .get("/p/acme/")
-      .set("Cookie", "session=other; p0a1b2c3d_session=mine; theme=dark")
-    expect(cookie).toBe("session=mine; theme=dark")
-  })
-
-  it("stores the child's cookies under the scope", async () => {
+  it("still sends the viewer's own capability cookie to the browser when a jar holds the child's", async () => {
     const port = await child((_req, res) => {
-      res.setHeader("set-cookie", ["session=abc; Path=/; HttpOnly", "seen=1"])
+      res.setHeader("set-cookie", "session=abc; Path=/")
       res.end("ok")
     })
-    const res = await request(appFor(port, { cookieScope: "p0a1b2c3d_" })).get("/p/acme/")
-    expect(res.headers["set-cookie"]).toEqual(["p0a1b2c3d_session=abc; Path=/; HttpOnly", "p0a1b2c3d_seen=1"])
-  })
-
-  it("derives one stable scope per deployment id, in cookie-name characters", () => {
-    expect(cookieScopeFor("dep-1")).toMatch(/^p[0-9a-f]{8}_$/)
-    expect(cookieScopeFor("dep-1")).toBe(cookieScopeFor("dep-1"))
-    expect(cookieScopeFor("dep-1")).not.toBe(cookieScopeFor("dep-2"))
+    const res = await request(appFor(port, { cookieJar: new ChildCookieJar(), setCookie: "dsv_cap=tok; Path=/" })).get("/p/acme/")
+    expect(res.headers["set-cookie"]).toEqual(["dsv_cap=tok; Path=/"])
   })
 
   it("sends no cookie header at all when the viewer's was the only one", async () => {
