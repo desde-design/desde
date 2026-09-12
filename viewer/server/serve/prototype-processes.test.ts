@@ -847,8 +847,12 @@ describe("createPrototypeProcesses", () => {
     expect(calls).toBe(3)
     expect(new Set([a.port, b.port])).toEqual(new Set(picked))
 
-    await procs.stop("a")
-    expect((await procs.ensure({ id: "a", serverStart: start() })).port).toBe(first)
+    // Whichever start won the first pick holds `first`; the other one was
+    // refused it and took the fresh port. Stop the holder: the port comes
+    // back, and the picker's next answer, `first` again, is accepted.
+    const holder = a.port === first ? "a" : "b"
+    await procs.stop(holder)
+    expect((await procs.ensure({ id: holder, serverStart: start() })).port).toBe(first)
   })
 
   it("gives up a cold start whose picker only ever repeats a held port", async () => {
