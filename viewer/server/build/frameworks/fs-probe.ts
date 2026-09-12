@@ -41,19 +41,23 @@ async function dependsOn(checkoutRoot: string, name: string): Promise<boolean> {
 }
 
 /**
- * The directory that owns a found build output (codex round 29, item 1):
- * the parent of `rel` (a path relative to the checkout root, such as a dist
- * dir, a build dir, or a Nitro output dir), or `null` when `rel` sits
- * directly under the checkout root and there is no separate app directory
- * to check.
+ * The package that owns a found build output (codex round 29, item 1;
+ * widened in round 31): the nearest ancestor of `rel` (a path relative to
+ * the checkout root, such as a dist dir, a build dir, or a Nitro output
+ * dir) that holds a `package.json`, relative to the root, or `null` when no
+ * ancestor below the root does and the root's own package is the owner.
  *
- * In an npm or pnpm workspace, this is the app package's own directory
- * (`apps/web`) — the one whose `package.json`, not the workspace root's,
- * declares the framework.
+ * In an npm or pnpm workspace this is the app package's own directory
+ * (`apps/web`), the one whose `package.json`, not the workspace root's,
+ * declares the framework. It stays `apps/web` for a custom nested output
+ * dir too (`apps/web/build/next`): round 29 took the output's parent, which
+ * named `apps/web/build`, a directory that owns nothing.
  */
-function parentAppDir(rel: string): string | null {
-  const dir = dirname(rel)
-  return dir === "." ? null : dir
+async function owningPackageDir(checkoutRoot: string, rel: string): Promise<string | null> {
+  for (let dir = dirname(rel); dir !== "." && dir !== "/" && dir !== ""; dir = dirname(dir)) {
+    if (await isFile(join(checkoutRoot, dir, "package.json"))) return dir
+  }
+  return null
 }
 
 /** Directory names never worth descending into while hunting for a Next dist dir. */
@@ -85,9 +89,39 @@ async function listDirs(p: string, excluded: Set<string>): Promise<string[]> {
 }
 
 /**
- * Walks the same ground {@link findNextDistDir} does — the preferred name
- * first, then depth 1, then depth 2, then depth 3 (the workspace layout) — and hands each candidate to `qualifies`,
- * which answers what that framework's scan wants to know about it.
+ * How deep the output scans look: a workspace app two segments down
+ * (`apps/web`) with a custom nested output dir two segments below that
+ * (`build/next`, `dist/rr`). Depth 3 covered either alone and missed the
+ * two together, so such a build fell through to static publishing (codex
+ * round 31).
+ */
+const MAX_SCAN_DEPTH = 4
+
+/**
+ * Every directory under `checkoutRoot` down to {@link MAX_SCAN_DEPTH},
+ * shallowest level first, as paths relative to the root. Names in
+ * `excluded` are neither listed nor entered.
+ */
+async function walkDirs(checkoutRoot: string, excluded: Set<string>): Promise<string[]> {
+  const found: string[] = []
+  let level = await listDirs(checkoutRoot, excluded)
+  for (let depth = 1; depth <= MAX_SCAN_DEPTH && level.length > 0; depth++) {
+    found.push(...level)
+    if (depth === MAX_SCAN_DEPTH) break
+    const next: string[] = []
+    for (const rel of level) {
+      for (const name of await listDirs(join(checkoutRoot, rel), excluded)) next.push(join(rel, name))
+    }
+    level = next
+  }
+  return found
+}
+
+/**
+ * The one scan every framework's finder runs: the preferred name first,
+ * then every directory {@link walkDirs} lists, shallowest first, each
+ * handed to `qualifies`, which answers what that framework wants to know
+ * about it.
  *
  * The preferred name is checked first so the answer never depends on
  * directory-listing order when more than one candidate would qualify.
@@ -96,31 +130,14 @@ async function scanForOutputDir<T>(
   checkoutRoot: string,
   preferred: string,
   qualifies: (rel: string) => Promise<T | null>,
+  excluded: Set<string> = EXCLUDED_OUTPUT_DIR_NAMES,
 ): Promise<T | null> {
   const first = await qualifies(preferred)
   if (first !== null) return first
-
-  const depth1 = await listDirs(checkoutRoot, EXCLUDED_OUTPUT_DIR_NAMES)
-  for (const name of depth1) {
-    if (name === preferred) continue
-    const found = await qualifies(name)
+  for (const rel of await walkDirs(checkoutRoot, excluded)) {
+    if (rel === preferred) continue
+    const found = await qualifies(rel)
     if (found !== null) return found
-  }
-  for (const name of depth1) {
-    for (const name2 of await listDirs(join(checkoutRoot, name), EXCLUDED_OUTPUT_DIR_NAMES)) {
-      const found = await qualifies(join(name, name2))
-      if (found !== null) return found
-    }
-  }
-  // Depth 3 is the workspace layout, `apps/web/<output>` (codex round 29
-  // review): the app is two segments down and its output one more.
-  for (const name of depth1) {
-    for (const name2 of await listDirs(join(checkoutRoot, name), EXCLUDED_OUTPUT_DIR_NAMES)) {
-      for (const name3 of await listDirs(join(checkoutRoot, name, name2), EXCLUDED_OUTPUT_DIR_NAMES)) {
-        const found = await qualifies(join(name, name2, name3))
-        if (found !== null) return found
-      }
-    }
   }
   return null
 }
@@ -145,7 +162,7 @@ async function isNextDistDir(checkoutRoot: string, rel: string): Promise<boolean
  * `BUILD_ID` can survive a switch to `output: "export"`, and only the pair
  * together is specific to a server-capable build.
  *
- * Scans depth 1 to 3 under `checkoutRoot`, skipping `node_modules`,
+ * Scans depth 1 to 4 under `checkoutRoot`, skipping `node_modules`,
  * `.git`, `out` and `public` — none of those is ever a Next dist dir, and
  * `node_modules` alone can hold thousands of directories worth walking into
  * for nothing. `.next` is checked FIRST and preferred when it qualifies,
@@ -156,31 +173,12 @@ async function isNextDistDir(checkoutRoot: string, rel: string): Promise<boolean
  * `build`, `build/next`, …), or `null` when nothing qualifies.
  */
 export async function findNextDistDir(checkoutRoot: string): Promise<string | null> {
-  if (await isNextDistDir(checkoutRoot, ".next")) return ".next"
-
-  const depth1 = await listDirs(checkoutRoot, EXCLUDED_DIST_DIR_NAMES)
-  for (const name of depth1) {
-    if (name === ".next") continue
-    if (await isNextDistDir(checkoutRoot, name)) return name
-  }
-  for (const name of depth1) {
-    const depth2 = await listDirs(join(checkoutRoot, name), EXCLUDED_DIST_DIR_NAMES)
-    for (const name2 of depth2) {
-      const rel = join(name, name2)
-      if (await isNextDistDir(checkoutRoot, rel)) return rel
-    }
-  }
-  // Depth 3 is the workspace layout, `apps/web/.next` (codex round 29
-  // review): the app is two segments down and its dist dir one more.
-  for (const name of depth1) {
-    for (const name2 of await listDirs(join(checkoutRoot, name), EXCLUDED_DIST_DIR_NAMES)) {
-      for (const name3 of await listDirs(join(checkoutRoot, name, name2), EXCLUDED_DIST_DIR_NAMES)) {
-        const rel = join(name, name2, name3)
-        if (await isNextDistDir(checkoutRoot, rel)) return rel
-      }
-    }
-  }
-  return null
+  return scanForOutputDir(
+    checkoutRoot,
+    ".next",
+    async (rel) => ((await isNextDistDir(checkoutRoot, rel)) ? rel : null),
+    EXCLUDED_DIST_DIR_NAMES,
+  )
 }
 
 /** Where a React Router framework-mode build landed, and which file is its server bundle. */
@@ -232,7 +230,7 @@ async function soleServerBundle(serverDir: string): Promise<string | null> {
  * enough name in a repo that either one alone would match something that is
  * not a build at all.
  *
- * Scans depth 1 to 3 under `checkoutRoot`, skipping `node_modules`,
+ * Scans depth 1 to 4 under `checkoutRoot`, skipping `node_modules`,
  * `.git` and `public`, and prefers `build` (the default) when it qualifies.
  */
 export async function findReactRouterBuildDir(checkoutRoot: string): Promise<ReactRouterBuild | null> {
@@ -257,7 +255,7 @@ export async function findReactRouterBuildDir(checkoutRoot: string): Promise<Rea
  * plausible file name in a source tree, and a `public/` directory is an
  * ordinary thing for a repo to have.
  *
- * Scans depth 1 to 3 under `checkoutRoot`, skipping `node_modules`,
+ * Scans depth 1 to 4 under `checkoutRoot`, skipping `node_modules`,
  * `.git` and `public`, and prefers `.output` (the default) when it qualifies.
  * Returns the output dir relative to `checkoutRoot`, or `null`.
  */
@@ -287,4 +285,4 @@ export async function findNextExportDir(checkoutRoot: string): Promise<string | 
   })
 }
 
-export { isDir, isFile, dependsOn, dependsOnAt, parentAppDir }
+export { isDir, isFile, dependsOn, dependsOnAt, owningPackageDir }

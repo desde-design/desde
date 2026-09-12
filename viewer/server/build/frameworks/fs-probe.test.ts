@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { findNextDistDir, findNitroOutputDir, findReactRouterBuildDir } from "./fs-probe"
+import { findNextDistDir, findNitroOutputDir, findReactRouterBuildDir, owningPackageDir } from "./fs-probe"
 
 /**
  * Codex round 4, Fix 4. `BUILD_ID` alone used to be hard-coded under `.next`
@@ -53,6 +53,18 @@ describe("findNextDistDir", () => {
     const r = await root()
     await writeDistDir(r, "build/next")
     expect(await findNextDistDir(r)).toBe("build/next")
+  })
+
+  it("finds a workspace app's custom nested distDir four segments down (apps/web/build/next, codex round 31)", async () => {
+    const r = await root()
+    await writeDistDir(r, "apps/web/build/next")
+    expect(await findNextDistDir(r)).toBe(join("apps", "web", "build", "next"))
+  })
+
+  it("stops at depth 4", async () => {
+    const r = await root()
+    await writeDistDir(r, "a/b/c/d/.next")
+    expect(await findNextDistDir(r)).toBeNull()
   })
 
   it("prefers .next when it qualifies, even alongside another qualifying directory", async () => {
@@ -129,6 +141,12 @@ describe("findReactRouterBuildDir", () => {
     const r = await root()
     await writeReactRouterBuild(r, join("out", "rr"))
     expect(await findReactRouterBuildDir(r)).toEqual({ dir: join("out", "rr"), serverFile: "index.js" })
+  })
+
+  it("finds a workspace app's nested buildDirectory four segments down (apps/web/dist/rr, codex round 31)", async () => {
+    const r = await root()
+    await writeReactRouterBuild(r, join("apps", "web", "dist", "rr"))
+    expect(await findReactRouterBuildDir(r)).toEqual({ dir: join("apps", "web", "dist", "rr"), serverFile: "index.js" })
   })
 
   it("prefers build when it qualifies, even alongside another qualifying directory", async () => {
@@ -219,6 +237,12 @@ describe("findNitroOutputDir", () => {
     expect(await findNitroOutputDir(r)).toBe(join("build", "nitro"))
   })
 
+  it("finds a workspace app's nested output.dir four segments down (apps/web/dist/nitro, codex round 31)", async () => {
+    const r = await root()
+    await writeNitroOutput(r, join("apps", "web", "dist", "nitro"))
+    expect(await findNitroOutputDir(r)).toBe(join("apps", "web", "dist", "nitro"))
+  })
+
   it("prefers .output when it qualifies, even alongside another qualifying directory", async () => {
     const r = await root()
     await writeNitroOutput(r, ".output")
@@ -243,5 +267,46 @@ describe("findNitroOutputDir", () => {
   it("answers null when nothing qualifies", async () => {
     const r = await root()
     expect(await findNitroOutputDir(r)).toBeNull()
+  })
+})
+
+/**
+ * Codex round 29, item 1, widened in round 31. The package that owns a build
+ * output is its nearest ancestor with a `package.json`, not simply its
+ * parent: a workspace app's custom nested dist dir (`apps/web/build/next`)
+ * belongs to `apps/web`, and taking the parent named `apps/web/build`, a
+ * directory that owns nothing.
+ */
+describe("owningPackageDir", () => {
+  async function writePackage(base: string, rel: string): Promise<void> {
+    await mkdir(join(base, rel), { recursive: true })
+    await writeFile(join(base, rel, "package.json"), JSON.stringify({ name: rel }))
+  }
+
+  it("names the app package that owns a workspace dist dir", async () => {
+    const r = await root()
+    await writePackage(r, "apps/web")
+    expect(await owningPackageDir(r, "apps/web/.next")).toBe(join("apps", "web"))
+  })
+
+  it("skips a custom nested output dir's own parent when it holds no package.json", async () => {
+    const r = await root()
+    await writePackage(r, "apps/web")
+    expect(await owningPackageDir(r, "apps/web/build/next")).toBe(join("apps", "web"))
+  })
+
+  it("takes the nearest package when several ancestors hold one", async () => {
+    const r = await root()
+    await writePackage(r, "apps")
+    await writePackage(r, "apps/web")
+    expect(await owningPackageDir(r, "apps/web/.next")).toBe(join("apps", "web"))
+  })
+
+  it("answers null when no ancestor below the root holds a package.json (the root owns it)", async () => {
+    const r = await root()
+    await writePackage(r, ".")
+    await mkdir(join(r, "build", "next"), { recursive: true })
+    expect(await owningPackageDir(r, "build/next")).toBeNull()
+    expect(await owningPackageDir(r, ".next")).toBeNull()
   })
 })

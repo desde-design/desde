@@ -30,8 +30,15 @@ async function checkout(opts: {
   publicDir?: boolean
   /** Whether `node_modules/.bin/next` exists in this checkout. */
   nextBinary?: boolean
-  /** Whether `<parent of distDir>/node_modules/.bin/next` exists (codex round 29, item 2). */
+  /** Whether `<app dir>/node_modules/.bin/next` exists (codex round 29, item 2). */
   appNextBinary?: boolean
+  /**
+   * The app directory `appNextBinary` and `appPackageJson` write under; the
+   * parent of `distDir` by default. Set it for a custom nested dist dir
+   * inside a workspace app (`apps/web/build/next` owned by `apps/web`,
+   * codex round 31).
+   */
+  appDir?: string
   /**
    * Dependencies to write into a package.json at the PARENT of `distDir` —
    * the app directory a workspace scan derives (codex round 29, item 1).
@@ -88,12 +95,12 @@ async function checkout(opts: {
     await writeFile(join(root, "node_modules", ".bin", "next"), "#!/usr/bin/env node\n")
   }
   if (opts.appNextBinary) {
-    const appDir = dirname(distDir)
+    const appDir = opts.appDir ?? dirname(distDir)
     await mkdir(join(root, appDir, "node_modules", ".bin"), { recursive: true })
     await writeFile(join(root, appDir, "node_modules", ".bin", "next"), "#!/usr/bin/env node\n")
   }
   if (opts.appPackageJson) {
-    const appDir = dirname(distDir)
+    const appDir = opts.appDir ?? dirname(distDir)
     if (appDir !== ".") {
       await mkdir(join(root, appDir), { recursive: true })
       await writeFile(
@@ -381,6 +388,28 @@ describe("Next.js adapter — nested app directory", () => {
     })
   })
 
+  /**
+   * Codex round 31. A workspace app with `distDir: "build/next"` in its own
+   * `next.config`: the dist dir is four segments down and its OWNER is the
+   * app package two levels up, not the `build` directory in between.
+   */
+  it("starts a workspace app with a custom nested distDir from the app directory", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(
+      await checkout({
+        next: false,
+        distDir: "apps/web/build/next",
+        buildId: true,
+        appDir: "apps/web",
+        appNextBinary: true,
+        appPackageJson: { next: "^16.0.0" },
+      }),
+    )
+    expect(shape).toMatchObject({
+      kind: "server",
+      start: [join("apps", "web", "node_modules", ".bin", "next"), "start", "-p", "$PORT", "-H", "127.0.0.1", join("apps", "web")],
+    })
+  })
+
   it("leaves a root-level build's argv unchanged (no app directory appended)", async () => {
     const shape = await NEXT_ADAPTER.inspectBuild(await checkout({ buildId: true, nextBinary: true }))
     expect(shape).toEqual({
@@ -481,6 +510,25 @@ describe("Next.js adapter — output: \"standalone\"", () => {
 
     expect(await exists(join(root, "build", "next", "standalone", "build", "next", "static", "chunk.js"))).toBe(true)
     expect(await exists(join(root, "build", "next", "standalone", "next", "static"))).toBe(false)
+  })
+
+  it("prepare() keeps a workspace app's custom nested distDir path under its standalone dir (codex round 31)", async () => {
+    const root = await checkout({
+      next: false,
+      distDir: "apps/web/build/next",
+      buildId: true,
+      standalone: true,
+      staticDir: true,
+      appDir: "apps/web",
+      appPackageJson: { next: "^16.0.0" },
+    })
+    const shape = await NEXT_ADAPTER.inspectBuild(root)
+    if (shape?.kind !== "server" || !shape.prepare) throw new Error("expected a standalone server shape with prepare")
+    await shape.prepare(root)
+
+    expect(
+      await exists(join(root, "apps", "web", "build", "next", "standalone", "build", "next", "static", "chunk.js")),
+    ).toBe(true)
   })
 
   it("prepare() copies a workspace app's static under its app-relative dist dir name", async () => {

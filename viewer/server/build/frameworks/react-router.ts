@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
-import { dependsOnAt, findReactRouterBuildDir, isFile, parentAppDir, type ReactRouterBuild } from "./fs-probe"
+import { dependsOnAt, findReactRouterBuildDir, isFile, owningPackageDir, type ReactRouterBuild } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
 /**
@@ -43,10 +43,10 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
     // Codex round 29, item 1. `dependsOn` used to read only the workspace
     // root's `package.json`. In an npm or pnpm workspace the framework is
     // declared in the app package's own `package.json`, not the root's; the
-    // app directory is the parent of the found build dir (when any build
-    // was found at all — a bare client-only checkout has no app dir to
-    // check beyond the root).
-    const appDir = found ? parentAppDir(found.dir) : null
+    // app directory is the package that owns the found build dir (round
+    // 31; when any build was found at all — a bare client-only checkout has
+    // no app dir to check beyond the root).
+    const appDir = found ? await owningPackageDir(checkoutRoot, found.dir) : null
     const hasReactRouter =
       (await dependsOnAt(checkoutRoot, "react-router")) ||
       (appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "react-router")))
@@ -74,7 +74,6 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
       // app package (`apps/web/node_modules/.bin/react-router-serve`), not
       // the root, so the app's own copy is preferred and the root's is the
       // fallback; the recorded argv names whichever one exists.
-      const appDir = parentAppDir(found.dir)
       const appServeBinaryRel = appDir !== null ? join(appDir, "node_modules", ".bin", "react-router-serve") : null
       const serveBinaryRel =
         appServeBinaryRel !== null && (await isFile(join(checkoutRoot, appServeBinaryRel)))

@@ -1,6 +1,6 @@
 import { cp, readFile, stat } from "node:fs/promises"
 import { join, relative } from "node:path"
-import { dependsOn, dependsOnAt, findNextDistDir, findNextExportDir, isDir, isFile, parentAppDir } from "./fs-probe"
+import { dependsOn, dependsOnAt, findNextDistDir, findNextExportDir, isDir, isFile, owningPackageDir } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
 /**
@@ -32,7 +32,7 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
     const distDir = await findNextDistDir(checkoutRoot)
     if (!distDir) {
       if (exportDir === null) return null
-      const exportApp = parentAppDir(exportDir)
+      const exportApp = await owningPackageDir(checkoutRoot, exportDir)
       const listed =
         (await dependsOn(checkoutRoot, "next")) ||
         (exportApp !== null && (await dependsOnAt(join(checkoutRoot, exportApp), "next")))
@@ -44,9 +44,10 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
     // in the app package's own `package.json` (`apps/web/package.json`),
     // not the root's, so a checkout where the root lists nothing used to
     // fall through to the static default and fail on a missing
-    // `index.html`. The app directory is the parent of the found dist dir;
+    // `index.html`. The app directory is the package that owns the found
+    // dist dir (its nearest ancestor with a `package.json`, codex round 31);
     // either package.json listing `next` is enough.
-    const appDir = parentAppDir(distDir)
+    const appDir = await owningPackageDir(checkoutRoot, distDir)
     const rootHasNext = await dependsOn(checkoutRoot, "next")
     const appHasNext = appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "next"))
     if (!rootHasNext && !appHasNext) return null
