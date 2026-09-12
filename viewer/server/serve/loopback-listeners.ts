@@ -302,6 +302,9 @@ export function createLoopbackListenerRegistry(
   const listeners = new Map<string, MutableListener>()
   /** In-flight opens, so concurrent `ensure` calls on one key share a socket. */
   const opening = new Map<string, Promise<LoopbackListener>>()
+  /** Deployments a delete has closed for good; `ensure` refuses them. Ids are never reused. */
+  const closedDeployments = new Set<string>()
+  const deploymentOfKey = (key: string): string => (JSON.parse(key) as [string, string])[0]
 
   function closeServer(server: Server): Promise<void> {
     return new Promise((resolve) => {
@@ -572,6 +575,9 @@ export function createLoopbackListenerRegistry(
 
   return {
     async ensure(deployment, target) {
+      if (closedDeployments.has(deployment.id)) {
+        throw new Error("This deployment was deleted; no listener will be opened for it.")
+      }
       const key = keyFor(deployment.id, target.shellOrigin)
 
       const existing = listeners.get(key)
@@ -626,6 +632,15 @@ export function createLoopbackListenerRegistry(
       for (const listener of all) await listener.close()
     },
     async closeForDeployment(deploymentId) {
+      // Marked first, so an `ensure` that arrives from here on is refused
+      // rather than opening a listener the delete has already swept. Then
+      // any open still in flight for this deployment is awaited, so the
+      // listener it produces is in the map by the time the sweep below
+      // runs (codex round 24: the snapshot alone missed it, and a pinned
+      // listener serves by deployment id with no project lookup).
+      closedDeployments.add(deploymentId)
+      const pending = [...opening].filter(([key]) => deploymentOfKey(key) === deploymentId).map(([, p]) => p)
+      for (const p of pending) await p.catch(() => {})
       const mine = [...listeners.values()].filter((listener) => listener.deploymentId === deploymentId)
       for (const listener of mine) await listener.close()
     },

@@ -327,6 +327,27 @@ describe("createLoopbackListenerRegistry", () => {
       ])
       expect(a).toBe(b)
     })
+
+    /**
+     * Codex round 24. A delete closed the listeners it could see; an open
+     * still in flight finished afterwards and inserted one nothing would ever
+     * close, serving the deleted deployment to anyone who knew the port.
+     */
+    it("closeForDeployment waits for an open in flight, closes it, and refuses the deployment from then on", async () => {
+      const registry = makeRegistry({ d1: { "index.html": "<html></html>" } })
+      const pending = registry.ensure(deployment("d1"), V4)
+      await registry.closeForDeployment("d1")
+      const settled = await pending.then(
+        (listener) => ({ port: listener.port }),
+        () => null,
+      )
+      if (settled) {
+        await expect(
+          httpCall({ host: "127.0.0.1", port: settled.port, path: "/" }),
+        ).rejects.toMatchObject({ code: "ECONNREFUSED" })
+      }
+      await expect(registry.ensure(deployment("d1"), V4)).rejects.toThrow(/deleted/)
+    })
   })
 
   describe("the bind", () => {
