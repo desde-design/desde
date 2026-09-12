@@ -261,8 +261,16 @@ export function createBuildQueue(deps: BuildQueueDeps): BuildQueue {
           // `inFlight` is only cleared in the finally.
           clearInterval(timer)
           console.error(`[viewer] build queue caught a runner throw for ${deployment.id}:`, err)
-          await finish(deployment.id, "failed", "\nBuild failed unexpectedly\n")
-          await discardCheckout(deployment.id)
+          // The discard runs whatever the failure write does: a storage
+          // outage that failed the activation fails this write too, and
+          // skipping the discard then left the kept checkout on disk to
+          // displace a real rollback checkout at the next prune (codex
+          // round 25).
+          try {
+            await finish(deployment.id, "failed", "\nBuild failed unexpectedly\n")
+          } finally {
+            await discardCheckout(deployment.id)
+          }
         } finally {
           clearInterval(timer)
           inFlight.delete(projectId)

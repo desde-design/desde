@@ -517,6 +517,64 @@ describe("build queue", () => {
    * later prune counted that directory as the retained previous checkout and
    * deleted the last good one in its place.
    */
+  /**
+   * Codex round 25. A storage outage that fails the activation fails the
+   * failure record too, and the discard used to sit after that write, so
+   * the kept checkout stayed on disk to displace a real rollback checkout at
+   * the next prune.
+   */
+  it("removes the checkout even when recording the failure fails as well", async () => {
+    const { createBuildQueue } = await import("../build-queue")
+    const { checkoutDirFor } = await import("../checkouts")
+    const { InMemoryStorage } = await import("../../storage/in-memory-storage")
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "act2", name: "Act", repoUrl: null })
+    await storage.setProjectRepoConfig(project.id, repoConfig())
+    const checkoutsRoot = await tempDir("viewer-checkouts-")
+    // Every terminal write fails: the activation and the failure record.
+    const original = storage.updateDeployment.bind(storage)
+    storage.updateDeployment = (id, patch) =>
+      patch.status === "deployed" || patch.status === "failed"
+        ? Promise.reject(new Error("storage is down"))
+        : original(id, patch)
+
+    const forgotten: string[] = []
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    const queue = createBuildQueue({
+      storage,
+      assets: collectingAssets(),
+      checkoutsRoot,
+      afterCheckoutRemove: async (id) => {
+        forgotten.push(id)
+      },
+      runner: {
+        async run({ deployment }) {
+          await fs.mkdir(checkoutDirFor(checkoutsRoot, deployment.id), { recursive: true })
+          return {
+            ok: true,
+            commitSha: "abc",
+            commitMessage: null,
+            fileCount: 1,
+            serve: "server",
+            serverStart: ["node", "server.js"],
+          }
+        },
+      },
+    })
+
+    const id = await queue.start(project.id)
+    await new Promise((r) => setTimeout(r, 50))
+    await queue.shutdown()
+    errors.mockRestore()
+
+    const left = await fs.stat(checkoutDirFor(checkoutsRoot, id)).then(
+      () => true,
+      () => false,
+    )
+    expect(left).toBe(false)
+    expect(forgotten).toContain(id)
+  })
+
   it("removes the checkout and forgets the deployment when the activation write fails", async () => {
     const { createBuildQueue } = await import("../build-queue")
     const { checkoutDirFor } = await import("../checkouts")
