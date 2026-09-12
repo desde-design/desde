@@ -107,7 +107,15 @@ async function isAuthoredPackage(dir: string): Promise<boolean> {
 }
 
 /** Directory names never worth descending into while hunting for a Next dist dir. */
-const EXCLUDED_DIST_DIR_NAMES = new Set(["node_modules", ".git", "out", "public"])
+const EXCLUDED_DIST_DIR_NAMES = new Set(["node_modules", ".git", "public"])
+
+/**
+ * Directory names a Next dist-dir scan may TEST but never enters (codex
+ * round 59): `distDir: "out"` is a valid setting for a server build, whose
+ * `out/BUILD_ID` and `out/required-server-files.json` have to be seen, while
+ * an export's `out/` is a tree of pages worth no descent at all.
+ */
+const NO_DESCENT_DIST_DIR_NAMES = new Set(["out"])
 
 /**
  * Directory names never worth descending into while hunting for a framework's
@@ -148,7 +156,12 @@ const MAX_SCAN_DEPTH = 4
  * shallowest level first, as paths relative to the root. Names in
  * `excluded` are neither listed nor entered.
  */
-async function walkDirs(checkoutRoot: string, excluded: Set<string>, base = ""): Promise<string[]> {
+async function walkDirs(
+  checkoutRoot: string,
+  excluded: Set<string>,
+  base = "",
+  noDescent: Set<string> = new Set(),
+): Promise<string[]> {
   const found: string[] = []
   let level = (await listDirs(join(checkoutRoot, base), excluded)).map((name) => join(base, name))
   for (let depth = 1; depth <= MAX_SCAN_DEPTH && level.length > 0; depth++) {
@@ -156,6 +169,7 @@ async function walkDirs(checkoutRoot: string, excluded: Set<string>, base = ""):
     if (depth === MAX_SCAN_DEPTH) break
     const next: string[] = []
     for (const rel of level) {
+      if (noDescent.has(basename(rel))) continue
       for (const name of await listDirs(join(checkoutRoot, rel), excluded)) next.push(join(rel, name))
     }
     level = next
@@ -178,6 +192,7 @@ async function scanForOutputDir<T>(
   qualifies: (rel: string) => Promise<T | null>,
   excluded: Set<string> = EXCLUDED_OUTPUT_DIR_NAMES,
   within: string | null = null,
+  noDescent: Set<string> = new Set(),
 ): Promise<T | null> {
   // Inside the target app and nowhere else, when the caller named one
   // (codex round 34, narrowed in round 36): its own preferred name, then
@@ -189,8 +204,8 @@ async function scanForOutputDir<T>(
   // the whole checkout is scanned in the usual order.
   const candidates =
     within === null
-      ? [preferred, ...(await walkDirs(checkoutRoot, excluded))]
-      : [join(within, preferred), ...(await walkDirs(checkoutRoot, excluded, within))]
+      ? [preferred, ...(await walkDirs(checkoutRoot, excluded, "", noDescent))]
+      : [join(within, preferred), ...(await walkDirs(checkoutRoot, excluded, within, noDescent))]
   for (const rel of candidates) {
     if (!(await isRealDir(join(checkoutRoot, rel)))) continue
     const found = await qualifies(rel)
@@ -220,7 +235,9 @@ async function isNextDistDir(checkoutRoot: string, rel: string): Promise<boolean
  * together is specific to a server-capable build.
  *
  * Scans depth 1 to 4 under `checkoutRoot`, skipping `node_modules`,
- * `.git`, `out` and `public` — none of those is ever a Next dist dir, and
+ * `.git` and `public`, and testing `out` without entering it (codex round
+ * 59: `distDir: "out"` is a valid server build) — none of those is worth
+ * descending into, and
  * `node_modules` alone can hold thousands of directories worth walking into
  * for nothing. `.next` is checked FIRST and preferred when it qualifies,
  * since that is what nearly every checkout uses and the answer should not
@@ -236,6 +253,7 @@ export async function findNextDistDir(checkoutRoot: string, within: string | nul
     async (rel) => ((await isNextDistDir(checkoutRoot, rel)) ? rel : null),
     EXCLUDED_DIST_DIR_NAMES,
     within,
+    NO_DESCENT_DIST_DIR_NAMES,
   )
 }
 

@@ -104,6 +104,17 @@ describe("findNextDistDir", () => {
     expect(await findNextDistDir(r)).toBe(".next")
   })
 
+  it("finds a server build whose distDir is out, without entering an export's out (codex round 59)", async () => {
+    const r = await root()
+    await writeDistDir(r, "out")
+    expect(await findNextDistDir(r)).toBe("out")
+    const exported = await root()
+    await mkdir(join(exported, "out", "_next"), { recursive: true })
+    await writeFile(join(exported, "out", "index.html"), "<html></html>")
+    await writeDistDir(exported, "out/nested")
+    expect(await findNextDistDir(exported)).toBeNull()
+  })
+
   it("does not descend into node_modules, .git, out, or public", async () => {
     const r = await root()
     await writeDistDir(r, join("node_modules", ".next"))
