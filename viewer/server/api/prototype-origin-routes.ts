@@ -939,6 +939,11 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
 
     if (current.deploymentId && current.body.serve === "server") {
       subscribeToProcess(current.deploymentId)
+      // The first body sampled the status before the listener was set up
+      // and before this subscription existed; a transition in that gap
+      // notified nobody. Read once more now that the subscription is in
+      // place, so the page never waits a heartbeat for it (codex round 19).
+      resendIfProcessChanged(project)
     }
 
     heartbeat = setInterval(() => {

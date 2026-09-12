@@ -1396,6 +1396,30 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
   })
 
   /**
+   * Codex round 19. The first body samples the status before the listener is
+   * set up and before the subscription exists, so a transition in that gap
+   * notified nobody and the page waited a whole heartbeat for it. The stream
+   * now reads once more right after subscribing. The fake answers `starting`
+   * until a subscriber exists and `running` after, which is exactly the gap.
+   */
+  it("re-reads the status once the subscription is in place, so a transition during setup is not lost", async () => {
+    const fake = fakePrototypeProcesses()
+    const ctx = setup({ prototypeProcesses: fake, prototypeOriginStreamPingMs: 60_000 })
+    const project = await seedProject(ctx.storage)
+    const deploymentId = await makeServerDeployment(ctx, project)
+    const starting: ProcessStatus = { state: "starting", generation: 1 }
+    const running: ProcessStatus = { state: "running", port: 4321, since: "2026-09-12T00:00:00.000Z", generation: 1 }
+    fake.status = (id) => (id === deploymentId && fake.subscribers.has(id) ? running : starting)
+
+    const { received, destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 2)
+    destroy()
+
+    const frames = originFrames(received) as { process?: ProcessStatus }[]
+    expect(frames[0]?.process).toEqual(starting)
+    expect(frames[1]?.process).toEqual(running)
+  })
+
+  /**
    * Codex round 16. The listener registry reaps a loopback port after 30
    * quiet minutes, and the stream never touched it: a reader sitting on the
    * page kept an origin nothing answered on. Every heartbeat now counts as
