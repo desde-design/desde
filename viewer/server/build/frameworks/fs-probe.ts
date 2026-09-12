@@ -1,5 +1,5 @@
 import { lstat, readdir, readFile, stat } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 
 async function isDir(p: string): Promise<boolean> {
   try {
@@ -354,7 +354,10 @@ export async function findNextExportDir(checkoutRoot: string, within: string | n
     checkoutRoot,
     "out",
     async (rel) => {
-      if (rel.split("/").pop() !== "out") return null
+      // The platform's own separator (codex round 50): `join` writes
+      // backslashes on Windows, and a split on `/` rejected every workspace
+      // export there.
+      if (basename(rel) !== "out") return null
       const complete =
         (await isDir(join(checkoutRoot, rel, "_next"))) && (await isFile(join(checkoutRoot, rel, "index.html")))
       return complete ? rel : null
