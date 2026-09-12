@@ -154,6 +154,17 @@ export interface LoopbackListenerAppContext {
   /** The one acceptable `Host` value: `127.0.0.1:45001` or `[::1]:45001`. */
   hostPort: string
   shellOrigin: string
+  /**
+   * This origin last served a DIFFERENT deployment (codex round 41). A
+   * fixed port range recycles ports, and a browser origin outlives the
+   * listener that answered on it: a still-open document of the previous
+   * deployment is same-origin with this one, and whatever it stored
+   * (localStorage, IndexedDB, a service worker, cached responses) is
+   * inherited. The app clears the origin's storage and cache on its first
+   * document response when this is set. Never set for the same deployment
+   * coming back on the origin it had before, which the registry prefers.
+   */
+  recycledOrigin: boolean
   /** Called on every request the listener serves. */
   touch: () => void
   /**
@@ -306,6 +317,16 @@ export function createLoopbackListenerRegistry(
   const opening = new Map<string, Promise<LoopbackListener>>()
   /** Deployments a delete has closed for good; `ensure` refuses them. Ids are never reused. */
   const closedDeployments = new Set<string>()
+  /**
+   * What each origin served last and when it was released (codex round 41).
+   * With a fixed range the same port comes back around, and a browser keeps
+   * an origin's storage past the listener: ports are handed out
+   * least-recently-released first, a deployment gets its previous origin
+   * back when it is free, and an origin that changes deployment is told so
+   * (`recycledOrigin`) so the app can clear what the last one left.
+   */
+  const originHistory = new Map<string, { deploymentId: string; releasedAt: number }>()
+  const originFor = (host: string, port: number): string => `http://${host}:${port}`
   const deploymentOfKey = (key: string): string => (JSON.parse(key) as [string, string])[0]
 
   function closeServer(server: Server): Promise<void> {
@@ -445,8 +466,27 @@ export function createLoopbackListenerRegistry(
     if (range === null) {
       await listenOn(0)
     } else {
+      // Least-recently-released first, and this deployment's own previous
+      // origin before anything else (codex round 41): the range is small,
+      // and the longer an origin sits unused before another deployment
+      // takes it, the less likely a document from the last one is still
+      // open. A port that never served anything comes before every
+      // released one.
+      const ports: number[] = []
+      for (let port = range.from; port <= range.to; port++) ports.push(port)
+      const rank = (port: number): [number, number] => {
+        const previous = originHistory.get(originFor(host, port))
+        if (previous === undefined) return [1, port]
+        if (previous.deploymentId === deployment.id) return [0, port]
+        return [2, previous.releasedAt]
+      }
+      ports.sort((a, b) => {
+        const [ra, ka] = rank(a)
+        const [rb, kb] = rank(b)
+        return ra - rb || ka - kb || a - b
+      })
       let bound = false
-      for (let port = range.from; port <= range.to; port++) {
+      for (const port of ports) {
         try {
           await listenOn(port)
           bound = true
@@ -498,9 +538,12 @@ export function createLoopbackListenerRegistry(
         // Dropped from the map FIRST, so a concurrent `ensure` opens a fresh
         // listener rather than handing out one that is closing.
         if (listeners.get(key) === record) listeners.delete(key)
+        originHistory.set(origin, { deploymentId: deployment.id, releasedAt: now() })
         await closeServer(server)
       },
     }
+    const previous = originHistory.get(origin)
+    const recycledOrigin = previous !== undefined && previous.deploymentId !== deployment.id
 
     try {
       app = deps.makeApp({
@@ -509,6 +552,7 @@ export function createLoopbackListenerRegistry(
         serve: deployment.serve,
         hostPort: `${host}:${address.port}`,
         shellOrigin: target.shellOrigin,
+        recycledOrigin,
         touch: () => {
           record.lastUsedAt = now()
         },

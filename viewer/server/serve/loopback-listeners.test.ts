@@ -287,6 +287,93 @@ describe("createLoopbackListenerRegistry", () => {
     })
   })
 
+  /**
+   * Codex round 41. A fixed range brings the same port back around, and a
+   * browser origin outlives the listener that answered on it: a document of
+   * the previous deployment still open in a tab is same-origin with the
+   * next one, and everything it stored is inherited. Ports are handed out
+   * least-recently-released first, a deployment gets its own previous
+   * origin back, and an origin that changes deployment clears what the last
+   * one left on its first document load.
+   */
+  describe("port rotation and recycled origins (fixed range)", () => {
+    async function freeRange(size: number): Promise<{ from: number; to: number }> {
+      const probe = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()))
+      const from = (probe.address() as AddressInfo).port
+      await new Promise<void>((r) => probe.close(() => r()))
+      return { from, to: from + size - 1 }
+    }
+    function documentGet(port: number, headers: Record<string, string>): Promise<{ status: number; headers: Record<string, string | string[] | undefined> }> {
+      return new Promise((resolve, reject) => {
+        const req = httpRequest(
+          // No keep-alive: the socket from a closed listener must not be reused for the next one on the same port.
+          { host: "127.0.0.1", port, path: "/", method: "GET", agent: false, headers: { Host: `127.0.0.1:${port}`, ...headers } },
+          (res) => {
+            res.resume()
+            res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers }))
+          },
+        )
+        req.on("error", reject)
+        req.end()
+      })
+    }
+
+    it("hands out the least recently released port, never-used ports first", async () => {
+      const range = await freeRange(3)
+      const registry = makeRegistry({ d1: {}, d2: {}, d3: {}, d4: {} }, { portRange: range, bindAllInterfaces: false })
+      const a = await registry.ensure(deployment("d1"), V4)
+      expect(a.port).toBe(range.from)
+      await a.close()
+      // The port A just gave back is the LAST choice while unused ones remain.
+      const b = await registry.ensure(deployment("d2"), V4)
+      expect(b.port).toBe(range.from + 1)
+      const c = await registry.ensure(deployment("d3"), V4)
+      expect(c.port).toBe(range.from + 2)
+      const d = await registry.ensure(deployment("d4"), V4)
+      expect(d.port).toBe(range.from)
+    })
+
+    it("gives a deployment its previous origin back when it is free", async () => {
+      const range = await freeRange(3)
+      const registry = makeRegistry({ d1: {}, d2: {} }, { portRange: range, bindAllInterfaces: false })
+      const first = await registry.ensure(deployment("d1"), V4)
+      await first.close()
+      const again = await registry.ensure(deployment("d1"), V4)
+      expect(again.origin).toBe(first.origin)
+    })
+
+    it("clears a recycled origin's storage and cache on its first document load only, and never on a fresh one", async () => {
+      const range = await freeRange(1)
+      const registry = makeRegistry(
+        { d1: { "index.html": "<html></html>" }, d2: { "index.html": "<html></html>" } },
+        { portRange: range, bindAllInterfaces: false },
+      )
+      const a = await registry.ensure(deployment("d1"), V4)
+      const fresh = await documentGet(a.port, { "Sec-Fetch-Dest": "iframe" })
+      expect(fresh.status).toBe(200)
+      expect(fresh.headers["clear-site-data"]).toBeUndefined()
+      await a.close()
+
+      const b = await registry.ensure(deployment("d2"), V4)
+      expect(b.port).toBe(a.port)
+      // An asset fetch first: not the moment, the document is.
+      const asset = await documentGet(b.port, { "Sec-Fetch-Dest": "script" })
+      expect(asset.headers["clear-site-data"]).toBeUndefined()
+      const document = await documentGet(b.port, { "Sec-Fetch-Dest": "iframe" })
+      expect(document.status).toBe(200)
+      expect(document.headers["clear-site-data"]).toBe('"cache", "storage"')
+      const reload = await documentGet(b.port, { "Sec-Fetch-Dest": "iframe" })
+      expect(reload.headers["clear-site-data"]).toBeUndefined()
+      await b.close()
+
+      // The same deployment back on its own origin is not a recycled one.
+      const bAgain = await registry.ensure(deployment("d2"), V4)
+      const back = await documentGet(bAgain.port, { Accept: "text/html,*/*" })
+      expect(back.headers["clear-site-data"]).toBeUndefined()
+    })
+  })
+
   describe("identity and keying", () => {
     it("returns the same listener for the same deployment and shell origin", async () => {
       const registry = makeRegistry({ d1: { "index.html": "<html></html>" } })

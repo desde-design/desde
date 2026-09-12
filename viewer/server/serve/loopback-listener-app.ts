@@ -106,6 +106,14 @@ function createPinnedDeploymentRewrite(pinned: { deploymentId: string; slug: str
   }
 }
 
+/** A navigation or a frame load, by the fetch metadata browsers send, or by `Accept` when they do not. */
+function isDocumentRequest(req: Request): boolean {
+  const dest = req.headers["sec-fetch-dest"]
+  if (typeof dest === "string") return dest === "document" || dest === "iframe" || dest === "frame"
+  const accept = req.headers.accept
+  return typeof accept === "string" && /\btext\/html\b/.test(accept)
+}
+
 export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): express.Express {
   const app = express()
 
@@ -174,6 +182,26 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
     res.once("close", release)
     next()
   })
+
+  // This origin last served another deployment (codex round 41): a
+  // still-open document of that one is same-origin with this listener, and
+  // the browser hands this deployment everything it stored. The first
+  // document this listener answers tells the browser to drop the origin's
+  // storage and cache; cookies are left alone (the shell's own `dsv_cap`
+  // is not this origin's, and a prototype's are its own). Once, not on
+  // every load, so this deployment's own state survives its reloads. Sent
+  // for a top-level or framed document, which is what the review page
+  // asks for; a bare asset fetch is not the moment.
+  if (deps.recycledOrigin) {
+    let cleared = false
+    app.use((req, res, next) => {
+      if (!cleared && isDocumentRequest(req)) {
+        cleared = true
+        res.setHeader("Clear-Site-Data", '"cache", "storage"')
+      }
+      next()
+    })
+  }
 
   app.use(createPinnedDeploymentRewrite({ deploymentId: deps.deploymentId, slug: deps.slug }))
 
