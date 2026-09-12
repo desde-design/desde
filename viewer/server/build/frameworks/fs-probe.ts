@@ -1,9 +1,24 @@
-import { readdir, readFile, stat } from "node:fs/promises"
+import { lstat, readdir, readFile, stat } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
 async function isDir(p: string): Promise<boolean> {
   try {
     return (await stat(p)).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A directory that is not a symbolic link. The scans below walk with this,
+ * never {@link isDir}, so a link a repository committed (`dist ->
+ * /somewhere`) cannot lead them out of the checkout: they would otherwise
+ * read another checkout's, or the host's, build output as this one's
+ * (codex round 31, found by the build runner's own escape test).
+ */
+async function isRealDir(p: string): Promise<boolean> {
+  try {
+    return (await lstat(p)).isDirectory()
   } catch {
     return false
   }
@@ -83,7 +98,7 @@ async function listDirs(p: string, excluded: Set<string>): Promise<string[]> {
   const dirs: string[] = []
   for (const name of names) {
     if (excluded.has(name)) continue
-    if (await isDir(join(p, name))) dirs.push(name)
+    if (await isRealDir(join(p, name))) dirs.push(name)
   }
   return dirs
 }
@@ -132,7 +147,7 @@ async function scanForOutputDir<T>(
   qualifies: (rel: string) => Promise<T | null>,
   excluded: Set<string> = EXCLUDED_OUTPUT_DIR_NAMES,
 ): Promise<T | null> {
-  const first = await qualifies(preferred)
+  const first = (await isRealDir(join(checkoutRoot, preferred))) ? await qualifies(preferred) : null
   if (first !== null) return first
   for (const rel of await walkDirs(checkoutRoot, excluded)) {
     if (rel === preferred) continue

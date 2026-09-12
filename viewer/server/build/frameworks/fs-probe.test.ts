@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -59,6 +59,15 @@ describe("findNextDistDir", () => {
     const r = await root()
     await writeDistDir(r, "apps/web/build/next")
     expect(await findNextDistDir(r)).toBe(join("apps", "web", "build", "next"))
+  })
+
+  it("does not follow a symlinked directory out of the checkout (codex round 31)", async () => {
+    const outside = await root()
+    await writeDistDir(outside, "app/.next")
+    const r = await root()
+    await symlink(outside, join(r, "dist"))
+    await symlink(join(outside, "app", ".next"), join(r, ".next"))
+    expect(await findNextDistDir(r)).toBeNull()
   })
 
   it("stops at depth 4", async () => {
@@ -141,6 +150,15 @@ describe("findReactRouterBuildDir", () => {
     const r = await root()
     await writeReactRouterBuild(r, join("out", "rr"))
     expect(await findReactRouterBuildDir(r)).toEqual({ dir: join("out", "rr"), serverFile: "index.js" })
+  })
+
+  it("does not follow a symlinked directory out of the checkout (codex round 31)", async () => {
+    const outside = await root()
+    await writeReactRouterBuild(outside, "build")
+    const r = await root()
+    await symlink(outside, join(r, "linked"))
+    await symlink(join(outside, "build"), join(r, "build"))
+    expect(await findReactRouterBuildDir(r)).toBeNull()
   })
 
   it("finds a workspace app's nested buildDirectory four segments down (apps/web/dist/rr, codex round 31)", async () => {
