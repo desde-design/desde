@@ -18,7 +18,10 @@ import type { FrameworkAdapter } from "./types"
  */
 export const NEXT_ADAPTER: FrameworkAdapter = {
   id: "next",
-  async inspectBuild(checkoutRoot) {
+  async inspectBuild(checkoutRoot, target) {
+    // The app the configured output dir belongs to is looked at first
+    // (codex round 34); `null` is the root.
+    const within = target?.within ?? null
     // An export is known by what it writes, not by the folder's name: every
     // `output: "export"` build writes `out/_next/` and an `out/index.html`.
     // A bare `out/` left by another tool used to win over a valid server
@@ -27,9 +30,9 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
     // export beside a fresh server build is a server build (codex round 19).
     // Wherever the export landed: the root's `out`, or a workspace app's
     // `apps/web/out` (codex round 30).
-    const exportDir = await findNextExportDir(checkoutRoot)
+    const exportDir = await findNextExportDir(checkoutRoot, within)
 
-    const distDir = await findNextDistDir(checkoutRoot)
+    const distDir = await findNextDistDir(checkoutRoot, within)
     if (!distDir) {
       if (exportDir === null) return null
       const exportApp = await owningPackageDir(checkoutRoot, exportDir)

@@ -67,6 +67,22 @@ describe("Nuxt adapter", () => {
       reason: "Nuxt with a server build",
     })
   })
+  it("starts the app the configured output dir belongs to when a workspace built several (codex round 34)", async () => {
+    const root = await checkout({ serverBuild: true })
+    await mkdir(join(root, "apps", "web", ".output", "server"), { recursive: true })
+    await mkdir(join(root, "apps", "web", ".output", "public"), { recursive: true })
+    await writeFile(join(root, "apps", "web", ".output", "server", "index.mjs"), "export default null")
+    await writeFile(join(root, "apps", "web", "package.json"), JSON.stringify({ name: "web", dependencies: { nuxt: "^3.0.0" } }))
+
+    expect(await NUXT_ADAPTER.inspectBuild(root, { within: join("apps", "web") })).toMatchObject({
+      kind: "server",
+      start: ["node", join("apps", "web", ".output", "server", "index.mjs")],
+    })
+    expect(await NUXT_ADAPTER.inspectBuild(root, { within: null })).toMatchObject({
+      kind: "server",
+      start: ["node", ".output/server/index.mjs"],
+    })
+  })
   it("reads .output/public/index.html with no server build as static", async () => {
     expect(await NUXT_ADAPTER.inspectBuild(await checkout({ staticHtml: true }))).toEqual({
       kind: "static",

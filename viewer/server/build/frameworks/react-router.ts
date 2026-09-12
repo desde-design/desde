@@ -29,16 +29,18 @@ const DEFAULT_BUILD_DIR = "build"
 
 export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
   id: "react-router",
-  async inspectBuild(checkoutRoot) {
+  async inspectBuild(checkoutRoot, target) {
+    // The app the configured output dir belongs to is looked at first
+    // (codex round 34): its own default `build`, then the scan from there.
+    const within = target?.within ?? null
+    const defaultDir = within === null ? DEFAULT_BUILD_DIR : join(within, DEFAULT_BUILD_DIR)
     // The default layout FIRST and by name, then the scan (codex round 20,
     // item 2). Not the scan alone: the scan needs a `client/` directory beside
     // the `server/` one to be sure a directory is a build at all, and a build
     // this manager can serve does not strictly have to have written one.
-    const found: ReactRouterBuild | null = (await isFile(
-      join(checkoutRoot, DEFAULT_BUILD_DIR, "server", "index.js"),
-    ))
-      ? { dir: DEFAULT_BUILD_DIR, serverFile: "index.js" }
-      : await findReactRouterBuildDir(checkoutRoot)
+    const found: ReactRouterBuild | null = (await isFile(join(checkoutRoot, defaultDir, "server", "index.js")))
+      ? { dir: defaultDir, serverFile: "index.js" }
+      : await findReactRouterBuildDir(checkoutRoot, within)
 
     // Codex round 29, item 1. `dependsOn` used to read only the workspace
     // root's `package.json`. In an npm or pnpm workspace the framework is
@@ -55,7 +57,7 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
       (appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "@react-router/dev")))
     if (!hasReactRouter && !hasReactRouterDev) return null
 
-    const clientDir = join(found?.dir ?? DEFAULT_BUILD_DIR, "client")
+    const clientDir = join(found?.dir ?? defaultDir, "client")
     const clientHtml = await isFile(join(checkoutRoot, clientDir, "index.html"))
     if (found) {
       const serverBundleRel = join(found.dir, "server", found.serverFile)

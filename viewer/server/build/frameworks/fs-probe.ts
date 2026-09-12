@@ -117,9 +117,9 @@ const MAX_SCAN_DEPTH = 4
  * shallowest level first, as paths relative to the root. Names in
  * `excluded` are neither listed nor entered.
  */
-async function walkDirs(checkoutRoot: string, excluded: Set<string>): Promise<string[]> {
+async function walkDirs(checkoutRoot: string, excluded: Set<string>, base = ""): Promise<string[]> {
   const found: string[] = []
-  let level = await listDirs(checkoutRoot, excluded)
+  let level = (await listDirs(join(checkoutRoot, base), excluded)).map((name) => join(base, name))
   for (let depth = 1; depth <= MAX_SCAN_DEPTH && level.length > 0; depth++) {
     found.push(...level)
     if (depth === MAX_SCAN_DEPTH) break
@@ -146,11 +146,19 @@ async function scanForOutputDir<T>(
   preferred: string,
   qualifies: (rel: string) => Promise<T | null>,
   excluded: Set<string> = EXCLUDED_OUTPUT_DIR_NAMES,
+  within: string | null = null,
 ): Promise<T | null> {
-  const first = (await isRealDir(join(checkoutRoot, preferred))) ? await qualifies(preferred) : null
-  if (first !== null) return first
-  for (const rel of await walkDirs(checkoutRoot, excluded)) {
-    if (rel === preferred) continue
+  // The target app first, when the caller named one (codex round 34): its
+  // own preferred name, then everything under it. Then the whole checkout
+  // in the usual order. Each candidate is asked once.
+  const candidates: string[] = []
+  if (within !== null) candidates.push(join(within, preferred), ...(await walkDirs(checkoutRoot, excluded, within)))
+  candidates.push(preferred, ...(await walkDirs(checkoutRoot, excluded)))
+  const asked = new Set<string>()
+  for (const rel of candidates) {
+    if (asked.has(rel)) continue
+    asked.add(rel)
+    if (!(await isRealDir(join(checkoutRoot, rel)))) continue
     const found = await qualifies(rel)
     if (found !== null) return found
   }
@@ -187,12 +195,13 @@ async function isNextDistDir(checkoutRoot: string, rel: string): Promise<boolean
  * Returns the dist dir as a path relative to `checkoutRoot` (`.next`,
  * `build`, `build/next`, …), or `null` when nothing qualifies.
  */
-export async function findNextDistDir(checkoutRoot: string): Promise<string | null> {
+export async function findNextDistDir(checkoutRoot: string, within: string | null = null): Promise<string | null> {
   return scanForOutputDir(
     checkoutRoot,
     ".next",
     async (rel) => ((await isNextDistDir(checkoutRoot, rel)) ? rel : null),
     EXCLUDED_DIST_DIR_NAMES,
+    within,
   )
 }
 
@@ -248,14 +257,23 @@ async function soleServerBundle(serverDir: string): Promise<string | null> {
  * Scans depth 1 to 4 under `checkoutRoot`, skipping `node_modules`,
  * `.git` and `public`, and prefers `build` (the default) when it qualifies.
  */
-export async function findReactRouterBuildDir(checkoutRoot: string): Promise<ReactRouterBuild | null> {
-  return await scanForOutputDir(checkoutRoot, "build", async (rel) => {
-    const dir = join(checkoutRoot, rel)
-    if (!(await isDir(join(dir, "client")))) return null
-    if (!(await isDir(join(dir, "server")))) return null
-    const serverFile = await soleServerBundle(join(dir, "server"))
-    return serverFile === null ? null : { dir: rel, serverFile }
-  })
+export async function findReactRouterBuildDir(
+  checkoutRoot: string,
+  within: string | null = null,
+): Promise<ReactRouterBuild | null> {
+  return await scanForOutputDir(
+    checkoutRoot,
+    "build",
+    async (rel) => {
+      const dir = join(checkoutRoot, rel)
+      if (!(await isDir(join(dir, "client")))) return null
+      if (!(await isDir(join(dir, "server")))) return null
+      const serverFile = await soleServerBundle(join(dir, "server"))
+      return serverFile === null ? null : { dir: rel, serverFile }
+    },
+    EXCLUDED_OUTPUT_DIR_NAMES,
+    within,
+  )
 }
 
 /**
@@ -274,13 +292,19 @@ export async function findReactRouterBuildDir(checkoutRoot: string): Promise<Rea
  * `.git` and `public`, and prefers `.output` (the default) when it qualifies.
  * Returns the output dir relative to `checkoutRoot`, or `null`.
  */
-export async function findNitroOutputDir(checkoutRoot: string): Promise<string | null> {
-  return await scanForOutputDir(checkoutRoot, ".output", async (rel) => {
-    const dir = join(checkoutRoot, rel)
-    if (!(await isFile(join(dir, "server", "index.mjs")))) return null
-    if (!(await isDir(join(dir, "public")))) return null
-    return rel
-  })
+export async function findNitroOutputDir(checkoutRoot: string, within: string | null = null): Promise<string | null> {
+  return await scanForOutputDir(
+    checkoutRoot,
+    ".output",
+    async (rel) => {
+      const dir = join(checkoutRoot, rel)
+      if (!(await isFile(join(dir, "server", "index.mjs")))) return null
+      if (!(await isDir(join(dir, "public")))) return null
+      return rel
+    },
+    EXCLUDED_OUTPUT_DIR_NAMES,
+    within,
+  )
 }
 
 /**
@@ -291,13 +315,19 @@ export async function findNitroOutputDir(checkoutRoot: string): Promise<string |
  * workspace app whose `.next` was found was recorded as a server and
  * `next start` refused it). Relative to `checkoutRoot`, or `null`.
  */
-export async function findNextExportDir(checkoutRoot: string): Promise<string | null> {
-  return scanForOutputDir(checkoutRoot, "out", async (rel) => {
-    if (rel.split("/").pop() !== "out") return null
-    const complete =
-      (await isDir(join(checkoutRoot, rel, "_next"))) && (await isFile(join(checkoutRoot, rel, "index.html")))
-    return complete ? rel : null
-  })
+export async function findNextExportDir(checkoutRoot: string, within: string | null = null): Promise<string | null> {
+  return scanForOutputDir(
+    checkoutRoot,
+    "out",
+    async (rel) => {
+      if (rel.split("/").pop() !== "out") return null
+      const complete =
+        (await isDir(join(checkoutRoot, rel, "_next"))) && (await isFile(join(checkoutRoot, rel, "index.html")))
+      return complete ? rel : null
+    },
+    EXCLUDED_OUTPUT_DIR_NAMES,
+    within,
+  )
 }
 
 export { isDir, isFile, dependsOn, dependsOnAt, owningPackageDir }

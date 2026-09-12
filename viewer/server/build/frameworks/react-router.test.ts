@@ -268,6 +268,25 @@ describe("React Router adapter", () => {
     expect(shape).toBeNull()
   })
 
+  it("starts the app the configured output dir belongs to when a workspace built several (codex round 34)", async () => {
+    const root = await checkout({ serverBuild: true, serveBinary: true })
+    for (const rel of [join("apps", "web", "build", "server"), join("apps", "web", "build", "client")]) {
+      await mkdir(join(root, rel), { recursive: true })
+    }
+    await writeFile(join(root, "apps", "web", "build", "server", "index.js"), "const isSpaMode = false;\nexport { isSpaMode };\nexport default null")
+    await writeFile(join(root, "apps", "web", "build", "client", "index.html"), "<html></html>")
+    await writeFile(join(root, "apps", "web", "package.json"), JSON.stringify({ name: "web", dependencies: { "react-router": "^6.0.0" } }))
+
+    expect(await REACT_ROUTER_ADAPTER.inspectBuild(root, { within: join("apps", "web") })).toMatchObject({
+      kind: "server",
+      start: ["node_modules/.bin/react-router-serve", join("apps", "web", "build", "server", "index.js")],
+    })
+    expect(await REACT_ROUTER_ADAPTER.inspectBuild(root, { within: null })).toMatchObject({
+      kind: "server",
+      start: ["node_modules/.bin/react-router-serve", "build/server/index.js"],
+    })
+  })
+
   /**
    * Codex round 30. A workspace installs `@react-router/serve` under the app
    * package, so the launcher lives at `apps/web/node_modules/.bin/...`; the

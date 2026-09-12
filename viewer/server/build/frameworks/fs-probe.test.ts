@@ -61,6 +61,26 @@ describe("findNextDistDir", () => {
     expect(await findNextDistDir(r)).toBe(join("apps", "web", "build", "next"))
   })
 
+  /**
+   * Codex round 34. A workspace build writes a dist dir per app, and the
+   * scan took the first one it met. The caller names the app the configured
+   * output dir belongs to, and that app is looked at first.
+   */
+  it("looks inside the target app before the root when one is named", async () => {
+    const r = await root()
+    await writeDistDir(r, ".next")
+    await writeDistDir(r, "apps/web/.next")
+    await writeDistDir(r, "apps/web/build/next")
+    expect(await findNextDistDir(r, "apps/web")).toBe(join("apps", "web", ".next"))
+    expect(await findNextDistDir(r, null)).toBe(".next")
+  })
+
+  it("falls back to the whole checkout when the target app has no dist dir", async () => {
+    const r = await root()
+    await writeDistDir(r, "apps/admin/.next")
+    expect(await findNextDistDir(r, "apps/web")).toBe(join("apps", "admin", ".next"))
+  })
+
   it("does not follow a symlinked directory out of the checkout (codex round 31)", async () => {
     const outside = await root()
     await writeDistDir(outside, "app/.next")
@@ -150,6 +170,16 @@ describe("findReactRouterBuildDir", () => {
     const r = await root()
     await writeReactRouterBuild(r, join("out", "rr"))
     expect(await findReactRouterBuildDir(r)).toEqual({ dir: join("out", "rr"), serverFile: "index.js" })
+  })
+
+  it("looks inside the target app before the root when one is named (codex round 34)", async () => {
+    const r = await root()
+    await writeReactRouterBuild(r, "build")
+    await writeReactRouterBuild(r, join("apps", "web", "dist"))
+    expect(await findReactRouterBuildDir(r, join("apps", "web"))).toEqual({
+      dir: join("apps", "web", "dist"),
+      serverFile: "index.js",
+    })
   })
 
   it("does not follow a symlinked directory out of the checkout (codex round 31)", async () => {
@@ -253,6 +283,13 @@ describe("findNitroOutputDir", () => {
     const r = await root()
     await writeNitroOutput(r, join("build", "nitro"))
     expect(await findNitroOutputDir(r)).toBe(join("build", "nitro"))
+  })
+
+  it("looks inside the target app before the root when one is named (codex round 34)", async () => {
+    const r = await root()
+    await writeNitroOutput(r, ".output")
+    await writeNitroOutput(r, join("apps", "web", "dist"))
+    expect(await findNitroOutputDir(r, join("apps", "web"))).toBe(join("apps", "web", "dist"))
   })
 
   it("finds a workspace app's nested output.dir four segments down (apps/web/dist/nitro, codex round 31)", async () => {

@@ -34,10 +34,14 @@ const DEFAULT_OUTPUT_DIR = ".output"
 
 export const NUXT_ADAPTER: FrameworkAdapter = {
   id: "nuxt",
-  async inspectBuild(checkoutRoot) {
-    const outputDir = (await isFile(join(checkoutRoot, DEFAULT_OUTPUT_DIR, "server", "index.mjs")))
-      ? DEFAULT_OUTPUT_DIR
-      : await findNitroOutputDir(checkoutRoot)
+  async inspectBuild(checkoutRoot, target) {
+    // The app the configured output dir belongs to is looked at first
+    // (codex round 34): its own default `.output`, then the scan from there.
+    const within = target?.within ?? null
+    const defaultDir = within === null ? DEFAULT_OUTPUT_DIR : join(within, DEFAULT_OUTPUT_DIR)
+    const outputDir = (await isFile(join(checkoutRoot, defaultDir, "server", "index.mjs")))
+      ? defaultDir
+      : await findNitroOutputDir(checkoutRoot, within)
 
     // Codex round 29, item 1. `dependsOn` used to read only the workspace
     // root's `package.json`. In an npm or pnpm workspace `nuxt` is declared
@@ -56,10 +60,10 @@ export const NUXT_ADAPTER: FrameworkAdapter = {
         reason: "Nuxt with a server build",
       }
     }
-    if (await isFile(join(checkoutRoot, DEFAULT_OUTPUT_DIR, "public", "index.html"))) {
+    if (await isFile(join(checkoutRoot, defaultDir, "public", "index.html"))) {
       return {
         kind: "static",
-        outputDir: join(DEFAULT_OUTPUT_DIR, "public"),
+        outputDir: join(defaultDir, "public"),
         reason: "Nuxt static generation",
       }
     }

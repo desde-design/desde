@@ -41,8 +41,22 @@ export type BuildShape =
    */
   | { kind: "unsupported"; reason: string }
 
+/**
+ * Where the prototype's configured output dir points (codex round 34).
+ * `within` is the package directory that owns it, relative to the checkout
+ * root, or `null` when the root's own package does. A workspace build can
+ * write outputs for several apps, and each adapter used to take the first
+ * one its scan met, so a prototype configured to publish `apps/web` could
+ * start the root app or a sibling instead. Adapters look inside `within`
+ * first and fall back to the whole checkout only when nothing there
+ * qualifies.
+ */
+export interface BuildTarget {
+  within: string | null
+}
+
 export interface FrameworkAdapter {
   readonly id: string
   /** `null` when this adapter does not recognise the checkout. */
-  inspectBuild(checkoutRoot: string): Promise<BuildShape | null>
+  inspectBuild(checkoutRoot: string, target?: BuildTarget): Promise<BuildShape | null>
 }

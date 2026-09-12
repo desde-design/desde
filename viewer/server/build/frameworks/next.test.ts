@@ -632,6 +632,26 @@ describe("inspectBuild", () => {
       reason: "This Next.js build needs the next package installed to run.",
     })
   })
+  /**
+   * Codex round 34. A workspace that builds its root app AND `apps/web`
+   * leaves two dist dirs; the first the scan met used to win, so a prototype
+   * whose settings name `apps/web` started the root app. The configured
+   * output dir says which app is meant, and that app is looked at first.
+   */
+  it("starts the app the configured output dir belongs to, not the first dist dir the scan meets", async () => {
+    const root = await checkout({ buildId: true, nextBinary: true })
+    await mkdir(join(root, "apps", "web", ".next"), { recursive: true })
+    await writeFile(join(root, "apps", "web", ".next", "BUILD_ID"), "def456")
+    await writeFile(join(root, "apps", "web", ".next", "required-server-files.json"), "{}")
+    await writeFile(join(root, "apps", "web", "package.json"), JSON.stringify({ name: "web", dependencies: { next: "^16.0.0" } }))
+
+    const web = await inspectBuild(root, join("apps", "web", "out"))
+    expect(web).toMatchObject({ kind: "server", start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1", join("apps", "web")] })
+
+    const rootApp = await inspectBuild(root, "out")
+    expect(rootApp).toMatchObject({ kind: "server", start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"] })
+  })
+
   it("recognises a Nuxt server checkout through the default ADAPTERS", async () => {
     const root = await mkdtemp(join(tmpdir(), "fw-nuxt-"))
     try {
