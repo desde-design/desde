@@ -413,6 +413,19 @@ const deploymentServe: Migration = {
 }
 
 /**
+ * The directory a server deployment's `server_start` runs in, relative to
+ * its checkout (codex round 39). Nullable: `NULL` is the checkout root,
+ * which is true of every row written before this migration.
+ */
+const deploymentServerCwd: Migration = {
+  version: 9,
+  description: "deployments: server_cwd column",
+  up(db) {
+    db.exec(`ALTER TABLE deployments ADD COLUMN server_cwd TEXT;`)
+  },
+}
+
+/**
  * The real migration list, applied on every boot after the baseline schema
  * `exec` in `SqliteStorage`'s constructor. See the comment above
  * `project_repo_configs` in sqlite-storage.ts for why a versioned mechanism
@@ -431,6 +444,7 @@ export const MIGRATIONS: Migration[] = [
   deploymentSteps,
   deploymentCommitMessage,
   deploymentServe,
+  deploymentServerCwd,
 ]
 
 /**

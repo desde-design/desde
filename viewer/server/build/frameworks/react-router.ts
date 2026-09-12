@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { dependsOnAt, findReactRouterBuildDir, isFile, owningPackageDir, type ReactRouterBuild } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
@@ -88,6 +88,19 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
           kind: "unsupported",
           reason:
             "This React Router build needs @react-router/serve to run. Add it to the project, or build a static (SPA) output.",
+        }
+      }
+      // Codex round 39. `react-router-serve` resolves the bundle's own
+      // `assetsBuildDirectory` (`build/client`) and `public/` against the
+      // working directory, so a workspace app has to run from its own
+      // directory or every asset 404s. The argv's paths are relative to
+      // that directory; the process manager runs it there.
+      if (appDir !== null) {
+        return {
+          kind: "server",
+          start: [relative(appDir, serveBinaryRel), relative(appDir, serverBundleRel)],
+          cwd: appDir,
+          reason: "React Router framework mode with a server build",
         }
       }
       return {

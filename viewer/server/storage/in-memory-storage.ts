@@ -258,6 +258,7 @@ export class InMemoryStorage implements StorageAdapter {
       steps: null,
       serve: "static",
       serverStart: null,
+      serverCwd: null,
       createdAt: this.nextTimestamp(),
     }
     this.deployments.set(deployment.id, deployment)

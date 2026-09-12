@@ -279,7 +279,8 @@ describe("React Router adapter", () => {
 
     expect(await REACT_ROUTER_ADAPTER.inspectBuild(root, { within: join("apps", "web") })).toMatchObject({
       kind: "server",
-      start: ["node_modules/.bin/react-router-serve", join("apps", "web", "build", "server", "index.js")],
+      start: [join("..", "..", "node_modules", ".bin", "react-router-serve"), join("build", "server", "index.js")],
+      cwd: join("apps", "web"),
     })
     expect(await REACT_ROUTER_ADAPTER.inspectBuild(root, { within: null })).toMatchObject({
       kind: "server",
@@ -303,9 +304,13 @@ describe("React Router adapter", () => {
         appPackageJson: { "react-router": "^6.0.0" },
       }),
     )
+    // Codex round 39: run from the app directory, with paths relative to it,
+    // since react-router-serve resolves `build/client` and `public` against
+    // its working directory.
     expect(shape).toEqual({
       kind: "server",
-      start: [join("apps", "web", "node_modules", ".bin", "react-router-serve"), join("apps", "web", "build", "server", "index.js")],
+      start: ["node_modules/.bin/react-router-serve", join("build", "server", "index.js")],
+      cwd: join("apps", "web"),
       reason: "React Router framework mode with a server build",
     })
   })
@@ -321,7 +326,11 @@ describe("React Router adapter", () => {
         appPackageJson: { "react-router": "^6.0.0" },
       }),
     )
-    expect(shape).toMatchObject({ kind: "server", start: ["node_modules/.bin/react-router-serve", join("apps", "web", "build", "server", "index.js")] })
+    expect(shape).toMatchObject({
+      kind: "server",
+      start: [join("..", "..", "node_modules", ".bin", "react-router-serve"), join("build", "server", "index.js")],
+      cwd: join("apps", "web"),
+    })
   })
 
   it("reports unsupported when neither the app package nor the root has react-router-serve", async () => {

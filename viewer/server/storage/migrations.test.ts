@@ -814,6 +814,7 @@ describe("a very old deployment: the FULL pre-branch schema, all five migrations
       // row, and `server_start` is nullable the same way `steps` is.
       serve: "static",
       serverStart: null,
+      serverCwd: null,
       createdAt: "2026-02-02T02:00:00.000Z",
     })
 
@@ -910,6 +911,7 @@ describe("migration 5 — deployments gains a nullable warnings column", () => {
       // `server_start` is nullable.
       serve: "static",
       serverStart: null,
+      serverCwd: null,
       createdAt: "2026-02-01T00:00:00.000Z",
     })
 

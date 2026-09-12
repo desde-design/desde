@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process"
 import { connect as netConnect, createServer } from "node:net"
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
-import { basename, join } from "node:path"
+import { basename, join, resolve, sep } from "node:path"
 import { promisify } from "node:util"
 import { buildEnv } from "../build/exec"
 import { checkoutDirFor } from "../build/checkouts"
@@ -118,7 +118,7 @@ export class PrototypeProcessError extends Error {
 }
 
 export interface PrototypeProcesses {
-  ensure(deployment: Pick<Deployment, "id" | "serverStart">): Promise<{ port: number }>
+  ensure(deployment: Pick<Deployment, "id" | "serverStart"> & { serverCwd?: string | null }): Promise<{ port: number }>
   touch(deploymentId: string): void
   /**
    * Runs `fn` with a request lease held against this deployment's process,
@@ -924,7 +924,12 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
    * `starting`: `spawned` and `ready` carry it, and either is refused once
    * something else has moved the record on.
    */
-  async function startChild(id: string, serverStart: string[], generation: number): Promise<{ port: number }> {
+  async function startChild(
+    id: string,
+    serverStart: string[],
+    serverCwd: string | null,
+    generation: number,
+  ): Promise<{ port: number }> {
     // The record this start was granted on. `forget` (a prune, a project
     // delete) can drop it while the awaits below are pending, and every
     // apply after an await goes through `entryFor`, which would CREATE a
@@ -935,12 +940,19 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     const stillOurs = (): boolean => startEntry !== undefined && entries.get(id) === startEntry
     const abandonedBeforeSpawn = (): PrototypeProcessError =>
       new PrototypeProcessError({ state: "stopped" }, RETIRED_REFUSAL)
+    let checkoutDir: string
     let cwd: string
     try {
       // Inside the try: a malformed id makes `checkoutDirFor` throw
       // synchronously, and that must land here too, not escape as an
       // uncaught rejection.
-      cwd = checkoutDirFor(deps.checkoutsRoot, id)
+      checkoutDir = checkoutDirFor(deps.checkoutsRoot, id)
+      // A workspace app runs from its own directory inside the checkout
+      // (codex round 39). The stored path is only ever a plain relative one
+      // the adapter wrote, but it is checked here all the same: a value
+      // that resolves outside the checkout runs nothing.
+      cwd = serverCwd === null ? checkoutDir : resolve(checkoutDir, serverCwd)
+      if (cwd !== checkoutDir && !cwd.startsWith(checkoutDir + sep)) throw new Error("cwd escapes the checkout")
       if (!(await stat(cwd)).isDirectory()) throw new Error("not a directory")
     } catch {
       // Permanent: no number of restarts puts the files back, and no amount
@@ -976,7 +988,9 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // Inside the checkout, not beside it: `pruneSupersededCheckouts`
       // deletes `checkoutDirFor(...)` wholesale, so a home dir living inside
       // it is pruned along with the checkout instead of leaking forever.
-      home = join(cwd, HOME_DIR)
+      // At the checkout's ROOT, not the working directory, so the boot
+      // reap finds every pid file in one place.
+      home = join(checkoutDir, HOME_DIR)
       await mkdir(home, { recursive: true })
     } catch (error) {
       // Retryable: nothing here says the NEXT attempt would fail the same
@@ -1207,7 +1221,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
           // Assigned in this same lock hold, so a record that is `starting` is
           // never seen without its `opening` — the room-making loop's leader
           // wait depends on that.
-          const started = startChild(id, serverStart, generation).finally(() => {
+          const started = startChild(id, serverStart, deployment.serverCwd ?? null, generation).finally(() => {
             entry.opening = null
           })
           entry.opening = started

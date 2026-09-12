@@ -1,5 +1,5 @@
 import { spawn as spawnChild } from "node:child_process"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -703,6 +703,38 @@ describe("createPrototypeProcesses", () => {
     expect(isRecordedCommand("node /x/node_modules/.bin/next start -p 9999 -H 127.0.0.1", ["/x/node_modules/.bin/next", "start", "-p", "4321", "-H", "127.0.0.1"])).toBe(false)
     expect(isRecordedCommand("sleep 30", ["node", "server.js"])).toBe(false)
     expect(isRecordedCommand("sleep 30", [])).toBe(false)
+  })
+
+  /**
+   * Codex round 39. A workspace app's launcher resolves its own relative
+   * paths against the working directory, so the deployment records where
+   * to run from and the manager runs it there. The pid file stays at the
+   * checkout root, where the boot reap looks.
+   */
+  it("runs a workspace app's server from its own directory, keeping the pid file at the checkout root", async () => {
+    const root = await checkoutsRoot(["d1"])
+    await mkdir(join(root, "d1", "apps", "web"), { recursive: true })
+    await copyFile(FAKE, join(root, "d1", "apps", "web", "server.mjs"))
+    const procs = createPrototypeProcesses({ checkoutsRoot: root })
+    managers.push(procs)
+    const { port } = await procs.ensure({
+      id: "d1",
+      serverStart: ["node", "server.mjs"],
+      serverCwd: join("apps", "web"),
+    })
+    expect((await get(port)).status).toBe(200)
+    await vi.waitFor(async () => {
+      expect(JSON.parse(await readFile(join(root, "d1", ".desde-home", "server.pid"), "utf8")).pid).toBeTypeOf("number")
+    })
+  })
+
+  it("refuses a server cwd that escapes the checkout, as a permanent failure", async () => {
+    const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
+    managers.push(procs)
+    await expect(
+      procs.ensure({ id: "d1", serverStart: start(), serverCwd: join("..", "elsewhere") }),
+    ).rejects.toBeInstanceOf(PrototypeProcessError)
+    expect(procs.status("d1").state).toBe("crashed")
   })
 
   /**

@@ -11,6 +11,13 @@ export type BuildShape =
       start: string[]
       reason: string
       /**
+       * The directory `start` runs in, relative to the checkout root;
+       * absent means the root (codex round 39). A workspace app's launcher
+       * resolves its own relative paths against the working directory, so
+       * `start`'s paths are relative to this directory too.
+       */
+      cwd?: string
+      /**
        * An optional extra build-output-to-build-output copy step, run once
        * against the checkout AFTER detection and BEFORE the checkout is kept
        * for the process manager to run `start` in.

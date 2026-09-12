@@ -241,6 +241,7 @@ export function createBuildQueue(deps: BuildQueueDeps): BuildQueue {
               warnings: result.warnings ?? null,
               serve: result.serve,
               serverStart: result.serverStart,
+              serverCwd: result.serverCwd ?? null,
             })
             await deps.storage.updateProject(projectId, { activeDeploymentId: deployment.id })
             // S5: the build lane leaked identically to the upload lane —

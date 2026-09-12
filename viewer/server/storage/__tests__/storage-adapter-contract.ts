@@ -284,17 +284,21 @@ export function storageAdapterContract(
       const created = await store.createDeployment({ projectId: project.id })
       expect(created.serve).toBe("static")
       expect(created.serverStart).toBeNull()
+      expect(created.serverCwd).toBeNull()
 
       const updated = await store.updateDeployment(created.id, {
         serve: "server",
         serverStart: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
+        serverCwd: "apps/web",
       })
       expect(updated.serve).toBe("server")
       expect(updated.serverStart).toEqual(["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"])
+      expect(updated.serverCwd).toBe("apps/web")
 
       const readBack = await store.getDeployment(created.id)
       expect(readBack?.serve).toBe("server")
       expect(readBack?.serverStart).toEqual(["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"])
+      expect(readBack?.serverCwd).toBe("apps/web")
       const listed = await store.listDeployments(project.id)
       expect(listed[0]?.serve).toBe("server")
 

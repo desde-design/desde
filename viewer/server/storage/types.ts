@@ -217,6 +217,16 @@ export interface Deployment {
    * runs. `$PORT` is substituted at start. `null` for a static deployment.
    */
   serverStart: string[] | null
+  /**
+   * The directory `serverStart` runs in, relative to the kept checkout's
+   * root, or `null` for the root itself (codex round 39). A workspace app's
+   * launcher resolves its own relative paths against the working directory
+   * (`@react-router/serve` looks for `build/client` and `public` there), so
+   * an app under `apps/web` has to start from `apps/web`. Only ever a plain
+   * relative path inside the checkout; the process manager refuses
+   * anything else.
+   */
+  serverCwd: string | null
   /** ISO-8601 UTC timestamp. Not guaranteed unique; `createdAt` has millisecond resolution. */
   createdAt: string
 }
@@ -252,6 +262,7 @@ export interface DeploymentUpdatePatch {
   steps?: BuildStep[] | null
   serve?: DeploymentServe
   serverStart?: string[] | null
+  serverCwd?: string | null
 }
 
 /** Input for creating a comment. The author snapshot is denormalized — no user table exists until Phase 3. */

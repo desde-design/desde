@@ -61,6 +61,8 @@ export interface BuildResult {
   serve: "static" | "server"
   /** The argv for a `server` result; `null` otherwise. See `Deployment.serverStart`. */
   serverStart: string[] | null
+  /** Where that argv runs, relative to the checkout; `null` or absent for its root. See `Deployment.serverCwd`. */
+  serverCwd?: string | null
 }
 
 export interface BuildRunner {

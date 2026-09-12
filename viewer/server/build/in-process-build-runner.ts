@@ -261,6 +261,7 @@ export function createInProcessBuildRunner(opts: InProcessBuildRunnerOptions): B
               warnings: null,
               serve: "server",
               serverStart: shape.start,
+              serverCwd: shape.cwd ?? null,
             }
           }
           case "unsupported":
@@ -327,6 +328,7 @@ export function createInProcessBuildRunner(opts: InProcessBuildRunnerOptions): B
           warnings,
           serve: "static",
           serverStart: null,
+          serverCwd: null,
         }
       } catch (error) {
         // `UnsafeOutputError` is authored for a human and safe to show. Any
@@ -370,6 +372,7 @@ export function createInProcessBuildRunner(opts: InProcessBuildRunnerOptions): B
           failureReason: reason,
           serve: "static",
           serverStart: null,
+          serverCwd: null,
         }
       }
     },
