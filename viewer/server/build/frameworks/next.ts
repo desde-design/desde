@@ -24,7 +24,9 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
     // `output: "export"` build writes `out/_next/` and an `out/index.html`.
     // A bare `out/` left by another tool used to win over a valid server
     // build and get the deployment published as static (codex round 16).
-    if ((await isDir(join(checkoutRoot, "out", "_next"))) || (await isFile(join(checkoutRoot, "out", "index.html")))) {
+    // Both, not either: a committed `out/index.html` left over from an old
+    // export beside a fresh server build is a server build (codex round 19).
+    if ((await isDir(join(checkoutRoot, "out", "_next"))) && (await isFile(join(checkoutRoot, "out", "index.html")))) {
       return { kind: "static", outputDir: "out", reason: "Next.js static export" }
     }
 
