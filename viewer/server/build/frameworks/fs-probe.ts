@@ -149,7 +149,7 @@ export interface ReactRouterBuild {
  * The one server bundle directly under `serverDir`, or `null`.
  *
  * `index.js` is the default `serverBuildFile` and wins whenever it is there.
- * Otherwise a single `.js` or `.mjs` file is taken as the configured one. Two
+ * Otherwise a single `.js`, `.mjs` or `.cjs` file is taken as the configured one. Two
  * or more, with no `index.js` to prefer, is not a guess worth making: the
  * recorded start command would ENOENT or boot the wrong file on every cold
  * start, so the directory simply does not qualify.
@@ -164,7 +164,9 @@ async function soleServerBundle(serverDir: string): Promise<string | null> {
   }
   const bundles: string[] = []
   for (const name of names) {
-    if (!/\.(?:js|mjs)$/.test(name)) continue
+    // `.cjs` too: `serverModuleFormat: "cjs"` names its bundle that way
+    // (codex round 23).
+    if (!/\.(?:js|mjs|cjs)$/.test(name)) continue
     if (await isFile(join(serverDir, name))) bundles.push(name)
   }
   return bundles.length === 1 ? (bundles[0] ?? null) : null

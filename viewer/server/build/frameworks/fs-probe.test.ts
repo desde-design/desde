@@ -138,6 +138,12 @@ describe("findReactRouterBuildDir", () => {
     expect(await findReactRouterBuildDir(r)).toEqual({ dir: "build", serverFile: "index.js" })
   })
 
+  it("takes a sole .cjs bundle, the shape serverModuleFormat cjs writes (codex round 23)", async () => {
+    const r = await root()
+    await writeReactRouterBuild(r, "build", { serverFiles: ["app.cjs"] })
+    expect(await findReactRouterBuildDir(r)).toEqual({ dir: "build", serverFile: "app.cjs" })
+  })
+
   it("answers null when the server directory holds two bundles and no index.js", async () => {
     const r = await root()
     await writeReactRouterBuild(r, "build", { serverFiles: ["app.js", "chunk.mjs"] })
