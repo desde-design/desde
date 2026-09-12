@@ -127,6 +127,7 @@ function fakeProcesses(overrides: Partial<PrototypeProcesses> = {}): PrototypePr
     serverLog: () => "",
     startReaper: () => () => {},
     recordCount: () => 0,
+    reapOrphans: () => Promise.resolve(0),
     shutdown: () => Promise.resolve(),
     ...overrides,
   }

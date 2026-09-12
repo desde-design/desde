@@ -95,6 +95,14 @@ async function main(): Promise<void> {
   const prototypeProcesses = createPrototypeProcesses({
     checkoutsRoot: join(config.dataDir, "checkouts"),
   })
+  // A previous Viewer that died without its graceful shutdown (SIGKILL, an
+  // uncaught exception) left its detached children running, and this
+  // manager cannot see them (codex round 33). Reaped first, so no child is
+  // running out of a checkout the reconcile below removes.
+  const orphans = await prototypeProcesses.reapOrphans()
+  if (orphans > 0) {
+    console.log(`[viewer] stopped ${orphans} prototype server${orphans === 1 ? "" : "s"} left running by a previous Viewer`)
+  }
 
   const buildChangeBus = createBuildChangeBus()
   // Per-deployment loopback listeners: each one an `http.Server` on an

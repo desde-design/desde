@@ -1,7 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process"
+import { execFile, spawn, type ChildProcess } from "node:child_process"
 import { connect as netConnect, createServer } from "node:net"
-import { mkdir, stat } from "node:fs/promises"
-import { join } from "node:path"
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { basename, join } from "node:path"
+import { promisify } from "node:util"
 import { buildEnv } from "../build/exec"
 import { checkoutDirFor } from "../build/checkouts"
 import { createKeyedLock } from "../keyed-lock"
@@ -208,6 +209,19 @@ export interface PrototypeProcesses {
   startReaper(): () => void
   /** How many deployment records the manager holds. For tests and diagnostics; a forgotten deployment must not count. */
   recordCount(): number
+  /**
+   * Kills every child a PREVIOUS manager left running (codex round 33) and
+   * answers how many. `shutdown()` only runs on a graceful exit; a Viewer
+   * killed with SIGKILL, or brought down by an uncaught exception, leaves
+   * its detached children alive with nobody counting or stopping them, and
+   * a fresh manager cannot see them. Each spawn writes
+   * `<checkout>/.desde-home/server.pid` (the pid and the command line); this
+   * reads every one under `checkoutsRoot`, checks with `ps` that the pid is
+   * still that command (a reused pid is left alone), kills that child's
+   * whole process group, and removes the file. `server/index.ts` awaits it
+   * at boot, before anything is served.
+   */
+  reapOrphans(): Promise<number>
   shutdown(): Promise<void>
 }
 
@@ -215,6 +229,43 @@ export const MAX_RUNNING_SERVER_PROTOTYPES = 4
 
 /** How many times a cold start asks the port picker before giving up, when every answer is a port another child already holds. */
 const PORT_PICK_ATTEMPTS = 10
+
+/** Inside the child's scratch HOME, so it is pruned with the checkout. See `PrototypeProcesses.reapOrphans`. */
+const PID_FILE = "server.pid"
+/** The scratch HOME a child gets, inside its checkout. */
+const HOME_DIR = ".desde-home"
+
+const execFileAsync = promisify(execFile)
+
+/**
+ * What `ps` prints for a pid's command line, or `null` when no such process
+ * exists. Any other failure (no `ps` at all) rejects, so the caller can tell
+ * "gone" from "could not look".
+ */
+async function commandLineOf(pid: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-o", "args=", "-p", String(pid)])
+    const line = stdout.trim()
+    return line === "" ? null : line
+  } catch (error) {
+    // `ps` exits 1 for a pid that does not exist.
+    if (typeof (error as { code?: unknown }).code === "number") return null
+    throw error
+  }
+}
+
+/**
+ * Whether `ps`'s command line for a pid is the command a pid file recorded:
+ * the executable's own name and every argument, in order. A shebang launcher
+ * (`node_modules/.bin/next`) shows up as `node <script> start …`, so the
+ * arguments are matched as a substring rather than the whole line.
+ */
+export function isRecordedCommand(commandLine: string, command: string[]): boolean {
+  const [file, ...args] = command
+  if (!file) return false
+  if (!commandLine.includes(basename(file))) return false
+  return args.length === 0 || commandLine.includes(args.join(" "))
+}
 /** The log ring buffer is measured in characters (`string.slice`), not bytes. */
 const LOG_CHARS = 64 * 1024
 /**
@@ -885,7 +936,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // Inside the checkout, not beside it: `pruneSupersededCheckouts`
       // deletes `checkoutDirFor(...)` wholesale, so a home dir living inside
       // it is pruned along with the checkout instead of leaking forever.
-      home = join(cwd, ".desde-home")
+      home = join(cwd, HOME_DIR)
       await mkdir(home, { recursive: true })
     } catch (error) {
       // Retryable: nothing here says the NEXT attempt would fail the same
@@ -944,6 +995,15 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       entry.child = spawned
       spawned.stdout?.on("data", (b: Buffer) => append(entry, b.toString("utf8")))
       spawned.stderr?.on("data", (b: Buffer) => append(entry, b.toString("utf8")))
+      // Not awaited: the exit handler below must be wired before this
+      // function yields, or a child that dies at once is missed. A write
+      // that loses to the exit's own removal leaves a file naming a dead
+      // pid, which the next boot's reap reads and discards.
+      if (spawned.pid) {
+        void writeFile(join(home, PID_FILE), JSON.stringify({ pid: spawned.pid, command: [file, ...args] })).catch(
+          (error: unknown) => console.error("[viewer] could not record a prototype server's pid:", error),
+        )
+      }
       return { entry, child: spawned }
     })
 
@@ -967,6 +1027,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     child.once("exit", (code) => {
       exited = true
       reservedPorts.delete(port)
+      void rm(join(home, PID_FILE), { force: true }).catch(() => {})
       killTree(child, "SIGKILL")
       void lock.run(id, async () => {
         if (entries.get(id) !== entry || entry.child !== child) return
@@ -1225,6 +1286,62 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       timer.unref()
       return () => clearInterval(timer)
     },
+    async reapOrphans() {
+      let ids: string[]
+      try {
+        ids = await readdir(deps.checkoutsRoot)
+      } catch {
+        return 0
+      }
+      let reaped = 0
+      for (const id of ids) {
+        const pidFile = join(deps.checkoutsRoot, id, HOME_DIR, PID_FILE)
+        let recorded: { pid: number; command: string[] }
+        try {
+          const parsed = JSON.parse(await readFile(pidFile, "utf8")) as { pid?: unknown; command?: unknown }
+          if (
+            typeof parsed.pid !== "number" ||
+            !Array.isArray(parsed.command) ||
+            !parsed.command.every((part) => typeof part === "string")
+          ) {
+            throw new Error("malformed")
+          }
+          recorded = { pid: parsed.pid, command: parsed.command as string[] }
+        } catch (error) {
+          // No file is the common case; a malformed one is discarded.
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            await rm(pidFile, { force: true }).catch(() => {})
+          }
+          continue
+        }
+        let commandLine: string | null
+        try {
+          commandLine = await commandLineOf(recorded.pid)
+        } catch (error) {
+          console.error(`[viewer] could not check the prototype server recorded for ${id}:`, error)
+          continue
+        }
+        if (commandLine !== null && isRecordedCommand(commandLine, recorded.command)) {
+          // The whole group, then the leader itself, the way `killTree` and
+          // the ready-refused path do for a child this manager spawned.
+          for (const target of [-recorded.pid, recorded.pid]) {
+            try {
+              process.kill(target, "SIGKILL")
+            } catch {
+              /* already gone */
+            }
+          }
+          reaped++
+        } else if (commandLine !== null) {
+          console.warn(
+            `[viewer] pid ${recorded.pid} recorded for ${id} now runs something else; leaving it alone`,
+          )
+        }
+        await rm(pidFile, { force: true }).catch(() => {})
+      }
+      return reaped
+    },
+
     async shutdown() {
       // First thing, before any await: from here on `ensure` refuses, so a
       // request that lands while the children are being killed cannot start

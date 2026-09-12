@@ -1,9 +1,11 @@
+import { spawn as spawnChild } from "node:child_process"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   createPrototypeProcesses,
+  isRecordedCommand,
   pickLoopbackPort,
   PrototypeProcessError,
   substitutePort,
@@ -548,6 +550,95 @@ describe("createPrototypeProcesses", () => {
     expect(a.port).toBe(b.port)
     const startingLines = procs.serverLog("d1").split("\n").filter((l) => l.includes("fake server: starting"))
     expect(startingLines).toHaveLength(1)
+  })
+
+  /**
+   * Codex round 33. `shutdown()` only runs on a graceful exit. A Viewer
+   * killed with SIGKILL leaves its detached children running with nobody
+   * counting or stopping them, so each spawn records its pid and command
+   * line inside the checkout, and the next manager kills what it finds.
+   */
+  describe("reapOrphans", () => {
+    it("kills a server a previous manager left running and removes its pid file", async () => {
+      const root = await checkoutsRoot(["d1"])
+      // Stands in for the Viewer that died: never shut down before the next
+      // manager boots over the same checkouts.
+      const previous = createPrototypeProcesses({ checkoutsRoot: root })
+      await previous.ensure({ id: "d1", serverStart: start() })
+      const pidFile = join(root, "d1", ".desde-home", "server.pid")
+      await vi.waitFor(async () => {
+        expect(JSON.parse(await readFile(pidFile, "utf8")).pid).toBeTypeOf("number")
+      })
+      const { pid, command } = JSON.parse(await readFile(pidFile, "utf8")) as { pid: number; command: string[] }
+      expect(alive(pid)).toBe(true)
+      expect(command).toEqual([process.execPath, FAKE])
+
+      const next = createPrototypeProcesses({ checkoutsRoot: root })
+      managers.push(next, previous)
+      expect(await next.reapOrphans()).toBe(1)
+      await vi.waitFor(() => expect(alive(pid)).toBe(false), { timeout: 2000, interval: 25 })
+      await expect(readFile(pidFile, "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+      // A second boot finds nothing.
+      expect(await next.reapOrphans()).toBe(0)
+    })
+
+    it("leaves a pid that now runs something else alone, and discards the stale file", async () => {
+      const root = await checkoutsRoot(["d1"])
+      const bystander = spawnChild("sleep", ["30"], { stdio: "ignore" })
+      try {
+        await mkdir(join(root, "d1", ".desde-home"), { recursive: true })
+        await writeFile(
+          join(root, "d1", ".desde-home", "server.pid"),
+          JSON.stringify({ pid: bystander.pid, command: ["node", "not-this-program.js"] }),
+        )
+        const procs = createPrototypeProcesses({ checkoutsRoot: root })
+        managers.push(procs)
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+        try {
+          expect(await procs.reapOrphans()).toBe(0)
+        } finally {
+          warn.mockRestore()
+        }
+        expect(alive(bystander.pid as number)).toBe(true)
+        await expect(readFile(join(root, "d1", ".desde-home", "server.pid"), "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        })
+      } finally {
+        bystander.kill("SIGKILL")
+      }
+    })
+
+    it("discards a pid file for a process that is already gone, and a malformed one", async () => {
+      const root = await checkoutsRoot(["gone", "junk", "none"])
+      const dead = spawnChild("sleep", ["30"], { stdio: "ignore" })
+      const deadPid = dead.pid as number
+      dead.kill("SIGKILL")
+      await vi.waitFor(() => expect(alive(deadPid)).toBe(false), { timeout: 2000, interval: 25 })
+      await mkdir(join(root, "gone", ".desde-home"), { recursive: true })
+      await writeFile(join(root, "gone", ".desde-home", "server.pid"), JSON.stringify({ pid: deadPid, command: ["node"] }))
+      await mkdir(join(root, "junk", ".desde-home"), { recursive: true })
+      await writeFile(join(root, "junk", ".desde-home", "server.pid"), "not json")
+      const procs = createPrototypeProcesses({ checkoutsRoot: root })
+      managers.push(procs)
+      expect(await procs.reapOrphans()).toBe(0)
+      for (const id of ["gone", "junk"]) {
+        await expect(readFile(join(root, id, ".desde-home", "server.pid"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+      }
+    })
+
+    it("answers 0 when the checkouts root does not exist yet", async () => {
+      const procs = createPrototypeProcesses({ checkoutsRoot: join(tmpdir(), "procs-missing-root-" + process.pid) })
+      managers.push(procs)
+      expect(await procs.reapOrphans()).toBe(0)
+    })
+  })
+
+  it("isRecordedCommand matches the executable's name and the arguments, not the whole line", () => {
+    expect(isRecordedCommand("node /x/node_modules/.bin/next start -p 4321 -H 127.0.0.1", ["/x/node_modules/.bin/next", "start", "-p", "4321", "-H", "127.0.0.1"])).toBe(true)
+    expect(isRecordedCommand("/usr/bin/node /x/.next/standalone/server.js", ["/usr/local/bin/node", "/x/.next/standalone/server.js"])).toBe(true)
+    expect(isRecordedCommand("node /x/node_modules/.bin/next start -p 9999 -H 127.0.0.1", ["/x/node_modules/.bin/next", "start", "-p", "4321", "-H", "127.0.0.1"])).toBe(false)
+    expect(isRecordedCommand("sleep 30", ["node", "server.js"])).toBe(false)
+    expect(isRecordedCommand("sleep 30", [])).toBe(false)
   })
 
   /**
