@@ -86,6 +86,29 @@ describe("pruneSupersededCheckouts", () => {
     expect(await exists(checkoutDirFor(root, older.id))).toBe(true)
     expect(await exists(checkoutDirFor(root, newer.id))).toBe(true)
   })
+  it("leaves a build in flight alone, whether counting or pruning (codex round 21)", async () => {
+    // An upload activates while a server build has moved its checkout into
+    // place but not yet flipped to deployed. That checkout is the build's;
+    // sweeping it as unfinished failed the build or activated it with no
+    // checkout.
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    const root = await tmp()
+    const older = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await mkdir(checkoutDirFor(root, older.id), { recursive: true })
+    const newer = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await mkdir(checkoutDirFor(root, newer.id), { recursive: true })
+    const inFlight = await storage.createDeployment({ projectId: project.id, status: "building" })
+    await mkdir(checkoutDirFor(root, inFlight.id), { recursive: true })
+    const upload = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const removed: string[] = []
+    await pruneSupersededCheckouts(storage, root, project.id, upload.id, async (id) => {
+      removed.push(id)
+    })
+    expect(removed).toEqual([])
+    expect(await exists(checkoutDirFor(root, inFlight.id))).toBe(true)
+    expect(await exists(checkoutDirFor(root, older.id))).toBe(true)
+  })
   it("counts only deployments that have a checkout when choosing what to keep", async () => {
     // Codex round 9. A failed build, or a static one, has no checkout. When
     // one of those is NEWER than the previous server build, it used to take

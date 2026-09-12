@@ -103,6 +103,13 @@ export async function pruneSupersededCheckouts(
         () => false,
       )
       if (!present) continue
+      // A build in flight owns its checkout: the runner has already moved
+      // it into place and is about to activate it. An upload activating at
+      // that moment must leave it alone (codex round 21: it was swept as
+      // unfinished, and the build failed mid-copy or went live with no
+      // checkout). Uploads do not go through the build queue, so the two
+      // are not serialised; this is the rule that keeps them apart.
+      if (d.status === "building") continue
       if (d.status === "deployed") retainable.push(d.id)
       else unfinished.push(d.id)
     }
