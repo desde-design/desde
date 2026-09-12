@@ -73,10 +73,17 @@ const UPSTREAM_TIMEOUT_MS = 60_000
  * RFC 7230 hop-by-hop headers, plus the ones this proxy owns or strips.
  *
  * `cookie` is NOT here: the prototype's own cookies are forwarded, minus the
- * viewer's (see {@link forwardedCookieHeader}). The three `x-forwarded-*`
- * names are dropped so the values this proxy sets below cannot end up
- * alongside a client-supplied copy under a different letter case, which Node
- * would send as two headers.
+ * viewer's (see {@link forwardedCookieHeader}). The `x-forwarded-*` names are
+ * dropped so the values this proxy sets below cannot end up alongside a
+ * client-supplied copy under a different letter case, which Node would send as
+ * two headers.
+ *
+ * `forwarded` and `x-real-ip` are dropped outright, and nothing is put back in
+ * their place. Together with `x-forwarded-for` they are how a proxy states WHO
+ * the client is, and this proxy is the only thing here entitled to say it: an
+ * app running with `trust proxy` on believes these headers for rate limiting,
+ * geo, audit logs and allowlists, so passing a caller's own values through
+ * would let anyone who can reach a prototype origin choose their address.
  */
 const DROP_REQUEST = new Set([
   "connection",
@@ -92,6 +99,9 @@ const DROP_REQUEST = new Set([
   "host",
   "x-forwarded-host",
   "x-forwarded-proto",
+  "x-forwarded-for",
+  "forwarded",
+  "x-real-ip",
 ])
 const DROP_RESPONSE = new Set([
   "connection",
@@ -231,6 +241,12 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
       headers["x-forwarded-host"] = browserHost
     }
     headers["x-forwarded-proto"] = opts.forwardedProto
+    // The one address the viewer actually knows. Express resolves `req.ip`
+    // through `VIEWER_TRUST_PROXY`, so it is the real client as far as this
+    // deployment is configured to be able to tell. When there is none to
+    // state, none is sent: an app is better off seeing no forwarding header
+    // at all than a value neither it nor the viewer can stand behind.
+    if (typeof req.ip === "string" && req.ip !== "") headers["x-forwarded-for"] = req.ip
 
     const maxRewriteBytes = opts.maxRewriteBytes ?? MAX_REWRITTEN_HTML_BYTES
     const upstreamTimeoutMs = opts.upstreamTimeoutMs ?? UPSTREAM_TIMEOUT_MS

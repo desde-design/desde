@@ -149,6 +149,41 @@ describe("proxyToProcess", () => {
   })
 
   /**
+   * The client does not get to name the client.
+   *
+   * `X-Forwarded-For`, `Forwarded` and `X-Real-IP` used to pass straight
+   * through, so anyone who could reach a prototype origin could hand the
+   * child any address they liked — and an app running with `trust proxy` on
+   * (every Express template that expects to sit behind one) would believe it,
+   * for rate limiting, geo, audit logs, allowlists. The viewer states the one
+   * value it actually knows: `req.ip`, which Express resolves through
+   * `VIEWER_TRUST_PROXY`.
+   */
+  it("replaces the client's own forwarding headers with the address the viewer sees", async () => {
+    let seen: { forwardedFor?: string; forwarded?: string; realIp?: string } = {}
+    const port = await child((req, res) => {
+      seen = {
+        forwardedFor: req.headers["x-forwarded-for"] as string | undefined,
+        forwarded: req.headers["forwarded"] as string | undefined,
+        realIp: req.headers["x-real-ip"] as string | undefined,
+      }
+      res.end("ok")
+    })
+
+    await request(appFor(port))
+      .get("/p/acme/")
+      .set("X-Forwarded-For", "1.2.3.4")
+      .set("Forwarded", "for=1.2.3.4;proto=https")
+      .set("X-Real-IP", "1.2.3.4")
+
+    expect(seen.forwarded, "the client's Forwarded reached the child").toBeUndefined()
+    expect(seen.realIp, "the client's X-Real-IP reached the child").toBeUndefined()
+    expect(seen.forwardedFor, "the client chose its own X-Forwarded-For").not.toBe("1.2.3.4")
+    // Supertest connects over loopback, so this is what the viewer sees.
+    expect(seen.forwardedFor).toMatch(/127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/)
+  })
+
+  /**
    * Framing policy is the viewer's. A Next template that sets
    * `X-Frame-Options: DENY` would otherwise refuse to load in the review
    * iframe wherever the prototype CSP is off (`VIEWER_PROTOTYPE_CSP=off`),
