@@ -141,8 +141,16 @@ export type PrototypeOriginErrorBody =
       serve: DeploymentServe
       range: { from: number; to: number } | null
       deploymentId?: string
+      /** Whether the shell's same-host fallback needs the capability; carried on a 503 too (codex round 35). */
+      capabilityRequired: boolean
     }
-  | { error: string; reason: "listener-failed"; serve: DeploymentServe; deploymentId?: string }
+  | {
+      error: string
+      reason: "listener-failed"
+      serve: DeploymentServe
+      deploymentId?: string
+      capabilityRequired: boolean
+    }
 
 /**
  * What `buildPrototypeOriginBody` hands back: the HTTP status the plain
@@ -381,6 +389,12 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
           serve,
           range: deps.config.loopbackPortRange,
           ...(deploymentId ? { deploymentId } : {}),
+          // A static prototype keeps loading from the shell's own path
+          // prefix while the origin is unavailable, and THAT needs the
+          // capability a private project requires; without this the shell
+          // could not tell an access change apart from the 503 it already
+          // had, and the fallback frame's assets 404ed (codex round 35).
+          capabilityRequired: !prototypeAnonymouslyReadable(project.access, policy.allowPublicLinks),
         },
       }
     }
@@ -414,7 +428,14 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
     return {
       status: 503,
       deploymentId,
-      body: { ...ORIGIN_UNAVAILABLE, reason: "listener-failed", serve, ...(deploymentId ? { deploymentId } : {}) },
+      body: {
+        ...ORIGIN_UNAVAILABLE,
+        reason: "listener-failed",
+        serve,
+        ...(deploymentId ? { deploymentId } : {}),
+        // Same reason as the ports-exhausted body above (codex round 35).
+        capabilityRequired: !prototypeAnonymouslyReadable(project.access, policy.allowPublicLinks),
+      },
     }
   }
 }
@@ -603,8 +624,9 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
      * comes from exactly those inputs.
      */
     const accessKey = (from: Project, against: ProjectReadPolicy, result: PrototypeOriginResult): string => {
-      const capabilityRequired =
-        result.status === 200 && "capabilityRequired" in result.body ? result.body.capabilityRequired : null
+      // A 503 body carries the verdict too (codex round 35), so an access
+      // change during an outage is noticed like any other.
+      const capabilityRequired = "capabilityRequired" in result.body ? result.body.capabilityRequired : null
       return `${from.access}|${against.allowPublicLinks}|${capabilityRequired}`
     }
     /** The key for the body this connection last sent. Set by `send`, and only there. */
@@ -822,7 +844,14 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         statedOrigin: stated.origin,
       })
       if (closed) return
-      if (next.status === 503 && previous.status === 503 && next.body.reason === previous.body.reason) return
+      if (
+        next.status === 503 &&
+        previous.status === 503 &&
+        next.body.reason === previous.body.reason &&
+        next.body.capabilityRequired === previous.body.capabilityRequired
+      ) {
+        return
+      }
       current = next
       send(next, freshProject)
       // Same rule the connect path and `refollowActiveDeployment` follow. A
@@ -912,9 +941,10 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         return
       }
       // Before the access check, so a 503 keeps its own "do not repeat the
-      // same failure" rule. Nothing about a 503 body depends on access, and
-      // the send that ends the 503 sets the key from the fresh project
-      // anyway.
+      // same failure" rule. The retry re-resolves with the fresh project, so
+      // an access change during the outage reaches the page through the
+      // fresh 503 body's `capabilityRequired` (codex round 35), and the send
+      // that ends the 503 sets the key from the fresh project anyway.
       if (current.status === 503) {
         await retryUnavailableOrigin(freshProject)
         return

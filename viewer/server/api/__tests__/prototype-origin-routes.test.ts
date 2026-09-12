@@ -985,6 +985,8 @@ describe("GET /projects/:id/prototype-origin", () => {
         reason: "listener-failed",
         serve: "static",
         deploymentId: project.activeDeploymentId,
+        // The verdict rides on a 503 too (codex round 35); all-members needs one.
+        capabilityRequired: true,
       })
     })
 
@@ -1008,6 +1010,8 @@ describe("GET /projects/:id/prototype-origin", () => {
         reason: "listener-failed",
         serve: "server",
         deploymentId: project.activeDeploymentId,
+        // The verdict rides on a 503 too (codex round 35); all-members needs one.
+        capabilityRequired: true,
       })
     })
 
@@ -1814,6 +1818,36 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     expect(frames[0]?.capabilityRequired).toBe(false)
     expect(frames[1]?.capabilityRequired).toBe(true)
     expect(frames[1]?.process).toEqual(running)
+  })
+
+  /**
+   * Codex round 35. A static prototype whose origin is unavailable keeps
+   * loading from the shell's own path prefix, and THAT needs the capability
+   * once the project turns private. The 503 body used to carry no
+   * `capabilityRequired`, so the change was invisible to the page and the
+   * fallback frame's assets 404ed until a manual reload.
+   */
+  it("sends a fresh 503 body when the project's access changes during the outage", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    const ctx = setup({ prototypeListeners: refusingListeners(), prototypeOriginStreamPingMs: 20 })
+    const project = await seedProject(ctx.storage, { access: "public-link" })
+
+    const { received, destroy } = await readUntil(
+      ctx.app,
+      project,
+      (r) => originFrames(r).length >= 2 && r.split(": ping").length > 5,
+      {
+        onFirstByte: () => {
+          void ctx.storage.updateProject(project.id, { access: "invited" })
+        },
+      },
+    )
+    destroy()
+
+    const frames = originFrames(received) as { reason?: string; capabilityRequired?: boolean }[]
+    expect(frames).toHaveLength(2)
+    expect(frames[0]).toMatchObject({ reason: "listener-failed", capabilityRequired: false })
+    expect(frames[1]).toMatchObject({ reason: "listener-failed", capabilityRequired: true })
   })
 
   /** A 503 that keeps saying the same thing sends nothing: the page already shows it. */
