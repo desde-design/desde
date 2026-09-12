@@ -234,6 +234,21 @@ describe("proxyToProcess", () => {
    * iframe wherever the prototype CSP is off (`VIEWER_PROTOTYPE_CSP=off`),
    * where no `frame-ancestors` directive is there to supersede it.
    */
+  it("strips the fixed hop-by-hop response headers even when Connection does not name them (codex round 26)", async () => {
+    const port = await child((_req, res) => {
+      res.setHeader("trailer", "x-checksum")
+      res.setHeader("upgrade", "h2c")
+      res.setHeader("proxy-authenticate", "Basic")
+      res.setHeader("x-kept", "1")
+      res.end("x")
+    })
+    const res = await request(appFor(port)).get("/p/acme/")
+    expect(res.headers.trailer).toBeUndefined()
+    expect(res.headers.upgrade).toBeUndefined()
+    expect(res.headers["proxy-authenticate"]).toBeUndefined()
+    expect(res.headers["x-kept"]).toBe("1")
+  })
+
   it("strips the headers a Connection header nominates, in both directions (codex round 24)", async () => {
     let seen: Record<string, unknown> = {}
     const port = await child((req, res) => {

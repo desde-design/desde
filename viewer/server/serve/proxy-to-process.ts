@@ -104,8 +104,16 @@ const DROP_REQUEST = new Set([
   "x-real-ip",
 ])
 const DROP_RESPONSE = new Set([
+  // The fixed hop-by-hop set, the same as on the request side (codex round
+  // 26): a trailer this proxy never relays, an upgrade it never performs,
+  // a proxy challenge that is not its own.
   "connection",
   "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "upgrade",
   "transfer-encoding",
   "content-security-policy",
   "content-security-policy-report-only",
