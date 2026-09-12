@@ -215,6 +215,24 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
   // every load, so this deployment's own state survives its reloads. Sent
   // for a top-level or framed document, which is what the review page
   // asks for; a bare asset fetch is not the moment.
+  // No service worker on a loopback origin, ever (codex round 50). A fixed
+  // range recycles origins, and a root-scoped worker a previous deployment
+  // registered answers a navigation to the recycled port from its own cache
+  // before this listener is even asked, so no header sent from here could
+  // clear it. The browser fetches a worker's script with this request
+  // header and without the worker in the way, and a 404 there both refuses
+  // a new registration and, on the next update check, clears an old one.
+  // Web workers are untouched: only the service-worker script fetch carries
+  // the header. A prototype that needs its worker reviews on its own
+  // subdomain.
+  app.use((req, res, next) => {
+    if (req.headers["service-worker"] === "script") {
+      res.status(404).end()
+      return
+    }
+    next()
+  })
+
   if (deps.recycledOrigin) app.use(clearSiteDataUntilDelivered())
 
   app.use(createPinnedDeploymentRewrite({ deploymentId: deps.deploymentId, slug: deps.slug }))

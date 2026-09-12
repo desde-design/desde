@@ -436,6 +436,29 @@ describe("createLoopbackListenerRegistry", () => {
       expect(third.origin).not.toBe(replacement.origin)
     })
 
+    /**
+     * Codex round 50. A root-scoped service worker a previous deployment
+     * registered answers a navigation to a recycled port from its own cache
+     * before the listener is asked, so nothing sent from here can clear it.
+     * The worker's SCRIPT fetch bypasses the worker and carries this header:
+     * a 404 there refuses a new registration and clears an old one on its
+     * next update check.
+     */
+    it("answers 404 to a service worker script fetch, and serves the same file to anything else", async () => {
+      const registry = makeRegistry({ d1: { "sw.js": "self.addEventListener('fetch', () => {})" } })
+      const a = await registry.ensure(deployment("d1"), V4)
+      const asWorker = await httpCall({
+        host: "127.0.0.1",
+        port: a.port,
+        path: "/sw.js",
+        hostHeader: `127.0.0.1:${a.port}`,
+        extraHeaders: { "Service-Worker": "script" },
+      })
+      expect(asWorker.status).toBe(404)
+      const asScript = await httpCall({ host: "127.0.0.1", port: a.port, path: "/sw.js", hostHeader: `127.0.0.1:${a.port}` })
+      expect(asScript.status).toBe(200)
+    })
+
     it("rotateForDeployment closes the deployment's listeners and lets a fresh one open", async () => {
       const registry = makeRegistry({ d1: {} })
       const first = await registry.ensure(deployment("d1"), V4)
