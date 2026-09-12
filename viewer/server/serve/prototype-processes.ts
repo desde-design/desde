@@ -241,7 +241,8 @@ const PORT_PICK_ATTEMPTS = 10
  * See `PrototypeProcesses.reapOrphans`.
  */
 const pidFileName = (generation: number): string => `server.${generation}.pid`
-const PID_FILE_PATTERN = /^server\.\d+\.pid$/
+/** A record, or the temp file it is written through: a kill between the write and the rename leaves the latter (codex round 62). */
+const PID_FILE_PATTERN = /^server\.\d+\.pid(\.tmp)?$/
 /** The scratch HOME a child gets, inside its checkout. */
 const HOME_DIR = ".desde-home"
 

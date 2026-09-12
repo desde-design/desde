@@ -715,6 +715,28 @@ describe("createPrototypeProcesses", () => {
       await vi.waitFor(() => expect(procs.status("d1")).toMatchObject({ state: "crashed", retryable: true }))
     })
 
+    /**
+     * Codex round 62. The record is written through a temp file and renamed
+     * into place; a kill between the two leaves only the temp file, which
+     * names the child just as well.
+     */
+    it("reaps a child whose record was left as the temp file", async () => {
+      const root = await checkoutsRoot(["d1"])
+      const previous = createPrototypeProcesses({ checkoutsRoot: root })
+      await previous.ensure({ id: "d1", serverStart: start() })
+      const home = join(root, "d1", ".desde-home")
+      const record = await readFile(join(home, "server.1.pid"), "utf8")
+      const { pid } = JSON.parse(record) as { pid: number }
+      await writeFile(join(home, "server.1.pid.tmp"), record)
+      await rm(join(home, "server.1.pid"))
+
+      const next = createPrototypeProcesses({ checkoutsRoot: root })
+      managers.push(next, previous)
+      expect(await next.reapOrphans()).toBe(1)
+      await vi.waitFor(() => expect(alive(pid)).toBe(false), { timeout: 2000, interval: 25 })
+      await expect(readFile(join(home, "server.1.pid.tmp"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+    })
+
     it("has recorded the pid before ensure resolves (codex round 45)", async () => {
       const root = await checkoutsRoot(["d1"])
       const procs = createPrototypeProcesses({ checkoutsRoot: root })
