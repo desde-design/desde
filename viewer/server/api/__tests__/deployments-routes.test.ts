@@ -364,18 +364,19 @@ describe("deployments API", () => {
 
     const project = await createProject(app)
 
-    // Two older SERVER deployments, each with its own on-disk checkout —
+    // Three older SERVER deployments, each with its own on-disk checkout,
     // the shape `pruneSupersededCheckouts` reaps. `CHECKOUT_RETENTION_COUNT`
-    // is 2, so once the upload below activates a THIRD deployment, only the
-    // newest of these two survives; the oldest is pruned.
+    // is 2, and an active UPLOAD has no checkout so it takes no slot (codex
+    // round 18): once the upload below activates, the two newest of these
+    // survive and the oldest is pruned.
     const older: string[] = []
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 3; i++) {
       const d = await deps.storage.createDeployment({ projectId: project.id, status: "deployed" })
       await deps.storage.updateDeployment(d.id, { serve: "server", serverStart: ["node", "x.js"] })
       await fs.mkdir(checkoutDirFor(checkoutsRoot, d.id), { recursive: true })
       older.push(d.id)
     }
-    const [oldest, newest] = older
+    const [oldest, , newest] = older
 
     await request(app)
       .post(`/api/v1/projects/${project.id}/deployments`)

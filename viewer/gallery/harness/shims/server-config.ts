@@ -48,6 +48,7 @@ const DEFAULT_CONFIG: ViewerConfig = {
   loopbackBindAllInterfaces: false,
   loopbackBindNetworkUnrecognized: false,
   loopbackBind: "auto",
+  loopbackInContainer: false,
 }
 
 let current: ViewerConfig = DEFAULT_CONFIG
