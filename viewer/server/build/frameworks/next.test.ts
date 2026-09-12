@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm, stat } from "node:fs/promises"
+import { mkdtemp, mkdir, writeFile, rm, stat, utimes } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -35,11 +35,6 @@ async function checkout(opts: {
     join(root, "package.json"),
     JSON.stringify({ name: "x", dependencies: opts.next === false ? {} : { next: "^16.0.0" } }),
   )
-  if (opts.out) {
-    // What `output: "export"` writes: the asset folder and a root page.
-    await mkdir(join(root, "out", "_next"), { recursive: true })
-    await writeFile(join(root, "out", "index.html"), "<html></html>")
-  }
   // A folder named `out` that some other tool left, with nothing Next wrote.
   if (opts.outBare) await mkdir(join(root, "out"), { recursive: true })
   // A stale `out/index.html` from an old export, with no asset folder.
@@ -52,6 +47,16 @@ async function checkout(opts: {
     await mkdir(join(root, distDir), { recursive: true })
     await writeFile(join(root, distDir, "BUILD_ID"), "abc123")
     await writeFile(join(root, distDir, "required-server-files.json"), "{}")
+  }
+  // Written LAST, because that is the order a real `output: "export"` build
+  // writes them in: the dist dir first, then the export it produces out of it.
+  // Which is newer now decides between them (codex round 20, item 4), so a
+  // fixture that wrote the export first would stand for a case that cannot
+  // happen.
+  if (opts.out) {
+    // What `output: "export"` writes: the asset folder and a root page.
+    await mkdir(join(root, "out", "_next"), { recursive: true })
+    await writeFile(join(root, "out", "index.html"), "<html></html>")
   }
   if (opts.standalone) {
     await mkdir(join(root, distDir, "standalone"), { recursive: true })
@@ -74,6 +79,10 @@ async function checkout(opts: {
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })))
 })
+/** Sets a file's access and modification times, so a test can say which build happened first. */
+async function touch(p: string, whenMs: number): Promise<void> {
+  await utimes(p, whenMs / 1000, whenMs / 1000)
+}
 async function exists(p: string): Promise<boolean> {
   try {
     await stat(p)
@@ -104,6 +113,52 @@ describe("Next.js adapter", () => {
   it("prefers out/ when both exist: a static export that also left .next behind", async () => {
     const shape = await NEXT_ADAPTER.inspectBuild(await checkout({ out: true, buildId: true }))
     expect(shape?.kind).toBe("static")
+  })
+
+  /**
+   * Codex round 20, item 4. A complete `out/` used to win over a server build
+   * outright, so a project that exported once and then switched to
+   * server-rendered routes was published as the old export for ever: every
+   * rebuild wrote a fresh `.next` that the stale `out/` kept outranking. The
+   * two are compared by write time instead, `out/index.html` against
+   * `<distDir>/BUILD_ID`, and the newer one is the build that just happened.
+   */
+  it("reads a server build newer than a complete out/ as the current build", async () => {
+    const root = await checkout({ out: true, buildId: true, nextBinary: true })
+    await touch(join(root, "out", "index.html"), Date.now() - 60_000)
+    await touch(join(root, ".next", "BUILD_ID"), Date.now())
+    expect((await NEXT_ADAPTER.inspectBuild(root))?.kind).toBe("server")
+  })
+
+  it("keeps reading an export newer than the server build as static", async () => {
+    const root = await checkout({ out: true, buildId: true, nextBinary: true })
+    await touch(join(root, ".next", "BUILD_ID"), Date.now() - 60_000)
+    await touch(join(root, "out", "index.html"), Date.now())
+    expect(await NEXT_ADAPTER.inspectBuild(root)).toEqual({
+      kind: "static",
+      outputDir: "out",
+      reason: "Next.js static export",
+    })
+  })
+
+  /**
+   * Same timestamp, the same answer as before this comparison existed: an
+   * export that left its dist dir behind as scratch is the case the tie
+   * stands for, and reading it as static is what that case wants.
+   */
+  it("reads an export and a server build written at the same moment as static", async () => {
+    const root = await checkout({ out: true, buildId: true, nextBinary: true })
+    const when = Date.now()
+    await touch(join(root, "out", "index.html"), when)
+    await touch(join(root, ".next", "BUILD_ID"), when)
+    expect((await NEXT_ADAPTER.inspectBuild(root))?.kind).toBe("static")
+  })
+
+  it("compares against a custom distDir's BUILD_ID too", async () => {
+    const root = await checkout({ out: true, buildId: true, distDir: "build", nextBinary: true })
+    await touch(join(root, "out", "index.html"), Date.now() - 60_000)
+    await touch(join(root, "build", "BUILD_ID"), Date.now())
+    expect((await NEXT_ADAPTER.inspectBuild(root))?.kind).toBe("server")
   })
   it("does not let a stale out/index.html with no asset folder win over a server build (codex round 19)", async () => {
     const shape = await NEXT_ADAPTER.inspectBuild(await checkout({ outIndexOnly: true, buildId: true, nextBinary: true }))

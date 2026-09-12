@@ -1,4 +1,4 @@
-import { cp } from "node:fs/promises"
+import { cp, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { dependsOn, findNextDistDir, isDir, isFile } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
@@ -26,12 +26,28 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
     // build and get the deployment published as static (codex round 16).
     // Both, not either: a committed `out/index.html` left over from an old
     // export beside a fresh server build is a server build (codex round 19).
-    if ((await isDir(join(checkoutRoot, "out", "_next"))) && (await isFile(join(checkoutRoot, "out", "index.html")))) {
-      return { kind: "static", outputDir: "out", reason: "Next.js static export" }
-    }
+    const exportComplete =
+      (await isDir(join(checkoutRoot, "out", "_next"))) && (await isFile(join(checkoutRoot, "out", "index.html")))
 
     const distDir = await findNextDistDir(checkoutRoot)
-    if (!distDir) return null
+    if (!distDir) return exportComplete ? { kind: "static", outputDir: "out", reason: "Next.js static export" } : null
+
+    // Both builds are on disk, so the question is which one the last build
+    // wrote (codex round 20, item 4). A complete `out/` used to win outright,
+    // which published a project that had exported once and then switched to
+    // server-rendered routes as that old export for ever: every rebuild wrote
+    // a fresh dist dir the stale `out/` kept outranking. The newer of the two
+    // marker files is the build that just happened. A TIE keeps the old
+    // answer, static: an export that leaves its dist dir behind as scratch
+    // writes both at about the same moment, and that is the case the
+    // preference was written for.
+    if (exportComplete) {
+      const exportedAt = await modifiedAt(join(checkoutRoot, "out", "index.html"))
+      const builtAt = await modifiedAt(join(checkoutRoot, distDir, "BUILD_ID"))
+      if (exportedAt === null || builtAt === null || exportedAt >= builtAt) {
+        return { kind: "static", outputDir: "out", reason: "Next.js static export" }
+      }
+    }
 
     const standaloneServerRel = join(distDir, "standalone", "server.js")
     if (await isFile(join(checkoutRoot, standaloneServerRel))) {
@@ -67,6 +83,19 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
       reason: "Next.js with server-rendered routes",
     }
   },
+}
+
+/**
+ * When a file was last written, in milliseconds, or `null` when it cannot be
+ * read. `null` is not "long ago": a marker that cannot be stat'd leaves the
+ * comparison undecided, and the caller keeps the answer it had before.
+ */
+async function modifiedAt(path: string): Promise<number | null> {
+  try {
+    return (await stat(path)).mtimeMs
+  } catch {
+    return null
+  }
 }
 
 /**
