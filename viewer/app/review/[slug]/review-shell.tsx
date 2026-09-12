@@ -572,21 +572,17 @@ export function ReviewShell({
    * is the closest thing. This is the honest signal available, and it is far
    * better than nothing.
    */
-  const [prototypeLoaded, setPrototypeLoaded] = useState(false)
   /**
-   * A new `frameGeneration` (above) remounts the iframe — a fresh DOM node,
-   * presumed unloaded again. Without this, `prototypeLoaded` would still read
-   * `true` from the frame the restart replaced, and the "Loading" overlay
-   * (below) would never come back while the new one cold-starts.
-   *
-   * An effect keyed on the generation rather than moving this state into a
-   * wrapper component around the iframe. Both work; this one leaves every
-   * other hook in this file in the position it already had, and a wrapper
-   * would have to forward the ref, the props and the `onLoad` for no gain.
+   * WHICH frame fired `onLoad`, stamped with its generation, rather than a
+   * boolean reset after a remount. The reset used to run in an effect, so a
+   * replacement frame that loaded fast fired `onLoad` first and the effect
+   * then wrote `false` over it, leaving the overlay stuck when the bridge
+   * could not say hello (a strict CSP, an old bundle); and for one commit
+   * the replacement was painted as loaded when it was not (codex round 28).
+   * Comparing generations has neither problem and needs no effect.
    */
-  useEffect(() => {
-    setPrototypeLoaded(false)
-  }, [frameGeneration])
+  const [loadedGeneration, setLoadedGeneration] = useState<BridgeGeneration | null>(null)
+  const prototypeLoaded = loadedGeneration === frameGeneration
   /**
    * The overlay clears on EITHER the iframe's own load event or the bridge
    * handshake, because the load event alone loses a race it cannot recover
@@ -1110,6 +1106,21 @@ export function ReviewShell({
     [activeTab, activateInspector, deactivateInspector],
   )
 
+  /**
+   * A replacement frame (a new generation) comes up with a bridge whose
+   * inspector is off. Comments are replayed on its handshake by the bridge
+   * hook; the inspector's on/off state was not, so with the Inspect tab
+   * open the tab stayed selected while clicks no longer inspected (codex
+   * round 28). Re-armed here the moment the current frame's bridge is
+   * ready, unless the rail is collapsed, which is the one case that turns
+   * it off on purpose.
+   */
+  useEffect(() => {
+    if (bridgeReadyGeneration === undefined || bridgeReadyGeneration !== frameGeneration) return
+    if (activeTab !== "inspect" || railCollapsed) return
+    activateInspector()
+  }, [bridgeReadyGeneration, frameGeneration, activeTab, railCollapsed, activateInspector])
+
   const handleRowClick = useCallback(
     (id: string) => {
       clearDraft()
@@ -1363,7 +1374,7 @@ export function ReviewShell({
               ref={iframeRef}
               {...iframeProps}
               className="h-full w-full border-0"
-              onLoad={() => setPrototypeLoaded(true)}
+              onLoad={() => setLoadedGeneration(frameGeneration)}
             />
 
             {/* Over the iframe, not in place of it: the frame has to be in the DOM
