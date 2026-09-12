@@ -106,11 +106,25 @@ export interface ServeRouterDeps {
 export function childPathFor(originalUrl: string): string {
   const mark = originalUrl.indexOf("?")
   if (mark === -1) return originalUrl
-  const params = new URLSearchParams(originalUrl.slice(mark + 1))
-  if (!params.has(CAPABILITY_SEGMENT)) return originalUrl
-  params.delete(CAPABILITY_SEGMENT)
-  const rest = params.toString()
-  return rest === "" ? originalUrl.slice(0, mark) : `${originalUrl.slice(0, mark)}?${rest}`
+  // The capability segment is cut out of the raw query text; nothing else
+  // is touched. Re-serialising through `URLSearchParams` changed the other
+  // parameters' bytes (`%20` to `+`, `%2f` to `%2F`, a bare `flag` to
+  // `flag=`), which broke an app that signs or reads its raw query (codex
+  // round 28).
+  const query = originalUrl.slice(mark + 1)
+  const segments = query.split("&")
+  const kept = segments.filter((segment) => {
+    const name = segment.split("=", 1)[0] ?? ""
+    let decoded = name
+    try {
+      decoded = decodeURIComponent(name.replace(/\+/g, " "))
+    } catch {
+      // Not decodable: it is not our parameter either way.
+    }
+    return decoded !== CAPABILITY_SEGMENT
+  })
+  if (kept.length === segments.length) return originalUrl
+  return kept.length === 0 ? originalUrl.slice(0, mark) : `${originalUrl.slice(0, mark)}?${kept.join("&")}`
 }
 
 /** Minimal HTML escaping for the two refusal pages below. */

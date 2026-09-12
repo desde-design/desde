@@ -12,7 +12,7 @@ import { contentTypeFor } from "../mime"
 import { buildHostAllowlist, isAllowedHost } from "../host-allowlist"
 import { resolveOrigins } from "../prototype-origin-resolve"
 import { PrototypeProcessError, type PrototypeProcesses } from "../prototype-processes"
-import { createServeRouter, type PinnedDeploymentRequest } from "../serve-router"
+import { childPathFor, createServeRouter, type PinnedDeploymentRequest } from "../serve-router"
 import { resolveIsolatedOriginServerCsp, type SubdomainRequest } from "../subdomain"
 import type { PrototypeOriginHostRequest } from "../prototype-host-scope"
 import { mintPrototypeCapability } from "../prototype-capability"
@@ -166,6 +166,18 @@ async function setup(
   stable.use(inner)
   return { storage, assets, app: stable.app }
 }
+
+describe("childPathFor", () => {
+  it("cuts the capability out of the raw query and leaves every other byte alone (codex round 28)", () => {
+    expect(childPathFor("/orders?~c=tok&a=b%20c&flag&z=%2f")).toBe("/orders?a=b%20c&flag&z=%2f")
+    expect(childPathFor("/orders?a=1&%7Ec=tok")).toBe("/orders?a=1")
+    expect(childPathFor("/orders?~c=tok")).toBe("/orders")
+  })
+  it("returns the path untouched when there is no capability in it", () => {
+    expect(childPathFor("/orders?a=b%20c&flag")).toBe("/orders?a=b%20c&flag")
+    expect(childPathFor("/orders")).toBe("/orders")
+  })
+})
 
 describe("createServeRouter", () => {
   let ctx: Awaited<ReturnType<typeof setup>>
