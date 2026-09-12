@@ -28,6 +28,8 @@ async function checkout(opts: {
   publicDir?: boolean
   /** Whether `node_modules/.bin/next` exists in this checkout. */
   nextBinary?: boolean
+  /** Whether `<parent of distDir>/node_modules/.bin/next` exists (codex round 29, item 2). */
+  appNextBinary?: boolean
   /**
    * Dependencies to write into a package.json at the PARENT of `distDir` —
    * the app directory a workspace scan derives (codex round 29, item 1).
@@ -81,6 +83,11 @@ async function checkout(opts: {
   if (opts.nextBinary) {
     await mkdir(join(root, "node_modules", ".bin"), { recursive: true })
     await writeFile(join(root, "node_modules", ".bin", "next"), "#!/usr/bin/env node\n")
+  }
+  if (opts.appNextBinary) {
+    const appDir = dirname(distDir)
+    await mkdir(join(root, appDir, "node_modules", ".bin"), { recursive: true })
+    await writeFile(join(root, appDir, "node_modules", ".bin", "next"), "#!/usr/bin/env node\n")
   }
   if (opts.appPackageJson) {
     const appDir = dirname(distDir)
@@ -256,6 +263,75 @@ describe("Next.js adapter", () => {
       await checkout({ next: false, distDir: "apps/web", buildId: true, nextBinary: true }),
     )
     expect(shape).toBeNull()
+  })
+})
+
+/**
+ * Codex round 29, item 2. `next start` with no directory argument reads the
+ * ROOT `next.config` and `.next`. When the found dist dir belongs to a
+ * DIFFERENT package in a workspace (its own `package.json` declares
+ * `next` — the same marker item 1 reads, and what tells a real workspace
+ * app apart from a checkout that merely configured a custom, nested
+ * `distDir` at the root), starting `next start` with no argument boots the
+ * wrong app. The app directory must be passed as the command's positional
+ * argument, and the binary preferred is the app's own
+ * `node_modules/.bin/next` when the workspace installed one there.
+ */
+describe("Next.js adapter — nested app directory", () => {
+  it("starts from the app directory, preferring the app's own next binary", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(
+      await checkout({
+        distDir: "apps/web",
+        buildId: true,
+        nextBinary: true,
+        appNextBinary: true,
+        appPackageJson: { next: "^16.0.0" },
+      }),
+    )
+    expect(shape).toEqual({
+      kind: "server",
+      start: [join("apps", "node_modules", ".bin", "next"), "start", "-p", "$PORT", "-H", "127.0.0.1", "apps"],
+      reason: "Next.js with server-rendered routes",
+    })
+  })
+
+  it("falls back to the root next binary when the app directory has none", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(
+      await checkout({ distDir: "apps/web", buildId: true, nextBinary: true, appPackageJson: { next: "^16.0.0" } }),
+    )
+    expect(shape).toEqual({
+      kind: "server",
+      start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1", "apps"],
+      reason: "Next.js with server-rendered routes",
+    })
+  })
+
+  it("reports unsupported when neither the app directory nor the root has a next binary", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(
+      await checkout({ distDir: "apps/web", buildId: true, appPackageJson: { next: "^16.0.0" } }),
+    )
+    expect(shape).toEqual({
+      kind: "unsupported",
+      reason: "This Next.js build needs the next package installed to run.",
+    })
+  })
+
+  it("does not nest the argv when the dist dir is nested only by a custom distDir (no app package.json)", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(await checkout({ distDir: "build/next", buildId: true, nextBinary: true }))
+    expect(shape).toEqual({
+      kind: "server",
+      start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
+      reason: "Next.js with server-rendered routes",
+    })
+  })
+
+  it("leaves a root-level build's argv unchanged (no app directory appended)", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(await checkout({ buildId: true, nextBinary: true }))
+    expect(shape).toEqual({
+      kind: "server",
+      start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
+      reason: "Next.js with server-rendered routes",
+    })
   })
 })
 

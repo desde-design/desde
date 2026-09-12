@@ -46,6 +46,16 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
     const appHasNext = appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "next"))
     if (!rootHasNext && !appHasNext) return null
 
+    // Codex round 29, items 2 & 3. `appDir` is nested for two different
+    // reasons, and only one of them is a workspace: a custom `distDir`
+    // configured at the checkout root (`distDir: "build/next"`) is still a
+    // ROOT build — plain `next start` already finds it correctly, because
+    // its `next.config` is the root's own. A dist dir that belongs to a
+    // DIFFERENT package is told apart by that package's own `package.json`
+    // declaring `next` — the same signal the gate above already reads.
+    // Only THAT case routes the start command at the app directory.
+    const nestedAppDir = appHasNext ? appDir : null
+
     // Both builds are on disk, so the question is which one the last build
     // wrote (codex round 20, item 4). A complete `out/` used to win outright,
     // which published a project that had exported once and then switched to
@@ -80,20 +90,39 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
       }
     }
 
+    // Codex round 29, item 2. `next start` with no directory argument reads
+    // the ROOT `next.config` and `.next` — started that way against a
+    // workspace app's dist dir it reads the wrong app's config, or none at
+    // all. The app directory is passed as the command's positional
+    // argument, and the binary preferred is the app's own
+    // `node_modules/.bin/next` when the workspace installed one there,
+    // falling back to the root's.
+    //
     // Codex round 15, Fix 3. `next` is a dependency (checked above), but a
     // dependency in `package.json` does not prove the binary actually got
     // installed into THIS checkout's `node_modules/.bin` — recording the
     // `start` command without checking it exists marked such a checkout
     // `deployed` and then ENOENT'd on every cold start.
-    if (!(await isFile(join(checkoutRoot, "node_modules", ".bin", "next")))) {
+    const appNextBinaryRel = nestedAppDir !== null ? join(nestedAppDir, "node_modules", ".bin", "next") : null
+    const nextBinaryRel =
+      appNextBinaryRel !== null && (await isFile(join(checkoutRoot, appNextBinaryRel)))
+        ? appNextBinaryRel
+        : (await isFile(join(checkoutRoot, "node_modules", ".bin", "next")))
+          ? "node_modules/.bin/next"
+          : null
+    if (nextBinaryRel === null) {
       return { kind: "unsupported", reason: "This Next.js build needs the next package installed to run." }
     }
     return {
       kind: "server",
       // The checkout's own next, never one the Viewer bundles. `next start`
       // reads `next.config` itself — including a custom `distDir` — so the
-      // discovered dist dir does not change this recorded argv.
-      start: ["node_modules/.bin/next", "start", "-p", "$PORT", "-H", "127.0.0.1"],
+      // discovered dist dir does not change this recorded argv beyond the
+      // app directory appended below.
+      start:
+        nestedAppDir !== null
+          ? [nextBinaryRel, "start", "-p", "$PORT", "-H", "127.0.0.1", nestedAppDir]
+          : [nextBinaryRel, "start", "-p", "$PORT", "-H", "127.0.0.1"],
       reason: "Next.js with server-rendered routes",
     }
   },
