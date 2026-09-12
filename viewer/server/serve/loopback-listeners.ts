@@ -171,6 +171,16 @@ export interface LoopbackListenerAppContext {
    * coming back on the origin it had before, which the registry prefers.
    */
   recycledOrigin: boolean
+  /**
+   * This listener's host is a numeric loopback address shared with every
+   * other listener on it (`127.0.0.1`, `[::1]`), so a browser keeps ONE
+   * cookie jar for all of them and a server prototype's cookies need a
+   * scope of their own (codex round 42). False on a host of the
+   * deployment's own (`<deploymentId>.localhost`, the fixed-range pairing),
+   * where the jar is already the deployment's and a scope would only change
+   * the names a page's own script reads (codex round 57).
+   */
+  cookieHostShared: boolean
   /** Called on every request the listener serves. */
   touch: () => void
   /**
@@ -652,6 +662,7 @@ export function createLoopbackListenerRegistry(
         hostPort: `${host}:${address.port}`,
         shellOrigin: target.shellOrigin,
         recycledOrigin,
+        cookieHostShared: !host.endsWith(".localhost"),
         touch: () => {
           record.lastUsedAt = now()
         },

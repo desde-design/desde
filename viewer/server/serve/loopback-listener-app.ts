@@ -262,10 +262,12 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
       bridgeVersion: deps.bridgeVersion,
       prototypeCsp: deps.prototypeCsp,
       prototypeProcesses: deps.prototypeProcesses,
-      // Every listener on this host is `127.0.0.1:<port>` (or `[::1]`) and a
-      // browser scopes cookies by host, so a server prototype's cookies are
-      // stored under a scope of its own (codex round 42).
-      cookieScope: cookieScopeFor(deps.deploymentId),
+      // On a numeric loopback host every listener is `127.0.0.1:<port>` (or
+      // `[::1]`) and a browser scopes cookies by host, so a server
+      // prototype's cookies are stored under a scope of its own (codex round
+      // 42). On a host of the deployment's own the jar is already its own,
+      // and a scope would only rename what a page's script reads (round 57).
+      ...(deps.cookieHostShared ? { cookieScope: cookieScopeFor(deps.deploymentId) } : {}),
     }),
   )
 

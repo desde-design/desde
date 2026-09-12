@@ -992,6 +992,61 @@ describe("createLoopbackListenerRegistry", () => {
      * half). This is the shape that actually ships, through a socket, with a
      * body on the wire.
      */
+    /**
+     * Codex round 57. On a numeric loopback host every listener shares the
+     * browser's cookie jar, so a server prototype's cookies are stored under
+     * a scope of its own (round 42); on a host of the deployment's own the
+     * jar is already its own, and the scope would only rename what a page's
+     * script reads.
+     */
+    it("scopes a child's cookies on a shared numeric host and leaves them alone on a per-deployment host", async () => {
+      const child = createServer((_req, res) => {
+        res.setHeader("set-cookie", "XSRF-TOKEN=abc; Path=/")
+        res.end("ok")
+      })
+      childServers.push(child)
+      await new Promise<void>((r) => child.listen(0, "127.0.0.1", () => r()))
+      const childPort = (child.address() as AddressInfo).port
+      const setCookieOn = (listener: { host: string; port: number }): Promise<string | string[] | undefined> =>
+        new Promise((resolve, reject) => {
+          const req = httpRequest(
+            { host: "127.0.0.1", port: listener.port, path: "/", agent: false, headers: { Host: `${listener.host}:${listener.port}` } },
+            (res) => {
+              res.resume()
+              res.on("end", () => resolve(res.headers["set-cookie"]))
+            },
+          )
+          req.on("error", reject)
+          req.end()
+        })
+      async function serverDeployment(storage: InMemoryStorage) {
+        const project = await storage.createProject({ slug: "one", name: "One" })
+        const dep = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+        await storage.updateDeployment(dep.id, { serve: "server", serverStart: ["node", "x.js"] })
+        return { id: dep.id, slug: "one", projectId: project.id, serve: "server" as const }
+      }
+      const processes = { ...nullPrototypeProcesses(), ensure: () => Promise.resolve({ port: childPort }) }
+
+      const sharedStorage = new InMemoryStorage()
+      const shared = makeRegistry({}, { storage: sharedStorage, prototypeProcesses: processes })
+      const onShared = await shared.ensure(await serverDeployment(sharedStorage), V4)
+      expect(onShared.host).toBe("127.0.0.1")
+      expect(String(await setCookieOn(onShared))).toMatch(/^p[0-9a-f]{8}_XSRF-TOKEN=abc; Path=\/$/)
+
+      const ownStorage = new InMemoryStorage()
+      const probe = createServer((_req, res) => res.end())
+      await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()))
+      const free = (probe.address() as AddressInfo).port
+      await new Promise<void>((r) => probe.close(() => r()))
+      const own = makeRegistry(
+        {},
+        { storage: ownStorage, prototypeProcesses: processes, portRange: { from: free, to: free }, bindAllInterfaces: false },
+      )
+      const onOwn = await own.ensure(await serverDeployment(ownStorage), V4)
+      expect(onOwn.host).toMatch(/\.localhost$/)
+      expect(String(await setCookieOn(onOwn))).toBe("XSRF-TOKEN=abc; Path=/")
+    })
+
     it("carries a POST body through to a server deployment's process", async () => {
       let seen: { method?: string; url?: string; contentType?: string; body: string } | null = null
       const child = createServer((req, res) => {
