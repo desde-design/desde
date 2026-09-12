@@ -110,6 +110,18 @@ describe("originModeBannerLines", () => {
     })
   })
 
+  const WIDE_BIND_LINE =
+    "[viewer] Prototype ports bind every interface so Docker can publish them. On --network host " +
+    "set VIEWER_LOOPBACK_BIND=loopback."
+  const NARROW_BIND_IN_CONTAINER_LINE =
+    "[viewer] Prototype ports stay on the container's own loopback (VIEWER_LOOPBACK_BIND=auto). " +
+    "With -p published ports set VIEWER_LOOPBACK_BIND=all. On --network host this is right."
+  const WIDE_BIND_IN_CONTAINER_LINE =
+    "[viewer] Prototype ports bind every interface (VIEWER_LOOPBACK_BIND=all) inside a container. " +
+    "With -p published ports that is right. On --network host set VIEWER_LOOPBACK_BIND=loopback, " +
+    "or the ports face the LAN."
+  const BIND_LINES = [WIDE_BIND_LINE, NARROW_BIND_IN_CONTAINER_LINE, WIDE_BIND_IN_CONTAINER_LINE]
+
   /**
    * Codex round 6, Fix 1. `loopbackBindAllInterfaces` means Docker publishes
    * the ports, and an operator on `--network host` needs to be told to turn
@@ -117,12 +129,8 @@ describe("originModeBannerLines", () => {
    * unnecessary and a real exposure there, since host networking ignores
    * `-p` and faces the ports at the LAN directly.
    */
-  describe("loopback: the wide-bind line (VIEWER_LOOPBACK_BIND)", () => {
-    const WIDE_BIND_LINE =
-      "[viewer] Prototype ports bind every interface so Docker can publish them. On --network host " +
-      "set VIEWER_LOOPBACK_BIND=loopback."
-
-    it("prints the extra line when the bind is widened", () => {
+  describe("loopback: the plain wide-bind line (VIEWER_LOOPBACK_BIND=all outside a container)", () => {
+    it("prints the line when the bind is widened by hand on a laptop", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
@@ -153,18 +161,13 @@ describe("originModeBannerLines", () => {
       expect(lines).not.toContain(WIDE_BIND_LINE)
     })
 
-    // Task 5 (server-prototypes rework): the bind can now be wide AND
-    // unrecognised at the same time (the shipped image forces `all`
-    // unconditionally). That combination gets its own warning below instead
-    // of this plain informational line — see the next describe block.
-    it("does NOT print this plain line when the bind is wide but the layout is unrecognised; the warning below prints instead", () => {
+    it("does NOT print this plain line inside a container; the container caution prints instead", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
-        loopbackBindNetworkUnrecognized: true,
         loopbackInContainer: true,
       })
       expect(lines).not.toContain(WIDE_BIND_LINE)
@@ -172,43 +175,21 @@ describe("originModeBannerLines", () => {
   })
 
   /**
-   * Codex round 10, Fix 2, still true after the Task 5 widening below: this
-   * is the line for a bind that STAYED NARROW (`loopbackBindAllInterfaces`
-   * false) while the layout was not recognised — a container was detected,
-   * but `isLikelyBridgedNamespace()` (`container-detect.ts`) could not
-   * recognise the layout (Podman, a bare physical NIC, or plain
-   * `--network host`), so the bind stayed on the container's own loopback
-   * instead of widening. When the bind is wide INSTEAD, the warning in the
-   * next describe block prints, never this one — see task-5-brief.md,
-   * decision 2.
+   * Codex round 10, Fix 2, kept after round 18: `auto` never widens, so a
+   * container under the default bind keeps its own loopback and is told how
+   * to publish its ports. Never printed for an explicit `loopback` (the
+   * operator meant it) and never alongside a wide bind.
    */
-  describe("loopback: the network-layout-unrecognised line (bind stayed narrow)", () => {
-    const UNRECOGNIZED_LINE =
-      "[viewer] Prototype ports stay on the container's own loopback (VIEWER_LOOPBACK_BIND=auto). " +
-      "With -p published ports set VIEWER_LOOPBACK_BIND=all. On --network host this is right."
-
-    it("prints the line when the layout was not recognised (VIEWER_LOOPBACK_BIND=auto)", () => {
+  describe("loopback: the narrow-bind container line (VIEWER_LOOPBACK_BIND=auto in a container)", () => {
+    it("prints the line for a container under the default bind", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
-        loopbackBindNetworkUnrecognized: true,
         loopbackInContainer: true,
       })
-      expect(lines).toContain(UNRECOGNIZED_LINE)
-    })
-
-    it("prints the line for a container whose layout WAS recognised too: auto never widens (codex round 18)", () => {
-      const { lines } = originModeBannerLines({
-        publicUrl: "http://localhost:3100",
-        serveDomain: null,
-        loopbackAvailable: true,
-        loopbackPortRange: { from: 3101, to: 3120 },
-        loopbackBindNetworkUnrecognized: false,
-        loopbackInContainer: true,
-      })
-      expect(lines).toContain(UNRECOGNIZED_LINE)
+      expect(lines).toContain(NARROW_BIND_IN_CONTAINER_LINE)
     })
 
     it("does NOT print the line under an explicit VIEWER_LOOPBACK_BIND=loopback: the operator meant it (Task 5 review)", () => {
@@ -218,125 +199,94 @@ describe("originModeBannerLines", () => {
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: false,
-        loopbackBindNetworkUnrecognized: true,
         loopbackInContainer: true,
         loopbackBind: "loopback",
       })
-      expect(lines).not.toContain(UNRECOGNIZED_LINE)
+      expect(lines).not.toContain(NARROW_BIND_IN_CONTAINER_LINE)
     })
 
-    it("does NOT print the line when the layout was recognised as bridged (loopbackBindAllInterfaces: true)", () => {
+    it("does NOT print this line when the bind is wide; the container caution prints instead", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
-        loopbackBindNetworkUnrecognized: false,
-      })
-      expect(lines).not.toContain(UNRECOGNIZED_LINE)
-    })
-
-    it("does NOT print this line when the bind is wide AND unrecognised; the warning below prints instead", () => {
-      const { lines } = originModeBannerLines({
-        publicUrl: "http://localhost:3100",
-        serveDomain: null,
-        loopbackAvailable: true,
-        loopbackPortRange: { from: 3101, to: 3120 },
-        loopbackBindAllInterfaces: true,
-        loopbackBindNetworkUnrecognized: true,
         loopbackInContainer: true,
       })
-      expect(lines).not.toContain(UNRECOGNIZED_LINE)
+      expect(lines).not.toContain(NARROW_BIND_IN_CONTAINER_LINE)
     })
 
-    it("does NOT print the line on a plain laptop (loopbackBindNetworkUnrecognized unset)", () => {
+    it("does NOT print the line on a plain laptop (loopbackInContainer unset)", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
         loopbackAvailable: true,
       })
-      expect(lines).not.toContain(UNRECOGNIZED_LINE)
+      expect(lines).not.toContain(NARROW_BIND_IN_CONTAINER_LINE)
     })
   })
 
   /**
-   * Server-prototypes rework, Task 5: the Docker image now states its bind
-   * explicitly (`ENV VIEWER_LOOPBACK_BIND=all`) instead of leaving it to
-   * container detection. That means the bind can be wide (forced by the
-   * image or by an operator) on a container whose layout is NOT recognised
-   * as bridged: a `--network host` container running the image without
-   * overriding the bind back to `loopback`, or a runtime like Podman the
-   * heuristic does not recognise. This line replaces the plain wide-bind
-   * line for exactly that combination, and never appears alongside it or
-   * alongside the narrow-bind line above (task-5-brief.md, decision 2).
+   * Server-prototypes rework, Task 5, widened in codex round 31. The Docker
+   * image states its bind (`ENV VIEWER_LOOPBACK_BIND=all`), and nothing a
+   * container can read about its own interfaces tells `--network host` on
+   * an `eth0` host from a bridged container (`lo` + `eth0` both ways). The
+   * caution therefore no longer waits for a heuristic to fail: EVERY
+   * container under `all` is told what host networking needs.
    */
-  describe("loopback: the wide-bind-but-unrecognised warning line (VIEWER_LOOPBACK_BIND=all)", () => {
-    const WIDE_BIND_UNRECOGNIZED_LINE =
-      "[viewer] Prototype ports bind every interface (VIEWER_LOOPBACK_BIND=all) and the network " +
-      "layout was not recognised. With -p published ports that is right. On --network host set " +
-      "VIEWER_LOOPBACK_BIND=loopback."
-
-    it("prints the warning when the bind is wide and the namespace is not recognised as bridged", () => {
+  describe("loopback: the wide-bind container caution (VIEWER_LOOPBACK_BIND=all in a container)", () => {
+    it("prints the caution for any container under a wide bind", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
-        loopbackBindNetworkUnrecognized: true,
         loopbackInContainer: true,
       })
-      expect(lines).toContain(WIDE_BIND_UNRECOGNIZED_LINE)
+      expect(lines).toContain(WIDE_BIND_IN_CONTAINER_LINE)
     })
 
-    it("does NOT print the warning when the bind is wide and the namespace IS recognised as bridged", () => {
+    it("does NOT print the caution outside a container (the plain line prints instead)", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
-        loopbackBindNetworkUnrecognized: false,
       })
-      expect(lines).not.toContain(WIDE_BIND_UNRECOGNIZED_LINE)
+      expect(lines).not.toContain(WIDE_BIND_IN_CONTAINER_LINE)
     })
 
-    it("does NOT print the warning when the bind stayed narrow, even if the namespace is unrecognised (the round-10 line prints instead)", () => {
+    it("does NOT print the caution when the bind stayed narrow (the narrow-bind line prints instead)", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: false,
-        loopbackBindNetworkUnrecognized: true,
         loopbackInContainer: true,
       })
-      expect(lines).not.toContain(WIDE_BIND_UNRECOGNIZED_LINE)
+      expect(lines).not.toContain(WIDE_BIND_IN_CONTAINER_LINE)
     })
 
     it("prints at most one of the three bind-related lines for any combination", () => {
-      const WIDE_BIND_LINE =
-        "[viewer] Prototype ports bind every interface so Docker can publish them. On --network host " +
-        "set VIEWER_LOOPBACK_BIND=loopback."
-      const UNRECOGNIZED_LINE =
-        "[viewer] Prototype ports stay on the container's own loopback because the network layout " +
-        "was not recognised. If the viewer is in Docker with -p published ports, set " +
-        "VIEWER_LOOPBACK_BIND=all."
-      const bindRelatedLines = [WIDE_BIND_LINE, UNRECOGNIZED_LINE, WIDE_BIND_UNRECOGNIZED_LINE]
-
       for (const loopbackBindAllInterfaces of [true, false]) {
-        for (const loopbackBindNetworkUnrecognized of [true, false]) {
-          const { lines } = originModeBannerLines({
-            publicUrl: "http://localhost:3100",
-            serveDomain: null,
-            loopbackAvailable: true,
-            loopbackPortRange: { from: 3101, to: 3120 },
-            loopbackBindAllInterfaces,
-            loopbackBindNetworkUnrecognized,
-          })
-          const matches = bindRelatedLines.filter((line) => lines.includes(line))
-          expect(matches.length).toBeLessThanOrEqual(1)
+        for (const loopbackInContainer of [true, false]) {
+          for (const loopbackBind of ["auto", "loopback", "all"] as const) {
+            const { lines } = originModeBannerLines({
+              publicUrl: "http://localhost:3100",
+              serveDomain: null,
+              loopbackAvailable: true,
+              loopbackPortRange: { from: 3101, to: 3120 },
+              loopbackBindAllInterfaces,
+              loopbackInContainer,
+              loopbackBind,
+            })
+            const matches = BIND_LINES.filter((line) => lines.includes(line))
+            expect(matches.length).toBeLessThanOrEqual(1)
+          }
         }
       }
     })

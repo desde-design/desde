@@ -58,7 +58,6 @@ const config: ViewerConfig = {
   loopbackAvailable: true,
   loopbackPortRange: null,
   loopbackBindAllInterfaces: false,
-  loopbackBindNetworkUnrecognized: false,
   loopbackBind: "auto",
   loopbackInContainer: false,
 }

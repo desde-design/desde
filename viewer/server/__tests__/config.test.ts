@@ -97,7 +97,6 @@ describe("loadConfig", () => {
       loopbackAvailable: false,
       loopbackPortRange: null,
       loopbackBindAllInterfaces: false,
-      loopbackBindNetworkUnrecognized: false,
       loopbackBind: "auto",
       loopbackInContainer: false,
     })
@@ -928,10 +927,7 @@ describe("loadConfig", () => {
     it("is false for a container detected under auto: auto never widens, the image sets all (codex round 18)", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir() },
-        // A recognised bridged layout: pinned explicitly rather than left to
-        // the real `/proc/net/dev` on whatever machine runs this suite
-        // (VIEWER_LOOPBACK_BIND task, codex round 6, Fix 1 / round 10, Fix 2).
-        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
+        { isLikelyContainerized: () => true },
       )
       expect(config.loopbackListeners).toBe("auto")
       expect(config.loopbackBindAllInterfaces).toBe(false)
@@ -957,7 +953,7 @@ describe("loadConfig", () => {
     it("is false for VIEWER_LOOPBACK_LISTENERS=on inside an actually-detected container: only VIEWER_LOOPBACK_BIND=all widens (codex round 18)", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_LISTENERS: "on" },
-        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
+        { isLikelyContainerized: () => true },
       )
       expect(config.loopbackBindAllInterfaces).toBe(false)
     })
@@ -981,18 +977,14 @@ describe("loadConfig", () => {
   })
 
   /**
-   * `VIEWER_LOOPBACK_BIND` (codex round 6, Fix 1; the `auto` default
-   * strengthened again in codex round 10, Fix 2). `docker run --network
+   * `VIEWER_LOOPBACK_BIND` (codex round 6, Fix 1). `docker run --network
    * host` still makes container detection succeed, but host networking
-   * means the container's loopback IS the host's loopback, so `auto`'s
-   * container-implies-wildcard-bind rule is wrong there — the fix is an
-   * explicit control, plus a safer `auto` default that widens only on
-   * POSITIVE evidence of Docker's ordinary bridged layout
-   * (`isLikelyBridgedNamespace`, `container-detect.ts`). Round 10 tightened
-   * this further: a round-6 negative check ("not one of Docker's own
-   * host-side names") read an unrecognised runtime — Podman's own bridge
-   * names included — as safe to widen; the positive check reads the same
-   * runtime as "stay narrow" instead.
+   * means the container's loopback IS the host's loopback, so a
+   * container-implies-wildcard-bind rule is wrong there. The fix is an
+   * explicit control: only `all` widens (round 18), and no reading of the
+   * container's interfaces gets a say (round 31 retired the last such
+   * heuristic, since `lo` + `eth0` is what BOTH layouts look like on an
+   * `eth0` host).
    */
   describe("VIEWER_LOOPBACK_BIND", () => {
     it("rejects an unknown VIEWER_LOOPBACK_BIND value", () => {
@@ -1001,68 +993,25 @@ describe("loadConfig", () => {
       ).toThrow(/Unknown VIEWER_LOOPBACK_BIND/)
     })
 
-    it("auto: even a container with a recognised bridged layout stays on loopback (codex round 18)", () => {
+    it("auto: a container stays on loopback whatever its interfaces look like (codex round 18)", () => {
       // `lo` + `eth0` is also what a host-network container on a host whose
       // NIC is named `eth0` looks like, and the wrong guess puts the port
       // range on the LAN. Only an explicit `all` widens; the image sets it.
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "auto" },
-        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
+        { isLikelyContainerized: () => true },
       )
       expect(config.loopbackBindAllInterfaces).toBe(false)
-      expect(config.loopbackBindNetworkUnrecognized).toBe(false)
       expect(config.loopbackInContainer).toBe(true)
     })
 
-    it("auto: a container whose network layout is not recognised as bridged stays on loopback", () => {
-      // Covers BOTH host networking (--network host) and a runtime this
-      // heuristic simply does not recognise (Podman) — isLikelyBridgedNamespace
-      // returns false for either, and auto treats them the same: narrow.
-      const config = loadConfig(
-        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "auto" },
-        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => false },
-      )
-      expect(config.loopbackBindAllInterfaces).toBe(false)
-      expect(config.loopbackBindNetworkUnrecognized).toBe(true)
-    })
-
-    it("auto: never probes the bridged-namespace check outside a container", () => {
-      const config = loadConfig(
-        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "auto" },
-        {
-          isLikelyContainerized: () => false,
-          isLikelyBridgedNamespace: () => {
-            throw new Error("must not be called when no container was detected")
-          },
-        },
-      )
-      expect(config.loopbackBindAllInterfaces).toBe(false)
-      expect(config.loopbackBindNetworkUnrecognized).toBe(false)
-    })
-
-    it("loopback: stays on loopback even inside a container, when the layout IS recognised", () => {
+    it("loopback: stays on loopback inside a container, and still counts as a container for the banner", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "loopback" },
-        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
+        { isLikelyContainerized: () => true },
       )
       expect(config.loopbackBindAllInterfaces).toBe(false)
-      // A recognised layout means the check has nothing to flag, whichever
-      // bind mode the operator chose.
-      expect(config.loopbackBindNetworkUnrecognized).toBe(false)
-    })
-
-    it("loopback: still flags an unrecognised layout even though the operator's own choice already keeps the bind narrow (Task 5 widening)", () => {
-      // `loopbackBindNetworkUnrecognized` used to be true only under `auto`.
-      // The server-prototypes rework (Task 5) widened it to fire on ANY bind
-      // mode whenever a container was detected and the layout was not
-      // confirmed as bridged, so the same fact is available to the banner
-      // regardless of how the operator set VIEWER_LOOPBACK_BIND.
-      const config = loadConfig(
-        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "loopback" },
-        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => false },
-      )
-      expect(config.loopbackBindAllInterfaces).toBe(false)
-      expect(config.loopbackBindNetworkUnrecognized).toBe(true)
+      expect(config.loopbackInContainer).toBe(true)
     })
 
     it("all: binds every interface on a plain laptop (not a container)", () => {
@@ -1071,8 +1020,7 @@ describe("loadConfig", () => {
         { isLikelyContainerized: () => false },
       )
       expect(config.loopbackBindAllInterfaces).toBe(true)
-      // Never a container, so nothing to flag either.
-      expect(config.loopbackBindNetworkUnrecognized).toBe(false)
+      expect(config.loopbackInContainer).toBe(false)
     })
 
     it("all: stays false under VIEWER_LOOPBACK_LISTENERS=off, since no listener opens", () => {
@@ -1087,26 +1035,17 @@ describe("loadConfig", () => {
       expect(config.loopbackBindAllInterfaces).toBe(false)
     })
 
-    it("all: a recognised bridged container widens the bind and flags nothing (the shipped image's normal case)", () => {
+    it("all: a container widens the bind and counts as a container, so the banner prints the host-network caution (codex round 31)", () => {
+      // The shipped image on either layout: bridged with `-p` (the normal
+      // case) or `--network host` without overriding back to `loopback`.
+      // Nothing inside the container tells the two apart, so both get the
+      // same wide bind and the same caution line.
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "all" },
-        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
+        { isLikelyContainerized: () => true },
       )
       expect(config.loopbackBindAllInterfaces).toBe(true)
-      expect(config.loopbackBindNetworkUnrecognized).toBe(false)
-    })
-
-    it("all: a container whose layout is NOT recognised as bridged still widens the bind (the operator forced it), but flags the mismatch (Task 5 widening)", () => {
-      // This is the shipped image on `--network host` (or on a runtime the
-      // heuristic does not recognise) without the operator overriding back to
-      // `loopback`: the image's `ENV VIEWER_LOOPBACK_BIND=all` still forces
-      // the wide bind, but the check now has something to say about it.
-      const config = loadConfig(
-        { VIEWER_DATA_DIR: tmpViewerDataDir(), VIEWER_LOOPBACK_BIND: "all" },
-        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => false },
-      )
-      expect(config.loopbackBindAllInterfaces).toBe(true)
-      expect(config.loopbackBindNetworkUnrecognized).toBe(true)
+      expect(config.loopbackInContainer).toBe(true)
     })
   })
 
@@ -1198,11 +1137,7 @@ describe("loadConfig", () => {
     it("defaults the range (but keeps the loopback bind) for VIEWER_LOOPBACK_LISTENERS=on inside an actually-detected container", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_LISTENERS: "on" },
-        // A recognised bridged layout: pinned explicitly (codex round 10, Fix
-        // 2) rather than left to the real `/proc/net/dev` on whatever machine
-        // runs this suite — an unpinned default now reads as "unrecognised"
-        // on a non-Linux runner, the opposite of what this test needs.
-        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
+        { isLikelyContainerized: () => true },
       )
       expect(config.loopbackPortRange).toEqual({ from: 3101, to: 3120 })
       expect(config.loopbackBindAllInterfaces).toBe(false)
@@ -1238,7 +1173,7 @@ describe("loadConfig", () => {
     it("auto: still defaults the range (but keeps the loopback bind) inside a container", () => {
       const config = loadConfig(
         { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_LOOPBACK_LISTENERS: "auto" },
-        { isLikelyContainerized: () => true, isLikelyBridgedNamespace: () => true },
+        { isLikelyContainerized: () => true },
       )
       expect(config.loopbackPortRange).toEqual({ from: 3101, to: 3120 })
       expect(config.loopbackBindAllInterfaces).toBe(false)

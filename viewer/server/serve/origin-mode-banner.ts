@@ -44,70 +44,48 @@ const LOOPBACK_DISABLED_LINE =
   "shares this host (host-network mode) set VIEWER_LOOPBACK_LISTENERS=on."
 
 /**
- * Codex round 10, Fix 2. Printed in loopback mode, alongside (never instead
- * of) the listener lines, when a container was detected but
- * `isLikelyBridgedNamespace()` could not recognise the network layout AND
- * the bind stayed narrow as a result — the listener still opened (so this is
- * NOT the downgrade-to-fallback case `LOOPBACK_DISABLED_LINE` covers), it
- * just stayed on the container's own loopback instead of widening to every
- * interface. Plain language, no em dashes, same house style as the line
- * beside it.
- *
- * When the bind is wide INSTEAD (an operator or the Docker image forced
- * `VIEWER_LOOPBACK_BIND=all` on that same unrecognised layout), this line
- * does not print — `WIDE_BIND_NETWORK_UNRECOGNIZED_LINE` below does, since
- * the fix it names is the opposite one. See `pickBindLine`.
+ * Codex round 10, Fix 2, kept after round 18 made `auto` never widen: a
+ * container under the default bind keeps its own loopback, and this line
+ * says how to publish the ports instead. Printed in loopback mode alongside
+ * (never instead of) the listener lines. Plain language, no em dashes.
  */
-const NETWORK_LAYOUT_UNRECOGNIZED_LINE =
+const NARROW_BIND_IN_CONTAINER_LINE =
   "[viewer] Prototype ports stay on the container's own loopback (VIEWER_LOOPBACK_BIND=auto). " +
   "With -p published ports set VIEWER_LOOPBACK_BIND=all. On --network host this is right."
 
 /**
- * Server-prototypes rework, Task 5. The Docker image now states its bind
- * explicitly (`ENV VIEWER_LOOPBACK_BIND=all`) rather than leaving container
- * detection to decide it — so the bind can be wide on a container whose
- * layout is NOT recognised as bridged: a `--network host` container running
- * the image without overriding the bind back to `loopback`, or a runtime
- * (Podman) the heuristic does not recognise either way. Printed instead of
- * (never alongside) the plain wide-bind line below, and instead of (never
- * alongside) `NETWORK_LAYOUT_UNRECOGNIZED_LINE` above — see `pickBindLine`.
+ * Server-prototypes rework, Task 5, widened in codex round 31. The Docker
+ * image states its bind (`ENV VIEWER_LOOPBACK_BIND=all`), so a container on
+ * `--network host` that did not override it back to `loopback` has the
+ * prototype range facing the LAN with no `-p` boundary. Nothing readable
+ * inside the container tells that layout from a bridged one (`lo` + `eth0`
+ * is what both look like on a host whose NIC is `eth0`), so this line no
+ * longer waits for a heuristic to fail to recognise the layout: EVERY
+ * container under `all` hears what host networking needs. Printed instead
+ * of (never alongside) the plain wide-bind line below.
  *
- * It names the CONDITION, not the runtime. The line used to tell anyone on an
- * unrecognised layout to set `loopback`, Podman included — and a rootless
- * Podman container's interface is `tap0`, so a perfectly correct
- * `podman run -p 127.0.0.1:3101-3120:3101-3120` lands here. An operator who
- * followed that advice broke every published port, and the README three
- * lines from the run command said the opposite (round 12, I5). Published
- * ports need the wide bind; only host networking does not.
+ * It names the condition, not the runtime: published ports need the wide
+ * bind (a rootless Podman `-p` run lands here too, correctly); only host
+ * networking does not (round 12, I5).
  */
-const WIDE_BIND_NETWORK_UNRECOGNIZED_LINE =
-  "[viewer] Prototype ports bind every interface (VIEWER_LOOPBACK_BIND=all) and the network " +
-  "layout was not recognised. With -p published ports that is right. On --network host set " +
-  "VIEWER_LOOPBACK_BIND=loopback."
+const WIDE_BIND_IN_CONTAINER_LINE =
+  "[viewer] Prototype ports bind every interface (VIEWER_LOOPBACK_BIND=all) inside a container. " +
+  "With -p published ports that is right. On --network host set VIEWER_LOOPBACK_BIND=loopback, " +
+  "or the ports face the LAN."
 
 /**
- * The one line, if any, about `loopbackBindAllInterfaces` /
- * `loopbackBindNetworkUnrecognized`. The two booleans cross into four
- * combinations and at most one line ever applies (task-5-brief.md,
- * decision 2):
+ * The one line, if any, about the bind. At most one ever applies:
  *
- * - wide bind, layout unrecognised → the Task 5 warning (something is
- *   probably wrong: the operator or the image forced a bind this check
- *   cannot confirm is safe or reachable).
- * - wide bind, layout recognised (or bind forced by hand with nothing to
- *   contradict it) → the plain informational wide-bind line.
- * - narrow bind, layout unrecognised → the round-10 line (the bind COULD
- *   have widened but didn't, because the check could not confirm it).
- * - narrow bind, layout recognised or no container at all → nothing to say.
+ * - wide bind, in a container → the host-network caution above.
+ * - wide bind, not a container (forced by hand on a laptop) → the plain
+ *   informational wide-bind line.
+ * - narrow bind under `auto`, in a container → the round-10 line: the
+ *   ports need `all` to be published.
+ * - anything else → nothing to say.
  */
-function pickBindLine(
-  bindAllInterfaces: boolean,
-  networkUnrecognized: boolean,
-  bind: ViewerLoopbackBindMode,
-  inContainer: boolean,
-): string[] {
-  if (bindAllInterfaces && networkUnrecognized) {
-    return [WIDE_BIND_NETWORK_UNRECOGNIZED_LINE]
+function pickBindLine(bindAllInterfaces: boolean, bind: ViewerLoopbackBindMode, inContainer: boolean): string[] {
+  if (bindAllInterfaces && inContainer) {
+    return [WIDE_BIND_IN_CONTAINER_LINE]
   }
   if (bindAllInterfaces) {
     return [
@@ -118,11 +96,8 @@ function pickBindLine(
   // Only the DEFAULT's own choice is worth second-guessing: an operator who
   // wrote `loopback` meant it, and telling them to set `all` would be noise
   // on top of a deliberate decision (Task 5 review).
-  // `auto` never widens (codex round 18), so every container under the
-  // default gets told how to publish its ports, whatever its layout looks
-  // like; `networkUnrecognized` only matters for the wide-bind warning.
   if (inContainer && bind === "auto") {
-    return [NETWORK_LAYOUT_UNRECOGNIZED_LINE]
+    return [NARROW_BIND_IN_CONTAINER_LINE]
   }
   return []
 }
@@ -145,12 +120,6 @@ export function originModeBannerLines(
     // the pairing named below keeps offering `[::1]`, exactly as it did
     // before this field existed.
     loopbackBindAllInterfaces?: boolean
-    // Optional, same reasoning: absent reads as `false`, so a caller that
-    // never configures it (every existing one) gets no extra line, exactly
-    // as before this field existed (codex round 10, Fix 2). After the Task 5
-    // widening this can now be `true` together with `loopbackBindAllInterfaces:
-    // true` — see `pickBindLine` for which line each combination prints.
-    loopbackBindNetworkUnrecognized?: boolean
     /** The operator's bind mode; absent reads as the default, `auto`. */
     loopbackBind?: ViewerLoopbackBindMode
     /** A container was detected; absent reads as false (a laptop). */
@@ -260,14 +229,11 @@ export function originModeBannerLines(
                 `-p 127.0.0.1:${range.from}-${range.to}:${range.from}-${range.to}`,
             ]
           : []),
-        // Codex round 6, Fix 1 (the plain wide-bind line) and round 10, Fix 2
-        // (the narrow-bind-but-unrecognised line), joined by the Task 5
-        // warning for the fourth combination the rework introduced: wide
-        // bind, layout unrecognised. `pickBindLine` returns at most one line
-        // — see its own doc comment for the four cases.
+        // Codex round 6, Fix 1 (the plain wide-bind line), round 10, Fix 2
+        // (the narrow-bind container line) and round 31 (the wide-bind
+        // container caution). `pickBindLine` returns at most one line.
         ...pickBindLine(
           Boolean(config.loopbackBindAllInterfaces),
-          Boolean(config.loopbackBindNetworkUnrecognized),
           config.loopbackBind ?? "auto",
           Boolean(config.loopbackInContainer),
         ),
