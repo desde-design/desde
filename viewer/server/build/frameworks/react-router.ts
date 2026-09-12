@@ -32,8 +32,8 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
   async inspectBuild(checkoutRoot, target) {
     // The app the configured output dir belongs to is looked at first
     // (codex round 34): its own default `build`, then the scan from there.
-    const within = target?.within ?? null
-    const defaultDir = within === null ? DEFAULT_BUILD_DIR : join(within, DEFAULT_BUILD_DIR)
+    const within = target?.within
+    const defaultDir = within === null || within === undefined ? DEFAULT_BUILD_DIR : join(within, DEFAULT_BUILD_DIR)
     // The default layout FIRST and by name, then the scan (codex round 20,
     // item 2). Not the scan alone: the scan needs a `client/` directory beside
     // the `server/` one to be sure a directory is a build at all, and a build
@@ -49,7 +49,7 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
     // 31), or the target app itself when no server bundle was found (codex
     // round 53: a client-only SPA under `apps/web` declares `react-router`
     // in its own package too).
-    const appDir = found ? await owningPackageDir(checkoutRoot, found.dir) : within
+    const appDir = found ? await owningPackageDir(checkoutRoot, found.dir) : (within ?? null)
     const hasReactRouter =
       (await dependsOnAt(checkoutRoot, "react-router")) ||
       (appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "react-router")))

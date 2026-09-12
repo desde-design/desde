@@ -720,6 +720,26 @@ describe("inspectBuild", () => {
     expect(await inspectBuild(root, join("apps", "web", "out"), ADAPTERS)).toMatchObject({ reason: "Next.js with server-rendered routes" })
   })
 
+  /**
+   * Codex round 63. A root-owned output dir is the root's app: a sibling
+   * workspace app's build must not override it, and used to, since the
+   * root-target scan covered the whole checkout.
+   */
+  it("keeps a root static output when a sibling workspace app also built a Next server", async () => {
+    const root = await checkout({ next: false })
+    await mkdir(join(root, "dist"), { recursive: true })
+    await writeFile(join(root, "dist", "index.html"), "<html></html>")
+    await mkdir(join(root, "apps", "web", ".next"), { recursive: true })
+    await writeFile(join(root, "apps", "web", ".next", "BUILD_ID"), "def456")
+    await writeFile(join(root, "apps", "web", ".next", "required-server-files.json"), "{}")
+    await writeFile(join(root, "apps", "web", "package.json"), JSON.stringify({ name: "web", dependencies: { next: "^16.0.0" } }))
+    expect(await inspectBuild(root, "dist", ADAPTERS)).toEqual({
+      kind: "static",
+      outputDir: "dist",
+      reason: "No framework recognised; using the configured output dir",
+    })
+  })
+
   it("recognises a Nuxt server checkout through the default ADAPTERS", async () => {
     const root = await mkdtemp(join(tmpdir(), "fw-nuxt-"))
     try {

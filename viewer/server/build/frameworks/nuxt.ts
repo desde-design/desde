@@ -37,8 +37,8 @@ export const NUXT_ADAPTER: FrameworkAdapter = {
   async inspectBuild(checkoutRoot, target) {
     // The app the configured output dir belongs to is looked at first
     // (codex round 34): its own default `.output`, then the scan from there.
-    const within = target?.within ?? null
-    const defaultDir = within === null ? DEFAULT_OUTPUT_DIR : join(within, DEFAULT_OUTPUT_DIR)
+    const within = target?.within
+    const defaultDir = within === null || within === undefined ? DEFAULT_OUTPUT_DIR : join(within, DEFAULT_OUTPUT_DIR)
     const outputDir = (await isFile(join(checkoutRoot, defaultDir, "server", "index.mjs")))
       ? defaultDir
       : await findNitroOutputDir(checkoutRoot, within)
@@ -50,7 +50,7 @@ export const NUXT_ADAPTER: FrameworkAdapter = {
     // or the target app itself when nothing was found (codex round 53: a
     // `nuxt generate` output has no server, and the app's own package is
     // still where `nuxt` is declared).
-    const appDir = outputDir !== null ? await owningPackageDir(checkoutRoot, outputDir) : within
+    const appDir = outputDir !== null ? await owningPackageDir(checkoutRoot, outputDir) : (within ?? null)
     const hasNuxt =
       (await dependsOnAt(checkoutRoot, "nuxt")) ||
       (appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "nuxt")))

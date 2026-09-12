@@ -66,6 +66,18 @@ describe("findNextDistDir", () => {
    * scan took the first one it met. The caller names the app the configured
    * output dir belongs to, and that app is looked at first.
    */
+  it("stops at a nested authored package when the root package is the target, and not when there is no target (codex round 63)", async () => {
+    const r = await root()
+    await mkdir(join(r, "apps", "web"), { recursive: true })
+    await writeFile(join(r, "apps", "web", "package.json"), JSON.stringify({ name: "web" }))
+    await writeDistDir(r, "apps/web/.next")
+    expect(await findNextDistDir(r, null)).toBeNull()
+    expect(await findNextDistDir(r)).toBe(join("apps", "web", ".next"))
+    // A plain nested directory is no boundary.
+    await writeDistDir(r, "build/next")
+    expect(await findNextDistDir(r, null)).toBe(join("build", "next"))
+  })
+
   it("looks inside the target app before the root when one is named", async () => {
     const r = await root()
     await writeDistDir(r, ".next")

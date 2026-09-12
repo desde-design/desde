@@ -21,7 +21,9 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
   async inspectBuild(checkoutRoot, target) {
     // The app the configured output dir belongs to is looked at first
     // (codex round 34); `null` is the root.
-    const within = target?.within ?? null
+    // Absent target: the whole checkout (an adapter asked directly); `null`:
+    // the root package, stopping at nested ones (codex round 63).
+    const within = target?.within
     // An export is known by what it writes, not by the folder's name: every
     // `output: "export"` build writes `out/_next/` and an `out/index.html`.
     // A bare `out/` left by another tool used to win over a valid server
