@@ -22,6 +22,26 @@ describe("pruneSupersededDeploymentAssets", () => {
     expect(calls).toEqual(["before:d-stale-a", "delete:d-stale-a", "before:d-stale-b", "delete:d-stale-b"])
   })
 
+  it("leaves a building row alone, however far past the retention window it sits (codex round 54)", async () => {
+    const rows = [
+      { id: "d-active", status: "deployed" },
+      { id: "d2", status: "deployed" },
+      { id: "d3", status: "deployed" },
+      { id: "d4", status: "deployed" },
+      { id: "d5", status: "deployed" },
+      { id: "d-building", status: "building" },
+      { id: "d-stale", status: "deployed" },
+    ]
+    const storage = { listDeployments: vi.fn().mockResolvedValue(rows) }
+    const before: string[] = []
+    const assets = { deleteDeployment: vi.fn().mockResolvedValue(undefined) }
+    await pruneSupersededDeploymentAssets(storage, assets, "p1", "d-active", async (id) => {
+      before.push(id)
+    })
+    expect(before).toEqual(["d-stale"])
+    expect(assets.deleteDeployment.mock.calls.map(([id]) => id)).toEqual(["d-stale"])
+  })
+
   it("a rejecting beforeRemove skips that deployment's delete and continues the sweep", async () => {
     const ids = ["d-active", "d2", "d3", "d4", "d5", "d-stale-a", "d-stale-b"]
     const storage = { listDeployments: vi.fn().mockResolvedValue(ids.map((id) => ({ id }))) }

@@ -203,14 +203,20 @@ export async function pruneSupersededDeploymentAssets(
   // 11, the checkout sibling had the same gap): both callers run this AFTER
   // the deployment is marked deployed and active, so a rejected listing
   // here used to rewrite a successful activation as failed.
-  let deployments: Pick<Deployment, "id">[]
+  let deployments: Pick<Deployment, "id" | "status">[]
   try {
     deployments = await storage.listDeployments(projectId)
   } catch (error) {
     console.error(`[viewer] failed to prune superseded deployments for project ${projectId}:`, error)
     return
   }
-  const rest = deployments.filter((d) => d.id !== keepActiveId)
+  // A build in flight owns nothing here yet and must not be swept (codex
+  // round 54): enough uploads during a long build pushed its row past the
+  // retention window, and the hook wired to this sweep closes a deployment
+  // for GOOD, so the build could finish and go live with every listener
+  // open refused. The checkout sweep has skipped `building` rows since
+  // round 21 for the same reason.
+  const rest = deployments.filter((d) => d.id !== keepActiveId && d.status !== "building")
   const stale = rest.slice(DEPLOYMENT_RETENTION_COUNT - 1)
   for (const d of stale) {
     try {
