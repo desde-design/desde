@@ -261,11 +261,13 @@ describe("createLoopbackListenerRegistry", () => {
       })
       // A host of the deployment's own under `.localhost` (codex round 51),
       // which Chrome and Firefox resolve to loopback without DNS.
-      expect(listener.host).toBe("d1.localhost")
-      expect(listener.origin).toBe(`http://d1.localhost:${listener.port}`)
+      // With a random label per open (codex round 62), so a rotation retires
+      // the name along with the port.
+      expect(listener.host).toMatch(/^d1-[0-9a-f]{12}\.localhost$/)
+      expect(listener.origin).toBe(`http://${listener.host}:${listener.port}`)
       expect(listener.boundAddress).toBe("0.0.0.0")
 
-      const res = await httpCall({ host: "127.0.0.1", port: listener.port, path: "/", hostHeader: `d1.localhost:${listener.port}` })
+      const res = await httpCall({ host: "127.0.0.1", port: listener.port, path: "/", hostHeader: `${listener.host}:${listener.port}` })
       expect(res.status).toBe(200)
       expect(res.body).toContain("range")
     })
@@ -339,10 +341,10 @@ describe("createLoopbackListenerRegistry", () => {
       const b = await registry.ensure(deployment("d2"), target)
       expect(b.port).toBe(a.port)
       expect(b.origin).not.toBe(a.origin)
-      expect(a.origin).toBe(`http://d1.localhost:${a.port}`)
-      expect(b.origin).toBe(`http://d2.localhost:${b.port}`)
+      expect(a.host).toMatch(/^d1-[0-9a-f]{12}\.localhost$/)
+      expect(b.host).toMatch(/^d2-[0-9a-f]{12}\.localhost$/)
       // The listener answers only its own host: A's spelling on B's port is refused.
-      const asA = await httpCall({ host: "127.0.0.1", port: b.port, path: "/", hostHeader: `d1.localhost:${b.port}` })
+      const asA = await httpCall({ host: "127.0.0.1", port: b.port, path: "/", hostHeader: `${a.host}:${b.port}` })
       expect(asA.status).toBe(400)
     })
 
@@ -361,13 +363,17 @@ describe("createLoopbackListenerRegistry", () => {
       expect(d.port).toBe(range.from)
     })
 
-    it("gives a deployment its previous origin back when it is free", async () => {
-      const range = await freeRange(3)
+    it("gives a reopened deployment a fresh host, and its old name answers nothing (codex round 62)", async () => {
+      const range = await freeRange(1)
       const registry = makeRegistry({ d1: {}, d2: {} }, { portRange: range, bindAllInterfaces: false })
       const first = await registry.ensure(deployment("d1"), V4)
       await first.close()
       const again = await registry.ensure(deployment("d1"), V4)
-      expect(again.origin).toBe(first.origin)
+      expect(again.port).toBe(first.port)
+      expect(again.host).not.toBe(first.host)
+      // The old name answers nothing on the port it had.
+      const asOld = await httpCall({ host: "127.0.0.1", port: again.port, path: "/", hostHeader: `${first.host}:${first.port}` })
+      expect(asOld.status).toBe(400)
     })
 
     it("clears a recycled origin's storage and cache on its first document load only", async () => {
@@ -397,10 +403,12 @@ describe("createLoopbackListenerRegistry", () => {
       expect(reload.headers["clear-site-data"]).toBeUndefined()
       await b.close()
 
-      // The same deployment back on its own origin is not a recycled one.
+      // A reopened deployment gets a fresh host, which is a fresh origin the
+      // browser has nothing stored for; clearing it once more costs nothing.
       const bAgain = await registry.ensure(deployment("d2"), V4)
+      expect(bAgain.host).not.toBe(b.host)
       const back = await documentGet(bAgain, { Accept: "text/html,*/*" })
-      expect(back.headers["clear-site-data"]).toBeUndefined()
+      expect(back.headers["clear-site-data"]).toBe('"cache", "storage"')
     })
 
     it("clears on the first use of an ephemeral port too, which the OS may have handed out before a restart", async () => {
@@ -418,18 +426,24 @@ describe("createLoopbackListenerRegistry", () => {
      * knows the old origin; ranking it first for the same deployment gave it
      * straight back on the next authorized open.
      */
-    it("never hands a rotated origin back to the same deployment, and fails closed when none is left", async () => {
+    it("retires the name along with the port on a rotation, so a scan of the range with the old host finds nothing", async () => {
       const range = await freeRange(2)
       const registry = makeRegistry({ d1: {}, d2: {} }, { portRange: range, bindAllInterfaces: false })
       const first = await registry.ensure(deployment("d1"), V4)
       await registry.rotateForDeployment("d1")
       const second = await registry.ensure(deployment("d1"), V4)
-      expect(second.port).not.toBe(first.port)
-      await registry.rotateForDeployment("d1")
-      await expect(registry.ensure(deployment("d1"), V4)).rejects.toBeInstanceOf(LoopbackPortsExhaustedError)
-      // Retired for that deployment only: another one may still use the port.
+      expect(second.host).not.toBe(first.host)
+      // A revoked reader knows the old host and the whole range (codex
+      // round 62): every port answers 400 to that name, the live one included.
+      for (let port = range.from; port <= range.to; port++) {
+        const probe = await httpCall({ host: "127.0.0.1", port, path: "/", hostHeader: `${first.host}:${port}` }).catch(
+          () => ({ status: 0 }),
+        )
+        expect([0, 400]).toContain(probe.status)
+      }
+      // Another deployment is unaffected.
       const other = await registry.ensure(deployment("d2"), V4)
-      expect([first.port, second.port]).toContain(other.port)
+      expect(registry.hasOrigin(other.origin)).toBe(true)
     })
 
     it("rotateForProject retires only that project's listeners; rotateAll every one; hasOrigin says which answer (codex round 46)", async () => {
@@ -773,8 +787,8 @@ describe("createLoopbackListenerRegistry", () => {
         // spelling paired with the shell, never the bind address.
         // The socket is on every interface; the host the browser uses is the
         // deployment's own name (codex rounds 51 and 52).
-        expect(listener.host).toBe("dep-1.localhost")
-        expect(listener.origin).toBe(`http://dep-1.localhost:${listener.port}`)
+        expect(listener.host).toMatch(/^dep-1-[0-9a-f]{12}\.localhost$/)
+        expect(listener.origin).toBe(`http://${listener.host}:${listener.port}`)
       } finally {
         await registry.closeAll()
       }
@@ -813,8 +827,8 @@ describe("createLoopbackListenerRegistry", () => {
         expect(listener.boundAddress).toBe("127.0.0.1")
         // A host of the deployment's own: a fixed range recycles ports on a
         // laptop as much as in a container (codex round 52).
-        expect(listener.host).toBe("dep-1.localhost")
-        expect(listener.origin).toBe(`http://dep-1.localhost:${listener.port}`)
+        expect(listener.host).toMatch(/^dep-1-[0-9a-f]{12}\.localhost$/)
+        expect(listener.origin).toBe(`http://${listener.host}:${listener.port}`)
       } finally {
         await registry.closeAll()
       }

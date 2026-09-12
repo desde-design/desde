@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto"
 import { ChildCookieJar } from "./child-cookie-jar"
 import type express from "express"
 import { createServer, type Server } from "node:http"
@@ -328,19 +329,29 @@ function hostSpellingFor(bindHost: LoopbackBindHost): "127.0.0.1" | "[::1]" | "l
   return bindHost === "::1" ? "[::1]" : bindHost
 }
 
+/** Whether listeners get a `.localhost` host of their own: with a fixed range, whatever the bind, or on the wildcard bind. */
+function usesOwnHost(bindHost: LoopbackBindHost, fixedRange: boolean): boolean {
+  return fixedRange || bindHost === "localhost"
+}
+
 /**
  * The host a listener answers on. With a fixed port range, whatever the
  * bind (codex rounds 51 and 52: the container's wildcard bind, and a range
- * set by hand on a laptop alike), ports come back around, so every
- * deployment gets a name of its own, `<deploymentId>.localhost`, and an
- * origin is never shared across deployments however ports are reused.
- * Chrome and Firefox resolve every `*.localhost` name to both loopback
- * addresses without DNS, so it reaches a `127.0.0.1`, `::1` or wildcard
- * bind alike. A deployment id is storage's UUID: a valid DNS label. On
- * ephemeral ports the plain loopback spelling stays.
+ * set by hand on a laptop alike), ports come back around and the range is
+ * known, so every OPEN gets a name of its own that nobody can guess:
+ * `<deploymentId>-<12 hex>.localhost` (codex round 62: with a deterministic
+ * name, a reader whose access was revoked scanned the range with the host
+ * they already knew and found the rotated listener). The one-entry Host
+ * allowlist answers that name alone, so a rotation retires the name along
+ * with the port. Chrome and Firefox resolve every `*.localhost` name to
+ * both loopback addresses without DNS, so it reaches a `127.0.0.1`, `::1`
+ * or wildcard bind alike. A deployment id is storage's UUID: a valid DNS
+ * label. On ephemeral ports the plain loopback spelling stays.
  */
 function listenerHostFor(deploymentId: string, bindHost: LoopbackBindHost, fixedRange: boolean): string {
-  return fixedRange || bindHost === "localhost" ? `${deploymentId.toLowerCase()}.localhost` : hostSpellingFor(bindHost)
+  return usesOwnHost(bindHost, fixedRange)
+    ? `${deploymentId.toLowerCase()}-${randomBytes(6).toString("hex")}.localhost`
+    : hostSpellingFor(bindHost)
 }
 
 /**
@@ -570,23 +581,19 @@ export function createLoopbackListenerRegistry(
         if (attempt >= 8) throw new Error("Every ephemeral port offered was one this deployment was rotated off.")
       }
     } else {
-      // Least-recently-released first, and this deployment's own previous
-      // origin before anything else (codex round 41): the range is small,
-      // and the longer an origin sits unused before another deployment
-      // takes it, the less likely a document from the last one is still
-      // open. A port that never served anything comes before every
-      // released one.
+      // Never-used ports first, then least recently released (codex round
+      // 41): the range is small, and the longer a port sits unused before
+      // another deployment takes it, the less likely a document from the
+      // last one is still open. With a fresh host per open (round 62) the
+      // origin never repeats whatever the port does, so this is only the
+      // gentlest order, not an isolation boundary.
       const ports: number[] = []
       for (let port = range.from; port <= range.to; port++) {
         if (!isRetiredFor(originFor(host, port), deployment.id)) ports.push(port)
       }
       const rank = (port: number): [number, number] => {
-        // This deployment's own previous origin first (its host is its own,
-        // so the history here can only be its own), then a port nothing has
-        // used, then released ports oldest first.
-        if (originHistory.get(originFor(host, port))?.deploymentId === deployment.id) return [0, port]
         const released = portReleasedAt.get(port)
-        return released === undefined ? [1, port] : [2, released]
+        return released === undefined ? [0, port] : [1, released]
       }
       ports.sort((a, b) => {
         const [ra, ka] = rank(a)
@@ -751,11 +758,15 @@ export function createLoopbackListenerRegistry(
         // silent mismatch would hand back an origin on a host the caller did
         // not ask for, which is precisely the host-flip property this whole
         // mechanism rests on.
-        const wanted = listenerHostFor(deployment.id, target.bindHost, (deps.portRange ?? null) !== null)
-        if (existing.host !== wanted) {
+        // The host's FAMILY, since an own host carries a random label no
+        // caller could recompute (codex round 62).
+        const ownHost = usesOwnHost(target.bindHost, (deps.portRange ?? null) !== null)
+        const matches = ownHost ? existing.host.endsWith(".localhost") : existing.host === hostSpellingFor(target.bindHost)
+        if (!matches) {
           throw new Error(
             `A prototype listener for deployment ${deployment.id} and shell origin ` +
-              `"${target.shellOrigin}" is already bound to ${existing.host}, but ${wanted} was ` +
+              `"${target.shellOrigin}" is already bound to ${existing.host}, but ` +
+              `${ownHost ? "a host of its own under .localhost" : hostSpellingFor(target.bindHost)} was ` +
               `asked for. The bind host must be a function of the shell origin.`,
           )
         }
