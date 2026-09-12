@@ -110,7 +110,16 @@ export async function pruneSupersededCheckouts(
     console.error(`[viewer] failed to prune checkouts for project ${projectId}:`, error)
     return
   }
-  const stale = [...unfinished, ...retainable.slice(CHECKOUT_RETENTION_COUNT - 1)]
+  // The active deployment takes one of the retained slots only when it has
+  // a checkout of its own. An active static upload has none, and reserving
+  // a slot for it pruned one more server checkout than the rule allows
+  // (codex round 18).
+  const activeHasCheckout = await stat(checkoutDirFor(checkoutsRoot, keepActiveId)).then(
+    () => true,
+    () => false,
+  )
+  const retainOthers = CHECKOUT_RETENTION_COUNT - (activeHasCheckout ? 1 : 0)
+  const stale = [...unfinished, ...retainable.slice(retainOthers)]
   for (const id of stale) {
     const dir = checkoutDirFor(checkoutsRoot, id)
     try {

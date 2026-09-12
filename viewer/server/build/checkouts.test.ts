@@ -69,6 +69,23 @@ describe("pruneSupersededCheckouts", () => {
     expect(await exists(checkoutDirFor(root, ids[1]!))).toBe(false)
     expect(removed.sort()).toEqual([ids[1]!, ids[2]!].sort())
   })
+  it("keeps two server checkouts when the active deployment is a static upload with none (codex round 18)", async () => {
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    const root = await tmp()
+    const older = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await mkdir(checkoutDirFor(root, older.id), { recursive: true })
+    const newer = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    await mkdir(checkoutDirFor(root, newer.id), { recursive: true })
+    const upload = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    const removed: string[] = []
+    await pruneSupersededCheckouts(storage, root, project.id, upload.id, async (id) => {
+      removed.push(id)
+    })
+    expect(removed).toEqual([])
+    expect(await exists(checkoutDirFor(root, older.id))).toBe(true)
+    expect(await exists(checkoutDirFor(root, newer.id))).toBe(true)
+  })
   it("counts only deployments that have a checkout when choosing what to keep", async () => {
     // Codex round 9. A failed build, or a static one, has no checkout. When
     // one of those is NEWER than the previous server build, it used to take
@@ -178,6 +195,10 @@ describe("pruneSupersededCheckouts", () => {
     const project = await storage.createProject({ slug: "p", name: "P" })
     const root = await tmp()
     const active = await storage.createDeployment({ projectId: project.id })
+    // A server deployment: it has a checkout, so it takes one of the two
+    // retained slots (since codex round 18 an active upload without one
+    // takes none, and both others would be kept).
+    await mkdir(checkoutDirFor(root, active.id), { recursive: true })
     const stale = await storage.createDeployment({ projectId: project.id })
     await storage.createDeployment({ projectId: project.id }) // the "newest other", keeps `stale` in the pruned set
     // No mkdir for `stale`: its checkout directory never existed.
@@ -230,6 +251,10 @@ describe("pruneSupersededCheckouts", () => {
     const active = await storage.createDeployment({ projectId: project.id, status: "deployed" })
     const stale = await storage.createDeployment({ projectId: project.id, status: "deployed" })
     const newest = await storage.createDeployment({ projectId: project.id, status: "deployed" })
+    // The active deployment is a server one with a checkout, so it takes one
+    // of the two retained slots; an active upload without one takes none
+    // (codex round 18), and nothing here would be stale.
+    await mkdir(checkoutDirFor(root, active.id), { recursive: true })
     await mkdir(checkoutDirFor(root, stale.id), { recursive: true })
     // The newest needs a checkout of its own to take the retained slot;
     // since codex round 9 a row with no checkout does not count.
