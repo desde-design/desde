@@ -2187,6 +2187,28 @@ describe("createServeRouter", () => {
       expect(res.headers["x-content-type-options"]).toBe("nosniff")
     })
 
+    /**
+     * Codex round 26. A busy refusal leaves the record `stopped`, which the
+     * page deliberately never remounts on, so the 503 page in the frame had
+     * to reload itself or the reader sat on it until a full reload.
+     */
+    it("answers a busy refusal with Retry-After and a page that reloads itself", async () => {
+      const { app } = await loopbackAppWith({
+        prototypeProcesses: fakeProcesses({
+          ensure: () =>
+            Promise.reject(
+              new PrototypeProcessError({ state: "stopped" }, "Every prototype server is busy. Try again in a moment.", 5),
+            ),
+        }),
+      })
+
+      const res = await request(app).get("/p/srv/")
+      expect(res.status).toBe(503)
+      expect(res.headers["retry-after"]).toBe("5")
+      expect(res.text).toContain('<meta http-equiv="refresh" content="5">')
+      expect(res.text).toContain("busy")
+    })
+
     it("still serves a static deployment from the asset store", async () => {
       const c = await setup({
         prototypeProcesses: fakeProcesses({

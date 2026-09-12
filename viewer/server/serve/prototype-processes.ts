@@ -104,6 +104,13 @@ export class PrototypeProcessError extends Error {
   constructor(
     public readonly status: ProcessStatus,
     message: string,
+    /**
+     * Set when the refusal is expected to clear on its own (every slot busy
+     * right now). The serve router turns it into a `Retry-After` header
+     * and a page that reloads itself, because the record is left `stopped`
+     * and nothing else would ever ask again (codex round 26).
+     */
+    public readonly retryAfterSeconds?: number,
   ) {
     super(message)
   }
@@ -783,7 +790,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
         if (!stillOurs()) throw new PrototypeProcessError({ state: "stopped" }, RETIRED_REFUSAL)
         return apply(id, { type: "stop-requested" })
       })
-      throw new PrototypeProcessError(statusOf(id), BUSY_MESSAGE)
+      throw new PrototypeProcessError(statusOf(id), BUSY_MESSAGE, 5)
     }
     // In the same synchronous step as the check above, so two waiters cannot
     // both read "there is room" and both take the last slot.

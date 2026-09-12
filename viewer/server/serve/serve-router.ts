@@ -979,7 +979,15 @@ export function createServeRouter(deps: ServeRouterDeps): Router {
           error instanceof PrototypeProcessError
             ? error.message
             : "The prototype's server could not be started."
-        refuse(503, `<!doctype html><title>Prototype unavailable</title><p>${escapeHtml(message)}</p>`)
+        // A refusal that clears on its own (every slot busy) reloads itself:
+        // the record is left `stopped`, which the page deliberately never
+        // remounts on, so without this the frame sat on the 503 until the
+        // reader reloaded the whole review (codex round 26). A meta refresh
+        // needs no script, so the prototype CSP does not block it.
+        const retryAfter = error instanceof PrototypeProcessError ? error.retryAfterSeconds : undefined
+        if (retryAfter !== undefined) res.setHeader("Retry-After", String(retryAfter))
+        const refreshTag = retryAfter !== undefined ? `<meta http-equiv="refresh" content="${retryAfter}">` : ""
+        refuse(503, `<!doctype html>${refreshTag}<title>Prototype unavailable</title><p>${escapeHtml(message)}</p>`)
       }
       return
     }
