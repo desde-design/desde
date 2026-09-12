@@ -1,5 +1,5 @@
 import { spawn as spawnChild } from "node:child_process"
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -762,6 +762,20 @@ describe("createPrototypeProcesses", () => {
     })
   })
 
+  it("refuses a server cwd that is a symlink out of the checkout (codex round 48)", async () => {
+    const root = await checkoutsRoot(["d1"])
+    const outside = await mkdtemp(join(tmpdir(), "procs-outside-"))
+    roots.push(outside)
+    await copyFile(FAKE, join(outside, "server.mjs"))
+    await symlink(outside, join(root, "d1", "app"))
+    const procs = createPrototypeProcesses({ checkoutsRoot: root })
+    managers.push(procs)
+    await expect(procs.ensure({ id: "d1", serverStart: ["node", "server.mjs"], serverCwd: "app" })).rejects.toBeInstanceOf(
+      PrototypeProcessError,
+    )
+    expect(procs.status("d1").state).toBe("crashed")
+  })
+
   it("refuses a server cwd that escapes the checkout, as a permanent failure", async () => {
     const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
     managers.push(procs)
@@ -780,15 +794,25 @@ describe("createPrototypeProcesses", () => {
    * port comes back once that child is gone.
    */
   it("hands concurrent cold starts distinct ports even when the picker repeats one", async () => {
-    const first = await pickLoopbackPort()
-    const second = await pickLoopbackPort()
-    const offered = [first, first, second]
+    // Picked at call time, not up front: a port held free across another
+    // test's bind is exactly the flake this suite runs in parallel with.
+    // The picker answers the first port twice, then a fresh one, then the
+    // first once more once its child has been stopped.
+    let first: number | null = null
+    let calls = 0
+    const picked: number[] = []
     const procs = createPrototypeProcesses({
       checkoutsRoot: await checkoutsRoot(["a", "b"]),
       pickPort: async () => {
-        const port = offered.shift()
-        if (port === undefined) throw new Error("picker exhausted")
-        return port
+        calls++
+        if (calls === 1 || calls === 2 || calls === 4) {
+          first ??= await pickLoopbackPort()
+          picked.push(first)
+          return first
+        }
+        const fresh = await pickLoopbackPort()
+        picked.push(fresh)
+        return fresh
       },
     })
     managers.push(procs)
@@ -796,11 +820,11 @@ describe("createPrototypeProcesses", () => {
       procs.ensure({ id: "a", serverStart: start() }),
       procs.ensure({ id: "b", serverStart: start() }),
     ])
-    expect(new Set([a.port, b.port])).toEqual(new Set([first, second]))
-    expect(offered).toHaveLength(0)
+    expect(a.port).not.toBe(b.port)
+    expect(calls).toBe(3)
+    expect(new Set([a.port, b.port])).toEqual(new Set(picked))
 
     await procs.stop("a")
-    offered.push(first)
     expect((await procs.ensure({ id: "a", serverStart: start() })).port).toBe(first)
   })
 

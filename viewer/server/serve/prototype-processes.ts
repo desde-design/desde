@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process"
 import { connect as netConnect, createServer } from "node:net"
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { basename, join, resolve, sep } from "node:path"
 import { promisify } from "node:util"
 import { buildEnv } from "../build/exec"
@@ -961,8 +961,15 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // the adapter wrote, but it is checked here all the same: a value
       // that resolves outside the checkout runs nothing.
       cwd = serverCwd === null ? checkoutDir : resolve(checkoutDir, serverCwd)
-      if (cwd !== checkoutDir && !cwd.startsWith(checkoutDir + sep)) throw new Error("cwd escapes the checkout")
-      if (!(await stat(cwd)).isDirectory()) throw new Error("not a directory")
+      // Real paths, not lexical ones (codex round 48): a symlinked app
+      // directory (`apps/web -> /somewhere`) resolves under the checkout on
+      // paper and runs the child outside it, where pruning and boot's
+      // reconcile no longer control the code.
+      const realCheckout = await realpath(checkoutDir)
+      const realCwd = await realpath(cwd)
+      if (realCwd !== realCheckout && !realCwd.startsWith(realCheckout + sep)) throw new Error("cwd escapes the checkout")
+      if (!(await stat(realCwd)).isDirectory()) throw new Error("not a directory")
+      cwd = realCwd
     } catch {
       // Permanent: no number of restarts puts the files back, and no amount
       // of waiting does. Only a rebuild does, which is what the review page
