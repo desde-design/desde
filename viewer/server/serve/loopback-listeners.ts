@@ -320,14 +320,18 @@ function hostSpellingFor(bindHost: LoopbackBindHost): "127.0.0.1" | "[::1]" | "l
 }
 
 /**
- * The host a listener answers on. The `localhost` bind (the port-range
- * pairing, where the socket is on every interface and the browser reaches
- * it through a published port) gets a name of the deployment's own, so an
- * origin is never shared across deployments however ports are reused
- * (codex round 51). A deployment id is storage's UUID: a valid DNS label.
+ * The host a listener answers on. With a fixed port range, whatever the
+ * bind (codex rounds 51 and 52: the container's wildcard bind, and a range
+ * set by hand on a laptop alike), ports come back around, so every
+ * deployment gets a name of its own, `<deploymentId>.localhost`, and an
+ * origin is never shared across deployments however ports are reused.
+ * Chrome and Firefox resolve every `*.localhost` name to both loopback
+ * addresses without DNS, so it reaches a `127.0.0.1`, `::1` or wildcard
+ * bind alike. A deployment id is storage's UUID: a valid DNS label. On
+ * ephemeral ports the plain loopback spelling stays.
  */
-function listenerHostFor(deploymentId: string, bindHost: LoopbackBindHost): string {
-  return bindHost === "localhost" ? `${deploymentId.toLowerCase()}.localhost` : hostSpellingFor(bindHost)
+function listenerHostFor(deploymentId: string, bindHost: LoopbackBindHost, fixedRange: boolean): string {
+  return fixedRange || bindHost === "localhost" ? `${deploymentId.toLowerCase()}.localhost` : hostSpellingFor(bindHost)
 }
 
 /**
@@ -379,6 +383,8 @@ export function createLoopbackListenerRegistry(
    */
   const originHistory = new Map<string, { deploymentId: string; releasedAt: number }>()
   const originFor = (host: string, port: number): string => `http://${host}:${port}`
+  /** When each port was last released, whichever deployment held it: the range's least-recently-used order. */
+  const portReleasedAt = new Map<number, number>()
   /**
    * Origins a deployment must never answer on again (codex round 45): the
    * ones `rotateForDeployment` closed. A rotation exists because a reader
@@ -419,7 +425,7 @@ export function createLoopbackListenerRegistry(
     target: { bindHost: LoopbackBindHost; shellOrigin: string },
     key: string,
   ): Promise<LoopbackListener> {
-    const host = listenerHostFor(deployment.id, target.bindHost)
+    const host = listenerHostFor(deployment.id, target.bindHost, (deps.portRange ?? null) !== null)
     const shell = new URL(target.shellOrigin)
 
     if (shell.protocol !== "http:") {
@@ -559,10 +565,12 @@ export function createLoopbackListenerRegistry(
         if (!isRetiredFor(originFor(host, port), deployment.id)) ports.push(port)
       }
       const rank = (port: number): [number, number] => {
-        const previous = originHistory.get(originFor(host, port))
-        if (previous === undefined) return [1, port]
-        if (previous.deploymentId === deployment.id) return [0, port]
-        return [2, previous.releasedAt]
+        // This deployment's own previous origin first (its host is its own,
+        // so the history here can only be its own), then a port nothing has
+        // used, then released ports oldest first.
+        if (originHistory.get(originFor(host, port))?.deploymentId === deployment.id) return [0, port]
+        const released = portReleasedAt.get(port)
+        return released === undefined ? [1, port] : [2, released]
       }
       ports.sort((a, b) => {
         const [ra, ka] = rank(a)
@@ -623,6 +631,7 @@ export function createLoopbackListenerRegistry(
         // listener rather than handing out one that is closing.
         if (listeners.get(key) === record) listeners.delete(key)
         originHistory.set(origin, { deploymentId: deployment.id, releasedAt: now() })
+        portReleasedAt.set(address.port, now())
         await closeServer(server)
       },
     }
@@ -725,7 +734,7 @@ export function createLoopbackListenerRegistry(
         // silent mismatch would hand back an origin on a host the caller did
         // not ask for, which is precisely the host-flip property this whole
         // mechanism rests on.
-        const wanted = listenerHostFor(deployment.id, target.bindHost)
+        const wanted = listenerHostFor(deployment.id, target.bindHost, (deps.portRange ?? null) !== null)
         if (existing.host !== wanted) {
           throw new Error(
             `A prototype listener for deployment ${deployment.id} and shell origin ` +

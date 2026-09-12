@@ -306,11 +306,15 @@ describe("createLoopbackListenerRegistry", () => {
       await new Promise<void>((r) => probe.close(() => r()))
       return { from, to: from + size - 1 }
     }
-    function documentGet(port: number, headers: Record<string, string>): Promise<{ status: number; headers: Record<string, string | string[] | undefined> }> {
+    function documentGet(
+      listener: { host: string; port: number },
+      headers: Record<string, string>,
+    ): Promise<{ status: number; headers: Record<string, string | string[] | undefined> }> {
+      const { host, port } = listener
       return new Promise((resolve, reject) => {
         const req = httpRequest(
           // No keep-alive: the socket from a closed listener must not be reused for the next one on the same port.
-          { host: "127.0.0.1", port, path: "/", method: "GET", agent: false, headers: { Host: `127.0.0.1:${port}`, ...headers } },
+          { host: "127.0.0.1", port, path: "/", method: "GET", agent: false, headers: { Host: `${host}:${port}`, ...headers } },
           (res) => {
             res.resume()
             res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers }))
@@ -376,7 +380,7 @@ describe("createLoopbackListenerRegistry", () => {
       // The first use of a range port in this process counts as recycled
       // too (codex round 42): the browser's memory of the origin outlives a
       // Viewer restart, and this registry cannot know what served here.
-      const fresh = await documentGet(a.port, { "Sec-Fetch-Dest": "iframe" })
+      const fresh = await documentGet(a, { "Sec-Fetch-Dest": "iframe" })
       expect(fresh.status).toBe(200)
       expect(fresh.headers["clear-site-data"]).toBe('"cache", "storage"')
       await a.close()
@@ -384,18 +388,18 @@ describe("createLoopbackListenerRegistry", () => {
       const b = await registry.ensure(deployment("d2"), V4)
       expect(b.port).toBe(a.port)
       // An asset fetch first: not the moment, the document is.
-      const asset = await documentGet(b.port, { "Sec-Fetch-Dest": "script" })
+      const asset = await documentGet(b, { "Sec-Fetch-Dest": "script" })
       expect(asset.headers["clear-site-data"]).toBeUndefined()
-      const document = await documentGet(b.port, { "Sec-Fetch-Dest": "iframe" })
+      const document = await documentGet(b, { "Sec-Fetch-Dest": "iframe" })
       expect(document.status).toBe(200)
       expect(document.headers["clear-site-data"]).toBe('"cache", "storage"')
-      const reload = await documentGet(b.port, { "Sec-Fetch-Dest": "iframe" })
+      const reload = await documentGet(b, { "Sec-Fetch-Dest": "iframe" })
       expect(reload.headers["clear-site-data"]).toBeUndefined()
       await b.close()
 
       // The same deployment back on its own origin is not a recycled one.
       const bAgain = await registry.ensure(deployment("d2"), V4)
-      const back = await documentGet(bAgain.port, { Accept: "text/html,*/*" })
+      const back = await documentGet(bAgain, { Accept: "text/html,*/*" })
       expect(back.headers["clear-site-data"]).toBeUndefined()
     })
 
@@ -404,7 +408,7 @@ describe("createLoopbackListenerRegistry", () => {
       // another deployment before this process existed.
       const registry = makeRegistry({ d1: { "index.html": "<html></html>" } })
       const a = await registry.ensure(deployment("d1"), V4)
-      const fresh = await documentGet(a.port, { "Sec-Fetch-Dest": "iframe" })
+      const fresh = await documentGet(a, { "Sec-Fetch-Dest": "iframe" })
       expect(fresh.status).toBe(200)
       expect(fresh.headers["clear-site-data"]).toBe('"cache", "storage"')
     })
@@ -486,10 +490,10 @@ describe("createLoopbackListenerRegistry", () => {
       const registry = makeRegistry({ d1: {} })
       const first = await registry.ensure(deployment("d1"), V4)
       await registry.rotateForDeployment("d1")
-      await expect(documentGet(first.port, {})).rejects.toBeTruthy()
+      await expect(documentGet(first, {})).rejects.toBeTruthy()
       const again = await registry.ensure(deployment("d1"), V4)
       expect(again).not.toBe(first)
-      expect((await documentGet(again.port, {})).status).toBe(404)
+      expect((await documentGet(again, {})).status).toBe(404)
     })
   })
 
@@ -767,8 +771,10 @@ describe("createLoopbackListenerRegistry", () => {
         expect(listener.boundAddress).toBe("0.0.0.0")
         // The origin the browser is told to use is unchanged: the loopback
         // spelling paired with the shell, never the bind address.
-        expect(listener.host).toBe("127.0.0.1")
-        expect(listener.origin).toBe(`http://127.0.0.1:${listener.port}`)
+        // The socket is on every interface; the host the browser uses is the
+        // deployment's own name (codex rounds 51 and 52).
+        expect(listener.host).toBe("dep-1.localhost")
+        expect(listener.origin).toBe(`http://dep-1.localhost:${listener.port}`)
       } finally {
         await registry.closeAll()
       }
@@ -805,8 +811,10 @@ describe("createLoopbackListenerRegistry", () => {
           { bindHost: "127.0.0.1", shellOrigin: "http://localhost:3100" },
         )
         expect(listener.boundAddress).toBe("127.0.0.1")
-        expect(listener.host).toBe("127.0.0.1")
-        expect(listener.origin).toBe(`http://127.0.0.1:${listener.port}`)
+        // A host of the deployment's own: a fixed range recycles ports on a
+        // laptop as much as in a container (codex round 52).
+        expect(listener.host).toBe("dep-1.localhost")
+        expect(listener.origin).toBe(`http://dep-1.localhost:${listener.port}`)
       } finally {
         await registry.closeAll()
       }
