@@ -8,7 +8,7 @@
  */
 import express from "express"
 import { createServer, request as nodeHttpRequest, type Server } from "node:http"
-import type { AddressInfo } from "node:net"
+import { connect, type AddressInfo } from "node:net"
 import { gzipSync } from "node:zlib"
 import request from "supertest"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -74,9 +74,9 @@ function unreachableApp(extra: Partial<Omit<ProxyOptions, "port" | "path">> = {}
 
 describe("proxyToProcess", () => {
   it("forwards the path minus the prefix, and strips authorization", async () => {
-    let seen: { url?: string; authorization?: string; host?: string } = {}
+    let seen: { url?: string; authorization?: string } = {}
     const port = await child((req, res) => {
-      seen = { url: req.url, authorization: req.headers.authorization, host: req.headers.host }
+      seen = { url: req.url, authorization: req.headers.authorization }
       res.setHeader("content-type", "text/plain")
       res.end("ok")
     })
@@ -87,7 +87,6 @@ describe("proxyToProcess", () => {
     expect(res.text).toBe("ok")
     expect(seen.url).toBe("/dashboard?x=1")
     expect(seen.authorization).toBeUndefined()
-    expect(seen.host).toBe(`127.0.0.1:${port}`)
   })
 
   /**
@@ -123,16 +122,14 @@ describe("proxyToProcess", () => {
   /**
    * Next's server-action handler compares the request's `Origin` against
    * `x-forwarded-host` first and `host` second, and refuses the action on a
-   * mismatch. `host` is the child's own address, so without this a form post
-   * or a server action through the proxy answered 500. The client's own
-   * values are overwritten rather than merged: they are whatever the browser
-   * or an intermediary claimed, and this proxy knows the truth.
+   * mismatch. The client's own values are overwritten rather than merged:
+   * they are whatever the browser or an intermediary claimed, and this proxy
+   * knows the truth.
    */
   it("states the browser's host and scheme in X-Forwarded-Host and X-Forwarded-Proto", async () => {
-    let seen: { host?: string; fwdHost?: string; fwdProto?: string } = {}
+    let seen: { fwdHost?: string; fwdProto?: string } = {}
     const port = await child((req, res) => {
       seen = {
-        host: req.headers.host,
         fwdHost: req.headers["x-forwarded-host"] as string | undefined,
         fwdProto: req.headers["x-forwarded-proto"] as string | undefined,
       }
@@ -143,9 +140,57 @@ describe("proxyToProcess", () => {
       .set("Host", "acme.desde.test")
       .set("X-Forwarded-Host", "attacker.example.com")
       .set("X-Forwarded-Proto", "gopher")
-    expect(seen.host).toBe(`127.0.0.1:${port}`)
     expect(seen.fwdHost).toBe("acme.desde.test")
     expect(seen.fwdProto).toBe("https")
+  })
+
+  /**
+   * Codex round 20, item 1. `host` used to be rewritten to the child's own
+   * `127.0.0.1:<port>`, leaving `X-Forwarded-Host` as the only statement of
+   * where the browser actually went. A server that does not read forwarding
+   * headers then builds every request URL from that private address:
+   * `@react-router/serve` runs Express without `trust proxy`, so its loaders
+   * and actions saw `http://127.0.0.1:<port>/...` and every origin-based
+   * redirect, absolute URL and secure-cookie decision was made against the
+   * wrong origin.
+   */
+  it("forwards the browser's own Host to the child unchanged", async () => {
+    let seen: string | undefined
+    const port = await child((req, res) => {
+      seen = req.headers.host
+      res.end("ok")
+    })
+    await request(appFor(port)).get("/p/acme/").set("Host", "acme.desde.test")
+    expect(seen).toBe("acme.desde.test")
+  })
+
+  /**
+   * HTTP/1.1 requires a `Host`, so an empty one is not something a browser
+   * produces (`node:http` refuses to send a request with no `Host` line at
+   * all, which is why this one is written onto the socket by hand). It is
+   * still worth pinning: an empty `Host` on the child's request would be
+   * worse than none, so the header is left off entirely and `node:http`
+   * addresses the child by the port it is dialling.
+   */
+  it("falls back to the child's own address when the request carried an empty Host", async () => {
+    let seen: string | undefined
+    const port = await child((req, res) => {
+      seen = req.headers.host
+      res.end("ok")
+    })
+    const proxy = appFor(port).listen(0, "127.0.0.1")
+    servers.push(proxy)
+    await new Promise<void>((r) => proxy.once("listening", () => r()))
+    const proxyPort = (proxy.address() as AddressInfo).port
+    await new Promise<void>((resolve, reject) => {
+      const socket = connect(proxyPort, "127.0.0.1", () => {
+        socket.write("GET /p/acme/ HTTP/1.1\r\nHost: \r\nConnection: close\r\n\r\n")
+      })
+      socket.resume()
+      socket.on("end", () => resolve())
+      socket.on("error", reject)
+    })
+    expect(seen).toBe(`127.0.0.1:${port}`)
   })
 
   /**

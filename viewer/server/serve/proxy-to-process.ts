@@ -230,24 +230,41 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
       if (!DROP_REQUEST.has(k.toLowerCase()) && v !== undefined) headers[k] = v
     }
     headers["accept-encoding"] = "identity"
-    headers.host = `127.0.0.1:${opts.port}`
     const cookie = forwardedCookieHeader(req.headers.cookie)
     if (cookie !== undefined) headers.cookie = cookie
     else delete headers.cookie
     // Set here, after the copy loop, and never merged with whatever the client
-    // claimed (both names are in `DROP_REQUEST`). A framework that checks a
-    // write's `Origin` against its own host reads `x-forwarded-host` FIRST and
-    // `host` second — Next's server-action handler does — and `host` is the
-    // child's internal address, which no browser `Origin` can ever equal. The
-    // same pair is what lets an app build absolute URLs (canonical links,
-    // `metadataBase`, OAuth redirects) that point at the prototype origin
-    // instead of the child's private port.
+    // claimed (all three names are in `DROP_REQUEST`).
+    //
+    // The child is told the browser's OWN host, both as `Host` and as
+    // `X-Forwarded-Host` (codex round 20, item 1). `Host` used to be rewritten
+    // to the child's `127.0.0.1:<port>`, which left the forwarding header as
+    // the only statement of where the browser went — and a server that does
+    // not read forwarding headers then builds every request URL from a private
+    // loopback address. The stock `@react-router/serve` is exactly that: plain
+    // Express with no `trust proxy`, so its loaders and actions saw
+    // `http://127.0.0.1:<port>/…` and decided origin-based redirects, absolute
+    // URLs and secure-cookie behaviour against the wrong origin. Sending the
+    // real host is safe here because the child listens on loopback only and
+    // none of the three supported servers validates `Host`.
+    //
+    // `X-Forwarded-Host` is still sent alongside it, because a framework that
+    // checks a write's `Origin` against its own host reads that name FIRST —
+    // Next's server-action handler does.
+    //
+    // The SCHEME cannot be restored the same way: there is no equivalent of
+    // `Host` for it, so a server that ignores `X-Forwarded-Proto` sees `http`
+    // however the browser arrived. On an https deployment a React Router app
+    // reads `http://…` in its loaders until the app itself enables
+    // `trust proxy`.
     //
     // A `Host` the request did not carry is impossible in practice (HTTP/1.1
     // requires it), but an empty string here would be worse than no header at
-    // all, so it is simply left off.
+    // all, so it is simply left off: `node:http` then addresses the child by
+    // the loopback port it is dialling.
     const browserHost = req.headers.host
     if (typeof browserHost === "string" && browserHost !== "") {
+      headers.host = browserHost
       headers["x-forwarded-host"] = browserHost
     }
     headers["x-forwarded-proto"] = opts.forwardedProto

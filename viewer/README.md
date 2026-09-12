@@ -375,6 +375,12 @@ loading it. The review page follows the process state live over a
 server-sent-events stream and keys the frame on the process generation, so
 a restart reloads the frame on its own and a crash past the restart budget
 shows the log with a Rebuild button, with no page reload in either case.
+The proxy hands the child the browser's own `Host`, plus `X-Forwarded-Host`
+and `X-Forwarded-Proto`, so the app builds its URLs against the address the
+reviewer actually used; the scheme is the one part that cannot be restored
+that way, so on an https deployment a server that ignores
+`X-Forwarded-Proto` (stock `@react-router/serve`, which runs Express without
+`trust proxy`) reads `http` until the app turns that setting on.
 The lifecycle rules live in one table, `server/serve/process-state.ts`;
 the runtime that drives it is `server/serve/prototype-processes.ts`.
 
