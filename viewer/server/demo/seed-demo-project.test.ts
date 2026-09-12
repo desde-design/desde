@@ -124,6 +124,8 @@ it("marks the deployment deployed, not building", async () => {
   const project = await d.storage.getProjectBySlug("demo")
   const deployment = await d.storage.getDeployment(project!.activeDeploymentId!)
   expect(deployment?.status).toBe("deployed")
+  // Activated through the one activation path, stamp and all (codex round 58).
+  expect(deployment?.activatedAt).toBeTypeOf("string")
 })
 
 it("does not seed twice", async () => {

@@ -139,7 +139,11 @@ export async function seedDemoProject(deps: SeedDemoDeps): Promise<"seeded" | "s
       status: "deployed",
       buildLog: "Seeded from the bundled demo prototype.\n",
     })
-    await deps.storage.updateProject(project.id, { activeDeploymentId: deployment.id })
+    // Through the one activation path, so the demo carries the "went live"
+    // stamp like any other deployment (codex round 58): the pointer written
+    // alone read as never activated once the demo was superseded, and boot
+    // marked it failed.
+    await deps.storage.activateDeployment(project.id, deployment.id)
 
     // Inside the same try as everything above, so a failure here takes the
     // cleanup path with the rest. A demo with a prototype and no conversation
