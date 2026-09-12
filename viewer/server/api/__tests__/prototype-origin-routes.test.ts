@@ -1780,6 +1780,36 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     expect(frames[1]?.capabilityRequired).toBe(true)
   })
 
+  /**
+   * Codex round 24. The access change used to be noticed only by the
+   * heartbeat; a process callback landing in the same moment patched the
+   * OLD body (still `capabilityRequired: false`) and recorded an access key
+   * built from it, so every later tick thought nothing had changed and the
+   * page stayed without a capability for good.
+   */
+  it("re-resolves the body when a process callback lands after the project's access changed", async () => {
+    const fake = fakePrototypeProcesses()
+    const ctx = setup({ config: subdomainConfig, prototypeProcesses: fake, prototypeOriginStreamPingMs: 60_000 })
+    const project = await seedProject(ctx.storage, { access: "public-link" })
+    const deploymentId = await makeServerDeployment(ctx, project)
+    const running: ProcessStatus = { state: "running", port: 4321, since: "2026-09-12T00:00:00.000Z", generation: 1 }
+
+    const { received, destroy } = await readUntil(ctx.app, project, (r) => originFrames(r).length >= 2, {
+      shellOrigin: null,
+      onFirstByte: () => {
+        void ctx.storage.updateProject(project.id, { access: "invited" }).then(() => {
+          fake.emit(deploymentId, running)
+        })
+      },
+    })
+    destroy()
+
+    const frames = originFrames(received) as { capabilityRequired?: boolean; process?: ProcessStatus }[]
+    expect(frames[0]?.capabilityRequired).toBe(false)
+    expect(frames[1]?.capabilityRequired).toBe(true)
+    expect(frames[1]?.process).toEqual(running)
+  })
+
   /** A 503 that keeps saying the same thing sends nothing: the page already shows it. */
   it("sends no repeat body while the 503 reason is unchanged", async () => {
     const ctx = setup({

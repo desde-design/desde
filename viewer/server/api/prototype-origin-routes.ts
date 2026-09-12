@@ -773,6 +773,15 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
       // it, and patching an old deployment's process into the new
       // deployment's body would be a lie the page acts on.
       if (fromDeploymentId !== current.deploymentId) return
+      // The access may have changed under this same callback (a project
+      // going private as the child crashes). Patching the old body would
+      // send a stale `capabilityRequired` AND record an access key built
+      // from it, leaving every later tick blind to the change (codex round
+      // 24). Re-resolve instead; the fresh body carries the status too.
+      if (accessKey(freshProject, policy, current) !== sentAccessKey) {
+        await refollowActiveDeployment(freshProject)
+        return
+      }
       if (current.status === 200) {
         // The cast is safe: this branch only runs when `subscribeToProcess`
         // was called, which only happens for a body whose `serve` is
