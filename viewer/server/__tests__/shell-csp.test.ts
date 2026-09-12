@@ -149,7 +149,7 @@ describe("shell connect-src (the port-unreachable probe, loopback only)", () => 
   it("adds the loopback connect-src (with 'self') on a shell page when loopback is available", async () => {
     const res = await request(appWithLoopback("on").app).get("/")
     const csp = res.headers["content-security-policy"]
-    expect(csp).toContain("connect-src 'self' http://localhost:* http://127.0.0.1:* http://[::1]:*")
+    expect(csp).toContain("connect-src 'self' http://localhost:* http://*.localhost:* http://127.0.0.1:* http://[::1]:*")
   })
 
   it("adds no connect-src at all when loopback is not available", async () => {

@@ -46,7 +46,7 @@ import type { StorageAdapter } from "./storage/types"
  *   of ITS OWN, which is a different thing — it says nothing about whether
  *   the shell can be embedded BY something else. This closes that
  *   permanently rather than depending on `frame-src` never being relaxed.
- * - `connect-src 'self' http://localhost:* http://127.0.0.1:* http://[::1]:*`,
+ * - `connect-src 'self' http://localhost:* http://*.localhost:* http://127.0.0.1:* http://[::1]:*`,
  *   ONLY when `config.loopbackAvailable` — the port-unreachable watchdog
  *   (`review-shell.tsx`'s `probeReachable`) probes a loopback listener's
  *   ephemeral origin with `fetch(...)` from the shell page, and without this
@@ -76,7 +76,15 @@ import type { StorageAdapter } from "./storage/types"
  */
 function createShellCspGuard(config: Pick<ViewerConfig, "loopbackAvailable">): RequestHandler {
   const directives = config.loopbackAvailable
-    ? ["frame-ancestors 'none'", "connect-src 'self' http://localhost:* http://127.0.0.1:* http://[::1]:*"]
+    ? [
+        "frame-ancestors 'none'",
+        // `*.localhost` too (codex round 52): with a fixed port range every
+        // deployment's listener is `<deploymentId>.localhost:<port>`, and a
+        // CSP host source never matches subdomains on its own, so the
+        // review page's reachability probe was blocked before it ever
+        // reached the port.
+        "connect-src 'self' http://localhost:* http://*.localhost:* http://127.0.0.1:* http://[::1]:*",
+      ]
     : ["frame-ancestors 'none'"]
   return function shellCspGuard(req: Request, res: Response, next: NextFunction): void {
     if (req.url.startsWith("/p/")) {
