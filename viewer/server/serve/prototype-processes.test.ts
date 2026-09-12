@@ -78,6 +78,45 @@ function holdLease(procs: PrototypeProcesses, id: string): () => Promise<void> {
 }
 
 /**
+ * One whole request, the shape `serve-router.ts` makes it: the lease is taken
+ * FIRST, the cold start happens inside it, and the lease stays open until the
+ * test releases it — a response still being written.
+ *
+ * `started` settles when the `ensure` does, so a test can assert on the four
+ * that got in and the two that were refused while all six requests are still
+ * in flight. `release()` ends the request and resolves once the lease is
+ * actually gone.
+ */
+function leasedEnsure(
+  procs: PrototypeProcesses,
+  id: string,
+): { started: Promise<{ port: number }>; release: () => Promise<void> } {
+  const done = deferred()
+  let settle!: (result: { port: number }) => void
+  let fail!: (error: unknown) => void
+  const started = new Promise<{ port: number }>((resolve, reject) => {
+    settle = resolve
+    fail = reject
+  })
+  const held = procs.withLease(id, async () => {
+    try {
+      settle(await procs.ensure({ id, serverStart: start() }))
+    } catch (error) {
+      fail(error)
+      return
+    }
+    await done.promise
+  })
+  return {
+    started,
+    release: async () => {
+      done.resolve()
+      await held
+    },
+  }
+}
+
+/**
  * Codex round 4, Fix 3. A standalone Next build's recorded `start` is
  * `["node", "<distDir>/standalone/server.js"]` — a BARE `node`, never an
  * absolute path, because the checkout has no `node` of its own and an
@@ -769,6 +808,90 @@ describe("createPrototypeProcesses", () => {
     expect(runningIds).toEqual(["c", "d"])
     expect(procs.status("a").state).toBe("stopped")
     expect(procs.status("b").state).toBe("stopped")
+  })
+
+  /**
+   * Codex round 14, Fix 2. A slot a cold start is merely WAITING for is not
+   * an occupied slot.
+   *
+   * The room-making loop counted every `starting` record against the cap, so
+   * with more concurrent cold starts than the cap every waiter saw the cap
+   * exceeded. One leader went through, became running, and was leased by its
+   * own request — and every other waiter then found nothing evictable and
+   * fell into the busy refusal with three of the four slots still free.
+   * MEASURED before the fix: one of six running, five refused.
+   *
+   * The rule now counts a start only once it has been ADMITTED (passed the
+   * room-making loop), so the cap admits exactly `maxRunning` of them and the
+   * rest wait on a start that is actually going somewhere.
+   */
+  it("admits cold starts up to the cap, and refuses the rest only once every slot is running and busy", async () => {
+    const ids = ["a", "b", "c", "d", "e", "f"]
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(ids),
+      maxRunning: 4,
+      spawnEnv: { FAKE_DELAY_MS: "80" },
+    })
+    managers.push(procs)
+    const runningIds = (): string[] => ids.filter((id) => procs.status(id).state === "running")
+
+    const attempts = ids.map((id) => leasedEnsure(procs, id))
+    const outcomes = await Promise.all(
+      attempts.map((attempt) =>
+        attempt.started.then(
+          () => ({ refused: null, runningThen: 0 }),
+          (error: unknown) => ({ refused: error, runningThen: runningIds().length }),
+        ),
+      ),
+    )
+
+    expect(runningIds()).toHaveLength(4)
+    const refusals = outcomes.filter((outcome) => outcome.refused !== null)
+    expect(refusals).toHaveLength(2)
+    for (const refusal of refusals) {
+      expect(refusal.refused).toMatchObject({
+        message: "Every prototype server is busy. Try again in a moment.",
+      })
+      // Not refused while a slot was still free: every one of the four was up
+      // and holding its request's lease before either of these gave up.
+      expect(refusal.runningThen).toBe(4)
+    }
+
+    for (const attempt of attempts) await attempt.release()
+  })
+
+  /** The plain case the admission rule must not change: one over the cap, one eviction. */
+  it("evicts one idle entry when a fifth deployment starts at a cap of four", async () => {
+    const ids = ["a", "b", "c", "d"]
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot([...ids, "e"]),
+      maxRunning: 4,
+    })
+    managers.push(procs)
+    for (const id of ids) await procs.ensure({ id, serverStart: start() })
+
+    await expect(procs.ensure({ id: "e", serverStart: start() })).resolves.toBeTruthy()
+
+    expect(procs.status("e").state).toBe("running")
+    // The least recently used of the four, and only that one.
+    expect(procs.status("a").state).toBe("stopped")
+    expect(ids.filter((id) => procs.status(id).state === "running")).toEqual(["b", "c", "d"])
+  })
+
+  /** Under the cap there is nothing to make room for, so nobody waits and nobody is refused. */
+  it("admits three concurrent cold starts under a cap of four, refusing none", async () => {
+    const ids = ["a", "b", "c"]
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(ids),
+      maxRunning: 4,
+      spawnEnv: { FAKE_DELAY_MS: "80" },
+    })
+    managers.push(procs)
+
+    const results = await Promise.allSettled(ids.map((id) => procs.ensure({ id, serverStart: start() })))
+
+    expect(results.every((r) => r.status === "fulfilled")).toBe(true)
+    expect(ids.filter((id) => procs.status(id).state === "running")).toEqual(ids)
   })
 
   /**

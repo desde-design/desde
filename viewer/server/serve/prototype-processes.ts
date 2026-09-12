@@ -329,6 +329,17 @@ interface Entry {
    * is `starting` always has one.
    */
   opening: Promise<{ port: number }> | null
+  /**
+   * Whether this record's cold start has passed `makeRoom` — it holds a slot
+   * against `maxRunning` and is on its way to `running`.
+   *
+   * True only while the record is `starting`: `applySync` clears it the
+   * moment the record leaves that state, whichever way it left (ready,
+   * crashed, stopped, retired). A start that is still INSIDE `makeRoom`
+   * occupies nothing, which is the whole of codex round 14, Fix 2 — see the
+   * room-making loop.
+   */
+  admitted: boolean
 }
 
 export function createPrototypeProcesses(deps: PrototypeProcessesDeps): PrototypeProcesses {
@@ -395,7 +406,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const entryFor = (id: string): Entry => {
     let e = entries.get(id)
     if (!e) {
-      e = { record: newRecord(tick()), child: null, log: "", opening: null }
+      e = { record: newRecord(tick()), child: null, log: "", opening: null, admitted: false }
       entries.set(id, e)
     }
     return e
@@ -499,6 +510,13 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     const before = exposedStatus(entry.record)
     const result = transition(entry.record, event, tick(), limits)
     entry.record = result.record
+    // An admission lasts exactly as long as the `starting` state it was
+    // granted for. Cleared here, in the one place every transition passes
+    // through, rather than at each of the half dozen sites a start can end
+    // at — a stale `admitted` would count a record against the cap that is
+    // no longer coming up, or (worse) count the NEXT start before it has
+    // passed `makeRoom`.
+    if (entry.record.state.kind !== "starting") entry.admitted = false
     let killing: ChildProcess | null = null
     for (const effect of result.effects) {
       switch (effect.kind) {
@@ -583,9 +601,18 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     }
   }
 
-  /** Every record that currently occupies a slot against `maxRunning`. */
-  const occupied = (): number =>
-    [...entries.values()].filter((e) => e.record.state.kind === "running" || e.record.state.kind === "starting").length
+  /**
+   * Every cold start that has been ADMITTED and is still coming up: it holds
+   * a slot against `maxRunning`, and it is going somewhere (it will end as
+   * `running` or as a crash), so it is safe to wait on.
+   *
+   * `opening !== null` is part of the predicate rather than an assumption
+   * about it, so the count and the wait target below are decided by exactly
+   * the same test. That is what makes "not admittable ⇒ there is something to
+   * wait on" true by construction rather than by a second argument.
+   */
+  const admittedStarts = (): [string, Entry][] =>
+    [...entries].filter(([, e]) => e.record.state.kind === "starting" && e.admitted && e.opening !== null)
   const runningCount = (): number => [...entries.values()].filter((e) => e.record.state.kind === "running").length
   const recordsById = (): Map<string, ProcessRecord> =>
     new Map([...entries].map(([id, e]) => [id, e.record] as const))
@@ -627,70 +654,67 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   }
 
   /**
-   * Frees a slot for a record that has already transitioned to `starting`.
+   * Reserves a slot for a record that has already transitioned to `starting`,
+   * and marks it ADMITTED once it has one.
    *
-   * `occupied()` counts that record too, so the condition is `> maxRunning`,
-   * not `>=`: this record alone is allowed to fill the last slot.
+   * The rule is `running + admittedStarting < maxRunning`. This record is not
+   * in either count — it is `starting` and not yet admitted — so the strict
+   * `<` is what leaves the last slot for it.
    *
-   * Never evicts a `starting` record — it may have no child yet, or one
-   * mid-spawn, and `chooseVictim` only ever returns a `running` one. When
-   * every occupied slot is `starting` (nothing `running` to evict), the
-   * record that reserved its slot FIRST — stable Map insertion order — is
-   * always let through, and every other `starting` record waits on THAT ONE
-   * specifically. That fixed, single leader is what keeps this from
-   * deadlocking: two starting records can never end up waiting on each
-   * other, because only the earliest one is ever a wait target, and the
-   * earliest one never waits (it always sees itself as the leader and
-   * proceeds). Once the leader settles (running or crashed) the waiters
-   * re-check from scratch.
+   * Admission is the whole of codex round 14, Fix 2. The count used to be
+   * every `starting` record, admitted or not: fire more concurrent cold
+   * starts than the cap and every one of them saw the cap exceeded, one
+   * leader went through, and the rest found nothing evictable and gave the
+   * reader the busy refusal with most of the slots still free.
+   *
+   * When there is no room, in order: evict the least recently used `running`
+   * record with no open lease (`chooseVictim`, which never returns a leased
+   * or a `starting` one) and re-check; else wait for an admitted start to
+   * finish and re-check; else refuse as busy, releasing the slot this attempt
+   * reserved.
+   *
+   * **Why this cannot deadlock.** A waiter only ever waits on an ADMITTED
+   * start, and an admitted start never waits: it has already left this loop,
+   * and every path out of `starting` is one it reaches on its own (it
+   * becomes `running`, it crashes, it times out, something stops it). So the
+   * wait graph is a set of waiters pointing at records that are making
+   * progress — it has no cycles, and no waiter can be pointing at another
+   * waiter. The "nothing to wait on" case is not a special case either: if
+   * `running + admittedStarting >= maxRunning` while `running < maxRunning`,
+   * then `admittedStarting > 0` and there IS something to wait on; and if
+   * `running >= maxRunning` with nothing evictable, every slot is held by a
+   * record answering a request, which is the busy refusal.
    *
    * A `running` record with an open lease (a response still being streamed)
-   * is never a victim either (codex round 8, Fix 2) — that rule is
-   * `chooseVictim`'s, which skips any record with `leases > 0`.
+   * is never a victim (codex round 8, Fix 2) — that rule is `chooseVictim`'s,
+   * which skips any record with `leases > 0`.
    */
   async function makeRoom(id: string): Promise<void> {
-    while (occupied() > maxRunning) {
+    while (runningCount() + admittedStarts().length >= maxRunning) {
       const victimId = chooseVictim(recordsById())
       if (victimId !== null) {
         await lock.run(victimId, () => applyAllowingRefusal(victimId, { type: "evict" }))
         continue
       }
-      const leaderId = [...entries].find(([, e]) => e.record.state.kind === "starting")?.[0]
-      if (leaderId !== undefined && leaderId !== id) {
-        const leaderOpening = entries.get(leaderId)?.opening
-        if (leaderOpening) {
-          await leaderOpening.catch(() => {})
-        } else {
-          // Should be unreachable — a `starting` record's `opening` is set in
-          // the same lock hold as its transition (see `ensure`), so this is
-          // only a defensive yield against ever spinning the event loop if
-          // that invariant is somehow violated.
-          await Promise.resolve()
-        }
+      // `id` is excluded defensively only: a record cannot be admitted while
+      // it is inside its own `makeRoom` — `admitted` is cleared whenever the
+      // record leaves `starting`, and `start-requested` is what put it there.
+      const waitFor = admittedStarts().find(([otherId]) => otherId !== id)?.[1].opening
+      if (waitFor) {
+        await waitFor.catch(() => {})
         continue
       }
-      // No running record can be evicted, and there is no OTHER starting
-      // record to wait on either. Two cases reach here, and they must be told
-      // apart:
-      //
-      // - nothing is running: every occupied slot is a fresh cold start,
-      //   including possibly this one. This is the deadlock-freedom case
-      //   above — `leaderId` is either absent or this record itself, so there
-      //   is nothing productive left to wait for, and breaking out
-      //   (proceeding to spawn over the cap, transiently) is what lets the
-      //   single leader through instead of every starting record waiting on
-      //   every other.
-      // - something IS running: every slot is held by a running record that
-      //   is actively answering a request, and nothing here will free one on
-      //   its own. Waiting would either spin or block indefinitely on a
-      //   response that may not end soon — so this attempt fails fast
-      //   instead, releasing the slot it reserved.
-      if (runningCount() > 0) {
-        await lock.run(id, () => apply(id, { type: "stop-requested" }))
-        throw new PrototypeProcessError(statusOf(id), BUSY_MESSAGE)
-      }
-      break
+      // Every slot is held by a running record that is actively answering a
+      // request, and nothing here will free one on its own. Waiting would
+      // block indefinitely on a response that may not end soon, so this
+      // attempt fails fast instead, releasing the slot it reserved.
+      await lock.run(id, () => apply(id, { type: "stop-requested" }))
+      throw new PrototypeProcessError(statusOf(id), BUSY_MESSAGE)
     }
+    // In the same synchronous step as the check above, so two waiters cannot
+    // both read "there is room" and both take the last slot.
+    const entry = entries.get(id)
+    if (entry && entry.record.state.kind === "starting") entry.admitted = true
   }
 
   /**
