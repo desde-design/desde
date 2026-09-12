@@ -142,7 +142,13 @@ describe("readPrototypeOrigin", () => {
         serve: "static",
         range: null,
       }),
-    ).toEqual({ mode: "loopback", origin: "http://127.0.0.1:45001", serve: "static", range: null })
+    ).toEqual({
+      mode: "loopback",
+      origin: "http://127.0.0.1:45001",
+      capabilityRequired: false,
+      serve: "static",
+      range: null,
+    })
   })
 
   it("passes a well-formed subdomain answer through", () => {
@@ -153,7 +159,13 @@ describe("readPrototypeOrigin", () => {
         capabilityRequired: true,
         serve: "static",
       }),
-    ).toEqual({ mode: "subdomain", origin: "https://acme.desde.test", serve: "static", range: null })
+    ).toEqual({
+      mode: "subdomain",
+      origin: "https://acme.desde.test",
+      capabilityRequired: true,
+      serve: "static",
+      range: null,
+    })
   })
 
   it("keeps the null origin of a loopback project with nothing built", () => {
@@ -166,7 +178,13 @@ describe("readPrototypeOrigin", () => {
         serve: "static",
         range: null,
       }),
-    ).toEqual({ mode: "loopback", origin: null, serve: "static", range: null })
+    ).toEqual({
+      mode: "loopback",
+      origin: null,
+      capabilityRequired: false,
+      serve: "static",
+      range: null,
+    })
   })
 
   it("passes a fallback answer through unchanged", () => {
@@ -177,7 +195,13 @@ describe("readPrototypeOrigin", () => {
         capabilityRequired: true,
         serve: "static",
       }),
-    ).toEqual({ mode: "fallback", origin: null, serve: "static", range: null })
+    ).toEqual({
+      mode: "fallback",
+      origin: null,
+      capabilityRequired: true,
+      serve: "static",
+      range: null,
+    })
   })
 
   // Every unrecognised shape lands on fallback, which `resolvePrototypeEmbed`
@@ -207,7 +231,13 @@ describe("readPrototypeOrigin", () => {
   it("defaults serve to \"static\" when the field is absent (an older server's body)", () => {
     expect(
       readPrototypeOrigin({ mode: "fallback", origin: null, capabilityRequired: true }),
-    ).toEqual({ mode: "fallback", origin: null, serve: "static", range: null })
+    ).toEqual({
+      mode: "fallback",
+      origin: null,
+      capabilityRequired: true,
+      serve: "static",
+      range: null,
+    })
   })
 
   it("carries the process status for a server deployment", () => {
@@ -224,6 +254,7 @@ describe("readPrototypeOrigin", () => {
     ).toEqual({
       mode: "loopback",
       origin: "http://127.0.0.1:45001",
+      capabilityRequired: false,
       serve: "server",
       process: status,
       range: null,
@@ -285,6 +316,35 @@ describe("readPrototypeOrigin", () => {
     expect(
       "deploymentId" in
         readPrototypeOrigin({ mode: "loopback", origin: "http://127.0.0.1:45001", serve: "static" }),
+    ).toBe(false)
+  })
+
+  /**
+   * The shell does not MINT from this — the capability in the frame's URL is
+   * the server-rendered one — but it does act on it: `true` on a page that
+   * holds no capability means the project's access changed under the open
+   * stream, and only the server can mint what the new policy needs. A body
+   * that says nothing (both 503 shapes, an older server) must leave the page
+   * alone, so the field is OMITTED rather than defaulted.
+   */
+  it("carries capabilityRequired, and omits it when the body does not say", () => {
+    expect(
+      readPrototypeOrigin({
+        mode: "subdomain",
+        origin: "https://acme.desde.test",
+        capabilityRequired: true,
+        serve: "static",
+      }).capabilityRequired,
+    ).toBe(true)
+    expect(
+      "capabilityRequired" in
+        readPrototypeOrigin({ mode: "loopback", origin: "http://127.0.0.1:45001", serve: "static" }),
+    ).toBe(false)
+    // And off a 503 body, which carries no mode either: the parse falls back,
+    // and the field stays absent rather than becoming a `false` the page
+    // would read as "no capability needed".
+    expect(
+      "capabilityRequired" in readPrototypeOrigin({ error: "nope", reason: "ports-exhausted", serve: "server" }),
     ).toBe(false)
   })
 

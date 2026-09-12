@@ -55,6 +55,19 @@ export interface ReviewEmbedOrigin {
    */
   bridgeAssetPath?: string | null
   /**
+   * Whether the prototype's own subresources need a minted capability, as the
+   * server sees it RIGHT NOW. ABSENT when the body did not say (both 503
+   * shapes, and a server old enough not to carry the field).
+   *
+   * The page does not mint from this — see `readPrototypeOrigin` below, and
+   * `review-shell.tsx`'s `embedTarget`, which deliberately keeps reading the
+   * server-rendered `project.capability`. It is read for one thing: a `true`
+   * here on a page rendered with NO capability means the project's access
+   * changed under the open stream, and only the server can mint the
+   * capability the new policy needs. The shell asks the router to re-render.
+   */
+  capabilityRequired?: boolean
+  /**
    * Which deployment this answer was computed against. ABSENT when the body
    * named none — the project has nothing built, or the answer came from a
    * server old enough not to say.
@@ -84,11 +97,15 @@ export const FALLBACK_EMBED_ORIGIN: ReviewEmbedOrigin = {
  * Failing closed is the point. Fallback is today's behaviour — the sandboxed
  * same-host embed — which works. The other direction, inventing an isolated
  * origin out of a shape nobody vouched for, is what would hand
- * `allow-same-origin` to a frame the server never named. `capabilityRequired`
- * is deliberately ignored: this page mints a capability by its own rule
- * (`prototypeAnonymouslyReadable`), and it must keep minting one even in an
- * isolated mode, because `resolvePrototypeEmbed` can still fall back to the
- * path prefix, where the capability is what makes the sandbox affordable.
+ * `allow-same-origin` to a frame the server never named.
+ *
+ * `capabilityRequired` is carried through but never MINTED from: this page
+ * mints a capability by its own rule (`prototypeAnonymouslyReadable`), and it
+ * must keep minting one even in an isolated mode, because
+ * `resolvePrototypeEmbed` can still fall back to the path prefix, where the
+ * capability is what makes the sandbox affordable. What the shell does with
+ * it is ask the SERVER for a fresh page when the answer starts saying `true`
+ * on a page that has no capability — see the field's own doc comment above.
  */
 export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -103,6 +120,7 @@ export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
     reason: rawReason,
     bridgeAssetPath: rawBridgeAssetPath,
     deploymentId: rawDeploymentId,
+    capabilityRequired: rawCapabilityRequired,
   } = value as {
     mode?: unknown
     origin?: unknown
@@ -112,6 +130,7 @@ export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
     reason?: unknown
     bridgeAssetPath?: unknown
     deploymentId?: unknown
+    capabilityRequired?: unknown
   }
 
   // Read before the shape checks below can bail out: neither 503 body (ports
@@ -141,6 +160,10 @@ export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
   // `ReviewEmbedOrigin.deploymentId`. Read here, alongside `serve` and
   // `reason`, so it survives a body that fails the shape checks below too.
   const deploymentId = typeof rawDeploymentId === "string" ? rawDeploymentId : null
+  // Omitted rather than defaulted when the body did not say: "this server
+  // never reports it" and "this server says no capability is needed" are
+  // different answers, and only the first must leave the page alone.
+  const capabilityRequired = typeof rawCapabilityRequired === "boolean" ? { capabilityRequired: rawCapabilityRequired } : {}
   /** What every unusable body falls back to, carrying what it did say. */
   const fallback: ReviewEmbedOrigin = {
     ...FALLBACK_EMBED_ORIGIN,
@@ -148,6 +171,7 @@ export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
     range,
     ...(reason ? { reason } : {}),
     ...(deploymentId ? { deploymentId } : {}),
+    ...capabilityRequired,
   }
 
   if (
@@ -189,5 +213,6 @@ export function readPrototypeOrigin(value: unknown): ReviewEmbedOrigin {
     ...(bridgeAssetPath ? { bridgeAssetPath } : {}),
     ...(reason ? { reason } : {}),
     ...(deploymentId ? { deploymentId } : {}),
+    ...capabilityRequired,
   }
 }

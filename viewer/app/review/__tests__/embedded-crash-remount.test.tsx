@@ -110,7 +110,7 @@ const PROJECT: ReviewShellProject = {
  */
 function loopbackBody(
   process: ProcessStatus,
-  body: { origin?: string | null; deploymentId?: string } = {},
+  body: { origin?: string | null; deploymentId?: string; capabilityRequired?: boolean } = {},
 ): unknown {
   return {
     mode: "loopback",
@@ -119,6 +119,7 @@ function loopbackBody(
     process,
     range: null,
     deploymentId: body.deploymentId ?? DEPLOYMENT_ID,
+    ...(body.capabilityRequired === undefined ? {} : { capabilityRequired: body.capabilityRequired }),
   }
 }
 
@@ -144,7 +145,7 @@ function stream() {
 /** Push one `origin` event, the way the route sends it. */
 function pushOrigin(
   process: ProcessStatus,
-  body: { origin?: string | null; deploymentId?: string } = {},
+  body: { origin?: string | null; deploymentId?: string; capabilityRequired?: boolean } = {},
 ): void {
   act(() => {
     stream().dispatch("origin", loopbackBody(process, body))
@@ -395,6 +396,50 @@ describe("review shell — following the process-state stream", () => {
     pushOrigin(RUNNING_GENERATION_2, { deploymentId: "dep-2" })
 
     expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * Codex round 14, Fix 3 — the client half.
+   *
+   * A project can go from anonymously readable to private while this reader
+   * stays authorised, so the stream survives and the page is never
+   * re-rendered. The body then starts saying a capability is required, and
+   * this page was rendered with none: the frame's URL carries no capability,
+   * and the prototype's own subresources start 404ing. Only the server can
+   * mint one, so the page asks for a fresh render, exactly as it does for a
+   * new deployment.
+   */
+  it("asks the router to re-render once when the live body starts requiring a capability", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+
+    pushOrigin(RUNNING_GENERATION_1, { capabilityRequired: false })
+    expect(refresh, "re-rendered for a body that needs no capability").not.toHaveBeenCalled()
+
+    pushOrigin(RUNNING_GENERATION_1, { capabilityRequired: true })
+    expect(refresh).toHaveBeenCalledTimes(1)
+
+    // The stream keeps sending bodies for the same access, and the page goes
+    // on rendering without a capability until Next hands it one.
+    pushOrigin(RUNNING_GENERATION_2, { capabilityRequired: true })
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not re-render when the page already holds a capability", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={{ ...PROJECT, capability: "cap-for-dep-1" }} />
+      </Scenario>,
+    )
+
+    pushOrigin(RUNNING_GENERATION_1, { capabilityRequired: true })
+
+    expect(refresh).not.toHaveBeenCalled()
   })
 
   /**

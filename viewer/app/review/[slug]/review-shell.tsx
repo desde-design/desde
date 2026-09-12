@@ -292,6 +292,34 @@ export function ReviewShell({
     refreshRouter()
   }, [liveDeployment, initialDeployment, refreshRouter])
 
+  /**
+   * The second change only the server can absorb: this prototype now needs a
+   * capability, and the page was rendered with none.
+   *
+   * An admin can make a public-link prototype private while this reader is
+   * still a member, so the read gate keeps passing, the stream survives, and
+   * nothing re-renders the page. The body's `capabilityRequired` flips to
+   * `true`, but the capability in the frame's URL was minted (or, here, NOT
+   * minted) under the old policy — so the frame goes on running while the
+   * prototype's own subresources start coming back 404. Only the server can
+   * mint the capability the new policy needs.
+   *
+   * Once per distinct answer, on the same guard the deployment refresh above
+   * uses. The fingerprint is stored on EVERY change, refresh or not, so the
+   * ref always describes the answer the page last acted on rather than only
+   * the last one that happened to need a refresh.
+   */
+  const capabilityRequired = liveOrigin.capabilityRequired
+  const capabilityMissing = capabilityRequired === true && project.capability === null
+  const capabilityFingerprint = `${liveDeployment ?? ""}|${capabilityRequired ?? "unstated"}`
+  const actedOnCapability = useRef<string | null>(null)
+  useEffect(() => {
+    if (actedOnCapability.current === capabilityFingerprint) return
+    actedOnCapability.current = capabilityFingerprint
+    if (!capabilityMissing) return
+    refreshRouter()
+  }, [capabilityFingerprint, capabilityMissing, refreshRouter])
+
   // Named `liveProcess`, not `process` — this component is server-rendered
   // too, where `process` is the Node global.
   const liveProcess = liveOrigin.process

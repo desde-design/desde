@@ -1141,9 +1141,20 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     app: ReturnType<typeof createApp>,
     project: Project,
     predicate: (received: string) => boolean,
-    options: { onFirstByte?: () => void; timeoutMs?: number; anonymous?: boolean } = {},
+    options: {
+      onFirstByte?: () => void
+      timeoutMs?: number
+      anonymous?: boolean
+      /**
+       * The stated shell origin, or `null` to send no header at all — which
+       * is what a subdomain-mode test needs: the closed set of acceptable
+       * origins is built from `publicUrl`'s scheme, so the `http://` spelling
+       * every loopback test sends is a 400 there.
+       */
+      shellOrigin?: string | null
+    } = {},
   ): Promise<{ received: string; destroy: () => void }> {
-    const { onFirstByte, timeoutMs = 3000 } = options
+    const { onFirstByte, timeoutMs = 3000, shellOrigin = "http://localhost:3100" } = options
     let sawFirstByte = false
     return new Promise((resolve, reject) => {
       const chunks: string[] = []
@@ -1155,8 +1166,8 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
       // The admin bearer reads every project, so a test about LOSING access
       // has to send no credential at all — see `streamUntilClosed`.
       if (!options.anonymous) pending.set(auth)
+      if (shellOrigin !== null) pending.set(SHELL_ORIGIN_HEADER, shellOrigin)
       pending
-        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
         .buffer(false)
         .parse((res, cb) => {
           res.on("data", (chunk: Buffer) => {
@@ -1673,6 +1684,45 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
     const frames = originFrames(received) as { reason?: string; deploymentId?: string }[]
     expect(frames[0]?.reason).toBe("listener-failed")
     expect(frames[0]?.deploymentId).toBe(project.activeDeploymentId)
+  })
+
+  /**
+   * Codex round 14, Fix 3. An access change is a body change.
+   *
+   * The tick refreshes the read POLICY on every pass, but the only thing it
+   * compared afterwards was the active deployment id. So a project that went
+   * from anonymously readable to private — while the caller stayed
+   * authorised, so the stream rightly survived — kept a body whose
+   * `capabilityRequired` was still `false`. The page went on rendering a
+   * frame with no capability in its URL, and the prototype's subresources
+   * started 404ing one by one.
+   *
+   * Subdomain mode, because that is where `capabilityRequired` is computed
+   * from the project's access rather than fixed by the mode.
+   */
+  it("sends a second origin event when the project's access changes under the stream", async () => {
+    const ctx = setup({ config: subdomainConfig, prototypeOriginStreamPingMs: 20 })
+    const project = await seedProject(ctx.storage, { access: "public-link" })
+
+    const { received, destroy } = await readUntil(
+      ctx.app,
+      project,
+      // Several ticks past the change, so a body re-sent on EVERY tick would
+      // show up as more than the two frames asserted below.
+      (r) => originFrames(r).length >= 2 && r.split(": ping").length > 5,
+      {
+        shellOrigin: null,
+        onFirstByte: () => {
+          void ctx.storage.updateProject(project.id, { access: "invited" })
+        },
+      },
+    )
+    destroy()
+
+    const frames = originFrames(received) as { capabilityRequired?: boolean }[]
+    expect(frames).toHaveLength(2)
+    expect(frames[0]?.capabilityRequired, "the connect body already required a capability").toBe(false)
+    expect(frames[1]?.capabilityRequired).toBe(true)
   })
 
   /** A 503 that keeps saying the same thing sends nothing: the page already shows it. */

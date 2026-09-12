@@ -590,7 +590,28 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     res.setHeader("Connection", "keep-alive")
     res.flushHeaders()
 
-    const send = (result: PrototypeOriginResult): void => {
+    /**
+     * The access-relevant facts the body in hand was built from: the
+     * project's access, the instance-wide public-link switch, and the
+     * capability verdict those two produced.
+     *
+     * Compared against the same three read FRESH on each tick, which is how
+     * the connection notices an access change with no deployment change
+     * behind it (codex round 14, Fix 3). The verdict is in the key as well as
+     * its two inputs so the comparison states what it is actually about,
+     * rather than leaving a reader to re-derive that `capabilityRequired`
+     * comes from exactly those inputs.
+     */
+    const accessKey = (from: Project, against: ProjectReadPolicy, result: PrototypeOriginResult): string => {
+      const capabilityRequired =
+        result.status === 200 && "capabilityRequired" in result.body ? result.body.capabilityRequired : null
+      return `${from.access}|${against.allowPublicLinks}|${capabilityRequired}`
+    }
+    /** The key for the body this connection last sent. Set by `send`, and only there. */
+    let sentAccessKey = ""
+
+    const send = (result: PrototypeOriginResult, from: Project): void => {
+      sentAccessKey = accessKey(from, policy, result)
       res.write(`event: origin\ndata: ${JSON.stringify(result.body)}\n\n`)
     }
 
@@ -606,7 +627,7 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
       statedOrigin: stated.origin,
     })
     if (closed) return
-    send(current)
+    send(current, project)
 
     /**
      * One promise chain for everything this connection does after it has
@@ -647,12 +668,17 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     }
 
     /**
-     * Moves the whole follow onto the project's current active deployment: a
-     * full re-resolution (a genuinely new deployment can need a new
-     * listener, so `ensure` runs again here — see the doc comment on
+     * Re-resolves this stream against the project as it is now: a full
+     * re-resolution (a genuinely new deployment can need a new listener, so
+     * `ensure` runs again here — see the doc comment on
      * `buildPrototypeOriginBody` for why it must NOT run on the patch path),
-     * a fresh `origin` event, and the process subscription pointed at the new
-     * id.
+     * a fresh `origin` event, and the process subscription pointed at
+     * whatever deployment the answer names.
+     *
+     * Two callers, both from the tick. The active deployment changed under
+     * the stream, which is what this was written for — and the project's
+     * ACCESS changed, which produces a different body for the same
+     * deployment (its `capabilityRequired`) and needs exactly the same work.
      *
      * The old subscription is released FIRST, before the await, so nothing
      * more arrives for a deployment this stream has left.
@@ -672,7 +698,7 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         statedOrigin: stated.origin,
       })
       if (closed) return
-      send(current)
+      send(current, freshProject)
       if (current.deploymentId && current.body.serve === "server") {
         subscribeToProcess(current.deploymentId)
       }
@@ -754,7 +780,7 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         // the union with no `process` field to patch.
         current = { ...current, body: { ...current.body, process: status } as PrototypeOriginResponse }
       }
-      send(current)
+      send(current, freshProject)
     }
 
     /**
@@ -789,7 +815,7 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
       if (closed) return
       if (next.status === 503 && previous.status === 503 && next.body.reason === previous.body.reason) return
       current = next
-      send(next)
+      send(next, freshProject)
       // Same rule the connect path and `refollowActiveDeployment` follow. A
       // recovery that produced a server body has a child to follow now;
       // anything else must leave no subscription behind.
@@ -824,14 +850,14 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
      * until someone reloaded it. This runs on the heartbeat tick, which is
      * the only clock this connection has.
      */
-    const resendIfProcessChanged = (): void => {
+    const resendIfProcessChanged = (freshProject: Project): void => {
       if (closed || current.status !== 200) return
       const deploymentId = current.deploymentId
       if (deploymentId === null || current.body.serve !== "server") return
       const status = deps.prototypeProcesses.status(deploymentId)
       if (JSON.stringify(status) === JSON.stringify(sentProcess())) return
       current = { ...current, body: { ...current.body, process: status } as PrototypeOriginResponse }
-      send(current)
+      send(current, freshProject)
     }
 
     /**
@@ -857,6 +883,14 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
      * And a fourth, when the last answer was a 503: the resolution itself can
      * start succeeding, with nothing to announce it. See
      * `retryUnavailableOrigin`.
+     *
+     * And a fifth: the project's ACCESS can change while the caller still
+     * passes the read gate. `readableProjectNow` refreshes the policy, and
+     * the only thing this used to compare afterwards was the deployment id —
+     * so a project made private under an authorised member kept a body
+     * saying `capabilityRequired: false`, the page kept a frame with no
+     * capability in its URL, and the prototype's subresources started 404ing
+     * (codex round 14, Fix 3). The comparison is `accessKey`'s.
      */
     const pollForChanges = async (): Promise<void> => {
       if (closed) return
@@ -868,11 +902,19 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         await refollowActiveDeployment(freshProject)
         return
       }
+      // Before the access check, so a 503 keeps its own "do not repeat the
+      // same failure" rule. Nothing about a 503 body depends on access, and
+      // the send that ends the 503 sets the key from the fresh project
+      // anyway.
       if (current.status === 503) {
         await retryUnavailableOrigin(freshProject)
         return
       }
-      resendIfProcessChanged()
+      if (accessKey(freshProject, policy, current) !== sentAccessKey) {
+        await refollowActiveDeployment(freshProject)
+        return
+      }
+      resendIfProcessChanged(freshProject)
     }
 
     if (current.deploymentId && current.body.serve === "server") {
