@@ -324,7 +324,7 @@ export function ReviewShell({
   // that follows a prop; never in an effect, which would paint one frame
   // with the stale key first.
   const [frameKey, setFrameKey] = useState(INITIAL_FRAME_KEY)
-  const nextKey = nextFrameKey(frameKey, liveOrigin.serve, liveProcess)
+  const nextKey = nextFrameKey(frameKey, liveOrigin.serve, liveProcess, liveOrigin.deploymentId)
   if (nextKey !== frameKey) setFrameKey(nextKey)
   const frameGeneration: BridgeGeneration = nextKey.key
 

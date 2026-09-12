@@ -398,6 +398,59 @@ describe("review shell — following the process-state stream", () => {
   })
 
   /**
+   * The refresh above is only half of what a new deployment needs. A rebuild
+   * can leave the iframe's URL byte-identical — a static prototype's path
+   * never names the deployment, a subdomain is one string for every build —
+   * and `router.refresh()` keeps this client component and its DOM, so React
+   * reuses the same iframe node and the browser never requests the new build.
+   * The key has to move as well.
+   */
+  it("remounts the frame for a new deployment reporting the same generation", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={PROJECT} />
+      </Scenario>,
+    )
+
+    const before = frame()
+    expect(before).not.toBeNull()
+
+    pushOrigin(RUNNING_GENERATION_1, { deploymentId: "dep-2" })
+
+    const after = frame()
+    expect(after, "no iframe rendered after the rebuild").not.toBeNull()
+    expect(after, "the frame kept the previous deployment's DOM node").not.toBe(before)
+  })
+
+  /** A static prototype has no process at all, so only the deployment can say a rebuild happened. */
+  it("remounts the frame for a new static deployment", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={{ ...PROJECT, serve: "static", process: undefined }} />
+      </Scenario>,
+    )
+
+    const before = frame()
+    expect(before).not.toBeNull()
+
+    act(() => {
+      stream().dispatch("origin", {
+        mode: "loopback",
+        origin: PROJECT.prototypeOrigin,
+        serve: "static",
+        range: null,
+        deploymentId: "dep-2",
+      })
+    })
+
+    const after = frame()
+    expect(after, "no iframe rendered after the static rebuild").not.toBeNull()
+    expect(after, "the frame kept the previous static build's DOM node").not.toBe(before)
+  })
+
+  /**
    * Codex round 7, Fix 5, carried over to the generation. `prototypeVisible`
    * used to read a bridge-ready counter that only ever went up, so once the
    * ORIGINAL frame's bridge had said hello the overlay was gone for good —
