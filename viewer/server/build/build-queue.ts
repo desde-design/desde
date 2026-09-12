@@ -13,11 +13,12 @@
  * in-flight deployment id lets the caller watch the build that already
  * exists, which is what they actually wanted.
  */
+import { rm, stat } from "node:fs/promises"
 import type { StorageAdapter } from "../storage/types"
 import type { AssetStore } from "../assets/types"
 import { MAX_BUILD_LOG_BYTES } from "../storage/log-append"
 import { withProjectLock } from "../project-locks"
-import { pruneSupersededCheckouts } from "./checkouts"
+import { checkoutDirFor, pruneSupersededCheckouts } from "./checkouts"
 import { pruneSupersededDeploymentAssets } from "./publish-output"
 import type { BuildRunner } from "./types"
 
@@ -100,6 +101,43 @@ export function createBuildQueue(deps: BuildQueueDeps): BuildQueue {
       console.error(`[viewer] could not finalize deployment ${deploymentId}:`, err)
     })
     deps.onChange?.(deploymentId)
+  }
+
+  /**
+   * Removes whatever checkout a build left behind when it did not become the
+   * active deployment.
+   *
+   * A server build's runner moves its checkout under `checkoutsRoot` BEFORE
+   * the deployment and project rows are written, so a failure at either write
+   * leaves the directory on disk under a row marked failed. That directory is
+   * a few hundred megabytes nothing will ever serve, and until `checkouts.ts`
+   * learned to skip unfinished rows it could also be mistaken for the
+   * retained previous checkout and cost the last good one.
+   *
+   * Best effort throughout: this runs on a path that is already failing, and
+   * none of it may replace the failure the caller is reporting. `rm` is only
+   * reached when there IS a directory, so the common case (a static build, or
+   * a failure before the checkout was kept) touches neither hook.
+   */
+  async function discardCheckout(deploymentId: string): Promise<void> {
+    let dir: string
+    try {
+      dir = checkoutDirFor(deps.checkoutsRoot, deploymentId)
+      if (!(await stat(dir).then(() => true, () => false))) return
+    } catch (err) {
+      console.error(`[viewer] could not locate the checkout for deployment ${deploymentId}:`, err)
+      return
+    }
+    try {
+      // Same retire-then-remove-then-forget order `pruneSupersededCheckouts`
+      // uses: nothing may spawn a child into a directory mid-delete, and the
+      // manager must keep no entry for an id that is gone.
+      await deps.beforeCheckoutRemove?.(deploymentId)
+      await rm(dir, { recursive: true, force: true })
+      await deps.afterCheckoutRemove?.(deploymentId)
+    } catch (err) {
+      console.error(`[viewer] could not discard the checkout for deployment ${deploymentId}:`, err)
+    }
   }
 
   return {
@@ -217,12 +255,14 @@ export function createBuildQueue(deps: BuildQueueDeps): BuildQueue {
           }
         } catch (err) {
           // A throw here is a runner BUG (its contract is to return a failed
-          // result, not reject). Without this the deployment would sit at
-          // `building` forever and the project would be permanently
-          // unbuildable, since `inFlight` is only cleared in the finally.
+          // result, not reject), or one of the two activation writes above
+          // failing. Without this the deployment would sit at `building`
+          // forever and the project would be permanently unbuildable, since
+          // `inFlight` is only cleared in the finally.
           clearInterval(timer)
           console.error(`[viewer] build queue caught a runner throw for ${deployment.id}:`, err)
           await finish(deployment.id, "failed", "\nBuild failed unexpectedly\n")
+          await discardCheckout(deployment.id)
         } finally {
           clearInterval(timer)
           inFlight.delete(projectId)

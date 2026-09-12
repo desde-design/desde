@@ -33,7 +33,8 @@ export async function keepCheckout(from: string, to: string): Promise<void> {
 
 /**
  * Checkouts carry `node_modules`, so they keep fewer than assets
- * (`DEPLOYMENT_RETENTION_COUNT` is 5): the active one plus the newest other.
+ * (`DEPLOYMENT_RETENTION_COUNT` is 5): the active one plus the newest other
+ * deployment that actually finished.
  */
 export const CHECKOUT_RETENTION_COUNT = 2
 
@@ -78,13 +79,22 @@ export async function pruneSupersededCheckouts(
     console.error(`[viewer] failed to prune checkouts for project ${projectId}:`, error)
     return
   }
-  // Only deployments that HAVE a checkout count toward the window (codex
-  // round 9). A failed build or a static one has none, and when such a row
-  // was newer than the previous server build it took the retained slot on
-  // paper while the real previous checkout was pruned: a pinned review of
-  // it broke and there was nothing to roll back to. The stat here is the
-  // same one the loop below used to do; it simply moved ahead of the slice.
-  const rest: string[] = []
+  // Two conditions decide whether a deployment can hold the retained slot.
+  //
+  // It must HAVE a checkout (codex round 9). A failed build or a static one
+  // has none, and when such a row was newer than the previous server build it
+  // took the retained slot on paper while the real previous checkout was
+  // pruned: a pinned review of it broke and there was nothing to roll back to.
+  //
+  // And it must have FINISHED (codex round 13). The runner moves a server
+  // build's checkout into place before the deployment and project rows are
+  // written, so a failure at either write leaves a directory behind under a
+  // row that never went live. The presence check alone read that as the
+  // retained previous checkout — newer than the last good one, so it took the
+  // slot and the last good one was deleted. A row that is not `deployed` is
+  // nobody's rollback target, so it is swept rather than kept.
+  const retainable: string[] = []
+  const unfinished: string[] = []
   try {
     for (const d of deployments) {
       if (d.id === keepActiveId) continue
@@ -92,13 +102,15 @@ export async function pruneSupersededCheckouts(
         () => true,
         () => false,
       )
-      if (present) rest.push(d.id)
+      if (!present) continue
+      if (d.status === "deployed") retainable.push(d.id)
+      else unfinished.push(d.id)
     }
   } catch (error) {
     console.error(`[viewer] failed to prune checkouts for project ${projectId}:`, error)
     return
   }
-  const stale = rest.slice(CHECKOUT_RETENTION_COUNT - 1)
+  const stale = [...unfinished, ...retainable.slice(CHECKOUT_RETENTION_COUNT - 1)]
   for (const id of stale) {
     const dir = checkoutDirFor(checkoutsRoot, id)
     try {

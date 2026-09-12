@@ -475,6 +475,65 @@ describe("build queue", () => {
     await queue.shutdown()
   })
 
+  /**
+   * Codex round 13. For a server build the runner moves the checkout under
+   * `checkoutsRoot` BEFORE the queue writes the deployment and project rows.
+   * A failure at either write used to mark the row failed and walk away, so
+   * the checkout stayed on disk under a deployment nobody can reach — and a
+   * later prune counted that directory as the retained previous checkout and
+   * deleted the last good one in its place.
+   */
+  it("removes the checkout and forgets the deployment when the activation write fails", async () => {
+    const { createBuildQueue } = await import("../build-queue")
+    const { checkoutDirFor } = await import("../checkouts")
+    const { InMemoryStorage } = await import("../../storage/in-memory-storage")
+    const storage = new InMemoryStorage()
+    const project = await storage.createProject({ slug: "act1", name: "Act", repoUrl: null })
+    await storage.setProjectRepoConfig(project.id, repoConfig())
+    const checkoutsRoot = await tempDir("viewer-checkouts-")
+    // The second of the two activation writes: the deployment row is already
+    // `deployed` when this rejects, which is the worse half of the window.
+    storage.updateProject = () => Promise.reject(new Error("storage is down"))
+
+    const forgotten: string[] = []
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    const queue = createBuildQueue({
+      storage,
+      assets: collectingAssets(),
+      checkoutsRoot,
+      afterCheckoutRemove: async (id) => {
+        forgotten.push(id)
+      },
+      runner: {
+        async run({ deployment }) {
+          // What a real server build has already done by the time it returns.
+          await fs.mkdir(checkoutDirFor(checkoutsRoot, deployment.id), { recursive: true })
+          return {
+            ok: true,
+            commitSha: "abc",
+            commitMessage: null,
+            fileCount: 1,
+            serve: "server",
+            serverStart: ["node", "server.js"],
+          }
+        },
+      },
+    })
+
+    const id = await queue.start(project.id)
+    await new Promise((r) => setTimeout(r, 50))
+    await queue.shutdown()
+    errors.mockRestore()
+
+    expect((await storage.getDeployment(id))?.status).toBe("failed")
+    const left = await fs.stat(checkoutDirFor(checkoutsRoot, id)).then(
+      () => true,
+      () => false,
+    )
+    expect(left, "the failed activation left its checkout on disk").toBe(false)
+    expect(forgotten).toEqual([id])
+  })
+
   it("writes the runner's warnings onto the deployment once a build succeeds", async () => {
     const { createBuildQueue } = await import("../build-queue")
     const { InMemoryStorage } = await import("../../storage/in-memory-storage")
