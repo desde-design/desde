@@ -30,7 +30,9 @@ describe("pruneSupersededDeploymentAssets", () => {
       { id: "d4", status: "deployed" },
       { id: "d5", status: "deployed" },
       { id: "d-building", status: "building" },
-      { id: "d-stale", status: "deployed" },
+      // Marked deployed but not yet activated: the same build one write later (codex round 55).
+      { id: "d-activating", status: "deployed", activatedAt: null },
+      { id: "d-stale", status: "deployed", activatedAt: "2026-09-12T00:00:00.000Z" },
     ]
     const storage = { listDeployments: vi.fn().mockResolvedValue(rows) }
     const before: string[] = []
