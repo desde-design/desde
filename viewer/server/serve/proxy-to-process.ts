@@ -364,6 +364,13 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
           // for why the viewer's own value has to go last, and why a child value
           // sharing its name is dropped.
           if (DROP_RESPONSE.has(k.toLowerCase()) || responseHopByHop.has(k.toLowerCase()) || v === undefined) continue
+          // No CORS grant from the child survives (codex round 27). On a
+          // pinned loopback origin a GET needs no capability, and the
+          // container's port range is enumerable, so a child that reflects
+          // `Access-Control-Allow-Origin` (a common middleware default) would
+          // let a hostile page read a private prototype. The static path
+          // withholds these for the same reason.
+          if (k.toLowerCase().startsWith("access-control-")) continue
           if (k.toLowerCase() === "set-cookie") continue
           res.setHeader(k, v)
         }

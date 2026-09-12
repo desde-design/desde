@@ -234,6 +234,21 @@ describe("proxyToProcess", () => {
    * iframe wherever the prototype CSP is off (`VIEWER_PROTOTYPE_CSP=off`),
    * where no `frame-ancestors` directive is there to supersede it.
    */
+  it("drops every CORS grant the child sends, so a hostile page cannot read a private prototype (codex round 27)", async () => {
+    const port = await child((req, res) => {
+      res.setHeader("access-control-allow-origin", req.headers.origin ?? "*")
+      res.setHeader("access-control-allow-credentials", "true")
+      res.setHeader("access-control-expose-headers", "x-secret")
+      res.setHeader("x-kept", "1")
+      res.end("private")
+    })
+    const res = await request(appFor(port)).get("/p/acme/").set("Origin", "https://evil.example")
+    expect(res.headers["access-control-allow-origin"]).toBeUndefined()
+    expect(res.headers["access-control-allow-credentials"]).toBeUndefined()
+    expect(res.headers["access-control-expose-headers"]).toBeUndefined()
+    expect(res.headers["x-kept"]).toBe("1")
+  })
+
   it("strips the fixed hop-by-hop response headers even when Connection does not name them (codex round 26)", async () => {
     const port = await child((_req, res) => {
       res.setHeader("trailer", "x-checksum")
