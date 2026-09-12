@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
-import { dependsOn, isFile } from "./fs-probe"
+import { dependsOn, findReactRouterBuildDir, isFile, type ReactRouterBuild } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
 /**
@@ -24,6 +24,9 @@ import type { FrameworkAdapter } from "./types"
  */
 const SPA_MODE_MARKER = /\bisSpaMode\s*=\s*true\b/
 
+/** `react-router.config`'s default `buildDirectory`. */
+const DEFAULT_BUILD_DIR = "build"
+
 export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
   id: "react-router",
   async inspectBuild(checkoutRoot) {
@@ -31,11 +34,22 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
     const hasReactRouterDev = await dependsOn(checkoutRoot, "@react-router/dev")
     if (!hasReactRouter && !hasReactRouterDev) return null
 
-    const serverBundle = join(checkoutRoot, "build", "server", "index.js")
-    const clientHtml = await isFile(join(checkoutRoot, "build", "client", "index.html"))
-    if (await isFile(serverBundle)) {
+    // The default layout FIRST and by name, then the scan (codex round 20,
+    // item 2). Not the scan alone: the scan needs a `client/` directory beside
+    // the `server/` one to be sure a directory is a build at all, and a build
+    // this manager can serve does not strictly have to have written one.
+    const found: ReactRouterBuild | null = (await isFile(
+      join(checkoutRoot, DEFAULT_BUILD_DIR, "server", "index.js"),
+    ))
+      ? { dir: DEFAULT_BUILD_DIR, serverFile: "index.js" }
+      : await findReactRouterBuildDir(checkoutRoot)
+    const clientDir = join(found?.dir ?? DEFAULT_BUILD_DIR, "client")
+    const clientHtml = await isFile(join(checkoutRoot, clientDir, "index.html"))
+    if (found) {
+      const serverBundleRel = join(found.dir, "server", found.serverFile)
+      const serverBundle = join(checkoutRoot, serverBundleRel)
       if (clientHtml && (await isSpaModeBundle(serverBundle))) {
-        return { kind: "static", outputDir: "build/client", reason: "React Router SPA mode" }
+        return { kind: "static", outputDir: clientDir, reason: "React Router SPA mode" }
       }
       // Codex round 15, Fix 3. `@react-router/serve` is a SEPARATE package
       // from `react-router`/`@react-router/dev` — a checkout can build a
@@ -54,12 +68,12 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
       return {
         kind: "server",
         // react-router-serve reads PORT from the environment, which the process manager sets.
-        start: ["node_modules/.bin/react-router-serve", "build/server/index.js"],
+        start: ["node_modules/.bin/react-router-serve", serverBundleRel],
         reason: "React Router framework mode with a server build",
       }
     }
     if (clientHtml) {
-      return { kind: "static", outputDir: "build/client", reason: "React Router SPA mode" }
+      return { kind: "static", outputDir: clientDir, reason: "React Router SPA mode" }
     }
     return null
   },

@@ -33,7 +33,17 @@ async function dependsOn(checkoutRoot: string, name: string): Promise<boolean> {
 /** Directory names never worth descending into while hunting for a Next dist dir. */
 const EXCLUDED_DIST_DIR_NAMES = new Set(["node_modules", ".git", "out", "public"])
 
-async function listDirs(p: string): Promise<string[]> {
+/**
+ * Directory names never worth descending into while hunting for a framework's
+ * build output.
+ *
+ * Shorter than {@link EXCLUDED_DIST_DIR_NAMES} by `out`: an `out/` directory
+ * means something specific to Next and nothing at all to the others, so a
+ * React Router build configured to land there stays findable.
+ */
+const EXCLUDED_OUTPUT_DIR_NAMES = new Set(["node_modules", ".git", "public"])
+
+async function listDirs(p: string, excluded: Set<string>): Promise<string[]> {
   let names: string[]
   try {
     names = await readdir(p)
@@ -42,10 +52,41 @@ async function listDirs(p: string): Promise<string[]> {
   }
   const dirs: string[] = []
   for (const name of names) {
-    if (EXCLUDED_DIST_DIR_NAMES.has(name)) continue
+    if (excluded.has(name)) continue
     if (await isDir(join(p, name))) dirs.push(name)
   }
   return dirs
+}
+
+/**
+ * Walks the same ground {@link findNextDistDir} does — the preferred name
+ * first, then depth 1, then depth 2 — and hands each candidate to `qualifies`,
+ * which answers what that framework's scan wants to know about it.
+ *
+ * The preferred name is checked first so the answer never depends on
+ * directory-listing order when more than one candidate would qualify.
+ */
+async function scanForOutputDir<T>(
+  checkoutRoot: string,
+  preferred: string,
+  qualifies: (rel: string) => Promise<T | null>,
+): Promise<T | null> {
+  const first = await qualifies(preferred)
+  if (first !== null) return first
+
+  const depth1 = await listDirs(checkoutRoot, EXCLUDED_OUTPUT_DIR_NAMES)
+  for (const name of depth1) {
+    if (name === preferred) continue
+    const found = await qualifies(name)
+    if (found !== null) return found
+  }
+  for (const name of depth1) {
+    for (const name2 of await listDirs(join(checkoutRoot, name), EXCLUDED_OUTPUT_DIR_NAMES)) {
+      const found = await qualifies(join(name, name2))
+      if (found !== null) return found
+    }
+  }
+  return null
 }
 
 /** `rel` (relative to `checkoutRoot`) has BOTH files every non-export Next build writes to its own dist dir. */
@@ -81,19 +122,79 @@ async function isNextDistDir(checkoutRoot: string, rel: string): Promise<boolean
 export async function findNextDistDir(checkoutRoot: string): Promise<string | null> {
   if (await isNextDistDir(checkoutRoot, ".next")) return ".next"
 
-  const depth1 = await listDirs(checkoutRoot)
+  const depth1 = await listDirs(checkoutRoot, EXCLUDED_DIST_DIR_NAMES)
   for (const name of depth1) {
     if (name === ".next") continue
     if (await isNextDistDir(checkoutRoot, name)) return name
   }
   for (const name of depth1) {
-    const depth2 = await listDirs(join(checkoutRoot, name))
+    const depth2 = await listDirs(join(checkoutRoot, name), EXCLUDED_DIST_DIR_NAMES)
     for (const name2 of depth2) {
       const rel = join(name, name2)
       if (await isNextDistDir(checkoutRoot, rel)) return rel
     }
   }
   return null
+}
+
+/** Where a React Router framework-mode build landed, and which file is its server bundle. */
+export interface ReactRouterBuild {
+  /** The build directory, relative to the checkout root (`build`, `dist`, `out/rr`, …). */
+  dir: string
+  /** The server bundle's own file name, directly under `<dir>/server/`. */
+  serverFile: string
+}
+
+/**
+ * The one server bundle directly under `serverDir`, or `null`.
+ *
+ * `index.js` is the default `serverBuildFile` and wins whenever it is there.
+ * Otherwise a single `.js` or `.mjs` file is taken as the configured one. Two
+ * or more, with no `index.js` to prefer, is not a guess worth making: the
+ * recorded start command would ENOENT or boot the wrong file on every cold
+ * start, so the directory simply does not qualify.
+ */
+async function soleServerBundle(serverDir: string): Promise<string | null> {
+  if (await isFile(join(serverDir, "index.js"))) return "index.js"
+  let names: string[]
+  try {
+    names = await readdir(serverDir)
+  } catch {
+    return null
+  }
+  const bundles: string[] = []
+  for (const name of names) {
+    if (!/\.(?:js|mjs)$/.test(name)) continue
+    if (await isFile(join(serverDir, name))) bundles.push(name)
+  }
+  return bundles.length === 1 ? (bundles[0] ?? null) : null
+}
+
+/**
+ * Finds a React Router framework-mode build (codex round 20, item 2).
+ *
+ * `react-router.ts` used to hard-code `build/server/index.js` and
+ * `build/client/`, so a project whose `react-router.config` sets
+ * `buildDirectory` or `serverBuildFile` was not recognised at all — no server
+ * build was found and the deployment fell through to static publishing.
+ *
+ * The markers are the pair a framework-mode build always writes together: a
+ * `client/` directory and a `server/` directory holding exactly one bundle.
+ * Both, not either — a lone `client/` or `server/` directory is a common
+ * enough name in a repo that either one alone would match something that is
+ * not a build at all.
+ *
+ * Scans depth 1 and depth 2 under `checkoutRoot`, skipping `node_modules`,
+ * `.git` and `public`, and prefers `build` (the default) when it qualifies.
+ */
+export async function findReactRouterBuildDir(checkoutRoot: string): Promise<ReactRouterBuild | null> {
+  return await scanForOutputDir(checkoutRoot, "build", async (rel) => {
+    const dir = join(checkoutRoot, rel)
+    if (!(await isDir(join(dir, "client")))) return null
+    if (!(await isDir(join(dir, "server")))) return null
+    const serverFile = await soleServerBundle(join(dir, "server"))
+    return serverFile === null ? null : { dir: rel, serverFile }
+  })
 }
 
 export { isDir, isFile, dependsOn }

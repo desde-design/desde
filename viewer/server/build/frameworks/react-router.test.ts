@@ -18,6 +18,12 @@ async function checkout(opts: {
   clientHtml?: boolean
   /** Whether `node_modules/.bin/react-router-serve` exists in this checkout. */
   serveBinary?: boolean
+  /** What `react-router.config`'s `buildDirectory` was set to, if anything. */
+  buildDir?: string
+  /** What `react-router.config`'s `serverBuildFile` was set to, if anything. */
+  serverFile?: string
+  /** A second bundle beside the first one, so no single server bundle can be named. */
+  extraServerFile?: string
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "fw-react-router-"))
   roots.push(root)
@@ -40,16 +46,20 @@ async function checkout(opts: {
 
   await writeFile(join(root, "package.json"), JSON.stringify(pkg))
 
+  const buildDir = opts.buildDir ?? "build"
   if (opts.serverBuild) {
-    await mkdir(join(root, "build", "server"), { recursive: true })
+    await mkdir(join(root, buildDir, "server"), { recursive: true })
     await writeFile(
-      join(root, "build", "server", "index.js"),
+      join(root, buildDir, "server", opts.serverFile ?? "index.js"),
       `const isSpaMode = ${opts.spaMode === true};\nexport { isSpaMode };\nexport default null`,
     )
+    if (opts.extraServerFile) {
+      await writeFile(join(root, buildDir, "server", opts.extraServerFile), "export default null")
+    }
   }
   if (opts.clientHtml) {
-    await mkdir(join(root, "build", "client"), { recursive: true })
-    await writeFile(join(root, "build", "client", "index.html"), "<html></html>")
+    await mkdir(join(root, buildDir, "client"), { recursive: true })
+    await writeFile(join(root, buildDir, "client", "index.html"), "<html></html>")
   }
   if (opts.serveBinary) {
     await mkdir(join(root, "node_modules", ".bin"), { recursive: true })
@@ -142,6 +152,63 @@ describe("React Router adapter", () => {
       reason:
         "This React Router build needs @react-router/serve to run. Add it to the project, or build a static (SPA) output.",
     })
+  })
+
+  /**
+   * Codex round 20, item 2. `build/server/index.js` and `build/client/` were
+   * hard-coded, so a project that set `buildDirectory` or `serverBuildFile` in
+   * `react-router.config` was not recognised at all: no server build was
+   * found, and the deployment fell through to the generic static default.
+   */
+  it("follows a configured buildDirectory and serverBuildFile", async () => {
+    expect(
+      await REACT_ROUTER_ADAPTER.inspectBuild(
+        await checkout({
+          serverBuild: true,
+          clientHtml: true,
+          serveBinary: true,
+          buildDir: "dist",
+          serverFile: "app.js",
+        }),
+      ),
+    ).toEqual({
+      kind: "server",
+      start: ["node_modules/.bin/react-router-serve", join("dist", "server", "app.js")],
+      reason: "React Router framework mode with a server build",
+    })
+  })
+
+  it("reads a configured build directory's SPA output as static", async () => {
+    expect(
+      await REACT_ROUTER_ADAPTER.inspectBuild(
+        await checkout({ serverBuild: true, spaMode: true, clientHtml: true, buildDir: "dist" }),
+      ),
+    ).toEqual({
+      kind: "static",
+      outputDir: join("dist", "client"),
+      reason: "React Router SPA mode",
+    })
+  })
+
+  /**
+   * Two bundles beside each other and no `index.js`: nothing names which one
+   * `react-router-serve` should be given, so the directory does not qualify as
+   * a build directory at all. Answering with a guess would record a start
+   * command that ENOENTs, or boots the wrong file, on every cold start.
+   */
+  it("answers null for a configured build directory with two server bundles and no index.js", async () => {
+    expect(
+      await REACT_ROUTER_ADAPTER.inspectBuild(
+        await checkout({
+          serverBuild: true,
+          clientHtml: true,
+          serveBinary: true,
+          buildDir: "dist",
+          serverFile: "app.js",
+          extraServerFile: "other.mjs",
+        }),
+      ),
+    ).toBeNull()
   })
 
   it("still reports unsupported for a server build with @react-router/dev only, when the serve binary is missing", async () => {
