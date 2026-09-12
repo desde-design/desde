@@ -174,11 +174,24 @@ const SCOPED_NAME = /^p[0-9a-f]{8}_/
  */
 function forwardedCookieHeader(raw: string | undefined, scope?: string): string | undefined {
   if (raw === undefined) return undefined
+  const pairs = raw
+    .split(";")
+    .map((p) => p.trim())
+    .filter((p) => p !== "")
+    .map((pair) => {
+      const eq = pair.indexOf("=")
+      return { pair, name: eq === -1 ? pair : pair.slice(0, eq) }
+    })
+  // The names this deployment's own scoped cookies supply: an unscoped
+  // cookie of the same name is not forwarded beside them (codex round 57),
+  // since a duplicate name lets whichever a parser picks shadow the scoped,
+  // possibly HttpOnly, value.
+  const suppliedByScope = new Set<string>()
+  if (scope !== undefined) {
+    for (const { name } of pairs) if (name.startsWith(scope)) suppliedByScope.add(name.slice(scope.length))
+  }
   const kept: string[] = []
-  for (const pair of raw.split(";").map((p) => p.trim())) {
-    if (pair === "") continue
-    const eq = pair.indexOf("=")
-    const name = eq === -1 ? pair : pair.slice(0, eq)
+  for (const { pair, name } of pairs) {
     if (VIEWER_COOKIE_NAMES.has(name)) continue
     if (scope === undefined) {
       kept.push(pair)
@@ -186,7 +199,7 @@ function forwardedCookieHeader(raw: string | undefined, scope?: string): string 
       // This deployment's own server cookie, under its stored name: handed
       // back as the child set it.
       kept.push(pair.slice(scope.length))
-    } else if (!SCOPED_NAME.test(name)) {
+    } else if (!SCOPED_NAME.test(name) && !suppliedByScope.has(name)) {
       // Unscoped: a cookie a page's own script set on the shared host. The
       // browser shows it to every page on that host anyway; the child
       // reading it too takes nothing that was not already shared.

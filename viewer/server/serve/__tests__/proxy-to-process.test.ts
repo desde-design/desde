@@ -128,6 +128,18 @@ describe("proxyToProcess", () => {
     expect(cookie).toBe("session=mine; theme=dark")
   })
 
+  it("drops an unscoped cookie whose name this deployment's scoped cookie already supplies (codex round 57)", async () => {
+    let cookie: string | undefined
+    const port = await child((req, res) => {
+      cookie = req.headers.cookie
+      res.end("ok")
+    })
+    await request(appFor(port, { cookieScope: "p0a1b2c3d_" }))
+      .get("/p/acme/")
+      .set("Cookie", "session=other; p0a1b2c3d_session=mine; theme=dark")
+    expect(cookie).toBe("session=mine; theme=dark")
+  })
+
   it("stores the child's cookies under the scope", async () => {
     const port = await child((_req, res) => {
       res.setHeader("set-cookie", ["session=abc; Path=/; HttpOnly", "seen=1"])
