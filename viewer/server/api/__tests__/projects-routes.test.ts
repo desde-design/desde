@@ -1130,6 +1130,7 @@ describe("projects API", () => {
         rotateForProject: () => Promise.resolve(),
         rotateAll: () => Promise.resolve(),
         hasOrigin: () => true,
+        rotateOrigin: () => Promise.resolve(),
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
@@ -1158,16 +1159,23 @@ describe("projects API", () => {
         },
         rotateAll: () => Promise.resolve(),
         hasOrigin: () => true,
+        rotateOrigin: () => Promise.resolve(),
         startReaper: () => () => {},
         isPrototypeHost: () => false,
       }
       const ctx = setup({ prototypeListeners: listeners })
       const project = await ctx.deps.storage.createProject({ slug: "acme", name: "Acme" })
+      const patch = (body: Record<string, unknown>) =>
+        request(ctx.app).patch(`/api/v1/projects/${project.id}`).set(auth).send(body).expect(200)
 
-      await request(ctx.app).patch(`/api/v1/projects/${project.id}`).set(auth).send({ name: "Renamed" }).expect(200)
+      await patch({ name: "Renamed" })
+      // The same value saved again, and a widening, revoke nobody and spend
+      // no slot of a fixed range (codex round 47).
+      await patch({ access: "all-members" })
+      await patch({ access: "public-link" })
       expect(rotated).toEqual([])
 
-      await request(ctx.app).patch(`/api/v1/projects/${project.id}`).set(auth).send({ access: "invited" }).expect(200)
+      await patch({ access: "invited" })
       expect(rotated).toEqual([project.id])
     })
 

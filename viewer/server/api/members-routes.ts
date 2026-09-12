@@ -211,13 +211,19 @@ export function createMembersRoutes(deps: AppDeps): Router {
       Every one of those existed only to answer "would this be the last active
       member", so a DELETE is now one storage call.
     */
+    // Whether there was a membership to remove decides the rotation below:
+    // the removal is idempotent, and rotating on a repeat (codex round 47)
+    // spent a slot of a fixed range for nobody.
+    const existed = (await deps.storage.getProjectMember(project.id, userId)) !== null
     await deps.storage.removeProjectMember(project.id, userId)
     // The removed member may hold this project's loopback origin with no
     // stream open (codex round 46): rotate every port the project answers on.
-    try {
-      await deps.prototypeListeners.rotateForProject(project.id)
-    } catch (error) {
-      console.error(`[viewer] could not rotate the prototype listeners of project ${project.id}:`, error)
+    if (existed) {
+      try {
+        await deps.prototypeListeners.rotateForProject(project.id)
+      } catch (error) {
+        console.error(`[viewer] could not rotate the prototype listeners of project ${project.id}:`, error)
+      }
     }
     res.status(204).end()
   })

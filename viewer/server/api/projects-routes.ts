@@ -298,6 +298,17 @@ async function addCreatorBeforeLockout(
 // string[]`), which fails strict typecheck. Leaving the callback untyped
 // lets TS infer the precise per-route params type instead.
 /**
+ * Whether fewer people may read after an access change. The three values
+ * nest: `public-link` admits everyone, `all-members` every active member,
+ * `invited` only the roster (plus admins). Moving down that ladder revokes
+ * someone; moving up, or staying put, revokes nobody.
+ */
+function readersNarrowed(before: Project["access"], after: Project["access"]): boolean {
+  const breadth = { "public-link": 2, "all-members": 1, invited: 0 } as const
+  return breadth[after] < breadth[before]
+}
+
+/**
  * Best effort, logged: a rotation that fails must not turn a completed
  * access change into an error response, and the idle reaper still closes
  * the listener within its bound.
@@ -610,16 +621,19 @@ export function createProjectsRoutes(
       // rename), and reads the identity `requireWrite` resolved rather than
       // resolving the request a second time — see the create route above.
       await addCreatorBeforeLockout(deps, getRequestContext(res), id, access)
+      const before = access !== undefined ? await deps.storage.getProject(id) : null
       const project = await deps.storage.updateProject(id, {
         ...(typeof name === "string" ? { name: name.trim() } : {}),
         ...(repoUrl !== undefined ? { repoUrl: repoUrl === null ? null : String(repoUrl) } : {}),
         ...(access !== undefined ? { access } : {}),
       })
-      // Who may read just changed, and a loopback listener is a credential
+      // Who may read just NARROWED, and a loopback listener is a credential
       // that outlives any one reader's stream (codex round 46): every port
       // this project answers on is rotated, and each reader still allowed
-      // gets the fresh one from their own stream.
-      if (access !== undefined) await rotateProjectListeners(deps, id)
+      // gets the fresh one from their own stream. Only a narrowing (codex
+      // round 47): a widening revokes nobody, and an unchanged value saved
+      // again must not spend a slot of a fixed range for every open review.
+      if (before !== null && readersNarrowed(before.access, project.access)) await rotateProjectListeners(deps, id)
       // Manage-gated (`requireWrite` with an `:id` param routes to
       // `requireProjectManage`) — see the create route above for why this
       // still goes through the projection.
