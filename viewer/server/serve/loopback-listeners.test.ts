@@ -376,12 +376,14 @@ describe("createLoopbackListenerRegistry", () => {
       expect(back.headers["clear-site-data"]).toBeUndefined()
     })
 
-    it("never clears on an ephemeral port, which no previous deployment can have had", async () => {
+    it("clears on the first use of an ephemeral port too, which the OS may have handed out before a restart", async () => {
+      // Codex round 44: `listen(0)` can return a port the browser used for
+      // another deployment before this process existed.
       const registry = makeRegistry({ d1: { "index.html": "<html></html>" } })
       const a = await registry.ensure(deployment("d1"), V4)
       const fresh = await documentGet(a.port, { "Sec-Fetch-Dest": "iframe" })
       expect(fresh.status).toBe(200)
-      expect(fresh.headers["clear-site-data"]).toBeUndefined()
+      expect(fresh.headers["clear-site-data"]).toBe('"cache", "storage"')
     })
 
     it("rotateForDeployment closes the deployment's listeners and lets a fresh one open", async () => {
