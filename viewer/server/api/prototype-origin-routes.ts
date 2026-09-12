@@ -181,6 +181,23 @@ interface BuildPrototypeOriginBodyParams {
   policy: ProjectReadPolicy
   requestHost: string | undefined
   statedOrigin: string | null
+  /**
+   * Re-runs the caller's read gate AFTER a loopback listener has been
+   * opened (codex round 48). The gate ran before the open, and a rotation
+   * for an access change can land in between: the open then mints a fresh
+   * credential for a reader who has just lost access. When this answers
+   * false the origin just opened is retired again and the builder throws
+   * `AccessRevokedDuringOpen`, which the caller answers as the gate would.
+   */
+  stillReadable?: () => Promise<boolean>
+}
+
+/** The read gate failed between the caller's own check and the listener open. See `BuildPrototypeOriginBodyParams.stillReadable`. */
+export class AccessRevokedDuringOpen extends Error {
+  constructor() {
+    super("Access was revoked while the prototype origin was being opened.")
+    this.name = "AccessRevokedDuringOpen"
+  }
 }
 
 /**
@@ -201,7 +218,7 @@ interface BuildPrototypeOriginBodyParams {
  * `process` field into the body already in hand instead.
  */
 async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams): Promise<PrototypeOriginResult> {
-  const { deps, allowlist, bridgeAssetPath, project, policy, requestHost, statedOrigin } = params
+  const { deps, allowlist, bridgeAssetPath, project, policy, requestHost, statedOrigin, stillReadable } = params
 
   // Loaded ONCE, before any mode branch, so EVERY mode's answer can state
   // `serve` correctly — subdomain, prototype-origin and fallback used to
@@ -363,6 +380,12 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
       { id: deployment.id, slug: project.slug, projectId: project.id, serve: deployment.serve },
       { bindHost: loopbackBindHostFor(prototypeHost), shellOrigin },
     )
+    if (stillReadable !== undefined && !(await stillReadable())) {
+      await deps.prototypeListeners.rotateOrigin(listener.origin).catch((error: unknown) => {
+        console.error("[viewer] could not retire a prototype listener opened for a revoked reader:", error)
+      })
+      throw new AccessRevokedDuringOpen()
+    }
     return {
       status: 200,
       deploymentId,
@@ -380,6 +403,9 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
       },
     }
   } catch (error) {
+    // Not an open that failed: an open that succeeded for a reader who had
+    // just lost access (codex round 48). The caller answers as the gate would.
+    if (error instanceof AccessRevokedDuringOpen) throw error
     if (error instanceof LoopbackPortsExhaustedError) {
       // `serve` and `range` ride along because the page decides what to do
       // with this from them: a STATIC prototype still loads from the shell's
@@ -502,15 +528,26 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
     if (!access) return
     const { project, policy } = access
 
-    const result = await buildPrototypeOriginBody({
-      deps,
-      allowlist,
-      bridgeAssetPath,
-      project,
-      policy,
-      requestHost: req.headers.host,
-      statedOrigin: stated.origin,
-    })
+    let result: PrototypeOriginResult
+    try {
+      result = await buildPrototypeOriginBody({
+        deps,
+        allowlist,
+        bridgeAssetPath,
+        project,
+        policy,
+        requestHost: req.headers.host,
+        statedOrigin: stated.origin,
+        stillReadable: async () => (await resolveProjectReadAccess(deps, req, project.id)).ok,
+      })
+    } catch (error) {
+      if (error instanceof AccessRevokedDuringOpen) {
+        // Exactly what the gate answers a non-reader: the same 404, byte for byte.
+        res.status(404).json({ error: "Project not found" })
+        return
+      }
+      throw error
+    }
     res.status(result.status).json(result.body)
   })
 
@@ -644,15 +681,38 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
 
     // The one and only `ensure` call this connection makes for the
     // deployment it connects against — see the doc comment above.
-    let current = await buildPrototypeOriginBody({
-      deps,
-      allowlist,
-      bridgeAssetPath,
-      project,
-      policy,
-      requestHost,
-      statedOrigin: stated.origin,
-    })
+    /**
+     * The read gate again, for the builder to run once a listener is open
+     * (codex round 48). On the connect below the stream's own helpers are
+     * not defined yet, so this is the bare gate; the update paths further
+     * down pass `readableProjectNow`, which also ends the stream.
+     */
+    const stillReadableAtConnect = async (): Promise<boolean> =>
+      (await resolveProjectReadAccess(deps, req, project.id)).ok
+    let current: PrototypeOriginResult
+    try {
+      current = await buildPrototypeOriginBody({
+        deps,
+        allowlist,
+        bridgeAssetPath,
+        project,
+        policy,
+        requestHost,
+        statedOrigin: stated.origin,
+        stillReadable: stillReadableAtConnect,
+      })
+    } catch (error) {
+      if (error instanceof AccessRevokedDuringOpen) {
+        // Nothing was sent yet; the connection ends as a refused one would.
+        if (!closed) {
+          closed = true
+          cleanup()
+          res.end()
+        }
+        return
+      }
+      throw error
+    }
     if (closed) return
     send(current, project)
 
@@ -715,15 +775,21 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
         unsubscribeProcess()
         unsubscribeProcess = null
       }
-      current = await buildPrototypeOriginBody({
-        deps,
-        allowlist,
-        bridgeAssetPath,
-        project: freshProject,
-        policy,
-        requestHost,
-        statedOrigin: stated.origin,
-      })
+      try {
+        current = await buildPrototypeOriginBody({
+          deps,
+          allowlist,
+          bridgeAssetPath,
+          project: freshProject,
+          policy,
+          requestHost,
+          statedOrigin: stated.origin,
+          stillReadable,
+        })
+      } catch (error) {
+        if (error instanceof AccessRevokedDuringOpen) return
+        throw error
+      }
       if (closed) return
       send(current, freshProject)
       if (current.deploymentId && current.body.serve === "server") {
@@ -765,6 +831,7 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
      * would be a second round trip AND a second answer to "what does the
      * project look like now".
      */
+    const stillReadable = async (): Promise<boolean> => (await readableProjectNow()) !== null
     const readableProjectNow = async (): Promise<Project | null> => {
       const outcome = await resolveProjectReadAccess(deps, req, project.id)
       if (!outcome.ok) {
@@ -853,15 +920,22 @@ export function createPrototypeOriginRoutes(deps: AppDeps): Router {
      */
     const retryUnavailableOrigin = async (freshProject: Project): Promise<void> => {
       const previous = current
-      const next = await buildPrototypeOriginBody({
-        deps,
-        allowlist,
-        bridgeAssetPath,
-        project: freshProject,
-        policy,
-        requestHost,
-        statedOrigin: stated.origin,
-      })
+      let next: PrototypeOriginResult
+      try {
+        next = await buildPrototypeOriginBody({
+          deps,
+          allowlist,
+          bridgeAssetPath,
+          project: freshProject,
+          policy,
+          requestHost,
+          statedOrigin: stated.origin,
+          stillReadable,
+        })
+      } catch (error) {
+        if (error instanceof AccessRevokedDuringOpen) return
+        throw error
+      }
       if (closed) return
       if (
         next.status === 503 &&

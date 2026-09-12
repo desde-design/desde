@@ -1713,6 +1713,62 @@ describe("GET /projects/:id/prototype-origin/stream", () => {
   })
 
   /**
+   * Codex round 48. The read gate ran before the listener opened, and a
+   * rotation for an access change can land in between: the open then
+   * minted a fresh credential for a reader who had just lost access. The
+   * gate runs again after the open; when it fails, the origin is retired
+   * and the answer is the gate's own 404.
+   */
+  it("retires a listener opened for a reader whose access was revoked during the open, and answers 404", async () => {
+    const rotated: string[] = []
+    let storageForRevoke: InMemoryStorage | null = null
+    const revokingDuringOpen: LoopbackListenerRegistry = {
+      ensure: async (deployment, target) => {
+        // The access change lands while the socket is being bound.
+        if (storageForRevoke) await setPublicLinks(storageForRevoke, false)
+        return {
+          deploymentId: deployment.id,
+          projectId: deployment.projectId,
+          slug: deployment.slug,
+          host: "127.0.0.1" as const,
+          port: 3101,
+          origin: "http://127.0.0.1:3101",
+          shellOrigin: target.shellOrigin,
+          boundAddress: "127.0.0.1",
+          lastUsedAt: 0,
+          close: () => Promise.resolve(),
+        }
+      },
+      touch: () => {},
+      touchOrigin: () => {},
+      reapIdle: () => Promise.resolve(0),
+      closeAll: () => Promise.resolve(),
+      closeForDeployment: () => Promise.resolve(),
+      rotateForDeployment: () => Promise.resolve(),
+      rotateForProject: () => Promise.resolve(),
+      rotateAll: () => Promise.resolve(),
+      hasOrigin: () => true,
+      rotateOrigin: (origin) => {
+        rotated.push(origin)
+        return Promise.resolve()
+      },
+      startReaper: () => () => {},
+      isPrototypeHost: () => false,
+    }
+    const ctx = setup({ prototypeListeners: revokingDuringOpen })
+    storageForRevoke = ctx.storage
+    const project = await seedProject(ctx.storage, { access: "public-link" })
+
+    // An anonymous reader: public links are what admitted them.
+    const res = await request(ctx.app)
+      .get(`/api/v1/projects/${project.id}/prototype-origin`)
+      .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+      .expect(404)
+    expect(res.body).toEqual({ error: "Project not found" })
+    expect(rotated).toEqual(["http://127.0.0.1:3101"])
+  })
+
+  /**
    * Codex round 46. A rotation (a revoked reader, an access change) closes
    * the listener a still-allowed reader's frame is on. Its stream used to
    * compare only the deployment, the access and the process, so it never
