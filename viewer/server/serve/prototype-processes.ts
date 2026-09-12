@@ -1,6 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { request as httpRequest } from "node:http"
-import { createServer } from "node:net"
+import { connect as netConnect, createServer } from "node:net"
 import { mkdir, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { buildEnv } from "../build/exec"
@@ -684,18 +683,26 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
     return new PrototypeProcessError({ state: "stopped" }, RETIRED_REFUSAL)
   }
 
+  /**
+   * Ready means LISTENING: a TCP connection to the port is accepted. The
+   * probe used to be an HTTP GET of `/` with one second to answer, and a
+   * healthy app whose root page took longer than that to render (a slow
+   * loader, a cold data fetch) had every probe destroyed before it could
+   * reply, until the outer deadline killed it (codex round 22). Whether the
+   * app then answers requests is the proxy's business: a child that accepts
+   * connections but never answers gets the proxy's timeout and 502, not a
+   * spurious "did not start".
+   */
   async function answers(port: number): Promise<boolean> {
     return await new Promise<boolean>((resolve) => {
-      const req = httpRequest({ host: "127.0.0.1", port, path: "/", method: "GET", timeout: 1000 }, (res) => {
-        res.resume()
-        resolve(true)
-      })
-      req.on("error", () => resolve(false))
-      req.on("timeout", () => {
-        req.destroy()
-        resolve(false)
-      })
-      req.end()
+      const socket = netConnect({ host: "127.0.0.1", port })
+      const done = (ok: boolean): void => {
+        socket.destroy()
+        resolve(ok)
+      }
+      socket.setTimeout(1000, () => done(false))
+      socket.once("connect", () => done(true))
+      socket.once("error", () => done(false))
     })
   }
 

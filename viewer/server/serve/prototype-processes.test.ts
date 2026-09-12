@@ -760,6 +760,28 @@ describe("createPrototypeProcesses", () => {
    * RETRYABLE `crashed` instead, so the next `ensure` restarts it under the
    * normal budget — same as any other exit.
    */
+  /**
+   * Codex round 22. Ready means listening. The probe used to GET `/` with one
+   * second to answer, so an app whose root page took longer to render had
+   * every probe destroyed and was killed at the deadline as "did not start".
+   * The fixture holds its `/` response for longer than the whole deadline;
+   * the start must still resolve, because the socket was accepting.
+   */
+  it("treats a listening child as ready even when its root page is slow to answer", async () => {
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: await checkoutsRoot(["d1"]),
+      readyTimeoutMs: 1500,
+      spawnEnv: { FAKE_RESPONSE_DELAY_MS: "2500" },
+    })
+    managers.push(procs)
+    const started = Date.now()
+    const { port } = await procs.ensure({ id: "d1", serverStart: start() })
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(procs.status("d1").state).toBe("running")
+    // The slow page still answers, in its own time, through a plain request.
+    expect((await get(port, "/other")).body).toContain("hello from")
+  })
+
   describe("markUnreachable", () => {
     it("queued behind a forget, it leaves no record behind (codex round 21)", async () => {
       const procs = createPrototypeProcesses({ checkoutsRoot: await checkoutsRoot(["d1"]) })
@@ -1167,17 +1189,19 @@ describe("createPrototypeProcesses", () => {
    * resolved with the port of a process that was being torn down, and the
    * reader got the proxy's 502 instead of the retired 503.
    *
-   * Deterministic rather than timed: the fixture logs when the probe arrives
-   * and holds the response open for 200ms, and `FAKE_SIGTERM_DELAY_MS` keeps
-   * the child alive long enough to answer it. The lock does the rest — the
-   * `ready` transition queues behind `retire`'s own slow stop, so it is
-   * always applied to a record that is already `retired`.
+   * Deterministic rather than timed: the fixture logs the moment it starts
+   * and only listens 800ms later (`FAKE_DELAY_MS`), so the retire lands in
+   * the window between the spawn and the child accepting connections. (The
+   * probe is a TCP connect since codex round 22, so there is no HTTP probe
+   * to hold open any more; the pre-listen delay is the window now.) The lock
+   * does the rest: whatever the start applies next is refused on a record
+   * that is already `retired`, and the retire's kill takes the child.
    */
-  it("a retire that lands while the readiness probe is in flight refuses the ready and leaves nothing listening", async () => {
+  it("a retire that lands while the child is still coming up refuses the start and leaves nothing listening", async () => {
     let chosen = 0
     const procs = createPrototypeProcesses({
       checkoutsRoot: await checkoutsRoot(["d1"]),
-      spawnEnv: { FAKE_RESPONSE_DELAY_MS: "200", FAKE_SIGTERM_DELAY_MS: "500" },
+      spawnEnv: { FAKE_DELAY_MS: "800" },
       pickPort: async () => {
         chosen = await pickLoopbackPort()
         return chosen
@@ -1187,7 +1211,7 @@ describe("createPrototypeProcesses", () => {
     const ensuring = procs.ensure({ id: "d1", serverStart: start() })
     await vi.waitFor(
       () => {
-        expect(procs.serverLog("d1")).toContain("fake server: probe received")
+        expect(procs.serverLog("d1")).toContain("fake server: starting")
       },
       { timeout: 5000 },
     )
