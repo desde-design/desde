@@ -1,5 +1,5 @@
 import { readdir, readFile, stat } from "node:fs/promises"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
 async function isDir(p: string): Promise<boolean> {
   try {
@@ -17,10 +17,10 @@ async function isFile(p: string): Promise<boolean> {
   }
 }
 
-/** True when `package.json` lists `name` under dependencies or devDependencies. */
-async function dependsOn(checkoutRoot: string, name: string): Promise<boolean> {
+/** True when `<dir>/package.json` lists `name` under dependencies or devDependencies. */
+async function dependsOnAt(dir: string, name: string): Promise<boolean> {
   try {
-    const pkg = JSON.parse(await readFile(join(checkoutRoot, "package.json"), "utf8")) as {
+    const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as {
       dependencies?: Record<string, unknown>
       devDependencies?: Record<string, unknown>
     }
@@ -28,6 +28,32 @@ async function dependsOn(checkoutRoot: string, name: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/**
+ * True when the checkout root's own `package.json` lists `name`. A thin
+ * alias over {@link dependsOnAt} for the common case of asking about the
+ * checkout root itself, kept so every existing call site did not need to
+ * change name.
+ */
+async function dependsOn(checkoutRoot: string, name: string): Promise<boolean> {
+  return dependsOnAt(checkoutRoot, name)
+}
+
+/**
+ * The directory that owns a found build output (codex round 29, item 1):
+ * the parent of `rel` (a path relative to the checkout root, such as a dist
+ * dir, a build dir, or a Nitro output dir), or `null` when `rel` sits
+ * directly under the checkout root and there is no separate app directory
+ * to check.
+ *
+ * In an npm or pnpm workspace, this is the app package's own directory
+ * (`apps/web`) — the one whose `package.json`, not the workspace root's,
+ * declares the framework.
+ */
+function parentAppDir(rel: string): string | null {
+  const dir = dirname(rel)
+  return dir === "." ? null : dir
 }
 
 /** Directory names never worth descending into while hunting for a Next dist dir. */
@@ -224,4 +250,4 @@ export async function findNitroOutputDir(checkoutRoot: string): Promise<string |
   })
 }
 
-export { isDir, isFile, dependsOn }
+export { isDir, isFile, dependsOn, dependsOnAt, parentAppDir }

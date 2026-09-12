@@ -1,6 +1,6 @@
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { REACT_ROUTER_ADAPTER } from "./react-router"
 
@@ -24,6 +24,12 @@ async function checkout(opts: {
   serverFile?: string
   /** A second bundle beside the first one, so no single server bundle can be named. */
   extraServerFile?: string
+  /**
+   * Dependencies to write into a package.json at the PARENT of `buildDir` —
+   * the app directory a workspace scan derives (codex round 29, item 1).
+   * Skipped when `buildDir` has no parent.
+   */
+  appPackageJson?: Record<string, string>
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "fw-react-router-"))
   roots.push(root)
@@ -64,6 +70,16 @@ async function checkout(opts: {
   if (opts.serveBinary) {
     await mkdir(join(root, "node_modules", ".bin"), { recursive: true })
     await writeFile(join(root, "node_modules", ".bin", "react-router-serve"), "#!/usr/bin/env node\n")
+  }
+  if (opts.appPackageJson) {
+    const appDir = dirname(buildDir)
+    if (appDir !== ".") {
+      await mkdir(join(root, appDir), { recursive: true })
+      await writeFile(
+        join(root, appDir, "package.json"),
+        JSON.stringify({ name: "app", dependencies: opts.appPackageJson }),
+      )
+    }
   }
   return root
 }
@@ -216,5 +232,32 @@ describe("React Router adapter", () => {
       await checkout({ reactRouter: "@react-router/dev", inDevDependencies: true, serverBuild: true }),
     )
     expect(shape?.kind).toBe("unsupported")
+  })
+
+  /**
+   * Codex round 29, item 1. `dependsOn` used to read only the workspace
+   * root's `package.json`. In an npm or pnpm workspace `react-router` is
+   * declared in the app package's own `package.json`, so a checkout where
+   * the root lists nothing fell through to the static default.
+   */
+  it("recognises react-router declared only in the app package's package.json in a workspace", async () => {
+    const shape = await REACT_ROUTER_ADAPTER.inspectBuild(
+      await checkout({
+        reactRouter: false,
+        serverBuild: true,
+        clientHtml: true,
+        serveBinary: true,
+        buildDir: "apps/web",
+        appPackageJson: { "react-router": "^6.0.0" },
+      }),
+    )
+    expect(shape?.kind).toBe("server")
+  })
+
+  it("still answers null when neither the root nor the app package lists react-router", async () => {
+    const shape = await REACT_ROUTER_ADAPTER.inspectBuild(
+      await checkout({ reactRouter: false, serverBuild: true, clientHtml: true, serveBinary: true, buildDir: "apps/web" }),
+    )
+    expect(shape).toBeNull()
   })
 })

@@ -1,6 +1,6 @@
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { NUXT_ADAPTER } from "./nuxt"
 
@@ -17,6 +17,12 @@ async function checkout(opts: {
   publicDir?: boolean
   /** What Nitro's `output.dir` was set to, if anything. */
   outputDir?: string
+  /**
+   * Dependencies to write into a package.json at the PARENT of `outputDir` —
+   * the app directory a workspace scan derives (codex round 29, item 1).
+   * Skipped when `outputDir` has no parent.
+   */
+  appPackageJson?: Record<string, string>
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "fw-nuxt-"))
   roots.push(root)
@@ -33,6 +39,16 @@ async function checkout(opts: {
   if (opts.staticHtml) {
     await mkdir(join(root, outputDir, "public"), { recursive: true })
     await writeFile(join(root, outputDir, "public", "index.html"), "<html></html>")
+  }
+  if (opts.appPackageJson) {
+    const appDir = dirname(outputDir)
+    if (appDir !== ".") {
+      await mkdir(join(root, appDir), { recursive: true })
+      await writeFile(
+        join(root, appDir, "package.json"),
+        JSON.stringify({ name: "app", dependencies: opts.appPackageJson }),
+      )
+    }
   }
   return root
 }
@@ -101,5 +117,31 @@ describe("Nuxt adapter", () => {
       start: ["node", join("dist", "server", "index.mjs")],
       reason: "Nuxt with a server build",
     })
+  })
+
+  /**
+   * Codex round 29, item 1. `dependsOn` used to read only the workspace
+   * root's `package.json`. In an npm or pnpm workspace `nuxt` is declared in
+   * the app package's own `package.json`, so a checkout where the root
+   * lists nothing fell through to the static default.
+   */
+  it("recognises nuxt declared only in the app package's package.json in a workspace", async () => {
+    const shape = await NUXT_ADAPTER.inspectBuild(
+      await checkout({
+        nuxt: false,
+        serverBuild: true,
+        publicDir: true,
+        outputDir: "apps/web",
+        appPackageJson: { nuxt: "^3.0.0" },
+      }),
+    )
+    expect(shape?.kind).toBe("server")
+  })
+
+  it("still answers null when neither the root nor the app package lists nuxt", async () => {
+    const shape = await NUXT_ADAPTER.inspectBuild(
+      await checkout({ nuxt: false, serverBuild: true, publicDir: true, outputDir: "apps/web" }),
+    )
+    expect(shape).toBeNull()
   })
 })

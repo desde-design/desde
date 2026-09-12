@@ -1,6 +1,6 @@
 import { mkdtemp, mkdir, writeFile, rm, stat, utimes } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { NEXT_ADAPTER } from "./next"
 import { inspectBuild, ADAPTERS } from "./index"
@@ -28,6 +28,14 @@ async function checkout(opts: {
   publicDir?: boolean
   /** Whether `node_modules/.bin/next` exists in this checkout. */
   nextBinary?: boolean
+  /**
+   * Dependencies to write into a package.json at the PARENT of `distDir` —
+   * the app directory a workspace scan derives (codex round 29, item 1).
+   * Lets a fixture model a workspace where only the app package, not the
+   * workspace root, declares `next`. Skipped when `distDir` has no parent
+   * (sits directly under the checkout root).
+   */
+  appPackageJson?: Record<string, string>
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "fw-next-"))
   roots.push(root)
@@ -73,6 +81,16 @@ async function checkout(opts: {
   if (opts.nextBinary) {
     await mkdir(join(root, "node_modules", ".bin"), { recursive: true })
     await writeFile(join(root, "node_modules", ".bin", "next"), "#!/usr/bin/env node\n")
+  }
+  if (opts.appPackageJson) {
+    const appDir = dirname(distDir)
+    if (appDir !== ".") {
+      await mkdir(join(root, appDir), { recursive: true })
+      await writeFile(
+        join(root, appDir, "package.json"),
+        JSON.stringify({ name: "app", dependencies: opts.appPackageJson }),
+      )
+    }
   }
   return root
 }
@@ -211,6 +229,33 @@ describe("Next.js adapter", () => {
       kind: "unsupported",
       reason: "This Next.js build needs the next package installed to run.",
     })
+  })
+
+  /**
+   * Codex round 29, item 1. `dependsOn` used to read only the workspace
+   * root's `package.json`. In an npm or pnpm workspace `next` is declared in
+   * the app package's own `package.json` (`apps/web/package.json`), so a
+   * checkout where the root lists nothing fell through to the static
+   * default and then failed on a missing `index.html`.
+   */
+  it("recognises next declared only in the app package's package.json in a workspace", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(
+      await checkout({
+        next: false,
+        distDir: "apps/web",
+        buildId: true,
+        nextBinary: true,
+        appPackageJson: { next: "^16.0.0" },
+      }),
+    )
+    expect(shape?.kind).toBe("server")
+  })
+
+  it("still answers null when neither the root nor the app package lists next", async () => {
+    const shape = await NEXT_ADAPTER.inspectBuild(
+      await checkout({ next: false, distDir: "apps/web", buildId: true, nextBinary: true }),
+    )
+    expect(shape).toBeNull()
   })
 })
 

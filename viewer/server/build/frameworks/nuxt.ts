@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { dependsOn, findNitroOutputDir, isFile } from "./fs-probe"
+import { dependsOnAt, findNitroOutputDir, isFile, parentAppDir } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
 /**
@@ -35,10 +35,20 @@ const DEFAULT_OUTPUT_DIR = ".output"
 export const NUXT_ADAPTER: FrameworkAdapter = {
   id: "nuxt",
   async inspectBuild(checkoutRoot) {
-    if (!(await dependsOn(checkoutRoot, "nuxt"))) return null
     const outputDir = (await isFile(join(checkoutRoot, DEFAULT_OUTPUT_DIR, "server", "index.mjs")))
       ? DEFAULT_OUTPUT_DIR
       : await findNitroOutputDir(checkoutRoot)
+
+    // Codex round 29, item 1. `dependsOn` used to read only the workspace
+    // root's `package.json`. In an npm or pnpm workspace `nuxt` is declared
+    // in the app package's own `package.json`, not the root's; the app
+    // directory is the parent of the found output dir.
+    const appDir = outputDir !== null ? parentAppDir(outputDir) : null
+    const hasNuxt =
+      (await dependsOnAt(checkoutRoot, "nuxt")) ||
+      (appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "nuxt")))
+    if (!hasNuxt) return null
+
     if (outputDir !== null) {
       return {
         kind: "server",

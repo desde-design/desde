@@ -1,6 +1,6 @@
 import { cp, stat } from "node:fs/promises"
 import { join } from "node:path"
-import { dependsOn, findNextDistDir, isDir, isFile } from "./fs-probe"
+import { dependsOn, dependsOnAt, findNextDistDir, isDir, isFile, parentAppDir } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
 /**
@@ -19,7 +19,6 @@ import type { FrameworkAdapter } from "./types"
 export const NEXT_ADAPTER: FrameworkAdapter = {
   id: "next",
   async inspectBuild(checkoutRoot) {
-    if (!(await dependsOn(checkoutRoot, "next"))) return null
     // An export is known by what it writes, not by the folder's name: every
     // `output: "export"` build writes `out/_next/` and an `out/index.html`.
     // A bare `out/` left by another tool used to win over a valid server
@@ -30,7 +29,22 @@ export const NEXT_ADAPTER: FrameworkAdapter = {
       (await isDir(join(checkoutRoot, "out", "_next"))) && (await isFile(join(checkoutRoot, "out", "index.html")))
 
     const distDir = await findNextDistDir(checkoutRoot)
-    if (!distDir) return exportComplete ? { kind: "static", outputDir: "out", reason: "Next.js static export" } : null
+    if (!distDir) {
+      if (!(await dependsOn(checkoutRoot, "next"))) return null
+      return exportComplete ? { kind: "static", outputDir: "out", reason: "Next.js static export" } : null
+    }
+
+    // Codex round 29, item 1. `dependsOn` used to read only the workspace
+    // root's `package.json`. In an npm or pnpm workspace `next` is declared
+    // in the app package's own `package.json` (`apps/web/package.json`),
+    // not the root's, so a checkout where the root lists nothing used to
+    // fall through to the static default and fail on a missing
+    // `index.html`. The app directory is the parent of the found dist dir;
+    // either package.json listing `next` is enough.
+    const appDir = parentAppDir(distDir)
+    const rootHasNext = await dependsOn(checkoutRoot, "next")
+    const appHasNext = appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "next"))
+    if (!rootHasNext && !appHasNext) return null
 
     // Both builds are on disk, so the question is which one the last build
     // wrote (codex round 20, item 4). A complete `out/` used to win outright,

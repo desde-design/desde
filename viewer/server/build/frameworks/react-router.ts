@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
-import { dependsOn, findReactRouterBuildDir, isFile, type ReactRouterBuild } from "./fs-probe"
+import { dependsOnAt, findReactRouterBuildDir, isFile, parentAppDir, type ReactRouterBuild } from "./fs-probe"
 import type { FrameworkAdapter } from "./types"
 
 /**
@@ -30,10 +30,6 @@ const DEFAULT_BUILD_DIR = "build"
 export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
   id: "react-router",
   async inspectBuild(checkoutRoot) {
-    const hasReactRouter = await dependsOn(checkoutRoot, "react-router")
-    const hasReactRouterDev = await dependsOn(checkoutRoot, "@react-router/dev")
-    if (!hasReactRouter && !hasReactRouterDev) return null
-
     // The default layout FIRST and by name, then the scan (codex round 20,
     // item 2). Not the scan alone: the scan needs a `client/` directory beside
     // the `server/` one to be sure a directory is a build at all, and a build
@@ -43,6 +39,22 @@ export const REACT_ROUTER_ADAPTER: FrameworkAdapter = {
     ))
       ? { dir: DEFAULT_BUILD_DIR, serverFile: "index.js" }
       : await findReactRouterBuildDir(checkoutRoot)
+
+    // Codex round 29, item 1. `dependsOn` used to read only the workspace
+    // root's `package.json`. In an npm or pnpm workspace the framework is
+    // declared in the app package's own `package.json`, not the root's; the
+    // app directory is the parent of the found build dir (when any build
+    // was found at all — a bare client-only checkout has no app dir to
+    // check beyond the root).
+    const appDir = found ? parentAppDir(found.dir) : null
+    const hasReactRouter =
+      (await dependsOnAt(checkoutRoot, "react-router")) ||
+      (appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "react-router")))
+    const hasReactRouterDev =
+      (await dependsOnAt(checkoutRoot, "@react-router/dev")) ||
+      (appDir !== null && (await dependsOnAt(join(checkoutRoot, appDir), "@react-router/dev")))
+    if (!hasReactRouter && !hasReactRouterDev) return null
+
     const clientDir = join(found?.dir ?? DEFAULT_BUILD_DIR, "client")
     const clientHtml = await isFile(join(checkoutRoot, clientDir, "index.html"))
     if (found) {
