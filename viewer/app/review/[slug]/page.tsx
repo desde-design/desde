@@ -347,6 +347,13 @@ export default async function ReviewPage({
 
   return (
     <ReviewShell
+      // Keyed on the deployment: the shell asks the router to refresh when
+      // its stream moves to a new deployment, and a refresh keeps every
+      // mounted client state (the project detail, an open deployments
+      // panel, the live access) unless the element's key changes. With the
+      // key, a new deployment remounts the shell and all of it starts from
+      // the new server render (codex round 25).
+      key={project.activeDeploymentId ?? "no-deployment"}
       project={{
         id: project.id,
         slug: project.slug,
