@@ -233,6 +233,28 @@ afterEach(() => {
 })
 
 describe("review shell — following the process-state stream", () => {
+  /**
+   * Live run 2, 2026-09-12: the first open of a server prototype sat on a
+   * plain "Loading" for ten seconds while the child cold-started, which reads
+   * as broken. The page knows the difference, because the process state is
+   * on the stream before the frame has anything to show.
+   */
+  it("names the cold start while the process is starting, and says Loading once it runs", () => {
+    installFakeEventSource()
+    render(
+      <Scenario>
+        <ReviewShell project={{ ...PROJECT, process: { state: "starting", generation: 1 } }} />
+      </Scenario>,
+    )
+    const loader = () => document.querySelector('[data-testid="prototype-loader"]')
+    expect(loader()?.textContent).toContain("Starting the prototype's server")
+    expect(loader()?.textContent).not.toContain("Loading")
+
+    pushOrigin(RUNNING_GENERATION_1)
+    expect(loader()?.textContent).toContain("Loading")
+    expect(loader()?.textContent).not.toContain("Starting")
+  })
+
   it("remounts the iframe when the process comes back under a new generation", () => {
     installFakeEventSource()
     render(

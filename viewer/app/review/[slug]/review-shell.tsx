@@ -1399,7 +1399,15 @@ export function ReviewShell({
                  hardcodes a single shared testid, so a test asking for "the
                  loader" got both and could not say which had cleared. */
               <div data-testid="prototype-loader" className="absolute inset-0 z-10 bg-background">
-                <ProjectLoader label="Loading" className="h-full" />
+                {/* A server prototype's cold start can take a minute, and the
+                    page already knows it is one: the process state arrives on
+                    the stream before the frame has anything to show. A plain
+                    "Loading" for that long reads as broken (live run 2,
+                    2026-09-12: ten seconds of it on the first open in Docker). */}
+                <ProjectLoader
+                  label={liveProcess?.state === "starting" ? "Starting the prototype's server" : "Loading"}
+                  className="h-full"
+                />
               </div>
             )}
           </>
