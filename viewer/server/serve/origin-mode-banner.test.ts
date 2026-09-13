@@ -7,6 +7,7 @@ describe("originModeBannerLines", () => {
       originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
       }),
     ).toEqual({
@@ -25,6 +26,7 @@ describe("originModeBannerLines", () => {
       originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
       }),
@@ -60,6 +62,7 @@ describe("originModeBannerLines", () => {
     const { lines } = originModeBannerLines({
       publicUrl: "http://127.0.0.1:3100",
       serveDomain: null,
+      localServeDomain: null,
       loopbackAvailable: true,
       loopbackPortRange: { from: 3101, to: 3120 },
       loopbackBindAllInterfaces: true,
@@ -77,6 +80,7 @@ describe("originModeBannerLines", () => {
     const { lines } = originModeBannerLines({
       publicUrl: "http://127.0.0.1:3100",
       serveDomain: null,
+      localServeDomain: null,
       loopbackAvailable: true,
       loopbackPortRange: { from: 3101, to: 3120 },
     })
@@ -87,6 +91,7 @@ describe("originModeBannerLines", () => {
     const { lines } = originModeBannerLines({
       publicUrl: "http://localhost:3100",
       serveDomain: null,
+      localServeDomain: null,
       loopbackAvailable: true,
     })
     expect(lines.some((line) => line.includes("Loopback prototype ports"))).toBe(false)
@@ -97,6 +102,7 @@ describe("originModeBannerLines", () => {
       originModeBannerLines({
         publicUrl: "http://127.0.0.1:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
       }),
     ).toEqual({
@@ -134,6 +140,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
@@ -145,6 +152,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
       })
       expect(lines).not.toContain(WIDE_BIND_LINE)
@@ -154,6 +162,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: false,
@@ -165,6 +174,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
@@ -185,6 +195,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackInContainer: true,
@@ -196,6 +207,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: false,
@@ -209,6 +221,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
@@ -221,6 +234,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
       })
       expect(lines).not.toContain(NARROW_BIND_IN_CONTAINER_LINE)
@@ -240,6 +254,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
@@ -252,6 +267,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: true,
@@ -263,6 +279,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindAllInterfaces: false,
@@ -278,6 +295,7 @@ describe("originModeBannerLines", () => {
             const { lines } = originModeBannerLines({
               publicUrl: "http://localhost:3100",
               serveDomain: null,
+              localServeDomain: null,
               loopbackAvailable: true,
               loopbackPortRange: { from: 3101, to: 3120 },
               loopbackBindAllInterfaces,
@@ -292,11 +310,34 @@ describe("originModeBannerLines", () => {
     })
   })
 
+  describe("local subdomain mode", () => {
+    it("names the derived address and the Safari fallback, and prints no loopback lines", () => {
+      const banner = originModeBannerLines({
+        publicUrl: "http://desde.localhost:3100",
+        serveDomain: null,
+        localServeDomain: "apps.desde.localhost",
+        loopbackAvailable: true,
+        loopbackPortRange: null,
+      })
+      expect(banner.mode).toBe("subdomain")
+      expect(banner.lines).toEqual([
+        "[viewer] prototypes are served on their own address under desde.localhost: http://{slug}.apps.desde.localhost:3100 (no DNS needed; Chrome and Firefox resolve *.localhost themselves)",
+        "[viewer] Safari cannot resolve *.localhost names. In Safari open http://localhost:3100 instead; prototypes then use their own loopback ports. In Docker publish those too: -p 127.0.0.1:3101-3120:3101-3120",
+      ])
+    })
+
+    it("keeps the configured-subdomain line unchanged", () => {
+      const banner = originModeBannerLines({ publicUrl: "https://viewer.example.com", serveDomain: "example.com", localServeDomain: null, loopbackAvailable: false })
+      expect(banner.lines).toEqual(["[viewer] prototypes are served on their own subdomain: https://{slug}.example.com"])
+    })
+  })
+
   it("subdomain: names the configured serve domain, scheme taken from publicUrl", () => {
     expect(
       originModeBannerLines({
         publicUrl: "https://desde.example.com",
         serveDomain: "proto.example.com",
+        localServeDomain: null,
         loopbackAvailable: true,
       }),
     ).toEqual({
@@ -312,6 +353,7 @@ describe("originModeBannerLines", () => {
       originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: "proto.test",
+        localServeDomain: null,
         loopbackAvailable: true,
       }),
     ).toEqual({
@@ -325,6 +367,7 @@ describe("originModeBannerLines", () => {
       originModeBannerLines({
         publicUrl: "https://desde.example.com",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
       }),
     ).toEqual({
@@ -341,6 +384,7 @@ describe("originModeBannerLines", () => {
       originModeBannerLines({
         publicUrl: "http://10.0.0.5:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
       }).mode,
     ).toBe("fallback")
@@ -351,6 +395,7 @@ describe("originModeBannerLines", () => {
       const banner = originModeBannerLines({
         publicUrl: "https://app.example.com",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         prototypeOrigin: "https://proto.example.net",
       })
@@ -369,6 +414,7 @@ describe("originModeBannerLines", () => {
         originModeBannerLines({
           publicUrl: "https://app.example.com",
           serveDomain: null,
+          localServeDomain: null,
           loopbackAvailable: false,
           prototypeOrigin: "https://proto.example.net",
         }).mode,
@@ -380,6 +426,7 @@ describe("originModeBannerLines", () => {
         originModeBannerLines({
           publicUrl: "https://app.example.com",
           serveDomain: "proto.example.com",
+          localServeDomain: null,
           loopbackAvailable: true,
           prototypeOrigin: "https://proto.example.net",
         }).mode,
@@ -389,19 +436,21 @@ describe("originModeBannerLines", () => {
 
   it("no line contains an em dash", () => {
     for (const config of [
-      { publicUrl: "http://localhost:3100", serveDomain: null, loopbackAvailable: true },
-      { publicUrl: "https://desde.example.com", serveDomain: "proto.example.com", loopbackAvailable: true },
-      { publicUrl: "https://desde.example.com", serveDomain: null, loopbackAvailable: true },
-      { publicUrl: "http://localhost:3100", serveDomain: null, loopbackAvailable: false },
+      { publicUrl: "http://localhost:3100", serveDomain: null, localServeDomain: null, loopbackAvailable: true },
+      { publicUrl: "https://desde.example.com", serveDomain: "proto.example.com", localServeDomain: null, loopbackAvailable: true },
+      { publicUrl: "https://desde.example.com", serveDomain: null, localServeDomain: null, loopbackAvailable: true },
+      { publicUrl: "http://localhost:3100", serveDomain: null, localServeDomain: null, loopbackAvailable: false },
       {
         publicUrl: "https://app.example.com",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         prototypeOrigin: "https://proto.example.net",
       },
       {
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
         loopbackPortRange: { from: 3101, to: 3120 },
         loopbackBindNetworkUnrecognized: true,
@@ -433,6 +482,7 @@ describe("originModeBannerLines", () => {
         originModeBannerLines({
           publicUrl: "http://localhost:3100",
           serveDomain: null,
+          localServeDomain: null,
           loopbackAvailable: false,
         }),
       ).toEqual({
@@ -447,7 +497,7 @@ describe("originModeBannerLines", () => {
 
     it("prints the downgrade line for every loopback spelling, not just localhost", () => {
       for (const publicUrl of ["http://localhost:3100", "http://127.0.0.1:3100", "http://[::1]:3100"]) {
-        const { lines } = originModeBannerLines({ publicUrl, serveDomain: null, loopbackAvailable: false })
+        const { lines } = originModeBannerLines({ publicUrl, serveDomain: null, localServeDomain: null, loopbackAvailable: false })
         expect(lines, publicUrl).toContain(DOWNGRADE_LINE)
       }
     })
@@ -459,6 +509,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "https://desde.example.com",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: false,
       })
       expect(lines).toEqual([
@@ -471,6 +522,7 @@ describe("originModeBannerLines", () => {
       const { lines } = originModeBannerLines({
         publicUrl: "http://localhost:3100",
         serveDomain: null,
+        localServeDomain: null,
         loopbackAvailable: true,
       })
       for (const line of lines) {
@@ -483,6 +535,7 @@ describe("originModeBannerLines", () => {
         originModeBannerLines({
           publicUrl: "http://localhost:3100",
           serveDomain: "proto.test",
+          localServeDomain: null,
           loopbackAvailable: false,
         }).mode,
       ).toBe("subdomain")

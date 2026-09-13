@@ -103,7 +103,7 @@ function pickBindLine(bindAllInterfaces: boolean, bind: ViewerLoopbackBindMode, 
 }
 
 export function originModeBannerLines(
-  config: Pick<ViewerConfig, "publicUrl" | "serveDomain" | "loopbackAvailable"> & {
+  config: Pick<ViewerConfig, "publicUrl" | "serveDomain" | "localServeDomain" | "loopbackAvailable"> & {
     // Optional here (not on the required `Pick`) so the many existing callers
     // that never configure `VIEWER_PROTOTYPE_ORIGIN` need no edit; a full
     // `ViewerConfig` (what `server/index.ts` passes) satisfies it. Absent
@@ -132,6 +132,7 @@ export function originModeBannerLines(
     hostIsPrototype: false,
     publicUrl: config.publicUrl,
     serveDomain: config.serveDomain,
+    localServeDomain: config.localServeDomain,
     loopbackAvailable: config.loopbackAvailable,
     prototypeOrigin: config.prototypeOrigin,
   })
@@ -152,6 +153,7 @@ export function originModeBannerLines(
       hostIsPrototype: false,
       publicUrl: config.publicUrl,
       serveDomain: config.serveDomain,
+      localServeDomain: config.localServeDomain,
       loopbackAvailable: true,
       prototypeOrigin: config.prototypeOrigin,
     }).mode === "loopback"
@@ -168,12 +170,27 @@ export function originModeBannerLines(
   }
 
   if (resolved.mode === "subdomain") {
-    const scheme = new URL(resolved.shellOrigin).protocol
+    const shell = new URL(resolved.shellOrigin)
+    const scheme = shell.protocol
+    const serveDomain = resolved.serveDomain
+    if (config.serveDomain === null && config.localServeDomain !== null) {
+      // Local subdomain mode: the default on a laptop and in Docker. The
+      // address needs no DNS in Chrome and Firefox. Safari does not resolve
+      // `*.localhost`, so it takes the loopback path on the bare name.
+      const port = shell.port ? `:${shell.port}` : ""
+      const portNumber = Number(shell.port || "80")
+      const range = config.loopbackPortRange ?? { from: portNumber + 1, to: portNumber + 20 }
+      return {
+        mode: "subdomain",
+        lines: [
+          `[viewer] prototypes are served on their own address under ${shell.hostname}: ${scheme}//{slug}.${serveDomain}${port} (no DNS needed; Chrome and Firefox resolve *.localhost themselves)`,
+          `[viewer] Safari cannot resolve *.localhost names. In Safari open ${scheme}//localhost${port} instead; prototypes then use their own loopback ports. In Docker publish those too: -p 127.0.0.1:${range.from}-${range.to}:${range.from}-${range.to}`,
+        ],
+      }
+    }
     return {
       mode: "subdomain",
-      lines: [
-        `[viewer] prototypes are served on their own subdomain: ${scheme}//{slug}.${config.serveDomain}`,
-      ],
+      lines: [`[viewer] prototypes are served on their own subdomain: ${scheme}//{slug}.${serveDomain}`],
     }
   }
 
