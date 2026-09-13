@@ -492,7 +492,7 @@ export const LOCAL_SERVE_LABEL = "apps"
  * are the operator stating a mode outright, and either one wins over deriving
  * anything here. Otherwise: the public URL must be plain `http:` (local
  * subdomain mode is not a supported setup over `https:`) and its hostname
- * must end with `.localhost` — the bare loopback spellings (`localhost`,
+ * must end with `.localhost`. The bare loopback spellings (`localhost`,
  * `127.0.0.1`, `[::1]`) are excluded on purpose, since those are the Safari
  * loopback fallback, not a name `apps.` can be prefixed onto.
  */
