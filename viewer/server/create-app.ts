@@ -3,6 +3,7 @@ import type { AssetStore } from "./assets/types"
 import type { ViewerConfig } from "./config"
 import { effectiveServeDomain } from "./config"
 import { createApiRouter } from "./api/api-router"
+import { createSessionCookieHygiene } from "./auth/session-cookie-hygiene"
 import type { ManifestConversion } from "./api/setup-routes"
 import type { CommentChangeBus } from "./comments/change-bus"
 import type { GithubRuntime } from "./github-runtime"
@@ -413,6 +414,11 @@ export function createApp(deps: AppDeps): express.Express {
   // being changed or dropped. The loopback listener app mounts the same fence
   // for the same reason.
   app.use(createPrototypeHostApiFence())
+
+  // Local subdomain mode spec, decision 6: a request carrying the session
+  // cookie name twice on http can only be a tossed `Domain` copy, and
+  // clearing it here means the next request from that browser is clean.
+  app.use(createSessionCookieHygiene(deps.config))
 
   app.use(
     "/api/v1",

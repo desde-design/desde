@@ -128,3 +128,39 @@ export function readCookie(header: string | undefined, name: string): string | n
   }
   return null
 }
+
+/** How many times `name` appears in a raw `Cookie` header. */
+export function countCookie(header: string | undefined, name: string): number {
+  if (!header) return 0
+  const prefix = `${name}=`
+  let count = 0
+  for (const rawPart of header.split(";")) {
+    if (rawPart.trim().startsWith(prefix)) count++
+  }
+  return count
+}
+
+/**
+ * Expires a session cookie that a sibling host planted with a `Domain`
+ * attribute (a "tossed" cookie). The shell never sets a `Domain` cookie
+ * itself, so one can only come from a prototype on `{slug}.<serve domain>`
+ * on plain http, where the `__Host-` prefix that closes this on https is not
+ * available. Only the plain name can be tossed; the prefixed one cannot
+ * carry `Domain` at all.
+ */
+export function clearTossedSessionCookie(hostname: string): string {
+  return `${sessionCookieName(false)}=; Domain=${hostname}; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`
+}
+
+/**
+ * Every `Set-Cookie` a sign-in answers with: the session cookie, and on http
+ * the clear for a tossed `Domain` copy, so a planted cookie never outlives
+ * the reviewer's own sign-in.
+ */
+export function sessionCookieHeaders(
+  value: string,
+  opts: { secure: boolean; maxAgeSeconds: number; publicHostname: string },
+): string[] {
+  const cookie = serializeSessionCookie(value, { secure: opts.secure, maxAgeSeconds: opts.maxAgeSeconds })
+  return opts.secure ? [cookie] : [cookie, clearTossedSessionCookie(opts.publicHostname)]
+}

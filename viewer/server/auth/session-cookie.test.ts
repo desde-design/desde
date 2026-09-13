@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest"
 import {
   SESSION_COOKIE_NAME,
   clearSessionCookie,
+  clearTossedSessionCookie,
+  countCookie,
   readCookie,
   serializeSessionCookie,
+  sessionCookieHeaders,
   sessionCookieName,
   signSessionId,
   verifySessionCookie,
@@ -133,5 +136,28 @@ describe("readCookie", () => {
   it("decodes a percent-encoded value", () => {
     const header = `${SESSION_COOKIE_NAME}=${encodeURIComponent("id.sig+with/chars")}`
     expect(readCookie(header, SESSION_COOKIE_NAME)).toBe("id.sig+with/chars")
+  })
+})
+
+describe("a tossed Domain cookie on http", () => {
+  it("counts a cookie name's occurrences in the header", () => {
+    expect(countCookie(undefined, "viewer_session")).toBe(0)
+    expect(countCookie("a=1; viewer_session=x", "viewer_session")).toBe(1)
+    expect(countCookie("viewer_session=x; b=2; viewer_session=y", "viewer_session")).toBe(2)
+    expect(countCookie("viewer_session_other=x", "viewer_session")).toBe(0)
+  })
+  it("clears the plain name for the public hostname's Domain", () => {
+    expect(clearTossedSessionCookie("desde.localhost")).toBe(
+      "viewer_session=; Domain=desde.localhost; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+    )
+  })
+  it("issues the clear beside the cookie on http only", () => {
+    const http = sessionCookieHeaders("v", { secure: false, maxAgeSeconds: 10, publicHostname: "desde.localhost" })
+    expect(http).toHaveLength(2)
+    expect(http[0]).toMatch(/^viewer_session=v; HttpOnly; SameSite=Lax; Path=\/; Max-Age=10$/)
+    expect(http[1]).toBe(clearTossedSessionCookie("desde.localhost"))
+    const https = sessionCookieHeaders("v", { secure: true, maxAgeSeconds: 10, publicHostname: "viewer.example.com" })
+    expect(https).toHaveLength(1)
+    expect(https[0]).toMatch(/^__Host-viewer_session=/)
   })
 })

@@ -3,7 +3,7 @@ import request from "supertest"
 import { beforeEach, describe, expect, it } from "vitest"
 import type { AssetStore } from "../../assets/types"
 import { generateMachineToken } from "../../auth/machine-token"
-import { signSessionId } from "../../auth/session-cookie"
+import { clearSessionCookie, clearTossedSessionCookie, signSessionId } from "../../auth/session-cookie"
 import type { AuthProvider } from "../../auth/types"
 import { loadConfig } from "../../config"
 import { createApp, type AppDeps } from "../../__tests__/test-app"
@@ -346,6 +346,10 @@ describe("auth routes", () => {
     expect(res.headers.location).toBe("/")
     const session = extractCookie(setCookies(res), "viewer_session")
     expect(session).toBeTruthy()
+    // On http, every sign-in also clears a tossed `Domain` copy of the plain
+    // cookie name, so a prototype host's planted cookie never outlives the
+    // reviewer's own sign-in (Task 6).
+    expect(setCookies(res)).toContainEqual(clearTossedSessionCookie("localhost"))
     const me = await request(app).get("/api/v1/me").set("Cookie", `viewer_session=${session}`)
     expect(me.body.user.email).toBe("mo@example.com")
     expect(me.body.user.provider).toBe("github")
@@ -1096,6 +1100,37 @@ describe("auth routes", () => {
     expect(me.body.authEnabled).toBe(true)
   })
 
+  /**
+   * Task 6. A doubled session cookie is never trusted (see
+   * `current-user.test.ts`), so logout must not try to verify or delete
+   * either copy — there is nothing legitimate to read a session id out of.
+   * It still has to answer, by clearing both spellings: the real name and
+   * the tossed `Domain` one.
+   */
+  it("logout with a doubled session cookie clears both spellings and deletes no session", async () => {
+    const start = await request(app).get("/api/v1/auth/github")
+    const state = new URL(start.headers.location).searchParams.get("state")!
+    const stateCookie = extractCookie(setCookies(start), "viewer_oauth_state")
+    const callback = await request(app)
+      .get(`/api/v1/auth/github/callback?code=good-code&state=${state}`)
+      .set("Cookie", `viewer_oauth_state=${stateCookie}`)
+    const session = extractCookie(setCookies(callback), "viewer_session")
+
+    const logout = await request(app)
+      .post("/api/v1/auth/logout")
+      .set("Cookie", `viewer_session=${session}; viewer_session=${session}`)
+    expect(logout.status).toBe(204)
+    expect(setCookies(logout)).toEqual([
+      clearSessionCookie({ secure: false }),
+      clearTossedSessionCookie("localhost"),
+    ])
+
+    // The session row was never touched — a single, ordinary cookie still
+    // resolves it, proving logout did not delete it.
+    const me = await request(app).get("/api/v1/me").set("Cookie", `viewer_session=${session}`)
+    expect(me.body.user?.email).toBe("mo@example.com")
+  })
+
   it("/me sets no-store + Vary on BOTH credential headers so a shared cache can't cross callers", async () => {
     const res = await request(app).get("/api/v1/me")
     expect(res.headers["cache-control"]).toBe("private, no-store")
@@ -1377,6 +1412,9 @@ describe("auth routes", () => {
       expect(res.headers.location).toBe("/")
       const session = extractCookie(setCookies(res), "viewer_session")
       expect(session).toBeTruthy()
+      // Local operator sign-in is a sign-in like any other: on http it also
+      // clears a tossed `Domain` copy of the plain cookie name (Task 6).
+      expect(setCookies(res)).toContainEqual(clearTossedSessionCookie("localhost"))
 
       // The point of the route: an ORDINARY session for an ORDINARY user row,
       // resolvable through the same `/me` every other caller uses. A 302 with

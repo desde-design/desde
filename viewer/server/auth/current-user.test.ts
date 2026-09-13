@@ -173,6 +173,28 @@ describe("getCurrentUser", () => {
     expect(got?.email).toBe("mo@example.com")
   })
 
+  /**
+   * Task 6. The shell only ever sets a host-only session cookie, so two
+   * copies under the same name can only mean a sibling host tossed a
+   * `Domain`-scoped one alongside the real one. Neither is trusted here —
+   * the request reads as signed out — and `session-cookie-hygiene.ts`
+   * clears both spellings on the same response.
+   */
+  it("returns null when the Cookie header carries the session cookie twice (a tossed Domain copy)", async () => {
+    const storage = new InMemoryStorage()
+    const { session } = await seedUserAndSession(
+      storage,
+      new Date(Date.now() + 60_000).toISOString(),
+    )
+    const signed = signSessionId(baseConfig.sessionSecret, session.id)
+
+    const got = await getCurrentUser(
+      { storage, config: baseConfig },
+      req(`viewer_session=${signed}; viewer_session=${signed}`),
+    )
+    expect(got).toBeNull()
+  })
+
   it("never throws when storage.getSession rejects — resolves to null", async () => {
     const storage = makeStorageThatRejects(new InMemoryStorage(), "getSession")
     const signed = signSessionId(baseConfig.sessionSecret, "some-session-id")

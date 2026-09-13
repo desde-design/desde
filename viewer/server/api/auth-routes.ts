@@ -28,8 +28,10 @@ import {
 } from "../auth/local-operator"
 import {
   clearSessionCookie,
+  clearTossedSessionCookie,
+  countCookie,
   readCookie,
-  serializeSessionCookie,
+  sessionCookieHeaders,
   sessionCookieName,
   signSessionId,
   verifySessionCookie,
@@ -240,23 +242,26 @@ function requireDocumentNavigation(req: Request, res: Response): boolean {
  * each built an expiry, created the storage row, signed the session id, and
  * serialized it into a `Set-Cookie` value — the same four lines, twice.
  *
- * Returns the serialized cookie VALUE rather than writing the header itself,
- * because the call sites don't agree on how to attach it: the GitHub callback
- * `res.append`s (there is already a state cookie on the response, and
- * `setHeader` would clobber it), the invite and sign-in-link routes
- * `res.setHeader` (nothing else on those responses uses `Set-Cookie`). That's
- * the one thing left for each call site to keep doing itself.
+ * Returns the Set-Cookie header VALUES (plural: on http this is the session
+ * cookie plus the tossed-`Domain`-copy clear, see `sessionCookieHeaders`)
+ * rather than writing the header itself, because the call sites don't agree
+ * on how to attach it: the GitHub callback `res.append`s (there is already a
+ * state cookie on the response, and `setHeader` would clobber it), the
+ * invite and sign-in-link routes `res.setHeader` (nothing else on those
+ * responses uses `Set-Cookie`). Both accept a string array. That's the one
+ * thing left for each call site to keep doing itself.
  */
 async function mintSessionCookieValue(
   deps: Pick<AppDeps, "storage" | "config">,
   userId: string,
-): Promise<string> {
+): Promise<string[]> {
   const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000).toISOString()
   const session = await deps.storage.createSession({ userId, expiresAt })
   const signed = signSessionId(deps.config.sessionSecret, session.id)
-  return serializeSessionCookie(signed, {
+  return sessionCookieHeaders(signed, {
     secure: isSecurePublicUrl(deps.config.publicUrl),
     maxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+    publicHostname: new URL(deps.config.publicUrl).hostname,
   })
 }
 
@@ -442,7 +447,13 @@ export function createAuthRoutes(deps: AppDeps): Router {
       const signed = signSessionId(deps.config.sessionSecret, result.sessionId)
       res.setHeader(
         "Set-Cookie",
-        serializeSessionCookie(signed, { secure, maxAgeSeconds: SESSION_MAX_AGE_SECONDS }),
+        // A sign-in like any other: on http this also clears a tossed
+        // `Domain` copy of the plain cookie name (Task 6).
+        sessionCookieHeaders(signed, {
+          secure,
+          maxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+          publicHostname: new URL(deps.config.publicUrl).hostname,
+        }),
       )
       res.redirect(302, "/")
     })
@@ -459,15 +470,27 @@ export function createAuthRoutes(deps: AppDeps): Router {
   router.post("/auth/logout", async (req, res) => {
     // On https the live cookie is `__Host-viewer_session`; read only that name,
     // matching the hard cutover in `getCurrentUser`.
-    const raw = readCookie(req.headers.cookie, sessionCookieName(secure))
-    if (raw) {
-      const sessionId = verifySessionCookie(deps.config.sessionSecret, raw)
-      // Deleting the storage row (not just clearing the cookie) is the
-      // point: a stolen/cached cookie value must stop working too, not
-      // merely disappear from this one browser.
-      if (sessionId) await deps.storage.deleteSession(sessionId)
+    //
+    // A doubled cookie means a tossed `Domain` copy beside the real one
+    // (Task 6) — `getCurrentUser` never trusts either, so there is no
+    // session id to read out here either. Skip straight to clearing.
+    const doubled = countCookie(req.headers.cookie, sessionCookieName(secure)) > 1
+    if (!doubled) {
+      const raw = readCookie(req.headers.cookie, sessionCookieName(secure))
+      if (raw) {
+        const sessionId = verifySessionCookie(deps.config.sessionSecret, raw)
+        // Deleting the storage row (not just clearing the cookie) is the
+        // point: a stolen/cached cookie value must stop working too, not
+        // merely disappear from this one browser.
+        if (sessionId) await deps.storage.deleteSession(sessionId)
+      }
     }
-    res.setHeader("Set-Cookie", clearSessionCookie({ secure }))
+    res.setHeader(
+      "Set-Cookie",
+      doubled && !secure
+        ? [clearSessionCookie({ secure }), clearTossedSessionCookie(new URL(deps.config.publicUrl).hostname)]
+        : clearSessionCookie({ secure }),
+    )
     res.status(204).send()
   })
 

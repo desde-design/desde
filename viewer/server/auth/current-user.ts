@@ -17,7 +17,7 @@
 import type { Request } from "express"
 import type { ViewerConfig } from "../config"
 import type { StorageAdapter, User } from "../storage/types"
-import { readCookie, sessionCookieName, verifySessionCookie } from "./session-cookie"
+import { countCookie, readCookie, sessionCookieName, verifySessionCookie } from "./session-cookie"
 import { isSecurePublicUrl } from "../api/state-cookie"
 
 export interface CurrentUserDeps {
@@ -35,6 +35,12 @@ export async function getCurrentUser(
     // the plain name on https would re-open the tossing vector `__Host-` exists
     // to close (see `sessionCookieName`).
     const secure = isSecurePublicUrl(deps.config.publicUrl)
+
+    // Two session cookies can only mean a tossed `Domain` copy beside the
+    // real one (the shell sets host-only cookies only). Neither is trusted;
+    // the hygiene middleware clears both on this same response.
+    if (countCookie(req.headers.cookie, sessionCookieName(secure)) > 1) return null
+
     const raw = readCookie(req.headers.cookie, sessionCookieName(secure))
     if (!raw) return null
 
