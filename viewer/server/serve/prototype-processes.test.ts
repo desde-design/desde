@@ -1,5 +1,5 @@
-import { spawn as spawnChild } from "node:child_process"
-import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
+import { execFileSync, spawn as spawnChild } from "node:child_process"
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -7,6 +7,7 @@ import {
   createPrototypeProcesses,
   isRecordedCommand,
   pickLoopbackPort,
+  processIdentity,
   PrototypeProcessError,
   substitutePort,
   type PrototypeProcesses,
@@ -616,6 +617,75 @@ describe("createPrototypeProcesses", () => {
       await expect(readFile(pidFile, "utf8")).rejects.toMatchObject({ code: "ENOENT" })
       // A second boot finds nothing.
       expect(await next.reapOrphans()).toBe(0)
+    })
+
+    /**
+     * Final review, P2-2. `next start` sets `process.title` once it is up,
+     * and the title overwrites the command line `ps` and `/proc` report, so
+     * a reaper that required the recorded command to appear in it spared
+     * every Next orphan and deleted its file. The start time plus a working
+     * directory inside the checkout is the identity then.
+     */
+    it("kills an orphan whose process title has rewritten its command line", async () => {
+      const root = await checkoutsRoot(["d1"])
+      const previous = createPrototypeProcesses({ checkoutsRoot: root, spawnEnv: { FAKE_TITLE: "next-server (v16.3.4)" } })
+      await previous.ensure({ id: "d1", serverStart: start() })
+      const pidFile = join(root, "d1", ".desde-home", "server.1.pid")
+      const { pid } = JSON.parse(await readFile(pidFile, "utf8")) as { pid: number }
+      // The title took: the live command line no longer names the fixture.
+      const live = execFileSync("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8" })
+      expect(live).toContain("next-server")
+      expect(live).not.toContain("fake-server")
+
+      const next = createPrototypeProcesses({ checkoutsRoot: root })
+      managers.push(next, previous)
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+      try {
+        expect(await next.reapOrphans()).toBe(1)
+      } finally {
+        warn.mockRestore()
+      }
+      await vi.waitFor(() => expect(alive(pid)).toBe(false), { timeout: 2000, interval: 25 })
+      await expect(readFile(pidFile, "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+    })
+
+    /**
+     * Delta review 3. `ps` reports the start time to the second on macOS, so
+     * a matching start time with a rewritten command line is not enough on
+     * its own: a stranger that took the pid within that second and works
+     * elsewhere must be left alone. Its start time is copied into the record
+     * the way the reaper reads it, so only the working directory tells.
+     */
+    it("leaves a same-start-time process whose command differs and whose directory is elsewhere alone", async () => {
+      const root = await checkoutsRoot(["d1"])
+      const bystander = spawnChild("sleep", ["30"], { stdio: "ignore", cwd: tmpdir() })
+      try {
+        const pid = bystander.pid as number
+        let identity: Awaited<ReturnType<typeof processIdentity>> = null
+        await vi.waitFor(async () => {
+          identity = await processIdentity(pid)
+          expect(identity).not.toBeNull()
+        })
+        await mkdir(join(root, "d1", ".desde-home"), { recursive: true })
+        await writeFile(
+          join(root, "d1", ".desde-home", "server.1.pid"),
+          JSON.stringify({ pid, command: ["node", "not-this-program.js"], startedAt: identity!.startedAt }),
+        )
+        const procs = createPrototypeProcesses({ checkoutsRoot: root })
+        managers.push(procs)
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+        try {
+          expect(await procs.reapOrphans()).toBe(0)
+        } finally {
+          warn.mockRestore()
+        }
+        expect(alive(pid)).toBe(true)
+        await expect(readFile(join(root, "d1", ".desde-home", "server.1.pid"), "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        })
+      } finally {
+        bystander.kill("SIGKILL")
+      }
     })
 
     /**
@@ -1480,6 +1550,46 @@ describe("createPrototypeProcesses", () => {
    * `stopEntry` is awaiting in is wide enough to land a concurrent `ensure`
    * inside it deterministically, not by timing luck.
    */
+  /**
+   * Final review, P2-3. A cold start parked in `makeRoom` (the cap is full)
+   * can outlive a retire, the removal of its checkout, and a forget. When it
+   * woke, it recreated `checkouts/<id>/.desde-home` before the spawn block
+   * refused it, and that stub then counted as a retained rollback at every
+   * later activation. The checkout must stay gone.
+   */
+  it("a start parked behind the cap does not recreate a checkout that was pruned while it waited", async () => {
+    const root = await checkoutsRoot(["d1", "d2"])
+    const procs = createPrototypeProcesses({
+      checkoutsRoot: root,
+      maxRunning: 1,
+      spawnEnv: { FAKE_DELAY_MS: "800" },
+    })
+    managers.push(procs)
+    // d1 takes the only slot and is slow to listen; d2 parks behind it.
+    const first = procs.ensure({ id: "d1", serverStart: start() })
+    const second = procs.ensure({ id: "d2", serverStart: start() })
+    // It rejects while this test is still busy elsewhere; without a handler
+    // attached now, Node reports that as an unhandled rejection. The
+    // assertion on it comes below.
+    second.catch(() => {})
+    await new Promise((r) => setTimeout(r, 100))
+    expect(procs.status("d2").state).toBe("starting")
+    // What `pruneSupersededCheckouts` does to a superseded deployment.
+    await procs.retire("d2")
+    await rm(join(root, "d2"), { recursive: true, force: true })
+    await procs.forget("d2")
+
+    await first
+    await expect(second).rejects.toBeInstanceOf(PrototypeProcessError)
+    await expect(readFile(join(root, "d2", ".desde-home", "server.1.pid"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+    await expect(stat(join(root, "d2"))).rejects.toMatchObject({ code: "ENOENT" })
+    // Nothing was ever spawned for d2, and no record survived.
+    expect(procs.serverLog("d2")).toBe("")
+    expect(procs.recordCount()).toBe(1)
+  })
+
   it("retire refuses a concurrent ensure immediately, before its slow stop finishes", async () => {
     const procs = createPrototypeProcesses({
       checkoutsRoot: await checkoutsRoot(["d1"]),

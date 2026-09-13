@@ -55,6 +55,10 @@ if (process.env.FAKE_SIGTERM_DELAY_MS) {
   })
 }
 console.log(`fake server: starting on ${port}`)
+// FAKE_TITLE rewrites the process title the way `next start` does
+// (`next-server (v16.3.4)`), which overwrites the command line `ps` and
+// `/proc/<pid>/cmdline` report.
+if (process.env.FAKE_TITLE) process.title = process.env.FAKE_TITLE
 setTimeout(() => {
   createServer((req, res) => {
     if (req.url === "/exit") {

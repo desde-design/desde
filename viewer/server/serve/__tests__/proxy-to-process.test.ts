@@ -707,6 +707,29 @@ describe("proxyToProcess", () => {
       expect(Date.now() - started).toBeLessThan(2000)
     })
 
+    /**
+     * Final review, P2-1. The socket connected and the child held the
+     * request open past the bound: a slow route, not a dead server. Reporting
+     * that as unreachable had the manager kill a child that was answering
+     * every other request and charge its restart budget.
+     */
+    it("does not report the child unreachable when the wait for headers times out", async () => {
+      let reported = false
+      const port = await child(() => {
+        // Never responds at all.
+      })
+      const res = await request(
+        appFor(port, {
+          upstreamTimeoutMs: 100,
+          onUnreachable: () => {
+            reported = true
+          },
+        }),
+      ).get("/p/acme/")
+      expect(res.status).toBe(502)
+      expect(reported).toBe(false)
+    })
+
     it("does not destroy a response that is quiet after its headers, past where the timeout would have fired", async () => {
       const port = await child((_req, res) => {
         res.setHeader("content-type", "text/event-stream")

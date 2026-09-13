@@ -510,7 +510,21 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
     // `destroy()` with no argument does not itself raise `upstream`'s "error"
     // event, so an explicit Error is passed to route a timeout through the
     // same handler as every other upstream failure.
-    upstream.on("timeout", () => upstream.destroy(new Error("proxy upstream timeout")))
+    //
+    // A timeout is remembered separately from a refusal (final review,
+    // P2-1). The socket CONNECTED and the child simply took longer than the
+    // bound to send headers: a long-poll route, a slow server-side fetch, a
+    // page waiting on a mock backend. That says one request is slow, not
+    // that the child is unreachable, and reporting it as unreachable had
+    // the manager kill a child that was answering every other request at
+    // that moment and charge its restart budget. Four slow requests in five
+    // minutes then told the reader the server "kept exiting" over a server
+    // that never exited on its own. The reader still gets the 502 page.
+    let timedOut = false
+    upstream.on("timeout", () => {
+      timedOut = true
+      upstream.destroy(new Error("proxy upstream timeout"))
+    })
 
     upstream.on("error", () => {
       if (responded) {
@@ -522,7 +536,7 @@ export function proxyToProcess(req: Request, res: Response, opts: ProxyOptions):
       // Our own abort is not the child's failure: nothing was learned about
       // the child, so nothing is reported and nothing is killed.
       if (clientAborted) return
-      opts.onUnreachable?.()
+      if (!timedOut) opts.onUnreachable?.()
       if (res.headersSent) {
         res.destroy()
         return

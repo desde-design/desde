@@ -293,7 +293,31 @@ function processIdentitySync(pid: number): ProcessIdentity | null {
   return commandLine === null || startedAt === null ? null : { commandLine, startedAt }
 }
 
-async function processIdentity(pid: number): Promise<ProcessIdentity | null> {
+/**
+ * The working directory of a live process, real path, or `null` when it
+ * cannot be read (no such process, or no way to ask on this platform).
+ * `/proc/<pid>/cwd` on Linux; `lsof` elsewhere, whose `-F n` output names
+ * the path on a line starting with `n`.
+ */
+async function processCwd(pid: number): Promise<string | null> {
+  if (process.platform === "linux") {
+    try {
+      return await realpath(`/proc/${pid}/cwd`)
+    } catch {
+      return null
+    }
+  }
+  try {
+    const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-F", "n"])
+    const line = stdout.split("\n").find((l) => l.startsWith("n"))
+    return line === undefined ? null : await realpath(line.slice(1))
+  } catch {
+    return null
+  }
+}
+
+/** Exported for the reaper's tests, which need the identity the way the reaper reads it. */
+export async function processIdentity(pid: number): Promise<ProcessIdentity | null> {
   if (process.platform === "linux") {
     try {
       const [cmdline, stat] = await Promise.all([
@@ -1020,6 +1044,30 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
 
     await makeRoom(id, stillOurs)
 
+    // Woken, not necessarily still wanted (final review, P2-3). The wait
+    // inside `makeRoom` can last a minute, and a `retire`, an `rm` of the
+    // checkout and a `forget` all fit inside it. `makeRoom` itself only
+    // refuses on the fail-fast path; a start it lets through by waiting
+    // could reach the `mkdir` below and recreate `checkouts/<id>/.desde-home`
+    // under a checkout that had just been deleted. The spawn block refused
+    // it a moment later, so no child ran, but the stub directory stayed:
+    // `pruneSupersededCheckouts` then counted it as a retained rollback and
+    // deleted the real one, and a later review of it burned the budget on
+    // ENOENT. Checked under the lock, so a retire that already landed is
+    // seen; one that lands after this and before the `mkdir` finds the
+    // directory recreated, its own `rm` then rejects with ENOTEMPTY, and the
+    // next activation retries the removal (`pruneSupersededCheckouts` keeps
+    // the retired record until the directory is gone).
+    await lock.run(id, async () => {
+      const entry = entries.get(id)
+      const wanted =
+        stillOurs() &&
+        entry !== undefined &&
+        entry.record.state.kind === "starting" &&
+        entry.record.state.generation === generation
+      if (!wanted) throw abandonedBeforeSpawn()
+    })
+
     // Setup between the room-making above and the actual `spawn` below,
     // wrapped so a throw here cannot leave the record stuck `starting`
     // forever: `pickPort` can reject (ports exhausted), `substitutePort`
@@ -1474,15 +1522,38 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
           console.error(`[viewer] could not check the prototype server recorded for ${id}:`, error)
           continue
         }
-        // Both halves, or nothing: a reused pid running the same generic
-        // command (`node .next/standalone/server.js` for another checkout)
-        // has a different start time, and a file that never got one cannot
-        // be told apart from that, so it is discarded unacted on.
-        const isOurs =
-          identity !== null &&
-          recorded.startedAt !== null &&
-          identity.startedAt === recorded.startedAt &&
-          isRecordedCommand(identity.commandLine, recorded.command)
+        // The start time, plus one more mark, or nothing. A reused pid
+        // running the same generic command (`node .next/standalone/server.js`
+        // for another checkout) has a different start time, and a file that
+        // never got one cannot be told apart from that, so it is discarded
+        // unacted on.
+        //
+        // The second mark is the recorded command OR a working directory
+        // inside this checkout (final review, P2-2, and delta review 3).
+        // Next sets `process.title = "next-server (v16.x)"` once it is up,
+        // and libuv writes a title over the argv region that `ps` and
+        // `/proc/<pid>/cmdline` read, so the recorded command was absent
+        // from the live command line for every Next orphan: the one server
+        // the feature exists for was the one the reaper always spared, and
+        // it then deleted the file so no later boot could find it either.
+        // The start time alone is not enough on macOS, where `ps` reports it
+        // to the second, so a pid reused within that second by a stranger
+        // would be killed. The child is always spawned inside its checkout
+        // (and Next's standalone server chdirs to its own directory, still
+        // inside it), while a stranger's working directory is elsewhere.
+        const startMatches =
+          identity !== null && recorded.startedAt !== null && identity.startedAt === recorded.startedAt
+        let isOurs = startMatches && identity !== null && isRecordedCommand(identity.commandLine, recorded.command)
+        if (startMatches && !isOurs) {
+          const cwd = await processCwd(recorded.pid)
+          const checkout = await realpath(join(deps.checkoutsRoot, id)).catch(() => null)
+          if (cwd !== null && checkout !== null && (cwd === checkout || cwd.startsWith(checkout + sep))) {
+            isOurs = true
+            console.warn(
+              `[viewer] pid ${recorded.pid} recorded for ${id} shows a rewritten command line; confirmed by its start time and working directory`,
+            )
+          }
+        }
         if (isOurs) {
           // The whole group, then the leader itself, the way `killTree` and
           // the ready-refused path do for a child this manager spawned.
