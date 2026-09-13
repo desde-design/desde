@@ -526,7 +526,7 @@ export function createAuthRoutes(deps: AppDeps): Router {
       return
     }
     const state = randomUUID()
-    res.setHeader("Set-Cookie", serializeStateCookie(OAUTH_STATE_COOKIE_NAME, state, secure))
+    res.append("Set-Cookie", serializeStateCookie(OAUTH_STATE_COOKIE_NAME, state, secure))
     /*
       `?next=` — where to land afterwards. Validated HERE rather than at the
       callback so a hostile value never reaches a cookie at all; see

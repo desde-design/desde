@@ -426,7 +426,7 @@ function resolveApiBaseUrl(config: ViewerConfig): string {
  */
 function clearSetupState(secure: boolean): RequestHandler {
   return (_req: Request, res: Response, next: NextFunction): void => {
-    res.setHeader("Set-Cookie", [
+    res.append("Set-Cookie", [
       clearStateCookie(SETUP_STATE_COOKIE_NAME, secure),
       clearStateCookie(SETUP_RETURN_COOKIE_NAME, secure),
     ])
@@ -530,7 +530,7 @@ export function createSetupRoutes(deps: AppDeps): Router {
     // it is only ever a same-origin path, and cleared rather than set when
     // there is nothing to carry.
     const returnPath = safeReturnPath(req.query.next)
-    res.setHeader("Set-Cookie", [
+    res.append("Set-Cookie", [
       serializeStateCookie(SETUP_STATE_COOKIE_NAME, state, secure),
       returnPath === DEFAULT_RETURN_PATH
         ? clearStateCookie(SETUP_RETURN_COOKIE_NAME, secure)
