@@ -6,6 +6,7 @@ import {
   internalPrototypeOriginFetchInit,
   readPrototypeOrigin,
   resolveReviewProject,
+  reviewOriginResolution,
   reviewShellOrigin,
   type ProjectSummary,
 } from "./page"
@@ -132,6 +133,34 @@ describe("reviewShellOrigin", () => {
       prototypeOrigin: null,
     }
     expect(reviewShellOrigin(containerConfig, "localhost:3100")).toBe("http://localhost:3100")
+  })
+
+  // Local subdomain mode: no `VIEWER_SERVE_DOMAIN`, but `localServeDomain` was
+  // derived from a `.localhost` publicUrl (`config.ts`'s
+  // `deriveLocalServeDomain`). The shell origin itself is just the `.localhost`
+  // host, same as any other allowlisted Host — the interesting part is that
+  // `reviewOriginResolution` reports subdomain mode with that derived
+  // `serveDomain`, and the bare loopback spellings still fall back to loopback
+  // mode (the Safari case).
+  it("resolves subdomain mode with the derived serveDomain on a .localhost shell, and loopback on localhost", () => {
+    const localSubdomainConfig = {
+      publicUrl: "http://desde.localhost:3100",
+      port: 3100,
+      serveDomain: null,
+      localServeDomain: "apps.desde.localhost",
+      loopbackAvailable: true,
+      prototypeOrigin: null,
+    }
+    expect(reviewShellOrigin(localSubdomainConfig, "desde.localhost:3100")).toBe(
+      "http://desde.localhost:3100",
+    )
+
+    const onLocal = reviewOriginResolution(localSubdomainConfig, "desde.localhost:3100")
+    expect(onLocal.mode).toBe("subdomain")
+    expect(onLocal.serveDomain).toBe("apps.desde.localhost")
+
+    const onLoopback = reviewOriginResolution(localSubdomainConfig, "localhost:3100")
+    expect(onLoopback.mode).toBe("loopback")
   })
 })
 

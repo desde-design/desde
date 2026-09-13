@@ -99,6 +99,19 @@ const subdomainConfig: ViewerConfig = {
   serveDomain: "desde.test",
 }
 
+/**
+ * A laptop with no `VIEWER_SERVE_DOMAIN`, but a `.localhost` public URL —
+ * local subdomain mode derives `localServeDomain` from it (`config.ts`'s
+ * `deriveLocalServeDomain`). A shell reached on the `.localhost` name gets
+ * subdomain mode; the bare loopback spellings still fall back to loopback
+ * mode (the Safari case).
+ */
+const localSubdomainConfig: ViewerConfig = {
+  ...baseConfig,
+  publicUrl: "http://desde.localhost:3100",
+  localServeDomain: "apps.desde.localhost",
+}
+
 /** A deployed instance with no serve domain: shell and prototype share an origin. */
 const fallbackConfig: ViewerConfig = {
   ...baseConfig,
@@ -686,6 +699,32 @@ describe("GET /projects/:id/prototype-origin", () => {
 
       expect(res.body.serve).toBe("server")
       expect(res.body.process).toEqual({ state: "stopped" })
+    })
+  })
+
+  describe("local subdomain mode", () => {
+    it("answers subdomain with the derived origin on the .localhost shell host, and loopback on localhost", async () => {
+      const ctx = setup({ config: localSubdomainConfig })
+      const project = await seedProject(ctx.storage, { access: "all-members" })
+
+      const onLocal = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .set("Host", "desde.localhost:3100")
+        .set(SHELL_ORIGIN_HEADER, "http://desde.localhost:3100")
+        .expect(200)
+
+      expect(onLocal.body.mode).toBe("subdomain")
+      expect(onLocal.body.origin).toBe("http://acme.apps.desde.localhost:3100")
+
+      const onLoopback = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .set("Host", "localhost:3100")
+        .set(SHELL_ORIGIN_HEADER, "http://localhost:3100")
+        .expect(200)
+
+      expect(onLoopback.body.mode).toBe("loopback")
     })
   })
 

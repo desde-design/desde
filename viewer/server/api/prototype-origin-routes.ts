@@ -5,6 +5,7 @@ import {
   resolveProjectReadAccess,
   type ProjectReadPolicy,
 } from "../auth/authorize"
+import { effectiveServeDomain } from "../config"
 import { buildHostAllowlist, isAllowedHost, type HostAllowlist } from "../serve/host-allowlist"
 import { LoopbackPortsExhaustedError } from "../serve/loopback-listeners"
 import {
@@ -240,7 +241,7 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
 
   const resolved = resolveOrigins({
     requestHost,
-    hostAllowed: isAllowedHost(allowlist, requestHost, deps.config.serveDomain),
+    hostAllowed: isAllowedHost(allowlist, requestHost, effectiveServeDomain(deps.config)),
     // A prototype host never reaches this route: `create-app.ts` mounts the
     // prototype-host scope and its API fence ahead of the API router, so a
     // request on a prototype origin is refused before routing. Stated as
@@ -249,6 +250,7 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
     hostIsPrototype: false,
     publicUrl: deps.config.publicUrl,
     serveDomain: deps.config.serveDomain,
+    localServeDomain: deps.config.localServeDomain,
     loopbackAvailable: deps.config.loopbackAvailable,
     prototypeOrigin: deps.config.prototypeOrigin,
     // Read for one thing only: a genuinely detected container binds the
@@ -259,13 +261,10 @@ async function buildPrototypeOriginBody(params: BuildPrototypeOriginBodyParams):
     loopbackBindAllInterfaces: deps.config.loopbackBindAllInterfaces,
   })
 
-  // `serveDomain` is what MADE the mode "subdomain" (see `resolveOrigins`),
-  // so it is a non-empty string here. Read into a local and checked rather
-  // than asserted, because the failure direction matters: a `null` slipping
-  // through would build the malformed origin `https://acme.`, whereas
-  // falling into the "fallback" branch below just means no isolated origin
-  // is offered, which is always safe.
-  const serveDomain = deps.config.serveDomain
+  // The resolver reports the serve domain that MADE the mode "subdomain":
+  // the configured one, or the local one derived for a `.localhost` shell.
+  // Building the origin from it is what lets both share this one branch.
+  const serveDomain = resolved.serveDomain
   if (resolved.mode === "subdomain" && serveDomain) {
     return {
       status: 200,

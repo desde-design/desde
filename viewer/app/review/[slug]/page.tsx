@@ -1,10 +1,14 @@
 import { headers } from "next/headers"
 import { notFound } from "next/navigation"
 import type { ViewerConfig } from "../../../server/config"
-import { loadConfig } from "../../../server/config"
+import { effectiveServeDomain, loadConfig } from "../../../server/config"
 import { buildHostAllowlist, isAllowedHost } from "../../../server/serve/host-allowlist"
 import { mintPrototypeCapability } from "../../../server/serve/prototype-capability"
-import { resolveOrigins, SHELL_ORIGIN_HEADER } from "../../../server/serve/prototype-origin-resolve"
+import {
+  resolveOrigins,
+  SHELL_ORIGIN_HEADER,
+  type ResolvedOrigins,
+} from "../../../server/serve/prototype-origin-resolve"
 import { prototypeAnonymouslyReadable } from "../../prototype-origin"
 import { NeverDeployed } from "./never-deployed"
 import {
@@ -107,6 +111,33 @@ export function internalPrototypeOriginFetchInit(
 }
 
 /**
+ * The full per-request resolution: `reviewShellOrigin` below reads only its
+ * `shellOrigin`, but the review page also needs `serveDomain` (the domain
+ * THIS request's subdomain mode actually used, configured or the local
+ * derived one) to hand to the shell. See `reviewShellOrigin`'s doc comment
+ * for the reasoning behind trusting the request Host at all.
+ */
+export function reviewOriginResolution(
+  config: Pick<
+    ViewerConfig,
+    "publicUrl" | "port" | "serveDomain" | "localServeDomain" | "loopbackAvailable" | "prototypeOrigin"
+  >,
+  requestHost: string | undefined,
+): ResolvedOrigins {
+  const allowlist = buildHostAllowlist(config)
+  return resolveOrigins({
+    requestHost,
+    hostAllowed: isAllowedHost(allowlist, requestHost, effectiveServeDomain(config)),
+    hostIsPrototype: false,
+    publicUrl: config.publicUrl,
+    serveDomain: config.serveDomain,
+    localServeDomain: config.localServeDomain,
+    loopbackAvailable: config.loopbackAvailable,
+    prototypeOrigin: config.prototypeOrigin,
+  })
+}
+
+/**
  * The origin THIS shell is on for this request.
  *
  * The reviewer's loopback spelling is not knowable at boot — they may type
@@ -130,22 +161,10 @@ export function internalPrototypeOriginFetchInit(
  * refused before it can be routed to a Next page at all.
  */
 export function reviewShellOrigin(
-  config: Pick<
-    ViewerConfig,
-    "publicUrl" | "port" | "serveDomain" | "localServeDomain" | "loopbackAvailable" | "prototypeOrigin"
-  >,
+  config: Parameters<typeof reviewOriginResolution>[0],
   requestHost: string | undefined,
 ): string {
-  const allowlist = buildHostAllowlist(config)
-  return resolveOrigins({
-    requestHost,
-    hostAllowed: isAllowedHost(allowlist, requestHost, config.serveDomain),
-    hostIsPrototype: false,
-    publicUrl: config.publicUrl,
-    serveDomain: config.serveDomain,
-    loopbackAvailable: config.loopbackAvailable,
-    prototypeOrigin: config.prototypeOrigin,
-  }).shellOrigin
+  return reviewOriginResolution(config, requestHost).shellOrigin
 }
 
 /**
@@ -245,12 +264,14 @@ export default async function ReviewPage({
   // being silently absorbed into that 404.
   const config = loadConfig()
 
-  // Resolved once, here, and used twice below: it is stated to the
-  // prototype-origin route (which pairs the prototype's loopback host against
-  // it) and handed to `ReviewShell` (which needs it to prove the prototype's
-  // origin is not its own before granting `allow-same-origin`). One
-  // computation, so the two can never disagree.
-  const shellOrigin = reviewShellOrigin(config, hdrs.get("host") ?? undefined)
+  // Resolved once, here, and used more than once below: `shellOrigin` is
+  // stated to the prototype-origin route (which pairs the prototype's
+  // loopback host against it) and handed to `ReviewShell` (which needs it to
+  // prove the prototype's origin is not its own before granting
+  // `allow-same-origin`), and `serveDomain` is handed to `ReviewShell` too.
+  // One computation, so none of them can ever disagree.
+  const origins = reviewOriginResolution(config, hdrs.get("host") ?? undefined)
+  const shellOrigin = origins.shellOrigin
 
   // A network-level throw (connection refused, DNS hiccup) is folded into
   // the same not-found path as a non-OK response — both mean "couldn't
@@ -373,10 +394,13 @@ export default async function ReviewPage({
         name: project.name,
         access: project.access,
         publicLinksEnabled,
-        // Not used to build the iframe origin (that is `shellOrigin` /
-        // `prototypeOrigin` below); the Deployments panel reads it to decide
-        // whether a deploy-time root-absolute-asset warning applies.
-        serveDomain: config.serveDomain,
+        // The serve domain that applies to THIS request (configured, or the
+        // local one derived for a `.localhost` shell), null in loopback and
+        // fallback. Not used to build the iframe origin (that is
+        // `shellOrigin` / `prototypeOrigin` below); the Deployments panel
+        // reads it to decide whether a root-absolute-asset warning applies,
+        // and the anonymous-read href builder uses it.
+        serveDomain: origins.serveDomain,
         capability,
         // Whether the prototype-origin route said a capability is needed, so
         // the shell can act on a render whose project fetch minted none
