@@ -72,8 +72,11 @@ RUN apt-get update \
 ENV NODE_ENV=production
 ENV PORT=3100
 # This image IS the container case, so it states its bind instead of relying
-# on network-layout detection. Override with -e VIEWER_LOOPBACK_BIND=loopback
-# on the run line when running with --network host.
+# on network-layout detection. Prototypes now ride the shell's own port by
+# default, so this wide bind matters only for the Safari fallback: that path
+# opens its own loopback listeners, and those need it to be published.
+# Override with -e VIEWER_LOOPBACK_BIND=loopback on the run line when running
+# with --network host.
 ENV VIEWER_LOOPBACK_BIND=all
 ENV VIEWER_DATA_DIR=/data
 

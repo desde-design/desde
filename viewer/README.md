@@ -27,8 +27,20 @@ doesn't trigger this. This isn't legal advice; read the license for the authorit
 ## Run it
 
 The quickest way is the published image. It needs one directory to keep its
-database and built prototypes in, and one variable saying what URL it is
-reached at:
+database and built prototypes in:
+
+```bash
+docker run -d --name desde-viewer -p 3100:3100 \
+  -v desde-viewer-data:/data \
+  ghcr.io/desde-design/viewer:latest
+```
+
+Then open http://desde.localhost:3100 and follow the one-time sign-in link
+the container prints (`docker logs desde-viewer`). Chrome and Firefox
+resolve that address to your own machine, with no setup needed. Safari does
+not resolve `.localhost` names. The paragraph below says what to do there.
+
+In Safari, open http://localhost:3100 instead, using this run line:
 
 ```bash
 docker run -d --name desde-viewer -p 3100:3100 -p 127.0.0.1:3101-3120:3101-3120 \
@@ -36,6 +48,11 @@ docker run -d --name desde-viewer -p 3100:3100 -p 127.0.0.1:3101-3120:3101-3120 
   -e VIEWER_PUBLIC_URL=http://localhost:3100 \
   ghcr.io/desde-design/viewer:latest
 ```
+
+This is loopback mode. It is the same mode the viewer always used, before
+this default existed. Each prototype is served from its own port, instead
+of its own address. You can choose loopback mode yourself, in any browser,
+by setting `VIEWER_PUBLIC_URL=http://localhost:3100` the same way.
 
 The second `-p` publishes the twenty ports prototypes open on (`VIEWER_LOOPBACK_PORT_RANGE`, defaulted from `PORT` inside a container); without it a prototype's page never loads and the review screen names this flag. The `127.0.0.1:` prefix on it keeps those ports on your own machine, which is where a prototype port belongs: a prototype listener has no sign-in of its own, so anyone who can reach the port can open the prototype.
 
@@ -47,9 +64,8 @@ Podman and other runtimes need nothing extra. The image sets `all` for every run
 
 Outside the image, the default is `auto`, and `auto` never widens the bind: the container's interface list cannot tell Docker's ordinary bridge from host networking on a machine whose network card happens to be named `eth0`, and the wrong guess would put the prototype ports on your LAN. So a container you built yourself stays on its own loopback until you say otherwise. If you published ports with `-p`, set `VIEWER_LOOPBACK_BIND=all`. The boot log says so whenever it starts in a container under `auto`.
 
-Then open http://localhost:3100 and follow the one-time sign-in link the
-container prints (`docker logs desde-viewer`). Everything below is the
-from-source path, which is what the image is built from.
+Everything below is the from-source path, which is what the image is built
+from.
 
 
 ```bash
@@ -60,12 +76,17 @@ cd viewer
 npm run dev
 ```
 
-The server prints a line like this:
+The server prints lines like this:
 
 ```
+[viewer] prototypes are served on their own address under desde.localhost: http://{slug}.apps.desde.localhost:3100 (no DNS needed; Chrome and Firefox resolve *.localhost themselves)
+[viewer] Safari cannot resolve *.localhost names. In Safari open http://localhost:3100 instead; prototypes then use their own loopback ports. In Docker publish those too: -p 127.0.0.1:3101-3120:3101-3120
 [viewer] No GitHub sign-in configured. Open this URL to sign in:
-[viewer]   http://localhost:3100/api/v1/auth/local?token=...
+[viewer]   http://desde.localhost:3100/api/v1/auth/local?token=...
 ```
+
+The first two lines explain the new default address. The last two are the
+one-time sign-in link.
 
 Open that URL. It signs you in and lands you on the dashboard, where there
 is already one project: a small demo prototype, seeded automatically on
@@ -259,8 +280,8 @@ config, at boot.
 
 | Mode | When it's used | Where the prototype is served | Credential for a private prototype |
 |---|---|---|---|
-| **Loopback** | The shell is reached on `localhost`, `127.0.0.1`, or `[::1]` (a laptop with no domain configured), and loopback listeners are available (`VIEWER_LOOPBACK_LISTENERS`, see below) | The *other* loopback name, on its own ephemeral port, at the origin root | None needed. Reaching that port at all is the credential. |
-| **Subdomain** | `VIEWER_SERVE_DOMAIN` is set | `{slug}.{domain}`, at the origin root | A `public-link` project needs none. An `all-members` or `invited` project gets a capability appended to the document load (`?~c={token}`). The server then carries it forward as a host-only `dsv_cap` cookie on the prototype's own host, so every later same-site request from the iframe, assets included, is authorized without ever needing the shell's session cookie. |
+| **Loopback** | The shell is reached on `localhost`, `127.0.0.1`, or `[::1]` (Safari, which cannot resolve `.localhost` names, or an explicit loopback public URL), and loopback listeners are available (`VIEWER_LOOPBACK_LISTENERS`, see below) | The *other* loopback name, on its own ephemeral port, at the origin root | None needed. Reaching that port at all is the credential. |
+| **Subdomain** | `VIEWER_SERVE_DOMAIN` is set. Also the default when nothing is configured and the public URL is a `.localhost` name (see below) | `{slug}.{domain}`, at the origin root | A `public-link` project needs none. An `all-members` or `invited` project gets a capability appended to the document load (`?~c={token}`). The server then carries it forward as a host-only `dsv_cap` cookie on the prototype's own host, so every later same-site request from the iframe, assets included, is authorized without ever needing the shell's session cookie. |
 | **Single alternate origin** | `VIEWER_PROTOTYPE_ORIGIN` is set (and no serve domain) | That one origin, at `/p/{slug}/~c/{token}/`, shared by every prototype | A capability token in the URL PATH (never a cookie: a cookie on the shared host would be sent to every prototype on it, leaking between them). |
 | **Fallback** | None of the above (a server reached by a bare IP or a hostname with no wildcard DNS) | The same host as the shell, at `/p/{slug}/~c/{token}/`, sandboxed into an opaque origin | A capability token in the URL path |
 
@@ -276,6 +297,43 @@ different origin from the shell there, so restoring its own origin grants it
 nothing toward the shell. Fallback mode never adds `allow-same-origin`: the
 prototype there is still same-origin with the shell, and adding it back
 would let the prototype's JS reach into the shell's DOM.
+
+**The default: prototypes on their own address under desde.localhost.**
+On a laptop, with nothing configured, each prototype gets its own address:
+`<slug>.apps.desde.localhost:3100`.
+
+- This address is same-site with the viewer. A prototype's own sign-in
+  cookies work inside the review frame, with nothing in between.
+- The viewer's own session cookie stays on `desde.localhost`. It never
+  reaches a prototype.
+- Who may open a prototype is still decided by a capability the viewer puts
+  in the frame's address. This is the same rule subdomain serving uses on a
+  real domain.
+- There is nothing to configure, and no DNS to set up.
+
+Set `VIEWER_PUBLIC_URL=http://localhost:3100` to turn this off. That gives
+you the loopback mode described below.
+
+**Plain http and a planted cookie.** The shell and a prototype share a
+domain, `desde.localhost`. That is what makes cookies work automatically.
+It also opens one risk. A hostile prototype could set its own session
+cookie on the shell's domain. A reviewer who then visits the shell would be
+signed in as whoever planted that cookie.
+
+The viewer defends against this. If a request ever carries the session
+cookie twice, the viewer treats it as signed out. It clears both copies
+right away. Every sign-in also clears a planted copy, so signing in cleans
+this up on its own.
+
+One thing remains. A reviewer with no session of their own, who visits the
+shell with only a planted cookie, gets signed in as whoever planted it.
+This needs the same machine and the same person using it, since nothing
+here reaches the network. Running the viewer over https closes this
+completely: it switches to a stricter cookie that a prototype cannot plant
+at all.
+
+Loopback mode applies when the viewer is opened on `localhost`, `127.0.0.1`
+or `[::1]`: Safari, or an explicit loopback public URL.
 
 **What loopback mode is for, and what it cannot do.** Loopback mode is for
 one machine: your browser and the viewer on the same computer, or a
@@ -301,24 +359,25 @@ accepted: any program on the machine can reach an open listener while it is
 open, and two people on one machine would share a server prototype's cookie
 jar. That is what "one machine" means.
 
-**Loopback listeners in a container.** Loopback mode only works when the
-browser is on the same machine as the viewer. Inside a container there is a
-second catch: Docker forwards a published port to the container's external
+**Loopback listeners in a container.** This port range is only needed for
+the Safari fallback: the default address in "Run it" above needs none of
+it. Loopback mode only works when the browser is on the same machine as the
+viewer. Inside a container there is a second catch: Docker forwards a published port to the container's external
 interface and never to the container's own loopback, so a listener bound to
 `127.0.0.1` in there answers nothing, whatever `-p` you write. A container
 therefore opens its listeners on every one of its own interfaces, on a fixed
 port range (`VIEWER_LOOPBACK_PORT_RANGE`, twenty ports above `PORT` by
 default) so you have something stable to publish. Publish that range to your
-own loopback, as the run line at the top of this file does
+own loopback, as the Safari run line in "Run it" does
 (`-p 127.0.0.1:3101-3120:3101-3120`), and the ports stay on your machine
 exactly as they do on a laptop. Each prototype is then served on a name of
 its own under `.localhost` (`<id>-<random>.localhost:3101`), so a port that
 comes back around never brings another prototype's origin with it, and a
-name nobody can guess stands in for the sign-in a listener does not have. Chrome and Firefox
-resolve every `*.localhost` name to your machine without DNS; Safari does
-not, so review a container-hosted viewer in one of those two. Leave the prefix off and they are reachable
-from your network, which a prototype listener is not built for: it has no
-sign-in of its own. A container on the same Docker network can still reach
+name nobody can guess stands in for the sign-in a listener does not have.
+Chrome and Firefox resolve every `*.localhost` name to your machine without
+DNS; Safari does not, so review a container-hosted viewer in one of those
+two. Leave the prefix off and they are reachable from your network, which a
+prototype listener is not built for: it has no sign-in of its own. A container on the same Docker network can still reach
 them, which is the same trust a laptop gives another local program.
 
 `VIEWER_LOOPBACK_LISTENERS` (default `auto`) is the switch: `auto` checks for
