@@ -146,6 +146,9 @@ function portSuffixesFor(url: URL, configPort: number, loopback: boolean): strin
  *
  * - `publicUrl` host is loopback → all three loopback spellings, on the port.
  * - otherwise → `publicUrl`'s host only, on the port.
+ * - a `.localhost` public host is local like a loopback one: the config port
+ *   is accepted, and the three loopback spellings on the config port are
+ *   already always present (Safari fallback).
  * - a serve domain adds `{slug}.{serveDomain}` hosts, matched by predicate in
  *   `isAllowedHost` rather than enumerated here (slugs are dynamic).
  * - a `VIEWER_PROTOTYPE_ORIGIN` adds that ONE origin's host spellings, using
@@ -155,14 +158,15 @@ function portSuffixesFor(url: URL, configPort: number, loopback: boolean): strin
  *   `config.port` — see "the process's own loopback address" below.
  */
 export function buildHostAllowlist(
-  config: Pick<ViewerConfig, "publicUrl" | "port" | "serveDomain" | "prototypeOrigin">,
+  config: Pick<ViewerConfig, "publicUrl" | "port" | "serveDomain" | "localServeDomain" | "prototypeOrigin">,
   options: BuildHostAllowlistOptions = {},
 ): HostAllowlist {
   const url = new URL(config.publicUrl)
   const hostname = bracketIpv6(url.hostname).toLowerCase()
   const loopback = isLoopbackName(hostname)
+  const local = loopback || hostname.endsWith(".localhost")
   const names = loopback ? [...LOOPBACK_NAMES] : [hostname]
-  const portSuffixes = portSuffixesFor(url, config.port, loopback)
+  const portSuffixes = portSuffixesFor(url, config.port, local)
 
   const allowed = new Set<string>()
   for (const name of names) {

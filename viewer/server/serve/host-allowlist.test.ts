@@ -18,25 +18,35 @@ import { testGithubRuntime } from "../__tests__/test-github-runtime"
 import { InMemoryStorage } from "../storage/in-memory-storage"
 import type { AssetStore } from "../assets/types"
 import type { ViewerConfig } from "../config"
+import { effectiveServeDomain } from "../config"
 
-const LOOPBACK: Pick<ViewerConfig, "publicUrl" | "port" | "serveDomain" | "prototypeOrigin"> = {
+const LOOPBACK: Pick<ViewerConfig, "publicUrl" | "port" | "serveDomain" | "localServeDomain" | "prototypeOrigin"> = {
   publicUrl: "http://localhost:3100",
   port: 3100,
   serveDomain: null,
+  localServeDomain: null,
   prototypeOrigin: null,
 }
 
-const PUBLIC_HTTPS: Pick<ViewerConfig, "publicUrl" | "port" | "serveDomain" | "prototypeOrigin"> = {
+const PUBLIC_HTTPS: Pick<
+  ViewerConfig,
+  "publicUrl" | "port" | "serveDomain" | "localServeDomain" | "prototypeOrigin"
+> = {
   publicUrl: "https://desde.acme.test",
   port: 3100,
   serveDomain: null,
+  localServeDomain: null,
   prototypeOrigin: null,
 }
 
-const WITH_SERVE_DOMAIN: Pick<ViewerConfig, "publicUrl" | "port" | "serveDomain" | "prototypeOrigin"> = {
+const WITH_SERVE_DOMAIN: Pick<
+  ViewerConfig,
+  "publicUrl" | "port" | "serveDomain" | "localServeDomain" | "prototypeOrigin"
+> = {
   publicUrl: "https://desde.acme.test",
   port: 3100,
   serveDomain: "desde.acme.test",
+  localServeDomain: null,
   prototypeOrigin: null,
 }
 
@@ -44,16 +54,21 @@ const WITH_SERVE_DOMAIN: Pick<ViewerConfig, "publicUrl" | "port" | "serveDomain"
  * `isAllowedHost` bound to one allowlist, so the tables below read as data.
  *
  * The param is the three-field Pick so the inline `accepts({ publicUrl, port,
- * serveDomain }, host)` call sites stay terse; `prototypeOrigin` defaults to
- * `null` here (the tables that exercise it pass a config constant instead).
+ * serveDomain }, host)` call sites stay terse; `localServeDomain` defaults to
+ * `null` and `prototypeOrigin` defaults to `null` here (the tables that
+ * exercise either pass a config constant instead).
  */
 function accepts(
   config: Pick<ViewerConfig, "publicUrl" | "port" | "serveDomain"> &
-    Partial<Pick<ViewerConfig, "prototypeOrigin">>,
+    Partial<Pick<ViewerConfig, "localServeDomain" | "prototypeOrigin">>,
   host: string | undefined,
 ): boolean {
   return isAllowedHost(
-    buildHostAllowlist({ ...config, prototypeOrigin: config.prototypeOrigin ?? null }),
+    buildHostAllowlist({
+      ...config,
+      localServeDomain: config.localServeDomain ?? null,
+      prototypeOrigin: config.prototypeOrigin ?? null,
+    }),
     host,
     config.serveDomain,
   )
@@ -199,10 +214,14 @@ describe("buildHostAllowlist / isAllowedHost", () => {
    * deployment. It must NOT leak into any other branch.
    */
   describe("config.port fallback (loopback publicUrl with no explicit port)", () => {
-    const IMPLICIT_LOOPBACK: Pick<ViewerConfig, "publicUrl" | "port" | "serveDomain" | "prototypeOrigin"> = {
+    const IMPLICIT_LOOPBACK: Pick<
+      ViewerConfig,
+      "publicUrl" | "port" | "serveDomain" | "localServeDomain" | "prototypeOrigin"
+    > = {
       publicUrl: "http://localhost",
       port: 3100,
       serveDomain: null,
+      localServeDomain: null,
       prototypeOrigin: null,
     }
 
@@ -301,6 +320,38 @@ describe("buildHostAllowlist / isAllowedHost", () => {
 
     it("ignores the serve-domain rule when no serve domain is configured", () => {
       expect(isAllowedHost(buildHostAllowlist(LOOPBACK), "acme.proto.test", null)).toBe(false)
+    })
+  })
+
+  describe("local subdomain mode hosts", () => {
+    const config = {
+      publicUrl: "http://desde.localhost:3100",
+      port: 3100,
+      serveDomain: null,
+      localServeDomain: "apps.desde.localhost",
+      prototypeOrigin: null,
+    }
+    it("admits the shell, the three loopback spellings on the port, and derived prototype hosts", () => {
+      const allowlist = buildHostAllowlist(config)
+      const domain = effectiveServeDomain(config)
+      for (const host of [
+        "desde.localhost:3100",
+        "localhost:3100",
+        "127.0.0.1:3100",
+        "[::1]:3100",
+        "acme.apps.desde.localhost:3100",
+      ]) {
+        expect(isAllowedHost(allowlist, host, domain), host).toBe(true)
+      }
+      for (const host of [
+        "evil.localhost:3100",
+        "desde.localhost:9999",
+        "acme.apps.desde.localhost",
+        "apps.desde.localhost:3100",
+        "a.b.apps.desde.localhost:3100",
+      ]) {
+        expect(isAllowedHost(allowlist, host, domain), host).toBe(false)
+      }
     })
   })
 

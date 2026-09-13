@@ -1,6 +1,7 @@
 import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express"
 import type { AssetStore } from "./assets/types"
 import type { ViewerConfig } from "./config"
+import { effectiveServeDomain } from "./config"
 import { createApiRouter } from "./api/api-router"
 import type { ManifestConversion } from "./api/setup-routes"
 import type { CommentChangeBus } from "./comments/change-bus"
@@ -270,6 +271,12 @@ export function createApp(deps: AppDeps): express.Express {
     allowAnyLoopbackPort: deps.allowAnyLoopbackPort,
   })
 
+  // The effective serve domain: the configured one, or the local one derived
+  // for a `.localhost` public host. Every reader below takes THIS value, so
+  // the allowlist predicate, the host scope, the write rule and the rewrite
+  // agree on what a prototype host is.
+  const serveDomain = effectiveServeDomain(deps.config)
+
   // FIRST of all, ahead of the subdomain rewrite: no request reaches routing
   // until its `Host` has been matched against a closed set of literal strings
   // built from config. Everything downstream that derives a value from `Host`
@@ -280,10 +287,11 @@ export function createApp(deps: AppDeps): express.Express {
   app.use(
     createHostAllowlistMiddleware(
       hostAllowlist,
-      // Read off the SAME config object the allowlist was built from: the
-      // predicate and the enumerated set must agree on what the serve domain
-      // is, or subdomain hosts are judged by one and routed by the other.
-      deps.config.serveDomain,
+      // Read off the SAME effective serve domain every other reader below
+      // uses: the predicate and the enumerated set must agree on what the
+      // serve domain is, or subdomain hosts are judged by one and routed by
+      // the other.
+      serveDomain,
     ),
   )
 
@@ -320,10 +328,15 @@ export function createApp(deps: AppDeps): express.Express {
     const host = typeof req.headers.host === "string" ? req.headers.host.toLowerCase() : undefined
     return resolveOrigins({
       requestHost: host,
-      hostAllowed: isAllowedHost(hostAllowlist, host, deps.config.serveDomain),
+      hostAllowed: isAllowedHost(hostAllowlist, host, serveDomain),
       hostIsPrototype: Boolean((req as PrototypeHostScopedRequest).prototypeHostScoped),
       publicUrl: deps.config.publicUrl,
+      // The CONFIGURED serve domain, not the effective one: `resolveOrigins`
+      // takes `localServeDomain` as its own separate input below and derives
+      // subdomain mode from the two together, so it must see the raw
+      // configured value here to tell "explicitly configured" from "derived".
       serveDomain: deps.config.serveDomain,
+      localServeDomain: deps.config.localServeDomain,
       loopbackAvailable: deps.config.loopbackAvailable,
       prototypeOrigin: deps.config.prototypeOrigin,
     }).shellOrigin
@@ -345,10 +358,11 @@ export function createApp(deps: AppDeps): express.Express {
   // this middleware at all (the allowlist above refuses it first).
   app.use(
     createPrototypeHostScope({
-      // Read off the SAME config object as the allowlist and the rewrites —
-      // several readers of one value, for the reason spelled out above.
+      // Read off the SAME `serveDomain` value as the allowlist and the
+      // rewrites below — several readers of one value, for the reason
+      // spelled out above.
       registry: composePrototypeHostRegistries(
-        createServeDomainRegistry(deps.config.serveDomain),
+        createServeDomainRegistry(serveDomain),
         createPrototypeOriginRegistry(deps.config.prototypeOrigin),
       ),
       // A server prototype takes writes; a folder of files does not. The rule
@@ -358,7 +372,7 @@ export function createApp(deps: AppDeps): express.Express {
       // terminal fence below. `serveDomain` is the same value the rewrite
       // mounted just after this one reads, which is what makes "the rewrite
       // will put this under /p/" true rather than merely likely.
-      writeReachesPrototypeRoute: createPrototypeRouteWriteRule(deps.config.serveDomain),
+      writeReachesPrototypeRoute: createPrototypeRouteWriteRule(serveDomain),
       // Fixed for the whole app, from config, never from the request (see
       // `createPrototypeHostScope`'s own doc comment on this field). Serves
       // BOTH registries above: subdomain mode inherits `publicUrl`'s scheme
@@ -374,7 +388,7 @@ export function createApp(deps: AppDeps): express.Express {
   // The API is therefore not merely CSP-blocked on a prototype origin — it
   // is not routed there at all, which is the property that makes subdomain
   // mode a real boundary rather than a policy we emit.
-  app.use(createSubdomainRewrite(deps.config.serveDomain))
+  app.use(createSubdomainRewrite(serveDomain))
 
   // Beside the subdomain rewrite: mark a request on the single
   // `VIEWER_PROTOTYPE_ORIGIN` host so the serve router picks the isolated CSP

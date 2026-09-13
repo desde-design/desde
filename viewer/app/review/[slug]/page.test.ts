@@ -76,6 +76,7 @@ describe("reviewShellOrigin", () => {
     publicUrl: "http://localhost:3100",
     port: 3100,
     serveDomain: null,
+    localServeDomain: null,
     loopbackAvailable: true,
     prototypeOrigin: null,
   }
@@ -106,6 +107,7 @@ describe("reviewShellOrigin", () => {
       publicUrl: "https://desde.acme.test",
       port: 3100,
       serveDomain: null,
+      localServeDomain: null,
       loopbackAvailable: true,
       prototypeOrigin: null,
     }
@@ -125,6 +127,7 @@ describe("reviewShellOrigin", () => {
       publicUrl: "http://localhost:3100",
       port: 3100,
       serveDomain: null,
+      localServeDomain: null,
       loopbackAvailable: false,
       prototypeOrigin: null,
     }

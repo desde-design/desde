@@ -554,4 +554,59 @@ describe("subdomain serving end to end", () => {
       expect(res.headers["set-cookie"]).toBeUndefined()
     })
   })
+
+  /**
+   * Local subdomain mode (task 3): no `VIEWER_SERVE_DOMAIN` is set, so
+   * `config.serveDomain` is null and `config.localServeDomain` is DERIVED
+   * from the default `.localhost` public URL (`apps.desde.localhost`). This
+   * proves the derived domain is routed exactly like a configured one — the
+   * same host-scope registry, the same rewrite, the same API fence — because
+   * every reader in `create-app.ts` takes `effectiveServeDomain(config)`
+   * rather than `config.serveDomain` directly.
+   */
+  describe("local subdomain mode (derived serve domain)", () => {
+    function localAppWith(files: Record<string, StoredAsset>) {
+      stable.use(
+        createApp({
+          storage,
+          assets: assetsWith(files),
+          config: loadConfig({
+            VIEWER_PUBLIC_URL: "http://desde.localhost:3100",
+            VIEWER_DATA_DIR: tmpViewerDataDir(),
+          }),
+          bridgeScript: "// bridge",
+          bridgeVersion: "test-1",
+          github: testGithubRuntime(),
+        }),
+      )
+      return stable.app
+    }
+
+    it("routes a derived prototype host as that prototype, and keeps the API off it", async () => {
+      await seed("acme")
+      const built = localAppWith({ "index.html": html("<!doctype html><h1>hi</h1>") })
+
+      const asset = await request(built).get("/index.html").set("Host", "acme.apps.desde.localhost:3100")
+      expect(asset.status).toBe(200)
+      expect(asset.text).toContain("<h1>hi</h1>")
+
+      // Same property as "does not route the API on a prototype subdomain"
+      // above: the rewrite sends this path to `/p/acme/api/v1/projects`
+      // before the API router is ever reached, so `/api/v1` never matches.
+      // This deployment is static, and `api/v1/projects` is extensionless,
+      // so the serve router's SPA fallback answers with the prototype's own
+      // `index.html` (a 200) rather than a 404 — the same shape the existing
+      // configured-subdomain test above asserts on the same fallback path.
+      // The point either way is that the response is the PROTOTYPE'S asset,
+      // never the API's JSON.
+      const api = await request(built).get("/api/v1/projects").set("Host", "acme.apps.desde.localhost:3100")
+      expect(api.text).toContain("<h1>hi</h1>")
+      expect(api.body).toEqual({})
+
+      // On the shell host itself the same path IS the API.
+      const onShell = await request(built).get("/api/v1/health").set("Host", "desde.localhost:3100")
+      expect(onShell.status).toBe(200)
+      expect(onShell.body.status).toBe("ok")
+    })
+  })
 })

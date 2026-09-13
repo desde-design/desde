@@ -130,7 +130,10 @@ export function internalPrototypeOriginFetchInit(
  * refused before it can be routed to a Next page at all.
  */
 export function reviewShellOrigin(
-  config: Pick<ViewerConfig, "publicUrl" | "port" | "serveDomain" | "loopbackAvailable" | "prototypeOrigin">,
+  config: Pick<
+    ViewerConfig,
+    "publicUrl" | "port" | "serveDomain" | "localServeDomain" | "loopbackAvailable" | "prototypeOrigin"
+  >,
   requestHost: string | undefined,
 ): string {
   const allowlist = buildHostAllowlist(config)
