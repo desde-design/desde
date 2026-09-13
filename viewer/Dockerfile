@@ -64,9 +64,9 @@ FROM node:24-bookworm-slim AS run
 WORKDIR /app
 
 # `git` for the build runner's clone; `ca-certificates` so it can reach
-# GitHub over TLS at all.
+# GitHub over TLS at all; `tini` to reap orphans, for the reason below.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates \
+  && apt-get install -y --no-install-recommends git ca-certificates tini \
   && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
@@ -97,6 +97,26 @@ USER node
 
 VOLUME ["/data"]
 EXPOSE 3100
+
+# An init that reaps, in front of everything.
+#
+# Without one, pid 1 here is `npm`, a Node process, and Node reaps only the
+# children it spawned itself — never one it merely inherits. That matters
+# because of how the process manager stops a prototype: it kills the server's
+# whole process GROUP, so a worker the server forked for itself (a Next server
+# with `experimental.cpus`, a Nitro worker) dies alongside its parent and is
+# then reparented to pid 1. Nothing reaped it, so it held its pid as a zombie
+# for the life of the container. MEASURED at ten start/stop cycles of a server
+# that forks one worker: ten zombies with a Node pid 1, none with this init.
+# A slow leak rather than an outage — one pid per forked worker per stop, and
+# it never drains.
+#
+# `-s` registers tini as a child subreaper, so orphans still reparent to it
+# if it is ever not pid 1 itself (someone adding `docker run --init`, which
+# puts another init in front). As pid 1 it already is that, so the flag costs
+# nothing and covers both. Signals reach the app either way: tini forwards
+# them to the process it started.
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 
 # `start` (not `dev`) — the dev script runs a file watcher and the Turbopack
 # bundler, neither of which belongs in an image.
