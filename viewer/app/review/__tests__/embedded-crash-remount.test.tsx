@@ -247,7 +247,7 @@ describe("review shell — following the process-state stream", () => {
       </Scenario>,
     )
     const loader = () => document.querySelector('[data-testid="prototype-loader"]')
-    expect(loader()?.textContent).toContain("Starting the prototype's server")
+    expect(loader()?.textContent).toContain("Starting the prototype's server. This can take up to a minute.")
     expect(loader()?.textContent).not.toContain("Loading")
 
     pushOrigin(RUNNING_GENERATION_1)

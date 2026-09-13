@@ -1405,7 +1405,11 @@ export function ReviewShell({
                     "Loading" for that long reads as broken (live run 2,
                     2026-09-12: ten seconds of it on the first open in Docker). */}
                 <ProjectLoader
-                  label={liveProcess?.state === "starting" ? "Starting the prototype's server" : "Loading"}
+                  label={
+                    liveProcess?.state === "starting"
+                      ? "Starting the prototype's server. This can take up to a minute."
+                      : "Loading"
+                  }
                   className="h-full"
                 />
               </div>
