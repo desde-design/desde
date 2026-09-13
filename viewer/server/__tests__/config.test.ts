@@ -1114,6 +1114,15 @@ describe("loadConfig", () => {
         loadConfig({ VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "65520" }, { isLikelyContainerized: () => true }),
       ).toThrow(/VIEWER_LOOPBACK_PORT_RANGE/)
     })
+    it("reads a whitespace-only serve domain as unset everywhere, so a container derives its default range for it (delta review 1)", () => {
+      const config = loadConfig(
+        { VIEWER_DATA_DIR: tmpViewerDataDir(), PORT: "3100", VIEWER_SERVE_DOMAIN: "  " },
+        { isLikelyContainerized: () => true },
+      )
+      expect(config.serveDomain).toBeNull()
+      expect(config.loopbackPortRange).toEqual({ from: 3101, to: 3120 })
+    })
+
     it("derives no default range in a container whose prototypes go to a serve domain or a prototype origin (codex round 63)", () => {
       for (const extra of [{ VIEWER_SERVE_DOMAIN: "proto.example.com" }, { VIEWER_PROTOTYPE_ORIGIN: "http://proto.example.com" }]) {
         const config = loadConfig(

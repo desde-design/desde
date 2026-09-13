@@ -650,7 +650,13 @@ export function loadConfig(
   // (codex round 63): under `VIEWER_SERVE_DOMAIN` or `VIEWER_PROTOTYPE_ORIGIN`
   // those modes win and no listener ever opens, and deriving the range
   // anyway refused a `PORT` near 65535 for twenty ports nothing would use.
-  const loopbackModePossible = !env.VIEWER_SERVE_DOMAIN?.trim() && !env.VIEWER_PROTOTYPE_ORIGIN?.trim()
+  // Both read as the returned config reads them (delta review 1): a
+  // whitespace-only `VIEWER_SERVE_DOMAIN` used to count as unset here and as
+  // set for the origin resolver, so the range was derived for a mode that
+  // would never use it.
+  const serveDomain = env.VIEWER_SERVE_DOMAIN?.trim() ? env.VIEWER_SERVE_DOMAIN.trim() : null
+  const prototypeOrigin = parsePrototypeOrigin(env.VIEWER_PROTOTYPE_ORIGIN)
+  const loopbackModePossible = serveDomain === null && prototypeOrigin === null
   const loopbackPortRange = env.VIEWER_LOOPBACK_PORT_RANGE
     ? parseLoopbackPortRange(env.VIEWER_LOOPBACK_PORT_RANGE, port)
     : actuallyInContainer && loopbackModePossible
@@ -773,14 +779,14 @@ export function loadConfig(
     dataDir,
     publicUrl,
     adminToken: env.VIEWER_ADMIN_TOKEN ?? null,
-    serveDomain: env.VIEWER_SERVE_DOMAIN ?? null,
+    serveDomain,
     // Comma-separated. Entries are lowercased and stripped of a leading `@`
     // so `@example.com`, `example.com` and `EXAMPLE.COM` all behave the
     // same — an operator should not have to guess the punctuation.
     allowedEmailDomains: parseAllowedEmailDomains(env.VIEWER_ALLOWED_EMAIL_DOMAINS),
     devBundler,
     prototypeCsp: normalizePrototypeCsp(env.VIEWER_PROTOTYPE_CSP),
-    prototypeOrigin: parsePrototypeOrigin(env.VIEWER_PROTOTYPE_ORIGIN),
+    prototypeOrigin,
     seedDemoProject: env.VIEWER_DEMO_PROJECT !== "off",
     trustProxy: parseTrustProxy(env.VIEWER_TRUST_PROXY),
     loopbackListeners,
