@@ -312,8 +312,9 @@ default) so you have something stable to publish. Publish that range to your
 own loopback, as the run line at the top of this file does
 (`-p 127.0.0.1:3101-3120:3101-3120`), and the ports stay on your machine
 exactly as they do on a laptop. Each prototype is then served on a name of
-its own under `.localhost` (`<id>.localhost:3101`), so a port that comes back
-around never brings another prototype's origin with it. Chrome and Firefox
+its own under `.localhost` (`<id>-<random>.localhost:3101`), so a port that
+comes back around never brings another prototype's origin with it, and a
+name nobody can guess stands in for the sign-in a listener does not have. Chrome and Firefox
 resolve every `*.localhost` name to your machine without DNS; Safari does
 not, so review a container-hosted viewer in one of those two. Leave the prefix off and they are reachable
 from your network, which a prototype listener is not built for: it has no
