@@ -1,4 +1,5 @@
-import { execFileSync, spawn as spawnChild } from "node:child_process"
+import { spawn as spawnChild } from "node:child_process"
+import { readFileSync } from "node:fs"
 import { copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -42,13 +43,40 @@ function start(): string[] {
  * Whether a pid names a live process. Signal 0 performs the permission and
  * existence checks and delivers nothing, so this asks the kernel rather than
  * inferring anything from a handle this test does not own.
+ *
+ * A ZOMBIE is not live, and signal 0 cannot tell the difference: a process
+ * that has exited keeps its pid until someone reaps it, and answers signal 0
+ * the whole time. That is not hypothetical here. The manager kills a server's
+ * whole process group, so a worker the server forked dies with its parent and
+ * is then reparented to pid 1 — and in a container whose pid 1 does not reap
+ * (a bare `docker run` of a Node image, say), nothing ever does. The worker
+ * was measured reaching state Z within 100ms of the kill while signal 0 still
+ * reported it alive, which failed the two worker tests in a container and
+ * passed everywhere with an init that reaps. On Linux the state is there to
+ * read, so read it.
  */
 function alive(pid: number): boolean {
+  if (gone(pid)) return false
+  if (process.platform !== "linux") return true
   try {
-    process.kill(pid, 0)
-    return true
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] !== "Z"
   } catch {
     return false
+  }
+}
+/**
+ * Whether a pid has left the process table altogether — exited AND reaped,
+ * so the kernel knows nothing about it. The stricter of the two questions:
+ * a zombie is not `alive`, but it is not `gone` either, and only `gone` says
+ * a later read of `/proc/<pid>` will find nothing.
+ */
+function gone(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch {
+    return true
   }
 }
 async function get(port: number, path = "/"): Promise<{ status: number; body: string }> {
@@ -210,7 +238,9 @@ describe("processStartedAtSync", () => {
     const dead = spawnChild(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "ignore" })
     const deadPid = dead.pid as number
     dead.kill("SIGKILL")
-    await vi.waitFor(() => expect(alive(deadPid)).toBe(false), { timeout: 2000, interval: 25 })
+    // `gone`, not `alive`: a zombie still has a `/proc/<pid>/stat` to read,
+    // so the start time is only absent once the pid has been reaped too.
+    await vi.waitFor(() => expect(gone(deadPid)).toBe(true), { timeout: 2000, interval: 25 })
     expect(processStartedAtSync(deadPid)).toBeNull()
   })
 })
@@ -691,9 +721,13 @@ describe("createPrototypeProcesses", () => {
       const pidFile = join(root, "d1", ".desde-home", "server.1.pid")
       const { pid } = JSON.parse(await readFile(pidFile, "utf8")) as { pid: number }
       // The title took: the live command line no longer names the fixture.
-      const live = execFileSync("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8" })
-      expect(live).toContain("next-server")
-      expect(live).not.toContain("fake-server")
+      // Read through the reaper's own reader, not `ps` — that is the text the
+      // reaper will actually compare, and `ps` is absent from the Node image
+      // the Viewer ships in, so asking for it there failed this test before it
+      // reached the behaviour it is about.
+      const live = await processIdentity(pid)
+      expect(live?.commandLine).toContain("next-server")
+      expect(live?.commandLine).not.toContain("fake-server")
 
       const next = createPrototypeProcesses({ checkoutsRoot: root })
       managers.push(next, previous)
