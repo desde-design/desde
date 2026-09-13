@@ -1,5 +1,5 @@
 import { AppHeader } from "@/components/blocks"
-import { loadConfig } from "../server/config"
+import { effectiveServeDomain, loadConfig } from "../server/config"
 import { AccountMenu } from "./account-menu"
 import { CurrentUserBoundary } from "./current-user-boundary"
 import { ProjectsList } from "./projects-list"
@@ -54,7 +54,7 @@ export default function DashboardPage() {
           {/* The "Projects" heading is rendered by `ProjectsList`, not here:
               it is suppressed when the list resolves to an empty state, and
               only that component knows. */}
-          <ProjectsList serveDomain={config.serveDomain} publicUrl={config.publicUrl} />
+          <ProjectsList serveDomain={effectiveServeDomain(config)} publicUrl={config.publicUrl} />
         </main>
       </div>
     </CurrentUserBoundary>

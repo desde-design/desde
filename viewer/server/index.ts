@@ -208,6 +208,7 @@ async function main(): Promise<void> {
         hostIsPrototype: false,
         publicUrl: config.publicUrl,
         serveDomain: config.serveDomain,
+        localServeDomain: config.localServeDomain,
         loopbackAvailable: config.loopbackAvailable,
         prototypeOrigin: config.prototypeOrigin,
       })
