@@ -726,6 +726,28 @@ describe("GET /projects/:id/prototype-origin", () => {
 
       expect(onLoopback.body.mode).toBe("loopback")
     })
+
+    /**
+     * Final review, P2. A `.localhost` public URL WITHOUT a port is admitted by
+     * the Host allowlist on the config port, so the shell origin the page
+     * states carries that port and must be acceptable here too, or every
+     * review page 404s under that (mis)configuration.
+     */
+    it("accepts the stated shell origin on the config port for a portless .localhost public URL", async () => {
+      const ctx = setup({ config: { ...localSubdomainConfig, publicUrl: "http://desde.localhost" } })
+      const project = await seedProject(ctx.storage, { access: "all-members" })
+
+      const res = await request(ctx.app)
+        .get(`/api/v1/projects/${project.id}/prototype-origin`)
+        .set(auth)
+        .set("Host", "desde.localhost:3100")
+        .set(SHELL_ORIGIN_HEADER, "http://desde.localhost:3100")
+        .expect(200)
+
+      expect(res.body.mode).toBe("subdomain")
+      // Portless public URL, portless prototype origin: a reverse proxy on 80 fronts both.
+      expect(res.body.origin).toBe("http://acme.apps.desde.localhost")
+    })
   })
 
   describe("prototype-origin mode (VIEWER_PROTOTYPE_ORIGIN)", () => {

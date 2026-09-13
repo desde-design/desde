@@ -321,8 +321,8 @@ cookie on the shell's domain. A reviewer who then visits the shell would be
 signed in as whoever planted that cookie.
 
 The viewer defends against this. If a request ever carries the session
-cookie twice, the viewer treats it as signed out. It clears both copies
-right away. Every sign-in also clears a planted copy, so signing in cleans
+cookie twice, the viewer treats it as signed out. It clears the planted
+copy right away and leaves the reviewer's own cookie alone. Every sign-in also clears a planted copy, so signing in cleans
 this up on its own.
 
 One thing remains. A reviewer with no session of their own, who visits the

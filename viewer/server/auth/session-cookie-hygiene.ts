@@ -2,7 +2,7 @@ import type { RequestHandler } from "express"
 import type { ViewerConfig } from "../config"
 import { isSecurePublicUrl } from "../api/state-cookie"
 import type { PrototypeHostScopedRequest } from "../serve/prototype-host-scope"
-import { clearSessionCookie, clearTossedSessionCookie, countCookie, sessionCookieName } from "./session-cookie"
+import { clearTossedSessionCookie, countCookie, sessionCookieName } from "./session-cookie"
 
 /**
  * On plain http, a request that carries the session cookie name twice has
@@ -25,7 +25,15 @@ export function createSessionCookieHygiene(config: Pick<ViewerConfig, "publicUrl
       return
     }
     if (countCookie(req.headers.cookie, name) > 1) {
-      res.append("Set-Cookie", [clearSessionCookie({ secure: false }), clearTossedSessionCookie(hostname)])
+      // Only the `Domain` spelling is cleared (final review, P1). The
+      // reviewer's own cookie is host-only, and a sibling host can never
+      // plant a host-only cookie, so it is never the planted one; clearing
+      // it too let a planted cookie on a narrower `Path` (which this clear
+      // cannot reach) stand alone on that subtree and sign the reviewer in as
+      // the planter. With the real cookie kept, that subtree reads two
+      // cookies and stays signed out until the browser's cookies are cleared,
+      // which is a nuisance, not an impersonation.
+      res.append("Set-Cookie", clearTossedSessionCookie(hostname))
     }
     next()
   }

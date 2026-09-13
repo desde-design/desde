@@ -111,7 +111,17 @@ function acceptableShellOrigins(config: { publicUrl: string; port: number }): Re
   const set = new Set<string>()
   const publicUrl = normalizeOrigin(config.publicUrl)
   if (publicUrl) set.add(publicUrl)
-  const scheme = new URL(config.publicUrl).protocol
+  const url = new URL(config.publicUrl)
+  const scheme = url.protocol
+  // A `.localhost` public host without an explicit port is admitted by the
+  // Host allowlist on the config port too (`host-allowlist.ts` treats it as
+  // local), so the shell origin the page then states carries that port and
+  // must be acceptable here as well (final review, P2). Same widening, same
+  // reason: the two must agree on what the shell is.
+  if (url.hostname.toLowerCase().endsWith(".localhost")) {
+    const candidate = normalizeOrigin(`${scheme}//${url.hostname.toLowerCase()}:${config.port}`)
+    if (candidate) set.add(candidate)
+  }
   for (const spelling of LOOPBACK_HOSTS) {
     // `LOOPBACK_HOSTS` already spells IPv6 bracketed (`[::1]`), which is the
     // only form a URL parses.

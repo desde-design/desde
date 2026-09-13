@@ -2,7 +2,7 @@ import express from "express"
 import request from "supertest"
 import { describe, expect, it } from "vitest"
 import { createSwappableApp } from "../__tests__/swappable-app"
-import { clearSessionCookie, clearTossedSessionCookie } from "./session-cookie"
+import { clearTossedSessionCookie } from "./session-cookie"
 import { createSessionCookieHygiene } from "./session-cookie-hygiene"
 
 describe("createSessionCookieHygiene", () => {
@@ -21,10 +21,7 @@ describe("createSessionCookieHygiene", () => {
     const twice = await request(stable.app)
       .get("/")
       .set("Cookie", "viewer_session=a; viewer_session=b")
-    expect(twice.headers["set-cookie"]).toEqual([
-      clearSessionCookie({ secure: false }),
-      clearTossedSessionCookie("desde.localhost"),
-    ])
+    expect(twice.headers["set-cookie"]).toEqual([clearTossedSessionCookie("desde.localhost")])
 
     const once = await request(stable.app).get("/").set("Cookie", "viewer_session=a")
     expect(once.headers["set-cookie"]).toBeUndefined()
