@@ -163,17 +163,6 @@ export interface LoopbackListenerAppContext {
   hostPort: string
   shellOrigin: string
   /**
-   * This origin last served a DIFFERENT deployment (codex round 41). A
-   * fixed port range recycles ports, and a browser origin outlives the
-   * listener that answered on it: a still-open document of the previous
-   * deployment is same-origin with this one, and whatever it stored
-   * (localStorage, IndexedDB, a service worker, cached responses) is
-   * inherited. The app clears the origin's storage and cache on its first
-   * document response when this is set. Never set for the same deployment
-   * coming back on the origin it had before, which the registry prefers.
-   */
-  recycledOrigin: boolean
-  /**
    * The jar this deployment's child cookies live in (codex round 60). A
    * loopback prototype is a cross-site frame, so the browser will not keep
    * the cookies its child sets; the proxy keeps them here and replays them.
@@ -393,15 +382,6 @@ export function createLoopbackListenerRegistry(
   const opening = new Map<string, Promise<LoopbackListener>>()
   /** Deployments a delete has closed for good; `ensure` refuses them. Ids are never reused. */
   const closedDeployments = new Set<string>()
-  /**
-   * What each origin served last and when it was released (codex round 41).
-   * With a fixed range the same port comes back around, and a browser keeps
-   * an origin's storage past the listener: ports are handed out
-   * least-recently-released first, a deployment gets its previous origin
-   * back when it is free, and an origin that changes deployment is told so
-   * (`recycledOrigin`) so the app can clear what the last one left.
-   */
-  const originHistory = new Map<string, { deploymentId: string; releasedAt: number }>()
   /** Each deployment's child cookies, replayed by its listeners' proxy. See `LoopbackListenerAppContext.cookieJar`. */
   const cookieJars = new Map<string, ChildCookieJar>()
   const cookieJarFor = (deploymentId: string): ChildCookieJar => {
@@ -653,20 +633,10 @@ export function createLoopbackListenerRegistry(
         // Dropped from the map FIRST, so a concurrent `ensure` opens a fresh
         // listener rather than handing out one that is closing.
         if (listeners.get(key) === record) listeners.delete(key)
-        originHistory.set(origin, { deploymentId: deployment.id, releasedAt: now() })
         portReleasedAt.set(address.port, now())
         await closeServer(server)
       },
     }
-    // The browser's memory of this origin outlives the Viewer's own (codex
-    // rounds 42 and 44): a port first used in THIS process may have served
-    // another deployment before a restart, whether the range is fixed or
-    // the OS handed `listen(0)` a number it handed out before. So the first
-    // use of any origin in a process counts as recycled; only a deployment
-    // coming back to the origin this process saw it on does not.
-    const previous = originHistory.get(origin)
-    const recycledOrigin = previous === undefined || previous.deploymentId !== deployment.id
-
     try {
       app = deps.makeApp({
         deploymentId: deployment.id,
@@ -674,7 +644,6 @@ export function createLoopbackListenerRegistry(
         serve: deployment.serve,
         hostPort: `${host}:${address.port}`,
         shellOrigin: target.shellOrigin,
-        recycledOrigin,
         cookieJar: cookieJarFor(deployment.id),
         touch: () => {
           record.lastUsedAt = now()

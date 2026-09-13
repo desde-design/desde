@@ -376,49 +376,43 @@ describe("createLoopbackListenerRegistry", () => {
       expect(asOld.status).toBe(400)
     })
 
-    it("clears a recycled origin's storage and cache on its first document load only", async () => {
+    it("never sends Clear-Site-Data on a document response, even on a recycled origin — it hangs the cross-site review iframe", async () => {
+      // Regression for the first-open hang (report:
+      // `.superpowers/sdd/2026-09-11-server-prototypes-rework/first-open-hang-report.md`).
+      // A loopback prototype is ALWAYS a cross-site iframe of the shell, and
+      // Chrome does not commit a cross-site iframe's document navigation when
+      // the response carries Clear-Site-Data: `contentWindow.location` stays
+      // `about:blank`, `onload` never fires, and the shell's loading overlay
+      // sat on top for minutes on the very first open. So the header must
+      // never be attached here — not on the first document, not on a
+      // genuinely recycled port. Origin recycling is prevented structurally
+      // by the per-open unique `.localhost` host instead (round 62).
       const range = await freeRange(1)
       const registry = makeRegistry(
         { d1: { "index.html": "<html></html>" }, d2: { "index.html": "<html></html>" } },
         { portRange: range, bindAllInterfaces: false },
       )
       const a = await registry.ensure(deployment("d1"), V4)
-      // The first use of a range port in this process counts as recycled
-      // too (codex round 42): the browser's memory of the origin outlives a
-      // Viewer restart, and this registry cannot know what served here.
-      const fresh = await documentGet(a, { "Sec-Fetch-Dest": "iframe" })
-      expect(fresh.status).toBe(200)
-      expect(fresh.headers["clear-site-data"]).toBe('"cache", "storage"')
+      const first = await documentGet(a, { "Sec-Fetch-Dest": "iframe" })
+      expect(first.status).toBe(200)
+      expect(first.headers["clear-site-data"]).toBeUndefined()
       await a.close()
 
+      // A genuinely recycled port (same port, a different deployment) must
+      // not carry it either: the header hangs that navigation just the same.
       const b = await registry.ensure(deployment("d2"), V4)
       expect(b.port).toBe(a.port)
-      // An asset fetch first: not the moment, the document is.
-      const asset = await documentGet(b, { "Sec-Fetch-Dest": "script" })
-      expect(asset.headers["clear-site-data"]).toBeUndefined()
       const document = await documentGet(b, { "Sec-Fetch-Dest": "iframe" })
       expect(document.status).toBe(200)
-      expect(document.headers["clear-site-data"]).toBe('"cache", "storage"')
-      const reload = await documentGet(b, { "Sec-Fetch-Dest": "iframe" })
-      expect(reload.headers["clear-site-data"]).toBeUndefined()
-      await b.close()
-
-      // A reopened deployment gets a fresh host, which is a fresh origin the
-      // browser has nothing stored for; clearing it once more costs nothing.
-      const bAgain = await registry.ensure(deployment("d2"), V4)
-      expect(bAgain.host).not.toBe(b.host)
-      const back = await documentGet(bAgain, { Accept: "text/html,*/*" })
-      expect(back.headers["clear-site-data"]).toBe('"cache", "storage"')
+      expect(document.headers["clear-site-data"]).toBeUndefined()
     })
 
-    it("clears on the first use of an ephemeral port too, which the OS may have handed out before a restart", async () => {
-      // Codex round 44: `listen(0)` can return a port the browser used for
-      // another deployment before this process existed.
+    it("never sends Clear-Site-Data on an ephemeral-port document either", async () => {
       const registry = makeRegistry({ d1: { "index.html": "<html></html>" } })
       const a = await registry.ensure(deployment("d1"), V4)
-      const fresh = await documentGet(a, { "Sec-Fetch-Dest": "iframe" })
-      expect(fresh.status).toBe(200)
-      expect(fresh.headers["clear-site-data"]).toBe('"cache", "storage"')
+      const first = await documentGet(a, { "Sec-Fetch-Dest": "iframe" })
+      expect(first.status).toBe(200)
+      expect(first.headers["clear-site-data"]).toBeUndefined()
     })
 
     /**

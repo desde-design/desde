@@ -106,35 +106,33 @@ function createPinnedDeploymentRewrite(pinned: { deploymentId: string; slug: str
   }
 }
 
-/** A navigation or a frame load, by the fetch metadata browsers send, or by `Accept` when they do not. */
-function isDocumentRequest(req: Request): boolean {
-  const dest = req.headers["sec-fetch-dest"]
-  if (typeof dest === "string") return dest === "document" || dest === "iframe" || dest === "frame"
-  const accept = req.headers.accept
-  return typeof accept === "string" && /\btext\/html\b/.test(accept)
-}
-
-/**
- * Attaches `Clear-Site-Data` to document responses until one of them has
- * actually been delivered (codex round 44). Consuming the one shot at
- * request entry lost it when the first document request was aborted before
- * its headers went out, and every later document then inherited the previous
- * deployment's storage. `finish` is the response fully flushed; a response
- * that only got as far as its headers before the client left sends the
- * header again next time, which clears an already-cleared origin at no cost.
- */
-export function clearSiteDataUntilDelivered(): RequestHandler {
-  let delivered = false
-  return (req, res, next) => {
-    if (!delivered && isDocumentRequest(req)) {
-      res.setHeader("Clear-Site-Data", '"cache", "storage"')
-      res.once("finish", () => {
-        delivered = true
-      })
-    }
-    next()
-  }
-}
+// A loopback listener used to attach `Clear-Site-Data: "cache", "storage"` to
+// the first document response of a recycled origin, to drop any storage a
+// previous deployment left on it. That is gone, because it hung the review
+// iframe on its FIRST open (measured 2026-09-12, root-cause report
+// `.superpowers/sdd/2026-09-11-server-prototypes-rework/first-open-hang-report.md`).
+//
+// The mechanism was fundamentally incompatible with its only delivery channel.
+// A loopback prototype is ALWAYS a CROSS-SITE iframe of the shell — that host
+// flip (`localhost` shell ↔ `127.0.0.1`/`*.localhost` prototype) is the whole
+// point of loopback mode, since it drops the reviewer's session cookie. And
+// Chrome does not commit a cross-site iframe's document navigation when its
+// response carries `Clear-Site-Data` (proven for `"cache"`, `"storage"` and
+// both together): `contentWindow.location` stays `about:blank`, `onload`
+// never fires, and the shell's loading overlay sits on top for minutes. So
+// this header could never actually reach the reviewer here — it only stalled
+// the very first navigation it was attached to, then a later remount (which
+// carried no header, the one-shot being spent) loaded in seconds.
+//
+// Origin recycling — the reason the header existed — is prevented structurally
+// instead: with a fixed port range every OPEN gets a fresh, unguessable
+// `<deploymentId>-<hex>.localhost` host (`listenerHostFor`, codex round 62), so
+// an origin never repeats whatever the port does, and there is nothing to
+// clear. On ephemeral ports the origin is `127.0.0.1:<fresh OS port>`; the only
+// residual is a same-user prototype reusing a port across viewer restarts while
+// an old tab is still open, which is low-probability and not a cross-user
+// boundary. Giving ephemeral listeners a unique host too would close even that,
+// but it is a separate change to the loopback pairing, not this fix.
 
 export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): express.Express {
   const app = express()
@@ -205,15 +203,6 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
     next()
   })
 
-  // This origin last served another deployment (codex round 41): a
-  // still-open document of that one is same-origin with this listener, and
-  // the browser hands this deployment everything it stored. The first
-  // document this listener answers tells the browser to drop the origin's
-  // storage and cache; cookies are left alone (the shell's own `dsv_cap`
-  // is not this origin's, and a prototype's are its own). Once, not on
-  // every load, so this deployment's own state survives its reloads. Sent
-  // for a top-level or framed document, which is what the review page
-  // asks for; a bare asset fetch is not the moment.
   // No service worker on a loopback origin, ever (codex round 50). A fixed
   // range recycles origins, and a root-scoped worker a previous deployment
   // registered answers a navigation to the recycled port from its own cache
@@ -231,8 +220,6 @@ export function createLoopbackListenerApp(deps: LoopbackListenerAppDeps): expres
     }
     next()
   })
-
-  if (deps.recycledOrigin) app.use(clearSiteDataUntilDelivered())
 
   app.use(createPinnedDeploymentRewrite({ deploymentId: deps.deploymentId, slug: deps.slug }))
 
