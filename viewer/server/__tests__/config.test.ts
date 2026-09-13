@@ -2,7 +2,7 @@ import { generateKeyPairSync } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { loadConfig } from "../config"
+import { deriveLocalServeDomain, effectiveServeDomain, LOCAL_SERVE_LABEL, loadConfig } from "../config"
 import { loadRuntimeConfig, updateRuntimeConfig } from "../runtime-config"
 import { tmpViewerDataDir } from "./test-config"
 
@@ -13,9 +13,10 @@ describe("loadConfig", () => {
     expect(config.profile).toBe("selfhost")
     expect(config.port).toBe(3100)
     expect(config.dataDir).toBe(dataDir)
-    expect(config.publicUrl).toBe("http://localhost:3100")
+    expect(config.publicUrl).toBe("http://desde.localhost:3100")
     expect(config.adminToken).toBeNull()
     expect(config.serveDomain).toBeNull()
+    expect(config.localServeDomain).toBe("apps.desde.localhost")
     expect(config.devBundler).toBe("turbopack")
     expect(config.email).toBeNull()
     expect(config.unsubscribeSecret).toBeNull()
@@ -72,6 +73,7 @@ describe("loadConfig", () => {
       publicUrl: "https://viewer.example.com",
       adminToken: "secret",
       serveDomain: "protos.example.com",
+      localServeDomain: null,
       devBundler: "webpack",
       emailSource: "env",
       email: {
@@ -1241,5 +1243,48 @@ describe("VIEWER_TRUST_PROXY", () => {
     // bucket this setting exists to fix.
     expect(() => loadConfig(env("true"))).toThrow(/refused/i)
     expect(() => loadConfig(env("TRUE"))).toThrow(/refused/i)
+  })
+})
+
+describe("local subdomain mode", () => {
+  const envWith = (overrides: Record<string, string>): Record<string, string> => ({
+    VIEWER_DATA_DIR: tmpViewerDataDir(),
+    ...overrides,
+  })
+
+  it("defaults the public URL to desde.localhost on the port", () => {
+    const config = loadConfig(envWith({ PORT: "3100" })) // use the file's own helper; VIEWER_PUBLIC_URL unset
+    expect(config.publicUrl).toBe("http://desde.localhost:3100")
+    expect(config.localServeDomain).toBe("apps.desde.localhost")
+    expect(effectiveServeDomain(config)).toBe("apps.desde.localhost")
+    expect(LOCAL_SERVE_LABEL).toBe("apps")
+  })
+
+  it("derives apps.<host> only for an http .localhost public host with no explicit mode", () => {
+    const base = { serveDomain: null, prototypeOrigin: null }
+    expect(deriveLocalServeDomain({ publicUrl: "http://desde.localhost:3100", ...base })).toBe("apps.desde.localhost")
+    expect(deriveLocalServeDomain({ publicUrl: "http://Viewer.LocalHost", ...base })).toBe("apps.viewer.localhost")
+    // The bare loopback spellings never derive one: they are the loopback (Safari) path.
+    expect(deriveLocalServeDomain({ publicUrl: "http://localhost:3100", ...base })).toBeNull()
+    expect(deriveLocalServeDomain({ publicUrl: "http://127.0.0.1:3100", ...base })).toBeNull()
+    // https on .localhost is not a supported setup.
+    expect(deriveLocalServeDomain({ publicUrl: "https://desde.localhost", ...base })).toBeNull()
+    // An explicit mode wins.
+    expect(deriveLocalServeDomain({ publicUrl: "http://desde.localhost:3100", serveDomain: "example.com", prototypeOrigin: null })).toBeNull()
+    expect(deriveLocalServeDomain({ publicUrl: "http://desde.localhost:3100", serveDomain: null, prototypeOrigin: "http://proto.localhost:3100" })).toBeNull()
+    // A public host that is not a .localhost name.
+    expect(deriveLocalServeDomain({ publicUrl: "https://viewer.example.com", ...base })).toBeNull()
+  })
+
+  it("keeps loopback listeners possible under a derived serve domain (the Safari fallback)", () => {
+    const config = loadConfig(envWith({ PORT: "3100" }))
+    expect(config.serveDomain).toBeNull()
+    expect(config.loopbackAvailable).toBe(true)
+  })
+
+  it("an explicit loopback public URL opts out", () => {
+    const config = loadConfig(envWith({ PORT: "3100", VIEWER_PUBLIC_URL: "http://localhost:3100" }))
+    expect(config.localServeDomain).toBeNull()
+    expect(effectiveServeDomain(config)).toBeNull()
   })
 })

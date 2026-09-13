@@ -20,7 +20,14 @@ import { createSwappableApp } from "../../__tests__/swappable-app"
 import { tmpViewerDataDir } from "../../__tests__/test-config"
 import { upsertTestUser } from "../../__tests__/user-fixtures"
 
-const openConfig = loadConfig({ VIEWER_DATA_DIR: tmpViewerDataDir() })
+// Explicit loopback public URL: this config backs the "per-request shell
+// origin" tests below, which are specifically about the bare loopback
+// spellings (localhost / 127.0.0.1). It must stay a loopback host even
+// though the DEFAULT public URL moved to desde.localhost.
+const openConfig = loadConfig({
+  VIEWER_DATA_DIR: tmpViewerDataDir(),
+  VIEWER_PUBLIC_URL: "http://localhost:3100",
+})
 const authedConfig = loadConfig({
   VIEWER_GITHUB_CLIENT_ID: "client-id",
   VIEWER_GITHUB_CLIENT_SECRET: "client-secret",
@@ -674,9 +681,9 @@ describe("createServeRouter", () => {
    * `buildHostAllowlist` + `isAllowedHost` + `resolveOrigins` — so what is
    * under test is the actual production wiring pattern, not a stand-in.
    *
-   * `openConfig`'s `publicUrl` is `http://localhost:3100` (no
-   * `VIEWER_PUBLIC_URL` set), which is a loopback host — exactly the
-   * condition `resolveOrigins` needs to trust the request's `Host` at all.
+   * `openConfig`'s `publicUrl` is set explicitly to `http://localhost:3100`,
+   * a loopback host — exactly the condition `resolveOrigins` needs to trust
+   * the request's `Host` at all.
    */
   describe("per-request shell origin (task 9)", () => {
     function resolverFor(config: ReturnType<typeof loadConfig>) {

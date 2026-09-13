@@ -89,12 +89,32 @@ export interface ViewerConfig {
 
   /** Root for SQLite db + disk assets (selfhost profile). */
   dataDir: string
-  /** Absolute origin the viewer is reachable at; used as the bridge's shell origin. */
+  /**
+   * Absolute origin the viewer is reachable at; used as the bridge's shell
+   * origin. Defaults to `http://desde.localhost:<port>`, not a bare
+   * `http://localhost:<port>`: local subdomain mode (see `localServeDomain`
+   * below) needs a real hostname to hang `apps.<host>` off of, and
+   * `.localhost` resolves to loopback in Chrome and Firefox with no DNS setup.
+   */
   publicUrl: string
   /** Static bearer token guarding write endpoints until real auth lands (Phase 3). */
   adminToken: string | null
   /** Optional `{slug}.{domain}` host routing. Null = path-based only. */
   serveDomain: string | null
+  /**
+   * The serve domain DERIVED for local subdomain mode, or null. Set only
+   * when no `VIEWER_SERVE_DOMAIN` and no `VIEWER_PROTOTYPE_ORIGIN` are
+   * configured, the public URL is `http:`, and its hostname ends with
+   * `.localhost` (the default `desde.localhost`): then every prototype is
+   * served at `{slug}.apps.<public host>`, which Chrome and Firefox resolve
+   * to loopback with no DNS, same-site with the shell so the prototype's own
+   * cookies work in the frame. The bare loopback spellings (`localhost`,
+   * `127.0.0.1`, `[::1]`) never derive one: a shell reached on those stays in
+   * loopback mode, which is the Safari fallback. Routing reads
+   * `effectiveServeDomain(config)`, never this field or `serveDomain`
+   * directly. Spec: docs/superpowers/specs/2026-09-12-local-subdomain-mode-design.md.
+   */
+  localServeDomain: string | null
   /** Dev-only Next.js bundler choice. See `ViewerDevBundler`. */
   devBundler: ViewerDevBundler
   /**
@@ -463,6 +483,37 @@ function parsePrototypeOrigin(raw: string | undefined): string | null {
   return `${url.protocol}//${url.host}`
 }
 
+/** The label under the public host that local subdomain mode serves prototypes from. */
+export const LOCAL_SERVE_LABEL = "apps"
+
+/**
+ * Derives `localServeDomain` from the public URL, but only when no explicit
+ * serve mode is configured. `VIEWER_SERVE_DOMAIN` and `VIEWER_PROTOTYPE_ORIGIN`
+ * are the operator stating a mode outright, and either one wins over deriving
+ * anything here. Otherwise: the public URL must be plain `http:` (local
+ * subdomain mode is not a supported setup over `https:`) and its hostname
+ * must end with `.localhost` — the bare loopback spellings (`localhost`,
+ * `127.0.0.1`, `[::1]`) are excluded on purpose, since those are the Safari
+ * loopback fallback, not a name `apps.` can be prefixed onto.
+ */
+export function deriveLocalServeDomain(input: {
+  publicUrl: string
+  serveDomain: string | null
+  prototypeOrigin: string | null
+}): string | null {
+  if (input.serveDomain !== null || input.prototypeOrigin !== null) return null
+  const url = new URL(input.publicUrl)
+  if (url.protocol !== "http:") return null
+  const hostname = url.hostname.toLowerCase()
+  if (!hostname.endsWith(".localhost")) return null
+  return `${LOCAL_SERVE_LABEL}.${hostname}`
+}
+
+/** The serve domain routing and allowlisting use: the configured one, else the derived local one. */
+export function effectiveServeDomain(config: Pick<ViewerConfig, "serveDomain" | "localServeDomain">): string | null {
+  return config.serveDomain ?? config.localServeDomain
+}
+
 /**
  * `VIEWER_PROTOTYPE_CSP=""` (or whitespace-only) is a common `.env`
  * misconfiguration — an unset variable left as an empty assignment rather
@@ -600,7 +651,7 @@ export function loadConfig(
     throw new Error(`Invalid PORT "${rawPort}". Expected a positive integer`)
   }
 
-  const publicUrl = (env.VIEWER_PUBLIC_URL ?? `http://localhost:${port}`).replace(
+  const publicUrl = (env.VIEWER_PUBLIC_URL ?? `http://desde.localhost:${port}`).replace(
     /\/+$/,
     "",
   )
@@ -656,6 +707,7 @@ export function loadConfig(
   // would never use it.
   const serveDomain = env.VIEWER_SERVE_DOMAIN?.trim() ? env.VIEWER_SERVE_DOMAIN.trim() : null
   const prototypeOrigin = parsePrototypeOrigin(env.VIEWER_PROTOTYPE_ORIGIN)
+  const localServeDomain = deriveLocalServeDomain({ publicUrl, serveDomain, prototypeOrigin })
   const loopbackModePossible = serveDomain === null && prototypeOrigin === null
   const loopbackPortRange = env.VIEWER_LOOPBACK_PORT_RANGE
     ? parseLoopbackPortRange(env.VIEWER_LOOPBACK_PORT_RANGE, port)
@@ -780,6 +832,7 @@ export function loadConfig(
     publicUrl,
     adminToken: env.VIEWER_ADMIN_TOKEN ?? null,
     serveDomain,
+    localServeDomain,
     // Comma-separated. Entries are lowercased and stripped of a leading `@`
     // so `@example.com`, `example.com` and `EXAMPLE.COM` all behave the
     // same — an operator should not have to guess the punctuation.

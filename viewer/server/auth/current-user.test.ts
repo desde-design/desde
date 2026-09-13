@@ -16,6 +16,7 @@ const baseConfig: ViewerConfig = {
   publicUrl: "http://localhost:3100",
   adminToken: null,
   serveDomain: null,
+  localServeDomain: null,
   devBundler: "turbopack",
   email: null,
   emailSource: null,

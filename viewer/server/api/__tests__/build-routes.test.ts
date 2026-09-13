@@ -43,6 +43,7 @@ const authConfig: ViewerConfig = {
   publicUrl: "https://viewer.example.com",
   adminToken: "admin-secret",
   serveDomain: null,
+  localServeDomain: null,
   devBundler: "turbopack",
   email: null,
   emailSource: null,
