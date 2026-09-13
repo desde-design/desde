@@ -8,7 +8,9 @@ import {
   isRecordedCommand,
   pickLoopbackPort,
   processIdentity,
+  processStartedAtSync,
   PrototypeProcessError,
+  startedAtFromProcStat,
   substitutePort,
   type PrototypeProcesses,
 } from "./prototype-processes"
@@ -154,6 +156,62 @@ describe("substitutePort", () => {
 
   it("throws on an empty serverStart", () => {
     expect(() => substitutePort([], 4321)).toThrow("serverStart is empty")
+  })
+})
+
+/**
+ * The spawn-time record stores the command THIS manager asked for, and the
+ * start time it reads back from the kernel. It never stores the child's live
+ * command line, so reading one is not a precondition for recording — which
+ * matters because `/proc/<pid>/cmdline` reads EMPTY in a narrow window right
+ * after `spawn()` returns. Measured on Linux at 2 spawns in 12,000, against
+ * a start time that read correctly in both. Requiring both fields there
+ * killed a healthy child and failed its start over a value the record throws
+ * away; two CI runs in a row died that way (2026-09-13).
+ */
+describe("startedAtFromProcStat", () => {
+  /**
+   * A `/proc/<pid>/stat` line, built the way `proc(5)` lays it out: the pid,
+   * the command name in parentheses, then the fields. `starttime` is field 22
+   * of the whole line, which is the 20th after the name — so 19 stand in
+   * ahead of it here, and the rest of the line follows.
+   */
+  const statLine = (name: string, startedAt: string): string =>
+    `4242 (${name}) ${Array.from({ length: 19 }, (_, i) => String(i)).join(" ")} ${startedAt} 94539776 1234`
+
+  it("reads the start time, counting fields from after the parenthesised name", () => {
+    expect(startedAtFromProcStat(statLine("node", "987654"))).toBe("987654")
+  })
+
+  it("counts from the LAST parenthesis, so a name holding spaces or parentheses still lands on the field", () => {
+    // What `next start` looks like once it has set its own process title.
+    expect(startedAtFromProcStat(statLine("next-server (v1", "987654"))).toBe("987654")
+  })
+
+  it("is null for a read that is not a stat line — an empty or truncated one", () => {
+    expect(startedAtFromProcStat("")).toBeNull()
+    expect(startedAtFromProcStat("4242 (node) S 1 4242")).toBeNull()
+  })
+})
+
+describe("processStartedAtSync", () => {
+  it("reads a start time for a live child the moment its spawn returns", () => {
+    const child = spawnChild(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "ignore" })
+    try {
+      expect(processStartedAtSync(child.pid as number)).toBeTypeOf("string")
+    } finally {
+      child.kill("SIGKILL")
+    }
+  })
+
+  it("is null for a pid that names no process", async () => {
+    // A pid this test owned and then killed, rather than a large number:
+    // `ps` writes its own complaint to stderr for one out of range.
+    const dead = spawnChild(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "ignore" })
+    const deadPid = dead.pid as number
+    dead.kill("SIGKILL")
+    await vi.waitFor(() => expect(alive(deadPid)).toBe(false), { timeout: 2000, interval: 25 })
+    expect(processStartedAtSync(deadPid)).toBeNull()
   })
 })
 
@@ -767,9 +825,9 @@ describe("createPrototypeProcesses", () => {
      * boot could find, so the start fails and the child is stopped rather
      * than left to outlive a crash.
      */
-    it("fails the start and stops the child when its identity cannot be read for the record", async () => {
+    it("fails the start and stops the child when its start time cannot be read for the record", async () => {
       const root = await checkoutsRoot(["d1"])
-      const procs = createPrototypeProcesses({ checkoutsRoot: root, processIdentity: () => null })
+      const procs = createPrototypeProcesses({ checkoutsRoot: root, processStartedAt: () => null })
       managers.push(procs)
       const errors = vi.spyOn(console, "error").mockImplementation(() => {})
       try {
@@ -781,7 +839,7 @@ describe("createPrototypeProcesses", () => {
       expect(status.state).toBe("crashed")
       if (status.state === "crashed") expect(status.reason).toContain("could not be started")
       await expect(readFile(join(root, "d1", ".desde-home", "server.1.pid"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
-      // Retryable: the next attempt reads the identity again.
+      // Retryable: the next attempt reads the start time again.
       await vi.waitFor(() => expect(procs.status("d1")).toMatchObject({ state: "crashed", retryable: true }))
     })
 

@@ -262,35 +262,51 @@ export interface ProcessIdentity {
 }
 
 /**
- * `processIdentity`, synchronously, for the record written right after a
- * spawn (codex round 60): the parent can be killed at any moment, and every
- * await between the spawn and the record was a window in which the child
- * outlived its parent with nothing a later boot could find. `/proc` reads
- * and a `ps` call are both quick enough to hold the event loop for.
+ * `/proc/<pid>/stat`'s start time: the 22nd field of the line. The command
+ * name sits in parentheses and may itself hold spaces and parentheses, so
+ * the fields are counted from after the LAST one — `starttime` is the 20th
+ * after the name. `null` when the text is not a stat line at all (an empty
+ * read, or one cut short).
  */
-function processIdentitySync(pid: number): ProcessIdentity | null {
+export function startedAtFromProcStat(stat: string): string | null {
+  const nameEnd = stat.lastIndexOf(")")
+  if (nameEnd === -1) return null
+  const startedAt = stat.slice(nameEnd + 2).split(" ")[19] ?? ""
+  return startedAt === "" ? null : startedAt
+}
+
+/**
+ * The child's start time, synchronously, for the record written right after
+ * a spawn (codex round 60): the parent can be killed at any moment, and
+ * every await between the spawn and the record was a window in which the
+ * child outlived its parent with nothing a later boot could find. One
+ * `/proc` read, or one `ps` call, is quick enough to hold the event loop for.
+ *
+ * The START TIME ONLY, not the whole identity — this is the one field the
+ * record takes from the kernel (its `command` is the argv this manager
+ * asked for). Reading the live command line here as well made an unrelated
+ * race fatal: `/proc/<pid>/cmdline` reads EMPTY in a narrow window just
+ * after `spawn()` returns — measured on Linux at 2 spawns in 12,000, with
+ * the start time reading correctly in both. Requiring both fields turned
+ * that empty read into a SIGKILL on a healthy child and a failed start,
+ * over a value the record then discards. Two CI runs in a row died that way
+ * (2026-09-13). The reaper still reads both, where the process has long
+ * settled and the command line is a real check — see `processIdentity`.
+ */
+export function processStartedAtSync(pid: number): string | null {
   if (process.platform === "linux") {
     try {
-      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8")
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
-      const commandLine = cmdline.split("\0").filter(Boolean).join(" ")
-      const startedAt = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? ""
-      return commandLine === "" || startedAt === "" ? null : { commandLine, startedAt }
+      return startedAtFromProcStat(readFileSync(`/proc/${pid}/stat`, "utf8"))
     } catch {
       return null
     }
   }
-  const psColumn = (column: string): string | null => {
-    try {
-      const line = execFileSync("ps", ["-o", `${column}=`, "-p", String(pid)], { encoding: "utf8" }).trim()
-      return line === "" ? null : line
-    } catch {
-      return null
-    }
+  try {
+    const line = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim()
+    return line === "" ? null : line
+  } catch {
+    return null
   }
-  const commandLine = psColumn("args")
-  const startedAt = psColumn("lstart")
-  return commandLine === null || startedAt === null ? null : { commandLine, startedAt }
 }
 
 /**
@@ -325,11 +341,8 @@ export async function processIdentity(pid: number): Promise<ProcessIdentity | nu
         readFile(`/proc/${pid}/stat`, "utf8"),
       ])
       const commandLine = cmdline.split("\0").filter(Boolean).join(" ")
-      // The command name sits in parentheses and may hold spaces, so the
-      // fields are counted from after it: `starttime` is the 22nd field of
-      // the line, the 20th after the name.
-      const startedAt = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? ""
-      return commandLine === "" || startedAt === "" ? null : { commandLine, startedAt }
+      const startedAt = startedAtFromProcStat(stat)
+      return commandLine === "" || startedAt === null ? null : { commandLine, startedAt }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       if (code === "ENOENT" || code === "ESRCH") return null
@@ -422,8 +435,8 @@ export interface PrototypeProcessesDeps {
   reapIntervalMs?: number
   maxRunning?: number
   pickPort?: () => Promise<number>
-  /** Overrides how a child's identity (command line and start time) is read for its pid record, synchronously. Tests only. */
-  processIdentity?: (pid: number) => ProcessIdentity | null
+  /** Overrides how a child's start time is read for its pid record, synchronously. Tests only. */
+  processStartedAt?: (pid: number) => string | null
   /**
    * Extra env merged into every spawned child, BEFORE `NODE_ENV`/`PORT`/
    * `HOSTNAME`/`HOST` so it can never override them.
@@ -510,7 +523,7 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
   const reapIntervalMs = deps.reapIntervalMs ?? 5 * 60_000
   const maxRunning = deps.maxRunning ?? MAX_RUNNING_SERVER_PROTOTYPES
   const pickPort = deps.pickPort ?? pickLoopbackPort
-  const readIdentity = deps.processIdentity ?? processIdentitySync
+  const readStartedAt = deps.processStartedAt ?? processStartedAtSync
   /**
    * Every port a child of this manager has been handed and not yet given
    * back (codex round 32). `pickLoopbackPort` binds an ephemeral port and
@@ -1163,12 +1176,12 @@ export function createPrototypeProcesses(deps: PrototypeProcessesDeps): Prototyp
       // reads half of one. A child that cannot be recorded is stopped here
       // and the start fails, since no later boot could find it (round 50).
       if (spawned.pid !== undefined) {
-        const identity = readIdentity(spawned.pid)
+        const startedAt = readStartedAt(spawned.pid)
         let recorded = false
-        if (identity !== null) {
+        if (startedAt !== null) {
           try {
             const target = join(home, pidFileName(generation))
-            writeFileSync(`${target}.tmp`, JSON.stringify({ pid: spawned.pid, command: [file, ...args], startedAt: identity.startedAt }))
+            writeFileSync(`${target}.tmp`, JSON.stringify({ pid: spawned.pid, command: [file, ...args], startedAt }))
             renameSync(`${target}.tmp`, target)
             recorded = true
           } catch (error) {
