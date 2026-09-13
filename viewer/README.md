@@ -277,13 +277,29 @@ nothing toward the shell. Fallback mode never adds `allow-same-origin`: the
 prototype there is still same-origin with the shell, and adding it back
 would let the prototype's JS reach into the shell's DOM.
 
-**The loopback boundary.** A loopback port is reachable by any process on
-your machine, not only your browser. Any local program that can make an
-HTTP request can reach a prototype's loopback listener while it's open.
-Prototypes served on the same loopback host share cookies with each other
-across ports, but nothing else: each port gets its own `localStorage`, its
-own IndexedDB, its own DOM. This is an accepted cost on a single-user
-laptop.
+**What loopback mode is for, and what it cannot do.** Loopback mode is for
+one machine: your browser and the viewer on the same computer, or a
+container whose prototype ports are published to that computer's own
+loopback. A prototype listener has no sign-in of its own. Reaching its port
+is the permission, and each listener answers exactly one host name; with a
+fixed port range that name carries a random label per open, so a port alone
+reaches nothing. What this cannot do is tell one person on the machine from
+another. Browsers treat the prototype frame as a different site from the
+viewer, so nothing the viewer knows about you reaches the frame. That is
+also why a server prototype's own cookies (a login session, say) are kept
+by the viewer and replayed to the prototype on every request, rather than
+stored in your browser: stored there, the browser would never send them
+back. Per-person access control belongs to subdomain mode, where the
+prototype is same-site with the viewer.
+
+What is enforced anyway: when someone's access is revoked, every listener
+of that prototype moves to a new port and a new name, and the old name is
+never answered again; a port that comes back around never brings another
+prototype's origin with it; a prototype cannot register a service worker on
+a loopback origin; and a write from another site is refused. What is
+accepted: any program on the machine can reach an open listener while it is
+open, and two people on one machine would share a server prototype's cookie
+jar. That is what "one machine" means.
 
 **Loopback listeners in a container.** Loopback mode only works when the
 browser is on the same machine as the viewer. Inside a container there is a
