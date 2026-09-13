@@ -147,6 +147,7 @@ describe("resolveOrigins", () => {
       mode: "loopback",
       shellOrigin: "http://localhost:3100",
       prototypeHost: "127.0.0.1",
+      serveDomain: null,
     })
   })
 
@@ -164,6 +165,7 @@ describe("resolveOrigins", () => {
       mode: "loopback",
       shellOrigin: "http://127.0.0.1:3100",
       prototypeHost: "[::1]",
+      serveDomain: null,
     })
   })
 
@@ -181,6 +183,7 @@ describe("resolveOrigins", () => {
       mode: "loopback",
       shellOrigin: "http://[::1]:3100",
       prototypeHost: "127.0.0.1",
+      serveDomain: null,
     })
   })
 
@@ -211,6 +214,7 @@ describe("resolveOrigins", () => {
         mode: "loopback",
         shellOrigin: "http://127.0.0.1:3100",
         prototypeHost: "localhost",
+        serveDomain: null,
       })
     })
 
@@ -276,6 +280,7 @@ describe("resolveOrigins", () => {
       mode: "fallback",
       shellOrigin: "https://desde.acme.test",
       prototypeHost: null,
+      serveDomain: null,
     })
   })
 
@@ -333,6 +338,7 @@ describe("resolveOrigins", () => {
       mode: "fallback",
       shellOrigin: "https://desde.acme.test",
       prototypeHost: null,
+      serveDomain: null,
     })
   })
 
@@ -393,6 +399,7 @@ describe("resolveOrigins", () => {
         mode: "fallback",
         shellOrigin: "https://localhost:3100",
         prototypeHost: null,
+        serveDomain: null,
       })
     })
 
@@ -463,6 +470,7 @@ describe("resolveOrigins", () => {
         mode: "fallback",
         shellOrigin: "https://desde.acme.test",
         prototypeHost: null,
+        serveDomain: null,
       })
     })
 
@@ -479,6 +487,7 @@ describe("resolveOrigins", () => {
         mode: "subdomain",
         shellOrigin: "https://desde.acme.test",
         prototypeHost: null,
+        serveDomain: "proto.acme.test",
       })
     })
   })
@@ -506,6 +515,7 @@ describe("resolveOrigins", () => {
         mode: "subdomain",
         shellOrigin: "http://localhost:3100",
         prototypeHost: null,
+        serveDomain: "desde.test",
       })
     })
 
@@ -549,6 +559,7 @@ describe("resolveOrigins", () => {
         mode: "fallback",
         shellOrigin: "http://localhost:3100",
         prototypeHost: null,
+        serveDomain: null,
       })
     })
 
@@ -606,6 +617,65 @@ describe("resolveOrigins", () => {
   })
 })
 
+describe("local subdomain mode", () => {
+  const base = {
+    hostAllowed: true,
+    hostIsPrototype: false,
+    publicUrl: "http://desde.localhost:3100",
+    serveDomain: null,
+    localServeDomain: "apps.desde.localhost",
+    loopbackAvailable: true,
+  }
+
+  it("is subdomain mode on the .localhost shell host, with the derived serve domain", () => {
+    const r = resolveOrigins({ ...base, requestHost: "desde.localhost:3100" })
+    expect(r.mode).toBe("subdomain")
+    expect(r.shellOrigin).toBe("http://desde.localhost:3100")
+    expect(r.serveDomain).toBe("apps.desde.localhost")
+    expect(r.prototypeHost).toBeNull()
+  })
+
+  it("trusts an allowed request host when the public URL is a .localhost name", () => {
+    const r = resolveOrigins({ ...base, requestHost: "localhost:3100" })
+    expect(r.shellOrigin).toBe("http://localhost:3100")
+  })
+
+  it("stays loopback for the bare loopback spellings (the Safari fallback)", () => {
+    for (const host of ["localhost:3100", "127.0.0.1:3100", "[::1]:3100"]) {
+      const r = resolveOrigins({ ...base, requestHost: host })
+      expect(r.mode).toBe("loopback")
+      expect(r.serveDomain).toBeNull()
+      expect(r.prototypeHost).not.toBeNull()
+    }
+  })
+
+  it("falls back, not loopback, for a bare spelling when listeners are unavailable", () => {
+    const r = resolveOrigins({ ...base, requestHost: "localhost:3100", loopbackAvailable: false })
+    expect(r.mode).toBe("fallback")
+  })
+
+  it("uses the public URL when the request host is not allowed or names a prototype", () => {
+    expect(resolveOrigins({ ...base, requestHost: "evil.localhost:3100", hostAllowed: false }).mode).toBe("subdomain")
+    expect(resolveOrigins({ ...base, requestHost: "x.apps.desde.localhost:3100", hostIsPrototype: true }).shellOrigin).toBe("http://desde.localhost:3100")
+  })
+
+  it("lets the explicit modes win over the derived one", () => {
+    expect(resolveOrigins({ ...base, requestHost: "desde.localhost:3100", serveDomain: "example.com" }).serveDomain).toBe("example.com")
+    expect(resolveOrigins({ ...base, requestHost: "desde.localhost:3100", prototypeOrigin: "http://proto.localhost:3100" }).mode).toBe("prototype-origin")
+  })
+
+  it("reports the configured serve domain in the result for plain subdomain mode", () => {
+    const r = resolveOrigins({ ...base, publicUrl: "https://viewer.example.com", requestHost: "viewer.example.com", localServeDomain: null, serveDomain: "example.com" })
+    expect(r.mode).toBe("subdomain")
+    expect(r.serveDomain).toBe("example.com")
+  })
+
+  it("never derives on an https shell", () => {
+    const r = resolveOrigins({ ...base, publicUrl: "https://desde.localhost", requestHost: "desde.localhost" })
+    expect(r.mode).toBe("fallback")
+  })
+})
+
 describe("resolveOrigins — prototype-origin mode (VIEWER_PROTOTYPE_ORIGIN)", () => {
   it("is prototype-origin mode when prototypeOrigin is set and no serveDomain, carrying the origin", () => {
     const result = resolveOrigins({
@@ -621,6 +691,7 @@ describe("resolveOrigins — prototype-origin mode (VIEWER_PROTOTYPE_ORIGIN)", (
       mode: "prototype-origin",
       shellOrigin: "https://app.example.com",
       prototypeHost: null,
+      serveDomain: null,
       prototypeOrigin: "https://proto.example.net",
     })
   })

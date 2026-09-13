@@ -219,6 +219,13 @@ export interface ResolvedOrigins {
    * mode. The client builds `{prototypeOrigin}/p/{slug}/~c/{token}/` from it.
    */
   prototypeOrigin?: string
+  /**
+   * The serve domain that made `mode` "subdomain": the configured one, or
+   * the derived local one. Null in every other mode. Callers build
+   * `{slug}.{serveDomain}` from THIS, never from config, so local subdomain
+   * mode and configured subdomain mode share one code path.
+   */
+  serveDomain: string | null
 }
 
 /**
@@ -443,6 +450,16 @@ export function resolveOrigins(input: {
   publicUrl: string
   serveDomain: string | null
   /**
+   * The DERIVED serve domain for local subdomain mode (`config.localServeDomain`),
+   * or null/absent. Optional so existing call sites need no edit. Used only
+   * when `serveDomain` and `prototypeOrigin` are both unset: a shell whose
+   * hostname ends with `.localhost` (the default `desde.localhost`) then
+   * gets subdomain mode on it, while the bare loopback spellings keep
+   * loopback mode as the Safari fallback. See the spec
+   * docs/superpowers/specs/2026-09-12-local-subdomain-mode-design.md.
+   */
+  localServeDomain?: string | null
+  /**
    * Whether a loopback prototype listener is allowed to open at all, from
    * `ViewerConfig.loopbackAvailable` (computed at boot in `config.ts` from
    * `VIEWER_LOOPBACK_LISTENERS`). Read ONLY inside the loopback branch — see
@@ -493,14 +510,20 @@ export function resolveOrigins(input: {
   loopbackBindAllInterfaces?: boolean
 }): ResolvedOrigins {
   const publicUrl = new URL(input.publicUrl)
-  const publicUrlIsLoopback = (LOOPBACK_HOSTS as readonly string[]).includes(
-    publicUrl.hostname.toLowerCase(),
-  )
+  const publicHostname = publicUrl.hostname.toLowerCase()
+  // A public URL on a loopback spelling OR on a `.localhost` name is the
+  // zero-config local case this per-request lookup exists for: the reviewer
+  // may have typed any of the loopback spellings or the `.localhost` name
+  // itself, and which one decides the mode (subdomain on the `.localhost`
+  // name, loopback on the bare spellings). A deployed public host stays
+  // untrusted exactly as before.
+  const publicUrlIsLocal =
+    (LOOPBACK_HOSTS as readonly string[]).includes(publicHostname) || publicHostname.endsWith(".localhost")
 
   let shellOrigin: string
   let shellHostname: string
 
-  if (input.hostAllowed && !input.hostIsPrototype && publicUrlIsLoopback && input.requestHost) {
+  if (input.hostAllowed && !input.hostIsPrototype && publicUrlIsLocal && input.requestHost) {
     // The scheme is never taken from the request: there is no reliable
     // scheme on the request object behind a proxy, and a loopback shell is
     // http in practice. publicUrl's scheme is the one source of truth for
@@ -552,19 +575,35 @@ export function resolveOrigins(input: {
   // different origin from `publicUrl` and shares its scheme, so no per-request
   // check is needed here.
   const shellIsHttp = publicUrl.protocol === "http:"
+  const shellIsBareLoopback = (LOOPBACK_HOSTS as readonly string[]).includes(shellHostname)
+  // Local subdomain mode: no explicit mode configured, an http shell, and a
+  // shell hostname that is a `.localhost` name rather than a bare loopback
+  // spelling. The bare spellings stay loopback on purpose: Safari does not
+  // resolve `*.localhost`, and `http://localhost:<port>` is its way in.
+  const localSubdomain =
+    !input.serveDomain &&
+    !input.prototypeOrigin &&
+    Boolean(input.localServeDomain) &&
+    shellIsHttp &&
+    !shellIsBareLoopback &&
+    shellHostname.endsWith(".localhost")
   const mode: OriginMode = input.serveDomain
     ? "subdomain"
     : input.prototypeOrigin
       ? "prototype-origin"
-      : shellIsHttp && (LOOPBACK_HOSTS as readonly string[]).includes(shellHostname)
-        ? input.loopbackAvailable
-          ? "loopback"
+      : localSubdomain
+        ? "subdomain"
+        : shellIsHttp && shellIsBareLoopback
+          ? input.loopbackAvailable
+            ? "loopback"
+            : "fallback"
           : "fallback"
-        : "fallback"
+  const serveDomain = mode === "subdomain" ? (input.serveDomain ?? input.localServeDomain ?? null) : null
 
   return {
     mode,
     shellOrigin,
+    serveDomain,
     prototypeHost:
       mode === "loopback"
         ? pairedLoopbackHost(shellHostname, {
