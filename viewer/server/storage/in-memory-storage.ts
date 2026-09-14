@@ -256,14 +256,15 @@ export class InMemoryStorage implements StorageAdapter {
         found.push(this.cloneProject(p))
       }
     }
-    // Sorted explicitly rather than relying on Map insertion order: the
-    // contract names an order, and a test impl that gets it right by accident
-    // is not holding the SQLite impl to anything.
-    return found.sort((a, b) =>
-      a.createdAt === b.createdAt
-        ? a.id.localeCompare(b.id)
-        : a.createdAt.localeCompare(b.createdAt),
-    )
+    // Sorted on `createdAt` ALONE, and the tie is left to sort stability.
+    //
+    // `found` was built by iterating `this.projects` in insertion order, and
+    // `Array.prototype.sort` is required to be stable, so equal timestamps
+    // keep creation order — which is what the contract means by "oldest
+    // first". Breaking the tie on `id` instead would sort by a `randomUUID`,
+    // the coin flip the SQLite impl was measured doing before it moved to
+    // `rowid`.
+    return found.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   }
 
   async createDeployment(input: DeploymentCreateInput): Promise<Deployment> {

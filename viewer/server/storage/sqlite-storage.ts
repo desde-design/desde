@@ -914,14 +914,24 @@ export class SqliteStorage implements StorageAdapter {
   async listProjectsByRepo(owner: string, name: string): Promise<Project[]> {
     // ORDER BY is load-bearing, not tidiness: without it the row order is
     // whatever the query plan produces, and every caller downstream inherits
-    // that non-determinism. `id` breaks the tie because `created_at` has
-    // millisecond resolution and two projects created in one request share it.
+    // that non-determinism.
+    //
+    // `rowid` breaks the tie, NOT `id`. `created_at` has millisecond
+    // resolution, so two projects created in one request routinely share it,
+    // and `id` is a `randomUUID` — ordering by it is a coin flip wearing a
+    // deterministic-looking ORDER BY. MEASURED with a frozen clock before
+    // this fix: 16 of 30 trials came back in the wrong order. `rowid` is the
+    // insertion sequence, which is what "oldest first" actually means.
+    //
+    // Same rule `listDeployments` follows, and the same one `StorageAdapter`
+    // states for it: an impl backed by a real clock needs a deterministic
+    // secondary key.
     const rows = this.db
       .prepare(
         `SELECT rc.project_id FROM project_repo_configs rc
          JOIN projects p ON p.id = rc.project_id
          WHERE LOWER(rc.owner) = LOWER(?) AND LOWER(rc.name) = LOWER(?)
-         ORDER BY p.created_at ASC, p.id ASC`,
+         ORDER BY p.created_at ASC, p.rowid ASC`,
       )
       .all(owner, name) as { project_id: string }[]
     const found: Project[] = []

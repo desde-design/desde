@@ -621,9 +621,16 @@ export interface StorageAdapter {
    * made the Editor's resolution depend on which row SQLite returned, and
    * decided between silently adopting and reporting a conflict on that basis.
    *
-   * Ordered oldest-first by `createdAt`, ties broken by `id`. `createdAt` is
-   * documented as not unique, so it cannot be the only key; an unordered
-   * result would put the same non-determinism back one level up.
+   * Ordered oldest-first by `createdAt`. When two projects share a
+   * `createdAt`, the impl MUST break the tie by CREATION ORDER, the same rule
+   * `listDeployments` below states and for the same reason: `createdAt` has
+   * millisecond resolution, so an impl backed by a real clock needs a
+   * deterministic secondary key (insertion sequence, or SQL rowid).
+   *
+   * It must NOT be `id`. Project ids are `randomUUID`, so ordering by one is a
+   * coin flip wearing a deterministic-looking `ORDER BY` — MEASURED at 16
+   * wrong orderings in 30 trials with a frozen clock, which first surfaced as
+   * an intermittently failing contract test rather than as anything visible.
    *
    * Matched case-INSENSITIVELY, because GitHub treats owner/name that way and
    * a case-sensitive lookup would mint a duplicate project for the same repo.

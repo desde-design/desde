@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { ConflictError, NotFoundError } from "../errors"
 import { LOG_TRUNCATION_MARKER, MAX_BUILD_LOG_BYTES } from "../log-append"
 import type { ProjectRepoConfig, StorageAdapter, UserInstallationEntry } from "../types"
@@ -190,36 +190,59 @@ export function storageAdapterContract(
     // -----------------------------------------------------------------
 
     it("returns every project connected to one repo, oldest first", async () => {
-      const store = await fresh()
       // Two prototypes on one repo is reachable through the ordinary UI:
       // `project_repo_configs` keys on project_id, so nothing stops a second
       // project claiming the same owner/name. The old single-result lookup
       // took an unordered first row, which made resolution depend on which
       // row SQLite happened to return.
-      const first = await store.createProject({ slug: "p1", name: "Main build" })
-      const second = await store.createProject({ slug: "p2", name: "Review build" })
-      for (const [project, branch] of [
-        [first, "main"],
-        [second, "design-review"],
-      ] as const) {
-        await store.setProjectRepoConfig(project.id, {
-          installationId: 1,
-          owner: "Acme",
-          name: "Proto",
-          defaultBranch: "main",
-          branch,
-          installCommand: "npm ci",
-          buildCommand: "npm run build",
-          outputDir: "dist",
-          autoDeploy: true,
-        })
-      }
+      //
+      // The clock is FROZEN so both projects get a byte-identical
+      // `createdAt`, which forces the tie-break to decide the whole answer.
+      //
+      // Without this the test only collided when the two inserts happened to
+      // land in one millisecond — true under full-suite load, false in
+      // isolation — so the original defect showed up as an intermittent
+      // failure that looked like flakiness and was nearly dismissed as such.
+      // It was not flaky. It was a `randomUUID` tie-break, wrong 16 times in
+      // 30 with the clock held still.
+      //
+      // An impl whose clock cannot collide (the in-memory one counts rather
+      // than reads a clock) passes this trivially. That is honest: it has no
+      // tie to break. The rule is stated on `StorageAdapter` for whichever
+      // impl can.
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date("2026-09-14T12:00:00.000Z"))
+      try {
+        const store = await fresh()
+        const first = await store.createProject({ slug: "p1", name: "Main build" })
+        const second = await store.createProject({ slug: "p2", name: "Review build" })
+        for (const [project, branch] of [
+          [first, "main"],
+          [second, "design-review"],
+        ] as const) {
+          await store.setProjectRepoConfig(project.id, {
+            installationId: 1,
+            owner: "Acme",
+            name: "Proto",
+            defaultBranch: "main",
+            branch,
+            installCommand: "npm ci",
+            buildCommand: "npm run build",
+            outputDir: "dist",
+            autoDeploy: true,
+          })
+        }
 
-      const found = await store.listProjectsByRepo("acme", "proto")
-      expect(found.map((p) => p.id)).toEqual([first.id, second.id])
-      expect(found.map((p) => p.repoConfig?.branch)).toEqual(["main", "design-review"])
-      await store.close()
-      await opts.cleanup?.()
+        const found = await store.listProjectsByRepo("acme", "proto")
+        expect(found.map((p) => p.id)).toEqual([first.id, second.id])
+        expect(found.map((p) => p.repoConfig?.branch)).toEqual(["main", "design-review"])
+        await store.close()
+        await opts.cleanup?.()
+      } finally {
+        // In a `finally` because a failed expectation must not leave every
+        // later test in this file running against a stopped clock.
+        vi.useRealTimers()
+      }
     })
 
     it("matches the repo case-insensitively and returns [] for a miss", async () => {
