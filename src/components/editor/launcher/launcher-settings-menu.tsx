@@ -33,7 +33,7 @@
  */
 
 import { useCallback, useState } from "react"
-import { KeyRound, SlidersHorizontal } from "lucide-react"
+import { KeyRound, Share2, SlidersHorizontal } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -47,15 +47,19 @@ import {
 } from "@/components/editor/desktop-update-menu"
 import { SettingsStatusDot } from "@/components/editor/settings-status-dot"
 import { LlmCredentialDialog } from "@/components/editor/llm-credential-dialog"
+import { YourViewerDialog } from "@/components/editor/your-viewer-dialog"
 import { everyProviderUncredentialed, useLlmCredentials } from "@/hooks/useLlmCredentials"
 import { useFirstRunCredentialPrompt } from "@/hooks/useFirstRunCredentialPrompt"
+import { useViewerAuthStatus } from "@/hooks/useViewerAuthStatus"
 import type { DesktopUpdatesApi } from "@/hooks/useDesktopUpdates"
 import { cn } from "@/lib/utils"
 
 export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi | undefined }) {
   const credentials = useLlmCredentials()
+  const viewerAuth = useViewerAuthStatus()
   const [credentialDialogManuallyOpen, setCredentialDialogManuallyOpen] =
     useState(false)
+  const [yourViewerOpen, setYourViewerOpen] = useState(false)
   // Owned here, not in `DesktopUpdateSection`: the dropdown closes on
   // select, so a dialog rendered inside it would unmount with the menu.
   const [checkDialogOpen, setCheckDialogOpen] = useState(false)
@@ -146,6 +150,16 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
               <span className="ml-auto text-2xs text-muted-foreground">Not set</span>
             ) : null}
           </DropdownMenuItem>
+          <DropdownMenuItem
+            onSelect={() => setYourViewerOpen(true)}
+            data-testid="launcher-settings-your-viewer"
+          >
+            <Share2 className="h-4 w-4" />
+            Your viewer
+            {viewerAuth.status?.defaultOrigin ? null : (
+              <span className="ml-auto text-2xs text-muted-foreground">Not set</span>
+            )}
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
       <DesktopUpdateCheckDialog
@@ -158,6 +172,18 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
         open={credentialDialogOpen}
         onOpenChange={handleCredentialDialogChange}
         credentials={credentials}
+      />
+      {/* The machine-level viewer. Its home is here, on the surface that is
+          about the person rather than a project; the project gear keeps an
+          entry that opens the same dialog against the same store, so a repo
+          opened straight from the CLI does not have to go Home to set one up.
+          No repo here, so no link summary. */}
+      <YourViewerDialog
+        open={yourViewerOpen}
+        onOpenChange={setYourViewerOpen}
+        defaultOrigin={viewerAuth.status?.defaultOrigin ?? null}
+        link={null}
+        onSaved={() => void viewerAuth.refresh()}
       />
     </>
   )

@@ -32,11 +32,11 @@ import {
 } from "./viewer-link-state.js"
 import {
   clearViewerToken,
-  readDefaultViewerOrigin,
   readViewerToken,
   writeDefaultViewerOrigin,
   writeViewerToken,
 } from "./viewer-token-store.js"
+import { readMachineViewerStatus } from "./machine-viewer-status.js"
 import {
   handleLLMFallback,
   defaultLLMFallbackLoaders,
@@ -904,7 +904,7 @@ async function handleViewerAuthStatus(
   // has to be able to say "linked, because your viewer recognised this repo"
   // differently from "linked, because this repo says so", and it must be able
   // to show a conflict, which is neither.
-  const defaultOrigin = await readDefaultViewerOrigin()
+  const machine = await readMachineViewerStatus()
   const link = await getViewerLink(ctx.repoRoot)
   const effective = effectiveViewerConfig({ baseUrl, projectId }, link)
   sendJson(res, 200, {
@@ -915,7 +915,7 @@ async function handleViewerAuthStatus(
     // necessarily the one the repo committed.
     hasToken: effective.baseUrl ? (await readViewerToken(effective.baseUrl)) !== null : hasToken,
     source: effective.source,
-    defaultOrigin,
+    defaultOrigin: machine.defaultOrigin,
     link,
   })
 }

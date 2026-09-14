@@ -47,6 +47,9 @@ import {
   handleLlmCredentialsRoute,
 } from "./llm-credentials-handler.js"
 import { isClaudeRuntimeResolvable } from "./claude-runtime-available.js"
+import { VIEWER_PROBE_ROUTE, handleViewerProbe } from "./viewer-probe.js"
+import { readMachineViewerStatus } from "./machine-viewer-status.js"
+import { writeDefaultViewerOrigin, writeViewerToken } from "./viewer-token-store.js"
 
 /**
  * The one refusal for "there is no directory at that path".
@@ -440,6 +443,52 @@ async function route(
     await handleLlmCredentialsRoute(req, res, url, {
       claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
     })
+    return
+  }
+
+  // "Your viewer" is machine-level, so the launcher's settings gear opens the
+  // same dialog the editor's does and needs the same routes. Same path on
+  // both servers, and the same auth split as the credentials block above: a
+  // same-origin GET carries no Origin header, so `required` would 403 the
+  // dialog's own status probe; writes carry one and stay strict.
+  //
+  // There is no repo here, so the response has no link to resolve. The dialog
+  // already renders nothing when `link` is absent.
+  if (
+    url.pathname === "/api/editor/viewer-auth" ||
+    url.pathname === VIEWER_PROBE_ROUTE
+  ) {
+    const auth = checkAuth(req, ctx.security, {
+      originPolicy: req.method === "GET" ? "if-present" : "required",
+    })
+    if (!auth.ok) {
+      sendJson(res, auth.status, { ok: false, reason: auth.reason })
+      return
+    }
+    if (url.pathname === VIEWER_PROBE_ROUTE) {
+      // No repoRoot, so the probe carries no pre-selected match. That is the
+      // documented optional-repo path, not a degraded one.
+      await handleViewerProbe(req, res)
+      return
+    }
+    if (req.method === "GET") {
+      const machine = await readMachineViewerStatus()
+      sendJson(res, 200, {
+        ...machine,
+        configured: false,
+        baseUrl: null,
+        projectId: null,
+        source: null,
+        matchDismissed: false,
+        link: { status: "no-viewer" },
+      })
+      return
+    }
+    if (req.method === "POST") {
+      await handleLauncherViewerAuthSet(req, res)
+      return
+    }
+    sendJson(res, 405, { ok: false, reason: "Method not allowed" })
     return
   }
 
@@ -1146,6 +1195,45 @@ async function route(
 
   res.statusCode = 405
   res.end("method not allowed")
+}
+
+/**
+ * The repo-free half of the editor's `handleViewerAuthSet`.
+ *
+ * There is no `.desde/config.json` here to fall back to, so `baseUrl` must
+ * be given explicitly. Does NOT call `invalidateViewerLink` — the launcher
+ * process holds no repo resolution to invalidate; each editor it spawns
+ * resolves for itself at its own boot.
+ */
+async function handleLauncherViewerAuthSet(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const body = await readJsonBody<{ token?: unknown; baseUrl?: unknown; makeDefault?: unknown }>(req)
+  const baseUrl = typeof body?.baseUrl === "string" ? body.baseUrl.trim() : ""
+  if (!baseUrl) {
+    sendJson(res, 400, { ok: false, reason: "No viewer URL given." })
+    return
+  }
+  const token = typeof body?.token === "string" ? body.token.trim() : ""
+  // Same shape check the editor's own store endpoint uses, so a
+  // pasted-wrong value fails HERE with a clear message rather than as a 401
+  // on the next comment fetch, which reads as "the viewer is broken".
+  if (!/^dsv_[0-9a-f]{16}_[A-Za-z0-9_-]{43}$/.test(token)) {
+    sendJson(res, 400, {
+      ok: false,
+      reason:
+        "That does not look like a viewer access token (expected `dsv_…`). Create one in the viewer under Settings.",
+    })
+    return
+  }
+  await writeViewerToken(baseUrl, token)
+  // `makeDefault` is what turns "a token for this viewer" into "this is my
+  // viewer" — the machine-level setting every repo resolves against.
+  if (body?.makeDefault === true) {
+    await writeDefaultViewerOrigin(baseUrl)
+  }
+  sendJson(res, 200, { ok: true })
 }
 
 /** Default: re-invoke this CLI on a free port and wait for the ready line. */
