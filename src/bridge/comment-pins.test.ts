@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from "vitest"
-import { buildPinAvatar, pinInitial } from "./comment-pins"
+import { buildPinAvatar, commentPinPoint, pinInitial, stackOffset } from "./comment-pins"
 
 const author = (displayName: string, photoURL: string) => ({ displayName, photoURL })
 
@@ -110,5 +110,112 @@ describe("buildPinAvatar", () => {
     img.dispatchEvent(new Event("error"))
 
     expect(img.onerror).toBeNull()
+  })
+})
+
+/**
+ * Where the pin lands.
+ *
+ * The rule Mo asked for on 2026-09-13: a pin should appear where the reviewer
+ * clicked, not at the anchored element's top-right corner, because a pin that
+ * jumps to a corner is easy to miss. The fraction is what makes that survive a
+ * resize, so the resize cases below are the point of this suite and not an
+ * edge case bolted onto it.
+ */
+const rectOf = (left: number, top: number, width: number, height: number): DOMRect =>
+  ({
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    x: left,
+    y: top,
+    toJSON: () => ({}),
+  }) as DOMRect
+
+describe("commentPinPoint", () => {
+  it("places a comment with no ratios at the element's top-right corner", () => {
+    // Every comment written before 2026-09-13 is this one. Its pin must not
+    // move a pixel.
+    expect(commentPinPoint({}, rectOf(100, 200, 400, 50), 0, 0)).toEqual({ x: 496, y: 196 })
+  })
+
+  it("treats a half-present ratio pair as absent", () => {
+    const corner = commentPinPoint({}, rectOf(100, 200, 400, 50), 0, 0)
+    expect(commentPinPoint({ offsetRatioX: 0.5 }, rectOf(100, 200, 400, 50), 0, 0)).toEqual(corner)
+    expect(commentPinPoint({ offsetRatioY: 0.5 }, rectOf(100, 200, 400, 50), 0, 0)).toEqual(corner)
+  })
+
+  it("places a click-placed pin up and to the right of the click point", () => {
+    // Clicked dead centre of a 400x100 box at (100, 200) — i.e. (300, 250).
+    // The pin's bottom-left corner lands there, overlapping by 4px each way,
+    // so its top-left is (296, 222) with the 32px pin height taken off.
+    const point = commentPinPoint({ offsetRatioX: 0.5, offsetRatioY: 0.5 }, rectOf(100, 200, 400, 100), 0, 0)
+    expect(point).toEqual({ x: 296, y: 222 })
+  })
+
+  it("adds the page scroll, so the point is document-space", () => {
+    const point = commentPinPoint({ offsetRatioX: 0.5, offsetRatioY: 0.5 }, rectOf(100, 200, 400, 100), 40, 1000)
+    expect(point).toEqual({ x: 336, y: 1222 })
+  })
+
+  it("keeps the pin at the same PROPORTIONAL spot when the element resizes", () => {
+    // The case that rules out storing a pixel offset. Clicked 25% across a
+    // 1200px-wide hero on a laptop; the same hero is 400px wide on a phone.
+    // A stored pixel offset of 300 would put the pin 300px into a 400px box —
+    // three quarters of the way across, nowhere near where it was clicked.
+    const ratios = { offsetRatioX: 0.25, offsetRatioY: 0.5 }
+    const wide = commentPinPoint(ratios, rectOf(0, 0, 1200, 200), 0, 0)
+    const narrow = commentPinPoint(ratios, rectOf(0, 0, 400, 200), 0, 0)
+    expect(wide.x).toBe(0.25 * 1200 - 4)
+    expect(narrow.x).toBe(0.25 * 400 - 4)
+  })
+
+  it("never resolves above the document origin, where the layer would clip it", () => {
+    // A click near the top edge of an element at the top of the page. The
+    // 28px upward shift would otherwise put the pin at a negative top, which
+    // the pin layer clips away entirely — a comment that exists and cannot be
+    // seen.
+    const point = commentPinPoint({ offsetRatioX: 0, offsetRatioY: 0 }, rectOf(0, 0, 300, 40), 0, 0)
+    expect(point).toEqual({ x: 0, y: 0 })
+  })
+})
+
+/**
+ * Fan-out, which is keyed on the rendered POINT rather than on the anchor
+ * selector. The cases below are the ones the key change actually moves, and
+ * one of them is a deliberate behaviour CHANGE for old comments — pinned here
+ * so it stays a decision rather than drifting back.
+ */
+describe("stackOffset", () => {
+  it("does not move a pin that is alone on its point", () => {
+    expect(stackOffset(new Map(), 100, 200)).toBe(0)
+  })
+
+  it("fans out pins that land on the same point, 20px apart", () => {
+    const counts = new Map<string, number>()
+    expect(stackOffset(counts, 100, 200)).toBe(0)
+    expect(stackOffset(counts, 100, 200)).toBe(20)
+    expect(stackOffset(counts, 100, 200)).toBe(40)
+  })
+
+  it("leaves click-placed pins on the same element alone when they are apart", () => {
+    // The case the selector key got wrong: two comments on one hero, clicked
+    // 300px apart, are already distinct and must not be displaced.
+    const counts = new Map<string, number>()
+    expect(stackOffset(counts, 100, 200)).toBe(0)
+    expect(stackOffset(counts, 400, 200)).toBe(0)
+  })
+
+  it("fans out legacy pins on DIFFERENT selectors that share a corner", () => {
+    // A deliberate change from the selector-keyed behaviour, not an accident.
+    // A wrapper and its first child commonly share a top-right corner. Under
+    // the old key each got index 0 in its own bucket and the two pins drew
+    // exactly on top of each other, leaving one unclickable. They now fan out.
+    const counts = new Map<string, number>()
+    expect(stackOffset(counts, 896, 196)).toBe(0)
+    expect(stackOffset(counts, 896, 196)).toBe(20)
   })
 })

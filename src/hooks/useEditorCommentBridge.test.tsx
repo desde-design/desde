@@ -228,6 +228,90 @@ describe("useEditorCommentBridge", () => {
     })
     expect(state.toolMode).toBe("comment")
     expect(onNewCommentPosition).toHaveBeenCalledTimes(1)
+    // No pinRect in this payload, so the composer falls back to the element.
+    expect(state.popupAnchorRect).toEqual({ top: 90, left: 100, width: 200, height: 40 })
+  })
+
+  // The click point the pin is placed at, and the composer that has to open
+  // beside it. Both are carried on this one message, and both are read out of
+  // it field by field on the way to the store — so a field dropped here is
+  // dropped silently, with the comment still saving and just landing in the
+  // wrong place.
+  it("carries the click point through, and anchors the composer to the pin", () => {
+    const { ref, contentWindow } = makeIframeRef()
+    useAppStore.setState({ toolMode: "comment" })
+    renderHook(() => useEditorCommentBridge(ref, {}))
+
+    act(() => {
+      emitBridgeMessage(contentWindow, "NEW_COMMENT_POSITION", {
+        anchorSelector: ".hero",
+        page: "/",
+        anchorX: 296,
+        anchorY: 397,
+        offsetRatioX: 0.25,
+        offsetRatioY: 0.75,
+        // Complete rects, because the bridge emits complete ones and the
+        // popup's placement reads `right`/`bottom` as well as `left`/`top`.
+        // An abbreviated fixture here quietly tests a shape the wire never
+        // carries (found by codex, 2026-09-13).
+        pinRect: { x: 296, y: 397, top: 397, left: 296, right: 328, bottom: 429, width: 32, height: 32 },
+        elementRect: { x: 100, y: 200, top: 200, left: 100, right: 900, bottom: 500, width: 800, height: 300 },
+      })
+    })
+
+    const state = useAppStore.getState()
+    expect(state.pendingPosition).toEqual({
+      anchorSelector: ".hero",
+      page: "/",
+      anchorX: 296,
+      anchorY: 397,
+      offsetRatioX: 0.25,
+      offsetRatioY: 0.75,
+    })
+    // The PIN, not the 800px-wide element it sits inside. The popup places
+    // itself off `left`/`right`/`top`/`bottom`, so the whole rect matters and
+    // not just the corner.
+    expect(state.popupAnchorRect).toEqual({
+      x: 296, y: 397, top: 397, left: 296, right: 328, bottom: 429, width: 32, height: 32,
+    })
+  })
+
+  // This message comes from the iframe, which runs the CUSTOMER's prototype
+  // code. The bridge clamps on the way out, but nothing makes the bridge the
+  // only possible sender, and a ratio is multiplied by a live element width at
+  // render time — `NaN` writes "NaNpx" into style.left, which the browser
+  // drops silently, leaving a comment that saves and then cannot be found.
+  it.each([
+    ["above 1", 2],
+    ["negative", -0.5],
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["a string", "0.5"],
+    ["only one of the pair", undefined],
+  ])("drops a ratio that is %s, falling back to corner placement", (_label, bad) => {
+    const { ref, contentWindow } = makeIframeRef()
+    useAppStore.setState({ toolMode: "comment" })
+    renderHook(() => useEditorCommentBridge(ref, {}))
+
+    act(() => {
+      emitBridgeMessage(contentWindow, "NEW_COMMENT_POSITION", {
+        anchorSelector: ".hero",
+        page: "/",
+        anchorX: 1,
+        anchorY: 2,
+        offsetRatioX: bad,
+        offsetRatioY: 0.75,
+        elementRect: { x: 100, y: 200, top: 200, left: 100, right: 900, bottom: 500, width: 800, height: 300 },
+      })
+    })
+
+    // Neither survives: a half-present pair is not a placement.
+    expect(useAppStore.getState().pendingPosition).toEqual({
+      anchorSelector: ".hero",
+      page: "/",
+      anchorX: 1,
+      anchorY: 2,
+    })
   })
 
   it("ignores messages from a different source", () => {

@@ -104,6 +104,18 @@ export interface UseEditorCommentBridgeResult {
   offTargetCommentIds: Set<string>
 }
 
+/**
+ * A pin placement ratio the renderer can actually use: a finite number in
+ * 0..1. Rejects `NaN`, `Infinity`, strings and `undefined`.
+ *
+ * See the call site for why the bound and not just the type, and for why this
+ * is a deliberate duplicate of the viewer's `isRatio` rather than a shared
+ * helper.
+ */
+function isPinRatio(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1
+}
+
 export function useEditorCommentBridge(
   iframeRef: RefObject<HTMLIFrameElement | null>,
   options: UseEditorCommentBridgeOptions = {},
@@ -253,13 +265,20 @@ export function useEditorCommentBridge(
               page?: string
               anchorX?: number
               anchorY?: number
+              offsetRatioX?: number
+              offsetRatioY?: number
+              pinRect?: unknown
               elementRect?: unknown
             }
           | undefined
         if (typeof payload?.anchorSelector !== "string") return
         if (typeof payload.page !== "string") return
+        // The composer hangs off the PIN when the bridge says where the pin
+        // will be, and off the whole element otherwise. Clicking the middle of
+        // a full-width hero used to open the composer at the hero's edge,
+        // which is the jump the pin itself was moved to avoid.
         setPopupAnchorRect(
-          (payload.elementRect ?? null) as Parameters<
+          ((payload.pinRect ?? payload.elementRect) ?? null) as Parameters<
             typeof setPopupAnchorRect
           >[0],
         )
@@ -278,6 +297,31 @@ export function useEditorCommentBridge(
           page: payload.page,
           anchorX: payload.anchorX,
           anchorY: payload.anchorY,
+          // Where in the element the reviewer clicked, so the pin lands there
+          // rather than at the element's top-right corner. Absent for a
+          // degenerate anchor rect, and the pin then keeps corner placement.
+          //
+          // Bounded here, not merely typechecked. This message arrives from
+          // the iframe, which runs the CUSTOMER's prototype code and can post
+          // whatever it likes: the bridge clamps on the way out, but nothing
+          // makes the bridge the only sender. A ratio is multiplied by a live
+          // element width at render time, so `2` puts a pin an element-width
+          // past its anchor and `NaN` writes "NaNpx" into `style.left`, which
+          // the browser discards without an error — a comment that saves fine
+          // and then cannot be found.
+          //
+          // Both or neither: the renderer treats a half-present pair as
+          // absent, so storing one alone persists a field that can never place
+          // anything while reading like a placement that exists.
+          //
+          // Same rule as the viewer's `isRatio` in
+          // `viewer/server/api/comments-routes.ts`. Deliberately duplicated
+          // rather than shared: every import `viewer/server` takes from `src/`
+          // today is `import type`, fully erased, and a four-line predicate is
+          // not worth making that boundary a runtime one.
+          ...(isPinRatio(payload.offsetRatioX) && isPinRatio(payload.offsetRatioY)
+            ? { offsetRatioX: payload.offsetRatioX, offsetRatioY: payload.offsetRatioY }
+            : {}),
         })
         onNewCommentPositionRef.current?.()
         return

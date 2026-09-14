@@ -118,6 +118,40 @@ describe("comments API", () => {
     expect(tooManyTabPanelIds.status).toBe(400)
   })
 
+  it("round-trips the click point that places the pin, and bounds it to 0..1", async () => {
+    // The pin renders at `left + width * offsetRatioX` inside the prototype,
+    // so an unbounded value places it an arbitrary distance from its anchor
+    // and a non-finite one places it nowhere visible at all. The bridge clamps
+    // on the way in; this is the same rule against a caller that is not the
+    // bridge.
+    const placed = await request(app)
+      .post(`/api/v1/projects/${projectId}/comments`)
+      .send({ position: { ...position, offsetRatioX: 0.25, offsetRatioY: 0.8 }, body: "x", author })
+    expect(placed.status).toBe(201)
+    expect(placed.body.position).toEqual({ ...position, offsetRatioX: 0.25, offsetRatioY: 0.8 })
+
+    for (const bad of [1.5, -0.1, Number.NaN, "0.5"]) {
+      const res = await request(app)
+        .post(`/api/v1/projects/${projectId}/comments`)
+        .send({ position: { ...position, offsetRatioX: bad, offsetRatioY: 0.5 }, body: "x", author })
+      expect(res.status).toBe(400)
+    }
+
+    // One ratio without the other describes no placement the renderer can use,
+    // so it must not be stored as if it did.
+    const half = await request(app)
+      .post(`/api/v1/projects/${projectId}/comments`)
+      .send({ position: { ...position, offsetRatioX: 0.5 }, body: "x", author })
+    expect(half.status).toBe(201)
+    expect(half.body.position).toEqual(position)
+
+    // And a comment placed the old way keeps storing neither.
+    const legacy = await request(app)
+      .post(`/api/v1/projects/${projectId}/comments`)
+      .send({ position, body: "x", author })
+    expect(legacy.body.position).toEqual(position)
+  })
+
   it("strips unknown keys from position and author before storing (no mass assignment)", async () => {
     const created = await request(app)
       .post(`/api/v1/projects/${projectId}/comments`)

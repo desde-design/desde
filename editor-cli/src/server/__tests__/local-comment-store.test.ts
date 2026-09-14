@@ -170,3 +170,53 @@ describe("createLocalCommentStore", () => {
     expect(numbers).toEqual(Array.from({ length: N }, (_, i) => i + 1))
   })
 })
+
+/**
+ * The click point that places the pin, through the Editor's own persistence.
+ *
+ * The Viewer rebuilds `position` from a field allowlist, so a new field there
+ * is dropped unless the allowlist names it — and that is tested on the Viewer
+ * side. The Editor stores `input.position` whole, which means the same field
+ * survives here for the OPPOSITE reason. Both surfaces have to actually keep
+ * it, and "the code looks like it passes the object through" is not the same
+ * claim as "the bytes came back off disk".
+ */
+describe("click-point placement round-trips through the file store", () => {
+  it("keeps offsetRatioX/offsetRatioY across a write and a fresh read", async () => {
+    const store = createLocalCommentStore(tmp)
+    const created = await store.create(
+      sampleInput({
+        position: {
+          anchorSelector: "#hero",
+          page: "/",
+          anchorX: 296,
+          anchorY: 397,
+          offsetRatioX: 0.25,
+          offsetRatioY: 0.75,
+        },
+      }),
+    )
+    expect(created.position.offsetRatioX).toBe(0.25)
+    expect(created.position.offsetRatioY).toBe(0.75)
+
+    // A SECOND store over the same directory, so this reads the file rather
+    // than anything the first store held in memory.
+    const reread = await createLocalCommentStore(tmp).get(created.id)
+    expect(reread!.position).toEqual({
+      anchorSelector: "#hero",
+      page: "/",
+      anchorX: 296,
+      anchorY: 397,
+      offsetRatioX: 0.25,
+      offsetRatioY: 0.75,
+    })
+  })
+
+  it("stores a corner-placed comment with no ratios at all", async () => {
+    const store = createLocalCommentStore(tmp)
+    const created = await store.create(sampleInput())
+    const reread = await createLocalCommentStore(tmp).get(created.id)
+    expect(reread!.position.offsetRatioX).toBeUndefined()
+    expect(reread!.position.offsetRatioY).toBeUndefined()
+  })
+})

@@ -12,7 +12,7 @@
  */
 import { sendToShell } from "./bridge-runtime"
 import { isElementVisible, areTabPanelsActive } from "./selector-engine"
-import { AnchorPinsManager, currentPageKey, rectJson } from "./anchor-pins"
+import { AnchorPinsManager, clickRatio, currentPageKey, rectJson, type PlacementResult } from "./anchor-pins"
 import { COMMENT_PLACEMENT_ACCENT } from "./placement-overlay"
 import type { Comment } from "./bridge-types"
 
@@ -177,6 +177,96 @@ export function buildPinAvatar(author: {
   return avatar
 }
 
+/** The pin circle's rendered size, matching `.pt-pin`'s width/height above. */
+const PIN_SIZE = 32
+
+/**
+ * How far the pin's box is shifted from the point it marks.
+ *
+ * The pin is positioned by its TOP-LEFT corner, so these put its BOTTOM-LEFT
+ * corner on the click point, overlapping it by 4px on each axis. The circle
+ * therefore sits up and to the right of where the reviewer aimed — the same
+ * relationship it has always had to the element's top-right corner, and the
+ * same one a Figma pin has to its own anchor.
+ *
+ * Up-and-right rather than centred on the click, deliberately: a 32px circle
+ * centred on the click covers the pixel the reviewer was pointing at, which is
+ * usually the thing the comment is about. Centring it is a two-constant change
+ * if that turns out to read better.
+ */
+const PIN_NUDGE_X = -4
+const PIN_NUDGE_Y = -(PIN_SIZE - 4)
+
+/**
+ * The document-space point a comment's pin is drawn at, given its anchor
+ * element's current rect.
+ *
+ * Two placements live here, and which one applies is decided by the stored
+ * position, not by a flag:
+ *
+ * - A comment with `offsetRatioX`/`offsetRatioY` was placed by CLICK. The
+ *   fractions are re-applied to whatever the element measures RIGHT NOW, so
+ *   the pin tracks the same proportional spot through a resize or a responsive
+ *   reflow rather than being pinned to a pixel offset that stops meaning
+ *   anything at another width.
+ * - A comment without them was written before 2026-09-13 and gets the corner
+ *   placement it was created under. Nothing about an old comment moves.
+ *
+ * The result is floored at 0 on both axes. A click near the top edge of an
+ * element near the top of the page resolves above the document origin, where
+ * the pin layer clips it away entirely; the corner placement could only ever
+ * be 4px out, but the click placement can be a full pin height out.
+ */
+export function commentPinPoint(
+  position: { offsetRatioX?: number; offsetRatioY?: number },
+  rect: DOMRect,
+  scrollX: number,
+  scrollY: number,
+): { x: number; y: number } {
+  const { offsetRatioX, offsetRatioY } = position
+  if (offsetRatioX == null || offsetRatioY == null) {
+    return { x: rect.right + scrollX - 4, y: rect.top + scrollY - 4 }
+  }
+  return {
+    x: Math.max(0, rect.left + rect.width * offsetRatioX + scrollX + PIN_NUDGE_X),
+    y: Math.max(0, rect.top + rect.height * offsetRatioY + scrollY + PIN_NUDGE_Y),
+  }
+}
+
+/**
+ * The fan-out offset for pins that land on the SAME point, counted through a
+ * caller-owned map.
+ *
+ * Keyed on the resolved POSITION, where it used to be keyed on the anchor
+ * selector. The change is what makes click placement work at all: two comments
+ * on the same hero, clicked 300px apart, are already visually distinct, and
+ * the selector key would have pushed the second one 20px down for a collision
+ * that is not happening.
+ *
+ * It is NOT purely behaviour-preserving for pre-2026-09-13 comments, and an
+ * earlier version of this comment claimed it was (found by codex, 2026-09-13).
+ * Two legacy comments on DIFFERENT selectors whose elements share a top-right
+ * corner — a wrapper and its first child, which is ordinary — used to fall in
+ * separate selector buckets and draw at the identical point, so one sat
+ * exactly on top of the other and could not be clicked. They now share a point
+ * bucket and fan out. That is the behaviour this mechanism exists to produce,
+ * so the change is kept and the claim is corrected rather than the code.
+ *
+ * PARKED, ruled P3 (codex, 2026-09-13): the key rounds to whole pixels, so
+ * points 0.02px apart can land either side of a boundary and fail to stack,
+ * while points almost 1px apart can share a key and fan out. Every bucketing
+ * scheme has a boundary somewhere, and a sub-pixel gap between two 32px
+ * circles is not a collision a reviewer can perceive. The case this has to
+ * catch reliably is the EXACT collision — two pins on one corner, or two
+ * clicks on one spot — and an exact key catches that exactly.
+ */
+export function stackOffset(counts: Map<string, number>, x: number, y: number): number {
+  const key = `${Math.round(x)}:${Math.round(y)}`
+  const index = counts.get(key) ?? 0
+  counts.set(key, index + 1)
+  return index * 20
+}
+
 export class CommentPinsManager extends AnchorPinsManager {
   private comments: Comment[] = []
   private pinElements = new Map<string, HTMLElement>()
@@ -196,6 +286,45 @@ export class CommentPinsManager extends AnchorPinsManager {
       exitModeType: "EXIT_COMMENT_MODE",
       placementOffsetX: -4,
     })
+  }
+
+  /**
+   * Comments place by the CLICK, not by the element's corner.
+   *
+   * `anchorX`/`anchorY` are still reported, and still mean the same thing they
+   * always did — the document point to draw the pin at when the selector stops
+   * matching — but they now describe the clicked spot rather than the top-right
+   * corner. That makes the detached-fallback pin land where the reviewer aimed
+   * too, which is strictly better than the corner it used to fall back to.
+   *
+   * A degenerate rect yields no ratio; the base class's corner placement is
+   * then the honest answer, so defer to it rather than inventing a point.
+   */
+  protected override computePlacement(rect: DOMRect, clientX: number, clientY: number): PlacementResult {
+    const ratio = clickRatio(rect, clientX, clientY)
+    if (!ratio) return super.computePlacement(rect, clientX, clientY)
+    const point = commentPinPoint(ratio, rect, window.scrollX, window.scrollY)
+    // `pinRect` is viewport-space, matching `elementRect`; `point` is
+    // document-space, matching `anchorX`/`anchorY`. Subtracting the scroll is
+    // the whole difference, and mixing the two is the bug this note exists to
+    // prevent — it only shows up on a scrolled page, so it survives testing.
+    const left = point.x - window.scrollX
+    const top = point.y - window.scrollY
+    return {
+      anchorX: point.x,
+      anchorY: point.y,
+      ...ratio,
+      pinRect: {
+        x: left,
+        y: top,
+        width: PIN_SIZE,
+        height: PIN_SIZE,
+        left,
+        top,
+        right: left + PIN_SIZE,
+        bottom: top + PIN_SIZE,
+      },
+    }
   }
 
   setComments(comments: Comment[]): void {
@@ -252,7 +381,8 @@ export class CommentPinsManager extends AnchorPinsManager {
     // Only show comments for the current page
     const currentPage = currentPageKey()
 
-    // Track how many pins share the same anchor so we can offset them
+    // Track how many pins land on the same POINT so we can fan them out.
+    // See `stackOffset` for why the key is the point and not the selector.
     const anchorCounts = new Map<string, number>()
 
     for (const comment of this.comments) {
@@ -277,15 +407,12 @@ export class CommentPinsManager extends AnchorPinsManager {
 
       if (anchorEl && isElementVisible(anchorEl)) {
         const rect = anchorEl.getBoundingClientRect()
-        const index = anchorCounts.get(selector) ?? 0
-        anchorCounts.set(selector, index + 1)
         const classes = ["pt-pin"]
         if (comment.resolved) classes.push("pt-pin--resolved")
         if (comment.id === this.activeCommentId) classes.push("pt-pin--active")
         pin.className = classes.join(" ")
-        const pinX = rect.right + window.scrollX - 4
-        const pinY = rect.top + window.scrollY - 4 + index * 20
-        this.positionPin(pin, pinX, pinY)
+        const point = commentPinPoint(comment.position, rect, window.scrollX, window.scrollY)
+        this.positionPin(pin, point.x, point.y + stackOffset(anchorCounts, point.x, point.y))
       } else if (comment.position.anchorX != null && comment.position.anchorY != null) {
         const classes = ["pt-pin", "pt-pin--detached-fallback"]
         if (comment.resolved) classes.push("pt-pin--resolved")
@@ -352,12 +479,9 @@ export class CommentPinsManager extends AnchorPinsManager {
 
       if (anchorEl && isElementVisible(anchorEl)) {
         const rect = anchorEl.getBoundingClientRect()
-        const index = anchorCounts.get(selector) ?? 0
-        anchorCounts.set(selector, index + 1)
-        const pinX = rect.right + window.scrollX - 4
-        const pinY = rect.top + window.scrollY - 4 + index * 20
+        const point = commentPinPoint(comment.position, rect, window.scrollX, window.scrollY)
         pin.classList.remove("pt-pin--detached", "pt-pin--detached-fallback")
-        this.positionPin(pin, pinX, pinY)
+        this.positionPin(pin, point.x, point.y + stackOffset(anchorCounts, point.x, point.y))
       } else if (comment.position.anchorX != null && comment.position.anchorY != null) {
         pin.classList.remove("pt-pin--detached")
         pin.classList.add("pt-pin--detached-fallback")

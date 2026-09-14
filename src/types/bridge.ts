@@ -130,6 +130,14 @@ export interface CommentPosition {
   anchorX?: number
   /** Document-relative Y coordinate — fallback when selector no longer matches */
   anchorY?: number
+  /**
+   * Where inside the anchored element the reviewer clicked, as a fraction of
+   * its box (0..1 on each axis). Absent means the pin goes to the element's
+   * top-right corner, which is what every comment written before 2026-09-13
+   * stored. See `AnnotationPosition` in ./annotation for the full reasoning.
+   */
+  offsetRatioX?: number
+  offsetRatioY?: number
 }
 
 export interface CommentAuthor {
@@ -691,7 +699,29 @@ export type BridgeToShellMessage =
   | { type: "COMMENT_PIN_CLICKED"; payload: { commentId: string; pinRect: DOMRectJSON } }
   | {
       type: "NEW_COMMENT_POSITION"
-      payload: { anchorSelector: string; page: string; anchorX: number; anchorY: number; elementRect: DOMRectJSON }
+      payload: {
+        anchorSelector: string
+        page: string
+        anchorX: number
+        anchorY: number
+        /**
+         * Click point as a fraction of the anchor's box — see `CommentPosition`.
+         * OPTIONAL: a surface that places by the element's corner rather than by
+         * the click (notes, today) sends neither, and the shell then stores
+         * neither, which is what keeps corner placement the default.
+         */
+        offsetRatioX?: number
+        offsetRatioY?: number
+        /**
+         * Where the pin will sit, in the same space as `elementRect`. A shell
+         * anchors the new-comment composer to this when present, so the
+         * composer opens beside the pin rather than beside the whole element.
+         * Absent for a corner-placed surface, and the shell falls back to
+         * `elementRect`.
+         */
+        pinRect?: DOMRectJSON
+        elementRect: DOMRectJSON
+      }
     }
   | {
       type: "PIN_POSITIONS_UPDATED"
@@ -704,7 +734,29 @@ export type BridgeToShellMessage =
     }
   | {
       type: "NEW_NOTE_POSITION"
-      payload: { anchorSelector: string; page: string; anchorX: number; anchorY: number; elementRect: DOMRectJSON }
+      payload: {
+        anchorSelector: string
+        page: string
+        anchorX: number
+        anchorY: number
+        /**
+         * Click point as a fraction of the anchor's box — see `CommentPosition`.
+         * OPTIONAL: a surface that places by the element's corner rather than by
+         * the click (notes, today) sends neither, and the shell then stores
+         * neither, which is what keeps corner placement the default.
+         */
+        offsetRatioX?: number
+        offsetRatioY?: number
+        /**
+         * Where the pin will sit, in the same space as `elementRect`. A shell
+         * anchors the new-comment composer to this when present, so the
+         * composer opens beside the pin rather than beside the whole element.
+         * Absent for a corner-placed surface, and the shell falls back to
+         * `elementRect`.
+         */
+        pinRect?: DOMRectJSON
+        elementRect: DOMRectJSON
+      }
     }
   | { type: "ROUTE_CHANGED"; payload: { url: string; sourceFile?: string } }
   /**

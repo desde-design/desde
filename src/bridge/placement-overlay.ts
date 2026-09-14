@@ -118,7 +118,20 @@ export class PlacementOverlay {
   private hoveredElement: Element | null = null
   private elements: HTMLElement[] = []
 
-  onElementSelected: ((el: Element) => void) | null = null
+  /**
+   * The chosen element, and the VIEWPORT point the reviewer actually clicked.
+   *
+   * The point used to stop here. `handleClick` had it — it is what
+   * `elementFromPoint` is called with — and then handed on only the element,
+   * so every pin the tool placed went to its element's top-right corner no
+   * matter where inside the element you aimed. Passing the point through is
+   * what lets the pin land where the click did.
+   *
+   * Viewport coordinates (`clientX`/`clientY`), not document ones. The caller
+   * compares them against a `getBoundingClientRect()`, which is also
+   * viewport-relative, so the two are in the same space with no scroll term.
+   */
+  onElementSelected: ((el: Element, clientX: number, clientY: number) => void) | null = null
   onCancel: (() => void) | null = null
 
   private boundMouseMove: (e: MouseEvent) => void
@@ -189,7 +202,7 @@ export class PlacementOverlay {
     e.stopPropagation()
     e.stopImmediatePropagation()
     this.deactivate()
-    this.onElementSelected?.(el)
+    this.onElementSelected?.(el, e.clientX, e.clientY)
   }
 
   private handleKeydown(e: KeyboardEvent): void {

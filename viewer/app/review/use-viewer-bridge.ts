@@ -127,6 +127,22 @@ export interface NewCommentDraft {
   page: string
   anchorX: number
   anchorY: number
+  /**
+   * Where inside the anchored element the reviewer clicked, as a fraction of
+   * its box on each axis. Carried through to the stored comment so the pin
+   * renders at the click rather than at the element's top-right corner.
+   *
+   * Optional: the bridge omits both for a degenerate anchor rect, and a
+   * comment stored without them keeps corner placement.
+   */
+  offsetRatioX?: number
+  offsetRatioY?: number
+  /**
+   * Where the pin will sit, in the same space as `elementRect`. The composer
+   * anchors to this when present, so it opens beside the pin instead of beside
+   * the whole element.
+   */
+  pinRect?: DOMRectJSON
   elementRect: DOMRectJSON
 }
 

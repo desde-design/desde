@@ -1252,6 +1252,12 @@ export function ReviewShell({
           page: draft.page,
           anchorX: draft.anchorX,
           anchorY: draft.anchorY,
+          // Carries the click point through to storage, so the pin renders
+          // where the reviewer clicked. Copied field by field like the rest of
+          // this object, which means a field omitted here is simply lost — the
+          // reason this line exists at all.
+          offsetRatioX: draft.offsetRatioX,
+          offsetRatioY: draft.offsetRatioY,
         },
         body,
         author: identity,
@@ -1279,8 +1285,11 @@ export function ReviewShell({
    */
   const popupAnchor = pinClick?.pinRect
     ? { rect: pinClick.pinRect, inIframe: true }
-    : draft?.elementRect
-      ? { rect: draft.elementRect, inIframe: true }
+    : draft?.pinRect || draft?.elementRect
+      ? // The PIN first: a click-placed pin sits where the reviewer clicked,
+        // and anchoring the composer to the whole element instead would open
+        // it at the element's edge, a hero's width away from the pin.
+        { rect: (draft.pinRect ?? draft.elementRect) as DOMRectJSON, inIframe: true }
       : rowAnchorRect
         ? { rect: rowAnchorRect, inIframe: false }
         : null

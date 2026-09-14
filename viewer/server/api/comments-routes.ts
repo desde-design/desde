@@ -79,14 +79,30 @@ function validateAuthorShape(a: unknown): string | null {
   return null
 }
 
+/** `undefined`, or a finite number in 0..1. Rejects NaN and Infinity. */
+function isRatio(v: unknown): boolean {
+  return v === undefined || (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1)
+}
+
 function validatePosition(p: unknown): string | null {
   if (typeof p !== "object" || p === null) return "position is required"
-  const { anchorSelector, page, anchorX, anchorY, tabPanelIds } = p as Record<string, unknown>
+  const { anchorSelector, page, anchorX, anchorY, offsetRatioX, offsetRatioY, tabPanelIds } = p as Record<
+    string,
+    unknown
+  >
   if (typeof anchorSelector !== "string" || anchorSelector.length === 0 || anchorSelector.length > MAX_SELECTOR_CHARS)
     return "position.anchorSelector is invalid"
   if (typeof page !== "string" || page.length === 0 || page.length > MAX_PAGE_CHARS) return "position.page is invalid"
   if (anchorX !== undefined && typeof anchorX !== "number") return "position.anchorX is invalid"
   if (anchorY !== undefined && typeof anchorY !== "number") return "position.anchorY is invalid"
+  // Fractions of the anchor's box, so 0..1 is the whole legal range. Bounded
+  // here and not merely typechecked: these are multiplied by a live element
+  // width in the bridge, so an out-of-range value places a pin an arbitrary
+  // distance from its anchor, and NaN/Infinity place it nowhere at all — a
+  // pin that silently does not render. The bridge clamps on the way in; this
+  // is the same rule enforced against a client that is not the bridge.
+  if (!isRatio(offsetRatioX)) return "position.offsetRatioX is invalid"
+  if (!isRatio(offsetRatioY)) return "position.offsetRatioY is invalid"
   if (
     tabPanelIds !== undefined &&
     (!Array.isArray(tabPanelIds) ||
@@ -120,12 +136,19 @@ function validateMentions(m: unknown): string | null {
  * viewer of the same comment. Only known fields survive.
  */
 function sanitizePosition(raw: Record<string, unknown>): CommentPosition {
-  const { anchorX, anchorY, tabPanelIds } = raw
+  const { anchorX, anchorY, offsetRatioX, offsetRatioY, tabPanelIds } = raw
   return {
     anchorSelector: raw.anchorSelector as string,
     page: raw.page as string,
     ...(typeof anchorX === "number" ? { anchorX } : {}),
     ...(typeof anchorY === "number" ? { anchorY } : {}),
+    // Both or neither. A position carrying one ratio and not the other is not
+    // a placement the renderer can use — it treats a half-present pair as
+    // absent — so storing one alone would persist a field that can never do
+    // anything, and would read as a placement that exists.
+    ...(typeof offsetRatioX === "number" && typeof offsetRatioY === "number"
+      ? { offsetRatioX, offsetRatioY }
+      : {}),
     ...(Array.isArray(tabPanelIds) ? { tabPanelIds: tabPanelIds as string[] } : {}),
   }
 }
