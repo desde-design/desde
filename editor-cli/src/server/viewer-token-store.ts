@@ -73,6 +73,32 @@ export function viewerTokenFilePath(home = homedir()): string {
  * slash silently creates a second entry and the user is asked to log in
  * again for a viewer they already have a token for.
  */
+/**
+ * Is this something we are willing to key a credential to, and then send that
+ * credential to?
+ *
+ * A stored viewer URL becomes the target of authenticated outbound requests
+ * carrying a `dsv_` token, so it should be trustworthy where it is STORED
+ * rather than because the dialog happened to probe it first. Both write paths
+ * shape-checked the token and neither checked the URL, so anything at all
+ * could be persisted as an origin; `normalizeOrigin` below deliberately
+ * degrades to a trimmed string rather than throwing, which meant a
+ * non-URL sailed straight through.
+ *
+ * Not reachable by an attacker today (both routes require the session bearer
+ * and a strict Origin, so only the user's own UI can call them). This closes
+ * it at the point of storage anyway, matching what `handleViewerProbe`
+ * already enforces on the same value.
+ */
+export function isStorableViewerUrl(baseUrl: string): boolean {
+  try {
+    const parsed = new URL(baseUrl)
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+  } catch {
+    return false
+  }
+}
+
 export function normalizeOrigin(baseUrl: string): string {
   try {
     return new URL(baseUrl).origin.toLowerCase()

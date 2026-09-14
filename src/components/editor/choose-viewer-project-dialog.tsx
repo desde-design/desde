@@ -17,8 +17,10 @@
  * writes. So the question is answered once, for everyone who clones the repo,
  * and later boots short-circuit resolution entirely.
  *
- * Dismissing never returns on its own. The label says so rather than reading
- * "Not now", and the manual Connect dialog is the way back.
+ * "Keep comments local" never returns on its own. The label says so rather
+ * than reading "Not now", and the manual Connect dialog is the way back.
+ * Escape and a click outside are deliberately NOT that: they close for this
+ * viewer and record nothing, because only the button states the consequence.
  */
 
 import { useCallback, useMemo, useState } from "react"
@@ -64,18 +66,29 @@ export function ChooseViewerProjectDialog({
   const [chosen, setChosen] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // Closing is tracked here so both buttons can shut the dialog immediately,
-  // without waiting for a round-trip and a re-probe.
-  const [closed, setClosed] = useState(false)
+  /**
+   * Which viewer origin this dialog has been closed FOR, rather than a bare
+   * boolean.
+   *
+   * Closing is tracked locally so both buttons shut the dialog at once,
+   * without waiting for a round-trip and a re-probe. A boolean made that
+   * suppression permanent for the session: pointing the Editor at a different
+   * viewer produces a fresh ambiguous link with `matchDismissed: false`, and
+   * the flag still hid it until a reload (codex P2). The server scopes
+   * dismissals per origin; this has to agree, or the local echo outlives the
+   * thing it was echoing.
+   */
+  const [closedForOrigin, setClosedForOrigin] = useState<string | null>(null)
 
   const link = status?.link
   const open = useMemo(() => {
-    if (closed || !status) return false
+    if (!status) return false
     // A committed link outranks any resolution, so there is nothing to ask.
     if (status.source !== null) return false
     if (status.matchDismissed) return false
-    return link?.status === "ambiguous"
-  }, [closed, status, link])
+    if (link?.status !== "ambiguous") return false
+    return closedForOrigin !== link.origin
+  }, [closedForOrigin, status, link])
 
   // Memoized (not a plain conditional) because it feeds `link_`'s dependency
   // array below: a fresh empty array on every non-ambiguous render would
@@ -86,12 +99,24 @@ export function ChooseViewerProjectDialog({
   )
   const origin = link?.status === "ambiguous" ? link.origin : null
 
+  /**
+   * Escape, or a click outside. Closes for this viewer and records NOTHING.
+   *
+   * Only the button makes it permanent, because only the button says what it
+   * does. Escape is a reflex, and wiring it to the same permanent dismissal
+   * meant one stray keypress silently stopped comments reaching the viewer
+   * with nothing on screen to say so and no obvious way back.
+   */
+  const closeForNow = useCallback(() => {
+    setClosedForOrigin(origin)
+  }, [origin])
+
   const keepLocal = useCallback(() => {
-    setClosed(true)
+    setClosedForOrigin(origin)
     // Fire and forget. A failed write means the chooser returns next launch,
     // which is the safe failure and must never block closing the dialog.
     void editorFetch("/api/editor/viewer-auth/dismiss-match", { method: "POST" })
-  }, [])
+  }, [origin])
 
   const link_ = useCallback(async () => {
     const picked = candidates.find((c) => c.projectId === chosen)
@@ -109,7 +134,7 @@ export function ChooseViewerProjectDialog({
         return
       }
       toast.success(`Linked to ${picked.name}`)
-      setClosed(true)
+      setClosedForOrigin(origin)
       onLinked()
     } finally {
       setBusy(false)
@@ -117,7 +142,7 @@ export function ChooseViewerProjectDialog({
   }, [candidates, chosen, origin, onLinked])
 
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && !busy && keepLocal()}>
+    <Dialog open={open} onOpenChange={(next) => !next && !busy && closeForNow()}>
       <DialogContent size="xl">
         <DialogHeader>
           <DialogTitle>Choose a prototype</DialogTitle>

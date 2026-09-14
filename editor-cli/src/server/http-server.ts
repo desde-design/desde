@@ -32,6 +32,7 @@ import {
 } from "./viewer-link-state.js"
 import {
   clearViewerToken,
+  isStorableViewerUrl,
   readViewerToken,
   writeDefaultViewerOrigin,
   writeViewerToken,
@@ -912,9 +913,15 @@ async function handleViewerAuthStatus(
   // machine-local file, and this repo has shipped the same defect three times
   // by letting a client reason about a flag that meant something narrower
   // than it looked. Only meaningful while the link is ambiguous.
+  // `canonicalRoot`, NOT `repoRoot`. The launcher registry is keyed by the
+  // canonical project path (`core.ts` seeds it that way at boot), and for an
+  // Editor opened on a monorepo SUBDIRECTORY the two differ: `repoRoot` is the
+  // git root. Reading by the wrong key silently misses the entry, and writing
+  // by it adds a second registry row for the git root, which the launcher then
+  // renders as a duplicate project card (codex P2).
   const matchDismissed =
     link.status === "ambiguous"
-      ? await isViewerMatchDismissed(ctx.repoRoot, link.origin)
+      ? await isViewerMatchDismissed(ctx.canonicalRoot, link.origin)
       : false
   sendJson(res, 200, {
     configured: Boolean(effective.baseUrl && effective.projectId),
@@ -944,6 +951,13 @@ async function handleViewerAuthSet(
       : (ctx.project?.platformBaseUrl ?? null)
   if (!baseUrl) {
     sendJson(res, 400, { ok: false, reason: "No viewer URL given, and none in .desde/config.json" })
+    return
+  }
+  if (!isStorableViewerUrl(baseUrl)) {
+    sendJson(res, 400, {
+      ok: false,
+      reason: `"${baseUrl}" is not a valid viewer URL: include http:// or https://.`,
+    })
     return
   }
   const token = typeof body?.token === "string" ? body.token.trim() : ""
@@ -1852,7 +1866,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
         sendJson(res, 409, { ok: false, reason: "There is nothing to dismiss." })
         return
       }
-      await dismissViewerMatch(ctx.repoRoot, link.origin)
+      // Same key as the status read above, and as the registry's own seed.
+      await dismissViewerMatch(ctx.canonicalRoot, link.origin)
       sendJson(res, 200, { ok: true })
     },
   },

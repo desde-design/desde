@@ -62,6 +62,26 @@ export function YourViewerDialog({
 }: YourViewerDialogProps) {
   const [baseUrl, setBaseUrl] = useState(defaultOrigin ?? "")
   const [token, setToken] = useState("")
+  /**
+   * Re-seed the URL when the stored one ARRIVES, not only when this component
+   * first mounts.
+   *
+   * `useState(defaultOrigin ?? "")` reads its argument once. Both settings
+   * menus mount this dialog unconditionally, and `useViewerAuthStatus` starts
+   * at `null` and fills in after a fetch — so on a machine that already has a
+   * viewer, the field initialised to "" and stayed empty, showing "no viewer
+   * set" to someone who had set one (codex P2). Saving from that state would
+   * have needed the URL retyped.
+   *
+   * Tracks the last SEEDED value rather than syncing on every render, so a
+   * user editing the field is never overwritten by a re-probe returning the
+   * same origin.
+   */
+  const [seededOrigin, setSeededOrigin] = useState(defaultOrigin ?? null)
+  if (defaultOrigin !== null && defaultOrigin !== seededOrigin) {
+    setSeededOrigin(defaultOrigin)
+    setBaseUrl(defaultOrigin)
+  }
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 

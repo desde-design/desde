@@ -49,7 +49,11 @@ import {
 import { isClaudeRuntimeResolvable } from "./claude-runtime-available.js"
 import { VIEWER_PROBE_ROUTE, handleViewerProbe } from "./viewer-probe.js"
 import { readMachineViewerStatus } from "./machine-viewer-status.js"
-import { writeDefaultViewerOrigin, writeViewerToken } from "./viewer-token-store.js"
+import {
+  isStorableViewerUrl,
+  writeDefaultViewerOrigin,
+  writeViewerToken,
+} from "./viewer-token-store.js"
 
 /**
  * The one refusal for "there is no directory at that path".
@@ -466,6 +470,14 @@ async function route(
       return
     }
     if (url.pathname === VIEWER_PROBE_ROUTE) {
+      // POST-only, checked explicitly. Dispatching on the path alone let a GET
+      // reach the probe under the lenient Origin policy above. Harmless in
+      // practice (no body means it 400s before contacting anything, so there
+      // was no request to forge) but a POST-only route should not answer GET.
+      if (req.method !== "POST") {
+        sendJson(res, 405, { ok: false, reason: "Method not allowed" })
+        return
+      }
       // No repoRoot, so the probe carries no pre-selected match. That is the
       // documented optional-repo path, not a degraded one.
       await handleViewerProbe(req, res)
@@ -1213,6 +1225,13 @@ async function handleLauncherViewerAuthSet(
   const baseUrl = typeof body?.baseUrl === "string" ? body.baseUrl.trim() : ""
   if (!baseUrl) {
     sendJson(res, 400, { ok: false, reason: "No viewer URL given." })
+    return
+  }
+  if (!isStorableViewerUrl(baseUrl)) {
+    sendJson(res, 400, {
+      ok: false,
+      reason: `"${baseUrl}" is not a valid viewer URL: include http:// or https://.`,
+    })
     return
   }
   const token = typeof body?.token === "string" ? body.token.trim() : ""

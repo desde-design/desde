@@ -122,13 +122,21 @@ async function checkCredential(
  * its count includes prototypes this caller may not be able to see; showing
  * those in a chooser would offer rows whose Link then fails. This route is
  * permission-checked, so its answer is the honest one.
+ *
+ * **`null` means the question could not be asked; `[]` means it was asked and
+ * the answer was none.** Collapsing the two was a real defect (codex P2): the
+ * caller reads an empty list as `unlinked`, and that verdict is CACHED for the
+ * life of the process. So one 500, one timeout, or one expired token turned a
+ * repo that has prototypes into "no viewer link" until the Editor restarted,
+ * taking the chooser and every credential message with it. A transient failure
+ * must not be recorded as a fact about the repo.
  */
 async function fetchRepoCandidates(
   origin: string,
   token: string,
   remoteUrl: string,
   fetchImpl?: typeof fetch,
-): Promise<ViewerCandidate[]> {
+): Promise<ViewerCandidate[] | null> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), RESOLVE_TIMEOUT_MS)
   try {
@@ -139,7 +147,7 @@ async function fetchRepoCandidates(
         signal: controller.signal,
       },
     )
-    if (!res.ok) return []
+    if (!res.ok) return null
     const body = (await res.json()) as {
       projects?: {
         id?: unknown
@@ -149,7 +157,7 @@ async function fetchRepoCandidates(
         activeDeployment?: { createdAt?: unknown } | null
       }[]
     }
-    if (!Array.isArray(body.projects)) return []
+    if (!Array.isArray(body.projects)) return null
     const out: ViewerCandidate[] = []
     for (const p of body.projects) {
       if (typeof p.id !== "string" || typeof p.slug !== "string" || typeof p.name !== "string") {
@@ -168,7 +176,7 @@ async function fetchRepoCandidates(
     }
     return out
   } catch {
-    return []
+    return null
   } finally {
     clearTimeout(timer)
   }
@@ -252,6 +260,12 @@ export async function resolveViewerLink(
         remoteUrl,
         deps.fetchImpl,
       )
+      // Could not ask, as opposed to asked and got none. Reported as an
+      // error so the repo is not recorded as unlinked on the strength of a
+      // timeout — see `fetchRepoCandidates`.
+      if (candidates === null) {
+        return { status: "error", origin, reason: "Could not reach the viewer." }
+      }
       // The authenticated list is the honest count. Resolve's is public-read
       // and includes prototypes this caller may not be able to open, so one
       // readable candidate is not an ambiguous question for this user.
