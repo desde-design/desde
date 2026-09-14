@@ -23,6 +23,7 @@ import { getActiveCliUser } from "@/lib/cli-user-identity"
 import { EDITOR_PROJECT } from "@/lib/editor-feature-flags"
 import type { CommentStore } from "@/editor/core"
 import type { CommentAuthor } from "@/types/bridge"
+import type { ViewerAuthStatus } from "./useViewerAuthStatus"
 
 export type CommentSyncMode = "viewer" | "local"
 
@@ -99,6 +100,17 @@ export interface EditorCommentStoreResult {
    * its own and the other wants a retry.
    */
   resolveFailed: boolean
+  /**
+   * The whole viewer-auth status, and a way to re-probe it.
+   *
+   * Same reasoning as `viewerProjectId` above, one level up: a caller that
+   * needs more than the project id must still not mount a second
+   * `useViewerAuthStatus`, because the hook fetches per mount with no shared
+   * cache. Its one reader today is the prototype chooser, which needs the
+   * ambiguous candidates, the dismissal flag, and a refresh after linking.
+   */
+  viewerStatus: ViewerAuthStatus | null
+  refreshViewerStatus: () => Promise<void>
 }
 
 export function useEditorCommentStore(): EditorCommentStoreResult {
@@ -107,7 +119,11 @@ export function useEditorCommentStore(): EditorCommentStoreResult {
   // the viewer store is a poll, not a push subscription. Treat SSR as
   // online so the server-rendered pass doesn't guess "local".
   const online = typeof navigator === "undefined" ? true : navigator.onLine
-  const { status: viewerAuth, loading: viewerAuthLoading } = useViewerAuthStatus()
+  const {
+    status: viewerAuth,
+    loading: viewerAuthLoading,
+    refresh: refreshViewerStatus,
+  } = useViewerAuthStatus()
 
   const { mode, needsViewerToken, resolving } = resolveCommentSyncMode({
     online,
@@ -196,7 +212,19 @@ export function useEditorCommentStore(): EditorCommentStoreResult {
       needsViewerToken,
       resolving,
       resolveFailed: resolving && !viewerAuthLoading,
+      viewerStatus: viewerAuth,
+      refreshViewerStatus,
     }),
-    [store, mode, viewerProjectId, author, needsViewerToken, resolving, viewerAuthLoading],
+    [
+      store,
+      mode,
+      viewerProjectId,
+      author,
+      needsViewerToken,
+      resolving,
+      viewerAuthLoading,
+      viewerAuth,
+      refreshViewerStatus,
+    ],
   )
 }

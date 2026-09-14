@@ -12,6 +12,16 @@
 
 import { useCallback, useEffect, useState } from "react"
 
+/** Mirrors `ViewerCandidate` in `editor-cli/src/server/viewer-resolve.ts`. */
+export interface ViewerCandidate {
+  projectId: string
+  slug: string
+  name: string
+  /** Empty string on a viewer too old to report it. */
+  branch: string
+  lastBuiltAt: string | null
+}
+
 /**
  * What the CLI resolved this repo to against the machine's default viewer.
  * Mirrors `ViewerLinkState` in `editor-cli/src/server/viewer-resolve.ts`.
@@ -21,6 +31,7 @@ export type ViewerLinkState =
   | { status: "no-token"; origin: string }
   | { status: "linked"; origin: string; projectId: string; slug: string; name: string }
   | { status: "unlinked"; origin: string }
+  | { status: "ambiguous"; origin: string; candidates: ViewerCandidate[] }
   | { status: "conflict"; origin: string; reason: string }
   | { status: "error"; origin: string; reason: string }
 
@@ -43,6 +54,11 @@ export interface ViewerAuthStatus {
   defaultOrigin: string | null
   /** The raw resolution, so the UI can show a conflict or an unreachable viewer. */
   link: ViewerLinkState
+  /**
+   * Whether this machine has already dismissed the chooser for this repo and
+   * this viewer. Only meaningful while `link.status` is `"ambiguous"`.
+   */
+  matchDismissed: boolean
 }
 
 export interface UseViewerAuthStatusResult {

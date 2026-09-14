@@ -29,6 +29,7 @@ import { LivePrototypePane } from "@/components/editor/live-prototype-pane"
 import { FileEditorPane } from "@/components/editor/file-editor-pane"
 import { useElementContextMenu } from "@/hooks/useElementContextMenu"
 import { ElementContextMenu } from "@/components/editor/element-context-menu"
+import { ChooseViewerProjectDialog } from "@/components/editor/choose-viewer-project-dialog"
 import { SaveProgressDialog } from "@/components/editor/save-progress-dialog"
 import { SwapDialog } from "@/components/editor/swap-dialog"
 import { DeleteScopeDialog } from "@/components/editor/delete-scope-dialog"
@@ -1260,6 +1261,16 @@ export function EditorSurface({
         // showing a control that does nothing.
         vscodeLinkEnabled={EDITOR_VSCODE_LINK}
         onStartChat={handleStartChatFromElement}
+      />
+      {/* Self-gating: renders nothing unless the viewer genuinely could not
+          tell which prototype this repo is. Mounted at the surface rather
+          than in the rail so it survives Canvas view and focus mode, the
+          same reasoning the comment bridge is mounted here. Its status comes
+          off `commentSync` rather than its own hook, because
+          `useViewerAuthStatus` refetches per mount. */}
+      <ChooseViewerProjectDialog
+        status={commentSync.viewerStatus}
+        onLinked={() => void commentSync.refreshViewerStatus()}
       />
     </div>
   )
