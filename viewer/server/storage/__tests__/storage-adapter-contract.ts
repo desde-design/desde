@@ -189,36 +189,6 @@ export function storageAdapterContract(
     // Repo lookup (the discovery index that prevents most collisions)
     // -----------------------------------------------------------------
 
-    it("finds a connected project by its repo, case-insensitively", async () => {
-      const store = await fresh()
-      const project = await store.createProject({ slug: "p", name: "P" })
-      await store.setProjectRepoConfig(project.id, {
-        installationId: 1,
-        owner: "Acme",
-        name: "Proto",
-        defaultBranch: "main",
-        branch: "main",
-        installCommand: "npm ci",
-        buildCommand: "npm run build",
-        outputDir: "dist",
-        autoDeploy: true,
-      })
-      // GitHub treats owner/name case-insensitively, so a lookup that
-      // disagreed would mint a duplicate project for the same repo.
-      expect((await store.getProjectByRepo("acme", "proto"))?.id).toBe(project.id)
-      expect((await store.getProjectByRepo("ACME", "PROTO"))?.id).toBe(project.id)
-      await store.close()
-      await opts.cleanup?.()
-    })
-
-    it("returns null from getProjectByRepo when nothing is connected", async () => {
-      const store = await fresh()
-      await store.createProject({ slug: "p", name: "P" })
-      expect(await store.getProjectByRepo("acme", "proto")).toBeNull()
-      await store.close()
-      await opts.cleanup?.()
-    })
-
     it("returns every project connected to one repo, oldest first", async () => {
       const store = await fresh()
       // Two prototypes on one repo is reachable through the ordinary UI:

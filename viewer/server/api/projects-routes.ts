@@ -460,8 +460,8 @@ export function createProjectsRoutes(
     // discovery index can't help, so we fall through to mint/adopt on the id.
     const parsed = remoteUrl ? parseRepoRemote(remoteUrl) : null
     const byRepo = parsed
-      ? await deps.storage.getProjectByRepo(parsed.owner, parsed.name)
-      : null
+      ? await deps.storage.listProjectsByRepo(parsed.owner, parsed.name)
+      : []
 
     res.json(
       decideResolution(

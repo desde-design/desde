@@ -911,18 +911,6 @@ export class SqliteStorage implements StorageAdapter {
     return row ? this.getProject(row.project_id) : null
   }
 
-  async getProjectByRepo(owner: string, name: string): Promise<Project | null> {
-    // GitHub treats owner/name case-insensitively; a case-SENSITIVE lookup
-    // here would mint a duplicate project for the same repo.
-    const row = this.db
-      .prepare(
-        `SELECT project_id FROM project_repo_configs
-         WHERE LOWER(owner) = LOWER(?) AND LOWER(name) = LOWER(?)`,
-      )
-      .get(owner, name) as { project_id: string } | undefined
-    return row ? this.getProject(row.project_id) : null
-  }
-
   async listProjectsByRepo(owner: string, name: string): Promise<Project[]> {
     // ORDER BY is load-bearing, not tidiness: without it the row order is
     // whatever the query plan produces, and every caller downstream inherits

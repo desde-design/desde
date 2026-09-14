@@ -612,15 +612,6 @@ export interface StorageAdapter {
   getProjectByEmbeddedId(embeddedId: string): Promise<Project | null>
 
   /**
-   * Look a project up by its connected GitHub repo — the discovery index that
-   * lets the Editor ask "do you already have a project for this remote?"
-   * before minting a new one. Matched case-INSENSITIVELY, because GitHub
-   * treats owner/name that way and a case-sensitive lookup would mint a
-   * duplicate project for the same repo.
-   */
-  getProjectByRepo(owner: string, name: string): Promise<Project | null>
-
-  /**
    * Every project connected to one GitHub repo, oldest first.
    *
    * Plural because nothing constrains it to one. `project_repo_configs` keys

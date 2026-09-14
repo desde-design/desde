@@ -45,7 +45,7 @@ function repoConfig(owner: string, name: string): ProjectRepoConfig {
   }
 }
 
-const none: ResolveLookups = { byEmbeddedId: null, byRepo: null }
+const none: ResolveLookups = { byEmbeddedId: null, byRepo: [] }
 
 describe("parseRepoRemote", () => {
   it("handles the three forms a real checkout produces", () => {
@@ -96,7 +96,7 @@ describe("decideResolution — the collision matrix", () => {
     const existing = project({ id: "p9", embeddedId: "emb-1" })
     const d = decideResolution(
       { embeddedId: "emb-1" },
-      { byEmbeddedId: existing, byRepo: null },
+      { byEmbeddedId: existing, byRepo: [] },
     )
     expect(d).toEqual({ decision: "adopt", project: view(existing) })
   })
@@ -107,7 +107,7 @@ describe("decideResolution — the collision matrix", () => {
     const existing = project({ id: "p9", embeddedId: null })
     const d = decideResolution(
       { embeddedId: "emb-1", remoteUrl: "https://github.com/acme/proto.git" },
-      { byEmbeddedId: null, byRepo: existing },
+      { byEmbeddedId: null, byRepo: [existing] },
     )
     expect(d).toEqual({ decision: "adopt", project: view(existing) })
   })
@@ -116,7 +116,7 @@ describe("decideResolution — the collision matrix", () => {
     const existing = project({ id: "p9", name: "Acme", embeddedId: "emb-OTHER" })
     const d = decideResolution(
       { embeddedId: "emb-1", remoteUrl: "https://github.com/acme/proto.git" },
-      { byEmbeddedId: null, byRepo: existing },
+      { byEmbeddedId: null, byRepo: [existing] },
     )
     // INVERTED deliberately (security audit S1): the conflict branch used
     // to carry the whole `conflictWith` project entity AND name the existing
@@ -137,7 +137,7 @@ describe("decideResolution — the collision matrix", () => {
     })
     const d = decideResolution(
       { embeddedId: "emb-1", remoteUrl: "https://github.com/someone/fork.git" },
-      { byEmbeddedId: existing, byRepo: null },
+      { byEmbeddedId: existing, byRepo: [] },
     )
     expect(d.decision).toBe("conflict")
     // Same inversion as C1/C4: no entity, and the claiming repo's
@@ -157,7 +157,7 @@ describe("decideResolution — the collision matrix", () => {
     })
     const d = decideResolution(
       { embeddedId: "emb-1", remoteUrl: "https://github.com/acme/proto.git" },
-      { byEmbeddedId: existing, byRepo: null },
+      { byEmbeddedId: existing, byRepo: [] },
     )
     expect(d).toEqual({ decision: "adopt", project: view(existing) })
   })
@@ -172,7 +172,7 @@ describe("decideResolution — the collision matrix", () => {
     })
     const d = decideResolution(
       { embeddedId: "emb-1", remoteUrl: "not-a-url" },
-      { byEmbeddedId: existing, byRepo: null },
+      { byEmbeddedId: existing, byRepo: [] },
     )
     expect(d).toEqual({ decision: "adopt", project: view(existing) })
   })
@@ -181,7 +181,7 @@ describe("decideResolution — the collision matrix", () => {
     const existing = project({ id: "p9", embeddedId: "emb-1", repoConfig: null })
     const d = decideResolution(
       { embeddedId: "emb-1", remoteUrl: "https://github.com/acme/proto.git" },
-      { byEmbeddedId: existing, byRepo: null },
+      { byEmbeddedId: existing, byRepo: [] },
     )
     expect(d).toEqual({ decision: "adopt", project: view(existing) })
   })
@@ -192,9 +192,52 @@ describe("decideResolution — the collision matrix", () => {
     const byRepo = project({ id: "by-repo", embeddedId: "emb-1" })
     const d = decideResolution(
       { embeddedId: "emb-1" },
-      { byEmbeddedId: byId, byRepo },
+      { byEmbeddedId: byId, byRepo: [byRepo] },
     )
     expect(d).toEqual({ decision: "adopt", project: view(byId) })
+  })
+})
+
+describe("decideResolution — several projects on one repo", () => {
+  it("refuses to choose, and names no project", () => {
+    const a = project({ id: "proj-a", slug: "main-build", repoConfig: repoConfig("acme", "proto") })
+    const b = project({ id: "proj-b", slug: "review", repoConfig: repoConfig("acme", "proto") })
+
+    const decision = decideResolution(
+      { remoteUrl: "https://github.com/acme/proto.git" },
+      { byEmbeddedId: null, byRepo: [a, b] },
+    )
+
+    expect(decision).toEqual({ decision: "ambiguous", count: 2 })
+    // The route is unauthenticated, so the answer carries a count and
+    // nothing else. Same discipline the conflict branch already follows
+    // when it withholds the other project's name.
+    expect(JSON.stringify(decision)).not.toContain("proj-a")
+    expect(JSON.stringify(decision)).not.toContain("main-build")
+  })
+
+  it("still adopts on the embedded id, which is exact", () => {
+    const claimed = project({ id: "proj-claimed", repoConfig: repoConfig("acme", "proto") })
+    const a = project({ id: "proj-a", repoConfig: repoConfig("acme", "proto") })
+    const b = project({ id: "proj-b", repoConfig: repoConfig("acme", "proto") })
+
+    // An id hit wins outright, so ambiguity is unreachable on that path.
+    expect(
+      decideResolution(
+        { embeddedId: "emb-1", remoteUrl: "https://github.com/acme/proto.git" },
+        { byEmbeddedId: claimed, byRepo: [a, b] },
+      ),
+    ).toEqual({ decision: "adopt", project: view(claimed) })
+  })
+
+  it("keeps the single-match behaviour exactly", () => {
+    const only = project({ repoConfig: repoConfig("acme", "proto") })
+    expect(
+      decideResolution(
+        { remoteUrl: "https://github.com/acme/proto.git" },
+        { byEmbeddedId: null, byRepo: [only] },
+      ),
+    ).toEqual({ decision: "adopt", project: view(only) })
   })
 })
 

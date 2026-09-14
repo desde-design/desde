@@ -246,18 +246,6 @@ export class InMemoryStorage implements StorageAdapter {
     return null
   }
 
-  async getProjectByRepo(owner: string, name: string): Promise<Project | null> {
-    const o = owner.toLowerCase()
-    const n = name.toLowerCase()
-    for (const p of this.projects.values()) {
-      const rc = p.repoConfig
-      if (rc && rc.owner.toLowerCase() === o && rc.name.toLowerCase() === n) {
-        return this.cloneProject(p)
-      }
-    }
-    return null
-  }
-
   async listProjectsByRepo(owner: string, name: string): Promise<Project[]> {
     const o = owner.toLowerCase()
     const n = name.toLowerCase()

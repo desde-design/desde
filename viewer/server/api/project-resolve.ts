@@ -56,6 +56,17 @@ export type ResolveDecision =
    * project the caller has not been shown to be entitled to.
    */
   | { decision: "conflict"; reason: string }
+  /**
+   * Several projects are connected to this repo, so there is no single right
+   * answer and guessing one would point comments at a prototype nobody chose.
+   *
+   * A count and nothing else. This route is UNAUTHENTICATED, so the candidate
+   * names and ids stay off it for the same reason `conflict` withholds the
+   * other project's name: the caller only had to guess an `owner/name` pair to
+   * get here. A caller holding a real token fetches the candidates from
+   * `GET /projects?remoteUrl=`, which is permission-checked.
+   */
+  | { decision: "ambiguous"; count: number }
 
 /** The projection itself. One place, so both decision branches agree. */
 function toResolveProjectView(project: Project): ResolveProjectView {
@@ -65,8 +76,12 @@ function toResolveProjectView(project: Project): ResolveProjectView {
 export interface ResolveLookups {
   /** Project claiming `embeddedId`, if any. */
   byEmbeddedId: Project | null
-  /** Project connected to `remoteUrl`'s repo, if any. */
-  byRepo: Project | null
+  /**
+   * Every project connected to `remoteUrl`'s repo, oldest first. Plural
+   * because nothing constrains it to one, and collapsing it here is what
+   * made the old behaviour depend on database row order.
+   */
+  byRepo: Project[]
 }
 
 /**
@@ -131,12 +146,20 @@ export function decideResolution(
     return { decision: "adopt", project: toResolveProjectView(byEmbeddedId) }
   }
 
-  if (byRepo) {
+  if (byRepo.length > 1) {
+    // Checked before the single-match branch below, because that branch
+    // reads `byRepo[0]` and would otherwise silently re-introduce the
+    // arbitrary pick this whole change exists to remove.
+    return { decision: "ambiguous", count: byRepo.length }
+  }
+
+  const only = byRepo[0]
+  if (only) {
     // C3 — the viewer connected this repo first and has no embedded id yet,
     // so it adopts whatever the repo carries. This is the "created in the
     // Editor, then connected in the Viewer" path working as intended.
-    if (byRepo.embeddedId === null) {
-      return { decision: "adopt", project: toResolveProjectView(byRepo) }
+    if (only.embeddedId === null) {
+      return { decision: "adopt", project: toResolveProjectView(only) }
     }
     // C1/C4 — the repo is already hosted under a DIFFERENT embedded id.
     // Two ids claim one repo; the user has to say which survives, because
