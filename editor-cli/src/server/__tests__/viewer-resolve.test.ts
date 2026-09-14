@@ -278,14 +278,12 @@ describe("resolveViewerLink — several prototypes on one repo", () => {
           slug: "a",
           name: "Prototype a",
           branch: "main",
-          lastBuiltAt: "2026-09-13T09:00:00.000Z",
         },
         {
           projectId: "b",
           slug: "b",
           name: "Prototype b",
           branch: "design-review",
-          lastBuiltAt: "2026-09-13T09:00:00.000Z",
         },
       ],
     })

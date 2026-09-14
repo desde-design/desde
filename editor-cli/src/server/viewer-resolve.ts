@@ -74,10 +74,8 @@ export interface ViewerCandidate {
   projectId: string
   slug: string
   name: string
-  /** The branch this prototype builds. */
+  /** The branch this project builds. */
   branch: string
-  /** ISO-8601, or null when it has never been built. */
-  lastBuiltAt: string | null
 }
 
 interface ResolveDeps {
@@ -154,7 +152,6 @@ async function fetchRepoCandidates(
         slug?: unknown
         name?: unknown
         repoMatch?: { branch?: unknown }
-        activeDeployment?: { createdAt?: unknown } | null
       }[]
     }
     if (!Array.isArray(body.projects)) return null
@@ -170,8 +167,6 @@ async function fetchRepoCandidates(
         // An older viewer has no `repoMatch`. The chooser degrades to name
         // and slug rather than refusing to render.
         branch: typeof p.repoMatch?.branch === "string" ? p.repoMatch.branch : "",
-        lastBuiltAt:
-          typeof p.activeDeployment?.createdAt === "string" ? p.activeDeployment.createdAt : null,
       })
     }
     return out

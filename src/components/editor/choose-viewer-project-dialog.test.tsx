@@ -38,14 +38,12 @@ function status(overrides: Partial<ViewerAuthStatus> = {}): ViewerAuthStatus {
           slug: "main-build",
           name: "Birchline",
           branch: "main",
-          lastBuiltAt: "2026-09-12T09:00:00.000Z",
         },
         {
           projectId: "b",
           slug: "review",
           name: "Birchline review",
           branch: "design-review",
-          lastBuiltAt: null,
         },
       ],
     },
@@ -62,13 +60,15 @@ describe("ChooseViewerProjectDialog", () => {
   it("lists every candidate with the branch it builds", () => {
     render(<ChooseViewerProjectDialog status={status()} onLinked={vi.fn()} />)
     expect(screen.getByText("Birchline")).toBeInTheDocument()
-    expect(screen.getByText(/Builds main/)).toBeInTheDocument()
-    expect(screen.getByText(/Builds design-review/)).toBeInTheDocument()
+    expect(screen.getByText("Branch: main")).toBeInTheDocument()
+    expect(screen.getByText("Branch: design-review")).toBeInTheDocument()
   })
 
-  it("says comments are local until a choice is made", () => {
+  it("says comments do not sync until a project is chosen", () => {
     render(<ChooseViewerProjectDialog status={status()} onLinked={vi.fn()} />)
-    expect(screen.getByText(/Comments stay on this computer/)).toBeInTheDocument()
+    expect(
+      screen.getByText(/Comments are not synced with the Viewer until a project is chosen/),
+    ).toBeInTheDocument()
   })
 
   it("cannot link until a row is chosen", () => {
@@ -78,7 +78,7 @@ describe("ChooseViewerProjectDialog", () => {
     expect(screen.getByRole("button", { name: "Link" })).toBeEnabled()
   })
 
-  it("links the chosen prototype, not the first one", async () => {
+  it("links the chosen project, not the first one", async () => {
     const onLinked = vi.fn()
     render(<ChooseViewerProjectDialog status={status()} onLinked={onLinked} />)
     fireEvent.click(screen.getByTestId("viewer-candidate-review"))
@@ -93,9 +93,9 @@ describe("ChooseViewerProjectDialog", () => {
     expect(onLinked).toHaveBeenCalled()
   })
 
-  it("records the dismissal when comments are kept local", async () => {
+  it("records the dismissal when cancelled", async () => {
     render(<ChooseViewerProjectDialog status={status()} onLinked={vi.fn()} />)
-    fireEvent.click(screen.getByRole("button", { name: "Keep comments local" }))
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
     await waitFor(() =>
       expect(editorFetch).toHaveBeenCalledWith(
         "/api/editor/viewer-auth/dismiss-match",
@@ -106,21 +106,28 @@ describe("ChooseViewerProjectDialog", () => {
   })
 
   /**
-   * Escape is a reflex, not a decision. Only the "Keep comments local" button
-   * says what closing means, so only that button should record anything.
-   * Before this fix, both paths called the same handler and Escape silently
-   * stopped comments from reaching the viewer.
+   * Escape records, exactly as Cancel does.
+   *
+   * They were split while the button read "Keep comments local": that label
+   * stated the permanent consequence and a reflexive Escape did not, so only
+   * the button made it stick. With the label now reading "Cancel"
+   * (Mo, 2026-09-14) nothing distinguishes them to a reader, and a dismissal
+   * that depended on which control their hand reached for would be worse than
+   * either rule on its own.
    */
-  it("closes on Escape without recording a dismissal", async () => {
+  it("records the dismissal on Escape too, matching Cancel", async () => {
     render(<ChooseViewerProjectDialog status={status()} onLinked={vi.fn()} />)
-    expect(screen.getByText("Choose a prototype")).toBeInTheDocument()
+    expect(screen.getByText("Choose a project")).toBeInTheDocument()
 
     fireEvent.keyDown(document, { key: "Escape" })
 
     await waitFor(() =>
-      expect(screen.queryByText("Choose a prototype")).not.toBeInTheDocument(),
+      expect(screen.queryByText("Choose a project")).not.toBeInTheDocument(),
     )
-    expect(editorFetch).not.toHaveBeenCalled()
+    expect(editorFetch).toHaveBeenCalledWith(
+      "/api/editor/viewer-auth/dismiss-match",
+      expect.objectContaining({ method: "POST" }),
+    )
   })
 
   /**
@@ -134,9 +141,9 @@ describe("ChooseViewerProjectDialog", () => {
     const { rerender } = render(
       <ChooseViewerProjectDialog status={status()} onLinked={vi.fn()} />,
     )
-    fireEvent.click(screen.getByRole("button", { name: "Keep comments local" }))
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
     await waitFor(() =>
-      expect(screen.queryByText("Choose a prototype")).not.toBeInTheDocument(),
+      expect(screen.queryByText("Choose a project")).not.toBeInTheDocument(),
     )
 
     rerender(
@@ -152,7 +159,6 @@ describe("ChooseViewerProjectDialog", () => {
                 slug: "other",
                 name: "Other viewer's prototype",
                 branch: "main",
-                lastBuiltAt: null,
               },
             ],
           },
@@ -161,14 +167,14 @@ describe("ChooseViewerProjectDialog", () => {
       />,
     )
 
-    expect(screen.getByText("Choose a prototype")).toBeInTheDocument()
+    expect(screen.getByText("Choose a project")).toBeInTheDocument()
   })
 
   it("does not open once dismissed", () => {
     render(
       <ChooseViewerProjectDialog status={status({ matchDismissed: true })} onLinked={vi.fn()} />,
     )
-    expect(screen.queryByText("Choose a prototype")).not.toBeInTheDocument()
+    expect(screen.queryByText("Choose a project")).not.toBeInTheDocument()
   })
 
   it("does not open when a committed link already answers the question", () => {
@@ -179,7 +185,7 @@ describe("ChooseViewerProjectDialog", () => {
         onLinked={vi.fn()}
       />,
     )
-    expect(screen.queryByText("Choose a prototype")).not.toBeInTheDocument()
+    expect(screen.queryByText("Choose a project")).not.toBeInTheDocument()
   })
 
   it("does not open for an unambiguous link", () => {
@@ -191,6 +197,6 @@ describe("ChooseViewerProjectDialog", () => {
         onLinked={vi.fn()}
       />,
     )
-    expect(screen.queryByText("Choose a prototype")).not.toBeInTheDocument()
+    expect(screen.queryByText("Choose a project")).not.toBeInTheDocument()
   })
 })

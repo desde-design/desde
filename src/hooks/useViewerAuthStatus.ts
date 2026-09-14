@@ -19,7 +19,6 @@ export interface ViewerCandidate {
   name: string
   /** Empty string on a viewer too old to report it. */
   branch: string
-  lastBuiltAt: string | null
 }
 
 /**

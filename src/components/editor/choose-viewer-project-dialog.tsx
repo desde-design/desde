@@ -17,10 +17,16 @@
  * writes. So the question is answered once, for everyone who clones the repo,
  * and later boots short-circuit resolution entirely.
  *
- * "Keep comments local" never returns on its own. The label says so rather
- * than reading "Not now", and the manual Connect dialog is the way back.
- * Escape and a click outside are deliberately NOT that: they close for this
- * viewer and record nothing, because only the button states the consequence.
+ * Dismissing is remembered and the dialog does not return for this viewer.
+ * Cancel, Escape and the close button all do the same thing, deliberately:
+ * they are indistinguishable to a reader, so behaving differently would make
+ * the outcome depend on which one their hand reached for. The manual Connect
+ * dialog is the way back.
+ *
+ * That uniformity is a consequence of the label. While the button read "Keep
+ * comments local" it stated the permanent consequence and Escape did not, so
+ * the two were split on purpose. "Cancel" (Mo, 2026-09-14) states nothing, so
+ * there is no longer a basis for treating them differently.
  */
 
 import { useCallback, useMemo, useState } from "react"
@@ -36,7 +42,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { editorFetch } from "@/lib/editor-fetch"
-import { formatRelativeTime } from "@/lib/relative-time"
 import { linkProjectOnDisk } from "@/services/editor-project-link"
 import type { ViewerAuthStatus, ViewerCandidate } from "@/hooks/useViewerAuthStatus"
 
@@ -46,17 +51,18 @@ export interface ChooseViewerProjectDialogProps {
   onLinked: () => void
 }
 
-/** The one line under a candidate's name. */
-function describe(candidate: ViewerCandidate): string {
-  const parts: string[] = []
-  // Empty on a viewer too old to report it. Omitted rather than shown blank.
-  if (candidate.branch) parts.push(`Builds ${candidate.branch}`)
-  parts.push(
-    candidate.lastBuiltAt
-      ? `Last built ${formatRelativeTime(candidate.lastBuiltAt)}`
-      : "Never built",
-  )
-  return parts.join(" · ")
+/**
+ * The one line under a candidate's name.
+ *
+ * The branch alone (Mo, 2026-09-14). It carried a build time too, which said
+ * nothing a reader could act on: every candidate here is a project on the same
+ * repo, so "Never built" is noise beside the one fact that tells them apart.
+ *
+ * `undefined` when the viewer is too old to report a branch, so the row shows
+ * a name with no empty second line.
+ */
+function describe(candidate: ViewerCandidate): string | undefined {
+  return candidate.branch ? `Branch: ${candidate.branch}` : undefined
 }
 
 export function ChooseViewerProjectDialog({
@@ -100,18 +106,12 @@ export function ChooseViewerProjectDialog({
   const origin = link?.status === "ambiguous" ? link.origin : null
 
   /**
-   * Escape, or a click outside. Closes for this viewer and records NOTHING.
+   * Every way of closing without choosing. Cancel, Escape, the close button.
    *
-   * Only the button makes it permanent, because only the button says what it
-   * does. Escape is a reflex, and wiring it to the same permanent dismissal
-   * meant one stray keypress silently stopped comments reaching the viewer
-   * with nothing on screen to say so and no obvious way back.
+   * The local flag shuts the dialog at once, without waiting for the
+   * round-trip; the POST is what survives a restart.
    */
-  const closeForNow = useCallback(() => {
-    setClosedForOrigin(origin)
-  }, [origin])
-
-  const keepLocal = useCallback(() => {
+  const dismiss = useCallback(() => {
     setClosedForOrigin(origin)
     // Fire and forget. A failed write means the chooser returns next launch,
     // which is the safe failure and must never block closing the dialog.
@@ -130,7 +130,7 @@ export function ChooseViewerProjectDialog({
         platformBaseUrl: origin,
       })
       if (!result.ok) {
-        setError(result.reason ?? "Could not link that prototype.")
+        setError(result.reason ?? "Could not link that project.")
         return
       }
       toast.success(`Linked to ${picked.name}`)
@@ -142,12 +142,12 @@ export function ChooseViewerProjectDialog({
   }, [candidates, chosen, origin, onLinked])
 
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && !busy && closeForNow()}>
+    <Dialog open={open} onOpenChange={(next) => !next && !busy && dismiss()}>
       <DialogContent size="xl">
         <DialogHeader>
-          <DialogTitle>Choose a prototype</DialogTitle>
+          <DialogTitle>Choose a project</DialogTitle>
           <DialogCopy
-            description="This repo matches more than one prototype on your viewer. Comments stay on this computer until you choose one."
+            description="This repo matches more than one project on your viewer. Comments are not synced with the Viewer until a project is chosen."
             {...(error ? { issues: [{ key: "link", node: error }] } : {})}
           />
         </DialogHeader>
@@ -155,7 +155,7 @@ export function ChooseViewerProjectDialog({
         <OptionCardGroup
           value={chosen}
           onValueChange={setChosen}
-          aria-label="Choose a prototype"
+          aria-label="Choose a project"
           className="max-h-64 overflow-y-auto"
         >
           {candidates.map((candidate) => (
@@ -170,8 +170,8 @@ export function ChooseViewerProjectDialog({
         </OptionCardGroup>
 
         <DialogFooter>
-          <Button variant="outline" size="sm" onClick={keepLocal} disabled={busy}>
-            Keep comments local
+          <Button variant="outline" size="sm" onClick={dismiss} disabled={busy}>
+            Cancel
           </Button>
           <Button
             size="sm"

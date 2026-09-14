@@ -13,8 +13,8 @@ describe("effectiveViewerConfig", () => {
           status: "ambiguous",
           origin: "https://viewer.test",
           candidates: [
-            { projectId: "a", slug: "a", name: "A", branch: "main", lastBuiltAt: null },
-            { projectId: "b", slug: "b", name: "B", branch: "review", lastBuiltAt: null },
+            { projectId: "a", slug: "a", name: "A", branch: "main" },
+            { projectId: "b", slug: "b", name: "B", branch: "review" },
           ],
         },
       ),
