@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -33,6 +34,10 @@ const LIVE_PROJECT_ID = process.env.LIVE_PROJECT_ID
 
 const live = Boolean(LIVE_URL && LIVE_TOKEN && LIVE_EMBEDDED_ID && LIVE_PROJECT_ID)
 
+// Not part of `live`: an older sandbox that has not been re-run yet still has
+// this unset, and the tests above must keep running without it.
+const LIVE_AMBIGUOUS_REMOTE = process.env.LIVE_AMBIGUOUS_REMOTE
+
 function repoWithIdentity(id: string | null): string {
   const root = mkdtempSync(join(tmpdir(), "live-repo-"))
   mkdirSync(join(root, ".desde"), { recursive: true })
@@ -43,6 +48,19 @@ function repoWithIdentity(id: string | null): string {
     ),
     "utf8",
   )
+  return root
+}
+
+/**
+ * A checkout with a git `origin` and no committed identity.
+ *
+ * A real `git init` because `readOriginRemoteUrl` shells out to
+ * `git remote get-url origin`; there is nothing to stub.
+ */
+function repoWithRemote(remoteUrl: string): string {
+  const root = mkdtempSync(join(tmpdir(), "live-remote-repo-"))
+  execFileSync("git", ["init", "-q"], { cwd: root })
+  execFileSync("git", ["remote", "add", "origin", remoteUrl], { cwd: root })
   return root
 }
 
@@ -96,4 +114,32 @@ describe.skipIf(!live)("resolveViewerLink against a live viewer", () => {
     // collapse into one.
     expect(result.status).toBe("no-token")
   })
+
+  it.skipIf(!LIVE_AMBIGUOUS_REMOTE)(
+    "reports ambiguous when two prototypes are connected to one repo",
+    async () => {
+      // MEASURED against a live viewer, not an injected fetch. This path turns
+      // on `/projects/resolve` (public-read) and `/projects` (permission-
+      // checked) disagreeing about what the caller can see, and a mock agrees
+      // with itself by construction.
+      const home = homeWithViewer()
+      await writeDefaultViewerOrigin(LIVE_URL!, home)
+      await writeViewerToken(LIVE_URL!, LIVE_TOKEN!, home)
+
+      const result = await resolveViewerLink(repoWithRemote(LIVE_AMBIGUOUS_REMOTE!), { home })
+
+      expect(result.status).toBe("ambiguous")
+      if (result.status !== "ambiguous") return
+      expect(result.candidates.map((c) => c.slug).sort()).toEqual([
+        "ambiguous-main",
+        "ambiguous-review",
+      ])
+      // Branch is what makes the chooser answerable, and it has to arrive for
+      // an ordinary token rather than only for an admin one.
+      expect(result.candidates.map((c) => c.branch).sort()).toEqual([
+        "design-review",
+        "main",
+      ])
+    },
+  )
 })
