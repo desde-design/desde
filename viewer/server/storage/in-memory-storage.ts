@@ -258,6 +258,26 @@ export class InMemoryStorage implements StorageAdapter {
     return null
   }
 
+  async listProjectsByRepo(owner: string, name: string): Promise<Project[]> {
+    const o = owner.toLowerCase()
+    const n = name.toLowerCase()
+    const found: Project[] = []
+    for (const p of this.projects.values()) {
+      const rc = p.repoConfig
+      if (rc && rc.owner.toLowerCase() === o && rc.name.toLowerCase() === n) {
+        found.push(this.cloneProject(p))
+      }
+    }
+    // Sorted explicitly rather than relying on Map insertion order: the
+    // contract names an order, and a test impl that gets it right by accident
+    // is not holding the SQLite impl to anything.
+    return found.sort((a, b) =>
+      a.createdAt === b.createdAt
+        ? a.id.localeCompare(b.id)
+        : a.createdAt.localeCompare(b.createdAt),
+    )
+  }
+
   async createDeployment(input: DeploymentCreateInput): Promise<Deployment> {
     const deployment: Deployment = {
       id: randomUUID(),

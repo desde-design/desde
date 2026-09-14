@@ -621,6 +621,25 @@ export interface StorageAdapter {
   getProjectByRepo(owner: string, name: string): Promise<Project | null>
 
   /**
+   * Every project connected to one GitHub repo, oldest first.
+   *
+   * Plural because nothing constrains it to one. `project_repo_configs` keys
+   * on `project_id`, so a second project can claim the same owner/name — a
+   * `main` build and a review-branch build of one repo is a legitimate setup.
+   * The single-result lookup this replaces took an unordered first row, which
+   * made the Editor's resolution depend on which row SQLite returned, and
+   * decided between silently adopting and reporting a conflict on that basis.
+   *
+   * Ordered oldest-first by `createdAt`, ties broken by `id`. `createdAt` is
+   * documented as not unique, so it cannot be the only key; an unordered
+   * result would put the same non-determinism back one level up.
+   *
+   * Matched case-INSENSITIVELY, because GitHub treats owner/name that way and
+   * a case-sensitive lookup would mint a duplicate project for the same repo.
+   */
+  listProjectsByRepo(owner: string, name: string): Promise<Project[]>
+
+  /**
    * Clear a project's repo config back to null. Idempotent on the config
    * itself (clearing an already-clear config is a no-op, not an error) —
    * but still throws NotFoundError if the PROJECT doesn't exist, mirroring

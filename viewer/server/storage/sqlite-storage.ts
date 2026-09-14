@@ -923,6 +923,29 @@ export class SqliteStorage implements StorageAdapter {
     return row ? this.getProject(row.project_id) : null
   }
 
+  async listProjectsByRepo(owner: string, name: string): Promise<Project[]> {
+    // ORDER BY is load-bearing, not tidiness: without it the row order is
+    // whatever the query plan produces, and every caller downstream inherits
+    // that non-determinism. `id` breaks the tie because `created_at` has
+    // millisecond resolution and two projects created in one request share it.
+    const rows = this.db
+      .prepare(
+        `SELECT rc.project_id FROM project_repo_configs rc
+         JOIN projects p ON p.id = rc.project_id
+         WHERE LOWER(rc.owner) = LOWER(?) AND LOWER(rc.name) = LOWER(?)
+         ORDER BY p.created_at ASC, p.id ASC`,
+      )
+      .all(owner, name) as { project_id: string }[]
+    const found: Project[] = []
+    for (const row of rows) {
+      const project = await this.getProject(row.project_id)
+      // A repo config whose project row is gone is skipped rather than
+      // thrown on: a dangling index entry must not fail a whole lookup.
+      if (project) found.push(project)
+    }
+    return found
+  }
+
   async createDeployment(input: DeploymentCreateInput): Promise<Deployment> {
     const deployment: Deployment = {
       id: randomUUID(),

@@ -219,6 +219,61 @@ export function storageAdapterContract(
       await opts.cleanup?.()
     })
 
+    it("returns every project connected to one repo, oldest first", async () => {
+      const store = await fresh()
+      // Two prototypes on one repo is reachable through the ordinary UI:
+      // `project_repo_configs` keys on project_id, so nothing stops a second
+      // project claiming the same owner/name. The old single-result lookup
+      // took an unordered first row, which made resolution depend on which
+      // row SQLite happened to return.
+      const first = await store.createProject({ slug: "p1", name: "Main build" })
+      const second = await store.createProject({ slug: "p2", name: "Review build" })
+      for (const [project, branch] of [
+        [first, "main"],
+        [second, "design-review"],
+      ] as const) {
+        await store.setProjectRepoConfig(project.id, {
+          installationId: 1,
+          owner: "Acme",
+          name: "Proto",
+          defaultBranch: "main",
+          branch,
+          installCommand: "npm ci",
+          buildCommand: "npm run build",
+          outputDir: "dist",
+          autoDeploy: true,
+        })
+      }
+
+      const found = await store.listProjectsByRepo("acme", "proto")
+      expect(found.map((p) => p.id)).toEqual([first.id, second.id])
+      expect(found.map((p) => p.repoConfig?.branch)).toEqual(["main", "design-review"])
+      await store.close()
+      await opts.cleanup?.()
+    })
+
+    it("matches the repo case-insensitively and returns [] for a miss", async () => {
+      const store = await fresh()
+      const project = await store.createProject({ slug: "p", name: "P" })
+      await store.setProjectRepoConfig(project.id, {
+        installationId: 1,
+        owner: "Acme",
+        name: "Proto",
+        defaultBranch: "main",
+        branch: "main",
+        installCommand: "npm ci",
+        buildCommand: "npm run build",
+        outputDir: "dist",
+        autoDeploy: true,
+      })
+      expect((await store.listProjectsByRepo("ACME", "PROTO")).map((p) => p.id)).toEqual([
+        project.id,
+      ])
+      expect(await store.listProjectsByRepo("acme", "other")).toEqual([])
+      await store.close()
+      await opts.cleanup?.()
+    })
+
     it("deletes a project", async () => {
       const store = await fresh()
       const created = await store.createProject({ slug: "acme", name: "Acme" })
