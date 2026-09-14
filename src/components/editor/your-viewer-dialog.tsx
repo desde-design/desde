@@ -17,7 +17,7 @@ import { editorFetch } from "@/lib/editor-fetch"
 import type { ViewerLinkState } from "@/hooks/useViewerAuthStatus"
 
 /**
- * "Your viewer" — the machine-level viewer, set once.
+ * "Viewer" — the machine-level viewer, set once.
  *
  * The point of it (Mo, 2026-08-26): point the Editor at a viewer, and every
  * repo you open afterwards finds its own project by itself. The CLI asks the
@@ -123,7 +123,7 @@ export function YourViewerDialog({
     <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
       <DialogContent size="xl">
         <DialogHeader>
-          <DialogTitle>Your viewer</DialogTitle>
+          <DialogTitle>Viewer</DialogTitle>
           <DialogCopy
             description="Projects you open will link themselves to this viewer when it recognises them. This is stored on this computer, not in any repo."
             {...(error ? { issues: [{ key: "save", node: error }] } : {})}

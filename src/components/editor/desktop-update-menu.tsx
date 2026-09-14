@@ -308,10 +308,17 @@ export function DesktopUpdateSection({
   if (!updates) return null
   return (
     <>
+      {/* The separator LEADS the section, because the section sits at the
+          BOTTOM of both menus (Mo, 2026-09-14: keys and Viewer at the top,
+          everything else below). It used to trail, which was right while this
+          was the first thing in the menu and wrong the moment it moved last —
+          a trailing rule under the final item is a divider with nothing after
+          it. Still inside the `!updates` early return, so a plain browser tab
+          gets no stray rule. */}
+      <DropdownMenuSeparator />
       <DesktopUpdateStatusRow updates={updates} onRestartClick={onRestartClick} />
       <DesktopUpdateAutoDownloadItem updates={updates} />
       <DesktopUpdateCheckNowItem updates={updates} onSelect={onCheckClick} />
-      <DropdownMenuSeparator />
     </>
   )
 }

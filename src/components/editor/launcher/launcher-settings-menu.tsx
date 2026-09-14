@@ -132,14 +132,10 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-64">
-          {/* Renders nothing, separator included, when there is no desktop
-              bridge — so a plain browser tab gets a menu of one item rather
-              than a leading rule with nothing above it. */}
-          <DesktopUpdateSection
-            updates={updates}
-            onRestartClick={handleRestartClick}
-            onCheckClick={() => setCheckDialogOpen(true)}
-          />
+          {/* The two things a person comes here to SET lead the menu, and
+              updates follow them (Mo, 2026-09-14). Updates were first because
+              this menu grew out of a standalone update button; that is a fact
+              about its history, not about what anyone opens it for. */}
           <DropdownMenuItem
             onSelect={() => setCredentialDialogManuallyOpen(true)}
             data-testid="launcher-settings-api-key"
@@ -155,11 +151,19 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
             data-testid="launcher-settings-your-viewer"
           >
             <Share2 className="h-4 w-4" />
-            Your viewer
+            Viewer
             {viewerAuth.status?.defaultOrigin ? null : (
               <span className="ml-auto text-2xs text-muted-foreground">Not set</span>
             )}
           </DropdownMenuItem>
+          {/* Renders nothing, its leading separator included, when there is no
+              desktop bridge — so a plain browser tab ends at the item above
+              rather than on a trailing rule. */}
+          <DesktopUpdateSection
+            updates={updates}
+            onRestartClick={handleRestartClick}
+            onCheckClick={() => setCheckDialogOpen(true)}
+          />
         </DropdownMenuContent>
       </DropdownMenu>
       <DesktopUpdateCheckDialog

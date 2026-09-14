@@ -97,7 +97,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe("LauncherSettingsMenu — Your viewer", () => {
+describe("LauncherSettingsMenu — Viewer", () => {
   it("offers the machine-level viewer setting", async () => {
     stubFetch({ defaultOrigin: "https://viewer.test" })
     render(<LauncherSettingsMenu updates={undefined} />)

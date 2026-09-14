@@ -230,11 +230,10 @@ export function EditorSettingsMenu({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DesktopUpdateSection
-            updates={updates}
-            onRestartClick={handleRestartClick}
-            onCheckClick={() => setCheckDialogOpen(true)}
-          />
+          {/* Machine-level first: the two things a person opens this menu to
+              SET, and neither belongs to the open project (Mo, 2026-09-14).
+              Everything under the separator is project-scoped, and updates
+              come last. */}
           <DropdownMenuItem
             onSelect={() => setCredentialDialogManuallyOpen(true)}
             data-testid="editor-settings-api-key"
@@ -244,6 +243,19 @@ export function EditorSettingsMenu({
             {credentialMissing ? (
               <span className="ml-auto text-2xs text-muted-foreground">Not set</span>
             ) : null}
+          </DropdownMenuItem>
+          {/* The MACHINE's viewer: one URL and token for every repo this
+              Editor opens, which is why it sits with the AI keys rather than
+              in the project group below. */}
+          <DropdownMenuItem
+            onSelect={() => setYourViewerOpen(true)}
+            data-testid="editor-settings-your-viewer"
+          >
+            <Share2 className="h-4 w-4" />
+            Viewer
+            {viewerAuth.status?.defaultOrigin ? null : (
+              <span className="ml-auto text-2xs text-muted-foreground">Not set</span>
+            )}
           </DropdownMenuItem>
           {/*
             Color theme is hidden (Mo, 2026-08-17). Dark mode is not designed
@@ -281,25 +293,16 @@ export function EditorSettingsMenu({
             <FolderSearch className="h-4 w-4" />
             Reference folders
           </DropdownMenuItem>
-          {/* The MACHINE's viewer, above the per-repo link. Setting it once
-              is what lets every other repo resolve itself, so it comes first:
-              the item below is the override, not the starting point. */}
-          <DropdownMenuItem
-            onSelect={() => setYourViewerOpen(true)}
-            data-testid="editor-settings-your-viewer"
-          >
-            <Share2 className="h-4 w-4" />
-            Your viewer
-            {viewerAuth.status?.defaultOrigin ? null : (
-              <span className="ml-auto text-2xs text-muted-foreground">Not set</span>
-            )}
-          </DropdownMenuItem>
+          {/* The per-repo link, in the project group because that is what it
+              is. It cannot also be called "Viewer": the machine-level item at
+              the top now owns that word, and two identically labelled entries
+              opening different dialogs is worse than either name. */}
           <DropdownMenuItem
             onSelect={() => setConnectViewerOpen(true)}
             data-testid="editor-settings-connect-viewer"
           >
             <Share2 className="h-4 w-4" />
-            {viewerAuth.status?.configured ? "Viewer" : "Share for review…"}
+            Link this project…
             {viewerAuth.status?.configured ? (
               <span className="ml-auto text-2xs text-muted-foreground">Connected</span>
             ) : null}
@@ -314,6 +317,11 @@ export function EditorSettingsMenu({
             un-hiding it is deleting this comment. What it needs first is a
             name that says what it checks and when to reach for it.
           */}
+          <DesktopUpdateSection
+            updates={updates}
+            onRestartClick={handleRestartClick}
+            onCheckClick={() => setCheckDialogOpen(true)}
+          />
         </DropdownMenuContent>
       </DropdownMenu>
       <YourViewerDialog
