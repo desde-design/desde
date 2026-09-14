@@ -218,10 +218,22 @@ function RevealFixture({ withCopy }: { withCopy: boolean }) {
       if (cancelled || !createButton) return
       clickLikeUser(createButton)
 
-      const revealCode = await waitForElement(() => document.querySelector("code.text-code"))
+      const revealCode = await waitForElement(() =>
+        document.querySelector('[data-testid="token-plaintext-row"] code.text-code'),
+      )
       if (cancelled || !revealCode || !withCopy) return
 
-      const copyButton = await waitForElement(() => findByText<HTMLButtonElement>("button", /^copy$/i))
+      // Scoped to the token's own row. The reveal box grew a second value
+      // (the viewer URL, 2026-09-13) with its own Copy button standing FIRST
+      // in the DOM, so an unscoped search would demonstrate copying the
+      // address while the screen is named for copying the token.
+      const tokenRow = await waitForElement(() =>
+        document.querySelector<HTMLElement>('[data-testid="token-plaintext-row"]'),
+      )
+      if (cancelled || !tokenRow) return
+      const copyButton = await waitForElement(() =>
+        findByText<HTMLButtonElement>("button", /^copy$/i, tokenRow),
+      )
       if (cancelled || !copyButton) return
       clickLikeUser(copyButton)
 

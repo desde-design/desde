@@ -21,6 +21,8 @@ import { LoadFailure } from "../load-failure"
 import { failureMessage } from "../api-client"
 import { useCurrentUser } from "../use-current-user"
 import {
+  editorConnectUrl,
+  editorConnectUrlDiffers,
   isMachineTokenView,
   isTokenExpired,
   validateExpiresInDays,
@@ -446,6 +448,17 @@ function CreateTokenDialog({
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [created, setCreated] = useState<CreatedToken | null>(null)
+  /*
+    Read after mount, never during render. `window` does not exist while this
+    page is prerendered on the server, and an origin that appears on the
+    client but not in the server's HTML is a hydration mismatch. Empty until
+    the effect runs, which is also the honest state: the address is unknown
+    at that point.
+  */
+  const [shellOrigin, setShellOrigin] = useState("")
+  useEffect(() => {
+    setShellOrigin(window.location.origin)
+  }, [])
 
   const scopes: MachineTokenScope[] = useMemo(
     () => [...(scopeRead ? (["read"] as const) : []), ...(scopeWrite ? (["write"] as const) : [])],
@@ -532,12 +545,50 @@ function CreateTokenDialog({
                 you, within its scopes.
               </DialogDescription>
             </DialogHeader>
-            <div className="flex items-center gap-1.5">
-              <code className="min-w-0 flex-1 truncate rounded-sm bg-muted px-2 py-1 text-code">
-                {created.token}
-              </code>
-              <CopyButton value={created.token} />
+            {/*
+              Two values, labelled, in the order the Editor's own dialog asks
+              for them. The token used to stand here alone, which quietly
+              assumed the reader already knew the other half of the handover.
+              They did not: the address is the thing this instance cannot
+              expect anyone to guess (Mo, 2026-09-13).
+            */}
+            <div className="grid gap-2">
+              {shellOrigin !== "" && (
+                <div className="grid gap-1">
+                  <span className="text-xs text-muted-foreground">Viewer URL</span>
+                  <div className="flex items-center gap-1.5">
+                    <code
+                      className="min-w-0 flex-1 truncate rounded-sm bg-muted px-2 py-1 text-code"
+                      data-testid="token-viewer-url"
+                    >
+                      {editorConnectUrl(shellOrigin)}
+                    </code>
+                    <CopyButton value={editorConnectUrl(shellOrigin)} />
+                  </div>
+                </div>
+              )}
+              <div className="grid gap-1" data-testid="token-plaintext-row">
+                <span className="text-xs text-muted-foreground">Access token</span>
+                <div className="flex items-center gap-1.5">
+                  <code className="min-w-0 flex-1 truncate rounded-sm bg-muted px-2 py-1 text-code">
+                    {created.token}
+                  </code>
+                  <CopyButton value={created.token} />
+                </div>
+              </div>
             </div>
+            {/*
+              Said only where it is true. On a deployed viewer the two
+              addresses are identical and this line would be noise, which is
+              how a reader learns to skip the one line that matters.
+            */}
+            {editorConnectUrlDiffers(shellOrigin) && (
+              <p className="text-sm text-muted-foreground" data-testid="token-viewer-url-note">
+                This is not the address in your browser bar. Names under{" "}
+                <code className="text-code">.localhost</code> work in Chrome and Firefox, but the
+                Editor runs outside the browser and cannot look them up.
+              </p>
+            )}
             {/*
               Where it goes, said at the only moment the user holds it.
               Otherwise this dialog hands over a secret and leaves the reader
@@ -561,9 +612,8 @@ function CreateTokenDialog({
             */}
             <p className="text-base text-foreground" data-testid="token-usage-hint">
               To connect the Editor, open its settings menu, choose{" "}
-              <strong className="font-medium">Share for review</strong>, and paste this into{" "}
-              <strong className="font-medium">Access token</strong>. It is stored on that machine
-              only.
+              <strong className="font-medium">Share for review</strong>, and paste both values in.
+              They are stored on that machine only.
             </p>
             <DialogFooter>
               <Button size="sm" onClick={() => handleOpenChange(false)}>

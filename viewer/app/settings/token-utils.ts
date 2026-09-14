@@ -109,3 +109,69 @@ export function formatTimestamp(iso: string | null, fallback = "Never"): string 
   if (Number.isNaN(d.getTime())) return fallback
   return d.toISOString().slice(0, 10)
 }
+
+/**
+ * The viewer address to paste into the Editor, given the origin the browser
+ * is currently on.
+ *
+ * ## Why this is not simply the address bar
+ *
+ * Since local subdomain mode became the default (2026-09-13) a laptop viewer
+ * serves its shell at `http://desde.localhost:3100`, and every prototype at
+ * `{slug}.apps.desde.localhost`. Resolving a name under `.localhost` without
+ * DNS is a BROWSER behavior (RFC 6761 §6.3): Chrome and Firefox do it, and so
+ * does curl, which is why the address works everywhere the user has so far
+ * looked. Node does not. `dns.lookup("desde.localhost")` is `ENOTFOUND` on
+ * macOS with no hosts-file entry.
+ *
+ * The Editor is a Node process. So the one address the viewer had ever shown
+ * anybody was the one address the Editor could not connect to, and the connect
+ * dialog reported it as "could not reach a viewer" while the same URL was
+ * live in the next tab.
+ *
+ * The bare name `localhost` resolves on every platform, and the viewer already
+ * serves its shell under it — that is the Safari fallback path, which this
+ * reuses rather than inventing a second spelling. So the subdomain is dropped
+ * and the scheme and port are kept.
+ *
+ * ## Why the viewer answers this and not the Editor
+ *
+ * A host-rewriting rule in the Editor would be the Editor guessing at the
+ * viewer's addressing scheme, which is a thing this repo changes (Mo,
+ * 2026-09-13). The viewer is the only party that knows how it is reachable,
+ * so it states the address and the Editor pastes what it is given.
+ *
+ * Only `*.localhost` is touched. A deployed viewer on a real domain is
+ * returned exactly as it is, because there the address bar is already right.
+ */
+export function editorConnectUrl(shellOrigin: string): string {
+  let url: URL
+  try {
+    url = new URL(shellOrigin)
+  } catch {
+    // Nothing useful to say about an origin we cannot parse, and this runs
+    // while a one-time secret is on screen. Handing back the input keeps the
+    // dialog rendering.
+    return shellOrigin
+  }
+
+  // `endsWith` and not `includes`: the bare name needs no help, and
+  // `localhost.example.com` is an ordinary registered domain belonging to
+  // somebody else, which must keep resolving through DNS like any other.
+  if (!url.hostname.toLowerCase().endsWith(".localhost")) return shellOrigin
+
+  url.hostname = "localhost"
+  return url.origin
+}
+
+/**
+ * Does the pasteable address differ from the one in the address bar?
+ *
+ * The dialog explains itself only when it has to. Saying "this is not the
+ * address you are looking at" on a deployed viewer, where the two are
+ * identical, is noise that teaches the reader to skip the line on the one
+ * occasion it matters.
+ */
+export function editorConnectUrlDiffers(shellOrigin: string): boolean {
+  return editorConnectUrl(shellOrigin) !== shellOrigin
+}

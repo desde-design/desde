@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
+  editorConnectUrl,
+  editorConnectUrlDiffers,
   formatTimestamp,
   isMachineTokenScope,
   isMachineTokenView,
@@ -165,5 +167,57 @@ describe("formatTimestamp", () => {
 
   it("falls back for an unparseable string", () => {
     expect(formatTimestamp("garbage")).toBe("Never")
+  })
+})
+
+describe("editorConnectUrl", () => {
+  it("drops the subdomain in local subdomain mode, because Node cannot resolve *.localhost", () => {
+    expect(editorConnectUrl("http://desde.localhost:3100")).toBe("http://localhost:3100")
+  })
+
+  it("keeps the port, which is the part that actually varies between instances", () => {
+    expect(editorConnectUrl("http://desde.localhost:8080")).toBe("http://localhost:8080")
+  })
+
+  it("drops every label, not just the first, so a deeper name still lands on the shell", () => {
+    expect(editorConnectUrl("http://apps.desde.localhost:3100")).toBe("http://localhost:3100")
+  })
+
+  it("leaves the bare name alone: it already resolves everywhere", () => {
+    expect(editorConnectUrl("http://localhost:3100")).toBe("http://localhost:3100")
+  })
+
+  it("leaves a deployed viewer exactly as it is", () => {
+    expect(editorConnectUrl("https://viewer.example.com")).toBe("https://viewer.example.com")
+  })
+
+  it("keeps a non-default port on a deployed viewer", () => {
+    expect(editorConnectUrl("https://viewer.example.com:8443")).toBe("https://viewer.example.com:8443")
+  })
+
+  it("does not rewrite a registered domain that merely contains the string", () => {
+    expect(editorConnectUrl("https://localhost.example.com")).toBe("https://localhost.example.com")
+  })
+
+  it("compares host names case-insensitively, the way host names compare", () => {
+    expect(editorConnectUrl("http://Desde.LOCALHOST:3100")).toBe("http://localhost:3100")
+  })
+
+  it("returns unparseable input untouched rather than throwing with a secret on screen", () => {
+    expect(editorConnectUrl("not a url")).toBe("not a url")
+  })
+})
+
+describe("editorConnectUrlDiffers", () => {
+  it("is true only where the address bar would mislead", () => {
+    expect(editorConnectUrlDiffers("http://desde.localhost:3100")).toBe(true)
+  })
+
+  it("is false on a deployed viewer, so the dialog stays quiet", () => {
+    expect(editorConnectUrlDiffers("https://viewer.example.com")).toBe(false)
+  })
+
+  it("is false on the Safari fallback address, which is already pasteable", () => {
+    expect(editorConnectUrlDiffers("http://localhost:3100")).toBe(false)
   })
 })
