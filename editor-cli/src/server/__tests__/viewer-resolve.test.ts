@@ -216,6 +216,37 @@ function viewerServingAmbiguous(count: number, candidates: unknown[]): typeof fe
   }) as unknown as typeof fetch
 }
 
+/**
+ * A viewer that answers `ambiguous`, but whose authenticated candidate list
+ * route (`/api/v1/projects?remoteUrl=`) fails instead of answering — either
+ * with an HTTP error status, or with a 200 whose body is not valid JSON.
+ *
+ * Sibling to `viewerServingAmbiguous` above: that one always answers the list
+ * route successfully, so it cannot exercise "could not ask" at all.
+ */
+function viewerServingCandidatesFailure(opts: {
+  status?: number
+  malformedBody?: boolean
+}): typeof fetch {
+  return (async (url: string | URL | Request) => {
+    const href = String(url)
+    if (href.endsWith("/api/v1/me")) return jsonResponse(200, { scopes: ["read", "write"] })
+    if (href.includes("/api/v1/projects/resolve")) {
+      return jsonResponse(200, { decision: "ambiguous", count: 2 })
+    }
+    if (href.includes("/api/v1/projects?")) {
+      if (opts.malformedBody) {
+        return new Response("not json", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return jsonResponse(opts.status ?? 500, { error: "boom" })
+    }
+    return jsonResponse(404, {})
+  }) as unknown as typeof fetch
+}
+
 function candidate(id: string, branch: string) {
   return {
     id,
@@ -289,5 +320,53 @@ describe("resolveViewerLink — several prototypes on one repo", () => {
     })
 
     expect(link).toEqual({ status: "unlinked", origin: "https://viewer.test" })
+  })
+
+  /**
+   * The 0-candidate case above is a SUCCESSFUL empty list: the viewer was
+   * asked and it honestly has no readable prototype for this repo, so
+   * `unlinked` is correct and must stay cached-safe.
+   *
+   * This is different: the viewer could not be asked at all. Before the fix,
+   * `fetchRepoCandidates` collapsed a failed fetch to `[]`, which read
+   * exactly like the successful-empty-list case above and reported
+   * `unlinked` — a verdict the caller then caches for the life of the
+   * process. A transient 500 would have looked identical to "this repo has
+   * no prototypes" until the Editor restarted.
+   */
+  it("reports an error, not unlinked, when the candidate list fetch 500s", async () => {
+    const home = tmp("vr-home-")
+    const root = await repoWithIdentity("emb-1")
+    await writeDefaultViewerOrigin("https://viewer.test", home)
+    await writeViewerToken("https://viewer.test", `dsv_${"0".repeat(16)}_${"a".repeat(43)}`, home)
+
+    const link = await resolveViewerLink(root, {
+      home,
+      fetchImpl: viewerServingCandidatesFailure({ status: 500 }),
+    })
+
+    expect(link).toEqual({
+      status: "error",
+      origin: "https://viewer.test",
+      reason: "Could not reach the viewer.",
+    })
+  })
+
+  it("reports an error, not unlinked, when the candidate list body is not valid JSON", async () => {
+    const home = tmp("vr-home-")
+    const root = await repoWithIdentity("emb-1")
+    await writeDefaultViewerOrigin("https://viewer.test", home)
+    await writeViewerToken("https://viewer.test", `dsv_${"0".repeat(16)}_${"a".repeat(43)}`, home)
+
+    const link = await resolveViewerLink(root, {
+      home,
+      fetchImpl: viewerServingCandidatesFailure({ malformedBody: true }),
+    })
+
+    expect(link).toEqual({
+      status: "error",
+      origin: "https://viewer.test",
+      reason: "Could not reach the viewer.",
+    })
   })
 })

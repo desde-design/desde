@@ -1,5 +1,6 @@
+import { fireEvent, render, screen } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
-import { summarizeViewerLink } from "./your-viewer-dialog"
+import { YourViewerDialog, summarizeViewerLink } from "./your-viewer-dialog"
 
 /**
  * What the machine's viewer made of the open repo, in one line.
@@ -56,5 +57,52 @@ describe("summarizeViewerLink", () => {
     // The dialog is already asking for one; a line saying "no viewer" under
     // the field that sets it is the same sentence twice.
     expect(summarizeViewerLink({ status: "no-viewer" })).toBeNull()
+  })
+})
+
+/**
+ * Both settings menus mount this dialog unconditionally, before
+ * `useViewerAuthStatus` has an answer. `defaultOrigin` starts `null` and
+ * arrives later as a prop change, not at first mount — so seeding the field
+ * with `useState(defaultOrigin ?? "")` (which reads its argument once) left
+ * the field permanently empty on a machine that already had a viewer set
+ * (codex P2, `7ed76c8`). The fix re-seeds on the render where `defaultOrigin`
+ * first turns non-null, tracked against the last value it seeded so a later
+ * render carrying the SAME origin does not stomp on something the user is
+ * mid-typing.
+ */
+describe("YourViewerDialog — seeding the URL field from the stored default", () => {
+  it("shows the origin once it arrives, and never clobbers a typed edit afterward", () => {
+    const { rerender } = render(
+      <YourViewerDialog open onOpenChange={() => {}} defaultOrigin={null} link={null} />,
+    )
+    // Mounted before the status probe answered: nothing to seed yet.
+    expect(screen.getByLabelText(/viewer url/i)).toHaveValue("")
+
+    // The probe resolves and the parent re-renders with the origin it found.
+    rerender(
+      <YourViewerDialog
+        open
+        onOpenChange={() => {}}
+        defaultOrigin="https://viewer.test"
+        link={null}
+      />,
+    )
+    expect(screen.getByLabelText(/viewer url/i)).toHaveValue("https://viewer.test")
+
+    // The user edits the field. A later render carrying the SAME origin (a
+    // second probe returning the same answer, say) must leave it alone.
+    fireEvent.change(screen.getByLabelText(/viewer url/i), {
+      target: { value: "https://typed-over.test" },
+    })
+    rerender(
+      <YourViewerDialog
+        open
+        onOpenChange={() => {}}
+        defaultOrigin="https://viewer.test"
+        link={null}
+      />,
+    )
+    expect(screen.getByLabelText(/viewer url/i)).toHaveValue("https://typed-over.test")
   })
 })

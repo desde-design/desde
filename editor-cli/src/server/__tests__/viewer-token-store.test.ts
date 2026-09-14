@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import {
   clearDefaultViewerOrigin,
   clearViewerToken,
+  isStorableViewerUrl,
   normalizeOrigin,
   readDefaultViewerOrigin,
   readViewerToken,
@@ -46,6 +47,27 @@ describe("normalizeOrigin", () => {
   it("does not throw on an unparseable value", () => {
     // A malformed config must not crash the Editor at boot.
     expect(() => normalizeOrigin("not a url")).not.toThrow()
+  })
+})
+
+/**
+ * A stored viewer URL becomes the target of authenticated outbound requests
+ * carrying a `dsv_` token (codex P2, `7ed76c8`). Neither credential-write
+ * route checked this before the fix, so anything at all could be persisted
+ * as the origin a token is keyed to and later sent to.
+ */
+describe("isStorableViewerUrl", () => {
+  it("accepts http and https URLs", () => {
+    expect(isStorableViewerUrl("http://localhost:3100")).toBe(true)
+    expect(isStorableViewerUrl("https://viewer.example.com")).toBe(true)
+  })
+
+  it("rejects an empty string, an unparseable value, and any other scheme", () => {
+    expect(isStorableViewerUrl("")).toBe(false)
+    expect(isStorableViewerUrl("not a url")).toBe(false)
+    expect(isStorableViewerUrl("ftp://x")).toBe(false)
+    expect(isStorableViewerUrl("javascript:alert(1)")).toBe(false)
+    expect(isStorableViewerUrl("file:///etc/passwd")).toBe(false)
   })
 })
 

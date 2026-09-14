@@ -105,6 +105,65 @@ describe("ChooseViewerProjectDialog", () => {
     expect(linkProjectOnDisk).not.toHaveBeenCalled()
   })
 
+  /**
+   * Escape is a reflex, not a decision. Only the "Keep comments local" button
+   * says what closing means, so only that button should record anything.
+   * Before this fix, both paths called the same handler and Escape silently
+   * stopped comments from reaching the viewer.
+   */
+  it("closes on Escape without recording a dismissal", async () => {
+    render(<ChooseViewerProjectDialog status={status()} onLinked={vi.fn()} />)
+    expect(screen.getByText("Choose a prototype")).toBeInTheDocument()
+
+    fireEvent.keyDown(document, { key: "Escape" })
+
+    await waitFor(() =>
+      expect(screen.queryByText("Choose a prototype")).not.toBeInTheDocument(),
+    )
+    expect(editorFetch).not.toHaveBeenCalled()
+  })
+
+  /**
+   * The local "closed" state has to be scoped to the origin it was closed
+   * for, matching how the server scopes a real dismissal. Before this fix it
+   * was a bare boolean: closing the dialog for one viewer suppressed it for
+   * every viewer afterwards, including a different one the Editor pointed at
+   * later in the same session.
+   */
+  it("re-opens for a different viewer origin after being closed for one", async () => {
+    const { rerender } = render(
+      <ChooseViewerProjectDialog status={status()} onLinked={vi.fn()} />,
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Keep comments local" }))
+    await waitFor(() =>
+      expect(screen.queryByText("Choose a prototype")).not.toBeInTheDocument(),
+    )
+
+    rerender(
+      <ChooseViewerProjectDialog
+        status={status({
+          matchDismissed: false,
+          link: {
+            status: "ambiguous",
+            origin: "https://other-viewer.test",
+            candidates: [
+              {
+                projectId: "c",
+                slug: "other",
+                name: "Other viewer's prototype",
+                branch: "main",
+                lastBuiltAt: null,
+              },
+            ],
+          },
+        })}
+        onLinked={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText("Choose a prototype")).toBeInTheDocument()
+  })
+
   it("does not open once dismissed", () => {
     render(
       <ChooseViewerProjectDialog status={status({ matchDismissed: true })} onLinked={vi.fn()} />,

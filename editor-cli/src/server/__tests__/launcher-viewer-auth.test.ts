@@ -114,4 +114,20 @@ describe("launcher viewer-auth", () => {
     })
     expect(res.status).toBe(401)
   })
+
+  /**
+   * The probe route is POST-only. Before this fix, the dispatch above it
+   * matched on path alone — a GET to `/api/editor/viewer-auth/probe` reached
+   * `handleViewerProbe` under the lenient (GET-only) Origin policy that block
+   * also applies. A GET carries no body, so it happened to 400 before
+   * contacting anything — but a POST-only route should refuse the method
+   * outright, not rely on that side effect.
+   */
+  it("refuses a GET to the probe route", async () => {
+    const token = await tokenFromBootstrap()
+    const res = await fetch(handle.url + "/api/editor/viewer-auth/probe", {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    expect(res.status).toBe(405)
+  })
 })
