@@ -134,7 +134,11 @@ export async function handleViewerProxy(
     // no credential for it, and the UI's remedy ("paste a token") differs
     // from the unconfigured case's ("edit your config").
     res.writeHead(401, { "Content-Type": "application/json" })
-    res.end(JSON.stringify({ error: "No viewer token stored. Add one in the Editor's project menu." }))
+    // Names the menu item that actually exists. It said "the Editor's project
+    // menu" until 2026-09-14, when that entry became "Viewer project"; a
+    // refusal that names a control the reader cannot find is worse than one
+    // that names none.
+    res.end(JSON.stringify({ error: "No viewer token stored. Add one in Viewer project." }))
     return true
   }
 

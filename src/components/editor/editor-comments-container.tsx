@@ -52,6 +52,7 @@
 import { useCallback, useEffect, useMemo } from "react"
 import type { RefObject } from "react"
 import { Callout } from "@/components/blocks"
+import { describeCommentError } from "@/components/editor/comment-error-copy"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/stores"
 import { CommentThreadPopup } from "@/components/comments/comment-thread-popup"
@@ -320,6 +321,9 @@ export function EditorCommentsContainer({
   // arrives later it shows once the comment one clears. Both share
   // the same Retry semantic (re-fetch).
   const error = localComments.error ?? localNotes.error
+  // Mapped once per render rather than inside the JSX, so the banner reads as
+  // a title and a detail instead of a parse.
+  const copy = error ? describeCommentError(error) : null
   const retry = useCallback(() => {
     void localComments.refresh()
     void localNotes.refresh()
@@ -334,7 +338,7 @@ export function EditorCommentsContainer({
           title plus a caption restating it was the surface repeating itself
           (Mo, 2026-09-02: "there should be no header"). The Viewer's
           Comments tab has none either; the action row is the first thing. */}
-      {error ? (
+      {copy ? (
         // The shared error card, not a hand-rolled full-bleed strip (Mo,
         // 2026-09-14). It was a `border-b` band spanning the panel's whole
         // width, which read as chrome belonging to the tab strip above it
@@ -349,7 +353,11 @@ export function EditorCommentsContainer({
             data-testid="comments-error-banner"
             className="text-xs"
           >
-            {error}{" "}
+            {/* A sentence the reader can act on, then the raw store message
+                underneath. The panel used to print the diagnostic as the
+                headline, so the first thing read was a status code and a JSON
+                body — see `comment-error-copy.ts`. */}
+            {copy.title}{" "}
             <Button
               type="button"
               variant="link"
@@ -358,6 +366,27 @@ export function EditorCommentsContainer({
             >
               Retry
             </Button>
+            <span
+              // Muted, and CLAMPED. Kept so a screenshot of this card can be
+              // quoted in a bug report, not so anyone has to read it — and at
+              // rail width the raw message runs to four mono lines, which made
+              // the diagnostic the bulk of the card again even in a quiet
+              // colour. Two lines is enough to recognise; `title` carries the
+              // whole thing on hover and the full text stays in the DOM, so
+              // selecting and copying it is unaffected.
+              //
+              // `break-all` because it carries URLs that would otherwise
+              // widen the rail.
+              // No `block` here: `line-clamp-2` works by setting
+              // `display: -webkit-box`, and a `block` beside it overrides that
+              // display and silently un-clamps the text. MEASURED — the first
+              // version of this still rendered four lines.
+              className="mt-1 line-clamp-2 break-all font-mono text-code text-destructive/70"
+              title={copy.detail}
+              data-testid="comments-error-detail"
+            >
+              {copy.detail}
+            </span>
           </Callout>
         </div>
       ) : null}
