@@ -51,6 +51,7 @@
 
 import { useCallback, useEffect, useMemo } from "react"
 import type { RefObject } from "react"
+import { Callout } from "@/components/blocks"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/stores"
 import { CommentThreadPopup } from "@/components/comments/comment-thread-popup"
@@ -68,8 +69,6 @@ import { useEditorNoteBridge } from "@/hooks/useEditorNoteBridge"
 import { getActiveCliUser } from "@/lib/cli-user-identity"
 import { EDITOR_NOTES } from "@/lib/editor-feature-flags"
 import { buildCommentFixPrompt } from "@/editor/edit-service/build-edit-escalation-prompt"
-import { cn } from "@/lib/utils"
-import { TONE_SURFACE } from "@/lib/tone-surface"
 
 interface EditorCommentsContainerProps {
   /**
@@ -336,26 +335,30 @@ export function EditorCommentsContainer({
           (Mo, 2026-09-02: "there should be no header"). The Viewer's
           Comments tab has none either; the action row is the first thing. */}
       {error ? (
-        <div
-          // A full-bleed strip, not a rounded Alert, so it composes the
-          // shared tone recipe rather than being one. `border-b` picks the
-          // side; TONE_SURFACE supplies the colour.
-          className={cn(
-            "shrink-0 border-b px-3 py-2 text-xs",
-            TONE_SURFACE.destructive,
-          )}
-          data-testid="comments-error-banner"
-          role="alert"
-        >
-          {error}{" "}
-          <Button
-            type="button"
-            variant="link"
-            className="h-auto p-0 underline hover:no-underline"
-            onClick={retry}
+        // The shared error card, not a hand-rolled full-bleed strip (Mo,
+        // 2026-09-14). It was a `border-b` band spanning the panel's whole
+        // width, which read as chrome belonging to the tab strip above it
+        // rather than as one failure inside the panel — and it was the only
+        // error in the Editor shaped that way. `Callout` is what every other
+        // one uses. `role="alert"` overrides its polite default, because a
+        // load that failed should interrupt rather than wait its turn.
+        <div className="shrink-0 p-2">
+          <Callout
+            tone="destructive"
+            role="alert"
+            data-testid="comments-error-banner"
+            className="text-xs"
           >
-            Retry
-          </Button>
+            {error}{" "}
+            <Button
+              type="button"
+              variant="link"
+              className="h-auto p-0 text-xs underline hover:no-underline"
+              onClick={retry}
+            >
+              Retry
+            </Button>
+          </Callout>
         </div>
       ) : null}
       <div className="min-h-0 flex-1">
