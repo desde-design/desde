@@ -1862,7 +1862,22 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       // Only an ambiguous link has a question to dismiss. Anything else is a
       // stale client, and recording a dismissal for it would silence a
       // chooser that has not been shown.
-      if (link.status !== "ambiguous") {
+      //
+      // The committed link is half of that test, not a detail. An ambiguous
+      // RESOLUTION that a committed link has already answered is not a
+      // question either: the chooser is gated on `source === null`, so it is
+      // not on screen. MEASURED in a live run — this route answered 200 for a
+      // repo whose link was committed, and the dismissal it recorded would
+      // have suppressed the chooser later, if that committed link were ever
+      // removed. The two gates have to agree, so this mirrors the client's.
+      const effective = effectiveViewerConfig(
+        {
+          baseUrl: ctx.project?.platformBaseUrl ?? null,
+          projectId: ctx.project?.projectId ?? null,
+        },
+        link,
+      )
+      if (link.status !== "ambiguous" || effective.source !== null) {
         sendJson(res, 409, { ok: false, reason: "There is nothing to dismiss." })
         return
       }
