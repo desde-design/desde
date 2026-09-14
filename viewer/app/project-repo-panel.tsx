@@ -204,14 +204,30 @@ export function ProjectRepoPanel({
   const [buildFields, setBuildFields] = useState<BuildFieldsDraft | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  /*
+    Whether a push could ever reach this deployment, answered by the server
+    (it is the only side that knows the public URL GitHub was given).
+
+    Defaults to `true` so a viewer that predates the field, or a response that
+    omits it, keeps saying exactly what it said before. The extra sentence
+    below is a warning; adding one on a guess would be worse than the silence
+    it replaces.
+  */
+  const [webhooksReachable, setWebhooksReachable] = useState(true)
 
 
   const loadProject = useCallback(async () => {
     try {
       const projectRes = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}`)
       if (!projectRes.ok) throw new Error(`GET project ${projectRes.status}`)
-      const projectBody = (await projectRes.json()) as { repoConfig?: unknown }
+      const projectBody = (await projectRes.json()) as {
+        repoConfig?: unknown
+        webhooksReachable?: unknown
+      }
       setRepoConfig(isProjectRepoConfigView(projectBody.repoConfig) ? projectBody.repoConfig : null)
+      // Only a literal `false` turns the warning on: anything else, including
+      // the field being absent, leaves the row as it was.
+      setWebhooksReachable(projectBody.webhooksReachable !== false)
       setProjectLoaded(true)
       setLoadError(null)
     } catch (err) {
@@ -602,7 +618,7 @@ export function ProjectRepoPanel({
     return (
       <div className={cn("flex flex-col gap-3", className)}>
         {repoConfig ? (
-          <ConnectedRepoSummary repoConfig={repoConfig} />
+          <ConnectedRepoSummary repoConfig={repoConfig} webhooksReachable={webhooksReachable} />
         ) : (
           <EmptyState size="sm" title="No repository connected" description="Connect one to build this project from source." />
         )}
@@ -636,7 +652,7 @@ export function ProjectRepoPanel({
     return (
       <div className={cn("flex flex-col gap-3", className)}>
         {repoConfig ? (
-          <ConnectedRepoSummary repoConfig={repoConfig} />
+          <ConnectedRepoSummary repoConfig={repoConfig} webhooksReachable={webhooksReachable} />
         ) : (
           <EmptyState
             size="sm"
@@ -666,7 +682,7 @@ export function ProjectRepoPanel({
   if (flowMode === null && repoConfig) {
     return (
       <div className={cn("flex flex-col gap-3", className)}>
-        <ConnectedRepoSummary repoConfig={repoConfig} />
+        <ConnectedRepoSummary repoConfig={repoConfig} webhooksReachable={webhooksReachable} />
         {githubConfigured === false ? <GithubAppUnreachableBanner /> : null}
         {githubConfigured === null && installationsError ? (
           /* The status check itself failed, so whether editing is possible is
@@ -774,7 +790,25 @@ function RefreshAccessNote({ href }: { href: string }) {
  * throughout, values in the UI font — a deliberate exception to the
  * mono-for-paths rule, by the same instruction.
  */
-function ConnectedRepoSummary({ repoConfig }: { repoConfig: ProjectRepoConfigView }) {
+function ConnectedRepoSummary({
+  repoConfig,
+  webhooksReachable,
+}: {
+  repoConfig: ProjectRepoConfigView
+  /** False on a deployment GitHub cannot reach. See `server/webhook-reachability.ts`. */
+  webhooksReachable: boolean
+}) {
+  /*
+    The stored setting and the world disagree on a local address: the flag is
+    on, the App was created with no webhook at all, and a push therefore does
+    nothing. Printing a bare "On" over that is the shape of failure this panel
+    already has a rule about, quoted in its own Deploy button: "a control that
+    does nothing with no explanation is the usual way this panel goes bad".
+
+    Only said when auto-deploy is ON. With it off, nothing was promised, so
+    there is nothing to correct.
+  */
+  const autoDeployStalled = repoConfig.autoDeploy && !webhooksReachable
   return (
     <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-base">
       <dt className="text-muted-foreground">Repository</dt>
@@ -790,7 +824,16 @@ function ConnectedRepoSummary({ repoConfig }: { repoConfig: ProjectRepoConfigVie
       <dt className="text-muted-foreground">Output</dt>
       <dd className="truncate">{repoConfig.outputDir}</dd>
       <dt className="text-muted-foreground">Auto-deploy</dt>
-      <dd>{repoConfig.autoDeploy ? "On" : "Off"}</dd>
+      <dd>
+        {autoDeployStalled ? "On, but pushes will not rebuild" : repoConfig.autoDeploy ? "On" : "Off"}
+        {autoDeployStalled ? (
+          /* Under the value, not beside it: the reason needs the full column
+             width, and the grid's second track is already the value's. */
+          <span className="mt-0.5 block text-sm text-muted-foreground">
+            GitHub cannot reach a local address. Use Deploy on the prototype&apos;s page instead.
+          </span>
+        ) : null}
+      </dd>
     </dl>
   )
 }

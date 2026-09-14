@@ -33,6 +33,13 @@ export interface ProjectDetail {
     owner: string
     name: string
     branch: string
+    /**
+     * Whether a push to `branch` is supposed to rebuild. The STORED setting,
+     * which is a narrower fact than it reads as: see `webhooksReachable`
+     * below, without which this flag says "On" on a deployment where no push
+     * can arrive.
+     */
+    autoDeploy?: boolean
   } | null
   repoUrl?: string | null
   /**
@@ -44,6 +51,15 @@ export interface ProjectDetail {
    * as `true` by the shell, which is what the product has always done.
    */
   canComment?: boolean
+  /**
+   * Whether GitHub could deliver a push webhook to this deployment at all.
+   * Computed by the server for the same reason `canComment` is: it depends on
+   * the deployment's public URL, which the browser never sees.
+   *
+   * Absent (an older server, or the fetch still in flight) is treated as
+   * `true`, which is what the product has always assumed.
+   */
+  webhooksReachable?: boolean
 }
 
 export interface UseProjectDetailResult {

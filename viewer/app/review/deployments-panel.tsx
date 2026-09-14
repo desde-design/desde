@@ -11,6 +11,7 @@ import { formatRelativeTime } from "@/lib/relative-time"
 import { failureMessage, fetchJson } from "../api-client"
 import { isDeploymentView, presentStatus, type DeploymentView } from "../build-log-utils"
 import { repoSourceBase, type ProjectDetail } from "./use-project-detail"
+import { AutoDeployBanner } from "./auto-deploy-banner"
 import { useBuildAccess } from "./use-build-access"
 import { DeploymentDetailDialog } from "./deployment-detail-dialog"
 import { Callout } from "@/components/blocks"
@@ -85,6 +86,26 @@ export function DeploymentsPanel({
 
   const repo = detail?.repoConfig ?? null
   const base = repoSourceBase(detail)
+  /*
+    Why a push will not produce a deployment, or null when one would.
+
+    Only with a repo attached: with no connection there is nothing a push
+    could rebuild, and the tab already offers Upload a build for that case.
+
+    Unreachable is checked FIRST and wins. On a local deployment the stored
+    flag is usually "On", so testing `autoDeploy` first would report the
+    connection as fine and leave the reader with no explanation at all. Both
+    fields default to the permissive value when absent, so an older server
+    renders no banner rather than a guessed one.
+  */
+  const autoDeployBlocker: "off" | "unreachable" | null =
+    repo === null
+      ? null
+      : detail?.webhooksReachable === false
+        ? "unreachable"
+        : repo.autoDeploy === false
+          ? "off"
+          : null
   const build = useBuildControls({
     projectId,
     hasRepo: repo !== null,
@@ -255,6 +276,36 @@ export function DeploymentsPanel({
             </div>
           ) : null}
         </section>
+      ) : null}
+
+      {/*
+        Below the repo and branch rows, above the list (Mo, 2026-09-14): the
+        reader has just confirmed which repo and branch this is, and is about
+        to scan a list for a deployment that never arrived. This is the line
+        between those two moments.
+
+        Held back until access has SETTLED, and suppressed while the App is
+        unreachable, for the same reason the Deploy button is: `useBuildAccess`
+        starts at all-false, and an App this deployment cannot reach already
+        has its own banner saying builds are unavailable. Two banners about
+        why nothing is building is one too many, and the App one names the
+        bigger problem.
+      */}
+      {autoDeployBlocker !== null && !buildAccess.loading && buildAccess.buildsEnabled ? (
+        <div className="border-b border-border px-2 py-2">
+          <AutoDeployBanner
+            reason={autoDeployBlocker}
+            deploy={
+              buildAccess.canManage
+                ? {
+                    onDeploy: () => void build.startBuild(),
+                    blocked: build.blocked ?? null,
+                    busy: build.starting,
+                  }
+                : undefined
+            }
+          />
+        </div>
       ) : null}
 
       {/*

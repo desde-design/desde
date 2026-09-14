@@ -483,8 +483,12 @@ describe("projects API", () => {
       await storage.addProjectMember({ projectId: project.id, userId: user.id })
 
       const res = await request(app).get(`/api/v1/projects/${project.id}`).set("Cookie", cookie).expect(200)
+      // `webhooksReachable` rides the same manage gate as `repoConfig`: it is
+      // only meaningful beside that config's `autoDeploy`, which no other
+      // caller receives. The two anonymous/viewer key sets below are what
+      // pin that, and they stay unchanged.
       expect(Object.keys(res.body).sort()).toEqual(
-        [...BY_ID_KEYS, "embeddedId", "repoConfig", "repoUrl"].sort(),
+        [...BY_ID_KEYS, "embeddedId", "repoConfig", "repoUrl", "webhooksReachable"].sort(),
       )
       expect(res.body.repoConfig).toEqual(secretRepoConfig)
       expect(res.body.embeddedId).toBe("emb-capability-token")

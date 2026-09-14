@@ -17,6 +17,7 @@ import {
 } from "../auth/authorize"
 import { getAllowAnonymousComments, getAllowPublicLinks } from "../instance-settings"
 import { withProjectLock } from "../project-locks"
+import { webhooksReachable } from "../webhook-reachability"
 import { ConflictError, NotFoundError } from "../storage/errors"
 import { nextSlugCandidate } from "./free-slug"
 import { deriveSlug } from "../../../src/core/project-identity"
@@ -376,12 +377,15 @@ export function createProjectsRoutes(
     const access = await requireProjectReadWithPolicy(deps, req, res, req.params.id)
     if (!access) return
     const { project, ctx, policy } = access
+    // Hoisted, because `webhooksReachable` below rides the SAME gate and the
+    // two must not be able to drift apart. Downstream of the read gate above,
+    // which is the precondition `hasProjectManageAuthority` cannot check for
+    // itself.
+    const includePrivate = hasProjectManageAuthority(ctx)
     res.json({
       ...toProjectView(project, {
         activeDeployment: await loadActiveDeployment(deps.storage, project),
-        // Downstream of the read gate above, which is the precondition
-        // `hasProjectManageAuthority` cannot check for itself.
-        includePrivate: hasProjectManageAuthority(ctx),
+        includePrivate,
       }),
       // Task 11: the instance-wide kill-switch state, merged onto the
       // project object rather than folded into `toProjectView` — it is a
@@ -401,6 +405,27 @@ export function createProjectsRoutes(
       // Sent on the same read that decided visibility, so it cannot be sampled
       // at a different instant from the policy above.
       canComment: !isAnonymous(ctx) || (await getAllowAnonymousComments(deps.storage)),
+      // Whether a push could ever reach this deployment, merged on beside the
+      // two facts above for the same reason they are: it is a property of the
+      // DEPLOYMENT, not a field of the project entity, so it does not belong
+      // inside `toProjectView`'s per-project projection.
+      //
+      // It exists because `repoConfig.autoDeploy` answers a narrower question
+      // than it appears to. That is the stored setting, and on a deployment
+      // GitHub cannot reach, the setting reads "On" while no webhook exists,
+      // so both the repo summary and the Deployments tab promised a rebuild
+      // that a push silently never produced. Same defect class as
+      // `canComment` above: the client cannot compute it (it never sees
+      // `publicUrl`), so the answer is computed where the fact is.
+      //
+      // **Behind `includePrivate`**, the same gate as `repoConfig` itself.
+      // Two reasons, and the second is the binding one. It is only useful
+      // beside `autoDeploy`, which no other caller receives. And the field
+      // scoping on this route is a security property with its own audit
+      // (S2) and exact key-set assertions: an anonymous caller's key set is
+      // fixed on purpose, and a deployment-shaped fact is not something to
+      // add to it for a surface that only managers can see.
+      ...(includePrivate ? { webhooksReachable: webhooksReachable(deps.config.publicUrl) } : {}),
     })
   })
 

@@ -93,7 +93,21 @@ function accessRoutes({
   canManage = true,
   buildsEnabled = true,
   hasRepo = true,
-}: { canManage?: boolean; buildsEnabled?: boolean; hasRepo?: boolean } = {}) {
+  autoDeploy = true,
+  webhooksReachable = true,
+}: {
+  canManage?: boolean
+  buildsEnabled?: boolean
+  hasRepo?: boolean
+  /** The STORED setting. False is somebody's choice, and reversible. */
+  autoDeploy?: boolean
+  /**
+   * False on a deployment GitHub cannot reach, where `autoDeploy` stays true
+   * and means nothing. The two are independent on purpose: that combination
+   * is the whole point of the banner.
+   */
+  webhooksReachable?: boolean
+} = {}) {
   return {
     "/api/v1/me": ok(
       canManage ? ME_SIGNED_IN : { ...ME_SIGNED_IN, user: { ...SAMPLE_USER, role: "viewer" as const } },
@@ -101,7 +115,8 @@ function accessRoutes({
     "/api/v1/github/installations": ok({ configured: buildsEnabled, installations: [] }),
     [`/api/v1/projects/${PROJECT_ID}`]: ok({
       ...SAMPLE_PROJECT,
-      ...(hasRepo ? { repoConfig: SAMPLE_REPO_CONFIG } : {}),
+      webhooksReachable,
+      ...(hasRepo ? { repoConfig: { ...SAMPLE_REPO_CONFIG, autoDeploy } } : {}),
     }),
   }
 }
@@ -358,6 +373,60 @@ export const BUILD_PANEL_SURFACE: SurfaceEntry = {
       run={openDeploymentsTab}
       route={null}
     />
+      ),
+    },
+    {
+      /*
+        The laptop case, and the reason the banner exists: `autoDeploy` is
+        stored as ON, and no push can arrive. Reading the stored flag alone
+        reports this deployment as healthy.
+      */
+      id: "build-panel/auto-deploy-unreachable",
+      label: "Local address — a push cannot arrive, so the banner offers Deploy",
+      readyWhen: '[data-testid="auto-deploy-banner"]',
+      render: () => (
+        <ReviewShellFixture
+          routes={{
+            ...accessRoutes({ webhooksReachable: false }),
+            ...{ [DEPLOYMENTS_PATH]: ok({ deployments: [sampleDeployment()] }) },
+          }}
+          run={openDeploymentsTab}
+          route={null}
+        />
+      ),
+    },
+    {
+      id: "build-panel/auto-deploy-off",
+      label: "Auto-deploy switched off — a push will not rebuild",
+      readyWhen: '[data-testid="auto-deploy-banner"]',
+      render: () => (
+        <ReviewShellFixture
+          routes={{
+            ...accessRoutes({ autoDeploy: false }),
+            ...{ [DEPLOYMENTS_PATH]: ok({ deployments: [sampleDeployment()] }) },
+          }}
+          run={openDeploymentsTab}
+          route={null}
+        />
+      ),
+    },
+    {
+      /*
+        The same blocked deployment seen by someone who cannot act on it: the
+        explanation stays, the Deploy button does not.
+      */
+      id: "build-panel/auto-deploy-unreachable-read-only",
+      label: "Local address, read-only role — the reason without the button",
+      readyWhen: '[data-testid="auto-deploy-banner"]',
+      render: () => (
+        <ReviewShellFixture
+          routes={{
+            ...accessRoutes({ webhooksReachable: false, canManage: false }),
+            ...{ [DEPLOYMENTS_PATH]: ok({ deployments: [sampleDeployment()] }) },
+          }}
+          run={openDeploymentsTab}
+          route={null}
+        />
       ),
     },
     {

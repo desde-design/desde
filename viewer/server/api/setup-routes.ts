@@ -114,6 +114,7 @@ import { hasAdminAuthority, resolveReadContext } from "../auth/authorize"
 import { isLocalOperatorUser } from "../auth/local-operator"
 import { readCookie } from "../auth/session-cookie"
 import { updateRuntimeConfig } from "../runtime-config"
+import { webhooksReachable } from "../webhook-reachability"
 import {
   clearStateCookie,
   isSecurePublicUrl,
@@ -213,26 +214,6 @@ export function buildAppName(publicUrl: string): string {
 }
 
 /**
- * True when GitHub could never deliver a webhook to this origin. MEASURED
- * (2026-08-20, live manifest run): GitHub rejects the whole manifest with
- * "Hook url is not supported because it isn't reachable over the public
- * Internet (localhost)" — so a loopback deployment must omit the hook
- * entirely, not merely mark it inactive. Push auto-deploy was never going
- * to work on localhost anyway; a deployed viewer with a public URL still
- * gets the hook provisioned.
- */
-function isLoopbackHost(publicUrl: string): boolean {
-  const host = new URL(publicUrl).hostname
-  return (
-    host === "localhost" ||
-    host === "127.0.0.1" ||
-    host === "::1" ||
-    host === "[::1]" ||
-    host.endsWith(".localhost")
-  )
-}
-
-/**
  * The manifest GitHub pre-fills its App registration form from.
  *
  * Read-only permissions, and no more than the two capabilities the viewer
@@ -245,7 +226,11 @@ function isLoopbackHost(publicUrl: string): boolean {
  * MEASURED note on `default_permissions` below.
  */
 function buildAppManifest(publicUrl: string): Record<string, unknown> {
-  const loopback = isLoopbackHost(publicUrl)
+  // See `webhook-reachability.ts`: GitHub refuses a manifest whose hook URL is
+  // a loopback address, so the hook is omitted rather than marked inactive.
+  // The predicate lives there because the dashboard has to reach the same
+  // conclusion when it reports whether auto-deploy can fire.
+  const loopback = !webhooksReachable(publicUrl)
   return {
     name: buildAppName(publicUrl),
     url: publicUrl,
