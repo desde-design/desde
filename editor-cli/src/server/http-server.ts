@@ -37,6 +37,7 @@ import {
   writeViewerToken,
 } from "./viewer-token-store.js"
 import { readMachineViewerStatus } from "./machine-viewer-status.js"
+import { dismissViewerMatch, isViewerMatchDismissed } from "./viewer-match-dismissal.js"
 import {
   handleLLMFallback,
   defaultLLMFallbackLoaders,
@@ -907,6 +908,14 @@ async function handleViewerAuthStatus(
   const machine = await readMachineViewerStatus()
   const link = await getViewerLink(ctx.repoRoot)
   const effective = effectiveViewerConfig({ baseUrl, projectId }, link)
+  // Computed here rather than in the browser: the client cannot see a
+  // machine-local file, and this repo has shipped the same defect three times
+  // by letting a client reason about a flag that meant something narrower
+  // than it looked. Only meaningful while the link is ambiguous.
+  const matchDismissed =
+    link.status === "ambiguous"
+      ? await isViewerMatchDismissed(ctx.repoRoot, link.origin)
+      : false
   sendJson(res, 200, {
     configured: Boolean(effective.baseUrl && effective.projectId),
     baseUrl: effective.baseUrl,
@@ -917,6 +926,7 @@ async function handleViewerAuthStatus(
     source: effective.source,
     defaultOrigin: machine.defaultOrigin,
     link,
+    matchDismissed,
   })
 }
 
@@ -968,6 +978,9 @@ async function handleViewerAuthClear(
 ): Promise<void> {
   const baseUrl = ctx.project?.platformBaseUrl ?? null
   if (baseUrl) await clearViewerToken(baseUrl)
+  // Clearing the token changes what this repo resolves to (a stored token
+  // that is gone reads as `no-token`), so the cached resolution is stale.
+  invalidateViewerLink()
   sendJson(res, 200, { ok: true })
 }
 
@@ -1824,6 +1837,24 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     path: "/api/editor/viewer-auth",
     authPolicy: "bearer-origin-required",
     handler: handleViewerAuthClear,
+  },
+  {
+    method: "POST",
+    path: "/api/editor/viewer-auth/dismiss-match",
+    // A mutation, so the strict posture every other editor write takes.
+    authPolicy: "bearer-origin-required",
+    handler: async (_req, res, ctx) => {
+      const link = await getViewerLink(ctx.repoRoot)
+      // Only an ambiguous link has a question to dismiss. Anything else is a
+      // stale client, and recording a dismissal for it would silence a
+      // chooser that has not been shown.
+      if (link.status !== "ambiguous") {
+        sendJson(res, 409, { ok: false, reason: "There is nothing to dismiss." })
+        return
+      }
+      await dismissViewerMatch(ctx.repoRoot, link.origin)
+      sendJson(res, 200, { ok: true })
+    },
   },
   // Split by method, on purpose.
   //

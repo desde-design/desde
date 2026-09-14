@@ -25,6 +25,7 @@ import { readJsonBody, runHandler, sendJson } from "./artifact-http.js"
 import { writeProjectConfig } from "./project-config.js"
 import { upsertProjectRegistryEntry } from "./projects-registry.js"
 import { checkOriginMatches } from "./git-remote.js"
+import { invalidateViewerLink } from "./viewer-link-state.js"
 
 export const PROJECT_LINK_ROUTE = "/api/editor/project/link"
 
@@ -115,6 +116,12 @@ export async function handleProjectLinkRequest(
       projectId: body.projectId,
       ...(platformBaseUrl !== undefined ? { platformBaseUrl } : {}),
     })
+
+    // A committed link outranks whatever was resolved, so the cached
+    // resolution is no longer the answer. Harmless before the chooser
+    // existed, because `effectiveViewerConfig` prefers the committed link
+    // anyway; not harmless once a dialog opens off the cached state.
+    invalidateViewerLink()
 
     // Reflect the link into the running CLI's in-memory association so a
     // page reload (which re-emits the bootstrap) stays linked WITHOUT a

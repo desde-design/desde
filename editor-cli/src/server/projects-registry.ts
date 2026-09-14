@@ -44,6 +44,20 @@ export interface ProjectRegistryEntry {
   lastPort?: number
   /** Full shell URL the editor last served for this path. */
   lastUrl?: string
+  /**
+   * Viewer origins whose "several prototypes match this repo" chooser this
+   * machine has dismissed. Normalized origins, one per viewer.
+   *
+   * An array rather than a flag, because a person with a team viewer and a
+   * local one must be able to dismiss one without silencing the other. Kept
+   * here rather than in `.desde/config.json` because that file is COMMITTED:
+   * one person's dismissal must not answer the question for everyone who
+   * clones the repo.
+   *
+   * Losing it means the chooser returns once, which is the safe direction for
+   * a file this module already documents as a cache.
+   */
+  dismissedMatchOrigins?: string[]
 }
 
 export interface ProjectsRegistry {
@@ -110,6 +124,10 @@ export async function readProjectsRegistry(): Promise<ProjectsRegistry> {
             : new Date(0).toISOString(),
         ...(typeof e.lastPort === "number" ? { lastPort: e.lastPort } : {}),
         ...(typeof e.lastUrl === "string" ? { lastUrl: e.lastUrl } : {}),
+        ...(Array.isArray(e.dismissedMatchOrigins) &&
+        e.dismissedMatchOrigins.every((o) => typeof o === "string")
+          ? { dismissedMatchOrigins: e.dismissedMatchOrigins as string[] }
+          : {}),
       })
     }
   }
@@ -142,6 +160,9 @@ export async function upsertProjectRegistryEntry(
     lastOpenedAt: now,
     lastPort: entry.lastPort ?? existing?.lastPort,
     lastUrl: entry.lastUrl ?? existing?.lastUrl,
+    // Preserved across a boot: `upsert` runs on every open, and dropping this
+    // would re-ask the question every time the project is opened.
+    dismissedMatchOrigins: entry.dismissedMatchOrigins ?? existing?.dismissedMatchOrigins,
   }
   // Drop undefined keys so the JSON stays clean.
   const cleaned = Object.fromEntries(
@@ -166,7 +187,7 @@ export async function upsertProjectRegistryEntry(
  */
 export async function patchProjectRegistryEntry(
   path: string,
-  patch: Partial<Pick<ProjectRegistryEntry, "name" | "slug">>,
+  patch: Partial<Pick<ProjectRegistryEntry, "name" | "slug" | "dismissedMatchOrigins">>,
 ): Promise<boolean> {
   const registry = await readProjectsRegistry()
   const index = registry.projects.findIndex((p) => p.path === path)
