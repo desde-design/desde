@@ -50,13 +50,44 @@ interface UtilityProbe {
  * by inspection but actually appeared in TWO pinned dirs. The current
  * set was re-audited with the grep above; counts in each comment.
  */
+/**
+ * Every probe name is SPLIT across a concatenation, and that is not a style
+ * choice.
+ *
+ * Tailwind's scanner reads this file. MEASURED 2026-09-14: a utility written
+ * as a plain string literal here is emitted into the bundle as if the UI used
+ * it, so a probe spelled out in one piece passes by naming itself, whether or
+ * not the directory it is meant to cover is scanned at all. Every probe below
+ * was in that state, which is why none of them caught either of the two
+ * missing directories.
+ *
+ * Splitting the literal leaves no candidate for the scanner to find, so the
+ * assertion once again depends on the component source alone. Keep it split.
+ * The same rule applies to comments in this file and in `editor-cli.css`:
+ * describe a rule in words, never by name.
+ */
 const REQUIRED_UTILITIES: UtilityProbe[] = [
   // editor-ui: 1 file, editor: 0, ui: 0
-  { className: "h-screen", source: "src/editor-ui/editor-page.tsx (LiveEditorView root)" },
-  // editor-ui: 0, editor: 1 (live-prototype-pane connection banner), ui: 0
-  { className: "bg-yellow-50", source: "src/components/editor/live-prototype-pane.tsx" },
+  { className: `h-${"screen"}`, source: "src/editor-ui/editor-page.tsx (LiveEditorView root)" },
+  /*
+    editor: 1 (save-progress-dialog's succeeded chip), everywhere else 0.
+
+    Re-anchored 2026-09-14. The previous anchor was a raw yellow on the
+    live-prototype-pane banner, and it had been gone from the tree for a while:
+    the house rules ban raw colour utilities, so the banner moved to theme
+    tokens and nothing failed, because this file was naming the class itself.
+    Splitting the literals is what surfaced it.
+  */
+  { className: `bg-success${"/15"}`, source: "src/components/editor/save-progress-dialog.tsx" },
   // editor-ui: 0, editor: 0, ui: 4 (separator, scroll-area, etc.)
-  { className: "bg-border", source: "src/components/ui/* (shadcn primitives)" },
+  { className: `bg-${"border"}`, source: "src/components/ui/* (shadcn primitives)" },
+  // components/annotations: the comment card's hover-revealed action row.
+  // Unique REPO-WIDE, not merely across the pinned dirs, which is why its
+  // absence removed the controls entirely rather than degrading them.
+  {
+    className: `group-hover${"/card:opacity-100"}`,
+    source: "src/components/annotations/annotation-card.tsx (comment card actions)",
+  },
   // src/lib/* is also pinned by editor-cli.css but contains only
   // utils.ts (cn helper) — no Tailwind classes live there. The pin
   // is defensive (so future lib additions get scanned); no probe
@@ -105,6 +136,44 @@ describe("Tailwind source-pinning coverage", () => {
     expect(css!.length).toBeGreaterThan(1000) // arbitrary lower bound; real bundle is 50KB+
   })
 
+  /**
+   * The probes above are a sample. This is the invariant.
+   *
+   * A probe can only be written for a directory somebody already remembered to
+   * scan, so a directory nobody scanned has no probe and the suite stays green
+   * while its rules quietly vanish. That is exactly how `blocks/` (2026-08-17)
+   * and then `annotations/`, `comments/`, `notes/` and `canvas/` (2026-09-14)
+   * went missing under a passing test.
+   *
+   * This reads the real `@source` lines and checks that every directory of
+   * shell components falls inside one, so narrowing the glob back to a list
+   * fails here immediately.
+   */
+  it("scans every component directory, rather than a list somebody has to maintain", () => {
+    const cssEntry = readFileSync(resolvePath(UI_SRC, "src", "editor-cli.css"), "utf-8")
+    const globs = [...cssEntry.matchAll(/@source\s+"([^"]+)"/g)].map((m) => m[1])
+    expect(globs.length, "no @source directives found in editor-cli.css").toBeGreaterThan(0)
+
+    // Each glob's literal prefix, resolved the way Tailwind resolves it:
+    // relative to the CSS file's own directory.
+    const scannedRoots = globs.map((glob) =>
+      resolvePath(UI_SRC, "src", glob.slice(0, glob.indexOf("*"))),
+    )
+
+    const componentsDir = resolvePath(UI_SRC, "..", "..", "src", "components")
+    const unscanned = readdirSync(componentsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => resolvePath(componentsDir, entry.name))
+      .filter((dir) => !scannedRoots.some((root) => dir === root || dir.startsWith(`${root}/`)))
+
+    expect(
+      unscanned,
+      "these component directories fall outside every @source glob in " +
+        "ui-src/src/editor-cli.css, so Tailwind emits no rule for any utility " +
+        "they alone use, and nothing about the build says so",
+    ).toEqual([])
+  })
+
   for (const probe of REQUIRED_UTILITIES) {
     it(`includes utility \`.${probe.className}\` (used by ${probe.source})`, () => {
       const css = readBuiltCss()
@@ -130,6 +199,9 @@ describe("Tailwind source-pinning coverage", () => {
  * reliable because utilities aren't atomic-mangled.
  */
 function cssContainsClass(css: string, className: string): boolean {
-  const escapedForCss = className.replace(/[/]/g, "\\/")
+  // `:` as well as `/`. Every probe was a bare utility until a variant probe
+  // arrived, and Tailwind escapes the variant separator too, so escaping only
+  // the slash reported that rule missing while it sat in the bundle.
+  const escapedForCss = className.replace(/[/:]/g, (ch) => `\\${ch}`)
   return css.includes(`.${escapedForCss}`)
 }

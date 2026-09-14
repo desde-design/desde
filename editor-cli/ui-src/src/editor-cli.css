@@ -22,18 +22,35 @@
    imports come first. */
 @import "../../../src/styles/globals.css";
 
-/* `blocks/` was MISSING until 2026-08-17, and the failure is silent: the class
-   lands in the DOM, Tailwind never emits a rule for it, and the element falls
-   back to whatever the `*` base rule says. MEASURED on the Stepper's active
-   step — `border-primary` was in the class list and the border computed to
-   `--border` grey, because no other scanned file used that utility bare (only
-   `hover:` and `has-data-checked:` variants, which are different rules).
+/* ONE glob for all of `src/components`, not a curated directory list.
 
-   This is the design system's MAIN layer, so anything it is the sole user of
-   silently does nothing here. Add a directory to this list the moment UI code
-   starts living in it. */
-@source "../../../src/components/blocks/**/*.{ts,tsx}";
-@source "../../../src/components/editor/**/*.{ts,tsx}";
-@source "../../../src/components/ui/**/*.{ts,tsx}";
+   The list itself was the bug, twice. Anything outside it fails SILENTLY: the
+   class lands in the DOM, Tailwind emits no rule, and the element falls back
+   to whatever the `*` base rule says. Nothing in typecheck, lint or tests sees
+   it.
+
+   `blocks/` was missing until 2026-08-17. MEASURED on the Stepper's active
+   step: its active border was in the class list and computed to the plain grey
+   border colour, because no other scanned file used that utility bare (only
+   `hover:` and `has-data-checked:` forms, which are different rules).
+
+   `annotations/`, `comments/`, `notes/` and `canvas/` were missing until
+   2026-09-14. MEASURED on the comment card: its Resolve, Delete and Close
+   buttons live in a row that stays transparent until the card is hovered, and
+   that hover rule has exactly one user in the whole tree. Unscanned, never
+   emitted, so the row could not become visible and the card shipped with no
+   usable controls at all.
+
+   The old note here ended "add a directory to this list the moment UI code
+   starts living in it", which asks someone to remember CSS scanning at the one
+   moment nobody is thinking about it. A glob needs no remembering. Scanning a
+   directory this bundle never renders costs a few unused rules; missing one
+   costs a control nobody can see.
+
+   NOTE FOR EDITORS OF THIS FILE: Tailwind scans CSS too, so a utility class
+   written in a comment here is emitted as if the UI used it. Describe rules in
+   words, never by name. That mistake wasted a full investigation on 2026-09-14
+   by making a missing rule look present. */
+@source "../../../src/components/**/*.{ts,tsx}";
 @source "../../../src/editor-ui/**/*.{ts,tsx}";
 @source "../../../src/lib/**/*.{ts,tsx}";
