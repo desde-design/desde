@@ -118,6 +118,26 @@ export interface ProjectView {
   repoUrl?: string | null
   /** Owner/admin only — the Editor join key, a capability someone may hold. */
   embeddedId?: string | null
+  /**
+   * The branch this prototype builds. Present ONLY on a `?remoteUrl=` query,
+   * and then for every role that can read the project.
+   *
+   * Not behind the owner/admin gate that `repoConfig` is, and that is a
+   * deliberate narrowing rather than an oversight. The caller supplied the
+   * remote, so every row in the response is a repo they already have checked
+   * out; the branch reveals nothing their own working copy does not
+   * (Mo, 2026-09-14).
+   *
+   * A separate field rather than unlocking `repoConfig`, because `branch`
+   * travels in that block alongside `installationId` and the raw
+   * install/build command line — the one place an operator can put a private
+   * registry credential. Widening the block would disclose those too, which
+   * the reasoning above does not cover.
+   *
+   * Hand-built, like every other projection here: a field added to
+   * `ProjectRepoConfig` later must not start round-tripping through it.
+   */
+  repoMatch?: { branch: string }
 }
 
 /**
@@ -147,6 +167,11 @@ function toProjectView(
      * rather than `null` — see `ProjectView.activeDeployment`.
      */
     activeDeployment?: Deployment | null
+    /**
+     * Include the `repoMatch` summary. True only when the caller filtered by
+     * remote — see `ProjectView.repoMatch`.
+     */
+    repoMatch?: boolean
   },
 ): ProjectView {
   return {
@@ -173,6 +198,9 @@ function toProjectView(
           repoUrl: project.repoUrl,
           embeddedId: project.embeddedId,
         }
+      : {}),
+    ...(opts.repoMatch && project.repoConfig
+      ? { repoMatch: { branch: project.repoConfig.branch } }
       : {}),
   }
 }
@@ -332,7 +360,23 @@ export function createProjectsRoutes(
   // the list (see authorize.ts — a 403/omission distinction doesn't apply
   // to a list endpoint the way it does to a by-id lookup).
   router.get("/projects", async (req, res) => {
-    const projects = await deps.storage.listProjects()
+    // Optional repo filter, used by the Editor to fetch the candidates behind
+    // an `ambiguous` resolution. Parsed with this module's own
+    // `parseRepoRemote` so there is ONE remote-parsing rule and it lives on
+    // the side holding the index — the same reasoning `project-resolve.ts`
+    // gives for owning the decision.
+    //
+    // An unparseable or unknown remote yields an empty list, never an error:
+    // failing to RECOGNISE a remote must degrade to "no match found".
+    const remoteUrl = typeof req.query.remoteUrl === "string" ? req.query.remoteUrl : null
+    const wantRepo = remoteUrl ? parseRepoRemote(remoteUrl) : null
+
+    const projects =
+      remoteUrl === null
+        ? await deps.storage.listProjects()
+        : wantRepo
+          ? await deps.storage.listProjectsByRepo(wantRepo.owner, wantRepo.name)
+          : []
     const ctx = await resolveReadContext(deps, req)
     if ("error" in ctx) {
       res.status(401).json({ error: ctx.error })
@@ -356,6 +400,7 @@ export function createProjectsRoutes(
           toProjectView(project, {
             includePrivate: canManage,
             activeDeployment: await loadActiveDeployment(deps.storage, project),
+            repoMatch: remoteUrl !== null,
           }),
         )
       }

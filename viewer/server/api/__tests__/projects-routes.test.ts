@@ -17,7 +17,7 @@ import { generateMachineToken } from "../../auth/machine-token"
 import { createSwappableApp } from "../../__tests__/swappable-app"
 import { testGithubRuntime } from "../../__tests__/test-github-runtime"
 import { upsertTestUser } from "../../__tests__/user-fixtures"
-import type { Deployment, InstanceRole, StorageAdapter } from "../../storage/types"
+import type { Deployment, InstanceRole, ProjectRepoConfig, StorageAdapter } from "../../storage/types"
 import type { LoopbackListenerRegistry } from "../../serve/loopback-listeners"
 
 class NullAssetStore implements AssetStore {
@@ -1827,5 +1827,123 @@ describe("projects API", () => {
 
       await request(app).delete(`/api/v1/projects/${project.id}`).expect(403)
     })
+  })
+})
+
+function repoConfigFor(owner: string, name: string, branch: string): ProjectRepoConfig {
+  return {
+    installationId: 1,
+    owner,
+    name,
+    defaultBranch: "main",
+    branch,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDir: "dist",
+    autoDeploy: true,
+  }
+}
+
+describe("GET /projects?remoteUrl=", () => {
+  it("returns only the projects on that repo, with the branch each builds", async () => {
+    const storage = new InMemoryStorage()
+    const { app } = setup({ storage, config: authConfig })
+    const { cookie } = await signInAs(storage, "viewer@acme.test", "viewer")
+
+    const onRepo = await storage.createProject({ slug: "main-build", name: "Main build" })
+    const alsoOnRepo = await storage.createProject({ slug: "review", name: "Review build" })
+    const elsewhere = await storage.createProject({ slug: "other", name: "Other" })
+    await storage.setProjectRepoConfig(onRepo.id, repoConfigFor("acme", "proto", "main"))
+    await storage.setProjectRepoConfig(alsoOnRepo.id, repoConfigFor("acme", "proto", "design-review"))
+    await storage.setProjectRepoConfig(elsewhere.id, repoConfigFor("acme", "unrelated", "main"))
+
+    const res = await request(app)
+      .get("/api/v1/projects")
+      .query({ remoteUrl: "git@github.com:acme/proto.git" })
+      .set("Cookie", cookie)
+      .expect(200)
+
+    expect(res.body.projects.map((p: { slug: string }) => p.slug)).toEqual([
+      "main-build",
+      "review",
+    ])
+    // Branch reaches every role that can read the project. The caller
+    // supplied the remote, so these are repos they already have checked out.
+    expect(
+      res.body.projects.map((p: { repoMatch?: { branch: string } }) => p.repoMatch?.branch),
+    ).toEqual(["main", "design-review"])
+  })
+
+  it("gives a viewer-role caller the branch but not the build commands", async () => {
+    const storage = new InMemoryStorage()
+    const { app } = setup({ storage, config: authConfig })
+    const { cookie } = await signInAs(storage, "viewer@acme.test", "viewer")
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    await storage.setProjectRepoConfig(project.id, repoConfigFor("acme", "proto", "main"))
+
+    const res = await request(app)
+      .get("/api/v1/projects")
+      .query({ remoteUrl: "https://github.com/acme/proto" })
+      .set("Cookie", cookie)
+      .expect(200)
+
+    const [view] = res.body.projects
+    expect(view.repoMatch).toEqual({ branch: "main" })
+    // `branch` lives inside repoConfig alongside installationId and the raw
+    // build command line. Exposing the branch must not unlock the block.
+    expect(view.repoConfig).toBeUndefined()
+    expect(JSON.stringify(view)).not.toContain("npm run build")
+  })
+
+  it("filters through the read gate, not after it", async () => {
+    const storage = new InMemoryStorage()
+    const { app } = setup({ storage, config: authConfig })
+    const { cookie } = await signInAs(storage, "outsider@acme.test", "viewer")
+    const invited = await storage.createProject({
+      slug: "private-build",
+      name: "Private build",
+      access: "invited",
+    })
+    await storage.setProjectRepoConfig(invited.id, repoConfigFor("acme", "proto", "main"))
+
+    const res = await request(app)
+      .get("/api/v1/projects")
+      .query({ remoteUrl: "https://github.com/acme/proto" })
+      .set("Cookie", cookie)
+      .expect(200)
+
+    expect(res.body.projects).toEqual([])
+  })
+
+  it("omits repoMatch entirely when no filter was given", async () => {
+    const storage = new InMemoryStorage()
+    const { app } = setup({ storage, config: authConfig })
+    const { cookie } = await signInAs(storage, "viewer@acme.test", "viewer")
+    const project = await storage.createProject({ slug: "p", name: "P" })
+    await storage.setProjectRepoConfig(project.id, repoConfigFor("acme", "proto", "main"))
+
+    const res = await request(app)
+      .get("/api/v1/projects")
+      .set("Cookie", cookie)
+      .expect(200)
+
+    // An unfiltered list must not start carrying branches for every
+    // prototype on the instance. The widening is justified only by the
+    // caller having named the repo.
+    expect(res.body.projects[0].repoMatch).toBeUndefined()
+  })
+
+  it("answers an unparseable remote with an empty list, not an error", async () => {
+    const storage = new InMemoryStorage()
+    const { app } = setup({ storage, config: authConfig })
+    const { cookie } = await signInAs(storage, "viewer@acme.test", "viewer")
+
+    const res = await request(app)
+      .get("/api/v1/projects")
+      .query({ remoteUrl: "not-a-remote" })
+      .set("Cookie", cookie)
+      .expect(200)
+
+    expect(res.body.projects).toEqual([])
   })
 })
