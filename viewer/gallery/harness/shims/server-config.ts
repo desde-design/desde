@@ -67,3 +67,20 @@ export function setGalleryConfig(overrides: Partial<ViewerConfig>): void {
 export function loadConfig(): ViewerConfig {
   return current
 }
+
+/**
+ * Re-exported because two SERVER components reach for it through this module
+ * (`app/page.tsx` and `app/review/[slug]/page.tsx`), and the shim replaces the
+ * module wholesale — anything it does not name is simply absent, which is a
+ * runtime "does not provide an export named" that takes the whole gallery
+ * down rather than one state with it.
+ *
+ * Imported from the real implementation rather than restated here. The rest
+ * of this file has to restate things (a `ViewerConfig` literal, a `loadConfig`
+ * that reads a module-level variable) because the real ones touch
+ * `node:crypto` and the process environment. This one is a pure two-field
+ * read, so there is nothing to stand in for and no reason to keep a second
+ * copy that can drift.
+ */
+export { effectiveServeDomain } from "../../../server/serve-domain"
+

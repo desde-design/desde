@@ -509,10 +509,12 @@ export function deriveLocalServeDomain(input: {
   return `${LOCAL_SERVE_LABEL}.${hostname}`
 }
 
-/** The serve domain routing and allowlisting use: the configured one, else the derived local one. */
-export function effectiveServeDomain(config: Pick<ViewerConfig, "serveDomain" | "localServeDomain">): string | null {
-  return config.serveDomain ?? config.localServeDomain
-}
+/**
+ * The serve domain routing and allowlisting use: the configured one, else the
+ * derived local one. Re-exported, not defined here, so the gallery's shim for
+ * this module can reach the real implementation — see `./serve-domain`.
+ */
+export { effectiveServeDomain } from "./serve-domain"
 
 /**
  * `VIEWER_PROTOTYPE_CSP=""` (or whitespace-only) is a common `.env`
