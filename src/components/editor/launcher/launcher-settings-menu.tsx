@@ -151,7 +151,11 @@ export function LauncherSettingsMenu({ updates }: { updates: DesktopUpdatesApi |
             data-testid="launcher-settings-your-viewer"
           >
             <Share2 className="h-4 w-4" />
-            Viewer
+            {/* "Viewer link", not "Viewer" (Mo, 2026-09-14). This is the
+                address and token for the viewer this Editor talks to; picking
+                WHICH project a repo is lives in the project gear, as "Viewer
+                project". Two nouns that name the two halves. */}
+            Viewer link
             {viewerAuth.status?.defaultOrigin ? null : (
               <span className="ml-auto text-2xs text-muted-foreground">Not set</span>
             )}

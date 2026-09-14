@@ -23,7 +23,12 @@ import {
   providerIdFromPath,
 } from "./llm-credentials-handler.js"
 import { isClaudeRuntimeResolvable } from "./claude-runtime-available.js"
-import { VIEWER_PROBE_ROUTE, handleViewerProbe } from "./viewer-probe.js"
+import {
+  VIEWER_PROBE_ROUTE,
+  VIEWER_PROJECTS_ROUTE,
+  handleViewerProbe,
+  handleViewerProjectsRequest,
+} from "./viewer-probe.js"
 import { VIEWER_PROXY_PREFIX, handleViewerProxy } from "./viewer-proxy.js"
 import {
   effectiveViewerConfig,
@@ -1829,6 +1834,16 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     // this checkout, instead of the dialog pre-selecting whichever project
     // the viewer listed first.
     handler: (req, res, ctx) => handleViewerProbe(req, res, ctx.repoRoot),
+  },
+  // The projects on the machine's default viewer, listed with the stored
+  // credential. Read-only, so the same lenient Origin posture as the status
+  // GET below it: a same-origin GET carries no Origin header, and `required`
+  // would 403 the dialog's own fetch.
+  {
+    method: "GET",
+    path: VIEWER_PROJECTS_ROUTE,
+    authPolicy: "bearer-origin-if-present",
+    handler: (_req, res, ctx) => handleViewerProjectsRequest(res, ctx.repoRoot),
   },
   {
     method: "GET",

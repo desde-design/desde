@@ -145,7 +145,7 @@ const ROOT_ATTR = "data-desktop-fixture-root"
  * and the unscoped lookup opened the ambient one, whose real desktop bridge is
  * absent, so it rendered no update section at all. Five states then timed out in
  * `surface-gallery-shots.mts` and a sixth (`auto-download-off`, which gates on
- * `editor-settings-api-key` — an item BOTH menus have) passed while showing the
+ * `editor-settings-api-key`, an item BOTH menus had) passed while showing the
  * wrong menu, which is worse than the timeouts.
  *
  * Menu CONTENT stays document-scoped below: Radix portals it out of this root,
@@ -251,11 +251,15 @@ function LauncherNavFixture({ bridge }: { bridge: DesktopBridge }) {
   )
 }
 
-// `editor-settings-api-key`, not `-theme`: the theme sub-menu was hidden on
-// 2026-08-17 (dark mode is not designed yet), and this selector is what tells
-// the harness the menu actually opened. The API-key item is the one every
-// settings menu still carries.
-const MENU_OPEN = '[data-testid="editor-settings-api-key"]'
+// What tells the harness the menu actually opened.
+//
+// It was `editor-settings-api-key` until 2026-09-14, when AI provider keys
+// left the PROJECT menu for the launcher's — one key per provider serves every
+// project, so it is not a project setting. Before that it was `-theme`, until
+// the theme sub-menu was hidden in August. Both times the selector broke
+// because it named a MOVEABLE item; `-viewer-project` is picked for being the
+// project menu's own, which is the property that matters here.
+const MENU_OPEN = '[data-testid="editor-settings-viewer-project"]'
 
 /** One check-dialog state: the menu opens, "Check for updates" is clicked, and the dialog lands on `view`. */
 function checkDialogState(

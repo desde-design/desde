@@ -2,7 +2,11 @@ import type { IncomingMessage, ServerResponse } from "node:http"
 import { readOriginRemoteUrl } from "./git-remote.js"
 import { readJsonBody } from "./http-body.js"
 import { readProjectConfig } from "./project-config.js"
-import { normalizeOrigin } from "./viewer-token-store.js"
+import {
+  normalizeOrigin,
+  readDefaultViewerOrigin,
+  readViewerToken,
+} from "./viewer-token-store.js"
 
 /**
  * `POST /api/editor/viewer-auth/probe` — validate a viewer URL + access token
@@ -157,29 +161,46 @@ export async function handleViewerProbe(
     return
   }
 
+  const result = await collectViewerProjects(origin, token, repoRoot)
+  sendJson(res, result.status, result.body)
+}
+
+/**
+ * Everything the probe does once a URL and token are in hand: list the
+ * viewer's projects, refuse a read-only token, and work out which project
+ * this checkout already is.
+ *
+ * Extracted 2026-09-14 so `GET /api/editor/viewer-auth/projects` can reuse it
+ * with the STORED credential. The project-scoped "Viewer project" dialog must
+ * not ask for a URL and token the machine already has, and duplicating the
+ * write-scope refusal into a second handler is how one of two copies quietly
+ * stops refusing.
+ */
+export async function collectViewerProjects(
+  origin: string,
+  token: string,
+  repoRoot?: string,
+): Promise<{ status: number; body: unknown }> {
   let listRes: Response
   try {
     listRes = await fetch(`${normalizeOrigin(origin)}/api/v1/projects`, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
     })
   } catch {
-    sendJson(res, 502, {
+    return jsonResult(502, {
       ok: false,
       reason: `Could not reach a viewer at ${origin}. Check the URL and that the server is running.`,
     })
-    return
   }
 
   if (listRes.status === 401) {
     // Distinguished from "unreachable" and from "reachable but empty": each
     // has a different fix, and collapsing them into one message is how a
     // connect flow becomes guesswork.
-    sendJson(res, 401, { ok: false, reason: "That token was rejected. It may have been revoked, or belong to a different viewer." })
-    return
+    return jsonResult(401, { ok: false, reason: "That token was rejected. It may have been revoked, or belong to a different viewer." })
   }
   if (!listRes.ok) {
-    sendJson(res, 502, { ok: false, reason: `The viewer answered ${listRes.status}. Is ${origin} really a Desde viewer?` })
-    return
+    return jsonResult(502, { ok: false, reason: `The viewer answered ${listRes.status}. Is ${origin} really a Desde viewer?` })
   }
 
   // Alive is not the same as sufficient.
@@ -202,13 +223,12 @@ export async function handleViewerProbe(
   // block: refusing on an older viewer would break connecting to it entirely,
   // which is a worse failure than the 403 this check is trying to pre-empt.
   if (scopes !== null && !scopes.includes("write")) {
-    sendJson(res, 400, {
+    return jsonResult(400, {
       ok: false,
       reason:
         "That token is read-only, so comments could be read but never posted. " +
         "Create a new token in the viewer under Settings with the WRITE scope ticked, and paste that one.",
     })
-    return
   }
 
   const payload = (await listRes.json().catch(() => null)) as { projects?: unknown } | null
@@ -222,7 +242,7 @@ export async function handleViewerProbe(
   // Field-by-field, never the viewer's raw objects: this response reaches the
   // browser, and a future viewer field (a member email, say) should not start
   // flowing there because the shape widened upstream.
-  sendJson(res, 200, {
+  return jsonResult(200, {
     ok: true,
     origin,
     projects: projects.map((p) => ({ id: p.id, slug: p.slug, name: p.name })),
@@ -230,7 +250,47 @@ export async function handleViewerProbe(
   })
 }
 
+function jsonResult(status: number, body: unknown): { status: number; body: unknown } {
+  return { status, body }
+}
+
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "Content-Type": "application/json" })
   res.end(JSON.stringify(body))
+}
+
+export const VIEWER_PROJECTS_ROUTE = "/api/editor/viewer-auth/projects"
+
+/**
+ * `GET /api/editor/viewer-auth/projects` — the projects on the machine's
+ * DEFAULT viewer, using the credential already stored for it.
+ *
+ * The project-scoped "Viewer project" dialog picks which project this repo is,
+ * and nothing more (Mo, 2026-09-14: "just have the affordance for the project
+ * link, not the whole viewer"). Asking again for a URL and token the machine
+ * already holds is what made that dialog indistinguishable from the
+ * editor-level one.
+ *
+ * Answers 409 rather than an error when there is no viewer or no token: that
+ * is not a failure, it is a prerequisite the user has not met yet, and the
+ * dialog says so and points at the editor-level setting. The token itself
+ * never leaves this process — only the project list does.
+ */
+export async function handleViewerProjectsRequest(
+  res: ServerResponse,
+  repoRoot?: string,
+): Promise<void> {
+  const origin = await readDefaultViewerOrigin()
+  if (!origin) {
+    sendJson(res, 409, { ok: false, reason: "no-viewer" })
+    return
+  }
+  const token = await readViewerToken(origin)
+  if (!token) {
+    sendJson(res, 409, { ok: false, reason: "no-token", origin })
+    return
+  }
+  const result = await collectViewerProjects(origin, token, repoRoot)
+  sendJson(res, result.status, result.body)
 }

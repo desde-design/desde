@@ -25,10 +25,8 @@ import { useCallback, useState } from "react"
 import {
   Boxes,
   FolderSearch,
-  KeyRound,
   SlidersHorizontal,
   Puzzle,
-  ScrollText,
   Share2,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -64,8 +62,7 @@ import { useDesktopUpdates } from "@/hooks/useDesktopUpdates"
 import { useClaudeRuntimeStatus } from "@/hooks/useClaudeRuntimeStatus"
 import { everyProviderUncredentialed, useLlmCredentials } from "@/hooks/useLlmCredentials"
 import { useViewerAuthStatus } from "@/hooks/useViewerAuthStatus"
-import { YourViewerDialog } from "@/components/editor/your-viewer-dialog"
-import { ConnectViewerDialog } from "@/components/editor/connect-viewer-dialog"
+import { ViewerProjectDialog } from "@/components/editor/viewer-project-dialog"
 import { useFirstRunCredentialPrompt } from "@/hooks/useFirstRunCredentialPrompt"
 import { LlmCredentialDialog } from "@/components/editor/llm-credential-dialog"
 
@@ -124,8 +121,7 @@ export function EditorSettingsMenu({
    * into "which server" (editor) and "which project" (repo) is the follow-up.
    */
   const viewerAuth = useViewerAuthStatus()
-  const [yourViewerOpen, setYourViewerOpen] = useState(false)
-  const [connectViewerOpen, setConnectViewerOpen] = useState(false)
+  const [viewerProjectOpen, setViewerProjectOpen] = useState(false)
   const credentialStatus = credentials.status
   const { shouldPrompt: credentialPrompt, dismiss: dismissCredentialPrompt } =
     useFirstRunCredentialPrompt(credentialStatus, credentials.dismissPrompt)
@@ -230,30 +226,26 @@ export function EditorSettingsMenu({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          {/* Machine-level first: the two things a person opens this menu to
-              SET, and neither belongs to the open project (Mo, 2026-09-14).
-              Everything under the separator is project-scoped, and updates
-              come last. */}
+          {/* No AI provider keys here (Mo, 2026-09-14): one key per provider
+              serves every project, so it belongs to the Editor, and the
+              launcher gear owns it. The dialog stays mounted below because the
+              FIRST-RUN prompt still opens it here — someone with no key at all
+              should be asked where they are, not sent home first. */}
+          {/* The PROJECT half of the viewer link, and only that half (Mo,
+              2026-09-14). The address and token are editor-level and live in
+              the launcher gear; this picks which project on that viewer this
+              repo is. They used to be one dialog whose first step asked for
+              credentials the machine already had, which made this entry and
+              the editor-level one indistinguishable. */}
           <DropdownMenuItem
-            onSelect={() => setCredentialDialogManuallyOpen(true)}
-            data-testid="editor-settings-api-key"
-          >
-            <KeyRound className="h-4 w-4" />
-            AI provider keys
-            {credentialMissing ? (
-              <span className="ml-auto text-2xs text-muted-foreground">Not set</span>
-            ) : null}
-          </DropdownMenuItem>
-          {/* The MACHINE's viewer: one URL and token for every repo this
-              Editor opens, which is why it sits with the AI keys rather than
-              in the project group below. */}
-          <DropdownMenuItem
-            onSelect={() => setYourViewerOpen(true)}
-            data-testid="editor-settings-your-viewer"
+            onSelect={() => setViewerProjectOpen(true)}
+            data-testid="editor-settings-viewer-project"
           >
             <Share2 className="h-4 w-4" />
-            Viewer
-            {viewerAuth.status?.defaultOrigin ? null : (
+            Viewer project
+            {viewerAuth.status?.configured ? (
+              <span className="ml-auto text-2xs text-muted-foreground">Linked</span>
+            ) : (
               <span className="ml-auto text-2xs text-muted-foreground">Not set</span>
             )}
           </DropdownMenuItem>
@@ -265,13 +257,11 @@ export function EditorSettingsMenu({
             `themes`; this is a gate, not a deletion.
           */}
           <DropdownMenuSeparator />
-          <DropdownMenuItem
-            onSelect={() => setConventionsOpen(true)}
-            data-testid="editor-settings-references"
-          >
-            <ScrollText className="h-4 w-4" />
-            Model &amp; references
-          </DropdownMenuItem>
+          {/* "Model & references" is hidden (Mo, 2026-09-14: "I don't think
+              it is that relevant"). It was a read-only view of what the agent
+              is grounded in, which is transparency rather than a setting. The
+              dialog and its hook stay wired, so un-hiding it is deleting this
+              comment. */}
           <DropdownMenuItem
             onSelect={() => setCapabilitiesOpen(true)}
             data-testid="editor-settings-capabilities"
@@ -293,20 +283,6 @@ export function EditorSettingsMenu({
             <FolderSearch className="h-4 w-4" />
             Reference folders
           </DropdownMenuItem>
-          {/* The per-repo link, in the project group because that is what it
-              is. It cannot also be called "Viewer": the machine-level item at
-              the top now owns that word, and two identically labelled entries
-              opening different dialogs is worse than either name. */}
-          <DropdownMenuItem
-            onSelect={() => setConnectViewerOpen(true)}
-            data-testid="editor-settings-connect-viewer"
-          >
-            <Share2 className="h-4 w-4" />
-            Link this project…
-            {viewerAuth.status?.configured ? (
-              <span className="ml-auto text-2xs text-muted-foreground">Connected</span>
-            ) : null}
-          </DropdownMenuItem>
           {/*
             "Run smoke test" is hidden (Mo, 2026-08-17: "I am not even sure
             what this is"). That is the finding, not the fix — a menu item
@@ -324,13 +300,6 @@ export function EditorSettingsMenu({
           />
         </DropdownMenuContent>
       </DropdownMenu>
-      <YourViewerDialog
-        open={yourViewerOpen}
-        onOpenChange={setYourViewerOpen}
-        defaultOrigin={viewerAuth.status?.defaultOrigin ?? null}
-        link={viewerAuth.status?.link ?? null}
-        onSaved={() => void viewerAuth.refresh()}
-      />
       <LlmCredentialDialog
         open={credentialDialogOpen}
         onOpenChange={handleCredentialDialogChange}
@@ -347,14 +316,14 @@ export function EditorSettingsMenu({
         invalidateManifest={invalidateManifest}
       />
       <ReferenceDirsDialog open={referenceDirsOpen} onOpenChange={setReferenceDirsOpen} />
-      <ConnectViewerDialog
-        open={connectViewerOpen}
-        onOpenChange={setConnectViewerOpen}
-        initialBaseUrl={viewerAuth.status?.baseUrl ?? null}
-        // Re-probe rather than trusting the dialog's own success: the menu
-        // label reads off `configured`, which is the CLI's view of the config
+      <ViewerProjectDialog
+        open={viewerProjectOpen}
+        onOpenChange={setViewerProjectOpen}
+        currentProjectId={viewerAuth.status?.projectId ?? null}
+        // Re-probe rather than trusting the dialog's own success: the menu's
+        // badge reads off `configured`, which is the CLI's view of the config
         // file, not the client's memory of a POST.
-        onConnected={() => void viewerAuth.refresh()}
+        onLinked={() => void viewerAuth.refresh()}
       />
       {/* No SmokeTestFailureDialog: nothing can start a smoke run from here
           while the menu item is hidden, so its failure dialog had no producer.
