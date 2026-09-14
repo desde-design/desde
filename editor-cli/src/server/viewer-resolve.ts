@@ -47,6 +47,11 @@ import { normalizeOrigin, readDefaultViewerOrigin, readViewerToken } from "./vie
  * `conflict` — the embedded id is claimed by a prototype this token cannot
  *   see. Surfaced verbatim; the viewer withholds the other prototype's name
  *   on purpose, so there is nothing more to say than what it returned.
+ * `ambiguous` — several prototypes are connected to this repo, so there is no
+ *   single right answer. Reported rather than resolved: picking one would put
+ *   comments on a prototype nobody chose, which is the behaviour this replaced.
+ *   The candidates come from the AUTHENTICATED list route, so what the user is
+ *   shown is what they may actually open. Comments stay local until they choose.
  */
 export type ViewerLinkState =
   | { status: "no-viewer" }
@@ -54,7 +59,26 @@ export type ViewerLinkState =
   | { status: "linked"; origin: string; projectId: string; slug: string; name: string }
   | { status: "unlinked"; origin: string }
   | { status: "conflict"; origin: string; reason: string }
+  | { status: "ambiguous"; origin: string; candidates: ViewerCandidate[] }
   | { status: "error"; origin: string; reason: string }
+
+/**
+ * One prototype the viewer offers for this repo.
+ *
+ * Built field by field from the list route's response rather than passed
+ * through. This reaches the browser, so a widened projection upstream must
+ * not start flowing there on its own — the same rule the viewer applies to
+ * its own wire types.
+ */
+export interface ViewerCandidate {
+  projectId: string
+  slug: string
+  name: string
+  /** The branch this prototype builds. */
+  branch: string
+  /** ISO-8601, or null when it has never been built. */
+  lastBuiltAt: string | null
+}
 
 interface ResolveDeps {
   home?: string
@@ -86,6 +110,65 @@ async function checkCredential(
     return res.ok ? "ok" : "unreachable"
   } catch {
     return "unreachable"
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * The prototypes this token can actually open for `remoteUrl`.
+ *
+ * Separate from `/projects/resolve` on purpose. That route is public-read, so
+ * its count includes prototypes this caller may not be able to see; showing
+ * those in a chooser would offer rows whose Link then fails. This route is
+ * permission-checked, so its answer is the honest one.
+ */
+async function fetchRepoCandidates(
+  origin: string,
+  token: string,
+  remoteUrl: string,
+  fetchImpl?: typeof fetch,
+): Promise<ViewerCandidate[]> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), RESOLVE_TIMEOUT_MS)
+  try {
+    const res = await (fetchImpl ?? fetch)(
+      `${origin}/api/v1/projects?remoteUrl=${encodeURIComponent(remoteUrl)}`,
+      {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        signal: controller.signal,
+      },
+    )
+    if (!res.ok) return []
+    const body = (await res.json()) as {
+      projects?: {
+        id?: unknown
+        slug?: unknown
+        name?: unknown
+        repoMatch?: { branch?: unknown }
+        activeDeployment?: { createdAt?: unknown } | null
+      }[]
+    }
+    if (!Array.isArray(body.projects)) return []
+    const out: ViewerCandidate[] = []
+    for (const p of body.projects) {
+      if (typeof p.id !== "string" || typeof p.slug !== "string" || typeof p.name !== "string") {
+        continue
+      }
+      out.push({
+        projectId: p.id,
+        slug: p.slug,
+        name: p.name,
+        // An older viewer has no `repoMatch`. The chooser degrades to name
+        // and slug rather than refusing to render.
+        branch: typeof p.repoMatch?.branch === "string" ? p.repoMatch.branch : "",
+        lastBuiltAt:
+          typeof p.activeDeployment?.createdAt === "string" ? p.activeDeployment.createdAt : null,
+      })
+    }
+    return out
+  } catch {
+    return []
   } finally {
     clearTimeout(timer)
   }
@@ -149,6 +232,7 @@ export async function resolveViewerLink(
       | { decision: "adopt"; project: { id: string; slug: string; name: string } }
       | { decision: "mint"; suggestedSlug: string }
       | { decision: "conflict"; reason: string }
+      | { decision: "ambiguous"; count: number }
     if (body.decision === "adopt") {
       return {
         status: "linked",
@@ -160,6 +244,29 @@ export async function resolveViewerLink(
     }
     if (body.decision === "conflict") {
       return { status: "conflict", origin, reason: body.reason }
+    }
+    if (body.decision === "ambiguous") {
+      const candidates = await fetchRepoCandidates(
+        normalizeOrigin(origin),
+        token,
+        remoteUrl,
+        deps.fetchImpl,
+      )
+      // The authenticated list is the honest count. Resolve's is public-read
+      // and includes prototypes this caller may not be able to open, so one
+      // readable candidate is not an ambiguous question for this user.
+      const only = candidates[0]
+      if (candidates.length === 1 && only) {
+        return {
+          status: "linked",
+          origin,
+          projectId: only.projectId,
+          slug: only.slug,
+          name: only.name,
+        }
+      }
+      if (candidates.length === 0) return { status: "unlinked", origin }
+      return { status: "ambiguous", origin, candidates }
     }
     return { status: "unlinked", origin }
   } catch (err) {

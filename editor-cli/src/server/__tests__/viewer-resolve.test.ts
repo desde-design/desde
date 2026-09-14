@@ -197,3 +197,97 @@ describe("resolveViewerLink", () => {
     expect(after).toBe(before)
   })
 })
+
+/**
+ * A viewer that answers `ambiguous` and serves `candidates` from the
+ * authenticated list route.
+ */
+function viewerServingAmbiguous(count: number, candidates: unknown[]): typeof fetch {
+  return (async (url: string | URL | Request) => {
+    const href = String(url)
+    if (href.endsWith("/api/v1/me")) return jsonResponse(200, { scopes: ["read", "write"] })
+    if (href.includes("/api/v1/projects/resolve")) {
+      return jsonResponse(200, { decision: "ambiguous", count })
+    }
+    if (href.includes("/api/v1/projects?")) {
+      return jsonResponse(200, { projects: candidates })
+    }
+    return jsonResponse(404, {})
+  }) as unknown as typeof fetch
+}
+
+function candidate(id: string, branch: string) {
+  return {
+    id,
+    slug: id,
+    name: `Prototype ${id}`,
+    repoMatch: { branch },
+    activeDeployment: { status: "deployed", createdAt: "2026-09-13T09:00:00.000Z" },
+  }
+}
+
+describe("resolveViewerLink — several prototypes on one repo", () => {
+  it("reports ambiguous with the readable candidates", async () => {
+    const home = tmp("vr-home-")
+    const root = await repoWithIdentity("emb-1")
+    await writeDefaultViewerOrigin("https://viewer.test", home)
+    await writeViewerToken("https://viewer.test", `dsv_${"0".repeat(16)}_${"a".repeat(43)}`, home)
+
+    const link = await resolveViewerLink(root, {
+      home,
+      fetchImpl: viewerServingAmbiguous(2, [candidate("a", "main"), candidate("b", "design-review")]),
+    })
+
+    expect(link).toEqual({
+      status: "ambiguous",
+      origin: "https://viewer.test",
+      candidates: [
+        {
+          projectId: "a",
+          slug: "a",
+          name: "Prototype a",
+          branch: "main",
+          lastBuiltAt: "2026-09-13T09:00:00.000Z",
+        },
+        {
+          projectId: "b",
+          slug: "b",
+          name: "Prototype b",
+          branch: "design-review",
+          lastBuiltAt: "2026-09-13T09:00:00.000Z",
+        },
+      ],
+    })
+  })
+
+  it("links silently when the caller can only read one of them", async () => {
+    // The resolve route is public-read, so it counts projects this token may
+    // not be able to open. One readable candidate is not an ambiguous
+    // question for this user, so it follows the one-match rule.
+    const home = tmp("vr-home-")
+    const root = await repoWithIdentity("emb-1")
+    await writeDefaultViewerOrigin("https://viewer.test", home)
+    await writeViewerToken("https://viewer.test", `dsv_${"0".repeat(16)}_${"a".repeat(43)}`, home)
+
+    const link = await resolveViewerLink(root, {
+      home,
+      fetchImpl: viewerServingAmbiguous(2, [candidate("a", "main")]),
+    })
+
+    expect(link).toMatchObject({ status: "linked", projectId: "a", slug: "a" })
+  })
+
+  it("reports unlinked when none of them are readable", async () => {
+    const home = tmp("vr-home-")
+    const root = await repoWithIdentity("emb-1")
+    await writeDefaultViewerOrigin("https://viewer.test", home)
+    await writeViewerToken("https://viewer.test", `dsv_${"0".repeat(16)}_${"a".repeat(43)}`, home)
+
+    const link = await resolveViewerLink(root, {
+      home,
+      fetchImpl: viewerServingAmbiguous(2, []),
+    })
+
+    expect(link).toEqual({ status: "unlinked", origin: "https://viewer.test" })
+  })
+})
