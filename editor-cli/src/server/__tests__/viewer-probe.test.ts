@@ -1,4 +1,7 @@
+import { promises as fs } from "node:fs"
 import { createServer, type Server } from "node:http"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import type { AddressInfo } from "node:net"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { handleViewerProbe } from "../viewer-probe"
@@ -174,5 +177,184 @@ describe("viewer probe — token scope", () => {
     const baseUrl = await fakeViewerWithScopes(undefined)
     const res = await probe({ baseUrl, token: VALID_TOKEN })
     expect(res.status).toBe(200)
+  })
+})
+
+/**
+ * Matching the open checkout to a project on the viewer.
+ *
+ * The dialog used to pre-select `projects[0]` — whichever row the viewer
+ * happened to return first, with nothing to do with the repo in front of you.
+ * The viewer has been able to answer "which project is this repo" since the
+ * auto-link work (`POST /api/v1/projects/resolve`); the connect flow simply
+ * never asked. These cover the asking, and every way it declines to answer.
+ */
+describe("viewer probe: matching this checkout to a project", () => {
+  let repoRoot = ""
+
+  beforeEach(async () => {
+    repoRoot = await fs.mkdtemp(join(tmpdir(), "desde-probe-"))
+  })
+
+  afterEach(async () => {
+    await fs.rm(repoRoot, { recursive: true, force: true })
+  })
+
+  /** Commits an identity into the checkout, the way a linked repo carries one. */
+  async function writeEmbeddedId(id: string): Promise<void> {
+    await fs.mkdir(join(repoRoot, ".desde"), { recursive: true })
+    await fs.writeFile(
+      join(repoRoot, ".desde", "config.json"),
+      // `name` is required by `parseProjectIdentity`; an identity without one
+      // reads as no identity at all, which would make this fixture silently
+      // test the nothing-to-match-on path instead.
+      JSON.stringify({ version: 2, project: { id, name: "Local checkout", slug: "local-checkout" } }),
+    )
+  }
+
+  /**
+   * A viewer that answers `/projects/resolve` differently from the list.
+   * The single-body fake above cannot express that, and the whole question
+   * here is what happens when the two disagree.
+   */
+  async function fakeViewerWithResolve(
+    projects: unknown[],
+    resolution: unknown,
+    resolveStatus = 200,
+  ): Promise<string> {
+    viewerServer = createServer((req, res) => {
+      if ((req.url ?? "").includes("/projects/resolve")) {
+        res.writeHead(resolveStatus, { "Content-Type": "application/json" })
+        res.end(JSON.stringify(resolution))
+        return
+      }
+      res.writeHead(200, { "Content-Type": "application/json" })
+      res.end(JSON.stringify({ projects }))
+    })
+    const port = await listen(viewerServer)
+    return `http://127.0.0.1:${port}`
+  }
+
+  /** Drives the probe WITH repo context, which the route supplies in production. */
+  function probeWithRepo(body: unknown) {
+    return fetch(`http://127.0.0.1:${withRepoPort}/api/editor/viewer-auth/probe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+  }
+
+  let withRepoServer: Server
+  let withRepoPort = 0
+
+  beforeEach(async () => {
+    withRepoServer = createServer((req, res) => void handleViewerProbe(req, res, repoRoot))
+    withRepoPort = await listen(withRepoServer)
+  })
+
+  afterEach(async () => {
+    await new Promise<void>((r) => withRepoServer.close(() => r()))
+  })
+
+  it("reports the project the viewer adopts for this checkout", async () => {
+    await writeEmbeddedId("id-42")
+    const baseUrl = await fakeViewerWithResolve(
+      [
+        { id: "p1", slug: "alpha", name: "Alpha" },
+        { id: "p2", slug: "beta", name: "Beta" },
+      ],
+      { decision: "adopt", project: { id: "p2", slug: "beta", name: "Beta" } },
+    )
+    const json = await (await probeWithRepo({ baseUrl, token: VALID_TOKEN })).json()
+    // Not `p1`, which is what the old first-row default would have chosen.
+    expect(json.match).toEqual({ projectId: "p2", by: "identity" })
+  })
+
+  /**
+   * `/projects/resolve` is deliberately public-read, so it answers for
+   * projects this token cannot open. Pre-selecting one of those would leave
+   * the dialog on a row whose Connect fails, chosen by us rather than by the
+   * user — strictly worse than not matching at all.
+   */
+  it("ignores a match the token cannot actually see", async () => {
+    await writeEmbeddedId("id-42")
+    const baseUrl = await fakeViewerWithResolve(
+      [{ id: "p1", slug: "alpha", name: "Alpha" }],
+      { decision: "adopt", project: { id: "invisible", slug: "x", name: "X" } },
+    )
+    const json = await (await probeWithRepo({ baseUrl, token: VALID_TOKEN })).json()
+    expect(json.match).toBeUndefined()
+    expect(json.projects).toEqual([{ id: "p1", slug: "alpha", name: "Alpha" }])
+  })
+
+  it("reports no match when the viewer has never seen this repo", async () => {
+    await writeEmbeddedId("id-42")
+    const baseUrl = await fakeViewerWithResolve(
+      [{ id: "p1", slug: "alpha", name: "Alpha" }],
+      { decision: "mint", suggestedSlug: "alpha" },
+    )
+    const json = await (await probeWithRepo({ baseUrl, token: VALID_TOKEN })).json()
+    expect(json.match).toBeUndefined()
+  })
+
+  it("reports no match on a conflict, which is not an answer about THIS repo", async () => {
+    await writeEmbeddedId("id-42")
+    const baseUrl = await fakeViewerWithResolve(
+      [{ id: "p1", slug: "alpha", name: "Alpha" }],
+      { decision: "conflict", reason: "claimed elsewhere" },
+    )
+    const json = await (await probeWithRepo({ baseUrl, token: VALID_TOKEN })).json()
+    expect(json.match).toBeUndefined()
+  })
+
+  /**
+   * Matching is an enhancement on top of a flow that has to keep working.
+   * An older viewer with no resolve route, or one that errors, must leave the
+   * user with the plain list rather than a failed connect.
+   */
+  it("still lists the projects when the resolve route errors", async () => {
+    await writeEmbeddedId("id-42")
+    const baseUrl = await fakeViewerWithResolve(
+      [{ id: "p1", slug: "alpha", name: "Alpha" }],
+      { error: "not found" },
+      404,
+    )
+    const res = await probeWithRepo({ baseUrl, token: VALID_TOKEN })
+    expect(res.status).toBe(200)
+    const json = await res.json()
+    expect(json.projects).toEqual([{ id: "p1", slug: "alpha", name: "Alpha" }])
+    expect(json.match).toBeUndefined()
+  })
+
+  /**
+   * A checkout with no committed identity and no git remote has nothing to
+   * match on. The resolve route 400s on an empty request, so this must not
+   * even ask.
+   */
+  it("does not ask when the checkout has nothing to match on", async () => {
+    let resolveCalls = 0
+    viewerServer = createServer((req, res) => {
+      if ((req.url ?? "").includes("/projects/resolve")) resolveCalls += 1
+      res.writeHead(200, { "Content-Type": "application/json" })
+      res.end(JSON.stringify({ projects: [{ id: "p1", slug: "alpha", name: "Alpha" }] }))
+    })
+    const port = await listen(viewerServer)
+    const json = await (
+      await probeWithRepo({ baseUrl: `http://127.0.0.1:${port}`, token: VALID_TOKEN })
+    ).json()
+    expect(resolveCalls).toBe(0)
+    expect(json.match).toBeUndefined()
+  })
+
+  /** The no-repo-context caller keeps its old behavior, match field and all. */
+  it("reports no match when the probe is called without a checkout", async () => {
+    await writeEmbeddedId("id-42")
+    const baseUrl = await fakeViewerWithResolve(
+      [{ id: "p1", slug: "alpha", name: "Alpha" }],
+      { decision: "adopt", project: { id: "p1", slug: "alpha", name: "Alpha" } },
+    )
+    // `probe` (not `probeWithRepo`) is the server built with no repoRoot.
+    const json = await (await probe({ baseUrl, token: VALID_TOKEN })).json()
+    expect(json.match).toBeUndefined()
   })
 })

@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http"
+import { readOriginRemoteUrl } from "./git-remote.js"
 import { readJsonBody } from "./http-body.js"
+import { readProjectConfig } from "./project-config.js"
 import { normalizeOrigin } from "./viewer-token-store.js"
 
 /**
@@ -31,7 +33,101 @@ function isViewerProject(v: unknown): v is ViewerProject {
   return typeof p.id === "string" && typeof p.slug === "string" && typeof p.name === "string"
 }
 
-export async function handleViewerProbe(req: IncomingMessage, res: ServerResponse): Promise<void> {
+/**
+ * Which project this checkout already belongs to, when the viewer knows.
+ *
+ * `null` whenever anything is uncertain: no repo context, no identity to ask
+ * with, the viewer said `mint` or `conflict`, or it named a project this token
+ * cannot actually see. A wrong pre-selection is worse than none — it points
+ * someone's comments at another prototype while looking like it did the work
+ * for them — so every unsure case falls back to the plain list.
+ */
+interface ProjectMatch {
+  projectId: string
+  /**
+   * What matched, for the dialog to say out loud. `identity` is the id
+   * committed in `.desde/config.json`; `repo` is the git remote used as a
+   * discovery index.
+   */
+  by: "identity" | "repo"
+}
+
+/**
+ * Ask the viewer whether it already has a prototype for this checkout.
+ *
+ * The machinery is not new. `POST /api/v1/projects/resolve` has matched on
+ * the embedded identity id and fallen back to the git remote since the
+ * auto-link work (2026-08-26), and `viewer-resolve.ts` already calls it at
+ * boot against the machine's DEFAULT viewer. What it never covered is the
+ * dialog: connecting to a viewer for the first time, or to a second one,
+ * listed every project and pre-selected `projects[0]` — the first row the
+ * viewer happened to return, unrelated to the repo in front of you.
+ *
+ * Read-only and best effort, like every other read here. It runs after the
+ * token has been accepted, so a failure at this point means the connect flow
+ * offers a plain list, which is exactly what it offered before.
+ */
+async function findProjectMatch(
+  origin: string,
+  token: string,
+  repoRoot: string,
+  visibleProjectIds: ReadonlySet<string>,
+): Promise<ProjectMatch | null> {
+  const config = await readProjectConfig(repoRoot)
+  const embeddedId = config.ok ? (config.config.project?.id ?? "") : ""
+  const remoteUrl = (await readOriginRemoteUrl(repoRoot)) ?? ""
+  // The endpoint 400s on neither, and a checkout with no remote and no
+  // committed identity genuinely has nothing to match on.
+  if (!embeddedId && !remoteUrl) return null
+
+  let body: unknown
+  try {
+    const resolved = await fetch(`${normalizeOrigin(origin)}/api/v1/projects/resolve`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        ...(embeddedId ? { embeddedId } : {}),
+        ...(remoteUrl ? { remoteUrl } : {}),
+      }),
+    })
+    if (!resolved.ok) return null
+    body = await resolved.json()
+  } catch {
+    return null
+  }
+
+  const decision = body as { decision?: unknown; project?: { id?: unknown } }
+  if (decision.decision !== "adopt") return null
+  const projectId = typeof decision.project?.id === "string" ? decision.project.id : ""
+  if (!projectId) return null
+
+  // The resolve route is deliberately public-read, so it answers for projects
+  // this token may not be able to open. Pre-selecting one of those would put
+  // the dialog in a state where Connect fails on a row the user never chose.
+  if (!visibleProjectIds.has(projectId)) return null
+
+  // Which of the two keys did it? The response does not say, so this is
+  // inferred from what was sent rather than asserted: with no embedded id in
+  // the repo, the remote is the only thing it can have matched on. When both
+  // were sent, the route's own precedence is identity first, so that is the
+  // honest label.
+  return { projectId, by: embeddedId ? "identity" : "repo" }
+}
+
+/**
+ * `repoRoot` is optional so the probe stays callable with no repo context
+ * (its own tests, and any future caller that has a token but no checkout).
+ * Without it the response simply carries no match.
+ */
+export async function handleViewerProbe(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoRoot?: string,
+): Promise<void> {
   const body = await readJsonBody<{ baseUrl?: unknown; token?: unknown }>(req).catch(
     () => ({}) as { baseUrl?: unknown; token?: unknown },
   )
@@ -117,6 +213,12 @@ export async function handleViewerProbe(req: IncomingMessage, res: ServerRespons
 
   const payload = (await listRes.json().catch(() => null)) as { projects?: unknown } | null
   const projects = Array.isArray(payload?.projects) ? payload.projects.filter(isViewerProject) : []
+
+  const match =
+    repoRoot === undefined
+      ? null
+      : await findProjectMatch(origin, token, repoRoot, new Set(projects.map((p) => p.id)))
+
   // Field-by-field, never the viewer's raw objects: this response reaches the
   // browser, and a future viewer field (a member email, say) should not start
   // flowing there because the shape widened upstream.
@@ -124,6 +226,7 @@ export async function handleViewerProbe(req: IncomingMessage, res: ServerRespons
     ok: true,
     origin,
     projects: projects.map((p) => ({ id: p.id, slug: p.slug, name: p.name })),
+    ...(match ? { match } : {}),
   })
 }
 

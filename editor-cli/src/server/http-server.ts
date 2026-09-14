@@ -1798,7 +1798,10 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     method: "POST",
     path: VIEWER_PROBE_ROUTE,
     authPolicy: "bearer-origin-required",
-    handler: (req, res) => handleViewerProbe(req, res),
+    // `ctx.repoRoot` so the probe can ask the viewer which of its projects is
+    // this checkout, instead of the dialog pre-selecting whichever project
+    // the viewer listed first.
+    handler: (req, res, ctx) => handleViewerProbe(req, res, ctx.repoRoot),
   },
   {
     method: "GET",

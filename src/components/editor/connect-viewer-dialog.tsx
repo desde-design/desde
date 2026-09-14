@@ -30,6 +30,7 @@ import {
   OptionCard,
   OptionCardGroup,
 } from "@/components/blocks"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -47,6 +48,17 @@ export interface ViewerProjectOption {
   id: string
   slug: string
   name: string
+}
+
+/**
+ * Which project this checkout already belongs to, as the CLI's probe resolved
+ * it against the viewer. Absent when nothing matched, and the dialog then
+ * behaves exactly as it did before: a plain list with the first row selected.
+ */
+export interface ViewerProjectMatch {
+  projectId: string
+  /** `identity` is the id committed in `.desde/config.json`; `repo` is the git remote. */
+  by: "identity" | "repo"
 }
 
 export interface ConnectViewerDialogProps {
@@ -78,6 +90,14 @@ export function ConnectViewerDialog({
     undefined,
   )
   const [projectFilter, setProjectFilter] = useState("")
+  /*
+    Which row the CLI matched to this checkout, if any. Kept beside the list
+    rather than folded into `selectedProjectId`, because the two answer
+    different questions: one is what the user is about to connect, the other
+    is why that row was offered first, and the second must survive the user
+    clicking a different row.
+  */
+  const [match, setMatch] = useState<ViewerProjectMatch | null>(null)
 
   /**
    * Discard a probe result the moment its inputs stop being true.
@@ -93,6 +113,7 @@ export function ConnectViewerDialog({
   const invalidateProbe = useCallback(() => {
     setProjects(null)
     setOrigin(null)
+    setMatch(null)
     setError(null)
     setSelectedProjectId(undefined)
     setProjectFilter("")
@@ -120,6 +141,7 @@ export function ConnectViewerDialog({
     // label, and it clears stale rows just as well.
     setProjects(null)
     setOrigin(null)
+    setMatch(null)
     try {
       const res = await editorFetch("/api/editor/viewer-auth/probe", {
         method: "POST",
@@ -131,14 +153,32 @@ export function ConnectViewerDialog({
         reason?: string
         origin?: string
         projects?: ViewerProjectOption[]
+        match?: ViewerProjectMatch
       }
       if (!json.ok) {
         setError(json.reason ?? `Could not reach the viewer (HTTP ${res.status}).`)
         return
       }
       setOrigin(json.origin ?? baseUrl)
-      setProjects(json.projects ?? [])
-      setSelectedProjectId(json.projects?.[0]?.id)
+      const listed = json.projects ?? []
+      setProjects(listed)
+      /*
+        Pre-select the project this repo already belongs to.
+
+        The fallback is the old behavior, and it was the ONLY behavior until
+        now: `listed[0]`, the first row the viewer happened to return. That is
+        fine as a default for a viewer that has never seen this repo, and
+        wrong every other time — an Editor open on a repo and a viewer serving
+        that same repo are the common case, not the exception.
+
+        The CLI does the matching, because it is the side that can read the
+        checkout's git remote and its committed identity. The probe verifies
+        the matched id is one this token can actually open before reporting
+        it, so nothing here has to re-check that.
+      */
+      const matched = json.match ?? null
+      setMatch(matched)
+      setSelectedProjectId(matched?.projectId ?? listed[0]?.id)
       setProjectFilter("")
     } catch {
       setError("Could not reach the CLI. Is the editor still running?")
@@ -196,12 +236,28 @@ export function ConnectViewerDialog({
   const step: "credentials" | "project" = projects === null ? "credentials" : "project"
 
   const query = projectFilter.trim().toLowerCase()
-  const visibleProjects = (projects ?? []).filter(
-    (project) =>
-      !query ||
-      project.name.toLowerCase().includes(query) ||
-      project.slug.toLowerCase().includes(query),
-  )
+  const visibleProjects = (projects ?? [])
+    .filter(
+      (project) =>
+        !query ||
+        project.name.toLowerCase().includes(query) ||
+        project.slug.toLowerCase().includes(query),
+    )
+    /*
+      The matched project is listed first, and not only pre-selected.
+
+      Selection alone is invisible on a viewer with more than a handful of
+      prototypes: the list scrolls inside a fixed frame, so the selected row
+      can sit well below the fold and the dialog looks like it chose nothing.
+      A row that was picked FOR you has to be the row you can see.
+
+      Order only, never membership: the filter above still decides what is in
+      the list, so typing a query that excludes the match excludes it.
+    */
+    .sort((a, b) => {
+      if (match === null) return 0
+      return Number(b.id === match.projectId) - Number(a.id === match.projectId)
+    })
   const selectedProject = (projects ?? []).find((p) => p.id === selectedProjectId)
 
   const issues = error
@@ -341,7 +397,24 @@ export function ConnectViewerDialog({
                   <OptionCard
                     key={project.id}
                     value={project.id}
-                    title={project.name}
+                    title={
+                      match?.projectId === project.id ? (
+                        <span className="flex items-center gap-1.5">
+                          {project.name}
+                          {/*
+                            Says WHY this row is the one, in the words the
+                            reader can check for themselves: they know what
+                            repo this Editor is open on. "Matched" alone would
+                            not tell them what was matched against.
+                          */}
+                          <Badge variant="secondary">
+                            {match.by === "identity" ? "This prototype" : "This repo"}
+                          </Badge>
+                        </span>
+                      ) : (
+                        project.name
+                      )
+                    }
                     hint={<span className="font-mono">{project.slug}</span>}
                     disabled={busy}
                     data-testid={`connect-viewer-project-${project.slug}`}

@@ -102,6 +102,32 @@ const PROJECTS_FOUND: ProbeResponse = {
 }
 
 /**
+ * The common case, once both sides know the same repo.
+ *
+ * An Editor open on a checkout and a viewer serving a prototype built from
+ * that same repo describe one thing, so the dialog should say which row that
+ * is instead of making the reader find it. The CLI resolves the match (it is
+ * the side that can read the git remote and the committed identity) and the
+ * dialog pre-selects it, lifts it to the top of the list, and badges it.
+ *
+ * Deliberately NOT the first project in the list: `proj-2` is the match here,
+ * so a regression that silently falls back to "select the first row" shows up
+ * as the wrong card being chosen rather than as a passing screenshot.
+ */
+const PROJECT_MATCHED: ProbeResponse = {
+  status: 200,
+  body: {
+    ok: true,
+    origin: FAKE_BASE_URL,
+    projects: [
+      { id: "proj-1", slug: "ai-gateway", name: "AI Gateway Prototype" },
+      { id: "proj-2", slug: "design-system-demo", name: "Design System Demo" },
+    ],
+    match: { projectId: "proj-2", by: "repo" },
+  },
+}
+
+/**
  * A viewer that authenticates fine and has nothing on it.
  *
  * The probe SUCCEEDS here, which is why this is a distinct state and not a
@@ -209,6 +235,12 @@ export const CONNECT_VIEWER_DIALOG_SURFACE: SurfaceEntry = {
       label: "Probe succeeded: projects listed",
       readyWhen: PROBE_PROJECT_LIST,
       render: (ctx) => <ProbeFixture ctx={ctx} probeResponse={PROJECTS_FOUND} />,
+    },
+    {
+      id: "connect-viewer-dialog/project-matched",
+      label: "Probe succeeded: this repo's project matched and pre-selected",
+      readyWhen: PROBE_PROJECT_LIST,
+      render: (ctx) => <ProbeFixture ctx={ctx} probeResponse={PROJECT_MATCHED} />,
     },
     {
       id: "connect-viewer-dialog/no-projects",
