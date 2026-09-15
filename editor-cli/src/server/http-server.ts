@@ -124,6 +124,7 @@ import {
 } from "./grounding-context.js"
 import { handleEditIterationRequest } from "./edit-iteration-handler.js"
 import { handleIterationVerifyRequest } from "./iteration-verify-handler.js"
+import { handleResolveCallsitesRequest } from "./resolve-callsites-handler.js"
 import { readPrototypeFile } from "./file-read-handler.js"
 import type {
   DriftLog,
@@ -2490,6 +2491,17 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-required",
     handler: (req, res, ctx) =>
       handleIterationVerifyRequest(req, res, ctx.repoRoot, sendJson),
+  },
+  // Callsite recovery for the Structure tree — where a component the
+  // runtime has no instance for (server-rendered) is written in the file
+  // its root element is displayed inside. Read-only; the panel POSTs one
+  // batch per structure fetch.
+  {
+    method: "POST",
+    path: "/api/editor/resolve-callsites",
+    authPolicy: "bearer-origin-required",
+    handler: (req, res, ctx) =>
+      handleResolveCallsitesRequest(req, res, ctx.repoRoot, sendJson),
   },
   {
     method: "GET",

@@ -61,6 +61,7 @@ import {
   describeWhyMoveGoesToChat,
   type MoveToChatHandoff,
 } from "./move-to-chat"
+import { enrichLayersWithCallsites } from "./resolve-layer-callsites"
 import { applyClassMutation } from "@/components/editor/align-size"
 import type { PropControlValue } from "@/components/editor/prop-control"
 import { resolveTailwindClasses } from "@/editor/tailwind/tailwind-declarations"
@@ -663,15 +664,27 @@ export function useEditorEditing({
             if (vueFiles.size === 0) {
               setLayersRawRoots(roots)
               setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
-              return
+            } else {
+              const groups = await ctx.step(
+                fetchConditionalGroupsForFiles([...vueFiles]),
+              )
+              if (groups.stale) return
+              if (generation !== layersGenerationRef.current) return
+              setLayersRawRoots(roots)
+              setLayersGroups(groups.value)
             }
-            const groups = await ctx.step(
-              fetchConditionalGroupsForFiles([...vueFiles]),
-            )
-            if (groups.stale) return
+            // Rows for components the runtime has no instance for
+            // (server-rendered) attribute to their own definition file. Ask
+            // the CLI where each is WRITTEN in the file it is displayed
+            // inside, and re-target those rows at the callsite — AFTER the
+            // tree is on screen, so a slow answer never delays it. An answer
+            // for a departed page or a superseded refresh is dropped; a
+            // failed request leaves the tree as the bridge reported it. See
+            // `resolve-layer-callsites.ts`.
+            const enriched = await ctx.step(enrichLayersWithCallsites(roots))
+            if (enriched.stale) return
             if (generation !== layersGenerationRef.current) return
-            setLayersRawRoots(roots)
-            setLayersGroups(groups.value)
+            if (enriched.value !== roots) setLayersRawRoots(enriched.value)
             return
           } catch (err) {
             if (generation !== layersGenerationRef.current) return
