@@ -5,10 +5,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   getGroundingService,
+  warmGroundingMemo,
   resetGroundingCache,
   type GroundingLoaders,
 } from "../grounding-context.js"
-import type { GroundingHealth, GroundingService } from "../../../../src/editor/core"
+import type {
+  ComponentManifest,
+  ComponentManifestSource,
+  GroundingHealth,
+  GroundingService,
+} from "../../../../src/editor/core"
 
 function fakeService(health: GroundingHealth | null = null): GroundingService {
   return {
@@ -192,5 +198,94 @@ describe("getGroundingService boot log", () => {
       "[grounding] 2 sources, 1 skipped, 2 failed (/root)",
     )
     consoleSpy.mockRestore()
+  })
+})
+
+describe("warmGroundingMemo", () => {
+  function sourceWith(
+    listComponents: () => Promise<ComponentManifest[]>,
+  ): ComponentManifestSource {
+    return {
+      id: "fake-source",
+      framework: "react",
+      designSystem: "acme-ds",
+      listComponents,
+      getComponent: async () => null,
+    }
+  }
+
+  function serviceWithSource(source: ComponentManifestSource | null): GroundingService {
+    // Lazy and single-flight, like the real `createGroundingService`: the
+    // memoized promise is what a request arriving mid-warm joins.
+    let manifestPromise: Promise<ComponentManifestSource | null> | null = null
+    return {
+      ...fakeService(),
+      getManifestSource: () => {
+        if (!manifestPromise) manifestPromise = Promise.resolve(source)
+        return manifestPromise
+      },
+    }
+  }
+
+  it("builds the composite into the SAME service instance the request path resolves", async () => {
+    // A warm that lived in its own cache would leave the routes cold. The
+    // service memo must be shared, not parallel.
+    const createGroundingService = vi.fn(() =>
+      serviceWithSource(sourceWith(async () => [])),
+    )
+    const loaders = loadersFor(createGroundingService)
+
+    const result = await warmGroundingMemo("/root", loaders)
+    const afterwards = await getGroundingService("/root", loaders)
+
+    expect(result.ok).toBe(true)
+    expect(createGroundingService).toHaveBeenCalledTimes(1)
+    expect(await afterwards.getManifestSource()).not.toBeNull()
+  })
+
+  it("never lists components: extraction is synchronous and belongs out of process", async () => {
+    // The whole reason the extraction moved to a child process. A future
+    // "just call listComponents here, it is one line" would freeze the
+    // Editor page at boot for the length of the checker walk.
+    const listComponents = vi.fn(async () => [])
+    const loaders = loadersFor(() => serviceWithSource(sourceWith(listComponents)))
+
+    await warmGroundingMemo("/root", loaders)
+
+    expect(listComponents).not.toHaveBeenCalled()
+  })
+
+  it("reports a missing manifest source without throwing", async () => {
+    const logs: string[] = []
+    const loaders: GroundingLoaders = {
+      ...loadersFor(() => serviceWithSource(null)),
+      logger: (msg) => logs.push(msg),
+    }
+
+    const result = await warmGroundingMemo("/root", loaders)
+
+    expect(result).toMatchObject({ ok: false, reason: "no manifest source" })
+    expect(logs.some((l) => /no manifest source/.test(l))).toBe(true)
+  })
+
+  it("does not memoize a failed construction, so the next request retries", async () => {
+    let calls = 0
+    const loaders: GroundingLoaders = {
+      loadCreateGroundingService: async () => {
+        calls += 1
+        if (calls === 1) throw new Error("import failed")
+        return {
+          createGroundingService: () => serviceWithSource(sourceWith(async () => [])),
+        } as unknown as Awaited<ReturnType<GroundingLoaders["loadCreateGroundingService"]>>
+      },
+      logger: () => {},
+    }
+
+    const result = await warmGroundingMemo("/root", loaders)
+    expect(result).toMatchObject({ ok: false, reason: "import failed" })
+
+    const service = await getGroundingService("/root", loaders)
+    expect(await service.getManifestSource()).not.toBeNull()
+    expect(calls).toBe(2)
   })
 })

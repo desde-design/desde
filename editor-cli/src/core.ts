@@ -87,6 +87,7 @@ import {
 } from "../../src/editor/onboarding/index.js"
 import type { StalenessCacheHolder } from "./server/design-systems-handler.js"
 import { resetGroundingCache } from "./server/grounding-context.js"
+import { prewarmManifestsAtBoot } from "./server/manifest-prewarm.js"
 import { runRetentionGc } from "../../src/editor/agent-chat-sdk/retention-gc.js"
 
 /**
@@ -1539,7 +1540,13 @@ export async function startCore(opts: CoreOptions): Promise<CoreHandle> {
   // this block is optional config a typo shouldn't be able to kill the
   // session over, and the GET route's `declared` flag still surfaces the
   // discrepancy to the user.
-  void (async () => {
+  //
+  // Held as a promise (never rejects) because two boot passes are sequenced
+  // after it: the staleness check, and the manifest prewarm. Each onboard in
+  // here calls `resetGroundingCache()`, so a manifest bundle built BEFORE
+  // this finishes would be thrown away and rebuilt on the first click, which
+  // is the exact wait the prewarm exists to remove.
+  const bootReconciliation: Promise<void> = (async () => {
     const declResult = await loadDesignSystemDeclarations(canonicalRoot)
     if (!declResult.ok) {
       console.error(
@@ -1577,12 +1584,22 @@ export async function startCore(opts: CoreOptions): Promise<CoreHandle> {
         }
       }
     }
+  })().catch((err) => {
+    console.error(`[design-systems] boot reconciliation crashed unexpectedly: ${(err as Error).message}`)
+  })
 
-    // Phase 3 refresh — warm the staleness cache once at boot, chained AFTER
-    // reconciliation (so a freshly-reconciled entry is included) but never
-    // gated on it: this runs for EVERY registered entry, declared or not,
-    // and a malformed/empty `designSystems` block above must not skip it.
-    // Non-blocking, never fails boot — same posture as reconciliation itself.
+  // Phase 3 refresh — warm the staleness cache once at boot, chained AFTER
+  // reconciliation (so a freshly-reconciled entry is included) but never
+  // gated on it: this runs for EVERY registered entry, declared or not,
+  // and a malformed/empty `designSystems` block above must not skip it.
+  // Non-blocking, never fails boot — same posture as reconciliation itself.
+  // Chained off the settled promise rather than written inside it, so a
+  // reconciliation crash (already logged above) no longer skips this pass.
+  //
+  // NOT a gate for the manifest prewarm below: each check here shells out
+  // to `npm view` / `git ls-remote`, and the prewarm must not wait on the
+  // network.
+  void bootReconciliation.then(async () => {
     try {
       const registry = await createLocalRegistryStore(canonicalRoot).list()
       const results: Record<string, StalenessResult> = {}
@@ -1595,8 +1612,6 @@ export async function startCore(opts: CoreOptions): Promise<CoreHandle> {
     } catch (err) {
       console.error(`[design-systems] boot staleness check failed (non-fatal): ${(err as Error).message}`)
     }
-  })().catch((err) => {
-    console.error(`[design-systems] boot reconciliation crashed unexpectedly: ${(err as Error).message}`)
   })
 
   // Boot verification. ONE probe of the served output produces BOTH the gate's
@@ -1636,6 +1651,25 @@ export async function startCore(opts: CoreOptions): Promise<CoreHandle> {
     }
     if (gate.warning) console.warn(`[editor-cli] ${gate.warning}`)
   }
+
+  // Manifest prewarm. On a cold on-disk cache the first selection after boot
+  // used to wait ~10s for every library source to extract, all inside the
+  // first `/api/editor/manifest` request (MEASURED against a shadcn repo,
+  // 2026-09-15). The extraction runs in a CHILD PROCESS and lands on disk as
+  // cache files; this process then builds only the composite, which is async
+  // I/O. See `manifest-prewarm.ts` for why it cannot run here: it is
+  // synchronous checker work, and in-process it held this event loop for
+  // 35.7s on one cold boot, which is the Editor page failing to load for
+  // that long. The inspector's "Still reading" copy stays as the honest
+  // fallback for a click that lands before the child finishes.
+  //
+  // Sequenced deliberately:
+  //   - AFTER the stamp gate, so a refused boot spawns nothing.
+  //   - AFTER `bootReconciliation`, because each onboard there resets the
+  //     grounding memo (see the comment on that promise).
+  // Non-blocking and never fails boot: `prewarmManifestsAtBoot` never
+  // rejects.
+  void bootReconciliation.then(() => prewarmManifestsAtBoot({ root: canonicalRoot }))
 
   // Publish the session-info file so the `desde-mcp`
   // stdio proxy can locate this editor-cli. Best-effort: a failed

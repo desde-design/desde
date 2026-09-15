@@ -20,6 +20,11 @@ import { cloneRepo } from "./server/clone-repo.js"
 import { readHomeUrl } from "./server/home-url.js"
 import { startLauncher } from "./server/launcher-server.js"
 import { captureInheritedLlmEnv } from "./server/inherited-llm-env.js"
+import {
+  PREWARM_CHILD_FLAG,
+  formatPrewarmResultLine,
+  runManifestPrewarmWork,
+} from "./server/manifest-prewarm.js"
 
 interface ParsedArgs {
   /** Subcommand. `boot` is the default (compatibility with D-0 invocations). */
@@ -241,6 +246,20 @@ async function main(): Promise<void> {
   // `ANTHROPIC_API_KEY` instead of preserving it. Idempotent, so
   // `applyLlmCredentialsAtBoot`'s own call remains a no-op safety net.
   captureInheritedLlmEnv()
+
+  // Hidden child mode: the boot-time manifest prewarm re-invokes this CLI
+  // to run the extraction out of process (see `server/manifest-prewarm.ts`).
+  // Checked before ordinary parsing so the flag never has to be a documented
+  // option, and so nothing else in `main` runs for it: no launcher, no host,
+  // no HTTP server. Exit code and the one stdout line are the whole contract.
+  if (process.argv[2] === PREWARM_CHILD_FLAG) {
+    const root = process.argv[3]
+    const result = root
+      ? await runManifestPrewarmWork(root)
+      : { ok: false as const, reason: `${PREWARM_CHILD_FLAG} needs a root`, ms: 0 }
+    console.log(formatPrewarmResultLine(result))
+    process.exit(result.ok ? 0 : 1)
+  }
 
   let args: ParsedArgs
   try {

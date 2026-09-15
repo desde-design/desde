@@ -106,6 +106,53 @@ function withBootSummaryLog(
   }
 }
 
+/** What warming the memo did. Diagnostic only; nothing branches on it. */
+export type GroundingMemoWarmResult =
+  | { ok: true; ms: number }
+  | { ok: false; reason: string; ms: number }
+
+/**
+ * Build the composite manifest source into the memo, ahead of any request.
+ *
+ * This is the ASYNC half of a cold start only: the file walk, the import
+ * index and the per-library discovery, ~1.4s of I/O on a shadcn repo. It
+ * deliberately never calls `listComponents()`: each library source extracts
+ * on first touch, and that extraction is synchronous checker work that
+ * would freeze this process (and with it the Editor page loading in the
+ * browser) for the ~10-20s it takes. The extraction is warmed out of
+ * process instead, see `manifest-prewarm.ts`, and lands on disk as cache
+ * files; the composite built here reads those on the first click.
+ *
+ * Goes through the SAME memoized service the routes read, so a request that
+ * arrives mid-build joins it rather than starting a second one. Never
+ * throws: a failed construction is not memoized (see
+ * {@link getGroundingService}), so the first request retries on its own.
+ */
+export async function warmGroundingMemo(
+  canonicalRoot: string,
+  loaders: GroundingLoaders = defaultGroundingLoaders,
+): Promise<GroundingMemoWarmResult> {
+  const logger = loaders.logger ?? console.log
+  const startedAt = Date.now()
+  try {
+    const grounding = await getGroundingService(canonicalRoot, loaders)
+    const source = await grounding.getManifestSource()
+    const ms = Date.now() - startedAt
+    if (!source) {
+      logger(`[grounding] no manifest source for ${canonicalRoot}`)
+      return { ok: false, reason: "no manifest source", ms }
+    }
+    return { ok: true, ms }
+  } catch (err) {
+    const ms = Date.now() - startedAt
+    const reason = err instanceof Error ? err.message : String(err)
+    logger(
+      `[grounding] building the manifest source failed (non-fatal, the first selection retries): ${reason}`,
+    )
+    return { ok: false, reason, ms }
+  }
+}
+
 /** Reset the memoized service. Exported for tests. */
 export function resetGroundingCache(): void {
   cached = null
