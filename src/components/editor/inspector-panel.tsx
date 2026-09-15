@@ -104,6 +104,15 @@ interface InspectorPanelProps {
   selection: Selection | null
   manifest: ComponentManifest | null
   /**
+   * Is the manifest lookup for this selection still running?
+   *
+   * Gates only ONE thing: whether the manifest-less fallback is allowed to
+   * state its conclusion. `manifest === null` means both "no manifest
+   * exists" and "not finished asking", and only the first of those earns
+   * the sentence "No prop definitions were found".
+   */
+  manifestPending?: boolean
+  /**
    * Active responsive breakpoint, owned by the editor chrome's global
    * viewport control. The style sections read & write classes for this
    * breakpoint (composed with the inspector-local state axis). Defaults to
@@ -219,6 +228,7 @@ interface InspectorPanelProps {
 function InspectorPanelImpl({
   selection,
   manifest,
+  manifestPending = false,
   activeBreakpoint = "base",
   iframeRef,
   onPropEdit,
@@ -702,6 +712,7 @@ function InspectorPanelImpl({
               <CurrentPropsSection
                 key={`props-${selection.targetId}`}
                 currentProps={selection.currentProps}
+                pending={manifestPending}
                 onPropEdit={onPropEdit}
               />
             </>
@@ -797,9 +808,15 @@ function InspectorPanelImpl({
             // the same inset or it prints flush against the rail's border
             // (Mo, 2026-09-02). "Manifest" is our word, not the reader's: say
             // what is missing and what that changes.
+            //
+            // The SECOND of the two places that speak for a null manifest —
+            // `CurrentPropsSection`'s description is the other. Both have to
+            // wait for `manifestPending` to clear, and a test that only
+            // covered one of them would have called this fixed.
             <p className="px-3 text-xs text-muted-foreground">
-              No prop definitions were found for this component, so only
-              element properties can be edited.
+              {manifestPending
+                ? "Still reading this component's prop definitions."
+                : "No prop definitions were found for this component, so only element properties can be edited."}
             </p>
           ) : null}
         </div>
@@ -1144,9 +1161,16 @@ function AttributesSection({
  */
 function CurrentPropsSection({
   currentProps,
+  pending = false,
   onPropEdit,
 }: {
   currentProps: Record<string, unknown>
+  /**
+   * The manifest lookup has not settled yet, so we do not know whether prop
+   * definitions exist. The live values below are still real and still
+   * editable; only the claim about what is MISSING has to wait.
+   */
+  pending?: boolean
   onPropEdit?: (propName: string, value: PropControlValue) => void
 }) {
   const editable = Object.entries(currentProps).filter(
@@ -1162,7 +1186,11 @@ function CurrentPropsSection({
     <section aria-label="Props" className="px-3 space-y-3">
       <SectionHeader
         title="Props"
-        description="Live prop values. No prop definitions were found, so types and unset props aren't shown."
+        description={
+          pending
+            ? "Live prop values. Still reading this component's prop definitions."
+            : "Live prop values. No prop definitions were found, so types and unset props aren't shown."
+        }
       />
       <div className="space-y-3">
         {editable.map(([name, value]) => (

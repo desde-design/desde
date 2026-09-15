@@ -128,6 +128,74 @@ describe("InspectorPanel", () => {
     expect(trigger).toHaveTextContent(liveOption.label)
   })
 
+  /**
+   * The manifest-less fallback states a conclusion out loud. It may only do
+   * that once the lookup has actually settled.
+   *
+   * Regression: on a cold manifest cache the first selection after boot
+   * rendered "No prop definitions were found" for ~10s while the lookup was
+   * still running, on a component that had eight variants. MEASURED against a
+   * shadcn repo, 2026-09-15. `manifest === null` cannot tell the two states
+   * apart, which is why `manifestPending` exists.
+   */
+  describe("manifest-less fallback (pending vs resolved)", () => {
+    const NO_DEFINITIONS = /no prop definitions were found/i
+    const STILL_READING = /still reading this component's prop definitions/i
+
+    it("does not claim definitions are missing while the lookup is pending", () => {
+      render(
+        <InspectorPanel
+          selection={{
+            targetId: "t1",
+            selector: "#t1",
+            componentName: "Button",
+            ancestry: [],
+            currentProps: { variant: "outline" },
+          }}
+          manifest={null}
+          manifestPending
+        />,
+      )
+      expect(screen.queryByText(NO_DEFINITIONS)).toBeNull()
+      expect(screen.getByText(STILL_READING)).toBeInTheDocument()
+    })
+
+    it("claims definitions are missing once the lookup has settled", () => {
+      render(
+        <InspectorPanel
+          selection={{
+            targetId: "t2",
+            selector: "#t2",
+            componentName: "Button",
+            ancestry: [],
+            currentProps: { variant: "outline" },
+          }}
+          manifest={null}
+          manifestPending={false}
+        />,
+      )
+      expect(screen.getByText(NO_DEFINITIONS)).toBeInTheDocument()
+      expect(screen.queryByText(STILL_READING)).toBeNull()
+    })
+
+    it("still shows the live prop values while pending", () => {
+      render(
+        <InspectorPanel
+          selection={{
+            targetId: "t3",
+            selector: "#t3",
+            componentName: "Button",
+            ancestry: [],
+            currentProps: { variant: "outline" },
+          }}
+          manifest={null}
+          manifestPending
+        />,
+      )
+      expect(screen.getByDisplayValue("outline")).toBeInTheDocument()
+    })
+  })
+
   it("dispatches onPropEdit when a boolean checkbox is toggled (V1.3 interactivity)", async () => {
     const manifest = loadManifest("UiButton")
     const boolProp = manifest.props.find((p) => p.control.kind === "boolean")

@@ -361,8 +361,12 @@ export function useEditorEditing({
   )
   const editorSelection = useEditorStore((s) => s.editorSelection)
   const editorManifest = useEditorStore((s) => s.editorManifest)
+  const editorManifestPending = useEditorStore((s) => s.editorManifestPending)
   const setEditorSelection = useEditorStore((s) => s.setEditorSelection)
   const setEditorManifest = useEditorStore((s) => s.setEditorManifest)
+  const setEditorManifestPending = useEditorStore(
+    (s) => s.setEditorManifestPending,
+  )
 
   const adapterRef = useRef<BridgeFrameworkAdapter | null>(null)
   const treeUpdateUnsubRef = useRef<(() => void) | null>(null)
@@ -893,6 +897,11 @@ export function useEditorEditing({
         // schema a prop edit is written against, so an answer from another
         // page or another element is not a stale label: it is the wrong
         // contract for the element in front of the designer.
+        //
+        // From here until `setEditorManifest` settles it, the inspector must
+        // not claim this component has no prop definitions — it does not know
+        // that yet. See `editorManifestPending` in `editor-slice.ts`.
+        setEditorManifestPending(true)
         await session.run(async (ctx) => {
           let manifest: Awaited<
             ReturnType<ComponentManifestSource["getComponent"]>
@@ -1279,6 +1288,7 @@ export function useEditorEditing({
     refreshLayers,
     setEditorSelection,
     setEditorManifest,
+    setEditorManifestPending,
   ])
 
   /**
@@ -5399,6 +5409,7 @@ export function useEditorEditing({
     bridgeDocumentId,
     editorSelection,
     editorManifest,
+    editorManifestPending,
     layersRoots,
     /**
      * The unfiltered tree, for mapping a selection the density filter hid

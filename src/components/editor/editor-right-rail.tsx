@@ -379,6 +379,7 @@ export function EditorRightRail({
     <InspectorPanel
       selection={editing.editorSelection}
       manifest={editing.editorManifest}
+      manifestPending={editing.editorManifestPending}
       activeBreakpoint={activeBreakpoint}
       iframeRef={iframeRef}
       onPropEdit={editing.handlePropEdit}

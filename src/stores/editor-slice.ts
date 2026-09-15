@@ -48,6 +48,24 @@ export interface EditorSlice {
   editorSelection: Selection | null
   editorManifest: ComponentManifest | null
   /**
+   * Is a manifest lookup for the current selection still in flight?
+   *
+   * `editorManifest: null` alone cannot answer that. It means BOTH "this
+   * component has no manifest" and "we have not finished asking", and the
+   * inspector has to tell those apart: its manifest-less fallback states a
+   * conclusion out loud ("No prop definitions were found"). Rendering that
+   * sentence while the lookup is still running tells a designer their
+   * component has no variants when it has eight, which is the wrong answer
+   * rather than a slow one. MEASURED on a cold manifest cache: the first
+   * selection after boot showed it for ~10s before the real controls
+   * arrived.
+   *
+   * Set true where a lookup STARTS; `setEditorManifest` is the settle point
+   * and clears it, so every existing call site (found, missing, failed,
+   * superseded) resolves the flag without having to remember to.
+   */
+  editorManifestPending: boolean
+  /**
    * Phase 6 — additional simultaneously-selected elements alongside
    * `editorSelection` (the "primary"). Empty array when single-
    * select is active. The primary always appears first when callers
@@ -93,6 +111,8 @@ export interface EditorSlice {
   setActiveProjectId: (projectId: string | null) => void
   setEditorSelectionMany: (selections: Selection[]) => void
   setEditorManifest: (manifest: ComponentManifest | null) => void
+  /** Mark a manifest lookup as started. `setEditorManifest` clears it. */
+  setEditorManifestPending: (pending: boolean) => void
   /** Record that a verification has started (or restart one for the same edit). */
   beginVerification: (
     editId: string,
@@ -117,6 +137,7 @@ export const createEditorSlice: StateCreator<
   editorSelection: null,
   editorSelectionMany: [],
   editorManifest: null,
+  editorManifestPending: false,
   verifications: [],
   previewSettleNonce: 0,
   // Seed from the bootstrap so the first render already knows the link
@@ -137,7 +158,13 @@ export const createEditorSlice: StateCreator<
       editorSelectionMany,
       editorSelection: editorSelectionMany[0] ?? null,
     }),
-  setEditorManifest: (editorManifest) => set({ editorManifest }),
+  // The settle point for a lookup, whatever the outcome: found, missing,
+  // failed or superseded. Clearing `editorManifestPending` here rather than
+  // at each call site is what keeps the flag from getting stuck on.
+  setEditorManifest: (editorManifest) =>
+    set({ editorManifest, editorManifestPending: false }),
+  setEditorManifestPending: (editorManifestPending) =>
+    set({ editorManifestPending }),
   beginVerification: (editId, label, startedAt, commitSha) =>
     set((state) => {
       const next = state.verifications.filter((v) => v.editId !== editId)
@@ -159,6 +186,7 @@ export const createEditorSlice: StateCreator<
       editorSelection: null,
       editorSelectionMany: [],
       editorManifest: null,
+      editorManifestPending: false,
       verifications: [],
       // Not reset: `previewSettleNonce` is a monotonic edge counter, and zeroing
       // it could make the NEXT settle collide with a value a subscriber already
