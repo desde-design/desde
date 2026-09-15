@@ -27,6 +27,7 @@ import {
   type ResolvedRoot,
 } from "./resolve-editable-path"
 import { readRawBody, BodyTooLargeError } from "./http-body.js"
+import { sourceVersionOf } from "../plugins/source-version.js"
 
 export interface ResolveCallsitesItem {
   /** Repo-relative path of the file the element's stamp names. */
@@ -44,7 +45,13 @@ export interface ResolveCallsitesRequestBody {
 
 export interface ResolvedCallsite {
   name: string
-  callsites: Array<{ line: number; column: number }>
+  /**
+   * The parent file's version, the same hash its `data-desde-v` stamps
+   * carry, so a target recovered from it keeps the stale-target guard.
+   */
+  parentHash: string
+  /** See `JsxCallsite` in `resolve-jsx-callsite.ts` for `inExpression`. */
+  callsites: Array<{ line: number; column: number; inExpression: boolean }>
 }
 
 export type ResolveCallsitesResult =
@@ -158,7 +165,11 @@ export async function handleResolveCallsites(
       definitionFile: definition.relPath.split(path.sep).join("/"),
       parentFile: parent.relPath.split(path.sep).join("/"),
     })
-    results.push(callsites && callsites.length > 0 ? { name: root.name, callsites } : null)
+    results.push(
+      callsites && callsites.length > 0
+        ? { name: root.name, parentHash: sourceVersionOf(parent.source), callsites }
+        : null,
+    )
   }
   return { ok: true, status: 200, results }
 }

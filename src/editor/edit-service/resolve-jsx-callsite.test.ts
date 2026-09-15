@@ -90,7 +90,7 @@ describe("findJsxCallsites", () => {
         definitionFile: "src/app/(main)/dashboard/crm/_components/kpi-cards.tsx",
         parentFile: "src/app/(main)/dashboard/crm/page.tsx",
       }),
-    ).toEqual([{ line: 8, column: 6 }])
+    ).toEqual([{ line: 8, column: 6, inExpression: false }])
   })
 
   it("returns every callsite in source order when the component is written more than once", () => {
@@ -112,8 +112,35 @@ export function Grid() {
         parentFile: "src/app/grid.tsx",
       }),
     ).toEqual([
-      { line: 5, column: 6 },
-      { line: 6, column: 6 },
+      { line: 5, column: 6, inExpression: false },
+      { line: 6, column: 6, inExpression: false },
+    ])
+  })
+
+  it("marks a callsite written inside a {…} expression, where rendering is conditional or repeated (codex P1)", () => {
+    const src = `import { Card } from "@/components/ui/card";
+export function Grid({ flag, items }) {
+  return (
+    <div>
+      {flag ? <Card>a</Card> : <Card>b</Card>}
+      {items.map((i) => <Card key={i}>c</Card>)}
+      <Card>d</Card>
+    </div>
+  );
+}
+`
+    expect(
+      findJsxCallsites({
+        source: src,
+        name: "Card",
+        definitionFile: "src/components/ui/card.tsx",
+        parentFile: "src/app/grid.tsx",
+      }),
+    ).toEqual([
+      { line: 5, column: 14, inExpression: true },
+      { line: 5, column: 31, inExpression: true },
+      { line: 6, column: 24, inExpression: true },
+      { line: 7, column: 6, inExpression: false },
     ])
   })
 
@@ -126,7 +153,7 @@ export function Grid() {
         definitionFile: "src/pages/hero.tsx",
         parentFile: "src/pages/index.tsx",
       }),
-    ).toEqual([{ line: 2, column: 16 }])
+    ).toEqual([{ line: 2, column: 16, inExpression: false }])
   })
 
   it("accepts an index module for a directory import", () => {
@@ -138,7 +165,36 @@ export function Grid() {
         definitionFile: "src/pages/hero/index.tsx",
         parentFile: "src/pages/index.tsx",
       }),
-    ).toEqual([{ line: 2, column: 16 }])
+    ).toEqual([{ line: 2, column: 16, inExpression: false }])
+  })
+
+  it("accepts the single-character alias roots and a baseUrl path", () => {
+    for (const spec of ["@/components/ui/card", "~/components/ui/card", "src/components/ui/card"]) {
+      const src = `import { Card } from "${spec}";\nconst P = () => <Card />\n`
+      expect(
+        findJsxCallsites({
+          source: src,
+          name: "Card",
+          definitionFile: "src/components/ui/card.tsx",
+          parentFile: "src/app/page.tsx",
+        }),
+        spec,
+      ).toEqual([{ line: 2, column: 16, inExpression: false }])
+    }
+  })
+
+  it("does NOT take a scoped package for an alias (codex P1)", () => {
+    // `@scope/ui/card` is an installed package whose tail happens to match
+    // a local file. Suffix matching would send edits to the wrong JSX.
+    const src = `import { Card } from "@scope/ui/card";\nconst P = () => <Card />\n`
+    expect(
+      findJsxCallsites({
+        source: src,
+        name: "Card",
+        definitionFile: "src/ui/card.tsx",
+        parentFile: "src/app/page.tsx",
+      }),
+    ).toBeNull()
   })
 
   it("answers null when the name is imported from a different module", () => {

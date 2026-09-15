@@ -1,10 +1,16 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   applyResolvedCallsites,
   collectCallsiteCandidates,
+  fetchResolvedCallsites,
   type ResolvedCallsite,
 } from "./resolve-layer-callsites"
 import type { OutlineNode } from "@/types/bridge"
+
+const editorFetchMock = vi.fn()
+vi.mock("@/lib/editor-fetch", () => ({
+  editorFetch: (...args: unknown[]) => editorFetchMock(...args),
+}))
 
 function node(over: Partial<OutlineNode> & { id: string }): OutlineNode {
   return {
@@ -95,7 +101,7 @@ describe("applyResolvedCallsites", () => {
     const roots = crmTree()
     const candidates = collectCallsiteCandidates(roots)
     const results: (ResolvedCallsite | null)[] = [
-      { name: "KpiCards", callsites: [{ line: 9, column: 6 }] },
+      { name: "KpiCards", parentHash: "abcdefabcdef", callsites: [{ line: 9, column: 6, inExpression: false }] },
       null,
     ]
     const out = applyResolvedCallsites(roots, candidates, results)
@@ -104,7 +110,9 @@ describe("applyResolvedCallsites", () => {
       id: "kpi",
       name: "KpiCards",
       type: "component",
-      editTarget: { file: PAGE, line: 9, column: 6 },
+      // The parent file's hash rides along, so the stale-target guard covers
+      // a recovered target the way it covers a stamped one (codex P2).
+      editTarget: { file: PAGE, line: 9, column: 6, fileHash: "abcdefabcdef" },
       authoredAt: { file: KPI, line: 8, column: 4 },
     })
     // Children are carried over untouched.
@@ -115,36 +123,91 @@ describe("applyResolvedCallsites", () => {
     expect(roots[0].children![0].name).toBe("section")
   })
 
-  it("maps DOM order onto source order when one component is written several times", () => {
-    const CARD = "src/components/ui/card.tsx"
-    const GRID = "src/app/grid.tsx"
-    const roots = [
+  const CARD = "src/components/ui/card.tsx"
+  const GRID = "src/app/grid.tsx"
+  function gridWith(count: number): OutlineNode[] {
+    return [
       node({
         id: "grid",
         editTarget: { file: GRID, line: 7, column: 4 },
-        children: [
-          node({ id: "c1", editTarget: { file: CARD, line: 10, column: 4 } }),
-          node({ id: "c2", editTarget: { file: CARD, line: 10, column: 4 } }),
-          node({ id: "c3", editTarget: { file: CARD, line: 10, column: 4 } }),
-        ],
+        children: Array.from({ length: count }, (_, i) =>
+          node({ id: `c${i + 1}`, editTarget: { file: CARD, line: 10, column: 4 } }),
+        ),
       }),
     ]
+  }
+  const twoStatic: ResolvedCallsite = {
+    name: "Card",
+    parentHash: "000000000000",
+    callsites: [
+      { line: 8, column: 6, inExpression: false },
+      { line: 25, column: 6, inExpression: false },
+    ],
+  }
+
+  it("maps DOM order onto source order when every callsite is static and the counts agree", () => {
+    const roots = gridWith(2)
     const candidates = collectCallsiteCandidates(roots)
-    const resolved: ResolvedCallsite = {
+    const out = applyResolvedCallsites(roots, candidates, [twoStatic, twoStatic])
+    const [c1, c2] = out[0].children!
+    expect(c1.editTarget).toMatchObject({ file: GRID, line: 8, column: 6 })
+    expect(c2.editTarget).toMatchObject({ file: GRID, line: 25, column: 6 })
+  })
+
+  it("leaves the whole group alone when the DOM has a different number of instances than the file writes (codex P1)", () => {
+    // Three on screen, two in source: some callsite rendered more than once,
+    // and DOM order no longer says which. Guessing would edit the wrong JSX.
+    const roots = gridWith(3)
+    const candidates = collectCallsiteCandidates(roots)
+    const out = applyResolvedCallsites(roots, candidates, [twoStatic, twoStatic, twoStatic])
+    for (const c of out[0].children!) {
+      expect(c.editTarget).toEqual({ file: CARD, line: 10, column: 4 })
+      expect(c.name).toBe("div")
+    }
+  })
+
+  it("leaves the group alone when any callsite sits inside a {…} expression (codex P1)", () => {
+    // `{flag ? <Card/> : <Card/>}` renders ONE Card from TWO callsites; the
+    // counts can even agree by accident. Only static callsites are mapped.
+    const conditional: ResolvedCallsite = {
       name: "Card",
+      parentHash: "000000000000",
       callsites: [
-        { line: 8, column: 6 },
-        { line: 25, column: 6 },
+        { line: 8, column: 14, inExpression: true },
+        { line: 8, column: 31, inExpression: true },
       ],
     }
-    const out = applyResolvedCallsites(roots, candidates, [resolved, resolved, resolved])
-    const [c1, c2, c3] = out[0].children!
-    expect(c1.editTarget).toEqual({ file: GRID, line: 8, column: 6 })
-    expect(c2.editTarget).toEqual({ file: GRID, line: 25, column: 6 })
-    // A third instance with no third callsite is left alone rather than
-    // guessed: the DOM has more of them than the file writes, so the
-    // mapping is not trustworthy for it.
-    expect(c3.editTarget).toEqual({ file: CARD, line: 10, column: 4 })
-    expect(c3.name).toBe("div")
+    const roots = gridWith(2)
+    const candidates = collectCallsiteCandidates(roots)
+    const out = applyResolvedCallsites(roots, candidates, [conditional, conditional])
+    for (const c of out[0].children!) expect(c.editTarget).toEqual({ file: CARD, line: 10, column: 4 })
+  })
+})
+
+describe("fetchResolvedCallsites", () => {
+  it("sends the candidates in batches of at most 200 and stitches the answers (codex P2)", async () => {
+    editorFetchMock.mockReset()
+    editorFetchMock.mockImplementation(async (_url: string, init: { body: string }) => {
+      const { items } = JSON.parse(init.body) as { items: unknown[] }
+      return {
+        ok: true,
+        json: async () => ({ ok: true, results: items.map((_, i) => ({ name: `R${i}`, parentHash: "0", callsites: [] })) }),
+      }
+    })
+    const items = Array.from({ length: 450 }, (_, i) => ({ file: `f${i}.tsx`, line: 1, column: 0, parentFile: "p.tsx" }))
+    const results = await fetchResolvedCallsites(items)
+    expect(editorFetchMock).toHaveBeenCalledTimes(3)
+    const sizes = editorFetchMock.mock.calls.map((c) => (JSON.parse((c[1] as { body: string }).body) as { items: unknown[] }).items.length)
+    expect(sizes).toEqual([200, 200, 50])
+    expect(results).toHaveLength(450)
+  })
+
+  it("answers null for the whole tree when any batch fails, rather than a partial map", async () => {
+    editorFetchMock.mockReset()
+    editorFetchMock
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, results: Array(200).fill(null) }) })
+      .mockResolvedValueOnce({ ok: false })
+    const items = Array.from({ length: 250 }, (_, i) => ({ file: `f${i}.tsx`, line: 1, column: 0, parentFile: "p.tsx" }))
+    expect(await fetchResolvedCallsites(items)).toBeNull()
   })
 })

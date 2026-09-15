@@ -10,7 +10,7 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react"
-import type { OutlineNode } from "@/types/bridge"
+import type { OutlineNode, SourceLocation } from "@/types/bridge"
 import { Button } from "@/components/ui/button"
 import {
   ContextMenu,
@@ -111,6 +111,14 @@ export interface LayersMovePayload {
    * appends.
    */
   anchor?: { node: OutlineNode; placement: "before" | "after" }
+  /**
+   * Where `destParent` is written in the source's file. Its `editTarget`
+   * as a rule; its `authoredAt` when the row was re-targeted at a callsite
+   * in another file (a resolved server component, a Vue component root),
+   * because that is the element its children are written inside. Absent
+   * only for a caller that did not run the drop through `judgeDrop`.
+   */
+  destParentTarget?: SourceLocation
 }
 
 /** Menu rows for the density control, in the order they are offered. */
@@ -343,7 +351,14 @@ interface DragState {
  * own internals (written in another file) is not sent to chat as a move.
  */
 type DropVerdict =
-  | { kind: "ok"; rawTarget: OutlineNode | null; effectiveParent: OutlineNode | null }
+  | {
+      kind: "ok"
+      rawTarget: OutlineNode | null
+      /** The destination parent row (before/after only; the target itself for "inside"). */
+      effectiveParent: OutlineNode | null
+      /** Where that parent is written in the source's file — see `parentTargetFor`. */
+      parentTarget: SourceLocation | null
+    }
   | { kind: "refused"; reason: LayersDropRefusal }
   | { kind: "chat"; reason: LayersChatMoveReason; sourceFile: string; targetFile: string }
 
@@ -361,22 +376,28 @@ function judgeDrop(
     return { kind: "refused", reason: "self-or-descendant" }
   }
   const targetFile = target.editTarget.file
+  if (position === "inside") {
+    // The target IS the parent. It qualifies by either of its coordinates
+    // in the source's file (see `parentTargetFor`).
+    const parentTarget = parentTargetFor(target, sourceFile)
+    if (!parentTarget) return { kind: "chat", reason: "different-file", sourceFile, targetFile }
+    return { kind: "ok", rawTarget: resolveRawNode(target, rawNodeById), effectiveParent: null, parentTarget }
+  }
+  // Before/after: the target is a SIBLING, written in the source's file or
+  // this is a move into another file's list.
   if (sourceFile !== targetFile) {
     return { kind: "chat", reason: "different-file", sourceFile, targetFile }
   }
-  if (position === "inside") {
-    return { kind: "ok", rawTarget: resolveRawNode(target, rawNodeById), effectiveParent: null }
-  }
   const rawTarget = resolveRawNode(target, rawNodeById)
   if (!rawTarget) return { kind: "refused", reason: "unmapped-row" }
-  const effectiveParent = findEffectiveSlotParent(rawTarget, sourceFile, parentByChildId)
-  if (!effectiveParent) {
+  const effective = findEffectiveSlotParent(rawTarget, sourceFile, parentByChildId)
+  if (!effective) {
     // Same file, but no ancestor of the target is written in it. Two
     // server-rendered instances of one shared primitive look exactly like
     // this, and a move that "worked" would have rewritten the primitive.
     return { kind: "chat", reason: "no-parent", sourceFile, targetFile }
   }
-  return { kind: "ok", rawTarget, effectiveParent }
+  return { kind: "ok", rawTarget, effectiveParent: effective.node, parentTarget: effective.target }
 }
 
 /**
@@ -690,7 +711,12 @@ function LayersPanelImpl({
         onMoveRefused?.("unmapped-row")
         return
       }
-      onMove?.({ source: rawSource, destParent: rawTarget, destIndex: -1 })
+      onMove?.({
+        source: rawSource,
+        destParent: rawTarget,
+        destIndex: -1,
+        ...(verdict.parentTarget ? { destParentTarget: verdict.parentTarget } : {}),
+      })
       return
     }
 
@@ -749,6 +775,7 @@ function LayersPanelImpl({
       destParent: effectiveParent,
       destIndex,
       anchor: { node: rawDropTarget, placement: position },
+      ...(verdict.parentTarget ? { destParentTarget: verdict.parentTarget } : {}),
     })
   }
 
@@ -1365,12 +1392,28 @@ function findEffectiveSlotParent(
   node: OutlineNode,
   sourceFile: string,
   parentByChildId: Map<string, OutlineNode>,
-): OutlineNode | null {
+): { node: OutlineNode; target: SourceLocation } | null {
   let cur: OutlineNode | undefined = parentByChildId.get(node.id)
   while (cur) {
-    if (cur.editTarget?.file === sourceFile) return cur
+    const target = parentTargetFor(cur, sourceFile)
+    if (target) return { node: cur, target }
     cur = parentByChildId.get(cur.id)
   }
+  return null
+}
+
+/**
+ * The coordinate at which `node` is a parent written in `sourceFile`, or
+ * null. Usually its `editTarget`. For a component root the tree re-targeted
+ * at its CALLSITE (a server component the Structure panel resolved, or a Vue
+ * component whose `editTarget` is the consumer's tag), the row's bytes live
+ * at `authoredAt` in the component's own file, and that is where its
+ * children are written: a move among them, or back into the root, has the
+ * root's own element as its parent (codex P2).
+ */
+function parentTargetFor(node: OutlineNode, sourceFile: string): SourceLocation | null {
+  if (node.editTarget?.file === sourceFile) return node.editTarget
+  if (node.authoredAt?.file === sourceFile) return node.authoredAt
   return null
 }
 

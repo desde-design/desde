@@ -31,9 +31,18 @@ export interface CallsiteCandidate {
 export interface ResolvedCallsite {
   /** The tag written at the callsite(s): the component's name. */
   name: string
-  /** Every place `parentFile` writes it, in source order. */
-  callsites: Array<{ line: number; column: number }>
+  /** The parent file's version — its `data-desde-v` — for the stale-target guard. */
+  parentHash: string
+  /**
+   * Every place `parentFile` writes it, in source order. `inExpression`
+   * marks one inside a `{…}` expression (a conditional, a `.map`), which
+   * renders zero, one or many times.
+   */
+  callsites: Array<{ line: number; column: number; inExpression: boolean }>
 }
+
+/** The handler's cap on one request; a tree can hold more rows than that. */
+const BATCH = 200
 
 function inNodeModules(file: string): boolean {
   return file.split("/").includes("node_modules")
@@ -73,29 +82,48 @@ export function collectCallsiteCandidates(roots: OutlineNode[]): CallsiteCandida
 }
 
 /**
- * Rewrite the resolved rows. When one component is written several times in
- * the parent file, DOM order maps onto source order among the rows that
- * share one definition under one parent; a row past the last callsite is
- * left alone rather than guessed.
+ * Rewrite the resolved rows.
+ *
+ * The rows that share one definition under one parent form a group, and DOM
+ * order maps onto source order within it ONLY when the mapping is a
+ * certainty: every callsite is static (renders exactly once, in source
+ * order) and there are exactly as many rows as callsites. A conditional or
+ * repeated callsite, or a count that disagrees, leaves the whole group as
+ * the bridge reported it — a guess would send an edit to the wrong JSX
+ * (codex P1).
  */
 export function applyResolvedCallsites(
   roots: OutlineNode[],
   candidates: CallsiteCandidate[],
   results: ReadonlyArray<ResolvedCallsite | null>,
 ): OutlineNode[] {
+  const groupOf = (c: CallsiteCandidate) => `${c.parentNodeId}|${c.file}:${c.line}:${c.column}`
+  const groupSize = new Map<string, number>()
+  for (const c of candidates) groupSize.set(groupOf(c), (groupSize.get(groupOf(c)) ?? 0) + 1)
+
   const ordinalByGroup = new Map<string, number>()
-  const rewrite = new Map<string, { name: string; editTarget: { file: string; line: number; column: number } }>()
+  const rewrite = new Map<
+    string,
+    { name: string; editTarget: { file: string; line: number; column: number; fileHash?: string } }
+  >()
   candidates.forEach((candidate, i) => {
     const result = results[i]
     if (!result) return
-    const group = `${candidate.parentNodeId}|${candidate.file}:${candidate.line}:${candidate.column}`
+    const group = groupOf(candidate)
     const ordinal = ordinalByGroup.get(group) ?? 0
     ordinalByGroup.set(group, ordinal + 1)
-    const callsite = result.callsites[ordinal]
+    const certain =
+      result.callsites.length === groupSize.get(group) && result.callsites.every((c) => !c.inExpression)
+    const callsite = certain ? result.callsites[ordinal] : undefined
     if (!callsite) return
     rewrite.set(candidate.nodeId, {
       name: result.name,
-      editTarget: { file: candidate.parentFile, line: callsite.line, column: callsite.column },
+      editTarget: {
+        file: candidate.parentFile,
+        line: callsite.line,
+        column: callsite.column,
+        ...(result.parentHash ? { fileHash: result.parentHash } : {}),
+      },
     })
   })
   if (rewrite.size === 0) return roots
@@ -115,24 +143,33 @@ export function applyResolvedCallsites(
   return roots.map(rebuild)
 }
 
-/** One round trip for the whole tree. Null when the CLI could not answer. */
+/**
+ * The answers for the whole tree, in batches the handler accepts. Null when
+ * any batch could not be answered: a partial map would re-target some rows
+ * and not their siblings, which is worse than re-targeting none.
+ */
 export async function fetchResolvedCallsites(
   items: ReadonlyArray<Pick<CallsiteCandidate, "file" | "line" | "column" | "parentFile">>,
 ): Promise<Array<ResolvedCallsite | null> | null> {
-  try {
-    const res = await editorFetch("/api/editor/resolve-callsites", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      cache: "no-store",
-      body: JSON.stringify({ items }),
-    })
-    if (!res.ok) return null
-    const data = (await res.json()) as { ok?: boolean; results?: Array<ResolvedCallsite | null> }
-    if (!data.ok || !Array.isArray(data.results) || data.results.length !== items.length) return null
-    return data.results
-  } catch {
-    return null
+  const out: Array<ResolvedCallsite | null> = []
+  for (let start = 0; start < items.length; start += BATCH) {
+    const batch = items.slice(start, start + BATCH)
+    try {
+      const res = await editorFetch("/api/editor/resolve-callsites", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ items: batch }),
+      })
+      if (!res.ok) return null
+      const data = (await res.json()) as { ok?: boolean; results?: Array<ResolvedCallsite | null> }
+      if (!data.ok || !Array.isArray(data.results) || data.results.length !== batch.length) return null
+      out.push(...data.results)
+    } catch {
+      return null
+    }
   }
+  return out
 }
 
 /** The tree with every resolvable row re-targeted, or the tree as given. */

@@ -29,6 +29,14 @@ export interface JsxCallsite {
   line: number
   /** 0-based column, Babel's own — the JSX lane's convention throughout. */
   column: number
+  /**
+   * Written inside a `{…}` expression: `{flag ? <Card/> : <Card/>}`,
+   * `{items.map(() => <Card/>)}`, a render prop. Such a callsite renders
+   * zero, one or many times, so the order of elements on screen says
+   * nothing about which callsite each came from. A static callsite renders
+   * exactly once, in source order.
+   */
+  inExpression: boolean
 }
 
 const FUNCTION_TYPES = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"])
@@ -142,11 +150,15 @@ function normalizeJoin(dir: string, rel: string): string {
 }
 
 /**
- * Does `specifier`, written in `parentFile`, name `definitionFile`? A
- * relative specifier resolves against the parent's directory. An aliased
- * one (`@/components/ui/card`, `~/x`, or a bare `src/x` under a baseUrl)
- * matches on its tail after the first segment. A bare package name never
- * matches: that is an installed library, not this file.
+ * Does `specifier`, written in `parentFile`, name `definitionFile`?
+ *
+ * A relative specifier resolves against the parent's directory. A bare
+ * project path under a `baseUrl` (`src/components/ui/card`) must equal the
+ * file's module id exactly. An alias is recognised only by the one-character
+ * roots projects use for one (`@/`, `~/`, `#/`, `$/`) and matches on the tail
+ * after that root. Everything else — a bare package name, and a SCOPED
+ * package like `@scope/ui/card` whose tail could equal a local file's —
+ * is an installed library, never this file (codex P1).
  */
 function specifierNamesFile(specifier: string, parentFile: string, definitionFile: string): boolean {
   const ids = moduleIdsOf(definitionFile)
@@ -155,10 +167,12 @@ function specifierNamesFile(specifier: string, parentFile: string, definitionFil
     const resolved = moduleIdsOf(normalizeJoin(parentDir, specifier))[0]
     return ids.includes(resolved)
   }
-  if (!specifier.includes("/")) return false
   const stripped = specifier.replace(/\.(tsx|jsx|ts|js|mjs|cjs)$/, "")
-  const tail = stripped.slice(stripped.indexOf("/") + 1)
-  return ids.some((id) => id === stripped || id.endsWith(`/${tail}`) || id === tail)
+  if (/^[@~#$]\//.test(stripped)) {
+    const tail = stripped.slice(2)
+    return tail.length > 0 && ids.some((id) => id === tail || id.endsWith(`/${tail}`))
+  }
+  return ids.includes(stripped)
 }
 
 /**
@@ -178,7 +192,7 @@ export function findJsxCallsites(input: {
 
   let imported = false
   const callsites: JsxCallsite[] = []
-  walkJsx(parsed.ast, (node) => {
+  walkWithAncestors(parsed.ast, (node, ancestors) => {
     if (node.type === "ImportDeclaration") {
       const specifier = (node.source as { value?: unknown } | undefined)?.value
       const specifiers = (node.specifiers as JsxNode[] | undefined) ?? []
@@ -193,7 +207,35 @@ export function findJsxCallsites(input: {
     if (tag?.type !== "JSXIdentifier" || (tag as { name?: unknown }).name !== name) return
     const start = node.loc?.start
     if (typeof start?.line !== "number" || typeof start?.column !== "number") return
-    callsites.push({ line: start.line, column: start.column })
+    callsites.push({
+      line: start.line,
+      column: start.column,
+      inExpression: ancestors.some((a) => a.type === "JSXExpressionContainer"),
+    })
   })
   return imported ? callsites : null
+}
+
+/** Depth-first walk that hands each node its ancestor chain, outermost first. */
+function walkWithAncestors(
+  root: JsxNode,
+  visit: (node: JsxNode, ancestors: readonly JsxNode[]) => void,
+): void {
+  const stack: JsxNode[] = []
+  const step = (node: JsxNode | null | undefined): void => {
+    if (!node || typeof node !== "object" || typeof node.type !== "string") return
+    visit(node, stack)
+    stack.push(node)
+    for (const key in node) {
+      if (key === "loc" || key === "start" || key === "end" || key === "type") continue
+      const v = node[key]
+      if (Array.isArray(v)) {
+        for (const item of v) step(item as JsxNode)
+      } else if (v && typeof v === "object" && typeof (v as JsxNode).type === "string") {
+        step(v as JsxNode)
+      }
+    }
+    stack.pop()
+  }
+  step(root)
 }

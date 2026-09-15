@@ -1514,7 +1514,10 @@ export function useEditorEditing({
     ) => {
       const { source, destParent, destIndex, anchor } = payload
       const adapter = adapterRef.current
-      if (!adapter || !source.editTarget || !destParent.editTarget) {
+      // Where the parent is written in the source's file — see
+      // `LayersMovePayload.destParentTarget`.
+      const destParentTarget = payload.destParentTarget ?? destParent.editTarget
+      if (!adapter || !source.editTarget || !destParentTarget) {
         return
       }
       if (!skipIterationCheck) {
@@ -1555,7 +1558,7 @@ export function useEditorEditing({
         destination: {
           parentId: destParent.selector,
           index: destIndex,
-          parentEditTarget: destParent.editTarget,
+          parentEditTarget: destParentTarget,
           // The sibling the drop landed beside; the applicator counts from
           // it instead of trusting `index`. See `InsertionTarget.anchor`.
           ...(anchor?.node.editTarget

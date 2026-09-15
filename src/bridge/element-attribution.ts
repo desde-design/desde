@@ -292,8 +292,22 @@ export function attributeElement(el: Element): Attribution | undefined {
   //       answer keeps priority, so nothing that worked is reordered.
   const callStamp = parseCallStamp((el as HTMLElement).dataset?.desdeCall)
   const runtimeNamesCallsite = isComponentRoot && !preferOwnRoot && !!leafVnodeStampLoc
+  //     A CLIENT component that spreads its props onto a NON-root child
+  //     (`return <div><input {...props} /></div>`) hands that child its own
+  //     callsite stamp. The runtime knows that callsite as the leaf's; an
+  //     element inside the leaf carrying the same one is a forwarded prop,
+  //     not a root, and its own bytes stay the edit target (codex P1).
+  const forwardedByLeaf =
+    !!callStamp &&
+    !!leafVnodeStampLoc &&
+    callStamp.loc.file === leafVnodeStampLoc.file &&
+    callStamp.loc.line === leafVnodeStampLoc.line &&
+    callStamp.loc.column === leafVnodeStampLoc.column
   const callsiteLoc =
-    callStamp && !runtimeNamesCallsite && !callStamp.loc.file.split("/").includes("node_modules")
+    callStamp &&
+    !runtimeNamesCallsite &&
+    !forwardedByLeaf &&
+    !callStamp.loc.file.split("/").includes("node_modules")
       ? callStamp.loc
       : undefined
   const editTargetLoc = callsiteLoc

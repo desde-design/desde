@@ -1082,6 +1082,28 @@ describe("attributeElement — data-desde-call names the callsite when no instan
     expect(attributeElement(root.querySelector("#card")!)?.editTarget.fileHash).toBe("aaaaaaaaaaaa")
   })
 
+  it("does not adopt a call stamp a CLIENT component forwarded onto a non-root (codex P1)", () => {
+    // `function Field(props) { return <div><input {...props} /></div> }`,
+    // rendered on the client: the input carries Field's callsite through
+    // the spread, but Field's mount root is the div. The runtime knows that
+    // callsite as Field's own; an element inside Field carrying it is a
+    // forwarded prop, not a root. Its own bytes stay the edit target.
+    const root = html(
+      `<div id="root" data-desde-src="src/Field.tsx:3:4">` +
+        `<input id="inp" data-desde-src="src/Field.tsx:4:6" data-desde-call="src/App.tsx:9:4 Field" />` +
+        `</div>`,
+    )
+    const rootEl = root.querySelector("#root")!
+    const field = register({ name: "Field", file: "src/Field.tsx", stamp: "src/App.tsx:9:4", mountRoot: rootEl })
+    own(rootEl, field)
+    const input = root.querySelector("#inp")!
+    own(input, field)
+
+    const attr = attributeElement(input)
+    expect(attr?.editTarget).toMatchObject({ file: "src/Field.tsx", line: 4, column: 6 })
+    expect(attr?.callsiteName).toBeUndefined()
+  })
+
   it("ignores an unparseable data-desde-call and falls back to the element's own stamp", () => {
     const root = html(
       `<div id="card" data-desde-src="src/ui/card.tsx:10:4" data-desde-call="garbage">x</div>`,
