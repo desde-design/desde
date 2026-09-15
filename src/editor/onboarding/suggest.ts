@@ -219,14 +219,31 @@ const FLAT_MAX_PARTS_PER_FAMILY = 2
  * ```
  *
  * The other 8 are not in the table because this function never sees them, or
- * sees too little to judge. `@heroicons/react`, `primereact`, `grommet` and
- * `@cloudscape-design/components` resolve no `.d.ts` entry at their package
- * root, so the scan never reaches them. `@elastic/eui` and `@remixicon/react`
- * resolve an entry whose exports yield NOTHING the extractor types as a
- * component, and the caller drops a zero-length list before asking. `baseui`
- * (4) and `react-icons` (2) land under the 20-name floor. Every one of those
- * is a separate gap in discovery, not in this rule, and each means a library
- * a user has installed is invisible to onboarding today.
+ * sees too little to judge. They are four separate gaps in DISCOVERY, none of
+ * them in this rule, and each one means a library a user has installed is
+ * invisible to onboarding. Diagnosed 2026-09-15 against the real checker:
+ *
+ *  - *No declared types, implicit layout* — `grommet` (345 exports behind a
+ *    bare root `index.d.ts`, no `types` field) and
+ *    `@cloudscape-design/components` (191, behind `exports["."]: "./index.js"`).
+ *    FIXED the same day: `discoverReactDtsEntries` now falls back to the
+ *    layout TypeScript itself resolves, and both are offered.
+ *  - *Types only under subpaths* — `primereact` (`primereact/button`) and
+ *    `@heroicons/react` (`./24/outline`). Their package root genuinely has no
+ *    declarations. Resolving these means walking `exports` subpaths and
+ *    deciding which to scan; still OPEN.
+ *  - *Union-typed components* — `@remixicon/react` declares all 3,228 of its
+ *    exports as `ComponentType<P>`, which is `ComponentClass | FunctionComponent`.
+ *    A union has no call OR construct signatures of its own, so
+ *    `getReactPropsType` sees nothing and the package counts zero. This hits
+ *    any library that types exports with React's own canonical component type;
+ *    still OPEN.
+ *  - *Ambient-module bundles* — `@elastic/eui` ships one 31k-line `eui.d.ts`
+ *    of `declare module '…'` blocks. The file is not itself a module, so it
+ *    has no module symbol to enumerate exports from; still OPEN.
+ *
+ * `baseui` (4 exports) and `react-icons` (2) are not gaps: their root entries
+ * really do expose almost nothing, and both land under the 20-name floor.
  *
  * ## How to read the table before changing a number
  *

@@ -201,9 +201,9 @@ async function fileExists(p: string): Promise<boolean> {
 
 /**
  * Does the package ship declarations the EXTRACTORS can consume? — `*.vue.d.ts`
- * (Vue), a React types entry resolvable by `discoverReactDtsEntries` (the
- * `types`/`typings` field OR `exports["."].types`, the modern layout), or a
- * bare root `index.d.ts` / `main`'s `.d.ts` sibling. Deliberately NOT "any
+ * (Vue), or a React types entry resolvable by `discoverReactDtsEntries` (the
+ * `types`/`typings` field, `exports["."]`, or the implicit layout: a bare root
+ * `index.d.ts` / `main`'s declaration sibling). Deliberately NOT "any
  * `.d.ts`": incidental stubs like `src/vite-env.d.ts` / `global.d.ts` must NOT
  * count, or a repo that needs its build to emit real declarations would skip it.
  */
@@ -218,8 +218,9 @@ async function shipsExtractableTypes(
   } catch {
     // ignore — fall through to the bare-file fallbacks
   }
-  // Fallbacks discoverReactDtsEntries doesn't cover: an undeclared root
-  // `index.d.ts`, or `main`'s `.d.ts` sibling.
+  // Belt and braces. `discoverReactDtsEntries` covers both of these itself as
+  // of 2026-09-15 — until then it did not, so this gate could answer "yes, it
+  // ships types" for a package the extractor would then resolve no entry for.
   const candidates = ['index.d.ts', meta.mainDts].filter(
     (c): c is string => typeof c === 'string' && c.length > 0,
   )
