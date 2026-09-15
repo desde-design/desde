@@ -15,7 +15,8 @@ interface PackageJsonTypes {
   main?: string
   types?: string
   typings?: string
-  exports?: Record<string, unknown> | string
+  /** Any of the four legal spellings — see {@link rootExport}. */
+  exports?: unknown
 }
 
 /**
@@ -29,44 +30,81 @@ const DTS_RE = /\.d\.[cm]?ts$/
 const JS_TARGET_RE = /\.[cm]?js$/
 
 /**
- * Walk an `exports` condition tree and return the first string target that
- * `accept` likes, trying `keys` in order at each object node. Conditions may
- * be a bare string, an array of fallbacks, or a nested object.
+ * Every string target in an `exports` condition tree that `accept` likes, in
+ * the order resolution would try them: `keys` in order at each object node,
+ * and array entries left to right. Conditions nest arbitrarily.
+ *
+ * ALL of them, not the first. An array is a FALLBACK LIST — `["./missing.js",
+ * "./dist/i.js"]` resolves to the second when the first is not there — so a
+ * caller looking for declarations beside a target has to try each in turn.
  */
-function firstTarget(
+function allTargets(
   node: unknown,
   keys: readonly string[],
   accept: (target: string) => boolean,
-): string | null {
-  if (typeof node === 'string') return accept(node) ? node : null
-  if (Array.isArray(node)) {
-    for (const item of node) {
-      const found = firstTarget(item, keys, accept)
-      if (found) return found
+): string[] {
+  const found: string[] = []
+  const visit = (n: unknown): void => {
+    if (typeof n === 'string') {
+      if (accept(n)) found.push(n)
+      return
     }
-    return null
-  }
-  if (node && typeof node === 'object') {
-    const o = node as Record<string, unknown>
-    for (const key of keys) {
-      const found = firstTarget(o[key], keys, accept)
-      if (found) return found
+    if (Array.isArray(n)) {
+      for (const item of n) visit(item)
+      return
+    }
+    if (n && typeof n === 'object') {
+      const o = n as Record<string, unknown>
+      for (const key of keys) if (key in o) visit(o[key])
     }
   }
-  return null
+  visit(node)
+  return found
 }
 
-/** The `"."` node of an `exports` map, or `undefined` when there is no map. */
-function rootExport(exportsField: PackageJsonTypes['exports']): unknown {
-  if (!exportsField || typeof exportsField !== 'object') return undefined
-  return (exportsField as Record<string, unknown>)['.']
+/**
+ * What an `exports` field says about the PACKAGE ROOT. Only one of its four
+ * legal spellings uses a literal `"."` key, so reading `exports['.']` alone
+ * mistakes two valid root forms for "no root export":
+ *
+ * ```jsonc
+ *   "exports": "./index.js"                        // string sugar for "."
+ *   "exports": ["./a.js", "./b.js"]                // array sugar for "."
+ *   "exports": { "import": "…", "require": "…" }   // CONDITION-ONLY sugar for "."
+ *   "exports": { ".": "…", "./sub": "…" }          // a real subpath map
+ * ```
+ *
+ * Node's rule for the object forms: if no key begins with `.`, every key is a
+ * CONDITION and the object as a whole is the root export. One `.`-prefixed key
+ * makes it a subpath map, and then a missing `"."` really does mean the bare
+ * specifier does not resolve.
+ */
+type RootExport =
+  | { kind: 'absent' }
+  | { kind: 'root'; node: unknown }
+  | { kind: 'subpathOnly' }
+
+function rootExport(exportsField: unknown): RootExport {
+  if (exportsField === undefined || exportsField === null) return { kind: 'absent' }
+  if (typeof exportsField === 'string' || Array.isArray(exportsField)) {
+    return { kind: 'root', node: exportsField }
+  }
+  if (typeof exportsField !== 'object') return { kind: 'absent' }
+
+  const map = exportsField as Record<string, unknown>
+  const keys = Object.keys(map)
+  // `"exports": {}` exports nothing at all, root included.
+  if (keys.length === 0) return { kind: 'subpathOnly' }
+  if (!keys.some((k) => k.startsWith('.'))) return { kind: 'root', node: map }
+  return '.' in map ? { kind: 'root', node: map['.'] } : { kind: 'subpathOnly' }
 }
 
-/** Pull a declaration path out of an `exports` "." entry, which may nest. */
-function typesFromExports(exportsField: PackageJsonTypes['exports']): string | null {
-  return firstTarget(rootExport(exportsField), ['types', 'import', 'require', 'default'], (t) =>
-    DTS_RE.test(t),
-  )
+/** Pull a declaration path out of a package's root export, which may nest. */
+function typesFromExports(exportsField: unknown): string | null {
+  const root = rootExport(exportsField)
+  if (root.kind !== 'root') return null
+  const keys = ['types', 'import', 'require', 'default']
+  return allTargets(root.node, keys, (t) => DTS_RE.test(t))[0] ?? null
 }
 
 /**
@@ -146,21 +184,24 @@ export function discoverReactDtsEntries(packageRoot: string): string[] {
     if (existsSync(abs)) return [abs]
   }
 
-  // 2. An `exports` map is a GATE, not just a source. A map with no `"."` is a
-  //    subpath-only package: the bare specifier does not resolve at all, so
-  //    there is no package-root entry to offer and guessing one would register
-  //    an import the prototype cannot write.
-  const hasExportsMap = !!pkg.exports && typeof pkg.exports === 'object'
-  const dot = rootExport(pkg.exports)
-  if (hasExportsMap && dot === undefined) return []
+  // 2. An `exports` field is a GATE, not just a source. A subpath map with no
+  //    root export means the bare specifier does not resolve at all, so there
+  //    is no package-root entry to offer and guessing one would register an
+  //    import the prototype cannot write.
+  const root = rootExport(pkg.exports)
+  if (root.kind === 'subpathOnly') return []
 
-  // 3. `exports["."]` naming a JavaScript target: TypeScript substitutes the
+  // 3. A root export naming a JavaScript target: TypeScript substitutes the
   //    declaration extension on THAT target, not on `main`.
-  const jsTarget = firstTarget(dot, ['import', 'require', 'default'], (t) => JS_TARGET_RE.test(t))
-  if (jsTarget) {
-    for (const rel of declarationSiblings(jsTarget)) {
-      const abs = resolve(packageRoot, rel)
-      if (existsSync(abs)) return [abs]
+  if (root.kind === 'root') {
+    const jsTargets = allTargets(root.node, ['import', 'require', 'default'], (t) =>
+      JS_TARGET_RE.test(t),
+    )
+    for (const target of jsTargets) {
+      for (const rel of declarationSiblings(target)) {
+        const abs = resolve(packageRoot, rel)
+        if (existsSync(abs)) return [abs]
+      }
     }
   }
 

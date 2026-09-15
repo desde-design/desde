@@ -129,6 +129,48 @@ describe('discoverReactDtsEntries', () => {
     expect(discoverReactDtsEntries(root)).toEqual([])
   })
 
+  it('treats `exports: {}` as exporting nothing, root included', async () => {
+    await pkg({ name: 'a', main: 'index.js', exports: {} })
+    await write('index.d.ts')
+    expect(discoverReactDtsEntries(root)).toEqual([])
+  })
+
+  // Only ONE of the four legal `exports` spellings uses a literal "." key.
+  // Reading `exports['.']` alone mistakes the other root forms for
+  // subpath-only and skips a package whose bare import resolves perfectly.
+  describe('root export sugar is not subpath-only', () => {
+    it('condition-only object', async () => {
+      await pkg({ name: 'a', exports: { import: './dist/i.mjs', require: './dist/i.cjs' } })
+      await write('dist/i.d.mts')
+      expect(discoverReactDtsEntries(root)).toEqual([join(root, 'dist/i.d.mts')])
+    })
+
+    it('condition-only object naming its own types', async () => {
+      await pkg({ name: 'a', exports: { types: './t/i.d.ts', default: './dist/i.js' } })
+      await write('t/i.d.ts')
+      expect(discoverReactDtsEntries(root)).toEqual([join(root, 't/i.d.ts')])
+    })
+
+    it('bare string', async () => {
+      await pkg({ name: 'a', exports: './dist/i.js' })
+      await write('dist/i.d.ts')
+      expect(discoverReactDtsEntries(root)).toEqual([join(root, 'dist/i.d.ts')])
+    })
+
+    it('array of fallbacks', async () => {
+      await pkg({ name: 'a', exports: ['./missing.js', './dist/i.js'] })
+      await write('dist/i.d.ts')
+      expect(discoverReactDtsEntries(root)).toEqual([join(root, 'dist/i.d.ts')])
+    })
+
+    // The gate must not fire for these, so the legacy layout is still reachable.
+    it('condition-only object still falls back to the root index.d.ts', async () => {
+      await pkg({ name: 'a', main: 'index.js', exports: { default: './dist/bundle.js' } })
+      await write('index.d.ts')
+      expect(discoverReactDtsEntries(root)).toEqual([join(root, 'index.d.ts')])
+    })
+  })
+
   // TypeScript substitutes the declaration extension on the target `exports`
   // selected, which is not necessarily `main`.
   it('substitutes the declaration extension on the `exports["."]` target', async () => {
