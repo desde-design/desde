@@ -101,7 +101,7 @@ describe("applyResolvedCallsites", () => {
     const roots = crmTree()
     const candidates = collectCallsiteCandidates(roots)
     const results: (ResolvedCallsite | null)[] = [
-      { name: "KpiCards", parentHash: "abcdefabcdef", callsites: [{ line: 9, column: 6, inExpression: false }] },
+      { name: "KpiCards", parentHash: "abcdefabcdef", callsites: [{ line: 9, column: 6, dynamic:false }] },
       null,
     ]
     const out = applyResolvedCallsites(roots, candidates, results)
@@ -140,8 +140,8 @@ describe("applyResolvedCallsites", () => {
     name: "Card",
     parentHash: "000000000000",
     callsites: [
-      { line: 8, column: 6, inExpression: false },
-      { line: 25, column: 6, inExpression: false },
+      { line: 8, column: 6, dynamic:false },
+      { line: 25, column: 6, dynamic:false },
     ],
   }
 
@@ -173,8 +173,8 @@ describe("applyResolvedCallsites", () => {
       name: "Card",
       parentHash: "000000000000",
       callsites: [
-        { line: 8, column: 14, inExpression: true },
-        { line: 8, column: 31, inExpression: true },
+        { line: 8, column: 14, dynamic:true },
+        { line: 8, column: 31, dynamic:true },
       ],
     }
     const roots = gridWith(2)

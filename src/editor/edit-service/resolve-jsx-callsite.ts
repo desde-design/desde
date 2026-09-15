@@ -30,13 +30,16 @@ export interface JsxCallsite {
   /** 0-based column, Babel's own — the JSX lane's convention throughout. */
   column: number
   /**
-   * Written inside a `{…}` expression: `{flag ? <Card/> : <Card/>}`,
-   * `{items.map(() => <Card/>)}`, a render prop. Such a callsite renders
-   * zero, one or many times, so the order of elements on screen says
-   * nothing about which callsite each came from. A static callsite renders
-   * exactly once, in source order.
+   * NOT known to render exactly once, in source order. A static callsite
+   * is one whose path up to a module-level component function is pure JSX
+   * nesting plus the function's own `return` (or an arrow's expression
+   * body). Anything else on that path — a `{…}` expression, a conditional,
+   * a `.map`, an `if`, a variable it was assigned to first, a helper
+   * function — can render it zero, one or many times, or in another order,
+   * so the order of elements on screen says nothing about which callsite
+   * each came from.
    */
-  inExpression: boolean
+  dynamic: boolean
 }
 
 const FUNCTION_TYPES = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"])
@@ -210,10 +213,71 @@ export function findJsxCallsites(input: {
     callsites.push({
       line: start.line,
       column: start.column,
-      inExpression: ancestors.some((a) => a.type === "JSXExpressionContainer"),
+      dynamic: !isStaticCallsite(ancestors),
     })
   })
   return imported ? callsites : null
+}
+
+const MODULE_LEVEL_WRAPPERS = new Set(["ExportNamedDeclaration", "ExportDefaultDeclaration"])
+
+/**
+ * Is a JSX opening element, given its ancestors (outermost first, the
+ * element's own JSXElement last), rendered exactly once in source order?
+ *
+ * Yes only when, walking up, there is nothing but JSX nesting until a
+ * module-level component function's own `return` (through its block) or an
+ * arrow's expression body. Every other construct on the way — an if, a
+ * variable, a call, a nested function, a `{…}` container — answers no. The
+ * first delta review showed why the `{…}` check alone was not enough:
+ * `const rows = items.map(i => <Card/>)` has no container in its ancestry
+ * and renders any number of times.
+ */
+function isStaticCallsite(ancestors: readonly JsxNode[]): boolean {
+  // ancestors[last] is the opening element's own JSXElement.
+  let i = ancestors.length - 1
+  let child = ancestors[i]
+  if (child?.type !== "JSXElement") return false
+  i--
+  while (i >= 0 && (ancestors[i].type === "JSXElement" || ancestors[i].type === "JSXFragment")) {
+    child = ancestors[i]
+    i--
+  }
+  const boundary = ancestors[i]
+  if (!boundary) return false
+
+  let fnIndex: number
+  if (boundary.type === "ReturnStatement" && boundary.argument === child) {
+    const block = ancestors[i - 1]
+    const fn = ancestors[i - 2]
+    if (block?.type !== "BlockStatement" || block.body === undefined || !fn || !FUNCTION_TYPES.has(fn.type ?? "")) {
+      return false
+    }
+    fnIndex = i - 2
+  } else if (FUNCTION_TYPES.has(boundary.type ?? "") && boundary.body === child) {
+    fnIndex = i
+  } else {
+    return false
+  }
+
+  // The function must be a module-level component definition, not a helper
+  // or a callback: a declaration under Program (or an export), or an
+  // expression assigned to a module-level variable, through at most one
+  // wrapping call (forwardRef, memo), or exported directly as the default.
+  const fn = ancestors[fnIndex]
+  let j = fnIndex - 1
+  if (fn.type === "FunctionDeclaration") {
+    if (ancestors[j] && MODULE_LEVEL_WRAPPERS.has(ancestors[j].type ?? "")) j--
+    return ancestors[j]?.type === "Program"
+  }
+  if (ancestors[j]?.type === "ExportDefaultDeclaration") return ancestors[j - 1]?.type === "Program"
+  if (ancestors[j]?.type === "CallExpression") j--
+  if (ancestors[j]?.type !== "VariableDeclarator") return false
+  j--
+  if (ancestors[j]?.type !== "VariableDeclaration") return false
+  j--
+  if (ancestors[j] && MODULE_LEVEL_WRAPPERS.has(ancestors[j].type ?? "")) j--
+  return ancestors[j]?.type === "Program"
 }
 
 /** Depth-first walk that hands each node its ancestor chain, outermost first. */

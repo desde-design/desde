@@ -34,11 +34,11 @@ export interface ResolvedCallsite {
   /** The parent file's version — its `data-desde-v` — for the stale-target guard. */
   parentHash: string
   /**
-   * Every place `parentFile` writes it, in source order. `inExpression`
-   * marks one inside a `{…}` expression (a conditional, a `.map`), which
-   * renders zero, one or many times.
+   * Every place `parentFile` writes it, in source order. `dynamic` marks
+   * one not known to render exactly once in that order (a conditional, a
+   * `.map`, an `if`, a variable, a helper function — see `JsxCallsite`).
    */
-  callsites: Array<{ line: number; column: number; inExpression: boolean }>
+  callsites: Array<{ line: number; column: number; dynamic: boolean }>
 }
 
 /** The handler's cap on one request; a tree can hold more rows than that. */
@@ -113,7 +113,7 @@ export function applyResolvedCallsites(
     const ordinal = ordinalByGroup.get(group) ?? 0
     ordinalByGroup.set(group, ordinal + 1)
     const certain =
-      result.callsites.length === groupSize.get(group) && result.callsites.every((c) => !c.inExpression)
+      result.callsites.length === groupSize.get(group) && result.callsites.every((c) => !c.dynamic)
     const callsite = certain ? result.callsites[ordinal] : undefined
     if (!callsite) return
     rewrite.set(candidate.nodeId, {

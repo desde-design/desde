@@ -62,7 +62,7 @@ describe("resolve-callsites-handler", () => {
           // The parent file's version, the same hash its data-desde-v stamps
           // carry, so a recovered target keeps the stale-target guard.
           parentHash: expect.stringMatching(/^[0-9a-f]{12}$/),
-          callsites: [{ ...babelLoc(PAGE, "<KpiCards"), inExpression: false }],
+          callsites: [{ ...babelLoc(PAGE, "<KpiCards"), dynamic: false }],
         },
       ],
     })

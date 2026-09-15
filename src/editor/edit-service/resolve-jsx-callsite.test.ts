@@ -90,7 +90,7 @@ describe("findJsxCallsites", () => {
         definitionFile: "src/app/(main)/dashboard/crm/_components/kpi-cards.tsx",
         parentFile: "src/app/(main)/dashboard/crm/page.tsx",
       }),
-    ).toEqual([{ line: 8, column: 6, inExpression: false }])
+    ).toEqual([{ line: 8, column: 6, dynamic:false }])
   })
 
   it("returns every callsite in source order when the component is written more than once", () => {
@@ -112,8 +112,8 @@ export function Grid() {
         parentFile: "src/app/grid.tsx",
       }),
     ).toEqual([
-      { line: 5, column: 6, inExpression: false },
-      { line: 6, column: 6, inExpression: false },
+      { line: 5, column: 6, dynamic:false },
+      { line: 6, column: 6, dynamic:false },
     ])
   })
 
@@ -137,11 +137,75 @@ export function Grid({ flag, items }) {
         parentFile: "src/app/grid.tsx",
       }),
     ).toEqual([
-      { line: 5, column: 14, inExpression: true },
-      { line: 5, column: 31, inExpression: true },
-      { line: 6, column: 24, inExpression: true },
-      { line: 7, column: 6, inExpression: false },
+      { line: 5, column: 14, dynamic:true },
+      { line: 5, column: 31, dynamic:true },
+      { line: 6, column: 24, dynamic:true },
+      { line: 7, column: 6, dynamic:false },
     ])
+  })
+
+  it("marks JSX built in plain JavaScript as dynamic too (codex delta P1)", () => {
+    // No `{…}` in sight, and still not exactly-once-in-source-order: a map
+    // assigned before the return, a return inside an if, a helper function.
+    const src = `import { Card } from "@/components/ui/card";
+export function Grid({ flag, items }) {
+  const rows = items.map((i) => <Card key={i}>r</Card>);
+  if (flag) return <Card>a</Card>;
+  function Row() {
+    return <Card>h</Card>;
+  }
+  return (
+    <div>
+      {rows}
+      <Row />
+      <Card>d</Card>
+    </div>
+  );
+}
+`
+    expect(
+      findJsxCallsites({
+        source: src,
+        name: "Card",
+        definitionFile: "src/components/ui/card.tsx",
+        parentFile: "src/app/grid.tsx",
+      }),
+    ).toEqual([
+      { line: 3, column: 32, dynamic: true },
+      { line: 4, column: 19, dynamic: true },
+      { line: 6, column: 11, dynamic: true },
+      { line: 12, column: 6, dynamic: false },
+    ])
+  })
+
+  it("keeps a callsite under a fragment root, or in a default-exported arrow, static", () => {
+    const fragment = `import { Card } from "@/components/ui/card";
+export function Two() {
+  return (
+    <>
+      <Card>a</Card>
+    </>
+  );
+}
+`
+    expect(
+      findJsxCallsites({
+        source: fragment,
+        name: "Card",
+        definitionFile: "src/components/ui/card.tsx",
+        parentFile: "src/app/two.tsx",
+      }),
+    ).toEqual([{ line: 5, column: 6, dynamic: false }])
+
+    const arrow = `import { Card } from "@/components/ui/card";\nexport default () => <Card />\n`
+    expect(
+      findJsxCallsites({
+        source: arrow,
+        name: "Card",
+        definitionFile: "src/components/ui/card.tsx",
+        parentFile: "src/app/arrow.tsx",
+      }),
+    ).toEqual([{ line: 2, column: 21, dynamic: false }])
   })
 
   it("accepts a default import under a local name", () => {
@@ -153,7 +217,7 @@ export function Grid({ flag, items }) {
         definitionFile: "src/pages/hero.tsx",
         parentFile: "src/pages/index.tsx",
       }),
-    ).toEqual([{ line: 2, column: 16, inExpression: false }])
+    ).toEqual([{ line: 2, column: 16, dynamic:false }])
   })
 
   it("accepts an index module for a directory import", () => {
@@ -165,7 +229,7 @@ export function Grid({ flag, items }) {
         definitionFile: "src/pages/hero/index.tsx",
         parentFile: "src/pages/index.tsx",
       }),
-    ).toEqual([{ line: 2, column: 16, inExpression: false }])
+    ).toEqual([{ line: 2, column: 16, dynamic:false }])
   })
 
   it("accepts the single-character alias roots and a baseUrl path", () => {
@@ -179,7 +243,7 @@ export function Grid({ flag, items }) {
           parentFile: "src/app/page.tsx",
         }),
         spec,
-      ).toEqual([{ line: 2, column: 16, inExpression: false }])
+      ).toEqual([{ line: 2, column: 16, dynamic:false }])
     }
   })
 

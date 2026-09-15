@@ -50,8 +50,8 @@ export interface ResolvedCallsite {
    * carry, so a target recovered from it keeps the stale-target guard.
    */
   parentHash: string
-  /** See `JsxCallsite` in `resolve-jsx-callsite.ts` for `inExpression`. */
-  callsites: Array<{ line: number; column: number; inExpression: boolean }>
+  /** See `JsxCallsite` in `resolve-jsx-callsite.ts` for `dynamic`. */
+  callsites: Array<{ line: number; column: number; dynamic: boolean }>
 }
 
 export type ResolveCallsitesResult =
