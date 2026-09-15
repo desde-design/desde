@@ -8,7 +8,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { detectFirstParty } from './detect-first-party'
+import { detectFirstParty, uniqueFirstPartyCount } from './detect-first-party'
 
 const BUTTON_TSX = `
 export function Button({ variant = "default" }: { variant?: "default" | "outline" }) {
@@ -68,5 +68,20 @@ describe('detectFirstParty', () => {
     await writeFile(path.join(root, 'src/Button.test.tsx'), BUTTON_TSX)
 
     expect(await detectFirstParty(root)).toBeNull()
+  })
+})
+
+
+describe('uniqueFirstPartyCount', () => {
+  it('counts a component present in both sources once, as the catalog does', () => {
+    // `Button.vue` and `Button.tsx` in one repo: the composite exposes one
+    // `Button` (first source wins, by name), so the step must promise one.
+    expect(uniqueFirstPartyCount(['Button', 'Card'], ['Button', 'Table'])).toBe(3)
+  })
+
+  it('is a plain sum when the names do not overlap', () => {
+    expect(uniqueFirstPartyCount(['A', 'B'], ['C'])).toBe(3)
+    expect(uniqueFirstPartyCount([], ['C', 'D'])).toBe(2)
+    expect(uniqueFirstPartyCount([], [])).toBe(0)
   })
 })

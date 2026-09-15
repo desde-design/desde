@@ -395,7 +395,8 @@ export function NewProjectPage({
     setFirstPartyLoading(true)
     setFirstParty(undefined)
     // Independent of the suggestions: a repo walk, not a node_modules scan.
-    // Whichever lands first is shown first.
+    // Whichever lands first is shown first (the list's `loading` gate below
+    // is what makes that true).
     void onDetectFirstParty(chosenPath)
       .then((detection) => {
         if (cancelled) return
@@ -1004,7 +1005,14 @@ export function NewProjectPage({
             */}
             <DesignSystemList
               entries={designSystemEntries}
-              loading={suggestLoading || firstPartyLoading}
+              // A finished detection is shown the moment it lands, even while
+              // the suggestions scan is still out: the two are independent and
+              // the slower one must not hide the faster one's answer (codex
+              // review, 2026-09-15). The loading line stays up only while
+              // there is nothing displayable yet, which also covers a
+              // detection that answered null with suggestions still pending,
+              // so the "nothing to add" state never flashes before rows land.
+              loading={firstParty ? false : suggestLoading || firstPartyLoading}
               firstParty={firstParty ?? null}
               busy={stepBusy}
               onAdd={() => {

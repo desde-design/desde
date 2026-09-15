@@ -79,26 +79,42 @@ async function readNamedSystem(root: string): Promise<FirstPartySystem | null> {
   }
 }
 
+/**
+ * The count the boot catalog will actually expose. `CompositeManifestSource`
+ * deduplicates by component NAME, first source wins, and its order puts
+ * `local-vue` before `local-react`, so a repo carrying both `Button.vue` and
+ * `Button.tsx` has ONE `Button`. Summing the two sources' lengths reported
+ * two (codex review, 2026-09-15). Pure, so the policy is testable without a
+ * Vue compiler in the test environment.
+ */
+export function uniqueFirstPartyCount(vueNames: readonly string[], reactNames: readonly string[]): number {
+  const seen = new Set<string>()
+  for (const name of vueNames) seen.add(name)
+  for (const name of reactNames) seen.add(name)
+  return seen.size
+}
+
 async function countFirstPartyComponents(root: string): Promise<number> {
   const { walkFiles } = await import('@/editor/edit-service/build-manifest-source')
   const { components, reactComponents } = await walkFiles(root)
 
-  let total = 0
+  let reactNames: string[] = []
   if (reactComponents.length > 0) {
     const { LocalReactManifestSource } = await import('@/editor/adapters/local-react')
     const source = new LocalReactManifestSource({ componentFiles: reactComponents })
-    total += (await source.listComponents()).length
+    reactNames = (await source.listComponents()).map((c) => c.name)
   }
+  let vueNames: string[] = []
   if (components.length > 0) {
     try {
       const { LocalVueManifestSource } = await import('@/editor/adapters/local-vue')
       const source = new LocalVueManifestSource({ componentFiles: components })
-      total += (await source.listComponents()).length
+      vueNames = (await source.listComponents()).map((c) => c.name)
     } catch {
       // No Vue compiler in this prototype: the boot skips these files too.
     }
   }
-  return total
+  return uniqueFirstPartyCount(vueNames, reactNames)
 }
 
 /**

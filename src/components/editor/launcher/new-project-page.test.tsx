@@ -378,6 +378,41 @@ describe("NewProjectPage", () => {
       expect(screen.queryByTestId("design-system-first-party")).not.toBeInTheDocument()
     })
 
+    it("shows a finished detection while the suggestions scan is still running", async () => {
+      // Codex review 2026-09-15: the two scans are independent, and the slower
+      // one must not hide the faster one's answer behind the loading line.
+      const props = baseProps()
+      props.onSuggestDesignSystems.mockReturnValue(new Promise(() => {}))
+      props.onDetectFirstParty.mockResolvedValue({
+        system: { id: "shadcn", label: "shadcn/ui" },
+        componentCount: 12,
+      })
+      render(<NewProjectPage {...props} />)
+
+      await pickLocalFolder()
+      await passNameStep()
+      await screen.findByTestId("new-project-design-systems-step")
+
+      expect(await screen.findByTestId("design-system-first-party")).toHaveTextContent(
+        "shadcn/ui detected",
+      )
+      expect(screen.queryByTestId("design-system-list-loading")).not.toBeInTheDocument()
+    })
+
+    it("keeps the loading line, not the empty state, while suggestions are pending and there is nothing to detect", async () => {
+      const props = baseProps()
+      props.onSuggestDesignSystems.mockReturnValue(new Promise(() => {}))
+      props.onDetectFirstParty.mockResolvedValue(null)
+      render(<NewProjectPage {...props} />)
+
+      await pickLocalFolder()
+      await passNameStep()
+      await screen.findByTestId("new-project-design-systems-step")
+
+      expect(await screen.findByTestId("design-system-list-loading")).toBeInTheDocument()
+      expect(screen.queryByText("No libraries to add")).not.toBeInTheDocument()
+    })
+
     it("shows the detection only in place of an empty list, never beside rows", async () => {
       const props = baseProps()
       props.onSuggestDesignSystems.mockResolvedValue([
