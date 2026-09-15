@@ -22,7 +22,11 @@ import type { GroundingService } from "../../../../src/editor/core"
 
 afterEach(() => resetGroundingCache())
 
-/** A stand-in for a spawned child: streams we write to, an exit we trigger. */
+/**
+ * A stand-in for a spawned child: streams we write to, a `close` we trigger.
+ * `close` and not `exit` on purpose: the parent must not read stdout on
+ * `exit`, because the pipe can still be delivering the result line then.
+ */
 function fakeChild() {
   const child = new EventEmitter() as EventEmitter & {
     stdout: PassThrough
@@ -101,7 +105,7 @@ describe("prewarmManifestsAtBoot", () => {
       groundingLoaders: loaders(service, logs),
     })
     child.stdout.write(`${formatPrewarmResultLine({ ok: true, components: 6295, ms: 14000 })}\n`)
-    child.emit("exit", 0, null)
+    child.emit("close", 0, null)
 
     expect(await outcome).toEqual({
       child: { ok: true, components: 6295, ms: 14000 },
@@ -136,7 +140,7 @@ describe("prewarmManifestsAtBoot", () => {
     expect(service.getManifestSource).not.toHaveBeenCalled()
 
     child.stdout.write(`${formatPrewarmResultLine({ ok: true, components: 1, ms: 5 })}\n`)
-    child.emit("exit", 0, null)
+    child.emit("close", 0, null)
     await outcome
 
     expect(service.getManifestSource).toHaveBeenCalledTimes(1)
@@ -145,6 +149,29 @@ describe("prewarmManifestsAtBoot", () => {
     // promise itself is memoized inside the real service, not this fake.
     await getGroundingService("/proto", groundingLoaders)
     expect(createGroundingService).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not read the result on `exit`; the pipe may still be delivering it", async () => {
+    const child = fakeChild()
+    const logs: string[] = []
+    let settled = false
+    const outcome = prewarmManifestsAtBoot({
+      root: "/proto",
+      cliEntry: "/cli",
+      spawn: (() => child) as unknown as typeof import("node:child_process").spawn,
+      logger: (m) => logs.push(m),
+      groundingLoaders: loaders(serviceWithSource(), logs),
+    }).then((o) => {
+      settled = true
+      return o
+    })
+    child.emit("exit", 0, null)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(settled).toBe(false)
+
+    child.stdout.write(`${formatPrewarmResultLine({ ok: true, components: 3, ms: 9 })}\n`)
+    child.emit("close", 0, null)
+    expect((await outcome).child).toEqual({ ok: true, components: 3, ms: 9 })
   })
 
   it("logs a child that died without a result, naming its last stderr line, and still warms the memo", async () => {
@@ -160,7 +187,7 @@ describe("prewarmManifestsAtBoot", () => {
       groundingLoaders: loaders(service, logs),
     })
     child.stderr.write("some warning\nTypeError: checker exploded\n")
-    child.emit("exit", 1, null)
+    child.emit("close", 1, null)
 
     const result = await outcome
     expect(result.child).toMatchObject({

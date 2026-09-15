@@ -266,7 +266,10 @@ function runPrewarmChild(opts: PrewarmManifestsOptions): Promise<PrewarmChildRes
     child.on("error", (err) => {
       settle({ ok: false, reason: `spawn failed: ${err.message}`, ms: Date.now() - startedAt })
     })
-    child.on("exit", (code, signal) => {
+    // `close`, not `exit`: `exit` can fire while the last `data` chunk of the
+    // stdout pipe is still in flight, and the result line is that chunk.
+    // `close` waits for both stdio streams to end (codex, first pass).
+    child.on("close", (code, signal) => {
       const result = parsePrewarmResult(stdout)
       if (result) {
         settle(result)

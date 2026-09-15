@@ -257,8 +257,15 @@ async function main(): Promise<void> {
     const result = root
       ? await runManifestPrewarmWork(root)
       : { ok: false as const, reason: `${PREWARM_CHILD_FLAG} needs a root`, ms: 0 }
-    console.log(formatPrewarmResultLine(result))
-    process.exit(result.ok ? 0 : 1)
+    // Exit from the write callback, not after `console.log`: stdout here is
+    // a pipe, and on macOS a pipe write is asynchronous, so `process.exit`
+    // straight after the log could cut the only line the parent reads
+    // (codex, first pass). `await` on a resolved promise is not enough
+    // either; the callback is the flush signal.
+    process.stdout.write(`${formatPrewarmResultLine(result)}\n`, () => {
+      process.exit(result.ok ? 0 : 1)
+    })
+    return
   }
 
   let args: ParsedArgs
