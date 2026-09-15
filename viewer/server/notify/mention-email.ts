@@ -3,10 +3,17 @@
  *
  * PORT of oss-comments' `packages/core/src/notify.ts` — verbatim except the
  * product name in the email footer / unsubscribe-confirmation copy
- * (`oss-comments` → `Desde`). Kept PURE (zero deps beyond Web Crypto) on
- * purpose: it is unit-testable in Node and reused verbatim by the outbox
- * drain (`outbox-drain.ts`), which supplies the I/O via `ProcessIntentDeps`.
+ * (`oss-comments` → `Desde`). Kept PURE (zero deps beyond Web Crypto and one
+ * constants module) on purpose: it is unit-testable in Node and reused
+ * verbatim by the outbox drain (`outbox-drain.ts`), which supplies the I/O
+ * via `ProcessIntentDeps`.
+ *
+ * Brand styling matches `auth-email.ts` — same aqua, same footer mark, same
+ * reasons (a PNG rather than inline SVG or a `data:` URI, because Gmail and
+ * Outlook refuse both). Read that file's header before changing either.
  */
+
+import { WORDMARK_PNG_PATH } from "../auth/auth-constants"
 
 /**
  * Must stay identical to `MENTION_PATTERN` in
@@ -20,6 +27,9 @@
  * and the person who was actually mentioned.
  */
 const MENTION_PATTERN = /@\[([^[\]]+)\]\(([^)]+)\)/g
+
+/** The brand aqua — `--primary` under `[data-theme="teal"]`, as sRGB hex. */
+const AQUA = "#00918a"
 
 /** `@[Name](id)` → `@Name` for human-readable email text. Mirrors core. */
 function stripMentionSyntax(body: string): string {
@@ -119,9 +129,19 @@ export function mentionEmail(
   const link = baseUrl
     ? `${baseUrl}/review/${encodeURIComponent(comment.projectSlug)}?commentId=${encodeURIComponent(comment.id)}`
     : ""
+  /*
+   * The footer mark, or the old text node when there is no origin to hang it
+   * on. `baseUrl` is optional here in a way it is not in the auth templates:
+   * the CTA above already disappears without it, and an `<img>` with a
+   * relative `src` in an inbox resolves against nothing.
+   */
+  const mark = baseUrl
+    ? `<img src="${escapeHtml(`${baseUrl}${WORDMARK_PNG_PATH}`)}" width="61" height="16" alt="Desde" style="display:block;margin:0 auto;width:61px;height:16px;border:0;">`
+    : `<p style="margin:0;color:#bbb;font-size:11px;">Desde</p>`
+
   const cta = link
     ? `<tr><td style="padding:0 24px 24px;" align="center">
-        <a href="${escapeHtml(link)}" style="display:inline-block;padding:10px 24px;background:#E84F9C;color:#fff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">View comment</a>
+        <a href="${escapeHtml(link)}" style="display:inline-block;padding:10px 24px;background:${AQUA};color:#fff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">View comment</a>
       </td></tr>`
     : ""
 
@@ -134,7 +154,7 @@ export function mentionEmail(
     <p style="margin:0;font-size:13px;color:#666;">${greeting} <strong>${author}</strong> mentioned you on <strong>${project}</strong> (comment #${comment.number}).</p>
   </td></tr>
   <tr><td style="padding:8px 24px 16px;">
-    <div style="padding:12px 16px;background:#f9f9f9;border-radius:6px;border-left:3px solid #E84F9C;">
+    <div style="padding:12px 16px;background:#f9f9f9;border-radius:6px;border-left:3px solid ${AQUA};">
       <p style="margin:0;font-size:14px;color:#333;line-height:1.5;">${body}</p>
     </div>
   </td></tr>
@@ -142,10 +162,10 @@ export function mentionEmail(
   <tr><td style="padding:16px 24px;border-top:1px solid #eee;text-align:center;">
     ${
       unsubscribeUrl
-        ? `<p style="margin:0 0 4px;font-size:11px;"><a href="${escapeHtml(unsubscribeUrl)}" style="color:#999;text-decoration:underline;">Unsubscribe</a></p>`
+        ? `<p style="margin:0 0 10px;font-size:11px;"><a href="${escapeHtml(unsubscribeUrl)}" style="color:#999;text-decoration:underline;">Unsubscribe</a></p>`
         : ""
     }
-    <p style="margin:0;color:#bbb;font-size:11px;">Desde</p>
+    ${mark}
   </td></tr>
 </table></td></tr></table></body></html>`
 

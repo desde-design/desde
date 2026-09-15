@@ -1,6 +1,6 @@
 /**
  * Constants shared between an auth route and the email template that
- * describes what that route just did.
+ * describes what that route just did — or, for the wordmark, points at.
  *
  * It exists because those two live in different layers on purpose —
  * `notify/auth-email.ts` is a pure module with no I/O and no knowledge of
@@ -59,3 +59,20 @@ export const SIGN_IN_LINK_TTL_MINUTES = 15
  * `SIGN_IN_LINK_EXPIRES_COPY` there).
  */
 export const ADMIN_SIGN_IN_LINK_TTL_HOURS = 24
+
+/**
+ * Where the wordmark PNG the emails show in their footer is served from.
+ *
+ * The route is `api/auth-page-assets.ts`'s, and by rights the path would live
+ * beside it with its three siblings. It cannot: `notify/auth-email.ts` builds
+ * the `<img src>` from it, and that module is pure, while
+ * `auth-page-assets.ts` imports `node:fs/promises`, `node:path` and Express.
+ * Importing a route module for one string would pull all of that into the
+ * template — the exact reach into the route layer this file's header says it
+ * exists to prevent. So the path is declared here and the route reads it.
+ *
+ * Path only, no origin. An email is read outside any page, so a relative URL
+ * there resolves against nothing; `auth-email.ts` prepends the origin of the
+ * link already in the message.
+ */
+export const WORDMARK_PNG_PATH = "/api/v1/auth/page-asset/wordmark.png"

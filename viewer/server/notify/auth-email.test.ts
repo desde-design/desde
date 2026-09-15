@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { inviteEmail, signInEmail } from "./auth-email"
+import { WORDMARK_PNG_PATH } from "../auth/auth-constants"
 import type { InstanceRole } from "../storage/types"
 
 /** Counts how many times `needle` occurs in `haystack` (non-overlapping). */
@@ -99,5 +100,52 @@ describe("signInEmail", () => {
     expect(subject).toBe("Your sign-in link")
     expect(subject).not.toContain("<script>")
     expect(subject).not.toContain("token=")
+  })
+})
+
+/**
+ * Styling, as asked for on 2026-09-15: aqua button, the real mark in the
+ * footer, one block of body copy rather than a sentence on each side of the
+ * button.
+ *
+ * Both templates get the same table, so each case runs against both rather
+ * than being written twice and drifting.
+ */
+describe.each([
+  ["inviteEmail", () => inviteEmail({ inviteUrl: "https://viewer.example.com/api/v1/auth/invite/dsi_x", role: "viewer" }).html],
+  ["signInEmail", () => signInEmail({ signInUrl: "https://viewer.example.com/api/v1/auth/signin/dss_x" }).html],
+])("%s styling", (_name, render) => {
+  it("uses the brand aqua for the button, not the old pink", () => {
+    const html = render()
+    expect(html).toContain("background:#00918a")
+    expect(html.toLowerCase()).not.toContain("e84f9c")
+  })
+
+  it("shows the wordmark PNG in the footer, at the same origin as the link", () => {
+    expect(render()).toContain(`src="https://viewer.example.com${WORDMARK_PNG_PATH}"`)
+  })
+
+  it("sizes the mark with attributes as well as CSS, for Outlook", () => {
+    // Outlook's Word renderer ignores the style block on an image. Without
+    // the attributes it draws the file at its full 122x32.
+    const html = render()
+    expect(html).toContain('width="61" height="16"')
+  })
+
+  it("says everything in ONE paragraph, above the button", () => {
+    const html = render()
+    const body = html.slice(html.indexOf("<td style=\"padding:24px;\""), html.indexOf("border-top"))
+    expect(body.split("<p").length - 1).toBe(2) // the copy, then the button's wrapper
+    expect(body.indexOf("</p>")).toBeLessThan(body.indexOf("<a href="))
+  })
+})
+
+describe("footer mark fallback", () => {
+  it("degrades to the plain word when the link has no parsable origin", () => {
+    // The templates never see this in practice — both callers build an
+    // absolute URL — but a footer is not worth throwing over.
+    const { html } = signInEmail({ signInUrl: "not-a-url" })
+    expect(html).not.toContain("<img")
+    expect(html).toContain(">Desde<")
   })
 })
