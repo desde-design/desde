@@ -170,11 +170,25 @@ const ICON_SET_MIN_FAMILIES = 250
  * 319, 730 and 1043. So 250 is 2.2x clear of every design system and catches
  * three of those four.
  *
- * It is not the midpoint, and that is deliberate. Calling a design system
- * "icons" removes it from onboarding with no trace. Calling an icon set "a
- * design system" costs the user one row they can decline. The expensive
- * mistake gets the headroom, which is why the 195 is allowed to escape rather
- * than pulling the threshold down to 150 and leaving Chakra 1.3x of room.
+ * It is not the midpoint, and that is deliberate. The two mistakes do not
+ * cost the same. Calling a design system "icons" removes it from onboarding
+ * with no trace. Calling an icon set "a design system" seeds a row the user
+ * has to notice and remove — the New Project step adds every detection and
+ * ignores `confidence` (`new-project-page.tsx`, Mo 2026-09-08: "found means
+ * added; remove what is not a design system"). Visible and reversible beats
+ * silent, so the expensive mistake gets the headroom. That is why the 195 is
+ * allowed to escape rather than pulling the threshold down to 150 and leaving
+ * Chakra 1.3x of room.
+ *
+ * The escape is not free, and the cost is worth knowing before anyone widens
+ * it. A wrongly-onboarded icon set lands in the agent's grounding digest,
+ * which is sorted by name and capped at 250
+ * (`DIGEST_COMPONENT_CAP`, `agent-chat-sdk/grounding-tools.ts`).
+ * `react-feather`'s 286 names are front-loaded alphabetically (`Activity`,
+ * `Airplay`, `AlertCircle`…), so it can fill that cap alone and push the real
+ * design system's components into the "+N more" overflow. The agent can still
+ * reach them through `list_components` / `search_components`, so this degrades
+ * the prompt rather than breaking it.
  *
  * ## Two known misses, both unchanged by this rewrite
  *
