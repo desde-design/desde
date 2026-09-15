@@ -236,8 +236,24 @@ const FLAT_MAX_PARTS_PER_FAMILY = 2
  *    exports as `ComponentType<P>`, which is `ComponentClass | FunctionComponent`.
  *    A union has no call OR construct signatures of its own, so
  *    `getReactPropsType` sees nothing and the package counts zero. This hits
- *    any library that types exports with React's own canonical component type;
- *    still OPEN.
+ *    any library that types exports with React's own canonical component type.
+ *    Still OPEN, and DELIBERATELY so — the fix is four lines (recurse into the
+ *    union's constituents) but it must not land alone. PROTOTYPED and MEASURED
+ *    2026-09-15 over 14 installed libraries: `@remixicon/react` goes 0 -> 3,227
+ *    and `@mui/material` 146 -> 148, every other count unchanged. The problem
+ *    is what 3,227 then does HERE. Remixicon prefixes every name `Ri`, so it
+ *    collapses to THREE families at 1,076 names each, and none of the three
+ *    signals fires: it would be offered as a design system with 3,227
+ *    components, eleven times the `react-feather` case above.
+ *
+ *    A fourth signal would catch it — no design system measured exceeds 6.8
+ *    names per family (Chakra), against 893 for `@tabler/icons-react` and
+ *    1,076 for remixicon, so "enormous parts-per-family" separates by 130x and
+ *    would also stop tabler depending on the literal word `Icon`. It is not
+ *    added here because that signal means "brand-prefixed", not "icons", and
+ *    design systems do it too: `@elastic/eui` names everything `Eui*` and
+ *    would land in the same box. Untangling that is a classifier change with
+ *    its own measurement pass, not a rider on an extractor fix.
  *  - *Ambient-module bundles* — `@elastic/eui` ships one 31k-line `eui.d.ts`
  *    of `declare module '…'` blocks. The file is not itself a module, so it
  *    has no module symbol to enumerate exports from; still OPEN.
