@@ -231,8 +231,10 @@ function spread(families: number, total: number, parts: readonly string[]): stri
 describe('looksLikeIconSet', () => {
   const comps = (n: number, fmt: (i: number) => string) => Array.from({ length: n }, (_, i) => fmt(i))
 
+  // 120 families: above @shopify/polaris (89, the largest flat design system
+  // measured) and above @chakra-ui/react (114), below the 150 flat floor.
   it('a design-system-sized list of ordinary names is not an icon set', () => {
-    expect(looksLikeIconSet(comps(150, (i) => `Widget${i}`))).toBe(false)
+    expect(looksLikeIconSet(comps(120, (i) => `Widget${i}`))).toBe(false)
   })
   it('a majority of `XIcon` or `IconX` names is an icon set', () => {
     expect(looksLikeIconSet(comps(40, (i) => (i % 2 ? `Thing${i}Icon` : `Thing${i}`)))).toBe(true)
@@ -284,33 +286,61 @@ describe('looksLikeIconSet', () => {
     expect(looksLikeIconSet(tabler)).toBe(true)
   })
 
+  // Signal 3, the flat-catalog pair. react-feather is 286 names over 195
+  // families, with no name containing `Icon` — under the 250 line and past
+  // neither of the first two signals. Its 1.47 names per family is what
+  // gives it away.
+  it('catches a flat catalog below the family threshold', () => {
+    const featherish = spread(195, 286, ICON_VARIANTS)
+    expect(featherish).toHaveLength(286)
+    expect(featherish.some((n) => /Icon/.test(n))).toBe(false)
+    expect(looksLikeIconSet(featherish)).toBe(true)
+  })
+
+  // And the half of the pair that keeps it safe. Both of these have MORE
+  // families than any design system measured (react-admin, at 127), and the
+  // dense one is still judged a design system.
+  it('needs both halves of the flat pair, not either one', () => {
+    // 195 families, 3 parts each: dense, so not caught.
+    expect(looksLikeIconSet(spread(195, 585, DS_PARTS))).toBe(false)
+    // 149 families, 1.4 parts each: flat, but under the family floor.
+    expect(looksLikeIconSet(spread(149, 209, ICON_VARIANTS))).toBe(false)
+    // Both at once is what fires.
+    expect(looksLikeIconSet(spread(150, 210, ICON_VARIANTS))).toBe(true)
+  })
+
+  // The shape the pair exists to protect: a design system BIGGER than Chakra.
+  // A plain 150-family rule would have thrown this away.
+  it('keeps a compound design system larger than any measured today', () => {
+    const biggerThanChakra = spread(200, 1400, DS_PARTS)
+    expect(looksLikeIconSet(biggerThanChakra)).toBe(false)
+  })
+
   // The property the whole rewrite rests on, and the threshold it turns on.
+  // Every list here is dense (3+ names per family) so signal 3 stays out of it.
   it('counts families, not parts', () => {
-    const families = Array.from({ length: 249 }, (_, i) => `Stem${i}`)
-    expect(looksLikeIconSet(families)).toBe(false)
+    expect(looksLikeIconSet(spread(249, 747, DS_PARTS))).toBe(false)
 
-    // Eight more parts on every family. 2,241 names, still 249 families.
-    const withParts = families.flatMap((f) => [f, ...DS_PARTS.map((p) => `${f}${p}`)])
-    expect(withParts).toHaveLength(2241)
-    expect(looksLikeIconSet(withParts)).toBe(false)
+    // Three times as many names, still 249 families. Still not an icon set.
+    const denser = spread(249, 2241, DS_PARTS)
+    expect(denser).toHaveLength(2241)
+    expect(looksLikeIconSet(denser)).toBe(false)
 
-    // One more FAMILY is what tips it over, at any size.
-    expect(looksLikeIconSet([...families, 'Stem249'])).toBe(true)
-    expect(looksLikeIconSet([...withParts, 'Stem249'])).toBe(true)
+    // One more FAMILY is what tips it over, at either size.
+    expect(looksLikeIconSet(spread(250, 750, DS_PARTS))).toBe(true)
+    expect(looksLikeIconSet(spread(250, 2250, DS_PARTS))).toBe(true)
   })
 
   // Real spellings, so a change to how a family is read off a name shows up
   // here rather than only against an installed package.
   it('reads one family off the parts of a real compound component', () => {
-    const glyphs = Array.from({ length: 246 }, (_, i) => `Glyph${i}`)
-    // Both lists are 250 names. Chakra's four Dialog parts collapse to one
-    // family, so the first is 247 families and stays a design system.
-    const dialogParts = ['DialogRoot', 'DialogTrigger', 'DialogBackdrop', 'DialogCloseTrigger']
-    expect(looksLikeIconSet([...glyphs, ...dialogParts])).toBe(false)
-    // Four more unrelated glyphs instead, and the same 250 names are 250
-    // families.
-    const moreGlyphs = ['Glyph246', 'Glyph247', 'Glyph248', 'Glyph249']
-    expect(looksLikeIconSet([...glyphs, ...moreGlyphs])).toBe(true)
+    // 248 families at 3 names each, so density never enters into it.
+    const base = spread(248, 744, DS_PARTS)
+    // Both lists below are 747 names. Chakra's three Dialog parts are one
+    // family, so that one is 249 families and stays a design system.
+    expect(looksLikeIconSet([...base, 'DialogRoot', 'DialogTrigger', 'DialogBackdrop'])).toBe(false)
+    // Three unrelated names instead, and the same 747 names are 251 families.
+    expect(looksLikeIconSet([...base, 'Sunrise', 'Umbrella', 'Wristwatch'])).toBe(true)
   })
 })
 
