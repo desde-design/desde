@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Desde Editor</title>
+    <!-- The mark: the D of the wordmark, white, on the aqua plate. Generated
+         for all three surfaces (this, the viewer, the website) by
+         `tasks/scripts/make-favicons.mts` — do not hand-edit the files, and do
+         not copy one surface's into another by hand. The files sit in
+         `ui-src/public/`, which Vite copies to the bundle root, so both HTTP
+         surfaces that serve that bundle (the editor and the launcher) answer
+         these paths. Unlike the two Next apps, this HTML is static: nothing
+         infers the tags from the filenames, so they are written out. -->
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-icon.png" />
     <!-- The three families globals.css names: DM Sans (--font-sans), Fira
          Code (--font-mono), Playfair Display (--font-display, wordmark only,
          and also what --font-serif points at). Nothing else loads them for

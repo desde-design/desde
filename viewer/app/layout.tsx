@@ -1,6 +1,21 @@
 import type { Metadata } from "next"
 import "./globals.css"
 
+/*
+ * The favicon is three files, not a line of config.
+ *
+ * `app/icon.svg`, `app/favicon.ico` and `app/apple-icon.png` are App Router
+ * metadata file conventions: Next finds them by FILENAME and writes the
+ * `<link>` tags itself. That is why nothing below mentions them, and why
+ * renaming one silently removes it from every page.
+ *
+ * All three are generated — the D of the wordmark, white, on the aqua plate
+ * (`--primary` / `--brand`, oklch(0.575 0.135 190)). The same mark ships in
+ * the viewer and the CLI editor from the same generator, so regenerate rather
+ * than hand-edit:
+ *
+ *   ./node_modules/.bin/tsx tasks/scripts/make-favicons.mts
+ */
 export const metadata: Metadata = {
   title: "Desde Viewer",
   description: "Host, view and comment on prototypes.",

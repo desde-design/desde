@@ -45,6 +45,9 @@ export const MIME_TYPES: Record<string, string> = {
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
+  // The favicon. Without an entry here it falls to application/octet-stream,
+  // which Chrome tolerates and Safari does not.
+  ".ico": "image/x-icon",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".woff": "font/woff",
