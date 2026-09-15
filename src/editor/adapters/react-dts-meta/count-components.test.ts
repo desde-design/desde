@@ -53,3 +53,16 @@ describe('listReactComponents', () => {
     expect(listReactComponents(TSCONFIG, new Map([['@fixtures/none', []]])).get('@fixtures/none')).toEqual([])
   })
 })
+
+// The suggester's count and the extractor share one predicate, so a shape
+// the extractor learns to see must count here too. `Chip.d.ts` declares its
+// components as class-or-function unions, React's `ComponentType<P>` shape.
+describe('listReactComponents — union-typed components', () => {
+  it('counts components declared as `ComponentClass | FunctionComponent` unions', () => {
+    const names = listReactComponents(
+      TSCONFIG,
+      new Map([['@fixtures/unions', [path.join(FIXTURE_DIR, 'Chip.d.ts')]]]),
+    )
+    expect(names.get('@fixtures/unions')).toEqual(['Chip', 'Tag', 'Badge'])
+  })
+})
