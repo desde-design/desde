@@ -43,8 +43,20 @@ export interface ApplyJsxMoveEditInput {
   /**
    * Final 0-based index the moved element should occupy among the destination
    * parent's JSXElement children. Negative counts from the end (-1 = append).
+   * Not consulted when `anchor` is given.
    */
   destIndex: number
+  /**
+   * Sibling-relative destination: land immediately before or after the
+   * element at this coordinate, which must be a JSXElement child of the
+   * destination parent. Preferred over `destIndex` whenever the gesture named
+   * a sibling — an index the caller counted over the children it could SEE is
+   * wrong the moment the parent has a child it could not (on a Next.js App
+   * Router page, a server-rendered sibling attributes to another file and
+   * drops out of the caller's count). The AST has every child; naming the
+   * sibling lets this applicator count.
+   */
+  anchor?: { line: number; column: number; placement: "before" | "after" }
 }
 
 export type ApplyJsxMoveEditResult =
@@ -114,6 +126,25 @@ export function applyJsxMoveEdit(input: ApplyJsxMoveEditInput): ApplyJsxMoveEdit
   const destElementChildren = elementChildren(destEl)
 
   let finalIndex = destIndex
+  if (input.anchor) {
+    const { line, column, placement } = input.anchor
+    const anchorEl = findJsxElementAt(ast, line, column)
+    if (!anchorEl) {
+      return { ok: false, reason: `No anchor element found at ${line}:${column}` }
+    }
+    // Position among the parent's children WITHOUT the source: that is the
+    // list the move lands in, so the anchor's index there is the source's
+    // final index (before) or one past it (after).
+    const siblings = destElementChildren.filter((c) => c !== sourceEl)
+    const anchorIndex = siblings.indexOf(anchorEl)
+    if (anchorIndex < 0) {
+      return {
+        ok: false,
+        reason: `The anchor element at ${line}:${column} is not a child of the destination parent`,
+      }
+    }
+    finalIndex = placement === "before" ? anchorIndex : anchorIndex + 1
+  }
   if (finalIndex < 0) finalIndex = destElementChildren.length + 1 + finalIndex
   if (finalIndex < 0) finalIndex = 0
   if (finalIndex > destElementChildren.length) finalIndex = destElementChildren.length

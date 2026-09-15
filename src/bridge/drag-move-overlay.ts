@@ -155,6 +155,18 @@ export class DragMoveOverlayManager implements SelectModeOverlay {
       (inspectElement(dragged) as { selector?: string }).selector ?? ""
     const destParentSelector =
       (inspectElement(drop.container) as { selector?: string }).selector ?? ""
+    // The sibling the drop landed beside. `editableChildren` only lists
+    // elements with an editTarget, so the anchor always has one.
+    const anchorAttr = drop.anchor ? attributeElement(drop.anchor.el) : undefined
+    const anchorFields =
+      drop.anchor && anchorAttr?.editTarget
+        ? {
+            anchorSelector:
+              (inspectElement(drop.anchor.el) as { selector?: string }).selector ?? "",
+            anchorEditTarget: anchorAttr.editTarget,
+            anchorPlacement: drop.anchor.placement,
+          }
+        : {}
     sendToShell({
       type: "DRAG_MOVE_COMMITTED",
       payload: {
@@ -163,6 +175,7 @@ export class DragMoveOverlayManager implements SelectModeOverlay {
         destParentSelector,
         destParentEditTarget: destAttr.editTarget,
         destIndex: drop.index,
+        ...anchorFields,
         // Flag v-for/map-rendered source OR destination so the shell refuses
         // rather than silently rewriting the shared loop template for every row
         // (codex). Iterated moves go through the Layers panel's iteration-scope

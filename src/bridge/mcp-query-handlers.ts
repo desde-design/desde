@@ -521,12 +521,13 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
         let nodeType: "element" | "component" | "text" = "element"
         let componentFile: string | undefined
         let packageName: string | undefined
+        let comp: ReturnType<typeof detectOutlineComponent> = null
         try {
           // Use the parent-chain-aware detector so transparent wrappers
           // (e.g. ProtoCatalogCard composed via <UiCard>) are labeled
            // by the prototype-authored component, not the design system
           // internals.
-          const comp = detectOutlineComponent(el)
+          comp = detectOutlineComponent(el)
           if (comp) {
             name = comp.name
             nodeType = "component"
@@ -544,6 +545,14 @@ export function handleMcpQuery(data: any, deps: McpQueryDeps): boolean {
 
         let attribution: ReturnType<typeof attributeElement> = undefined
         try { attribution = attributeElement(el) } catch { /* ignore */ }
+        // A component root the runtime has no instance for (server-rendered)
+        // is invisible to the detector above, which labelled `KpiCards` as
+        // `section` and every `<Card>` as `div`. Attribution recovers the
+        // callsite from `data-desde-call`, and with it the tag written there.
+        if (!comp && attribution?.callsiteName) {
+          name = attribution.callsiteName
+          nodeType = "component"
+        }
 
         const children: OutlineNode[] = []
         for (const child of Array.from(el.children)) {

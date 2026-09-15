@@ -254,6 +254,15 @@ export interface DragMoveRequest {
   destParentSelector: string
   destParentEditTarget: SourceLoc
   destIndex: number
+  /**
+   * The sibling the drop landed beside, when the container had one. The
+   * shell forwards it as `InsertionTarget.anchor`, and the applicator counts
+   * from it instead of trusting `destIndex` (which was counted over the DOM
+   * children the bridge could attribute, not over the source file's).
+   */
+  anchorSelector?: string
+  anchorEditTarget?: SourceLoc
+  anchorPlacement?: "before" | "after"
   /** True when the dragged element is v-for/map-rendered (shell refuses). */
   sourceIsIterated: boolean
   /** True when the destination container is v-for/map-rendered (shell refuses). */

@@ -997,3 +997,100 @@ describe("findEditableTextFields", () => {
     expect(fields[0].selector).toBeTruthy()
   })
 })
+
+// ──────────────── data-desde-call: the callsite with no runtime to read it from ────────────────
+
+/**
+ * A component rendered on the server (Next.js App Router) has no client
+ * instance. Its root element is owned, at runtime, by whatever client
+ * component sits above it — which does NOT treat that element as its own
+ * mount root, so `attributeElement` used to read the element's own
+ * `data-desde-src`: the root markup inside the component's definition file.
+ * Four sibling `<Card>`s then all resolved to `card.tsx:10:4`. The stamper
+ * now writes the callsite under `data-desde-call`, which survives the
+ * `{...props}` spread that clobbers `data-desde-src`; this is the bridge half.
+ */
+describe("attributeElement — data-desde-call names the callsite when no instance does", () => {
+  it("uses the callsite as editTarget and keeps the element's own bytes as authoredAt", () => {
+    const root = html(
+      `<div id="grid" data-desde-src="src/metric-cards.tsx:7:4">` +
+        `<div id="card" data-desde-src="src/ui/card.tsx:10:4" data-desde-v="cafe00000001"` +
+        ` data-desde-call="src/metric-cards.tsx:8:6 Card">x</div>` +
+        `</div>`,
+    )
+    // The nearest CLIENT component is a layout wrapper whose own root is
+    // elsewhere: the grid and the card are both merely inside it.
+    const wrapper = register({
+      name: "SegmentViewNode",
+      file: null,
+      stamp: null,
+      mountRoot: document.createElement("div"),
+    })
+    own(root.querySelector("#grid")!, wrapper)
+    const card = root.querySelector("#card")!
+    own(card, wrapper)
+
+    const attr = attributeElement(card)
+    expect(attr?.editTarget).toMatchObject({ file: "src/metric-cards.tsx", line: 8, column: 6 })
+    expect(attr?.authoredAt).toEqual({ file: "src/ui/card.tsx", line: 10, column: 4 })
+    expect(attr?.callsiteName).toBe("Card")
+    expect(attr?.isLibrary).toBe(false)
+  })
+
+  it("keeps two server-rendered instances of one component apart", () => {
+    const root = html(
+      `<div id="grid" data-desde-src="src/metric-cards.tsx:7:4">` +
+        `<div id="a" data-desde-src="src/ui/card.tsx:10:4" data-desde-call="src/metric-cards.tsx:8:6 Card">a</div>` +
+        `<div id="b" data-desde-src="src/ui/card.tsx:10:4" data-desde-call="src/metric-cards.tsx:25:6 Card">b</div>` +
+        `</div>`,
+    )
+    const wrapper = register({ name: "Shell", file: null, stamp: null, mountRoot: document.createElement("div") })
+    for (const id of ["grid", "a", "b"]) own(root.querySelector(`#${id}`)!, wrapper)
+
+    expect(attributeElement(root.querySelector("#a")!)?.editTarget).toMatchObject({ line: 8, column: 6 })
+    expect(attributeElement(root.querySelector("#b")!)?.editTarget).toMatchObject({ line: 25, column: 6 })
+  })
+
+  it("does not override a callsite the runtime already knows (a client component root)", () => {
+    // A client component carries the callsite on its instance. The DOM
+    // attribute says the same thing there, or, through a wrapper chain, a
+    // NEARER thing. The instance answer keeps priority: this change fills a
+    // hole, it does not reorder what already worked.
+    const root = html(
+      `<div id="card" data-desde-src="src/ui/card.tsx:10:4" data-desde-call="src/Inner.tsx:3:2 Card">x</div>`,
+    )
+    const card = root.querySelector("#card")!
+    const inst = register({ name: "Card", file: null, stamp: "src/App.tsx:5:4", mountRoot: card })
+    own(card, inst)
+
+    const attr = attributeElement(card)
+    expect(attr?.editTarget).toMatchObject({ file: "src/App.tsx", line: 5, column: 4 })
+    expect(attr?.callsiteName).toBeUndefined()
+  })
+
+  it("pairs the callsite with the callsite FILE's version, not the root's", () => {
+    const root = html(
+      `<div id="grid" data-desde-src="src/metric-cards.tsx:7:4" data-desde-v="aaaaaaaaaaaa">` +
+        `<div id="card" data-desde-src="src/ui/card.tsx:10:4" data-desde-v="bbbbbbbbbbbb"` +
+        ` data-desde-call="src/metric-cards.tsx:8:6 Card">x</div>` +
+        `</div>`,
+    )
+    const wrapper = register({ name: "Shell", file: null, stamp: null, mountRoot: document.createElement("div") })
+    own(root.querySelector("#grid")!, wrapper)
+    own(root.querySelector("#card")!, wrapper)
+
+    expect(attributeElement(root.querySelector("#card")!)?.editTarget.fileHash).toBe("aaaaaaaaaaaa")
+  })
+
+  it("ignores an unparseable data-desde-call and falls back to the element's own stamp", () => {
+    const root = html(
+      `<div id="card" data-desde-src="src/ui/card.tsx:10:4" data-desde-call="garbage">x</div>`,
+    )
+    const wrapper = register({ name: "Shell", file: null, stamp: null, mountRoot: document.createElement("div") })
+    own(root.querySelector("#card")!, wrapper)
+
+    const attr = attributeElement(root.querySelector("#card")!)
+    expect(attr?.editTarget).toMatchObject({ file: "src/ui/card.tsx", line: 10, column: 4 })
+    expect(attr?.callsiteName).toBeUndefined()
+  })
+})

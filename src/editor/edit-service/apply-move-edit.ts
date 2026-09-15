@@ -59,6 +59,14 @@ export interface ApplyMoveEditInput {
    */
   destIndex: number
   /**
+   * Sibling-relative destination: land immediately before or after the
+   * element at this SFC-absolute coordinate, which must be an element child
+   * of the destination parent. Preferred over `destIndex` whenever the
+   * gesture named a sibling; see the same field on `ApplyJsxMoveEditInput`
+   * for why a caller-counted index is not trustworthy.
+   */
+  anchor?: { line: number; column: number; placement: 'before' | 'after' }
+  /**
    * Conditional-GROUP move (WS2 follow-up): the source coordinates must
    * target the `<template v-if>` HEAD of a branch group; the moved byte
    * range extends across every consecutive `<template v-else-if>` /
@@ -90,6 +98,7 @@ export function applyMoveEdit(input: ApplyMoveEditInput): ApplyMoveEditResult {
     destParentLine,
     destParentColumn,
     destIndex,
+    anchor,
     moveGroup,
   } = input
 
@@ -212,6 +221,40 @@ export function applyMoveEdit(input: ApplyMoveEditInput): ApplyMoveEditResult {
 
   // Resolve the final index, handling negative ("from end") semantics.
   let finalIndex = destIndex
+  if (anchor) {
+    // Sibling-relative destination — see `ApplyMoveEditInput.anchor`. The
+    // anchor is resolved in its own parse and re-located in the destination
+    // AST by start offset, exactly as the source element was above.
+    const anchorResolved = resolveTemplateTarget({
+      source,
+      line: anchor.line,
+      column: anchor.column,
+    })
+    if (!anchorResolved.ok) {
+      return {
+        ok: false,
+        reason:
+          anchorResolved.failure.kind === 'not-found'
+            ? `No anchor element found at SFC line ${anchor.line}, column ${anchor.column}`
+            : anchorResolved.failure.reason,
+      }
+    }
+    const anchorEl = findByStartOffset(
+      destResolved.ctx.templateAst.children as unknown as ElementLike[],
+      (anchorResolved.node as unknown as ElementLike).loc.start.offset,
+    )
+    // Position among the parent's children WITHOUT the moved element (or
+    // group): that is the list the move lands in.
+    const siblings = destElementChildren.filter((c) => !groupMembers.includes(c))
+    const anchorIndex = anchorEl ? siblings.indexOf(anchorEl) : -1
+    if (anchorIndex < 0) {
+      return {
+        ok: false,
+        reason: `The anchor element at SFC line ${anchor.line}, column ${anchor.column} is not a child of the destination parent`,
+      }
+    }
+    finalIndex = anchor.placement === 'before' ? anchorIndex : anchorIndex + 1
+  }
   if (finalIndex < 0) finalIndex = destElementChildren.length + 1 + finalIndex
   if (finalIndex < 0) finalIndex = 0
   if (finalIndex > destElementChildren.length) finalIndex = destElementChildren.length

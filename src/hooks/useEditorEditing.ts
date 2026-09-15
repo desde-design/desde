@@ -1492,7 +1492,7 @@ export function useEditorEditing({
       payload: LayersMovePayload,
       skipIterationCheck: boolean = false,
     ) => {
-      const { source, destParent, destIndex } = payload
+      const { source, destParent, destIndex, anchor } = payload
       const adapter = adapterRef.current
       if (!adapter || !source.editTarget || !destParent.editTarget) {
         return
@@ -1536,6 +1536,11 @@ export function useEditorEditing({
           parentId: destParent.selector,
           index: destIndex,
           parentEditTarget: destParent.editTarget,
+          // The sibling the drop landed beside; the applicator counts from
+          // it instead of trusting `index`. See `InsertionTarget.anchor`.
+          ...(anchor?.node.editTarget
+            ? { anchor: { editTarget: anchor.node.editTarget, placement: anchor.placement } }
+            : {}),
         },
         // Conditional-GROUP move: source is a synthetic layers-panel row
         // (see layers-conditional-groups.ts) whose editTarget is the
@@ -1598,6 +1603,10 @@ export function useEditorEditing({
         parentId: move.destParentSelector,
         index: move.destIndex,
         parentEditTarget: move.destParentEditTarget,
+        // The neighbour the drop landed beside, when the bridge named one.
+        ...(move.anchorEditTarget && move.anchorPlacement
+          ? { anchor: { editTarget: move.anchorEditTarget, placement: move.anchorPlacement } }
+          : {}),
       },
     }
     // Drag-move dispatches immediately, like every other edit (branch mode

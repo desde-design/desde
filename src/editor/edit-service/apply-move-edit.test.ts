@@ -720,3 +720,79 @@ describe("applyMoveEdit — whitespace and formatting", () => {
     )
   })
 })
+
+/**
+ * Anchor-relative destination — the Vue half of what
+ * `apply-jsx-move-edit.test.ts` covers under the same heading. The caller
+ * names the sibling to land next to; the applicator counts the position
+ * itself, so a child list the caller could not see in full cannot mislead it.
+ */
+describe('applyMoveEdit — anchor-relative destination', () => {
+  function order(source: string): string[] {
+    const at = (v: string) => source.indexOf(`variant="${v}"`)
+    return [
+      ['A', at('primary')],
+      ['B', at('secondary')],
+      ['C', at('danger')],
+    ]
+      .sort((x, y) => (x[1] as number) - (y[1] as number))
+      .map((p) => p[0] as string)
+  }
+
+  it('places the source BEFORE the anchor, and the index is not consulted', () => {
+    const result = applyMoveEdit({
+      source: sfcThreeButtons,
+      sourceLine: 5,
+      sourceColumn: 5,
+      destParentLine: 2,
+      destParentColumn: 3,
+      destIndex: 99,
+      anchor: { line: 3, column: 5, placement: 'before' },
+    })
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(order(result.source)).toEqual(['C', 'A', 'B'])
+  })
+
+  it('places the source AFTER the anchor', () => {
+    const result = applyMoveEdit({
+      source: sfcThreeButtons,
+      sourceLine: 3,
+      sourceColumn: 5,
+      destParentLine: 2,
+      destParentColumn: 3,
+      destIndex: 0,
+      anchor: { line: 4, column: 5, placement: 'after' },
+    })
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(order(result.source)).toEqual(['B', 'A', 'C'])
+  })
+
+  it('refuses an anchor that is not a child of the destination parent', () => {
+    const result = applyMoveEdit({
+      source: sfcThreeButtons,
+      sourceLine: 3,
+      sourceColumn: 5,
+      destParentLine: 2,
+      destParentColumn: 3,
+      destIndex: 0,
+      anchor: { line: 2, column: 3, placement: 'before' },
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toMatch(/anchor/i)
+  })
+
+  it('returns the source unchanged for a same-position move expressed as an anchor', () => {
+    // A before B: already there. destIndex says otherwise and is ignored.
+    const result = applyMoveEdit({
+      source: sfcThreeButtons,
+      sourceLine: 3,
+      sourceColumn: 5,
+      destParentLine: 2,
+      destParentColumn: 3,
+      destIndex: 2,
+      anchor: { line: 4, column: 5, placement: 'before' },
+    })
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.source).toBe(sfcThreeButtons)
+  })
+})

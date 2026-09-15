@@ -346,6 +346,12 @@ describe("LayersPanel", () => {
     // so the post-removal final index is 1 (target's spot). The off-by-one
     // adjustment subtracts 1 from the naive `targetIndex + 1` = 2 → 1.
     expect(payload.destIndex).toBe(1)
+    // The drop also names the sibling it landed beside. The applicator
+    // resolves that against the source file, where the index above can be
+    // wrong (it is counted over the rows the panel can see, and a
+    // server-rendered sibling attributes to another file and is not among
+    // them).
+    expect(payload.anchor).toEqual({ node: expect.objectContaining({ id: "n3" }), placement: "after" })
   })
 
   it("refuses drop when source has no editTarget", () => {
@@ -726,7 +732,11 @@ describe("LayersPanel", () => {
     const payload = onMove.mock.calls[0][0]
     expect(payload.source.id).toBe("a")
     expect(payload.destParent.id).toBe("container")
-    expect(payload.destIndex).toBe(2)
+    // "Last child" is sent as an append (-1), not as a counted position: the
+    // applicator knows how many children the parent really has, the panel
+    // only knows how many rows it rendered.
+    expect(payload.destIndex).toBe(-1)
+    expect(payload.anchor).toBeUndefined()
   })
 
   describe("a rendered row absent from the raw tree", () => {

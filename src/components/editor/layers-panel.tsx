@@ -74,8 +74,21 @@ export interface LayersMovePayload {
   source: OutlineNode
   /** The destination parent node — the node the source will become a child of. */
   destParent: OutlineNode
-  /** Final 0-based index in destParent's children list AFTER the move. */
+  /**
+   * Final 0-based index in destParent's children list AFTER the move; -1
+   * appends. Counted over the RAW tree's rows, which is not always every
+   * child the source file has — see `anchor`.
+   */
   destIndex: number
+  /**
+   * The row the drop landed beside, for a before/after drop. The applicator
+   * places the source relative to THIS element and ignores `destIndex`: a
+   * row the panel never saw (a server-rendered sibling attributes to another
+   * file) is still a child in the source file, and an index counted without
+   * it lands the move one slot off. Absent for an "inside" drop, which
+   * appends.
+   */
+  anchor?: { node: OutlineNode; placement: "before" | "after" }
 }
 
 /** Menu rows for the density control, in the order they are offered. */
@@ -579,19 +592,16 @@ function LayersPanelImpl({
     }
 
     // "inside" → append source as the LAST child of target (target IS
-    // the dest parent), counting the RAW child list. Same off-by-one for
-    // same-direct-parent reorder.
+    // the dest parent). Sent as -1, not as a counted position: the
+    // applicator knows how many children the parent really has in source,
+    // the panel only knows how many rows it rendered.
     if (position === "inside") {
       const rawTarget = resolveRawNode(target, rawNodeById)
       if (!rawTarget) {
         onMoveRefused?.("unmapped-row")
         return
       }
-      const children = rawTarget.children ?? []
-      const sourceIndex = children.findIndex((c) => c.id === draggingNode.id)
-      let destIndex = children.length
-      if (sourceIndex >= 0) destIndex -= 1
-      onMove?.({ source: rawSource, destParent: rawTarget, destIndex })
+      onMove?.({ source: rawSource, destParent: rawTarget, destIndex: -1 })
       return
     }
 
@@ -646,7 +656,15 @@ function LayersPanelImpl({
     if (isSameParentReorder && sourceIndex < targetIndex) {
       destIndex -= 1
     }
-    onMove?.({ source: rawSource, destParent: effectiveParent, destIndex })
+    // The index above is counted over the rows the panel can see. The row
+    // the drop landed beside travels too, and the applicator places the
+    // source relative to it — see `LayersMovePayload.anchor`.
+    onMove?.({
+      source: rawSource,
+      destParent: effectiveParent,
+      destIndex,
+      anchor: { node: rawDropTarget, placement: position },
+    })
   }
 
   return (

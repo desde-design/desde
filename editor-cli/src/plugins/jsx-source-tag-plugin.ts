@@ -50,6 +50,11 @@ export type JsxSourceTagPluginOptions = StampScope
  * on a component it's an inert prop unless the component spreads it — same
  * graceful behavior as a Vue component without attribute inheritance. Fragments
  * (`<>…</>`) have no opening element name and are naturally skipped.
+ *
+ * Component elements get a THIRD attribute, `data-desde-call="<file>:<line>:<col>
+ * <Tag>"` — the callsite under a name the callee never writes, so it survives a
+ * `{...props}` spread onto the callee's root where `data-desde-src` cannot. See
+ * `insertionsForElement` for why that matters on a server-rendered component.
  */
 export function jsxSourceTagPlugin(opts: JsxSourceTagPluginOptions): Plugin {
   // Resolved once at construction: the policy is immutable and `transform` runs
@@ -195,6 +200,7 @@ function realignJsxInsertions(opts: {
       ...insertionsForElement(codeEl.insertOffset, opts.filePath, sourceVersion, {
         line: authoredEl.line,
         column: authoredEl.column,
+        tag: authoredEl.tag,
       }),
     )
   }
@@ -413,23 +419,61 @@ function collectElements(ast: BabelFile, skipTags?: ReadonlySet<string>): JsxEle
   return out
 }
 
-/** The two attributes one element contributes, both at the same offset. */
+/**
+ * A component tag, as opposed to a host element. JSX's own rule: a lowercase
+ * bare name (`div`, `svg:use`) is a host element; a capitalised name or any
+ * member expression (`Card`, `Router.Outlet`) is a component reference.
+ */
+function isComponentTag(tag: string): boolean {
+  if (tag.includes(".")) return true
+  if (tag.includes(":")) return false
+  const first = tag.charAt(0)
+  return first !== first.toLowerCase()
+}
+
+/**
+ * The attributes one element contributes, all at the same offset: two on
+ * every element, a third on component elements only.
+ */
 function insertionsForElement(
   insertOffset: number,
   filePath: string,
   sourceVersion: string,
-  at: { line: number; column: number },
+  at: { line: number; column: number; tag: string },
 ): Insertion[] {
-  return [
+  const loc = `${filePath}:${at.line}:${at.column}`
+  const out: Insertion[] = [
     {
       offset: insertOffset,
-      text: ` data-desde-src=${JSON.stringify(`${filePath}:${at.line}:${at.column}`)}`,
+      text: ` data-desde-src=${JSON.stringify(loc)}`,
     },
     // Sibling per-file version stamp (data-desde-v) — see sourceVersionOf in
     // source-version.ts. Same offset; later-key-wins ordering doesn't
     // matter here (nothing forwards a competing data-desde-v before the stamp).
     { offset: insertOffset, text: ` data-desde-v=${JSON.stringify(sourceVersion)}` },
   ]
+  // CALLSITE stamp, component elements only: `"<file>:<line>:<col> <Tag>"`.
+  //
+  // `data-desde-src` cannot carry the callsite through a component that spreads
+  // its props onto its root: the root's own stamp is placed after the spread
+  // and wins. That is the right outcome for the ROOT's identity, but it loses
+  // the callsite — and when the component renders on the server (Next.js App
+  // Router) there is no client fiber to read it back from either, so the
+  // bridge sees four sibling `<Card>`s as one coordinate in `card.tsx`. A
+  // distinct name survives the spread because this stamper never writes it
+  // on a host element, so nothing in the callee can overwrite it.
+  //
+  // Placed at the same offset as the other stamps, so on a spreading
+  // component tag it also lands after the spread and the NEAREST callsite
+  // wins through a wrapper chain. That is the safe direction: a stamp that
+  // reached the DOM always names the tag whose root that element is (or
+  // whose spread it received), never an outer wrapper's tag on an inner
+  // element. `parseCallStamp` in the bridge splits the value on its LAST
+  // space, so a file path containing one still parses.
+  if (isComponentTag(at.tag)) {
+    out.push({ offset: insertOffset, text: ` data-desde-call=${JSON.stringify(`${loc} ${at.tag}`)}` })
+  }
+  return out
 }
 
 /** Walk the whole AST collecting one Insertion per JSXOpeningElement. */

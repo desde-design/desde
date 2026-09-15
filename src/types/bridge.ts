@@ -1045,6 +1045,16 @@ export interface DragMoveCommittedPayload {
   destParentSelector: string
   destParentEditTarget: { file: string; line: number; column: number }
   destIndex: number
+  /**
+   * The sibling the drop landed beside — `before` the child at `destIndex`
+   * when there is one, else `after` the child before it. Absent only for a
+   * drop into an empty container. The applicator resolves this against the
+   * source file, where `destIndex` (counted over attributable DOM children)
+   * can be off by every child the bridge could not attribute.
+   */
+  anchorSelector?: string
+  anchorEditTarget?: { file: string; line: number; column: number }
+  anchorPlacement?: "before" | "after"
   /** True when the dragged element is v-for/map-rendered — the shell refuses
    *  (iterated moves go through the Layers panel's iteration-scope intercept). */
   sourceIsIterated: boolean
