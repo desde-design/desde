@@ -82,6 +82,16 @@ describe('discoverReactDtsEntries', () => {
     expect(discoverReactDtsEntries(root)).toEqual([join(root, 'lib/index.d.ts')])
   })
 
+  // An extensionless `main` can name a FILE. TypeScript tries `dist/index.d.ts`
+  // before `dist/index/index.d.ts`, so a package shipping both must not get the
+  // directory barrel.
+  it('prefers the file sibling over the directory index for an extensionless main', async () => {
+    await pkg({ name: 'a', main: 'dist/index' })
+    await write('dist/index.d.ts')
+    await write('dist/index/index.d.ts')
+    expect(discoverReactDtsEntries(root)).toEqual([join(root, 'dist/index.d.ts')])
+  })
+
   it('preserves the m/c variant when swapping `main`s extension', async () => {
     await pkg({ name: 'a', main: 'dist/bundle.mjs' })
     await write('dist/bundle.d.mts')
@@ -108,6 +118,38 @@ describe('discoverReactDtsEntries', () => {
     await pkg({ name: 'a', main: 'primereact.all.min.js' })
     await write('button/button.d.ts')
     expect(discoverReactDtsEntries(root)).toEqual([])
+  })
+
+  // An `exports` map is a gate. Without a `"."` the bare specifier does not
+  // resolve, so a root `index.d.ts` left over from an older layout describes an
+  // import the prototype cannot write.
+  it('offers nothing for a subpath-only `exports` map, even with a root index.d.ts', async () => {
+    await pkg({ name: 'a', main: 'index.js', exports: { './button': './button/index.js' } })
+    await write('index.d.ts')
+    expect(discoverReactDtsEntries(root)).toEqual([])
+  })
+
+  // TypeScript substitutes the declaration extension on the target `exports`
+  // selected, which is not necessarily `main`.
+  it('substitutes the declaration extension on the `exports["."]` target', async () => {
+    await pkg({ name: 'a', main: 'legacy/old.js', exports: { '.': './modern/new.js' } })
+    await write('legacy/old.d.ts')
+    await write('modern/new.d.ts')
+    expect(discoverReactDtsEntries(root)).toEqual([join(root, 'modern/new.d.ts')])
+  })
+
+  it('substitutes through nested `exports` conditions', async () => {
+    await pkg({ name: 'a', exports: { '.': { import: './esm/i.mjs', require: './cjs/i.cjs' } } })
+    await write('esm/i.d.mts')
+    expect(discoverReactDtsEntries(root)).toEqual([join(root, 'esm/i.d.mts')])
+  })
+
+  // `moduleResolution: node` ignores `exports` outright, so a root entry is
+  // still worth offering when the map names no declarations of its own.
+  it('still falls back when an `exports["."]` target has no declarations', async () => {
+    await pkg({ name: 'a', main: 'index.js', exports: { '.': './dist/bundle.js' } })
+    await write('index.d.ts')
+    expect(discoverReactDtsEntries(root)).toEqual([join(root, 'index.d.ts')])
   })
 
   it('returns nothing for an unreadable package.json', async () => {
