@@ -98,7 +98,11 @@ export function isPolicyRefusal(reason: string): boolean {
 function detailForHandoff(edit: StructuralEdit): string | undefined {
   switch (edit.kind) {
     case "move":
-      return describeMoveDestination(edit.destination.parentEditTarget, edit.destination.index)
+      return describeMoveDestination(
+        edit.destination.parentEditTarget,
+        edit.destination.index,
+        edit.destination.anchor,
+      )
     case "insert": {
       const snippet = edit.snippet.trim()
       const shown =

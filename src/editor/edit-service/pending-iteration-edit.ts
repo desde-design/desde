@@ -490,7 +490,12 @@ function requestedOf(pending: PendingIterationEdit): string {
  */
 function detailOf(pending: PendingIterationEdit): string | undefined {
   if (pending.editKind !== "move") return undefined
-  return describeMoveDestination(pending.payload.destParent.editTarget, pending.payload.destIndex)
+  const anchor = pending.payload.anchor
+  return describeMoveDestination(
+    pending.payload.destParentTarget ?? pending.payload.destParent.editTarget,
+    pending.payload.destIndex,
+    anchor?.node.editTarget ? { editTarget: anchor.node.editTarget, placement: anchor.placement } : undefined,
+  )
 }
 
 /** Everything `buildAmbiguousIterationHandoffPrompt` needs, read off the pending edit. */

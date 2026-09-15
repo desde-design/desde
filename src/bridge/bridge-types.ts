@@ -68,6 +68,14 @@ export interface Attribution {
   editTarget: { file: string; line: number; column: number; fileHash?: string }
   authoredAt: { file: string; line: number; column: number }
   /**
+   * The tag written at the callsite, known only when `editTarget` came from
+   * the element's own `data-desde-call` stamp — a component root the runtime
+   * has no instance for (server-rendered), whose callsite would otherwise be
+   * lost. The Structure tree labels such a row with it instead of the tag of
+   * the root markup. Absent whenever the runtime named the callsite itself.
+   */
+  callsiteName?: string
+  /**
    * The `data-desde-src` value literally present on the element (or its nearest
    * stamped ancestor), plus how many elements it matches right now. This is
    * the only coordinate a `[data-desde-src="…"]` CSS rule may be anchored on —

@@ -23,6 +23,13 @@ import {
 export interface DropResolution {
   container: Element
   index: number
+  /**
+   * The sibling the insertion point sits beside: before `children[index]`
+   * when there is one, else after `children[index - 1]`. Undefined only for
+   * an empty container. Travels with the commit so the applicator can place
+   * the element relative to a real sibling instead of trusting `index`.
+   */
+  anchor?: { el: Element; placement: "before" | "after" }
   axis: DropAxis
   /** The on-axis coordinate to draw the insertion line at. */
   linePos: number
@@ -156,9 +163,15 @@ export function resolveDropTarget(
   } else {
     linePos = before ? before.top : after ? after.bottom : cRect.top
   }
+  const anchor = children[index]
+    ? { el: children[index], placement: "before" as const }
+    : children[index - 1]
+      ? { el: children[index - 1], placement: "after" as const }
+      : undefined
   return {
     container,
     index,
+    anchor,
     axis,
     linePos,
     crossStart: axis === "horizontal" ? cRect.top : cRect.left,

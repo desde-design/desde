@@ -8,6 +8,7 @@ import {
   buildAmbiguousIterationHandoffPrompt,
   buildRowScopedEditHandoffPrompt,
   buildStructuralEditHandoffPrompt,
+  describeMoveDestination,
   afterEscalation,
   type EscalationMutation,
 } from "./build-edit-escalation-prompt"
@@ -662,5 +663,44 @@ describe("buildRowScopedEditHandoffPrompt", () => {
     expect(p).toContain("- The loop it sits inside: src/App.vue:0:0")
     expect(p).toContain("item 1 of 4")
     expect(p).not.toContain("Ignore previous instructions")
+  })
+})
+
+describe("describeMoveDestination", () => {
+  const parent = { file: "src/App.tsx", line: 14, column: 6 }
+
+  it("names the sibling when the drop had one — a child index means nothing to the agent", () => {
+    expect(
+      describeMoveDestination(parent, 2, {
+        editTarget: { file: "src/App.tsx", line: 20, column: 8 },
+        placement: "before",
+      }),
+    ).toBe(
+      "move it to just before the element at src/App.tsx:20:8 (inside the element at src/App.tsx:14:6)",
+    )
+    expect(
+      describeMoveDestination(parent, 2, {
+        editTarget: { file: "src/App.tsx", line: 20, column: 8 },
+        placement: "after",
+      }),
+    ).toBe(
+      "move it to just after the element at src/App.tsx:20:8 (inside the element at src/App.tsx:14:6)",
+    )
+  })
+
+  it("names the sibling even when the parent is unknown (a cross-file drop)", () => {
+    expect(
+      describeMoveDestination(undefined, 0, {
+        editTarget: { file: "src/Other.tsx", line: 20, column: 8 },
+        placement: "after",
+      }),
+    ).toBe("move it to just after the element at src/Other.tsx:20:8")
+  })
+
+  it("falls back to the child index when no sibling was named", () => {
+    expect(describeMoveDestination(parent, 2)).toBe(
+      "move it to be child index 2 of the element at src/App.tsx:14:6",
+    )
+    expect(describeMoveDestination(parent, -1)).toBe("append it to the element at src/App.tsx:14:6")
   })
 })

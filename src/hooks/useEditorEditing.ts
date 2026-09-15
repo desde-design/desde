@@ -51,9 +51,22 @@ import { useDriftReporter } from "./useDriftReporter"
 import type { CatalogEntry } from "@/editor/edit-service/component-catalog"
 import { buildVariantCells } from "@/editor/edit-service/variant-cells"
 import type {
+  LayersChatMovePayload,
   LayersDropRefusal,
   LayersMovePayload,
 } from "@/components/editor/layers-panel"
+import {
+  buildMoveEditToChatHandoff,
+  buildMoveToChatHandoff,
+  describeWhyMoveGoesToChat,
+  type MoveToChatHandoff,
+} from "./move-to-chat"
+import {
+  enrichLayersWithCallsites,
+  remapDragMove,
+  remapSelectionTarget,
+  type RecoveredCallsites,
+} from "./resolve-layer-callsites"
 import { applyClassMutation } from "@/components/editor/align-size"
 import type { PropControlValue } from "@/components/editor/prop-control"
 import { resolveTailwindClasses } from "@/editor/tailwind/tailwind-declarations"
@@ -437,6 +450,12 @@ export function useEditorEditing({
   const [aiQueueCount, setAiQueueCount] = useState(0)
 
   const layersGenerationRef = useRef(0)
+  // The rows the Structure tree re-targeted at a recovered callsite, by
+  // selector (see `resolve-layer-callsites.ts`). A click in the prototype
+  // and a drag in the canvas arrive with the bridge's own targets — the
+  // definition file — and take the tree's answer through this. A ref, not
+  // state: the drag-move handler is subscribed once and must stay stable.
+  const recoveredCallsitesRef = useRef<RecoveredCallsites>(new Map())
   // The tree exactly as the bridge walked it. The panel is handed a FILTERED
   // view of this (see `layersRoots` below); both are kept so changing the
   // density is a re-render, not a refetch.
@@ -660,15 +679,46 @@ export function useEditorEditing({
             if (vueFiles.size === 0) {
               setLayersRawRoots(roots)
               setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
-              return
+            } else {
+              const groups = await ctx.step(
+                fetchConditionalGroupsForFiles([...vueFiles]),
+              )
+              if (groups.stale) return
+              if (generation !== layersGenerationRef.current) return
+              setLayersRawRoots(roots)
+              setLayersGroups(groups.value)
             }
-            const groups = await ctx.step(
-              fetchConditionalGroupsForFiles([...vueFiles]),
-            )
-            if (groups.stale) return
+            // Rows for components the runtime has no instance for
+            // (server-rendered) attribute to their own definition file. Ask
+            // the CLI where each is WRITTEN in the file it is displayed
+            // inside, and re-target those rows at the callsite — AFTER the
+            // tree is on screen, so a slow answer never delays it. An answer
+            // for a departed page or a superseded refresh is dropped; a
+            // failed request leaves the tree as the bridge reported it. See
+            // `resolve-layer-callsites.ts`.
+            const enriched = await ctx.step(enrichLayersWithCallsites(roots))
+            if (enriched.stale) return
             if (generation !== layersGenerationRef.current) return
-            setLayersRawRoots(roots)
-            setLayersGroups(groups.value)
+            recoveredCallsitesRef.current = enriched.value.recovered
+            if (enriched.value.roots !== roots) setLayersRawRoots(enriched.value.roots)
+            // A selection made WHILE the lookup was in flight went through the
+            // previous (or empty) map and still names the definition file. Run
+            // it through the new map now, or a Delete on it would edit the
+            // component's own root for every page that uses it (codex P1).
+            const store = useEditorStore.getState()
+            if (store.editorSelectionMany.length > 0) {
+              // A multi-selection is re-run as a list: the single setter
+              // clears `editorSelectionMany`, which would collapse it.
+              const many = store.editorSelectionMany.map((s) =>
+                remapSelectionTarget(s, enriched.value.recovered),
+              )
+              if (many.some((s, i) => s !== store.editorSelectionMany[i])) {
+                store.setEditorSelectionMany(many)
+              }
+            } else {
+              const remapped = remapSelectionTarget(store.editorSelection, enriched.value.recovered)
+              if (remapped !== store.editorSelection) store.setEditorSelection(remapped)
+            }
             return
           } catch (err) {
             if (generation !== layersGenerationRef.current) return
@@ -823,7 +873,10 @@ export function useEditorEditing({
         // without a number here the first click's answer would still match
         // the second click's selector.
         const seq = ++selectionSeqRef.current
-        setEditorSelection(selection)
+        // A selection on a row the Structure tree re-targeted at a recovered
+        // callsite takes that target, so the canvas and the tree agree on
+        // what a move or a delete of it means.
+        setEditorSelection(remapSelectionTarget(selection, recoveredCallsitesRef.current))
         // Phase 3 Stage A: warm the manifest cache for this selection's
         // component chain so `attribute()` resolves synchronously at edit
         // time. Also the entry point for the 2026-07-30 widening (Phase 5
@@ -1009,6 +1062,7 @@ export function useEditorEditing({
         // place below that issues that request.
         setLayersRawRoots(null)
         setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
+        recoveredCallsitesRef.current = new Map()
         setLayersError(false)
         // The reset is belt and braces, and it is worth saying which part is
         // load-bearing. The one place that issues the request compares
@@ -1264,6 +1318,7 @@ export function useEditorEditing({
       setAdapterReadyMarker((n) => n + 1)
       setLayersRawRoots(null)
       setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
+      recoveredCallsitesRef.current = new Map()
       setLayersError(false)
       setEditorSelection(null)
       setEditorManifest(null)
@@ -1502,9 +1557,12 @@ export function useEditorEditing({
       payload: LayersMovePayload,
       skipIterationCheck: boolean = false,
     ) => {
-      const { source, destParent, destIndex } = payload
+      const { source, destParent, destIndex, anchor } = payload
       const adapter = adapterRef.current
-      if (!adapter || !source.editTarget || !destParent.editTarget) {
+      // Where the parent is written in the source's file — see
+      // `LayersMovePayload.destParentTarget`.
+      const destParentTarget = payload.destParentTarget ?? destParent.editTarget
+      if (!adapter || !source.editTarget || !destParentTarget) {
         return
       }
       if (!skipIterationCheck) {
@@ -1545,7 +1603,12 @@ export function useEditorEditing({
         destination: {
           parentId: destParent.selector,
           index: destIndex,
-          parentEditTarget: destParent.editTarget,
+          parentEditTarget: destParentTarget,
+          // The sibling the drop landed beside; the applicator counts from
+          // it instead of trusting `index`. See `InsertionTarget.anchor`.
+          ...(anchor?.node.editTarget
+            ? { anchor: { editTarget: anchor.node.editTarget, placement: anchor.placement } }
+            : {}),
         },
         // Conditional-GROUP move: source is a synthetic layers-panel row
         // (see layers-conditional-groups.ts) whose editTarget is the
@@ -1564,6 +1627,30 @@ export function useEditorEditing({
   )
 
   /**
+   * Send a move the direct path could not make to chat, under the session,
+   * and say what happened. `null` means the drop had nothing to hand over
+   * (no source position), which is the one shape that stays a plain status.
+   */
+  const handOffMoveToChat = useCallback(
+    (handoff: MoveToChatHandoff | null) => {
+      if (!handoff) {
+        setSaveStatus("Move could not be handed to chat: the element has no source position.")
+        return
+      }
+      void session.run(async (ctx) => {
+        const res = await ctx.step(handOffToChat(handoff.prompt, { signal: ctx.signal }))
+        if (res.stale) return
+        setSaveStatus(
+          res.value
+            ? "Move needs a decision. Sent to chat."
+            : "Move could not be sent to chat, so nothing was changed.",
+        )
+      })
+    },
+    [handOffToChat, session],
+  )
+
+  /**
    * Direct-manipulation drag-to-move (Phase 2). The bridge's DragMoveOverlay
    * emits a DRAG_MOVE_COMMITTED on drop; the adapter forwards it here. Build
    * the SAME `move` StructuralEdit handleLayerMove builds (from source +
@@ -1572,26 +1659,19 @@ export function useEditorEditing({
    * refuse gracefully via setSaveStatus (the applicator's same-file guard),
    * same as the Layers-panel drag.
    */
-  const handleDragMove = useCallback((move: DragMoveRequest) => {
+  const handleDragMove = useCallback((rawMove: DragMoveRequest) => {
     const adapter = adapterRef.current
     if (!adapter) return
+    // The bridge names the definition file for a server component's root;
+    // the Structure tree may have recovered its callsite. Source and anchor
+    // take the tree's answer; the container stays the bridge's.
+    const move = remapDragMove(rawMove, recoveredCallsitesRef.current)
     // Refuse iterated (v-for/map) source OR destination: a plain move would
     // rewrite the shared loop template for EVERY row (codex). Iterated moves
     // need the iteration-scope intercept the Layers-panel drag provides.
     if (move.sourceIsIterated || move.destIsIterated) {
       setSaveStatus(
         "Drag-move involving a repeated (v-for) element isn't supported yet. Use the Layers panel to move it with a scope choice.",
-      )
-      return
-    }
-    // Same-file only (apply-move-edit's contract). A cross-file drop (the common
-    // slot / component-internal case where the resolved destination lives in a
-    // different SFC) must refuse cleanly here — NOT fall into the LLM-repair
-    // path, which could drop the destination anchor and rewrite the source file
-    // (codex P1). Matches the documented slotted-reorder limitation.
-    if (move.sourceEditTarget.file !== move.destParentEditTarget.file) {
-      setSaveStatus(
-        "Can't drag-move across files (the drop landed in another component's source). Use the Layers panel for cross-file / slotted moves.",
       )
       return
     }
@@ -1602,18 +1682,34 @@ export function useEditorEditing({
       target: {
         targetId: move.sourceSelector,
         selector: move.sourceSelector,
+        componentName: useEditorStore.getState().editorSelection?.componentName,
         editTarget: move.sourceEditTarget,
       },
       destination: {
         parentId: move.destParentSelector,
         index: move.destIndex,
         parentEditTarget: move.destParentEditTarget,
+        // The neighbour the drop landed beside, when the bridge named one.
+        ...(move.anchorEditTarget && move.anchorPlacement
+          ? { anchor: { editTarget: move.anchorEditTarget, placement: move.anchorPlacement } }
+          : {}),
       },
+    }
+    // Same-file only (apply-move-edit's contract). A cross-file drop (the
+    // common slot / component-internal case where the resolved destination
+    // lives in a different file) does not go through the deterministic path,
+    // which could drop the destination anchor and rewrite the source file
+    // (codex P1). It goes to chat with the intent, the same as the
+    // Layers-panel drop.
+    if (move.sourceEditTarget.file !== move.destParentEditTarget.file) {
+      const why = `The element is written in ${move.sourceEditTarget.file}; the drop landed in ${move.destParentEditTarget.file}. A direct move rewrites one file, so it cannot do this.`
+      handOffMoveToChat(buildMoveEditToChatHandoff(edit, why))
+      return
     }
     // Drag-move dispatches immediately, like every other edit (branch mode
     // is the only editor edit substrate).
     applyEditThenReport(edit, adapter, "Move")
-  }, [applyEditThenReport])
+  }, [applyEditThenReport, handOffMoveToChat])
 
   const handleLayerMoveRefused = useCallback((reason: LayersDropRefusal) => {
     // The layers panel silently rejects most invalid drops (returns false
@@ -1621,23 +1717,47 @@ export function useEditorEditing({
     // reason, designers see "dragging does nothing" with zero feedback.
     // Translate each refusal into a one-liner the pending-changes-panel
     // banner can show — same channel used by deterministic edit failures.
+    // `different-file` and `no-parent` reach here only when no chat is wired
+    // (the panel hands those drops to chat otherwise, see
+    // `handleLayerMoveViaChat`), so their copy says what is true rather than
+    // what the tool cannot do.
     const message =
       reason === "no-source-location"
         ? "Can't drag this element: it has no source mapping (not authored in this prototype's repo, or the framework adapter didn't tag it)."
         : reason === "no-parent-source-location"
           ? "Can't drop here: the destination's parent has no source mapping."
           : reason === "different-file"
-            ? "Can't drop here: source and destination live in different files (cross-file moves aren't supported yet)."
+            ? "Can't drop here: the element and the drop target are written in different files, and a direct move rewrites one file. Ask chat to move it."
             : reason === "self-or-descendant"
               ? "Can't drop an element into itself or one of its descendants."
               : reason === "no-parent"
-                ? "Can't drop here: no valid parent container."
+                ? "Can't drop here: nothing above the drop target is written in the element's file, so a direct move has no parent to write into. Ask chat to move it."
                 : reason === "unmapped-row"
                   ? "Can't move this row: it isn't in the unfiltered tree, so the new position can't be counted. Switch the Structure detail to Everything and try again."
                   : `Drag/drop refused: ${reason}`
     setSaveStatus(message)
     console.info("[Editor] Drag/drop refused:", reason)
   }, [])
+
+  /**
+   * A Layers-panel drop the direct move cannot make but chat can: the source
+   * and the drop target are written in different files, or nothing above the
+   * target is written in the source's file (two server-rendered instances of
+   * one shared primitive look like this). The panel accepts the drop and
+   * sends it here. On hover the banner says where the drop will go; on drop
+   * the move is handed to chat with the element, the sibling it was dropped
+   * beside, and why the direct path could not do it.
+   */
+  const handleLayerMoveViaChat = useCallback(
+    (payload: LayersChatMovePayload, phase: "hover" | "drop") => {
+      if (phase === "hover") {
+        setSaveStatus(`Drop to hand this move to chat. ${describeWhyMoveGoesToChat(payload)}`)
+        return
+      }
+      handOffMoveToChat(buildMoveToChatHandoff(payload))
+    },
+    [handOffMoveToChat],
+  )
 
   // Phase F4 — Edit component flow. Tracks whether the iframe is
   // currently navigated to the F3 isolation route, plus the URL we
@@ -5427,6 +5547,7 @@ export function useEditorEditing({
     handleLayerHover,
     handleLayerMove,
     handleLayerMoveRefused,
+    handleLayerMoveViaChat,
     handleDetach,
     handleLayerDetach,
     handleLayerDelete,

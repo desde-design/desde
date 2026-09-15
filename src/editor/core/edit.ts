@@ -91,6 +91,19 @@ export interface InsertionTarget {
    * the destination parent.
    */
   parentEditTarget?: SourceLocation
+  /**
+   * The sibling the drop landed beside, when the gesture named one. The
+   * applicator then places the element immediately before or after it and
+   * does not consult `index`.
+   *
+   * `index` is counted by the caller over the children it can SEE, and that
+   * is not always every child: on a Next.js App Router page a server-rendered
+   * sibling attributes to another file and drops out of the count, so a move
+   * the caller allowed landed at the wrong position. The applicator has the
+   * whole child list; naming the sibling lets it do the counting. Same file
+   * as `parentEditTarget`, always.
+   */
+  anchor?: { editTarget: SourceLocation; placement: 'before' | 'after' }
 }
 
 /**

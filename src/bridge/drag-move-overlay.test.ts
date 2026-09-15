@@ -98,3 +98,41 @@ describe("drag-move-overlay — the drop names its document", () => {
     })
   })
 })
+
+/**
+ * The drop names the SIBLING it landed beside, not only an index. The index
+ * was counted over the container's editable DOM children, and on a page with
+ * a server-rendered sibling that count disagrees with the source file's; the
+ * applicator resolves an anchor against the AST instead. See
+ * `apply-jsx-move-edit.ts` § anchor.
+ */
+describe("drag-move-overlay — the drop names the sibling it landed beside", () => {
+  it("carries the neighbour's editTarget and which side of it the drop fell on", () => {
+    const dragged = document.getElementById("a")!
+    const over = document.getElementById("b")!
+    Object.defineProperty(document, "elementsFromPoint", {
+      configurable: true,
+      value: () => [over, over.parentElement!, document.body],
+    })
+
+    const overlay = new DragMoveOverlayManager(() => dragged)
+    overlay.activate()
+    try {
+      pointer("pointerdown", { clientX: 0, clientY: 0, target: dragged })
+      pointer("pointermove", { clientX: 0, clientY: 40, target: dragged })
+      pointer("pointerup", { clientX: 0, clientY: 40, target: dragged })
+    } finally {
+      overlay.deactivate()
+    }
+
+    const message = sent.find((m) => m.type === "DRAG_MOVE_COMMITTED")
+    expect(message).toBeDefined()
+    // Every rect is 0x0, so the cursor at y=40 is past #b's midpoint: the
+    // drop is AFTER #b.
+    expect(message!.payload).toMatchObject({
+      anchorSelector: "#b",
+      anchorEditTarget: { file: "src/App.vue", line: 4, column: 2 },
+      anchorPlacement: "after",
+    })
+  })
+})

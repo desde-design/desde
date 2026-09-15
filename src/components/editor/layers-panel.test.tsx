@@ -346,6 +346,12 @@ describe("LayersPanel", () => {
     // so the post-removal final index is 1 (target's spot). The off-by-one
     // adjustment subtracts 1 from the naive `targetIndex + 1` = 2 → 1.
     expect(payload.destIndex).toBe(1)
+    // The drop also names the sibling it landed beside. The applicator
+    // resolves that against the source file, where the index above can be
+    // wrong (it is counted over the rows the panel can see, and a
+    // server-rendered sibling attributes to another file and is not among
+    // them).
+    expect(payload.anchor).toEqual({ node: expect.objectContaining({ id: "n3" }), placement: "after" })
   })
 
   it("refuses drop when source has no editTarget", () => {
@@ -378,15 +384,213 @@ describe("LayersPanel", () => {
     expect(onMove).not.toHaveBeenCalled()
   })
 
-  it("refuses cross-file drops via onMoveRefused", () => {
+  it("hands a cross-file drop to chat instead of refusing it", () => {
+    // Source and drop target are written in different files. The
+    // deterministic move rewrites one file, so it cannot do this; chat can.
+    // The drop is ACCEPTED and routed, not refused: a refusal dead-ended the
+    // user with a message about files.
+    const onMove = vi.fn()
+    const onMoveRefused = vi.fn()
+    const onMoveViaChat = vi.fn()
+    const roots = makeDraggableRoots()
+    roots[0].children![1].editTarget = { file: "Other.vue", line: 4, column: 5 }
+    roots[0].editTarget = { file: "Other.vue", line: 2, column: 3 }
+    render(
+      <LayersPanel
+        roots={roots}
+        selectedSelector={null}
+        onSelect={() => {}}
+        onMove={onMove}
+        onMoveRefused={onMoveRefused}
+        onMoveViaChat={onMoveViaChat}
+        onRefresh={() => {}}
+        refreshing={false}
+      />,
+    )
+    fireEvent.click(screen.getByLabelText("Expand"))
+    const allUiButtons = screen.getAllByText("UiButton")
+    const rowAButton = allUiButtons[0].closest("button") as HTMLButtonElement
+    const rowBButton = allUiButtons[1].closest("button") as HTMLButtonElement
+
+    const dataTransfer: Partial<DataTransfer> = { setData: vi.fn(), getData: vi.fn() }
+    fireEvent.dragStart(rowAButton, { dataTransfer })
+    rowBButton.getBoundingClientRect = () =>
+      ({ top: 100, bottom: 130, height: 30, left: 0, right: 100, width: 100, x: 0, y: 100, toJSON: () => ({}) }) as DOMRect
+    // dragover is ACCEPTED (default prevented) so the browser lets the drop happen.
+    const notPrevented = fireEvent.dragOver(rowBButton, { dataTransfer, clientY: 125 })
+    expect(notPrevented).toBe(false)
+    expect(onMoveViaChat).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "different-file", position: "after" }),
+      "hover",
+    )
+    fireEvent.drop(rowBButton, { dataTransfer, clientY: 125 })
+
+    expect(onMove).not.toHaveBeenCalled()
+    expect(onMoveRefused).not.toHaveBeenCalled()
+    expect(onMoveViaChat).toHaveBeenLastCalledWith(
+      {
+        source: expect.objectContaining({ id: "n2" }),
+        target: expect.objectContaining({ id: "n3" }),
+        position: "after",
+        reason: "different-file",
+        sourceFile: "Demo.vue",
+        targetFile: "Other.vue",
+      },
+      "drop",
+    )
+  })
+
+  it("hands a same-file drop with no same-file parent to chat (the shared-primitive case)", () => {
+    // Two rows written in the SAME file (two server-rendered <Card>s both
+    // attribute to card.tsx) under a parent written elsewhere. The file check
+    // passes and the effective-parent walk finds nothing; before, this was
+    // "no valid parent container". Chat gets it.
+    const onMove = vi.fn()
+    const onMoveRefused = vi.fn()
+    const onMoveViaChat = vi.fn()
+    const roots = makeDraggableRoots()
+    roots[0].editTarget = { file: "Other.vue", line: 2, column: 3 }
+    render(
+      <LayersPanel
+        roots={roots}
+        selectedSelector={null}
+        onSelect={() => {}}
+        onMove={onMove}
+        onMoveRefused={onMoveRefused}
+        onMoveViaChat={onMoveViaChat}
+        onRefresh={() => {}}
+        refreshing={false}
+      />,
+    )
+    fireEvent.click(screen.getByLabelText("Expand"))
+    const allUiButtons = screen.getAllByText("UiButton")
+    const rowAButton = allUiButtons[0].closest("button") as HTMLButtonElement
+    const rowBButton = allUiButtons[1].closest("button") as HTMLButtonElement
+
+    const dataTransfer: Partial<DataTransfer> = { setData: vi.fn(), getData: vi.fn() }
+    fireEvent.dragStart(rowAButton, { dataTransfer })
+    rowBButton.getBoundingClientRect = () =>
+      ({ top: 100, bottom: 130, height: 30, left: 0, right: 100, width: 100, x: 0, y: 100, toJSON: () => ({}) }) as DOMRect
+    fireEvent.dragOver(rowBButton, { dataTransfer, clientY: 125 })
+    fireEvent.drop(rowBButton, { dataTransfer, clientY: 125 })
+
+    expect(onMove).not.toHaveBeenCalled()
+    expect(onMoveRefused).not.toHaveBeenCalled()
+    expect(onMoveViaChat).toHaveBeenLastCalledWith(
+      expect.objectContaining({ reason: "no-parent", sourceFile: "Demo.vue", targetFile: "Demo.vue" }),
+      "drop",
+    )
+  })
+
+  describe("a root re-targeted at its callsite keeps its own file for its children (codex P2)", () => {
+    /**
+     * The Structure tree rewrites a server component's row to the caller's
+     * file (`editTarget` = page.tsx) while its bytes stay in its own file
+     * (`authoredAt` = kpi-cards.tsx). Its children are written in the
+     * latter. Reordering them, or dropping one back INTO the root, is a
+     * same-file move whose destination parent is the root's OWN element —
+     * `authoredAt`, not the callsite.
+     */
+    function makeRecoveredRoot(): OutlineNode[] {
+      return [
+        {
+          id: "page", name: "div", type: "element",
+          x: 0, y: 0, width: 800, height: 600, selector: "#page",
+          editTarget: { file: "page.tsx", line: 8, column: 4 },
+          children: [
+            {
+              id: "kpi", name: "KpiCards", type: "component",
+              x: 0, y: 0, width: 800, height: 300, selector: "#kpi",
+              editTarget: { file: "page.tsx", line: 9, column: 6 },
+              authoredAt: { file: "kpi-cards.tsx", line: 8, column: 4 },
+              children: [
+                { id: "a", name: "UiButton", type: "component", x: 0, y: 0, width: 100, height: 32, selector: "#a", editTarget: { file: "kpi-cards.tsx", line: 9, column: 6 } },
+                { id: "b", name: "UiButton", type: "component", x: 0, y: 32, width: 100, height: 32, selector: "#b", editTarget: { file: "kpi-cards.tsx", line: 10, column: 6 } },
+              ],
+            },
+          ],
+        },
+      ]
+    }
+
+    it("reorders two children with the root's own element as the destination parent", () => {
+      const onMove = vi.fn()
+      const onMoveViaChat = vi.fn()
+      render(
+        <LayersPanel
+          roots={makeRecoveredRoot()}
+          selectedSelector={null}
+          onSelect={() => {}}
+          onMove={onMove}
+          onMoveViaChat={onMoveViaChat}
+          onRefresh={() => {}}
+          refreshing={false}
+        />,
+      )
+      // Two levels deep: the root's Expand reveals KpiCards, whose own Expand
+      // reveals the children. Query again after each pass.
+      for (let pass = 0; pass < 2; pass++) screen.getAllByLabelText("Expand").forEach((btn) => fireEvent.click(btn))
+      const [rowA, rowB] = screen.getAllByText("UiButton").map((el) => el.closest("button") as HTMLButtonElement)
+      const dataTransfer: Partial<DataTransfer> = { setData: vi.fn(), getData: vi.fn() }
+      fireEvent.dragStart(rowB, { dataTransfer })
+      rowA.getBoundingClientRect = () =>
+        ({ top: 100, bottom: 130, height: 30, left: 0, right: 100, width: 100, x: 0, y: 100, toJSON: () => ({}) }) as DOMRect
+      fireEvent.dragOver(rowA, { dataTransfer, clientY: 103 })
+      // jsdom's fireEvent.drop strips clientY; a MouseEvent of type "drop"
+      // carries it (same workaround as the inside-band test above).
+      rowA.dispatchEvent(new MouseEvent("drop", { bubbles: true, cancelable: true, clientY: 103 }))
+
+      expect(onMoveViaChat).not.toHaveBeenCalled()
+      expect(onMove).toHaveBeenCalledTimes(1)
+      const payload = onMove.mock.calls[0][0]
+      expect(payload.destParent.id).toBe("kpi")
+      expect(payload.destParentTarget).toEqual({ file: "kpi-cards.tsx", line: 8, column: 4 })
+      expect(payload.anchor).toEqual({ node: expect.objectContaining({ id: "a" }), placement: "before" })
+    })
+
+    it("drops a child INTO the root as an append to the root's own element", () => {
+      const onMove = vi.fn()
+      const onMoveViaChat = vi.fn()
+      render(
+        <LayersPanel
+          roots={makeRecoveredRoot()}
+          selectedSelector={null}
+          onSelect={() => {}}
+          onMove={onMove}
+          onMoveViaChat={onMoveViaChat}
+          onRefresh={() => {}}
+          refreshing={false}
+        />,
+      )
+      for (let pass = 0; pass < 2; pass++) screen.getAllByLabelText("Expand").forEach((btn) => fireEvent.click(btn))
+      const rowA = screen.getAllByText("UiButton")[0].closest("button") as HTMLButtonElement
+      const kpiRow = screen.getByText("KpiCards").closest("button") as HTMLButtonElement
+      const dataTransfer: Partial<DataTransfer> = { setData: vi.fn(), getData: vi.fn() }
+      fireEvent.dragStart(rowA, { dataTransfer })
+      kpiRow.getBoundingClientRect = () =>
+        ({ top: 100, bottom: 200, height: 100, left: 0, right: 100, width: 100, x: 0, y: 100, toJSON: () => ({}) }) as DOMRect
+      // Both events as MouseEvents so clientY survives jsdom (fireEvent
+      // strips it, and a stripped Y reads as the "after" band). The dragover
+      // needs a dataTransfer to write its dropEffect into.
+      const over = new MouseEvent("dragover", { bubbles: true, cancelable: true, clientY: 150 })
+      Object.defineProperty(over, "dataTransfer", { value: { dropEffect: "none" } })
+      kpiRow.dispatchEvent(over)
+      kpiRow.dispatchEvent(new MouseEvent("drop", { bubbles: true, cancelable: true, clientY: 150 }))
+
+      expect(onMoveViaChat).not.toHaveBeenCalled()
+      expect(onMove).toHaveBeenCalledTimes(1)
+      const payload = onMove.mock.calls[0][0]
+      expect(payload.destParent.id).toBe("kpi")
+      expect(payload.destParentTarget).toEqual({ file: "kpi-cards.tsx", line: 8, column: 4 })
+      expect(payload.destIndex).toBe(-1)
+    })
+  })
+
+  it("still refuses a cross-file drop when no chat is wired", () => {
     const onMove = vi.fn()
     const onMoveRefused = vi.fn()
     const roots = makeDraggableRoots()
-    // Make the second UiButton's source location point at a different file.
     roots[0].children![1].editTarget = { file: "Other.vue", line: 4, column: 5 }
-    // ALSO change root parent to Other.vue so that when we drop ON the second
-    // button, the dest parent (root) and source (first button, Demo.vue)
-    // disagree.
     roots[0].editTarget = { file: "Other.vue", line: 2, column: 3 }
     render(
       <LayersPanel
@@ -726,7 +930,11 @@ describe("LayersPanel", () => {
     const payload = onMove.mock.calls[0][0]
     expect(payload.source.id).toBe("a")
     expect(payload.destParent.id).toBe("container")
-    expect(payload.destIndex).toBe(2)
+    // "Last child" is sent as an append (-1), not as a counted position: the
+    // applicator knows how many children the parent really has, the panel
+    // only knows how many rows it rendered.
+    expect(payload.destIndex).toBe(-1)
+    expect(payload.anchor).toBeUndefined()
   })
 
   describe("a rendered row absent from the raw tree", () => {

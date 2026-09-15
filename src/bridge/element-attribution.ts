@@ -151,6 +151,24 @@ function parseOwnStamp(
   return { loc, version: version || undefined }
 }
 
+/**
+ * Parse a `data-desde-call` value: `"<file>:<line>:<col> <Tag>"` — the JSX
+ * callsite of a component element, plus the tag written there (`Card`,
+ * `Router.Outlet`). Same last-space split as {@link parseOwnStamp}, for the
+ * same reason. The tag is REQUIRED: a value with no tag is not this stamp.
+ */
+function parseCallStamp(
+  raw: string | undefined,
+): { loc: { file: string; line: number; column: number }; tag: string } | undefined {
+  if (!raw) return undefined
+  const sep = raw.lastIndexOf(" ")
+  if (sep < 0) return undefined
+  const tag = raw.slice(sep + 1)
+  const loc = parseSourceTag(raw.slice(0, sep))
+  if (!loc || !tag) return undefined
+  return { loc, tag }
+}
+
 export function attributeElement(el: Element): Attribution | undefined {
   const leafInst = frameworkAdapter.getOwningInstance(el)
   if (!leafInst) return undefined
@@ -259,13 +277,47 @@ export function attributeElement(el: Element): Attribution | undefined {
   const authoredInLibrary =
     !!authoredAtLoc && authoredAtLoc.file.split("/").includes("node_modules")
   const preferOwnRoot = elIsOwnStampedRoot && !authoredInLibrary
-  const editTargetLoc = isComponentRoot && !preferOwnRoot
-    ? (leafVnodeStampLoc ?? authoredAtLoc)
-    : (
-        authoredAtLoc && !authoredInLibrary
-          ? authoredAtLoc
-          : (leafVnodeStampLoc ?? authoredAtLoc)
-      )
+  //     - Component root the RUNTIME HAS NO INSTANCE FOR: a component
+  //       rendered on the server (Next.js App Router) leaves no client fiber,
+  //       so `leafInst` is some client ancestor and `isComponentRoot` is
+  //       false — every branch above then lands on `authoredAtLoc`, the root
+  //       markup inside the component's DEFINITION file. That is where its
+  //       bytes live, not where the designer sees it placed: four sibling
+  //       `<Card>`s all resolved to `card.tsx:10:4`, and a reorder among
+  //       them was refused as a cross-file move. The JSX stamper writes the
+  //       callsite a second time under `data-desde-call`, a name the callee
+  //       never writes on a host element, so it survives the `{...props}`
+  //       spread that overwrites `data-desde-src`. It fills the hole only:
+  //       when the runtime already names a callsite for this element, that
+  //       answer keeps priority, so nothing that worked is reordered.
+  const callStamp = parseCallStamp((el as HTMLElement).dataset?.desdeCall)
+  const runtimeNamesCallsite = isComponentRoot && !preferOwnRoot && !!leafVnodeStampLoc
+  //     A CLIENT component that spreads its props onto a NON-root child
+  //     (`return <div><input {...props} /></div>`) hands that child its own
+  //     callsite stamp. The runtime knows that callsite as the leaf's; an
+  //     element inside the leaf carrying the same one is a forwarded prop,
+  //     not a root, and its own bytes stay the edit target (codex P1).
+  const forwardedByLeaf =
+    !!callStamp &&
+    !!leafVnodeStampLoc &&
+    callStamp.loc.file === leafVnodeStampLoc.file &&
+    callStamp.loc.line === leafVnodeStampLoc.line &&
+    callStamp.loc.column === leafVnodeStampLoc.column
+  const callsiteLoc =
+    callStamp &&
+    !runtimeNamesCallsite &&
+    !forwardedByLeaf &&
+    !callStamp.loc.file.split("/").includes("node_modules")
+      ? callStamp.loc
+      : undefined
+  const editTargetLoc = callsiteLoc
+    ?? (isComponentRoot && !preferOwnRoot
+      ? (leafVnodeStampLoc ?? authoredAtLoc)
+      : (
+          authoredAtLoc && !authoredInLibrary
+            ? authoredAtLoc
+            : (leafVnodeStampLoc ?? authoredAtLoc)
+        ))
   if (!editTargetLoc) return undefined
   const finalAuthoredAt = authoredAtLoc ?? editTargetLoc
 
@@ -333,6 +385,7 @@ export function attributeElement(el: Element): Attribution | undefined {
         (authoredAtLoc?.file === editTargetLoc.file ? ownVersion : undefined),
     },
     authoredAt: finalAuthoredAt,
+    ...(callsiteLoc && callStamp ? { callsiteName: callStamp.tag } : {}),
     // The CSS-rule anchor. Deliberately NOT derived from the two fields
     // above — see `resolveDomAnchor`'s note on why a rescued root makes
     // `authoredAt` unusable as a selector.

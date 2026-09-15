@@ -10,7 +10,7 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react"
-import type { OutlineNode } from "@/types/bridge"
+import type { OutlineNode, SourceLocation } from "@/types/bridge"
 import { Button } from "@/components/ui/button"
 import {
   ContextMenu,
@@ -70,12 +70,55 @@ export type LayersDropRefusal =
    */
   | "unmapped-row"
 
+/**
+ * A drop the deterministic move cannot make but chat can. `different-file`:
+ * the source and the drop target are written in different files, and the
+ * applicator rewrites one. `no-parent`: they are in the same file, but
+ * nothing above the drop target is — the shape a shared primitive produces
+ * when two server-rendered `<Card>`s both attribute to `card.tsx`.
+ *
+ * Both used to be refusals. A refusal dead-ended the user with a sentence
+ * about files; the drop is now accepted and handed to chat with the intent.
+ */
+export type LayersChatMoveReason = "different-file" | "no-parent"
+
+export interface LayersChatMovePayload {
+  source: OutlineNode
+  /** The row the drop landed on or beside. */
+  target: OutlineNode
+  position: "before" | "inside" | "after"
+  reason: LayersChatMoveReason
+  sourceFile: string
+  targetFile: string
+}
+
 export interface LayersMovePayload {
   source: OutlineNode
   /** The destination parent node — the node the source will become a child of. */
   destParent: OutlineNode
-  /** Final 0-based index in destParent's children list AFTER the move. */
+  /**
+   * Final 0-based index in destParent's children list AFTER the move; -1
+   * appends. Counted over the RAW tree's rows, which is not always every
+   * child the source file has — see `anchor`.
+   */
   destIndex: number
+  /**
+   * The row the drop landed beside, for a before/after drop. The applicator
+   * places the source relative to THIS element and ignores `destIndex`: a
+   * row the panel never saw (a server-rendered sibling attributes to another
+   * file) is still a child in the source file, and an index counted without
+   * it lands the move one slot off. Absent for an "inside" drop, which
+   * appends.
+   */
+  anchor?: { node: OutlineNode; placement: "before" | "after" }
+  /**
+   * Where `destParent` is written in the source's file. Its `editTarget`
+   * as a rule; its `authoredAt` when the row was re-targeted at a callsite
+   * in another file (a resolved server component, a Vue component root),
+   * because that is the element its children are written inside. Absent
+   * only for a caller that did not run the drop through `judgeDrop`.
+   */
+  destParentTarget?: SourceLocation
 }
 
 /** Menu rows for the density control, in the order they are offered. */
@@ -142,6 +185,14 @@ interface LayersPanelProps {
    * silently rejects invalid drops.
    */
   onMoveRefused?: (reason: LayersDropRefusal) => void
+  /**
+   * A drop the deterministic move cannot make but chat can — see
+   * {@link LayersChatMoveReason}. Fires on `"hover"` when the cursor first
+   * enters such a target (for a banner saying where the drop will go) and on
+   * `"drop"` with the same payload. When this is not wired, those drops are
+   * refused through `onMoveRefused` as before.
+   */
+  onMoveViaChat?: (payload: LayersChatMovePayload, phase: "hover" | "drop") => void
   /** Refresh callback — re-runs `getStructure()` on the adapter. */
   onRefresh: () => void
   /** True while a refresh is in flight. */
@@ -289,7 +340,64 @@ type DropPosition = "before" | "inside" | "after"
 
 interface DragState {
   draggingId: string | null
-  hoverTarget: { nodeId: string; position: DropPosition } | null
+  /** `viaChat`: the hovered drop would be handed to chat, not applied. */
+  hoverTarget: { nodeId: string; position: DropPosition; viaChat?: boolean } | null
+}
+
+/**
+ * What a drop on `target` at `position` would do, decided once for dragover
+ * and drop so the two cannot disagree. The order matters: a descendant is
+ * refused before the files are compared, so dragging a component onto its
+ * own internals (written in another file) is not sent to chat as a move.
+ */
+type DropVerdict =
+  | {
+      kind: "ok"
+      rawTarget: OutlineNode | null
+      /** The destination parent row (before/after only; the target itself for "inside"). */
+      effectiveParent: OutlineNode | null
+      /** Where that parent is written in the source's file — see `parentTargetFor`. */
+      parentTarget: SourceLocation | null
+    }
+  | { kind: "refused"; reason: LayersDropRefusal }
+  | { kind: "chat"; reason: LayersChatMoveReason; sourceFile: string; targetFile: string }
+
+function judgeDrop(
+  draggingNode: OutlineNode,
+  target: OutlineNode,
+  position: DropPosition,
+  rawNodeById: Map<string, OutlineNode>,
+  parentByChildId: Map<string, OutlineNode>,
+): DropVerdict {
+  const sourceFile = draggingNode.editTarget?.file
+  if (!sourceFile) return { kind: "refused", reason: "no-source-location" }
+  if (!target.editTarget) return { kind: "refused", reason: "no-parent-source-location" }
+  if (draggingNode.id === target.id || isDescendant(draggingNode, target.id)) {
+    return { kind: "refused", reason: "self-or-descendant" }
+  }
+  const targetFile = target.editTarget.file
+  if (position === "inside") {
+    // The target IS the parent. It qualifies by either of its coordinates
+    // in the source's file (see `parentTargetFor`).
+    const parentTarget = parentTargetFor(target, sourceFile)
+    if (!parentTarget) return { kind: "chat", reason: "different-file", sourceFile, targetFile }
+    return { kind: "ok", rawTarget: resolveRawNode(target, rawNodeById), effectiveParent: null, parentTarget }
+  }
+  // Before/after: the target is a SIBLING, written in the source's file or
+  // this is a move into another file's list.
+  if (sourceFile !== targetFile) {
+    return { kind: "chat", reason: "different-file", sourceFile, targetFile }
+  }
+  const rawTarget = resolveRawNode(target, rawNodeById)
+  if (!rawTarget) return { kind: "refused", reason: "unmapped-row" }
+  const effective = findEffectiveSlotParent(rawTarget, sourceFile, parentByChildId)
+  if (!effective) {
+    // Same file, but no ancestor of the target is written in it. Two
+    // server-rendered instances of one shared primitive look exactly like
+    // this, and a move that "worked" would have rewritten the primitive.
+    return { kind: "chat", reason: "no-parent", sourceFile, targetFile }
+  }
+  return { kind: "ok", rawTarget, effectiveParent: effective.node, parentTarget: effective.target }
 }
 
 /**
@@ -324,6 +432,7 @@ function LayersPanelImpl({
   onHover,
   onMove,
   onMoveRefused,
+  onMoveViaChat,
   onRefresh,
   refreshing,
   error = false,
@@ -481,33 +590,37 @@ function LayersPanelImpl({
     // site). The authored parent — the one the applicator will splice
     // into — is found by walking UP from the target until we hit an
     // ancestor in the same file as the source. That ancestor is the
-    // "effective parent" used by handleDrop.
-    let refusal: LayersDropRefusal | null = null
-    if (position === "inside") {
-      if (!target.editTarget) refusal = "no-parent-source-location"
-      else if (draggingNode.editTarget.file !== target.editTarget.file) refusal = "different-file"
-      else if (isDescendant(draggingNode, target.id)) refusal = "self-or-descendant"
-    } else {
-      const rawTarget = resolveRawNode(target, rawNodeById)
-      if (!target.editTarget) refusal = "no-parent-source-location"
-      else if (draggingNode.editTarget.file !== target.editTarget.file) refusal = "different-file"
-      else if (isDescendant(draggingNode, target.id)) refusal = "self-or-descendant"
-      else if (!rawTarget) refusal = "unmapped-row"
-      else if (
-        !findEffectiveSlotParent(
-          rawTarget,
-          draggingNode.editTarget.file,
-          parentByChildId,
+    // "effective parent" used by handleDrop. `judgeDrop` holds the rules,
+    // and handleDrop asks it the same question.
+    const verdict = judgeDrop(draggingNode, target, position, rawNodeById, parentByChildId)
+
+    if (verdict.kind === "chat" && onMoveViaChat) {
+      // Accepted; the drop will go to chat. Fire once per target/position so
+      // the banner is not rewritten every frame the cursor moves.
+      const already =
+        drag.hoverTarget?.nodeId === target.id &&
+        drag.hoverTarget.position === position &&
+        drag.hoverTarget.viaChat === true
+      if (!already) {
+        onMoveViaChat(
+          {
+            source: draggingNode,
+            target,
+            position,
+            reason: verdict.reason,
+            sourceFile: verdict.sourceFile,
+            targetFile: verdict.targetFile,
+          },
+          "hover",
         )
-      ) {
-        // Target is in the right file but no same-file ancestor exists
-        // (would only happen for root-SFC native elements with no parent
-        // — extremely unusual; refuse rather than guess).
-        refusal = "no-parent"
+        setDrag((prev) => ({ ...prev, hoverTarget: { nodeId: target.id, position, viaChat: true } }))
       }
+      return true
     }
 
-    if (refusal) {
+    if (verdict.kind !== "ok") {
+      // A chat-shaped verdict with nowhere to send it is a refusal, as before.
+      const refusal: LayersDropRefusal = verdict.reason
       // Only re-fire on transition so we don't spam the status banner every
       // frame the cursor is over the rejected row. Track via hoverTarget's
       // "rejected" sentinel.
@@ -520,7 +633,11 @@ function LayersPanelImpl({
       return false
     }
 
-    if (drag.hoverTarget?.nodeId !== target.id || drag.hoverTarget.position !== position) {
+    if (
+      drag.hoverTarget?.nodeId !== target.id ||
+      drag.hoverTarget.position !== position ||
+      drag.hoverTarget.viaChat
+    ) {
       console.log("[LayersPanel] dragOver accepted", { targetName: target.name, position })
       setDrag((prev) => ({ ...prev, hoverTarget: { nodeId: target.id, position } }))
     }
@@ -550,16 +667,22 @@ function LayersPanelImpl({
       onMoveRefused?.("no-source-location")
       return
     }
-    if (!target.editTarget) {
-      onMoveRefused?.("no-parent-source-location")
+    const verdict = judgeDrop(draggingNode, target, position, rawNodeById, parentByChildId)
+    // A drop the deterministic move cannot make. With chat wired it is
+    // handed over with the intent; without, it is refused as before.
+    const sendToChat = (reason: LayersChatMoveReason, sourceFile: string, targetFile: string) => {
+      if (onMoveViaChat) {
+        onMoveViaChat({ source: draggingNode, target, position, reason, sourceFile, targetFile }, "drop")
+      } else {
+        onMoveRefused?.(reason)
+      }
+    }
+    if (verdict.kind === "chat") {
+      sendToChat(verdict.reason, verdict.sourceFile, verdict.targetFile)
       return
     }
-    if (draggingNode.editTarget.file !== target.editTarget.file) {
-      onMoveRefused?.("different-file")
-      return
-    }
-    if (draggingId === target.id || isDescendant(draggingNode, target.id)) {
-      onMoveRefused?.("self-or-descendant")
+    if (verdict.kind === "refused") {
+      onMoveRefused?.(verdict.reason)
       return
     }
 
@@ -579,19 +702,21 @@ function LayersPanelImpl({
     }
 
     // "inside" → append source as the LAST child of target (target IS
-    // the dest parent), counting the RAW child list. Same off-by-one for
-    // same-direct-parent reorder.
+    // the dest parent). Sent as -1, not as a counted position: the
+    // applicator knows how many children the parent really has in source,
+    // the panel only knows how many rows it rendered.
     if (position === "inside") {
       const rawTarget = resolveRawNode(target, rawNodeById)
       if (!rawTarget) {
         onMoveRefused?.("unmapped-row")
         return
       }
-      const children = rawTarget.children ?? []
-      const sourceIndex = children.findIndex((c) => c.id === draggingNode.id)
-      let destIndex = children.length
-      if (sourceIndex >= 0) destIndex -= 1
-      onMove?.({ source: rawSource, destParent: rawTarget, destIndex })
+      onMove?.({
+        source: rawSource,
+        destParent: rawTarget,
+        destIndex: -1,
+        ...(verdict.parentTarget ? { destParentTarget: verdict.parentTarget } : {}),
+      })
       return
     }
 
@@ -600,18 +725,14 @@ function LayersPanelImpl({
     // the slot provider in Vue's slot model — the file where target was
     // authored as a child, NOT the rendered DOM parent (which may live
     // in a different SFC's template).
-    const rawDropTarget = resolveRawNode(target, rawNodeById)
+    const rawDropTarget = verdict.rawTarget
+    const effectiveParent = verdict.effectiveParent
     if (!rawDropTarget) {
       onMoveRefused?.("unmapped-row")
       return
     }
-    const effectiveParent = findEffectiveSlotParent(
-      rawDropTarget,
-      draggingNode.editTarget.file,
-      parentByChildId,
-    )
     if (!effectiveParent) {
-      onMoveRefused?.("no-parent")
+      sendToChat("no-parent", draggingNode.editTarget.file, target.editTarget?.file ?? "")
       return
     }
 
@@ -629,7 +750,7 @@ function LayersPanelImpl({
       position === "after" ? "last" : "first",
     )
     if (targetIndex < 0) {
-      onMoveRefused?.("no-parent")
+      sendToChat("no-parent", draggingNode.editTarget.file, target.editTarget?.file ?? "")
       return
     }
     const sourceIndex = indexInSameFileList(
@@ -646,7 +767,16 @@ function LayersPanelImpl({
     if (isSameParentReorder && sourceIndex < targetIndex) {
       destIndex -= 1
     }
-    onMove?.({ source: rawSource, destParent: effectiveParent, destIndex })
+    // The index above is counted over the rows the panel can see. The row
+    // the drop landed beside travels too, and the applicator places the
+    // source relative to it — see `LayersMovePayload.anchor`.
+    onMove?.({
+      source: rawSource,
+      destParent: effectiveParent,
+      destIndex,
+      anchor: { node: rawDropTarget, placement: position },
+      ...(verdict.parentTarget ? { destParentTarget: verdict.parentTarget } : {}),
+    })
   }
 
   return (
@@ -867,6 +997,9 @@ function LayerNode({
     drag.hoverTarget?.nodeId === node.id && drag.hoverTarget.position === "after"
   const showInsertionInside =
     drag.hoverTarget?.nodeId === node.id && drag.hoverTarget.position === "inside"
+  // The hovered drop would be handed to chat rather than applied: the
+  // indicator is drawn dashed so the two outcomes do not look the same.
+  const hoverViaChat = drag.hoverTarget?.nodeId === node.id && drag.hoverTarget.viaChat === true
 
   const colorClass =
     node.type === "component"
@@ -948,7 +1081,10 @@ function LayerNode({
         // lists of separate things and want the breathing room.
         "py-0.5 transition-colors",
         isDragging && "opacity-40",
-        showInsertionInside && "ring-2 ring-inset ring-component",
+        showInsertionInside &&
+          (hoverViaChat
+            ? "outline-dashed outline-2 -outline-offset-2 outline-component"
+            : "ring-2 ring-inset ring-component"),
       )}
       style={{ paddingLeft: indent }}
       title={layerRowTitle(node)}
@@ -1019,7 +1155,10 @@ function LayerNode({
       {showInsertionBefore ? (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-x-1 top-0 h-0.5 rounded bg-component"
+          className={cn(
+            "pointer-events-none absolute inset-x-1 top-0 rounded",
+            hoverViaChat ? "h-0 border-t-2 border-dashed border-component" : "h-0.5 bg-component",
+          )}
         />
       ) : null}
       {showContextMenu ? (
@@ -1099,7 +1238,10 @@ function LayerNode({
       {showInsertionAfter ? (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-x-1 bottom-0 h-0.5 rounded bg-component"
+          className={cn(
+            "pointer-events-none absolute inset-x-1 bottom-0 rounded",
+            hoverViaChat ? "h-0 border-t-2 border-dashed border-component" : "h-0.5 bg-component",
+          )}
         />
       ) : null}
       {hasChildren && isExpanded ? (
@@ -1250,12 +1392,28 @@ function findEffectiveSlotParent(
   node: OutlineNode,
   sourceFile: string,
   parentByChildId: Map<string, OutlineNode>,
-): OutlineNode | null {
+): { node: OutlineNode; target: SourceLocation } | null {
   let cur: OutlineNode | undefined = parentByChildId.get(node.id)
   while (cur) {
-    if (cur.editTarget?.file === sourceFile) return cur
+    const target = parentTargetFor(cur, sourceFile)
+    if (target) return { node: cur, target }
     cur = parentByChildId.get(cur.id)
   }
+  return null
+}
+
+/**
+ * The coordinate at which `node` is a parent written in `sourceFile`, or
+ * null. Usually its `editTarget`. For a component root the tree re-targeted
+ * at its CALLSITE (a server component the Structure panel resolved, or a Vue
+ * component whose `editTarget` is the consumer's tag), the row's bytes live
+ * at `authoredAt` in the component's own file, and that is where its
+ * children are written: a move among them, or back into the root, has the
+ * root's own element as its parent (codex P2).
+ */
+function parentTargetFor(node: OutlineNode, sourceFile: string): SourceLocation | null {
+  if (node.editTarget?.file === sourceFile) return node.editTarget
+  if (node.authoredAt?.file === sourceFile) return node.authoredAt
   return null
 }
 

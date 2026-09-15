@@ -126,6 +126,48 @@ const VALIDATION_CASES: Case[] = [
     },
   },
   {
+    name: "move anchor with an unknown placement",
+    body: {
+      edit: {
+        kind: "move",
+        file: "a.vue",
+        line: 1,
+        column: 1,
+        destFile: "a.vue",
+        destParentLine: 1,
+        destParentColumn: 1,
+        destIndex: 0,
+        anchorLine: 3,
+        anchorColumn: 5,
+        anchorPlacement: "inside",
+      },
+    },
+    expect: {
+      status: 400,
+      reason: 'edit.anchorPlacement must be "before" or "after" when an anchor is given',
+    },
+  },
+  {
+    name: "move anchor given only in part",
+    body: {
+      edit: {
+        kind: "move",
+        file: "a.vue",
+        line: 1,
+        column: 1,
+        destFile: "a.vue",
+        destParentLine: 1,
+        destParentColumn: 1,
+        destIndex: 0,
+        anchorLine: 3,
+      },
+    },
+    expect: {
+      status: 400,
+      reason: "edit.anchorLine, edit.anchorColumn and edit.anchorPlacement must be given together",
+    },
+  },
+  {
     name: "detach missing componentFile",
     body: { edit: { kind: "detach", file: "x.vue", line: 1, column: 1 } },
     expect: { status: 400, reason: "edit.componentFile required for detach" },

@@ -159,6 +159,37 @@ describe("buildEditRequest — correlationId join key", () => {
     })
   }
 
+  it("move: an anchor on the destination travels as anchorLine/anchorColumn/anchorPlacement", () => {
+    const destLoc = { file: FILE, line: 2, column: 2, fileHash: HASH }
+    const body = editBodyOf({
+      kind: "move",
+      id: "e7-anchor",
+      target: target(stamped),
+      destination: {
+        parentEditTarget: destLoc,
+        index: 0,
+        anchor: { editTarget: { file: FILE, line: 9, column: 4 }, placement: "after" },
+      },
+    } as unknown as StructuralEdit)
+    expect(body).toMatchObject({ anchorLine: 9, anchorColumn: 4, anchorPlacement: "after" })
+  })
+
+  it("move: an anchor in another file is refused before it reaches the wire", () => {
+    const destLoc = { file: FILE, line: 2, column: 2 }
+    const built = buildEditRequest({
+      kind: "move",
+      id: "e7-anchor-x",
+      target: target(stamped),
+      destination: {
+        parentEditTarget: destLoc,
+        index: 0,
+        anchor: { editTarget: { file: "src/Other.vue", line: 9, column: 4 }, placement: "before" },
+      },
+    } as unknown as StructuralEdit)
+    expect(built.ok).toBe(false)
+    if (!built.ok) expect(built.result.kind).toBe("failed")
+  })
+
   it("move: request body's correlationId is the edit's own id", () => {
     const destLoc = { file: FILE, line: 1, column: 1, fileHash: HASH }
     const edit = {

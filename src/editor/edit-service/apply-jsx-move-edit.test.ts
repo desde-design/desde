@@ -384,3 +384,224 @@ describe("applyJsxMoveEdit — expression-container boundary (codex P1)", () => 
     expect(result.reason).toMatch(/cond &&|conditional/i)
   })
 })
+
+/**
+ * Whitespace travels with the element, the way the Vue applicator's does
+ * (`template-whitespace.ts`). Before this, the exact byte range was snipped
+ * and dropped at the next sibling's start: the moved tag landed on the same
+ * line as its new neighbour and a blank line stayed behind. Every move a
+ * designer made left that in the file.
+ */
+describe("applyJsxMoveEdit — whitespace", () => {
+  it("re-indents the moved element and leaves no blank line behind (reorder)", () => {
+    const r = applyJsxMoveEdit({
+      source: LIST,
+      sourceLine: 5,
+      sourceColumn: 4,
+      destParentLine: 2,
+      destParentColumn: 2,
+      destIndex: 0,
+      anchor: { line: 3, column: 4, placement: "before" },
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.source).toBe(`const C = () => (
+  <ul>
+    <li>C</li>
+    <li>A</li>
+    <li>B</li>
+  </ul>
+)
+`)
+    }
+  })
+
+  it("appends on its own line after the last child", () => {
+    const r = applyJsxMoveEdit({
+      source: LIST,
+      sourceLine: 3,
+      sourceColumn: 4,
+      destParentLine: 2,
+      destParentColumn: 2,
+      destIndex: -1,
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.source).toBe(`const C = () => (
+  <ul>
+    <li>B</li>
+    <li>C</li>
+    <li>A</li>
+  </ul>
+)
+`)
+    }
+  })
+
+  it("indents one step past an empty destination parent", () => {
+    const source = `const C = () => (
+  <div>
+    <ul>
+      <li>A</li>
+      <li>B</li>
+    </ul>
+    <ol></ol>
+  </div>
+)
+`
+    const r = applyJsxMoveEdit({
+      source,
+      sourceLine: 4,
+      sourceColumn: 6,
+      destParentLine: 7,
+      destParentColumn: 4,
+      destIndex: -1,
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.source).toBe(`const C = () => (
+  <div>
+    <ul>
+      <li>B</li>
+    </ul>
+    <ol>
+      <li>A</li></ol>
+  </div>
+)
+`)
+    }
+  })
+
+  it("keeps siblings written on one line on one line", () => {
+    const source = `const C = () => <ul><li>A</li><li>B</li><li>C</li></ul>\n`
+    const r = applyJsxMoveEdit({
+      source,
+      sourceLine: 1,
+      sourceColumn: 40,
+      destParentLine: 1,
+      destParentColumn: 16,
+      destIndex: 0,
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.source).toBe(`const C = () => <ul><li>C</li><li>A</li><li>B</li></ul>\n`)
+  })
+})
+
+/**
+ * Anchor-relative destination: "put it before/after THIS sibling" instead of
+ * "put it at index N".
+ *
+ * The index was counted by the caller over the children it could see, and on
+ * a Next.js App Router page that is not every child: a server-rendered
+ * sibling attributes to another file and drops out of the count, so a move
+ * the panel allowed landed at the wrong position. The AST has every child.
+ * Naming the sibling lets the applicator do the counting, so the two can no
+ * longer disagree.
+ */
+describe("applyJsxMoveEdit — anchor-relative destination", () => {
+  function order(source: string): string[] {
+    return ["A", "B", "C"].sort((x, y) => source.indexOf(`>${x}<`) - source.indexOf(`>${y}<`))
+  }
+
+  it("places the source BEFORE the anchor, and the index is not consulted", () => {
+    // Move C before A. destIndex is deliberately nonsense.
+    const r = applyJsxMoveEdit({
+      source: LIST,
+      sourceLine: 5,
+      sourceColumn: 4,
+      destParentLine: 2,
+      destParentColumn: 2,
+      destIndex: 99,
+      anchor: { line: 3, column: 4, placement: "before" },
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(order(r.source)).toEqual(["C", "A", "B"])
+  })
+
+  it("places the source AFTER the anchor", () => {
+    // Move A after B.
+    const r = applyJsxMoveEdit({
+      source: LIST,
+      sourceLine: 3,
+      sourceColumn: 4,
+      destParentLine: 2,
+      destParentColumn: 2,
+      destIndex: 0,
+      anchor: { line: 4, column: 4, placement: "after" },
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(order(r.source)).toEqual(["B", "A", "C"])
+  })
+
+  it("counts siblings the caller could not see", () => {
+    // Four children; a caller that saw only B and D would send index 1 for
+    // "after B". The anchor lands the move after B in the REAL list.
+    const source = `const C = () => (
+  <ul>
+    <li>A</li>
+    <li>B</li>
+    <li>C</li>
+    <li>D</li>
+  </ul>
+)
+`
+    const r = applyJsxMoveEdit({
+      source,
+      sourceLine: 6,
+      sourceColumn: 4,
+      destParentLine: 2,
+      destParentColumn: 2,
+      destIndex: 1,
+      anchor: { line: 4, column: 4, placement: "after" },
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      const seq = ["A", "B", "C", "D"].sort((x, y) => r.source.indexOf(`>${x}<`) - r.source.indexOf(`>${y}<`))
+      expect(seq).toEqual(["A", "B", "D", "C"])
+    }
+  })
+
+  it("refuses an anchor that is not a child of the destination parent", () => {
+    // The anchor is the <ul> itself.
+    const r = applyJsxMoveEdit({
+      source: LIST,
+      sourceLine: 3,
+      sourceColumn: 4,
+      destParentLine: 2,
+      destParentColumn: 2,
+      destIndex: 0,
+      anchor: { line: 2, column: 2, placement: "before" },
+    })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/anchor/i)
+  })
+
+  it("refuses an anchor that does not resolve to an element", () => {
+    const r = applyJsxMoveEdit({
+      source: LIST,
+      sourceLine: 3,
+      sourceColumn: 4,
+      destParentLine: 2,
+      destParentColumn: 2,
+      destIndex: 0,
+      anchor: { line: 40, column: 4, placement: "before" },
+    })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/anchor/i)
+  })
+
+  it("reports a same-position move expressed as an anchor as a no-op", () => {
+    // A before B: A is already there. destIndex says otherwise and is ignored.
+    const r = applyJsxMoveEdit({
+      source: LIST,
+      sourceLine: 3,
+      sourceColumn: 4,
+      destParentLine: 2,
+      destParentColumn: 2,
+      destIndex: 2,
+      anchor: { line: 4, column: 4, placement: "before" },
+    })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/already at the requested position/)
+  })
+})

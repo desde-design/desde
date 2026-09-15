@@ -56,7 +56,7 @@ describe("jsx-source-tag-plugin", () => {
     const code = `const C = () => <Foo.Bar baz={1} />\n`
     const out = transform(code)
     const expectedHash = sourceVersionOf(code)
-    expect(out).toContain(`<Foo.Bar data-desde-v="${expectedHash}" data-desde-src="src/Test.tsx:1:16" baz={1} />`)
+    expect(out).toContain(`<Foo.Bar data-desde-call="src/Test.tsx:1:16 Foo.Bar" data-desde-v="${expectedHash}" data-desde-src="src/Test.tsx:1:16" baz={1} />`)
   })
 
   it("stamps a self-closing element", () => {
@@ -79,7 +79,7 @@ describe("jsx-source-tag-plugin", () => {
     const out = transform(code)
     // Must land after `<Row>`, not split the type args.
     const expectedHash = sourceVersionOf(code)
-    expect(out).toContain(`<Table<Row> data-desde-v="${expectedHash}" data-desde-src="src/Test.tsx:1:16" rows={r} />`)
+    expect(out).toContain(`<Table<Row> data-desde-call="src/Test.tsx:1:16 Table" data-desde-v="${expectedHash}" data-desde-src="src/Test.tsx:1:16" rows={r} />`)
   })
 
   it("skips fragments but still stamps their children", () => {
@@ -100,14 +100,14 @@ describe("jsx-source-tag-plugin", () => {
     const code = `const C = (props) => <Card {...props} title="x" />\n`
     const out = transform(code)
     const expectedHash = sourceVersionOf(code)
-    expect(out).toContain(`<Card {...props} title="x" data-desde-v="${expectedHash}" data-desde-src="src/Test.tsx:1:21" />`)
+    expect(out).toContain(`<Card {...props} title="x" data-desde-call="src/Test.tsx:1:21 Card" data-desde-v="${expectedHash}" data-desde-src="src/Test.tsx:1:21" />`)
   })
 
   it("stamps after a sole {...spread}", () => {
     const code = `const C = (props) => <Card {...props} />\n`
     const out = transform(code)
     const expectedHash = sourceVersionOf(code)
-    expect(out).toContain(`<Card {...props} data-desde-v="${expectedHash}" data-desde-src="src/Test.tsx:1:21" />`)
+    expect(out).toContain(`<Card {...props} data-desde-call="src/Test.tsx:1:21 Card" data-desde-v="${expectedHash}" data-desde-src="src/Test.tsx:1:21" />`)
   })
 
   it("is idempotent — re-running does not double-stamp", () => {
@@ -184,5 +184,54 @@ describe("jsx-source-tag-plugin", () => {
     const t = plugin.transform as (this: unknown, code: string, id: string) => { code: string } | null
     const out = t.call({}, code, `${REPO_ROOT}/src/Test.tsx?t=123`)
     expect(out?.code).toContain('data-desde-src="src/Test.tsx:1:16"')
+  })
+})
+
+/**
+ * `data-desde-call` — the CALLSITE stamp, written on component elements only.
+ *
+ * Why a second attribute: a component that spreads its props onto its root
+ * (`function Card(props) { return <div {...props} /> }`) receives the caller's
+ * `data-desde-src` through the spread and then overwrites it with the root's
+ * own stamp, which is placed after the spread on purpose. When the component
+ * renders on the server (Next.js App Router) there is no client fiber to
+ * recover the callsite from either, so the callsite is lost entirely: four
+ * sibling `<Card>`s all resolve to `card.tsx:10:4`, and reordering them is
+ * refused. A distinct attribute name survives the spread because the callee
+ * never writes it on a host element.
+ */
+describe("jsx-source-tag-plugin — data-desde-call", () => {
+  /** All `data-desde-call` values in transformed output, in source order. */
+  function callStamps(code: string): string[] {
+    return [...code.matchAll(/data-desde-call="([^"]*)"/g)].map((m) => m[1])
+  }
+
+  it("writes data-desde-call on a component element, carrying the tag name", () => {
+    const code = `const P = () => <Card />\n`
+    expect(callStamps(transform(code))).toEqual(["src/Test.tsx:1:16 Card"])
+  })
+
+  it("does NOT write data-desde-call on a host element", () => {
+    const code = `const P = () => <div className="a"><span>x</span></div>\n`
+    expect(callStamps(transform(code))).toEqual([])
+  })
+
+  it("writes it for a member-expression component with the dotted tag", () => {
+    const code = `const P = () => <Router.Outlet />\n`
+    expect(callStamps(transform(code))).toEqual(["src/Test.tsx:1:16 Router.Outlet"])
+  })
+
+  it("places it after a {...spread}, next to the other stamps, so the nearest callsite wins", () => {
+    const code = `const C = (props) => <Card {...props} />\n`
+    const out = transform(code)
+    const spreadEnd = out.indexOf("{...props}") + "{...props}".length
+    const callAt = out.indexOf("data-desde-call=")
+    expect(callAt).toBeGreaterThan(spreadEnd)
+  })
+
+  it("is idempotent — a re-run adds no second data-desde-call", () => {
+    const code = `const P = () => <Card />\n`
+    const once = transform(code)
+    expect(callStamps(transform(once))).toHaveLength(1)
   })
 })

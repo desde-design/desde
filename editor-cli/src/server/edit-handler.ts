@@ -749,6 +749,26 @@ async function handleAllowCreate(args: {
  * `conflicts` array) checked in its dispatch branch. `llm-patch` never reaches
  * here — `handleLLMPatch` runs its own per-mutation version check.
  */
+/**
+ * The sibling-relative destination of a move, as the applicators take it, or
+ * undefined when the request carried none. The validator has already
+ * refused a partial anchor, so "all three present" is the only shape here.
+ */
+function moveAnchorOf(edit: {
+  anchorLine?: number
+  anchorColumn?: number
+  anchorPlacement?: "before" | "after"
+}): { line: number; column: number; placement: "before" | "after" } | undefined {
+  if (
+    typeof edit.anchorLine !== "number" ||
+    typeof edit.anchorColumn !== "number" ||
+    (edit.anchorPlacement !== "before" && edit.anchorPlacement !== "after")
+  ) {
+    return undefined
+  }
+  return { line: edit.anchorLine, column: edit.anchorColumn, placement: edit.anchorPlacement }
+}
+
 function checkStaleTarget(
   edit: EditRequestBody["edit"],
   source: string,
@@ -911,6 +931,7 @@ async function tryVueScriptJsx(
         destParentLine: body.edit.destParentLine,
         destParentColumn: body.edit.destParentColumn,
         destIndex: body.edit.destIndex,
+        anchor: moveAnchorOf(body.edit),
       })
     } else {
       // Move is the ONE kind the script-JSX family refuses rather than
@@ -941,6 +962,7 @@ async function tryVueScriptJsx(
           destParentLine: body.edit.destParentLine,
           destParentColumn: body.edit.destParentColumn,
           destIndex: body.edit.destIndex,
+          anchor: moveAnchorOf(body.edit),
         })
       }
     }

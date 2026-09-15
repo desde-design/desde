@@ -109,7 +109,7 @@ import { createOverridePreview } from "./override-preview"
   // the viewer's `html-inject`). Keep it a single-use literal;
   // bridge-bundle-version.test.ts fails if that stops holding.
   ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__ =
-    "2026-09-15a-loop-rows"
+    "2026-09-15b-loop-rows-callsite-stamp-move-anchor"
   const BRIDGE_VERSION = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__ as string
 
@@ -871,9 +871,10 @@ import { createOverridePreview } from "./override-preview"
         // always a vnode/string mix, and the slot-text path is the
         // right rewrite route for slot content).
         if (propName === "key" || propName === "ref" || propName === "children") continue
-        // The source-tag plugin's `data-desde-src` callsite stamp lands on
-        // component `memoizedProps` — it's bridge internals, not a real prop.
-        if (propName === "data-desde-src") continue
+        // The source-tag plugin's stamps (`data-desde-src`, `data-desde-v`,
+        // `data-desde-call`) land on component `memoizedProps` — bridge
+        // internals, not real props.
+        if (propName.startsWith("data-desde-")) continue
         if (
           propName.length > 2 &&
           propName.startsWith("on") &&
@@ -964,8 +965,8 @@ import { createOverridePreview } from "./override-preview"
       const props: Record<string, unknown> = {}
       for (const propName of Object.keys(memoized)) {
         if (propName === "children" || propName === "ref" || propName === "key") continue
-        // Bridge internals: the callsite stamp the source-tag plugin adds.
-        if (propName === "data-desde-src") continue
+        // Bridge internals: the stamps the source-tag plugin adds.
+        if (propName.startsWith("data-desde-")) continue
         if (
           propName.length > 2 &&
           propName.startsWith("on") &&

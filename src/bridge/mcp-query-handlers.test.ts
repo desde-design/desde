@@ -211,6 +211,43 @@ describe("mcp-query-handlers — every selection reply names its document", () =
 })
 
 /**
+ * A row for a component the runtime has no instance for (server-rendered)
+ * used to be labelled by its tag: `KpiCards` showed as `section`, `<Card>` as
+ * `div`. When attribution recovers the callsite from `data-desde-call`, it
+ * also knows the tag that was written there, and the outline labels the row
+ * with it.
+ */
+describe("mcp-query-handlers — GET_STRUCTURE labels a callsite-attributed row as its component", () => {
+  it("names the row after the callsite tag and types it as a component", () => {
+    configureBridgeRuntime({
+      sendToShell: (message: { type: string; payload?: unknown }) => void sent.push(message),
+      inspectElement: (node: Element) => ({ selector: `#${node.id}` }),
+      attributeElement: (node: Element) =>
+        node.id === "card"
+          ? {
+              editTarget: { file: "src/metric-cards.tsx", line: 8, column: 6 },
+              authoredAt: { file: "src/ui/card.tsx", line: 10, column: 4 },
+              callsiteName: "Card",
+              editableComponent: {},
+              isLibrary: false,
+            }
+          : undefined,
+      documentId: TEST_DOCUMENT_ID,
+    })
+
+    query({ type: "GET_STRUCTURE", requestId: "req-9" })
+
+    const reply = sent.find((m) => m.type === "STRUCTURE_CAPTURED")
+    const roots = (reply!.payload as { roots: { name: string; type: string; children?: { name: string }[] }[] }).roots
+    const card = roots.find((r) => r.name === "Card")
+    expect(card).toBeDefined()
+    expect(card!.type).toBe("component")
+    // Its children keep their own labels: the rescue is for the root only.
+    expect(card!.children?.map((c) => c.name)).toEqual(["button", "button"])
+  })
+})
+
+/**
  * `ELEMENT_INSPECTION_UNRESOLVED` is the other half of the same round trip.
  *
  * It settles the same pending request the selection replies settle, so a stale

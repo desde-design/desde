@@ -102,6 +102,19 @@ export function buildEditRequest(
         },
       }
     }
+    const anchor = destination.anchor
+    if (anchor && anchor.editTarget.file !== destination.parentEditTarget.file) {
+      // The anchor is a child of the destination parent by construction; one
+      // in another file is a bug upstream, and the server would refuse it
+      // too. Refusing here keeps the wire honest.
+      return {
+        ok: false,
+        result: {
+          kind: 'failed',
+          reason: `The anchor element lives in ${anchor.editTarget.file}, not in the destination parent's file ${destination.parentEditTarget.file}`,
+        },
+      }
+    }
     requestBody = {
       edit: {
         kind: edit.kind,
@@ -112,6 +125,15 @@ export function buildEditRequest(
         destParentLine: destination.parentEditTarget.line,
         destParentColumn: destination.parentEditTarget.column,
         destIndex: destination.index,
+        // Sibling-relative destination — see `InsertionTarget.anchor`. When
+        // present the applicator ignores `destIndex`.
+        ...(anchor
+          ? {
+              anchorLine: anchor.editTarget.line,
+              anchorColumn: anchor.editTarget.column,
+              anchorPlacement: anchor.placement,
+            }
+          : {}),
         // Stale-target guard (source + dest coordinates were captured
         // from the same DOM snapshot; same-file moves share one hash).
         ...(editTarget.fileHash ? { baseHash: editTarget.fileHash } : {}),

@@ -46,6 +46,15 @@ export interface MoveEditBody {
   destParentLine: number
   destParentColumn: number
   destIndex: number
+  /**
+   * Sibling-relative destination — see `InsertionTarget.anchor` in
+   * `src/editor/core/edit.ts`. All three or none. When given, the applicator
+   * lands the element before/after the child at this coordinate and does
+   * not consult `destIndex`. Same file as `destFile`.
+   */
+  anchorLine?: number
+  anchorColumn?: number
+  anchorPlacement?: "before" | "after"
   /** Stale-target guard for `file` — see {@link PropEditBody.baseHash}. */
   baseHash?: string
   /** Stale-target guard for `destFile` (cross-file moves refuse client-side
@@ -816,6 +825,29 @@ export function validateEditRequest(body: unknown): string | null {
     }
     if (typeof e.destIndex !== "number" || !Number.isInteger(e.destIndex)) {
       return "edit.destIndex must be an integer"
+    }
+    // Sibling-relative destination: all three fields or none. A partial
+    // anchor is a client bug, not a request the applicator should guess at.
+    const anchorGiven =
+      e.anchorLine !== undefined || e.anchorColumn !== undefined || e.anchorPlacement !== undefined
+    if (anchorGiven) {
+      if (e.anchorLine === undefined || e.anchorColumn === undefined || e.anchorPlacement === undefined) {
+        return "edit.anchorLine, edit.anchorColumn and edit.anchorPlacement must be given together"
+      }
+      if (typeof e.anchorLine !== "number" || !Number.isInteger(e.anchorLine) || e.anchorLine < 1) {
+        return "edit.anchorLine must be a positive integer"
+      }
+      // Column 0 is valid for React/JSX — same relaxation as destParentColumn.
+      if (
+        typeof e.anchorColumn !== "number" ||
+        !Number.isInteger(e.anchorColumn) ||
+        e.anchorColumn < 0
+      ) {
+        return "edit.anchorColumn must be a non-negative integer"
+      }
+      if (e.anchorPlacement !== "before" && e.anchorPlacement !== "after") {
+        return 'edit.anchorPlacement must be "before" or "after" when an anchor is given'
+      }
     }
     const hashErr = baseHashShapeError(e.baseHash, "baseHash")
     if (hashErr) return hashErr
