@@ -386,6 +386,108 @@ describe("applyJsxMoveEdit — expression-container boundary (codex P1)", () => 
 })
 
 /**
+ * Whitespace travels with the element, the way the Vue applicator's does
+ * (`template-whitespace.ts`). Before this, the exact byte range was snipped
+ * and dropped at the next sibling's start: the moved tag landed on the same
+ * line as its new neighbour and a blank line stayed behind. Every move a
+ * designer made left that in the file.
+ */
+describe("applyJsxMoveEdit — whitespace", () => {
+  it("re-indents the moved element and leaves no blank line behind (reorder)", () => {
+    const r = applyJsxMoveEdit({
+      source: LIST,
+      sourceLine: 5,
+      sourceColumn: 4,
+      destParentLine: 2,
+      destParentColumn: 2,
+      destIndex: 0,
+      anchor: { line: 3, column: 4, placement: "before" },
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.source).toBe(`const C = () => (
+  <ul>
+    <li>C</li>
+    <li>A</li>
+    <li>B</li>
+  </ul>
+)
+`)
+    }
+  })
+
+  it("appends on its own line after the last child", () => {
+    const r = applyJsxMoveEdit({
+      source: LIST,
+      sourceLine: 3,
+      sourceColumn: 4,
+      destParentLine: 2,
+      destParentColumn: 2,
+      destIndex: -1,
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.source).toBe(`const C = () => (
+  <ul>
+    <li>B</li>
+    <li>C</li>
+    <li>A</li>
+  </ul>
+)
+`)
+    }
+  })
+
+  it("indents one step past an empty destination parent", () => {
+    const source = `const C = () => (
+  <div>
+    <ul>
+      <li>A</li>
+      <li>B</li>
+    </ul>
+    <ol></ol>
+  </div>
+)
+`
+    const r = applyJsxMoveEdit({
+      source,
+      sourceLine: 4,
+      sourceColumn: 6,
+      destParentLine: 7,
+      destParentColumn: 4,
+      destIndex: -1,
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.source).toBe(`const C = () => (
+  <div>
+    <ul>
+      <li>B</li>
+    </ul>
+    <ol>
+      <li>A</li></ol>
+  </div>
+)
+`)
+    }
+  })
+
+  it("keeps siblings written on one line on one line", () => {
+    const source = `const C = () => <ul><li>A</li><li>B</li><li>C</li></ul>\n`
+    const r = applyJsxMoveEdit({
+      source,
+      sourceLine: 1,
+      sourceColumn: 40,
+      destParentLine: 1,
+      destParentColumn: 16,
+      destIndex: 0,
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.source).toBe(`const C = () => <ul><li>C</li><li>A</li><li>B</li></ul>\n`)
+  })
+})
+
+/**
  * Anchor-relative destination: "put it before/after THIS sibling" instead of
  * "put it at index N".
  *

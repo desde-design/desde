@@ -15,7 +15,8 @@
  * Best-effort at every step: an unresolved row stays exactly as the bridge
  * reported it, and a failed request leaves the whole tree as it was.
  */
-import type { OutlineNode } from "@/types/bridge"
+import type { OutlineNode, SourceLocation } from "@/types/bridge"
+import type { DragMoveRequest } from "@/editor/core"
 import { editorFetch } from "@/lib/editor-fetch"
 
 export interface CallsiteCandidate {
@@ -43,6 +44,13 @@ export interface ResolvedCallsite {
 
 /** The handler's cap on one request; a tree can hold more rows than that. */
 const BATCH = 200
+
+/** What a recovered row now says about itself, keyed by the row's selector. */
+export interface RecoveredCallsite {
+  name: string
+  editTarget: SourceLocation
+}
+export type RecoveredCallsites = ReadonlyMap<string, RecoveredCallsite>
 
 function inNodeModules(file: string): boolean {
   return file.split("/").includes("node_modules")
@@ -96,16 +104,13 @@ export function applyResolvedCallsites(
   roots: OutlineNode[],
   candidates: CallsiteCandidate[],
   results: ReadonlyArray<ResolvedCallsite | null>,
-): OutlineNode[] {
+): { roots: OutlineNode[]; recovered: RecoveredCallsites } {
   const groupOf = (c: CallsiteCandidate) => `${c.parentNodeId}|${c.file}:${c.line}:${c.column}`
   const groupSize = new Map<string, number>()
   for (const c of candidates) groupSize.set(groupOf(c), (groupSize.get(groupOf(c)) ?? 0) + 1)
 
   const ordinalByGroup = new Map<string, number>()
-  const rewrite = new Map<
-    string,
-    { name: string; editTarget: { file: string; line: number; column: number; fileHash?: string } }
-  >()
+  const rewrite = new Map<string, RecoveredCallsite>()
   candidates.forEach((candidate, i) => {
     const result = results[i]
     if (!result) return
@@ -126,12 +131,16 @@ export function applyResolvedCallsites(
       },
     })
   })
-  if (rewrite.size === 0) return roots
+  const recovered = new Map<string, RecoveredCallsite>()
+  if (rewrite.size === 0) return { roots, recovered }
 
   const rebuild = (node: OutlineNode): OutlineNode => {
     const hit = rewrite.get(node.id)
     const children = node.children ? node.children.map(rebuild) : undefined
     if (!hit) return children ? { ...node, children } : node
+    // Keyed by selector: that is what a click in the prototype and a drag
+    // in the canvas arrive with (see `remapSelectionTarget`, `remapDragMove`).
+    if (node.selector) recovered.set(node.selector, hit)
     return {
       ...node,
       name: hit.name,
@@ -140,7 +149,40 @@ export function applyResolvedCallsites(
       ...(children ? { children } : {}),
     }
   }
-  return roots.map(rebuild)
+  return { roots: roots.map(rebuild), recovered }
+}
+
+/**
+ * A selection whose selector is a recovered row takes the row's callsite as
+ * its `editTarget` and the tag written there as its name; `authoredAt` stays
+ * where the bytes live. That is the shape a client component root already
+ * has, so every consumer of the selection handles it. Anything else comes
+ * back as it came, the same object.
+ */
+export function remapSelectionTarget<
+  T extends { selector: string; editTarget?: SourceLocation; componentName?: string } | null,
+>(selection: T, recovered: RecoveredCallsites): T {
+  if (!selection) return selection
+  const hit = recovered.get(selection.selector)
+  if (!hit) return selection
+  return { ...selection, componentName: hit.name, editTarget: hit.editTarget }
+}
+
+/**
+ * A canvas drag-move whose source or anchor is a recovered row takes the
+ * row's callsite. The CONTAINER is left as the bridge reported it: for a
+ * recovered root that coordinate is its own element, the one its children
+ * are written inside, which is exactly the parent a drop into it needs.
+ */
+export function remapDragMove(move: DragMoveRequest, recovered: RecoveredCallsites): DragMoveRequest {
+  const source = recovered.get(move.sourceSelector)
+  const anchor = move.anchorSelector ? recovered.get(move.anchorSelector) : undefined
+  if (!source && !anchor) return move
+  return {
+    ...move,
+    ...(source ? { sourceEditTarget: source.editTarget } : {}),
+    ...(anchor ? { anchorEditTarget: anchor.editTarget } : {}),
+  }
 }
 
 /**
@@ -172,13 +214,20 @@ export async function fetchResolvedCallsites(
   return out
 }
 
-/** The tree with every resolvable row re-targeted, or the tree as given. */
-export async function enrichLayersWithCallsites(roots: OutlineNode[]): Promise<OutlineNode[]> {
+const NONE: RecoveredCallsites = new Map()
+
+/**
+ * The tree with every resolvable row re-targeted, plus those rows by
+ * selector for the canvas — or the tree as given and an empty map.
+ */
+export async function enrichLayersWithCallsites(
+  roots: OutlineNode[],
+): Promise<{ roots: OutlineNode[]; recovered: RecoveredCallsites }> {
   const candidates = collectCallsiteCandidates(roots)
-  if (candidates.length === 0) return roots
+  if (candidates.length === 0) return { roots, recovered: NONE }
   const results = await fetchResolvedCallsites(
     candidates.map(({ file, line, column, parentFile }) => ({ file, line, column, parentFile })),
   )
-  if (!results) return roots
+  if (!results) return { roots, recovered: NONE }
   return applyResolvedCallsites(roots, candidates, results)
 }

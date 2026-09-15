@@ -30,6 +30,7 @@ import {
   walkJsx,
   type JsxNode,
 } from "./resolve-jsx-target"
+import { findGutterStart, readGutterBefore, readLineIndent } from "./template-whitespace"
 
 export interface ApplyJsxMoveEditInput {
   /** Full `.tsx`/`.jsx` source text. */
@@ -160,6 +161,12 @@ export function applyJsxMoveEdit(input: ApplyJsxMoveEditInput): ApplyJsxMoveEdit
   }
   const srcStart = sourceEl.start
   const srcEnd = sourceEl.end
+  // The range actually removed extends back over the element's gutter (the
+  // whitespace run before it, newline included), so the vacated position
+  // leaves no blank line and the neighbours that become adjacent keep one
+  // separator between them. Same unit of relocation as the Vue applicator;
+  // see `findGutterStart`.
+  const removeStart = findGutterStart(source, srcStart)
 
   // Insertion offset is keyed off the PRE-MOVE child list; if source is in the
   // same parent before finalIndex, removing it shifts later indices left, so
@@ -167,10 +174,13 @@ export function applyJsxMoveEdit(input: ApplyJsxMoveEditInput): ApplyJsxMoveEdit
   const preIndex =
     isSameParent && currentIndexInDest < finalIndex ? finalIndex + 1 : finalIndex
 
-  const insertOffset = computeInsertionOffset(destEl, destElementChildren, preIndex)
-  if (insertOffset < 0) {
+  const slot = computeInsertionSlot(source, destEl, destElementChildren, preIndex)
+  if (!slot) {
     return { ok: false, reason: "Could not compute destination insertion offset" }
   }
+  // The boundary checks below reason about the sibling's own position; the
+  // splice itself lands at `slot.offset`, the start of that sibling's gutter.
+  const insertOffset = slot.anchor
   if (insertOffset > srcStart && insertOffset < srcEnd) {
     return { ok: false, reason: "Destination position falls inside the source element" }
   }
@@ -212,7 +222,7 @@ export function applyJsxMoveEdit(input: ApplyJsxMoveEditInput): ApplyJsxMoveEdit
   }
 
   const srcText = source.slice(srcStart, srcEnd)
-  const newSource = spliceMove(source, srcStart, srcEnd, insertOffset, srcText)
+  const newSource = spliceMove(source, removeStart, srcEnd, slot.offset, slot.separator + srcText)
 
   // Post-splice validation — byte-offset splices don't prove the result still
   // parses. A re-parse (errorRecovery off) turns an offset-arithmetic bug into
@@ -331,24 +341,48 @@ function describeJsxExpressionContainer(
   return { description: "{…}", isIterationCallback: false }
 }
 
-/** Byte offset where a new child should go so it lands at element-child
- *  index `preIndex` (pre-move). */
-function computeInsertionOffset(
+interface InsertionSlot {
+  /** The sibling's own start (or the append point) — what the boundary checks reason about. */
+  anchor: number
+  /** Where the bytes are spliced: the start of that sibling's gutter. */
+  offset: number
+  /** The whitespace written before the moved element so it takes the slot's indentation. */
+  separator: string
+}
+
+/**
+ * Where a child goes so it lands at element-child index `preIndex`
+ * (pre-move), with the whitespace that makes it sit on its own line at the
+ * right indentation. Mirrors `computeInsertionSlot` in apply-move-edit.ts.
+ */
+function computeInsertionSlot(
+  source: string,
   dest: BabelNode,
   destElementChildren: BabelNode[],
   preIndex: number,
-): number {
+): InsertionSlot | null {
   if (preIndex < destElementChildren.length) {
+    // Before the Nth child: splice at the START of its gutter and reuse that
+    // gutter as the separator, so both neighbours end up separated as before.
     const target = destElementChildren[preIndex]
-    return typeof target.start === "number" ? target.start : -1
+    if (typeof target.start !== "number") return null
+    return {
+      anchor: target.start,
+      offset: findGutterStart(source, target.start),
+      separator: readGutterBefore(source, target.start),
+    }
   }
   if (destElementChildren.length > 0) {
+    // Append after the last child, reusing its own leading separator.
     const last = destElementChildren[destElementChildren.length - 1]
-    return typeof last.end === "number" ? last.end : -1
+    if (typeof last.start !== "number" || typeof last.end !== "number") return null
+    return { anchor: last.end, offset: last.end, separator: readGutterBefore(source, last.start) }
   }
-  // Empty parent — insert right after the opening tag's `>` (openingElement.end).
+  // Empty parent: right after the opening tag's `>`. No sibling to copy a
+  // separator from, so indent one step past the parent.
   const openEnd = dest.openingElement?.end
-  return typeof openEnd === "number" ? openEnd : -1
+  if (typeof openEnd !== "number" || typeof dest.start !== "number") return null
+  return { anchor: openEnd, offset: openEnd, separator: `\n${readLineIndent(source, dest.start)}  ` }
 }
 
 /** Atomic move splice — offsets resolved against the ORIGINAL source. Mirrors

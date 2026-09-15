@@ -61,7 +61,12 @@ import {
   describeWhyMoveGoesToChat,
   type MoveToChatHandoff,
 } from "./move-to-chat"
-import { enrichLayersWithCallsites } from "./resolve-layer-callsites"
+import {
+  enrichLayersWithCallsites,
+  remapDragMove,
+  remapSelectionTarget,
+  type RecoveredCallsites,
+} from "./resolve-layer-callsites"
 import { applyClassMutation } from "@/components/editor/align-size"
 import type { PropControlValue } from "@/components/editor/prop-control"
 import { resolveTailwindClasses } from "@/editor/tailwind/tailwind-declarations"
@@ -441,6 +446,12 @@ export function useEditorEditing({
   const [aiQueueCount, setAiQueueCount] = useState(0)
 
   const layersGenerationRef = useRef(0)
+  // The rows the Structure tree re-targeted at a recovered callsite, by
+  // selector (see `resolve-layer-callsites.ts`). A click in the prototype
+  // and a drag in the canvas arrive with the bridge's own targets — the
+  // definition file — and take the tree's answer through this. A ref, not
+  // state: the drag-move handler is subscribed once and must stay stable.
+  const recoveredCallsitesRef = useRef<RecoveredCallsites>(new Map())
   // The tree exactly as the bridge walked it. The panel is handed a FILTERED
   // view of this (see `layersRoots` below); both are kept so changing the
   // density is a re-render, not a refetch.
@@ -684,7 +695,8 @@ export function useEditorEditing({
             const enriched = await ctx.step(enrichLayersWithCallsites(roots))
             if (enriched.stale) return
             if (generation !== layersGenerationRef.current) return
-            if (enriched.value !== roots) setLayersRawRoots(enriched.value)
+            recoveredCallsitesRef.current = enriched.value.recovered
+            if (enriched.value.roots !== roots) setLayersRawRoots(enriched.value.roots)
             return
           } catch (err) {
             if (generation !== layersGenerationRef.current) return
@@ -839,7 +851,10 @@ export function useEditorEditing({
         // without a number here the first click's answer would still match
         // the second click's selector.
         const seq = ++selectionSeqRef.current
-        setEditorSelection(selection)
+        // A selection on a row the Structure tree re-targeted at a recovered
+        // callsite takes that target, so the canvas and the tree agree on
+        // what a move or a delete of it means.
+        setEditorSelection(remapSelectionTarget(selection, recoveredCallsitesRef.current))
         // Phase 3 Stage A: warm the manifest cache for this selection's
         // component chain so `attribute()` resolves synchronously at edit
         // time. Also the entry point for the 2026-07-30 widening (Phase 5
@@ -1020,6 +1035,7 @@ export function useEditorEditing({
         // place below that issues that request.
         setLayersRawRoots(null)
         setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
+        recoveredCallsitesRef.current = new Map()
         setLayersError(false)
         // The reset is belt and braces, and it is worth saying which part is
         // load-bearing. The one place that issues the request compares
@@ -1275,6 +1291,7 @@ export function useEditorEditing({
       setAdapterReadyMarker((n) => n + 1)
       setLayersRawRoots(null)
       setLayersGroups(EMPTY_CONDITIONAL_GROUPS)
+      recoveredCallsitesRef.current = new Map()
       setLayersError(false)
       setEditorSelection(null)
       setEditorManifest(null)
@@ -1614,9 +1631,13 @@ export function useEditorEditing({
    * refuse gracefully via setSaveStatus (the applicator's same-file guard),
    * same as the Layers-panel drag.
    */
-  const handleDragMove = useCallback((move: DragMoveRequest) => {
+  const handleDragMove = useCallback((rawMove: DragMoveRequest) => {
     const adapter = adapterRef.current
     if (!adapter) return
+    // The bridge names the definition file for a server component's root;
+    // the Structure tree may have recovered its callsite. Source and anchor
+    // take the tree's answer; the container stays the bridge's.
+    const move = remapDragMove(rawMove, recoveredCallsitesRef.current)
     // Refuse iterated (v-for/map) source OR destination: a plain move would
     // rewrite the shared loop template for EVERY row (codex). Iterated moves
     // need the iteration-scope intercept the Layers-panel drag provides.

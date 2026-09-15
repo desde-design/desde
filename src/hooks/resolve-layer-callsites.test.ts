@@ -3,6 +3,9 @@ import {
   applyResolvedCallsites,
   collectCallsiteCandidates,
   fetchResolvedCallsites,
+  remapDragMove,
+  remapSelectionTarget,
+  type RecoveredCallsites,
   type ResolvedCallsite,
 } from "./resolve-layer-callsites"
 import type { OutlineNode } from "@/types/bridge"
@@ -105,7 +108,7 @@ describe("applyResolvedCallsites", () => {
       null,
     ]
     const out = applyResolvedCallsites(roots, candidates, results)
-    const kpi = out[0].children![0]
+    const kpi = out.roots[0].children![0]
     expect(kpi).toMatchObject({
       id: "kpi",
       name: "KpiCards",
@@ -118,7 +121,7 @@ describe("applyResolvedCallsites", () => {
     // Children are carried over untouched.
     expect(kpi.children![0].id).toBe("kpi-inner")
     // The unresolved row is exactly as it was.
-    expect(out[0].children![2]).toEqual(roots[0].children![2])
+    expect(out.roots[0].children![2]).toEqual(roots[0].children![2])
     // The input is not mutated.
     expect(roots[0].children![0].name).toBe("section")
   })
@@ -149,7 +152,7 @@ describe("applyResolvedCallsites", () => {
     const roots = gridWith(2)
     const candidates = collectCallsiteCandidates(roots)
     const out = applyResolvedCallsites(roots, candidates, [twoStatic, twoStatic])
-    const [c1, c2] = out[0].children!
+    const [c1, c2] = out.roots[0].children!
     expect(c1.editTarget).toMatchObject({ file: GRID, line: 8, column: 6 })
     expect(c2.editTarget).toMatchObject({ file: GRID, line: 25, column: 6 })
   })
@@ -160,7 +163,7 @@ describe("applyResolvedCallsites", () => {
     const roots = gridWith(3)
     const candidates = collectCallsiteCandidates(roots)
     const out = applyResolvedCallsites(roots, candidates, [twoStatic, twoStatic, twoStatic])
-    for (const c of out[0].children!) {
+    for (const c of out.roots[0].children!) {
       expect(c.editTarget).toEqual({ file: CARD, line: 10, column: 4 })
       expect(c.name).toBe("div")
     }
@@ -180,7 +183,81 @@ describe("applyResolvedCallsites", () => {
     const roots = gridWith(2)
     const candidates = collectCallsiteCandidates(roots)
     const out = applyResolvedCallsites(roots, candidates, [conditional, conditional])
-    for (const c of out[0].children!) expect(c.editTarget).toEqual({ file: CARD, line: 10, column: 4 })
+    for (const c of out.roots[0].children!) expect(c.editTarget).toEqual({ file: CARD, line: 10, column: 4 })
+  })
+})
+
+describe("recovered rows, reused by the canvas", () => {
+  /**
+   * The Structure tree is where a server component's callsite is recovered.
+   * A click in the prototype, and a drag in the canvas, arrive with the
+   * bridge's own targets — the definition file. The same lookup, by
+   * selector, gives them what the tree already knows.
+   */
+  const recovered: RecoveredCallsites = new Map([
+    [
+      "section.space-y-5",
+      { name: "KpiCards", editTarget: { file: PAGE, line: 9, column: 6, fileHash: "abcdefabcdef" } },
+    ],
+  ])
+
+  it("collects the recovered rows by selector when applying", () => {
+    const roots = crmTree()
+    const candidates = collectCallsiteCandidates(roots)
+    const results: (ResolvedCallsite | null)[] = [
+      { name: "KpiCards", parentHash: "abcdefabcdef", callsites: [{ line: 9, column: 6, dynamic: false }] },
+      null,
+    ]
+    const out = applyResolvedCallsites(roots, candidates, results)
+    expect(out.recovered.get("#kpi")).toEqual({
+      name: "KpiCards",
+      editTarget: { file: PAGE, line: 9, column: 6, fileHash: "abcdefabcdef" },
+    })
+    expect(out.recovered.size).toBe(1)
+  })
+
+  it("re-targets a selection whose selector is a recovered row, keeping where its bytes live", () => {
+    const selection = {
+      targetId: "section.space-y-5",
+      selector: "section.space-y-5",
+      tagName: "section",
+      editTarget: { file: KPI, line: 8, column: 4, fileHash: "kpi000000000" },
+      authoredAt: { file: KPI, line: 8, column: 4 },
+    }
+    expect(remapSelectionTarget(selection, recovered)).toEqual({
+      ...selection,
+      componentName: "KpiCards",
+      editTarget: { file: PAGE, line: 9, column: 6, fileHash: "abcdefabcdef" },
+    })
+    // Any other selector is returned as it came, same object.
+    const other = { ...selection, selector: "div.other" }
+    expect(remapSelectionTarget(other, recovered)).toBe(other)
+    expect(remapSelectionTarget(null, recovered)).toBeNull()
+  })
+
+  it("re-targets a drag-move's source and anchor, never its container", () => {
+    const move = {
+      sourceSelector: "section.space-y-5",
+      sourceEditTarget: { file: KPI, line: 8, column: 4 },
+      destParentSelector: "div.page",
+      destParentEditTarget: { file: PAGE, line: 8, column: 4 },
+      destIndex: 1,
+      anchorSelector: "section.space-y-5",
+      anchorEditTarget: { file: KPI, line: 8, column: 4 },
+      anchorPlacement: "after" as const,
+      sourceIsIterated: false,
+      destIsIterated: false,
+    }
+    const out = remapDragMove(move, recovered)
+    expect(out.sourceEditTarget).toEqual({ file: PAGE, line: 9, column: 6, fileHash: "abcdefabcdef" })
+    expect(out.anchorEditTarget).toEqual({ file: PAGE, line: 9, column: 6, fileHash: "abcdefabcdef" })
+    expect(out.destParentEditTarget).toEqual(move.destParentEditTarget)
+    // A container that is itself a recovered root keeps the bridge's
+    // coordinate: that is the root's own element, the one its children are
+    // written inside.
+    const into = { ...move, destParentSelector: "section.space-y-5" }
+    expect(remapDragMove(into, recovered).destParentEditTarget).toEqual(into.destParentEditTarget)
+    expect(remapDragMove(move, new Map())).toBe(move)
   })
 })
 
