@@ -245,13 +245,43 @@ export function detectIterationViaStamp(
     return undefined
   }
   if (matches.length < 2) return undefined
-  let index = -1
-  for (let i = 0; i < matches.length; i++) {
-    if (matches[i] === owner) {
-      index = i
-      break
-    }
+  // Same stamp is not the same loop. A component's ROOT element carries the
+  // component's own stamp (`badge.tsx:39:4`), not the callsite's, so every
+  // `<Badge>` on the page matches here whichever loop, or no loop, rendered
+  // it. MEASURED on a shadcn dashboard (2026-09-15): four metric badges in a
+  // `METRICS.map(...)` grid plus one in a `degraded.map(...)` list reported
+  // "item 3 of 5", and the dialog promised "the other 4 keep its value".
+  // The loop is a fact about the DOM, though: an iteration renders its
+  // items as DISTINCT CHILDREN of one container, so the owner's loop is the
+  // lowest container under which some other match sits in a different
+  // child, and its rows are the distinct children holding a match. Two
+  // matches in one row (two badges in one card) are one row, and a match
+  // outside that container is not in this loop at all.
+  //
+  // The callsite is the sharper fact where the runtime has it. Every row of
+  // one loop was written at ONE callsite, and two badges side by side in one
+  // card were written at two, so filtering by the owner's callsite settles
+  // the case the DOM alone cannot: from the DOM, two badges in one card look
+  // exactly like a two-item loop. A match whose callsite the runtime cannot
+  // name is kept and left to the container grouping, never dropped on a
+  // guess. Substrates with no per-element callsite (a production React
+  // build) get the DOM grouping alone, which still separates the two loops.
+  const ownerInstForSite = frameworkAdapter.getOwningInstance(owner)
+  const ownerSite = ownerInstForSite ? frameworkAdapter.getCallSiteStamp(ownerInstForSite) : null
+  let candidates: Element[] = Array.from(matches)
+  if (ownerSite) {
+    candidates = candidates.filter((m) => {
+      if (m === owner) return true
+      const inst = frameworkAdapter.getOwningInstance(m)
+      const site = inst ? frameworkAdapter.getCallSiteStamp(inst) : null
+      return site === null || site === ownerSite
+    })
   }
+  const grouped = groupByLoopContainer(owner, candidates)
+  if (!grouped) return undefined
+  const { rows, ownerRow } = grouped
+  if (rows.length < 2) return undefined
+  const index = rows.indexOf(ownerRow)
   if (index < 0) return undefined
   let key: string | number = index
   try {
@@ -272,5 +302,63 @@ export function detectIterationViaStamp(
   } catch {
     // Best-effort — positional index is a fine fallback.
   }
-  return { source: "v-for", key, index, siblingCount: matches.length, expression: null }
+  return { source: "v-for", key, index, siblingCount: rows.length, expression: null }
+}
+
+/**
+ * The rows of the loop that rendered `owner`, read off the DOM.
+ *
+ * Walk up from `owner`; at each ancestor `a`, its parent is a candidate
+ * container and `a` is the owner's candidate row. The first container where
+ * another match lives under a DIFFERENT direct child is the loop. Its rows
+ * are the distinct direct children that hold at least one match, in document
+ * order (`querySelectorAll` order, which is document order). A container
+ * never qualifies because of a match inside the owner's own row, so a nested
+ * repeat of the same component inside one item does not split that item.
+ *
+ * `null` when no ancestor qualifies: every other match is in the owner's own
+ * subtree chain, which is nesting rather than iteration.
+ */
+export function groupByLoopContainer(
+  owner: Element,
+  matches: ArrayLike<Element>,
+): { rows: Element[]; ownerRow: Element } | null {
+  const others: Element[] = []
+  for (let i = 0; i < matches.length; i++) {
+    if (matches[i] !== owner) others.push(matches[i])
+  }
+  if (others.length === 0) return null
+  /** The direct child of `container` on the path down to `el`, or null. */
+  const childToward = (container: Element, el: Element): Element | null => {
+    let cur: Element | null = el
+    while (cur && cur.parentElement !== container) cur = cur.parentElement
+    return cur
+  }
+  let ownerRow: Element | null = owner
+  while (ownerRow) {
+    const container: Element | null = ownerRow.parentElement
+    if (!container) return null
+    let splits = false
+    for (const other of others) {
+      const row = childToward(container, other)
+      if (row && row !== ownerRow) {
+        splits = true
+        break
+      }
+    }
+    if (splits) {
+      const rows: Element[] = []
+      const seen = new Set<Element>()
+      for (let i = 0; i < matches.length; i++) {
+        const row = childToward(container, matches[i])
+        if (row && !seen.has(row)) {
+          seen.add(row)
+          rows.push(row)
+        }
+      }
+      return { rows, ownerRow }
+    }
+    ownerRow = container
+  }
+  return null
 }

@@ -13,7 +13,8 @@
  * 2026-08-09.
  */
 import { afterEach, describe, expect, it } from "vitest"
-import { tracer } from "./tracer-attribution"
+import { detectIterationViaStamp, groupByLoopContainer, tracer } from "./tracer-attribution"
+import type { FrameworkRuntimeAdapter } from "./leaf-prop-attribution"
 
 const w = window as unknown as Record<string, unknown>
 
@@ -65,5 +66,153 @@ describe("tracer.locFromInfo — repo-relative path reconstruction", () => {
     expect(tracer.locFromInfo(undefined)).toBeNull()
     expect(tracer.locFromInfo({ pos: undefined } as never)).toBeNull()
     expect(tracer.locFromInfo({ pos: ["", 1, 1] } as never)).toBeNull()
+  })
+})
+
+/**
+ * A runtime with no instances: the same-instance guard passes, no mount root
+ * narrows the scope, no key is read. What is left is the DOM, which is the
+ * part under test.
+ */
+const domOnlyAdapter = {
+  getOwningInstance: () => null,
+  getInstanceMountRoot: () => null,
+  getParentInstance: () => null,
+  getCallSiteStamp: () => null,
+  getInstanceIterationKey: () => null,
+} as unknown as FrameworkRuntimeAdapter
+
+const STAMP = "src/components/ui/badge.tsx:39:4"
+
+/**
+ * A runtime that knows callsites: each element stands for its own component
+ * instance, and its callsite is the `data-callsite` attribute the fixture
+ * gives it. This is the React shape, where the plugin's stamp on a component
+ * ELEMENT lands on the fiber's props while the DOM carries the component's
+ * own root stamp.
+ */
+const callsiteAdapter = {
+  getOwningInstance: (el: Element) => el,
+  getInstanceMountRoot: () => null,
+  getParentInstance: () => null,
+  getCallSiteStamp: (inst: unknown) => (inst as Element).getAttribute("data-callsite"),
+  getInstanceIterationKey: () => null,
+} as unknown as FrameworkRuntimeAdapter
+
+describe("detectIterationViaStamp — rows come from the loop, not the stamp", () => {
+  afterEach(() => {
+    document.body.innerHTML = ""
+  })
+
+  it("does not count a same-component match rendered by a different loop", () => {
+    // The shadcn dashboard, 2026-09-15: four metric badges in a grid, each in
+    // its own card, and one status badge in a list elsewhere on the page. All
+    // five carry the Badge component's ROOT stamp. The dialog said "item 3 of
+    // 5"; the loop has four rows.
+    document.body.innerHTML = `
+      <main>
+        <div class="grid">
+          <div class="card"><div class="content"><span data-desde-src="${STAMP}">+12.4%</span></div></div>
+          <div class="card"><div class="content"><span data-desde-src="${STAMP}">+3.1%</span></div></div>
+          <div class="card"><div class="content"><span id="owner" data-desde-src="${STAMP}">+0.18%</span></div></div>
+          <div class="card"><div class="content"><span data-desde-src="${STAMP}">-22ms</span></div></div>
+        </div>
+        <div class="card"><ul><li><span data-desde-src="${STAMP}">Degraded</span></li></ul></div>
+      </main>`
+    const owner = document.getElementById("owner")!
+    const result = detectIterationViaStamp(owner, null, domOnlyAdapter)
+    expect(result).toMatchObject({ source: "v-for", index: 2, siblingCount: 4 })
+  })
+
+  it("counts a plain sibling loop by its items", () => {
+    document.body.innerHTML = `
+      <ul>
+        <li data-desde-src="${STAMP}">a</li>
+        <li id="owner" data-desde-src="${STAMP}">b</li>
+        <li data-desde-src="${STAMP}">c</li>
+      </ul>`
+    const owner = document.getElementById("owner")!
+    expect(detectIterationViaStamp(owner, null, domOnlyAdapter)).toMatchObject({
+      index: 1,
+      siblingCount: 3,
+    })
+  })
+
+  it("separates the two loops by callsite when the runtime knows it", () => {
+    // Same page as above, with the callsites the React adapter reads off the
+    // fibers: the four metric badges share overview.tsx:27, the status badge
+    // was written at overview.tsx:47.
+    document.body.innerHTML = `
+      <main>
+        <div class="grid">
+          <div class="card"><span data-desde-src="${STAMP}" data-callsite="overview.tsx:27:15">+12.4%</span></div>
+          <div class="card"><span data-desde-src="${STAMP}" data-callsite="overview.tsx:27:15">+3.1%</span></div>
+          <div class="card"><span id="owner" data-desde-src="${STAMP}" data-callsite="overview.tsx:27:15">+0.18%</span></div>
+          <div class="card"><span data-desde-src="${STAMP}" data-callsite="overview.tsx:27:15">-22ms</span></div>
+        </div>
+        <div class="card"><ul><li><span data-desde-src="${STAMP}" data-callsite="overview.tsx:47:19">Degraded</span></li></ul></div>
+      </main>`
+    const owner = document.getElementById("owner")!
+    expect(detectIterationViaStamp(owner, null, callsiteAdapter)).toMatchObject({
+      index: 2,
+      siblingCount: 4,
+    })
+  })
+
+  it("treats two badges written at two callsites inside one row as one row", () => {
+    // A card that renders two badges from the same item: two matches, one
+    // iteration. From the DOM alone this is indistinguishable from a
+    // two-item loop; the callsites are what say otherwise.
+    document.body.innerHTML = `
+      <div class="grid">
+        <div class="card"><span data-desde-src="${STAMP}" data-callsite="c.tsx:27:9">a</span><span data-desde-src="${STAMP}" data-callsite="c.tsx:28:9">a2</span></div>
+        <div class="card"><span id="owner" data-desde-src="${STAMP}" data-callsite="c.tsx:27:9">b</span><span data-desde-src="${STAMP}" data-callsite="c.tsx:28:9">b2</span></div>
+      </div>`
+    const owner = document.getElementById("owner")!
+    expect(detectIterationViaStamp(owner, null, callsiteAdapter)).toMatchObject({
+      index: 1,
+      siblingCount: 2,
+    })
+  })
+
+  it("keeps a match whose callsite the runtime cannot name", () => {
+    // Unknown is not different: the container grouping still judges it.
+    document.body.innerHTML = `
+      <ul>
+        <li><span data-desde-src="${STAMP}" data-callsite="c.tsx:5:7">a</span></li>
+        <li><span id="owner" data-desde-src="${STAMP}" data-callsite="c.tsx:5:7">b</span></li>
+        <li><span data-desde-src="${STAMP}">c</span></li>
+      </ul>`
+    const owner = document.getElementById("owner")!
+    expect(detectIterationViaStamp(owner, null, callsiteAdapter)).toMatchObject({
+      index: 1,
+      siblingCount: 3,
+    })
+  })
+
+  it("reports no iteration when every other match is nested inside the owner's own subtree chain", () => {
+    document.body.innerHTML = `
+      <div id="owner" data-desde-src="${STAMP}">
+        <div><span data-desde-src="${STAMP}">nested</span></div>
+      </div>`
+    const owner = document.getElementById("owner")!
+    expect(detectIterationViaStamp(owner, null, domOnlyAdapter)).toBeUndefined()
+  })
+
+  it("groupByLoopContainer returns the rows in document order with the owner's row among them", () => {
+    document.body.innerHTML = `
+      <section>
+        <article><p><b id="x" data-desde-src="${STAMP}">1</b></p></article>
+        <article><p><b id="owner" data-desde-src="${STAMP}">2</b></p></article>
+        <aside><b data-desde-src="${STAMP}">not a row of this loop</b></aside>
+      </section>`
+    const owner = document.getElementById("owner")!
+    const matches = document.querySelectorAll(`[data-desde-src="${STAMP}"]`)
+    const grouped = groupByLoopContainer(owner, matches)!
+    // The lowest container that splits owner from another match is <section>:
+    // its rows are the two <article>s and the <aside>, in document order.
+    expect(grouped.rows.map((r) => r.tagName)).toEqual(["ARTICLE", "ARTICLE", "ASIDE"])
+    expect(grouped.ownerRow.tagName).toBe("ARTICLE")
+    expect(grouped.rows.indexOf(grouped.ownerRow)).toBe(1)
   })
 })
