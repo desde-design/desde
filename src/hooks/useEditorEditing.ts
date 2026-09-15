@@ -697,6 +697,13 @@ export function useEditorEditing({
             if (generation !== layersGenerationRef.current) return
             recoveredCallsitesRef.current = enriched.value.recovered
             if (enriched.value.roots !== roots) setLayersRawRoots(enriched.value.roots)
+            // A selection made WHILE the lookup was in flight went through the
+            // previous (or empty) map and still names the definition file. Run
+            // it through the new map now, or a Delete on it would edit the
+            // component's own root for every page that uses it (codex P1).
+            const store = useEditorStore.getState()
+            const remapped = remapSelectionTarget(store.editorSelection, enriched.value.recovered)
+            if (remapped !== store.editorSelection) store.setEditorSelection(remapped)
             return
           } catch (err) {
             if (generation !== layersGenerationRef.current) return
