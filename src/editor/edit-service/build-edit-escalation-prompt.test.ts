@@ -688,6 +688,15 @@ describe("describeMoveDestination", () => {
     )
   })
 
+  it("names the sibling even when the parent is unknown (a cross-file drop)", () => {
+    expect(
+      describeMoveDestination(undefined, 0, {
+        editTarget: { file: "src/Other.tsx", line: 20, column: 8 },
+        placement: "after",
+      }),
+    ).toBe("move it to just after the element at src/Other.tsx:20:8")
+  })
+
   it("falls back to the child index when no sibling was named", () => {
     expect(describeMoveDestination(parent, 2)).toBe(
       "move it to be child index 2 of the element at src/App.tsx:14:6",

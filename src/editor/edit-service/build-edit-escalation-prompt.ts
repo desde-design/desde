@@ -325,14 +325,16 @@ export function describeMoveDestination(
     placement: "before" | "after"
   },
 ): string {
-  if (!parent) return "move it within the page"
-  const at = `the element at ${parent.file}:${parent.line}:${parent.column}`
   // A named sibling is the request as the user made it; a child index is a
-  // count the agent would have to redo against the file anyway.
+  // count the agent would have to redo against the file anyway. The parent
+  // may be unknown (a cross-file drop names the sibling and nothing else).
   if (anchor) {
     const beside = `the element at ${anchor.editTarget.file}:${anchor.editTarget.line}:${anchor.editTarget.column}`
-    return `move it to just ${anchor.placement} ${beside} (inside ${at})`
+    const inside = parent ? ` (inside the element at ${parent.file}:${parent.line}:${parent.column})` : ""
+    return `move it to just ${anchor.placement} ${beside}${inside}`
   }
+  if (!parent) return "move it within the page"
+  const at = `the element at ${parent.file}:${parent.line}:${parent.column}`
   return index < 0 ? `append it to ${at}` : `move it to be child index ${index} of ${at}`
 }
 

@@ -384,15 +384,109 @@ describe("LayersPanel", () => {
     expect(onMove).not.toHaveBeenCalled()
   })
 
-  it("refuses cross-file drops via onMoveRefused", () => {
+  it("hands a cross-file drop to chat instead of refusing it", () => {
+    // Source and drop target are written in different files. The
+    // deterministic move rewrites one file, so it cannot do this; chat can.
+    // The drop is ACCEPTED and routed, not refused: a refusal dead-ended the
+    // user with a message about files.
+    const onMove = vi.fn()
+    const onMoveRefused = vi.fn()
+    const onMoveViaChat = vi.fn()
+    const roots = makeDraggableRoots()
+    roots[0].children![1].editTarget = { file: "Other.vue", line: 4, column: 5 }
+    roots[0].editTarget = { file: "Other.vue", line: 2, column: 3 }
+    render(
+      <LayersPanel
+        roots={roots}
+        selectedSelector={null}
+        onSelect={() => {}}
+        onMove={onMove}
+        onMoveRefused={onMoveRefused}
+        onMoveViaChat={onMoveViaChat}
+        onRefresh={() => {}}
+        refreshing={false}
+      />,
+    )
+    fireEvent.click(screen.getByLabelText("Expand"))
+    const allUiButtons = screen.getAllByText("UiButton")
+    const rowAButton = allUiButtons[0].closest("button") as HTMLButtonElement
+    const rowBButton = allUiButtons[1].closest("button") as HTMLButtonElement
+
+    const dataTransfer: Partial<DataTransfer> = { setData: vi.fn(), getData: vi.fn() }
+    fireEvent.dragStart(rowAButton, { dataTransfer })
+    rowBButton.getBoundingClientRect = () =>
+      ({ top: 100, bottom: 130, height: 30, left: 0, right: 100, width: 100, x: 0, y: 100, toJSON: () => ({}) }) as DOMRect
+    // dragover is ACCEPTED (default prevented) so the browser lets the drop happen.
+    const notPrevented = fireEvent.dragOver(rowBButton, { dataTransfer, clientY: 125 })
+    expect(notPrevented).toBe(false)
+    expect(onMoveViaChat).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "different-file", position: "after" }),
+      "hover",
+    )
+    fireEvent.drop(rowBButton, { dataTransfer, clientY: 125 })
+
+    expect(onMove).not.toHaveBeenCalled()
+    expect(onMoveRefused).not.toHaveBeenCalled()
+    expect(onMoveViaChat).toHaveBeenLastCalledWith(
+      {
+        source: expect.objectContaining({ id: "n2" }),
+        target: expect.objectContaining({ id: "n3" }),
+        position: "after",
+        reason: "different-file",
+        sourceFile: "Demo.vue",
+        targetFile: "Other.vue",
+      },
+      "drop",
+    )
+  })
+
+  it("hands a same-file drop with no same-file parent to chat (the shared-primitive case)", () => {
+    // Two rows written in the SAME file (two server-rendered <Card>s both
+    // attribute to card.tsx) under a parent written elsewhere. The file check
+    // passes and the effective-parent walk finds nothing; before, this was
+    // "no valid parent container". Chat gets it.
+    const onMove = vi.fn()
+    const onMoveRefused = vi.fn()
+    const onMoveViaChat = vi.fn()
+    const roots = makeDraggableRoots()
+    roots[0].editTarget = { file: "Other.vue", line: 2, column: 3 }
+    render(
+      <LayersPanel
+        roots={roots}
+        selectedSelector={null}
+        onSelect={() => {}}
+        onMove={onMove}
+        onMoveRefused={onMoveRefused}
+        onMoveViaChat={onMoveViaChat}
+        onRefresh={() => {}}
+        refreshing={false}
+      />,
+    )
+    fireEvent.click(screen.getByLabelText("Expand"))
+    const allUiButtons = screen.getAllByText("UiButton")
+    const rowAButton = allUiButtons[0].closest("button") as HTMLButtonElement
+    const rowBButton = allUiButtons[1].closest("button") as HTMLButtonElement
+
+    const dataTransfer: Partial<DataTransfer> = { setData: vi.fn(), getData: vi.fn() }
+    fireEvent.dragStart(rowAButton, { dataTransfer })
+    rowBButton.getBoundingClientRect = () =>
+      ({ top: 100, bottom: 130, height: 30, left: 0, right: 100, width: 100, x: 0, y: 100, toJSON: () => ({}) }) as DOMRect
+    fireEvent.dragOver(rowBButton, { dataTransfer, clientY: 125 })
+    fireEvent.drop(rowBButton, { dataTransfer, clientY: 125 })
+
+    expect(onMove).not.toHaveBeenCalled()
+    expect(onMoveRefused).not.toHaveBeenCalled()
+    expect(onMoveViaChat).toHaveBeenLastCalledWith(
+      expect.objectContaining({ reason: "no-parent", sourceFile: "Demo.vue", targetFile: "Demo.vue" }),
+      "drop",
+    )
+  })
+
+  it("still refuses a cross-file drop when no chat is wired", () => {
     const onMove = vi.fn()
     const onMoveRefused = vi.fn()
     const roots = makeDraggableRoots()
-    // Make the second UiButton's source location point at a different file.
     roots[0].children![1].editTarget = { file: "Other.vue", line: 4, column: 5 }
-    // ALSO change root parent to Other.vue so that when we drop ON the second
-    // button, the dest parent (root) and source (first button, Demo.vue)
-    // disagree.
     roots[0].editTarget = { file: "Other.vue", line: 2, column: 3 }
     render(
       <LayersPanel

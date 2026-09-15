@@ -51,9 +51,16 @@ import { useDriftReporter } from "./useDriftReporter"
 import type { CatalogEntry } from "@/editor/edit-service/component-catalog"
 import { buildVariantCells } from "@/editor/edit-service/variant-cells"
 import type {
+  LayersChatMovePayload,
   LayersDropRefusal,
   LayersMovePayload,
 } from "@/components/editor/layers-panel"
+import {
+  buildMoveEditToChatHandoff,
+  buildMoveToChatHandoff,
+  describeWhyMoveGoesToChat,
+  type MoveToChatHandoff,
+} from "./move-to-chat"
 import { applyClassMutation } from "@/components/editor/align-size"
 import type { PropControlValue } from "@/components/editor/prop-control"
 import { resolveTailwindClasses } from "@/editor/tailwind/tailwind-declarations"
@@ -1559,6 +1566,30 @@ export function useEditorEditing({
   )
 
   /**
+   * Send a move the direct path could not make to chat, under the session,
+   * and say what happened. `null` means the drop had nothing to hand over
+   * (no source position), which is the one shape that stays a plain status.
+   */
+  const handOffMoveToChat = useCallback(
+    (handoff: MoveToChatHandoff | null) => {
+      if (!handoff) {
+        setSaveStatus("Move could not be handed to chat: the element has no source position.")
+        return
+      }
+      void session.run(async (ctx) => {
+        const res = await ctx.step(handOffToChat(handoff.prompt, { signal: ctx.signal }))
+        if (res.stale) return
+        setSaveStatus(
+          res.value
+            ? "Move needs a decision. Sent to chat."
+            : "Move could not be sent to chat, so nothing was changed.",
+        )
+      })
+    },
+    [handOffToChat, session],
+  )
+
+  /**
    * Direct-manipulation drag-to-move (Phase 2). The bridge's DragMoveOverlay
    * emits a DRAG_MOVE_COMMITTED on drop; the adapter forwards it here. Build
    * the SAME `move` StructuralEdit handleLayerMove builds (from source +
@@ -1579,17 +1610,6 @@ export function useEditorEditing({
       )
       return
     }
-    // Same-file only (apply-move-edit's contract). A cross-file drop (the common
-    // slot / component-internal case where the resolved destination lives in a
-    // different SFC) must refuse cleanly here — NOT fall into the LLM-repair
-    // path, which could drop the destination anchor and rewrite the source file
-    // (codex P1). Matches the documented slotted-reorder limitation.
-    if (move.sourceEditTarget.file !== move.destParentEditTarget.file) {
-      setSaveStatus(
-        "Can't drag-move across files (the drop landed in another component's source). Use the Layers panel for cross-file / slotted moves.",
-      )
-      return
-    }
     const id = makeEditId()
     const edit: StructuralEdit = {
       kind: "move",
@@ -1597,6 +1617,7 @@ export function useEditorEditing({
       target: {
         targetId: move.sourceSelector,
         selector: move.sourceSelector,
+        componentName: useEditorStore.getState().editorSelection?.componentName,
         editTarget: move.sourceEditTarget,
       },
       destination: {
@@ -1609,10 +1630,21 @@ export function useEditorEditing({
           : {}),
       },
     }
+    // Same-file only (apply-move-edit's contract). A cross-file drop (the
+    // common slot / component-internal case where the resolved destination
+    // lives in a different file) does not go through the deterministic path,
+    // which could drop the destination anchor and rewrite the source file
+    // (codex P1). It goes to chat with the intent, the same as the
+    // Layers-panel drop.
+    if (move.sourceEditTarget.file !== move.destParentEditTarget.file) {
+      const why = `The element is written in ${move.sourceEditTarget.file}; the drop landed in ${move.destParentEditTarget.file}. A direct move rewrites one file, so it cannot do this.`
+      handOffMoveToChat(buildMoveEditToChatHandoff(edit, why))
+      return
+    }
     // Drag-move dispatches immediately, like every other edit (branch mode
     // is the only editor edit substrate).
     applyEditThenReport(edit, adapter, "Move")
-  }, [applyEditThenReport])
+  }, [applyEditThenReport, handOffMoveToChat])
 
   const handleLayerMoveRefused = useCallback((reason: LayersDropRefusal) => {
     // The layers panel silently rejects most invalid drops (returns false
@@ -1620,23 +1652,47 @@ export function useEditorEditing({
     // reason, designers see "dragging does nothing" with zero feedback.
     // Translate each refusal into a one-liner the pending-changes-panel
     // banner can show — same channel used by deterministic edit failures.
+    // `different-file` and `no-parent` reach here only when no chat is wired
+    // (the panel hands those drops to chat otherwise, see
+    // `handleLayerMoveViaChat`), so their copy says what is true rather than
+    // what the tool cannot do.
     const message =
       reason === "no-source-location"
         ? "Can't drag this element: it has no source mapping (not authored in this prototype's repo, or the framework adapter didn't tag it)."
         : reason === "no-parent-source-location"
           ? "Can't drop here: the destination's parent has no source mapping."
           : reason === "different-file"
-            ? "Can't drop here: source and destination live in different files (cross-file moves aren't supported yet)."
+            ? "Can't drop here: the element and the drop target are written in different files, and a direct move rewrites one file. Ask chat to move it."
             : reason === "self-or-descendant"
               ? "Can't drop an element into itself or one of its descendants."
               : reason === "no-parent"
-                ? "Can't drop here: no valid parent container."
+                ? "Can't drop here: nothing above the drop target is written in the element's file, so a direct move has no parent to write into. Ask chat to move it."
                 : reason === "unmapped-row"
                   ? "Can't move this row: it isn't in the unfiltered tree, so the new position can't be counted. Switch the Structure detail to Everything and try again."
                   : `Drag/drop refused: ${reason}`
     setSaveStatus(message)
     console.info("[Editor] Drag/drop refused:", reason)
   }, [])
+
+  /**
+   * A Layers-panel drop the direct move cannot make but chat can: the source
+   * and the drop target are written in different files, or nothing above the
+   * target is written in the source's file (two server-rendered instances of
+   * one shared primitive look like this). The panel accepts the drop and
+   * sends it here. On hover the banner says where the drop will go; on drop
+   * the move is handed to chat with the element, the sibling it was dropped
+   * beside, and why the direct path could not do it.
+   */
+  const handleLayerMoveViaChat = useCallback(
+    (payload: LayersChatMovePayload, phase: "hover" | "drop") => {
+      if (phase === "hover") {
+        setSaveStatus(`Drop to hand this move to chat. ${describeWhyMoveGoesToChat(payload)}`)
+        return
+      }
+      handOffMoveToChat(buildMoveToChatHandoff(payload))
+    },
+    [handOffMoveToChat],
+  )
 
   // Phase F4 — Edit component flow. Tracks whether the iframe is
   // currently navigated to the F3 isolation route, plus the URL we
@@ -5425,6 +5481,7 @@ export function useEditorEditing({
     handleLayerHover,
     handleLayerMove,
     handleLayerMoveRefused,
+    handleLayerMoveViaChat,
     handleDetach,
     handleLayerDetach,
     handleLayerDelete,

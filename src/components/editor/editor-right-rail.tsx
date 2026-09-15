@@ -365,6 +365,7 @@ export function EditorRightRail({
       onHover={editing.handleLayerHover}
       onMove={editing.handleLayerMove}
       onMoveRefused={editing.handleLayerMoveRefused}
+      onMoveViaChat={editing.handleLayerMoveViaChat}
       onRefresh={editing.refreshLayers}
       refreshing={editing.layersRefreshing}
       error={editing.layersError}
