@@ -50,9 +50,34 @@ describe("bootBannerLines", () => {
     const lines = bootBannerLines({ ...base, signInUrl: null })
     expect(lines.join("\n")).not.toContain("sign in")
     expect(lines.join("\n")).not.toContain("auth/local")
-    // Nothing is appended after the diagnostics, so the last line is the last
-    // diagnostic rather than a stray blank the reader would scroll past.
-    expect(lines.at(-1)).toContain("VIEWER_ADMIN_TOKEN")
+  })
+
+  it("ends on the viewer's own URL when there is no sign-in URL", () => {
+    // The reported bug (Mo, 2026-09-14): a `docker run` banner that ended on
+    // the VIEWER_ADMIN_TOKEN warning, with the address to open buried in the
+    // profile line five lines up.
+    const lines = bootBannerLines({ ...base, signInUrl: null })
+    expect(lines.at(-1)).toBe("  http://localhost:3100")
+    expect(lines.at(-2)).toBe("")
+    expect(lines.at(-3)).toBe("[viewer] Open this in a browser:")
+  })
+
+  it("keeps every warning above the URL to open, sign-in URL or not", () => {
+    for (const signInUrl of [null, SIGN_IN]) {
+      const lines = bootBannerLines({ ...base, adminTokenSet: false, signInUrl })
+      const warningAt = lines.findIndex((line) => line.includes("VIEWER_ADMIN_TOKEN"))
+      expect(warningAt).toBeGreaterThanOrEqual(0)
+      expect(warningAt).toBeLessThan(lines.length - 1)
+    }
+  })
+
+  it("always ends on a URL, so `.at(-1)` is what a reader copies", () => {
+    for (const signInUrl of [null, SIGN_IN]) {
+      for (const adminTokenSet of [false, true]) {
+        const lines = bootBannerLines({ ...base, adminTokenSet, signInUrl })
+        expect(lines.at(-1)?.trim()).toMatch(/^https?:\/\//)
+      }
+    }
   })
 
   it("omits the admin-bearer notice when a token is configured", () => {

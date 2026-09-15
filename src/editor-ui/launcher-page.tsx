@@ -257,6 +257,15 @@ export function LauncherPage({
         <div className="mb-6 flex items-center justify-between gap-3">
           <h1 className="text-2xl font-medium">Projects</h1>
           <Button
+            /*
+              Secondary, not the filled teal primary (Mo, 2026-09-14): match
+              the Viewer's "Add project", which sits in the same place on the
+              same kind of screen. A soft fill still reads as a button without
+              competing with the project cards below, which are the thing you
+              came to this page for. The Viewer's reasoning is written out at
+              its own call site in `viewer/app/projects-list.tsx`.
+            */
+            variant="secondary"
             onClick={() => openDialog(null)}
             disabled={busy}
             data-testid="launcher-new-project"

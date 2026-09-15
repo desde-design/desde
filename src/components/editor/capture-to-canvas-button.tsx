@@ -21,6 +21,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { Eyebrow, Field, ListRow } from "@/components/blocks"
 import { useAppStore } from "@/stores"
 import { useLocalCanvases } from "@/hooks/useLocalCanvases"
@@ -160,18 +166,32 @@ export function CaptureToCanvasButton({
 
   return (
     <>
-      <Button
-        size={iconOnly ? "icon" : "lg"}
-        variant={iconOnly ? "ghost" : "outline"}
-        onClick={() => void onCapture()}
-        disabled={!enabled || capturing}
-        className={cn(!iconOnly && "gap-1.5", className)}
-        title="Capture this screen and add it to a canvas"
-        aria-label={iconOnly ? "Screenshot → canvas" : undefined}
-      >
-        {capturing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Camera className="h-3.5 w-3.5" />}
-        {iconOnly ? null : "Screenshot → canvas"}
-      </Button>
+      {/* The shadcn `Tooltip`, not the native `title` attribute: this button
+          sits in the toolbar pill, where every other control is dark,
+          immediate and themed. See the same note in `editor-toolbar.tsx`. */}
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            {/* span wrapper so the tooltip still fires while the button is
+                disabled (a disabled button swallows pointer events), matching
+                `UndoRedoControls`. */}
+            <span>
+              <Button
+                size={iconOnly ? "icon" : "lg"}
+                variant={iconOnly ? "ghost" : "outline"}
+                onClick={() => void onCapture()}
+                disabled={!enabled || capturing}
+                className={cn(!iconOnly && "gap-1.5", className)}
+                aria-label={iconOnly ? "Screenshot → canvas" : undefined}
+              >
+                {capturing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Camera className="h-3.5 w-3.5" />}
+                {iconOnly ? null : "Screenshot → canvas"}
+              </Button>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>Capture this screen and add it to a canvas</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
 
       <Dialog open={open} onOpenChange={(o) => !busy && setOpen(o)}>
         <DialogContent size="xl">

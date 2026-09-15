@@ -12,6 +12,11 @@ import type { SurfaceEntry } from "@/components/gallery/types"
  *
  * The same block is what the Editor's launcher shows while a project opens,
  * so this covers both surfaces.
+ *
+ * There is no "small" state any more. It demonstrated 96px "for a tighter
+ * surface", which no call site ever used, and once the default came down to
+ * 80 (Mo, 2026-09-14) the small one was the BIGGER one. A gallery state for a
+ * size the product cannot produce is a state nobody can review.
  */
 export const PROJECT_LOADER_SURFACE: SurfaceEntry = {
   id: "project-loader",
@@ -34,15 +39,6 @@ export const PROJECT_LOADER_SURFACE: SurfaceEntry = {
       render: () => (
         <PanelFrame>
           <ProjectLoader />
-        </PanelFrame>
-      ),
-    },
-    {
-      id: "project-loader/small",
-      label: "Small — 96px, for a tighter surface",
-      render: () => (
-        <PanelFrame>
-          <ProjectLoader size={96} label="Opening prototype" />
         </PanelFrame>
       ),
     },

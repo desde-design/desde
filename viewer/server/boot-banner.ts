@@ -5,11 +5,12 @@
  * Two things went wrong with printing these inline in `server/index.ts`, and
  * this module exists to fix both.
  *
- * ## The sign-in URL was not last, and under Docker it was not even in order
+ * ## The URL to open was not last, and under Docker it was not even in order
  *
- * The local sign-in URL is the only way into a fresh instance that has no
- * GitHub App configured, so it is the one line a reader has to find and copy.
- * It was printed in the middle of the banner, with warnings after it.
+ * The banner always ends on the address the reader is meant to open: the local
+ * sign-in URL when one was minted, and the viewer's own URL otherwise. That is
+ * the one line they have to find and copy, and it used to be printed in the
+ * middle of the banner, with warnings after it.
  *
  * Worse, the order on screen did not match the order in the source. The
  * warning lines went to stderr (`console.warn`) while everything else went to
@@ -19,7 +20,7 @@
  * landed after the whole stdout group, which pushed four warning lines below
  * the sign-in URL and buried it.
  *
- * So: every line here goes out on ONE stream, and the sign-in URL is the last
+ * So: every line here goes out on ONE stream, and the URL to open is the last
  * line printed. Warnings losing stderr is the deliberate trade. These are boot
  * diagnostics read by a person watching a terminal, not a log stream anything
  * greps by severity, and a banner that is reordered by the reader is worth less
@@ -51,8 +52,9 @@ export interface BootBannerInputs {
 }
 
 /**
- * The banner, in print order. The sign-in URL, when there is one, is the final
- * line: `bootBannerLines(...).at(-1)` is what a reader copies.
+ * The banner, in print order. `bootBannerLines(...).at(-1)` is always the URL
+ * a reader copies: the sign-in URL when there is one, the viewer's own address
+ * otherwise.
  */
 export function bootBannerLines(inputs: BootBannerInputs): string[] {
   const lines: string[] = [
@@ -81,11 +83,22 @@ export function bootBannerLines(inputs: BootBannerInputs): string[] {
     // URL stays the last line.
     lines.push(
       "",
-      "[viewer] No GitHub sign-in configured. Open the URL below to sign in. It is regenerated",
-      "[viewer] on every restart, and a session you already have survives a restart either way.",
+      "[viewer] No GitHub sign-in configured. Open the URL below in a browser to sign in. It is",
+      "[viewer] regenerated on every restart, and a session you already have survives a restart",
+      "[viewer] either way.",
       "",
       `  ${inputs.signInUrl}`,
     )
+  } else {
+    // With nothing to sign in through, the address of the viewer itself is
+    // what a reader has to find and copy, so it gets the last line for the
+    // same reason the sign-in URL does (Mo, 2026-09-14, reading `docker run`
+    // output: "it doesn't clearly output the page to use to view in the
+    // browser"). The first line already carries this URL, but it carries it
+    // behind `profile=` and `bridge=`, where it reads as one more diagnostic
+    // rather than as the way in. Ending on the admin-token warning instead
+    // made the reader scroll back up past four lines to find it.
+    lines.push("", "[viewer] Open this in a browser:", "", `  ${inputs.publicUrl}`)
   }
 
   return lines

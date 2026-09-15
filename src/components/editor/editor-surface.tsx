@@ -15,6 +15,12 @@ import {
 import type { SegmentedToggleOption } from "@/components/editor/segmented-toggle"
 import type { ActiveBreakpoint } from "@/editor/tailwind/tailwind-classes"
 import { Button } from "@/components/ui/button"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { Minimize2 } from "lucide-react"
 import {
@@ -1014,16 +1020,27 @@ export function EditorSurface({
           corner that brings the chrome back. Only rendered while chrome is
           hidden, layered above the prototype container. */}
       {chromeHidden ? (
-        <Button
-          variant="outline"
-          size="icon-lg"
-          onClick={() => setChromeHidden(false)}
-          title="Show chrome"
-          data-testid="editor-show-chrome"
-          className="fixed right-3 top-3 z-50 bg-background/90 shadow-md backdrop-blur"
-        >
-          <Minimize2 className="h-4 w-4" />
-        </Button>
+        // The shadcn `Tooltip`, not the native `title` attribute: this is the
+        // other half of the toolbar's Hide chrome, and that one is themed.
+        // Hiding the chrome and then hovering the way back should not switch
+        // tooltip systems mid-gesture.
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon-lg"
+                onClick={() => setChromeHidden(false)}
+                aria-label="Show chrome"
+                data-testid="editor-show-chrome"
+                className="fixed right-3 top-3 z-50 bg-background/90 shadow-md backdrop-blur"
+              >
+                <Minimize2 className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Show chrome</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       ) : null}
       <main className="flex flex-1 overflow-hidden">
         {/* Keep the iframe mounted across Editor↔Canvas toggles so

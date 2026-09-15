@@ -44,6 +44,12 @@ import { BreakpointMenu } from "@/components/editor/breakpoint-menu"
 import { CaptureToCanvasButton } from "@/components/editor/capture-to-canvas-button"
 import { UndoRedoControls } from "@/components/editor/undo-redo-controls"
 import { PinsHiddenToggle } from "@/components/editor/pins-hidden-toggle"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import type { ActiveBreakpoint } from "@/editor/tailwind/tailwind-classes"
 import type { CaptureScreenshotResult } from "@/hooks/useIframeScreenshotCapture"
 import type { BranchesApi } from "@/hooks/useEditorBranches"
@@ -299,30 +305,55 @@ export function EditorToolbar({
           iconOnly
         />
       ) : null}
-      {onExitCompose ? (
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={onExitCompose}
-          title="Exit editor mode"
-          data-testid="editor-exit"
-        >
-          <X />
-        </Button>
-      ) : null}
-      {/* Full screen, last. A one-shot action like Undo and Redo, so it sits
-          in this cluster; rightmost because it is the one control here that
-          takes the whole toolbar away with it. */}
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        onClick={onHideChrome}
-        title="Hide chrome"
-        aria-label="Hide chrome"
-        data-testid="editor-hide-chrome"
-      >
-        <Maximize2 />
-      </Button>
+      {/*
+        The shadcn `Tooltip`, not the native `title` attribute. Same rule as
+        `BreakpointMenu` two controls to the left (Mo, 2026-08-18: "there is a
+        different hover for items in the toolbar"), reported again against
+        these two on 2026-09-14 because that pass only fixed the control it
+        was filed on. `title` draws the OS tooltip: a light box, after the
+        browser's own ~1s delay, in the platform's font. Every other control
+        in this pill is dark, immediate and themed, so the odd one out reads
+        as coming from a different application.
+
+        One provider around both: Radix's provider renders no DOM, so the
+        pill's flex row is unchanged and Hide chrome is still the header's
+        `lastElementChild`, which its test asserts.
+      */}
+      <TooltipProvider>
+        {onExitCompose ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onExitCompose}
+                aria-label="Exit editor mode"
+                data-testid="editor-exit"
+              >
+                <X />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Exit editor mode</TooltipContent>
+          </Tooltip>
+        ) : null}
+        {/* Full screen, last. A one-shot action like Undo and Redo, so it sits
+            in this cluster; rightmost because it is the one control here that
+            takes the whole toolbar away with it. */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onHideChrome}
+              aria-label="Hide chrome"
+              data-testid="editor-hide-chrome"
+            >
+              <Maximize2 />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Hide chrome</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
     </header>
   )
 }

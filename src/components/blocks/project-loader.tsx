@@ -31,7 +31,7 @@ import { cn } from "@/lib/utils"
  * matrix and the mechanism. The replacement costs 5.2%.
  *
  * The artwork and its timing are unchanged — same 45 frames at 33fps, from the
- * vendor's own 800×800 export, downscaled to 240px (2x the 120px default) with
+ * vendor's own 800×800 export, downscaled to 240px (3x the 80px default) with
  * its transparent margin trimmed so the cat fills the box at the size it used
  * to. Downscaling from 800px is also what recovers a real alpha channel from
  * the export's 1-bit transparency: 211 distinct alpha levels at 240px,
@@ -53,26 +53,31 @@ export interface ProjectLoaderProps {
    */
   label?: string
   /**
-   * Rendered size of the square animation, in px. Defaults to 120.
+   * Rendered size of the square animation, in px. Defaults to 80.
    *
-   * There are two sizes in the product and only two. Thirteen inline and
-   * panel waits pass `80` explicitly; the three FULL-PAGE waits (the Editor
-   * launcher's overlay, the Viewer loading a prototype over its iframe, and
-   * the project list) take this default. So the default IS the full-page
-   * size, and changing it reaches exactly those three and nothing else.
+   * Sixteen inline and panel waits pass `80` explicitly; the three FULL-PAGE
+   * waits (the Editor launcher's overlay, the Viewer loading a prototype over
+   * its iframe, and the project list) take this default. So the default IS
+   * the full-page size, and changing it reaches exactly those three and
+   * nothing else.
    *
-   * 120, not 160 (Mo, 2026-09-01: "a little large ... let's make it a little
-   * smaller"). Not 80: a full-screen overlay and a row inside a settings card
-   * should not wear the same size.
+   * 80, down from 120 (Mo, 2026-09-14). The full-page waits did not agree
+   * with each other: those three sat at 120, while the Viewer page that says
+   * "The first build is running" fills the same area and sat at 80. Mo picked
+   * the smaller one as the ceiling for a full page. That supersedes the note
+   * this replaced, which argued a full-screen overlay and a row in a settings
+   * card "should not wear the same size" — they now do, and there is ONE size
+   * in the product.
    *
-   * The asset is 240px, so 120 is exactly 1:1 on a 2x display and every
-   * smaller call site is oversampled. Going ABOVE 120 starts to soften it.
+   * The asset is 240px, so every call site is oversampled 3x and stays crisp.
+   * 120 was exactly 1:1 on a 2x display; going ABOVE it is what softens the
+   * image, and nothing goes there any more.
    */
   size?: number
   className?: string
 }
 
-export function ProjectLoader({ label, size = 120, className }: ProjectLoaderProps) {
+export function ProjectLoader({ label, size = 80, className }: ProjectLoaderProps) {
   return (
     <div
       // `status` + `polite`: this reports progress, it does not interrupt.
