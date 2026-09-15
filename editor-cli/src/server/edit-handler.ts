@@ -1341,13 +1341,33 @@ async function handleApplicatorRefusal(args: {
   {
     // Source-aware fallback. When `applyPropEdit` refuses with a
     // `fallback` hint (`bound-binding`, `v-model`, `dynamic-vbind`), the
-    // deterministic applicator can't rewrite the attribute safely — but
-    // a focused LLM pass that traces the binding within the same SFC
-    // often can. The source-aware lane is text-only (the prompt is
-    // shaped for string literals); numeric / boolean prop edits skip
-    // it and, in `'chat'` mode, escalate directly to the chat agent
-    // (which can handle any prop value type with its multi-file tools).
+    // deterministic applicator can't rewrite the attribute safely.
+    //
+    // In `'chat'` mode — every direct edit from the inspector — the refusal
+    // goes STRAIGHT to the visible chat agent, whatever the value's type.
+    // Until 2026-09-15 a string value ran the headless mini-turn first, and
+    // that put the designer in front of nothing for as long as it took: the
+    // client's only surface for it is a two-second toast, the mini-turn
+    // cannot ask, so on the common ambiguous binding (a ternary) it spends
+    // ~30s and refuses, and only THEN did the chat tab open. MEASURED on a
+    // shadcn Badge whose variant is `metric.positive ? "secondary" :
+    // "destructive"`: two AI runs for one edit, the first invisible. Mo's
+    // rule for ambiguity (2026-09-08) is that it goes to chat, which can
+    // ask; a bound binding is ambiguous by construction. Numbers and
+    // booleans already escalated directly; strings now do the same.
+    //
+    // The mini-turn remains the engine for `'patch'` mode (the Save-all AI
+    // queue) and for callers with no fallback mode at all, where there is
+    // no chat to hand to and the save dialog shows its progress.
     if (body.edit.kind === "prop" && hint) {
+      if (body.edit.llmFallback === "chat") {
+        return {
+          ok: false,
+          status: 422,
+          reason: result.reason,
+          needsChat: true,
+        }
+      }
       if (typeof body.edit.value === "string") {
         // Lock-scope escalation (Task 11 review, Critical). The mini-turn
         // verifies its own work by diffing whole-repo `git status` snapshots
@@ -1392,15 +1412,6 @@ async function handleApplicatorRefusal(args: {
           blockSecretReads: opts.blockSecretReads,
         })
         if (fallbackResult !== null) return fallbackResult
-      } else if (body.edit.llmFallback === "chat") {
-        // Non-string value (number/boolean) on a bound prop in chat mode
-        // — skip the (text-only) source-aware lane and escalate directly.
-        return {
-          ok: false,
-          status: 422,
-          reason: result.reason,
-          needsChat: true,
-        }
       }
     }
   }
@@ -1747,6 +1758,10 @@ async function tryPropEditLLMFallback(args: {
    * mini-turn refuse. `'chat'` returns `needsChat: true` so the client
    * escalates to the (visible) chat agent. `'patch'` or absent: legacy
    * behavior — the combined refusal is surfaced as a plain 422.
+   *
+   * `applyEdit` no longer reaches this lane in `'chat'` mode (a bound-prop
+   * refusal there escalates before any mini-turn; see the caller), so the
+   * `'chat'` arms below are kept for the contract, not for a live path.
    */
   llmFallbackMode?: "patch" | "chat"
   applicatorLoaders: ApplicatorLoaders

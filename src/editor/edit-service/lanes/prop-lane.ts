@@ -176,10 +176,12 @@ export async function dispatchPropEdit(
       const result = written.value
       if (result.kind === "failed") {
         // `'chat'` fallback mode: the deterministic applicator refused
-        // (bound-binding / v-model / dynamic-vbind) AND the source-aware
-        // LLM lane refused too, so the server returned `needsChat`. Route
-        // the edit to the chat agent (which has multi-file tool access)
-        // instead of leaving it stuck in the buffer, and drop the entry.
+        // (bound-binding / v-model / dynamic-vbind), so the server returned
+        // `needsChat` without running any AI of its own (since 2026-09-15;
+        // it used to try a headless mini-turn first, invisibly, for ~30s).
+        // Route the edit to the chat agent (which has multi-file tool access
+        // and can ask) instead of leaving it stuck in the buffer, and drop
+        // the entry.
         if (result.needsChat && deps.escalateToChat) {
           const editTarget = current.target.editTarget
           const editTargetLocation = editTarget

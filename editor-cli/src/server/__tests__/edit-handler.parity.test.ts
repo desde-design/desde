@@ -1080,7 +1080,15 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
     expect(result.reason).toContain('Cannot overwrite bound prop "placeholder"')
   })
 
-  it("returns needsChat:true when the mini-turn refuses AND llmFallback='chat'", async () => {
+  /**
+   * A string value used to run the headless mini-turn first in chat mode,
+   * and only escalate when it refused. That left the designer looking at
+   * nothing for as long as the mini-turn took (~30s on an ambiguous
+   * ternary, MEASURED 2026-09-15), because the mini-turn cannot ask and
+   * its only client surface is a two-second toast. Chat mode now escalates
+   * straight away, as numbers and booleans already did.
+   */
+  it("escalates a string bound-prop refusal directly to chat without running the mini-turn", async () => {
     writeFileSync(join(dir, "App.vue"), ORIGINAL_SOURCE)
 
     const body: EditRequestBody = {
@@ -1095,13 +1103,17 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
       },
     }
 
+    const miniTurnCalls: number[] = []
     const loaders = makeLoaders({
       loadRunEditFixMiniTurn: async () =>
         ({
-          runEditFixMiniTurn: async () => ({
-            outcome: "refused",
-            notes: "Agent could not locate the binding definition.",
-          }),
+          runEditFixMiniTurn: async () => {
+            miniTurnCalls.push(1)
+            return {
+              outcome: "refused",
+              notes: "Agent could not locate the binding definition.",
+            }
+          },
         }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
     })
 
@@ -1110,10 +1122,12 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
     expect(result.ok).toBe(false)
     expect(result.status).toBe(422)
     expect(result.needsChat).toBe(true)
-    // Combined reason still surfaces so the chat prompt and any banner
-    // share the same context.
+    expect(miniTurnCalls.length).toBe(0)
+    // The deterministic refusal is the whole reason: no agent ran, so no
+    // agent note is appended.
     expect(result.reason).toContain('Cannot overwrite bound prop "placeholder"')
-    expect(result.reason).toContain("Agent could not locate the binding definition.")
+    expect(result.reason).not.toContain("could not locate")
+    expect(readFileSync(join(dir, "App.vue"), "utf8")).toBe(ORIGINAL_SOURCE)
   })
 
   it("does NOT set needsChat when the mini-turn refuses but llmFallback is absent (legacy)", async () => {
@@ -1174,7 +1188,30 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
     expect(result.reason).not.toContain("could not locate")
   })
 
-  it("does NOT engage chat lane when the mini-turn succeeds — file is written and committed", async () => {
+  it("runs the mini-turn and writes the file in patch mode (the Save-all AI queue)", async () => {
+    writeFileSync(join(dir, "App.vue"), ORIGINAL_SOURCE)
+
+    const body: EditRequestBody = {
+      edit: {
+        kind: "prop",
+        file: "App.vue",
+        line: 2,
+        column: 3,
+        propName: "placeholder",
+        value: "Filter results",
+        llmFallback: "patch",
+      },
+    }
+
+    const result = await applyEdit(body, dir, makeLoaders())
+
+    expect(result.ok).toBe(true)
+    expect(result.fallbackUsed).toBe("agent-mini-turn")
+    expect(result.needsChat).toBeUndefined()
+    expect(readFileSync(join(dir, "App.vue"), "utf8")).toBe(REWRITTEN_SOURCE)
+  })
+
+  it("does not run the mini-turn in chat mode even when it would succeed: the edit goes to chat", async () => {
     writeFileSync(join(dir, "App.vue"), ORIGINAL_SOURCE)
 
     const body: EditRequestBody = {
@@ -1189,12 +1226,16 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
       },
     }
 
+    // `makeLoaders()` stubs a mini-turn that WOULD succeed. The point is that
+    // a silent AI write is not what chat mode means: the designer should see
+    // the agent work, and be asked when the binding is ambiguous.
     const result = await applyEdit(body, dir, makeLoaders())
 
-    expect(result.ok).toBe(true)
-    expect(result.fallbackUsed).toBe("agent-mini-turn")
-    expect(result.needsChat).toBeUndefined()
-    expect(readFileSync(join(dir, "App.vue"), "utf8")).toBe(REWRITTEN_SOURCE)
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(422)
+    expect(result.needsChat).toBe(true)
+    expect(result.fallbackUsed).toBeUndefined()
+    expect(readFileSync(join(dir, "App.vue"), "utf8")).toBe(ORIGINAL_SOURCE)
   })
 
   it("escalates a numeric bound-prop refusal directly to chat (skips the text-only mini-turn lane)", async () => {
