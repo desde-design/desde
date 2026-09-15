@@ -203,11 +203,38 @@ describe('suggestDesignSystems (React arm)', () => {
   })
 })
 
+/** Design-system part names (Chakra's vocabulary) and icon variant names. */
+const DS_PARTS = ['Root', 'Trigger', 'Content', 'Item', 'Indicator', 'Label', 'Context', 'Provider']
+const ICON_VARIANTS = ['Outlined', 'Rounded', 'Sharp', 'TwoTone', 'Filled']
+
+/**
+ * `families` distinct first words, with `total` names spread over them using
+ * `parts` as suffixes.
+ *
+ * A compound design system and a variant-per-glyph icon set have the SAME
+ * shape under this builder. Only the family count differs, which is the whole
+ * point: it is the one thing that tells them apart. Counts come from the
+ * measurement table in `suggest.ts`.
+ */
+function spread(families: number, total: number, parts: readonly string[]): string[] {
+  const stems = Array.from({ length: families }, (_, i) => `Stem${String(i).padStart(4, '0')}`)
+  const names: string[] = []
+  for (let round = 0; names.length < total; round++) {
+    for (const stem of stems) {
+      if (names.length >= total) break
+      names.push(round === 0 ? stem : `${stem}${parts[(round - 1) % parts.length]}`)
+    }
+  }
+  return names
+}
+
 describe('looksLikeIconSet', () => {
   const comps = (n: number, fmt: (i: number) => string) => Array.from({ length: n }, (_, i) => fmt(i))
 
+  // 120 families: above @shopify/polaris (89, the largest flat design system
+  // measured) and above @chakra-ui/react (114), below the 150 flat floor.
   it('a design-system-sized list of ordinary names is not an icon set', () => {
-    expect(looksLikeIconSet(comps(150, (i) => `Widget${i}`))).toBe(false)
+    expect(looksLikeIconSet(comps(120, (i) => `Widget${i}`))).toBe(false)
   })
   it('a majority of `XIcon` or `IconX` names is an icon set', () => {
     expect(looksLikeIconSet(comps(40, (i) => (i % 2 ? `Thing${i}Icon` : `Thing${i}`)))).toBe(true)
@@ -216,8 +243,104 @@ describe('looksLikeIconSet', () => {
   it('a small list is never judged by name (a design system may ship a few icons)', () => {
     expect(looksLikeIconSet(['MenuIcon', 'CloseIcon', 'Button'])).toBe(false)
   })
-  it('a list in the hundreds is an icon set whatever the names', () => {
-    expect(looksLikeIconSet(comps(400, (i) => `Glyph${i}`))).toBe(true)
+
+  // The defect this rule was rewritten for: Chakra v3 exports 775 symbols that
+  // type as React components, and the old rule called anything over 400 icons.
+  it('a compound design system is not an icon set however many parts it exports', () => {
+    const chakra = spread(114, 775, DS_PARTS)
+    expect(chakra).toHaveLength(775)
+    expect(looksLikeIconSet(chakra)).toBe(false)
+  })
+
+  // Why a bigger number would not have worked either: @ant-design/icons ships
+  // 832 exports and Chakra ships 775, so no raw cutoff separates them. The
+  // family count does: 319 against 114. Same total, same builder, one differs.
+  it('separates an icon set from a design system of the same export count', () => {
+    expect(looksLikeIconSet(spread(319, 832, ICON_VARIANTS))).toBe(true)
+    expect(looksLikeIconSet(spread(114, 832, DS_PARTS))).toBe(false)
+  })
+
+  // lucide-react: 5,211 exports, only 33% icon-named, because each glyph also
+  // ships bare and brand-prefixed. @mui/icons-material is worse — 10,615
+  // exports, not one of them named `Icon`. The name ratio misses both.
+  it('catches an icon set that the name ratio misses', () => {
+    const lucide = Array.from({ length: 1737 }, (_, i) => `Glyph${i}`).flatMap((g) => [
+      g,
+      `${g}Icon`,
+      `Lucide${g}`,
+    ])
+    expect(lucide).toHaveLength(5211)
+    expect(lucide.filter((n) => /Icon$/.test(n)).length / lucide.length).toBeLessThan(0.5)
+    expect(looksLikeIconSet(lucide)).toBe(true)
+
+    const muiIcons = spread(2121, 10615, ICON_VARIANTS)
+    expect(muiIcons.some((n) => /Icon/.test(n))).toBe(false)
+    expect(looksLikeIconSet(muiIcons)).toBe(true)
+  })
+
+  // @tabler/icons-react collapses to 7 families because every name starts
+  // `Icon`. Only the name ratio catches it — the two signals cover each other.
+  it('catches an icon set that the family count misses', () => {
+    const tabler = comps(6250, (i) => `IconGlyph${i}`)
+    expect(new Set(tabler.map((n) => /^Icon[a-z0-9]*/.exec(n)?.[0])).size).toBeLessThan(250)
+    expect(looksLikeIconSet(tabler)).toBe(true)
+  })
+
+  // Signal 3, the flat-catalog pair. react-feather is 286 names over 195
+  // families, with no name containing `Icon` — under the 250 line and past
+  // neither of the first two signals. Its 1.47 names per family is what
+  // gives it away.
+  it('catches a flat catalog below the family threshold', () => {
+    const featherish = spread(195, 286, ICON_VARIANTS)
+    expect(featherish).toHaveLength(286)
+    expect(featherish.some((n) => /Icon/.test(n))).toBe(false)
+    expect(looksLikeIconSet(featherish)).toBe(true)
+  })
+
+  // And the half of the pair that keeps it safe. Both of these have MORE
+  // families than any design system measured (react-admin, at 127), and the
+  // dense one is still judged a design system.
+  it('needs both halves of the flat pair, not either one', () => {
+    // 195 families, 3 parts each: dense, so not caught.
+    expect(looksLikeIconSet(spread(195, 585, DS_PARTS))).toBe(false)
+    // 149 families, 1.4 parts each: flat, but under the family floor.
+    expect(looksLikeIconSet(spread(149, 209, ICON_VARIANTS))).toBe(false)
+    // Both at once is what fires.
+    expect(looksLikeIconSet(spread(150, 210, ICON_VARIANTS))).toBe(true)
+  })
+
+  // The shape the pair exists to protect: a design system BIGGER than Chakra.
+  // A plain 150-family rule would have thrown this away.
+  it('keeps a compound design system larger than any measured today', () => {
+    const biggerThanChakra = spread(200, 1400, DS_PARTS)
+    expect(looksLikeIconSet(biggerThanChakra)).toBe(false)
+  })
+
+  // The property the whole rewrite rests on, and the threshold it turns on.
+  // Every list here is dense (3+ names per family) so signal 3 stays out of it.
+  it('counts families, not parts', () => {
+    expect(looksLikeIconSet(spread(249, 747, DS_PARTS))).toBe(false)
+
+    // Three times as many names, still 249 families. Still not an icon set.
+    const denser = spread(249, 2241, DS_PARTS)
+    expect(denser).toHaveLength(2241)
+    expect(looksLikeIconSet(denser)).toBe(false)
+
+    // One more FAMILY is what tips it over, at either size.
+    expect(looksLikeIconSet(spread(250, 750, DS_PARTS))).toBe(true)
+    expect(looksLikeIconSet(spread(250, 2250, DS_PARTS))).toBe(true)
+  })
+
+  // Real spellings, so a change to how a family is read off a name shows up
+  // here rather than only against an installed package.
+  it('reads one family off the parts of a real compound component', () => {
+    // 248 families at 3 names each, so density never enters into it.
+    const base = spread(248, 744, DS_PARTS)
+    // Both lists below are 747 names. Chakra's three Dialog parts are one
+    // family, so that one is 249 families and stays a design system.
+    expect(looksLikeIconSet([...base, 'DialogRoot', 'DialogTrigger', 'DialogBackdrop'])).toBe(false)
+    // Three unrelated names instead, and the same 747 names are 251 families.
+    expect(looksLikeIconSet([...base, 'Sunrise', 'Umbrella', 'Wristwatch'])).toBe(true)
   })
 })
 
@@ -250,6 +373,41 @@ describe('suggestDesignSystems (React arm) excludes icon sets', () => {
     for (let i = 0; i < 5; i++) await write(root, `src/P${i}.tsx`, `import { Glyph1Icon } from 'fancy-icons'`)
 
     expect(await suggestDesignSystems(root)).toEqual([])
+  })
+
+  /**
+   * The reported defect, end to end: Chakra v3 exports 775 symbols that type
+   * as React components, so the old export-count guard classified it as icons
+   * and `suggestDesignSystems` returned nothing. A compound library has to
+   * come back out of discovery with its real component count.
+   */
+  it('offers a compound design system with hundreds of exported parts', async () => {
+    const names = spread(114, 775, DS_PARTS)
+    await write(root, 'package.json', JSON.stringify({ dependencies: { 'compound-ui': '3.0.0' } }))
+    await write(
+      root,
+      'node_modules/compound-ui/package.json',
+      JSON.stringify({ name: 'compound-ui', version: '3.0.0', types: 'index.d.ts', peerDependencies: { react: '*' } }),
+    )
+    await write(
+      root,
+      'node_modules/compound-ui/index.d.ts',
+      [
+        'interface PartProps { children?: unknown }',
+        ...names.map((n) => `declare const ${n}: (props: PartProps) => null;`),
+        `export { ${names.join(', ')} };`,
+      ].join('\n'),
+    )
+    await write(root, 'src/App.tsx', `import { Stem0000 } from 'compound-ui'`)
+
+    const out = await suggestDesignSystems(root)
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({
+      package: 'compound-ui',
+      framework: 'react',
+      componentCount: 775,
+      confidence: 'likely',
+    })
   })
 })
 
