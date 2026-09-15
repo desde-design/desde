@@ -157,8 +157,20 @@ describe('discoverReactDtsEntries', () => {
       expect(discoverReactDtsEntries(root)).toEqual([join(root, 'dist/i.d.ts')])
     })
 
-    it('array of fallbacks', async () => {
+    // An array is root sugar too. NOTE the permissiveness this pins: a runtime
+    // takes the FIRST valid target and fails to load it, rather than falling
+    // through because the file is missing. This looks past it. Accepted, with
+    // the reasoning on `allTargets`.
+    it('array of targets, including ones a runtime would never reach', async () => {
       await pkg({ name: 'a', exports: ['./missing.js', './dist/i.js'] })
+      await write('dist/i.d.ts')
+      expect(discoverReactDtsEntries(root)).toEqual([join(root, 'dist/i.d.ts')])
+    })
+
+    // Same permissiveness, the other shape codex raised: `import: null` blocks
+    // ESM outright, and this still reports the `default` branch's declarations.
+    it('a null-blocked condition does not stop the search', async () => {
+      await pkg({ name: 'a', exports: { import: null, default: './dist/i.js' } })
       await write('dist/i.d.ts')
       expect(discoverReactDtsEntries(root)).toEqual([join(root, 'dist/i.d.ts')])
     })

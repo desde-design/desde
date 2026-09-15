@@ -30,13 +30,38 @@ const DTS_RE = /\.d\.[cm]?ts$/
 const JS_TARGET_RE = /\.[cm]?js$/
 
 /**
- * Every string target in an `exports` condition tree that `accept` likes, in
- * the order resolution would try them: `keys` in order at each object node,
- * and array entries left to right. Conditions nest arbitrarily.
+ * Every string target in an `exports` condition tree that `accept` likes:
+ * `keys` in order at each object node, array entries left to right.
  *
- * ALL of them, not the first. An array is a FALLBACK LIST — `["./missing.js",
- * "./dist/i.js"]` resolves to the second when the first is not there — so a
- * caller looking for declarations beside a target has to try each in turn.
+ * ## This is deliberately PERMISSIVE, and it is not what a runtime does
+ *
+ * A real resolver picks ONE target. It knows which conditions are active
+ * (`import` vs `require`, `types` under a given `moduleResolution`), it stops
+ * at the first one that matches, and a `null` target BLOCKS the resolution
+ * rather than falling through. An array is "first valid target" — validity is
+ * about the target's syntax, not whether the file is on disk, so a runtime
+ * never falls through to a later entry because an earlier one is missing.
+ *
+ * This function does none of that, because it cannot: it is handed a package
+ * directory and nothing about the prototype that will import it. So it answers
+ * the weaker question it CAN answer — "could the package root resolve to a
+ * declaration file under some condition set" — and leaves the caller to decide.
+ *
+ * Two consequences, both accepted (see {@link discoverReactDtsEntries}):
+ *
+ *  - `{"import": null, "default": "./i.js"}` blocks ESM outright, and this
+ *    still finds `./i.d.ts` through `default`. A CJS-only package can be
+ *    offered to an ESM prototype.
+ *  - `["./missing.js", "./dist/i.js"]` resolves to the FIRST entry at runtime
+ *    and then fails to load it. This finds `dist/i.d.ts`. Only reachable for a
+ *    package that is already broken.
+ *
+ * Both were raised by codex review on 2026-09-15 and both are real. Fixing
+ * either properly means taking the active conditions as a parameter, which is
+ * a change to every caller. The bias is deliberate: this whole seam exists
+ * because packages were being dropped SILENTLY, and a wrong offer is a row the
+ * user can see and remove. Revisit when a caller can say which conditions
+ * apply.
  */
 function allTargets(
   node: unknown,
@@ -162,12 +187,20 @@ function implicitDtsEntry(packageRoot: string, main: string | undefined): string
  *  - A package that DECLARES an entry which is not on disk falls through
  *    rather than reporting nothing. A stale `types` field is a broken package,
  *    not a reason to ignore declarations that are sitting there.
- *  - An `exports` map is a GATE. A map with no `"."` means the bare specifier
- *    does not resolve, so there is no root entry to offer however many `.d.ts`
- *    files are lying around. MEASURED 2026-09-15 on `@cloudscape-design/components`
- *    (191 exports behind `exports["."]: "./index.js"`): the declaration comes
- *    from substituting the extension on the target `exports` selected, which
- *    is the same file TypeScript would load and is not necessarily `main`'s.
+ *  - An `exports` map is a GATE. A SUBPATH map with no root export means the
+ *    bare specifier does not resolve, so there is no root entry to offer
+ *    however many `.d.ts` files are lying around. Only one of the four legal
+ *    spellings uses a literal `"."` key, so {@link rootExport} normalises them
+ *    before the gate is applied. MEASURED 2026-09-15 on
+ *    `@cloudscape-design/components` (191 exports behind
+ *    `exports["."]: "./index.js"`): the declaration comes from substituting
+ *    the extension on the target `exports` selected, which is the same file
+ *    TypeScript would load and is not necessarily `main`'s.
+ *  - It is CONDITION-AGNOSTIC, and so more permissive than any runtime. It
+ *    reports a declaration the root export could resolve to under SOME set of
+ *    conditions, not the one a particular prototype would get. See
+ *    {@link allTargets} for the two known consequences and why they are
+ *    accepted rather than fixed.
  */
 export function discoverReactDtsEntries(packageRoot: string): string[] {
   let pkg: PackageJsonTypes
