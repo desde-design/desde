@@ -22,12 +22,15 @@
  *         component (`listReactComponents`, the extractor's own predicate
  *         over ONE shared TS program), and
  *      3. is it not an icon set: an export list that is mostly `*Icon` /
- *         `Icon*`, or one in the hundreds, is icons. Icons are a different
- *         surface (`adapters/icon-sets`), and onboarding one as a design
- *         system would mean extracting thousands of identical components
- *         on the next boot. MEASURED on a shadcn dashboard: the icon
- *         package was the top suggestion by import count (140 files) and
- *         would have arrived with 6,211 "components".
+ *         `Icon*`, or one spread over too many distinct component
+ *         FAMILIES, is icons. Icons are a different surface
+ *         (`adapters/icon-sets`), and onboarding one as a design system
+ *         would mean extracting thousands of identical components on the
+ *         next boot. MEASURED on a shadcn dashboard: the icon package was
+ *         the top suggestion by import count (140 files) and would have
+ *         arrived with 6,211 "components". This test used to be "the list
+ *         is in the hundreds" instead; see {@link looksLikeIconSet} for
+ *         why a raw count was the wrong question and what replaced it.
  *    A package failing any of the three is not offered. The count is real,
  *    not approximate: it is what onboarding the package would extract.
  *
@@ -79,18 +82,120 @@ export interface DesignSystemSuggestion {
 const ICON_NAME_RE = /(^Icon[A-Z]|Icon$)/
 
 /**
- * Is this export list an icon set rather than a design system? Either the
- * majority of a non-trivial list is icon-named, or the list is larger than
- * any design system (the largest React design systems export a few hundred
- * components; icon sets export thousands, and some name them without any
- * `Icon` affix at all).
+ * A component name's FAMILY: its first CamelCase word. `DialogRoot`,
+ * `DialogTrigger` and `DialogBackdrop` are all one family, `Dialog`.
+ * Leading acronyms stop at the next capitalized word, so `HStack` is `H`.
+ */
+const FAMILY_RE = /^[A-Z]+(?![a-z])|^[A-Z][a-z0-9]*/
+
+/**
+ * How many distinct families make a list icons rather than a design system.
+ * 250 is 2.2x the largest design system measured — see the table below.
+ */
+const ICON_SET_MIN_FAMILIES = 250
+
+/**
+ * Is this export list an icon set rather than a design system?
+ *
+ * Two signals. Either one on its own is enough:
+ *
+ *  1. **Most of the names are icon-named** — half or more match `XIcon` or
+ *     `IconX`.
+ *  2. **The names are spread over too many FAMILIES.** A design system has
+ *     few families and many parts in each one. An icon set has roughly one
+ *     family per glyph.
+ *
+ * A list under 20 is never judged. A design system may ship a few icons of
+ * its own, and the ratio is meaningless on a handful of names.
+ *
+ * ## Signal 2 replaced a raw export count on 2026-09-15
+ *
+ * The old rule called any list of 400 or more an icon set. It assumed the
+ * largest React design systems export a few hundred components. Chakra v3
+ * exports 775, because its compound API (`Dialog.Root`, `Dialog.Trigger`,
+ * `Menu.Item`) genuinely ships hundreds of parts. So a top-five library was
+ * classified as icons and silently dropped from onboarding.
+ *
+ * Moving the number would not have fixed it. The two groups OVERLAP on raw
+ * count: `@ant-design/icons` exports 832 and Chakra exports 775, so no cutoff
+ * separates them. They do not overlap on families: 319 against 114. A
+ * compound API multiplies the parts per family, never the family count, which
+ * is exactly why counting parts broke and counting families does not.
+ *
+ * ## MEASURED 2026-09-15
+ *
+ * 27 packages installed at their current versions and run through the real
+ * {@link listReactComponents}. `n` is exported symbols that type as a React
+ * component; `icon%` is the share matching `XIcon`/`IconX`.
+ *
+ * ```
+ *   design systems                        n    icon%   families
+ *     @chakra-ui/react 3.37.0           775     0.8%        114
+ *     @mantine/core 7.17.8              228     2.2%        106
+ *     @carbon/react 1.116.0             254     2.8%         89
+ *     @shopify/polaris 13.9.5           110     0.9%         89
+ *     @fluentui/react-components 9.74   256       0%         85
+ *     @salt-ds/core 1.70.0              169     2.4%         84
+ *     @mui/material 6.5.0               146     4.1%         75
+ *     rsuite 5.83.4                      99     1.0%         74
+ *     react-aria-components 1.21.1      150       0%         69
+ *     @adobe/react-spectrum 3.47.5      100     1.0%         67
+ *     antd 5.29.3                        68       0%         66
+ *     @blueprintjs/core 5.19.1           94     1.1%         61
+ *     @heroui/react 2.8.10              117     0.9%         56
+ *     @primer/react 37.31.0              68     1.5%         54
+ *     semantic-ui-react 2.1.5           163     2.5%         51
+ *     react-bootstrap 2.10.10           110       0%         43
+ *     @radix-ui/themes 3.3.0             44    13.6%         40
+ *
+ *   icon sets                             n    icon%   families
+ *     @mui/icons-material 6.5.0       10615       0%       1043
+ *     lucide-react 0.460.0             5211    33.4%        730
+ *     @phosphor-icons/react 2.1.10     3042    50.3%        688
+ *     @ant-design/icons 5.6.1           832     0.1%        319
+ *     @radix-ui/react-icons 1.3.2       318     100%        198
+ *     react-feather 2.0.10              286       0%        195
+ *     @tabler/icons-react 3.46.0       6250    99.9%          7
+ * ```
+ *
+ * Read the `icon%` column before trusting signal 1 alone. Three of the seven
+ * icon sets are under 50% and two are effectively zero — the largest of them,
+ * `@mui/icons-material`, names nothing `Icon` at all. Only families catch
+ * those. `@tabler/icons-react` is the mirror image: every name starts `Icon`,
+ * so it collapses to 7 families and only signal 1 catches it. The two signals
+ * cover each other's blind spot, which is why both are kept.
+ *
+ * The threshold sits at 250 for this reason. The largest design system
+ * measured is 114 families. The four icon sets signal 1 misses sit at 195,
+ * 319, 730 and 1043. So 250 is 2.2x clear of every design system and catches
+ * three of those four.
+ *
+ * It is not the midpoint, and that is deliberate. Calling a design system
+ * "icons" removes it from onboarding with no trace. Calling an icon set "a
+ * design system" costs the user one row they can decline. The expensive
+ * mistake gets the headroom, which is why the 195 is allowed to escape rather
+ * than pulling the threshold down to 150 and leaving Chakra 1.3x of room.
+ *
+ * ## Two known misses, both unchanged by this rewrite
+ *
+ * `react-feather` (195 families, 0% icon-named) is judged a design system. Its
+ * 286 exports were under the old 400-count rule too, so it was judged the same
+ * way before this change and nothing regressed. See the paragraph above for
+ * why the threshold is not lowered to catch it.
+ *
+ * `evergreen-ui` is judged an icon set, because it ships its icons in the same
+ * entry as its components: 623 exports, 86.8% of them icon-named. Signal 1
+ * claims it, as it did under the old rule. Fixing that one means classifying
+ * the list with the icon-named names REMOVED, which is a different change.
  */
 export function looksLikeIconSet(componentNames: readonly string[]): boolean {
   const n = componentNames.length
-  if (n >= 400) return true
   if (n < 20) return false
   const iconNamed = componentNames.filter((name) => ICON_NAME_RE.test(name)).length
-  return iconNamed / n >= 0.5
+  if (iconNamed / n >= 0.5) return true
+  const families = new Set<string>()
+  for (const name of componentNames) families.add(FAMILY_RE.exec(name)?.[0] ?? name)
+  return families.size >= ICON_SET_MIN_FAMILIES
 }
 
 const SOURCE_FILE_RE = /\.(vue|ts|tsx|js|jsx|mts|cts|mjs|cjs)$/i
