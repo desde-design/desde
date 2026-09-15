@@ -34,7 +34,7 @@
  * can share this without either owning the other's data.
  */
 
-import { MoreVertical, Plus } from "lucide-react"
+import { CircleCheck, MoreVertical, Plus } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -45,6 +45,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { EmptyState } from "@/components/blocks"
 import type { DesignSystemDeclaration } from "@/editor/core/design-system-declarations"
+import type { FirstPartyDetection } from "@/editor/onboarding/detect-first-party"
 
 export interface DesignSystemListEntry {
   /** Stable identity, from `pendingIdentity`. */
@@ -64,15 +65,41 @@ export interface DesignSystemListProps {
   entries: readonly DesignSystemListEntry[]
   loading?: boolean
   busy?: boolean
+  /**
+   * What the prototype already has, shown in place of the empty state.
+   *
+   * An empty list used to read "Nothing found to add", and designers took
+   * that to mean nothing was detected, and from there that variants would
+   * not work (Mo, 2026-09-15). A shadcn repo is the common case: its
+   * components are files in the repo, so there is nothing to register and
+   * everything already works. The step has to show the evidence, not just
+   * assert it in a caption. `undefined` while the scan is running; `null`
+   * when there is genuinely nothing to report.
+   */
+  firstParty?: FirstPartyDetection | null
   onAdd: () => void
   onEdit: (entry: DesignSystemListEntry) => void
   onRemove: (id: string) => void
+}
+
+/**
+ * The count is the evidence; the sentence after it is what changes for the
+ * reader. A named system needs nothing more said. Without one, the reader
+ * still has to be told when adding a library IS the right move.
+ */
+function firstPartyDescription(detection: FirstPartyDetection): string {
+  const n = detection.componentCount
+  const count = `${n} ${n === 1 ? "component" : "components"}`
+  return detection.system
+    ? `${count} in this repo are already available. Nothing to set up.`
+    : `${count} are already available. Add a library only if this prototype pulls one from npm or a Git repository.`
 }
 
 export function DesignSystemList({
   entries,
   loading = false,
   busy = false,
+  firstParty = null,
   onAdd,
   onEdit,
   onRemove,
@@ -84,11 +111,29 @@ export function DesignSystemList({
           Looking for libraries this prototype uses
         </p>
       ) : entries.length === 0 ? (
-        <EmptyState
-          size="sm"
-          title="Nothing found to add"
-          description="Components written in this repo are picked up on their own. Add a library if this prototype uses one from npm or a Git repository."
-        />
+        firstParty ? (
+          // A confirmation, not an empty state, so the cat gives way to a
+          // check: the picture has to say "found", because the title is
+          // the only other thing on screen saying it.
+          <EmptyState
+            size="sm"
+            illustration={false}
+            icon={<CircleCheck />}
+            title={
+              firstParty.system
+                ? `${firstParty.system.label} detected`
+                : "Using components written in this repo"
+            }
+            description={firstPartyDescription(firstParty)}
+            data-testid="design-system-first-party"
+          />
+        ) : (
+          <EmptyState
+            size="sm"
+            title="No libraries to add"
+            description="Components written in this repo are picked up on their own. Add a library if this prototype uses one from npm or a Git repository."
+          />
+        )
       ) : (
         <ul className="flex flex-col divide-y rounded-md border">
           {entries.map((entry) => (

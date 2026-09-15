@@ -13,6 +13,7 @@ export {
   type DetectStyleCapabilitiesResult,
 } from './detect-style-capabilities'
 export { suggestDesignSystems, extractPackageName } from './suggest'
+export { detectFirstParty } from './detect-first-party'
 export { computeCoverage, type ComputeCoverageOptions } from './coverage'
 export {
   buildRegisteredSources,

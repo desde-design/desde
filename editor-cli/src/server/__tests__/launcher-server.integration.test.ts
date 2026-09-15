@@ -996,6 +996,66 @@ describe("launcher server", () => {
     })
   })
 
+  describe("design-systems/first-party", () => {
+    it("rejects an unauthenticated request", async () => {
+      const res = await fetch(handle.url + "/api/launcher/design-systems/first-party", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: handle.url },
+        body: JSON.stringify({ path: tmp }),
+      })
+      expect(res.status).toBe(401)
+    })
+
+    it("rejects a non-directory path", async () => {
+      const token = await tokenFromBootstrap()
+      const res = await fetch(handle.url + "/api/launcher/design-systems/first-party", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: path.join(tmp, "does-not-exist") }),
+      })
+      expect(res.status).toBe(400)
+    })
+
+    it("names shadcn/ui from components.json and counts first-party components", async () => {
+      const fixture = path.join(tmp, "first-party-fixture")
+      await fs.mkdir(path.join(fixture, "src/components/ui"), { recursive: true })
+      await fs.writeFile(
+        path.join(fixture, "components.json"),
+        JSON.stringify({ $schema: "https://ui.shadcn.com/schema.json", style: "radix-nova" }),
+      )
+      await fs.writeFile(
+        path.join(fixture, "src/components/ui/button.tsx"),
+        'export function Button({ variant = "default" }: { variant?: "default" | "outline" }) { return <button data-variant={variant} /> }',
+      )
+
+      const token = await tokenFromBootstrap()
+      const res = await fetch(handle.url + "/api/launcher/design-systems/first-party", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: fixture }),
+      })
+      const json = await res.json()
+      expect(json.ok).toBe(true)
+      expect(json.detection).toEqual({
+        system: { id: "shadcn", label: "shadcn/ui", style: "radix-nova" },
+        componentCount: 1,
+      })
+    })
+
+    it("returns null for a directory with nothing to report", async () => {
+      const fixture = path.join(tmp, "first-party-empty")
+      await fs.mkdir(fixture, { recursive: true })
+      const token = await tokenFromBootstrap()
+      const res = await fetch(handle.url + "/api/launcher/design-systems/first-party", {
+        method: "POST",
+        headers: authedHeaders(token),
+        body: JSON.stringify({ path: fixture }),
+      })
+      const json = await res.json()
+      expect(json).toEqual({ ok: true, detection: null })
+    })
+  })
+
   /**
    * The project's NAME comes from the repo's own identity block
    * (`.desde/config.json` → `project.name`), never from the recents cache.

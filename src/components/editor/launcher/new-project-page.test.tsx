@@ -31,6 +31,7 @@ function baseProps() {
     onOpenPath: vi.fn().mockResolvedValue(undefined),
     onClone: vi.fn().mockResolvedValue({ path: "/cloned/repo" }),
     onSuggestDesignSystems: vi.fn().mockResolvedValue([]),
+    onDetectFirstParty: vi.fn().mockResolvedValue(null),
     onDeclareDesignSystems: vi.fn().mockResolvedValue({ ok: true }),
     onSetProjectName: vi.fn().mockResolvedValue({ ok: true }),
   }
@@ -318,6 +319,80 @@ describe("NewProjectPage", () => {
     openRowMenu("@acme/ui")
     expect(await screen.findByRole("menuitem", { name: "Remove" })).toBeInTheDocument()
     expect(screen.queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument()
+  })
+
+  /**
+   * The empty list used to read "Nothing found to add", which designers took
+   * as "nothing was detected" and, from there, "the variants will not work"
+   * (Mo, 2026-09-15). On a shadcn repo everything already works and there is
+   * nothing to register, so the step has to show what it found instead.
+   */
+  describe("design-systems step: what the repo already has", () => {
+    it("names shadcn/ui and the component count when the marker is present", async () => {
+      const props = baseProps()
+      props.onSuggestDesignSystems.mockResolvedValue([])
+      props.onDetectFirstParty.mockResolvedValue({
+        system: { id: "shadcn", label: "shadcn/ui", style: "radix-nova" },
+        componentCount: 35,
+      })
+      render(<NewProjectPage {...props} />)
+
+      await pickLocalFolder()
+      await passNameStep()
+      await screen.findByTestId("new-project-design-systems-step")
+
+      const found = await screen.findByTestId("design-system-first-party")
+      expect(found).toHaveTextContent("shadcn/ui detected")
+      expect(found).toHaveTextContent("35 components in this repo are already available. Nothing to set up.")
+      expect(screen.queryByText(/nothing found/i)).not.toBeInTheDocument()
+      expect(props.onDetectFirstParty).toHaveBeenCalledWith("/picked/repo")
+    })
+
+    it("falls back to the generic first-party wording when there is no named system", async () => {
+      const props = baseProps()
+      props.onSuggestDesignSystems.mockResolvedValue([])
+      props.onDetectFirstParty.mockResolvedValue({ system: null, componentCount: 1 })
+      render(<NewProjectPage {...props} />)
+
+      await pickLocalFolder()
+      await passNameStep()
+      await screen.findByTestId("new-project-design-systems-step")
+
+      const found = await screen.findByTestId("design-system-first-party")
+      expect(found).toHaveTextContent("Using components written in this repo")
+      // Singular, because the count is the evidence and "1 components" reads as a bug.
+      expect(found).toHaveTextContent("1 component are already available")
+    })
+
+    it("keeps the plain empty state when there is genuinely nothing to report", async () => {
+      const props = baseProps()
+      props.onSuggestDesignSystems.mockResolvedValue([])
+      props.onDetectFirstParty.mockResolvedValue(null)
+      render(<NewProjectPage {...props} />)
+
+      await pickLocalFolder()
+      await passNameStep()
+      await screen.findByTestId("new-project-design-systems-step")
+
+      expect(await screen.findByText("No libraries to add")).toBeInTheDocument()
+      expect(screen.queryByTestId("design-system-first-party")).not.toBeInTheDocument()
+    })
+
+    it("shows the detection only in place of an empty list, never beside rows", async () => {
+      const props = baseProps()
+      props.onSuggestDesignSystems.mockResolvedValue([
+        { package: "@acme/ui", componentCount: 5, framework: "vue3" },
+      ])
+      props.onDetectFirstParty.mockResolvedValue({ system: null, componentCount: 3 })
+      render(<NewProjectPage {...props} />)
+
+      await pickLocalFolder()
+      await passNameStep()
+      await screen.findByTestId("new-project-design-systems-step")
+
+      expect(await screen.findByTestId("design-system-row-@acme/ui")).toBeInTheDocument()
+      expect(screen.queryByTestId("design-system-first-party")).not.toBeInTheDocument()
+    })
   })
 
   it("adds an npm package through the modal, and it lands in the list", async () => {

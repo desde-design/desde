@@ -132,7 +132,7 @@ import {
   serveBootstrapJs,
   serveStatic,
 } from "./static-assets.js"
-import { suggestDesignSystems } from "../../../src/editor/onboarding/index.js"
+import { detectFirstParty, suggestDesignSystems } from "../../../src/editor/onboarding/index.js"
 import {
   validateDeclaration,
   appendDesignSystemDeclaration,
@@ -951,6 +951,29 @@ async function route(
         // — no git/npm/network, safe to run before a project is ever opened.
         const suggestions = await suggestDesignSystems(abs)
         sendJson(res, 200, { ok: true, suggestions })
+      })
+      return
+    }
+
+    // What the prototype already has, for the step's empty state: a named
+    // copy-in system (shadcn's `components.json`) and the first-party
+    // component count. Its own route rather than a field on /suggest because
+    // it is different work (a repo walk + parse, not a node_modules scan) and
+    // the step wants to show whichever answer lands first.
+    if (req.method === "POST" && url.pathname === "/api/launcher/design-systems/first-party") {
+      await runHandler(res, async () => {
+        const body = await readJsonBody<{ path?: unknown }>(req)
+        if (typeof body.path !== "string" || body.path.trim().length === 0) {
+          sendJson(res, 400, { ok: false, reason: "path is required" })
+          return
+        }
+        const abs = resolvePath(body.path.trim())
+        if (!(await isDirectory(abs))) {
+          sendJson(res, 400, { ok: false, reason: DIRECTORY_NOT_FOUND })
+          return
+        }
+        const detection = await detectFirstParty(abs)
+        sendJson(res, 200, { ok: true, detection })
       })
       return
     }

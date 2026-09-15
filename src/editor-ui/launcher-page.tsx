@@ -532,6 +532,7 @@ export function LauncherPage({
         onOpenPath={handoffToLoader(api.openPath)}
         onSetProjectName={api.setProjectName}
         onSuggestDesignSystems={api.suggestDesignSystems}
+        onDetectFirstParty={api.detectFirstParty}
         onDeclareDesignSystems={api.declareDesignSystems}
       />
     </div>

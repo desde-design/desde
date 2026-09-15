@@ -25,7 +25,12 @@ import { cn } from "@/lib/utils"
 import { TONE_SURFACE } from "@/lib/tone-surface"
 import type { DesignSystemDeclaration } from "@/editor/core/design-system-declarations"
 import type { LauncherOpenBlock } from "@/types/launcher"
-import type { DesignSystemSuggestion, GitHubReposState, InspectPathResult } from "./use-launcher-api"
+import type {
+  DesignSystemSuggestion,
+  FirstPartyDetection,
+  GitHubReposState,
+  InspectPathResult,
+} from "./use-launcher-api"
 
 export type NewProjectSource = "local" | "clone"
 
@@ -163,6 +168,13 @@ interface NewProjectPageProps {
   onListGitHubRepos?: () => Promise<GitHubReposState>
   /** Read-only scan for design systems `path` already depends on + imports. */
   onSuggestDesignSystems: (path: string) => Promise<DesignSystemSuggestion[]>
+  /**
+   * What `path` already has: a named copy-in system (shadcn) and the
+   * first-party component count. Shown in place of the empty list so the
+   * step never reads as "nothing was detected" on a repo where everything
+   * already works.
+   */
+  onDetectFirstParty: (path: string) => Promise<FirstPartyDetection | null>
   /** Persist the accumulated declarations to `path`'s config (no cloning/installing here). */
   onDeclareDesignSystems: (
     path: string,
@@ -234,6 +246,7 @@ export function NewProjectPage({
   onClone,
   onListGitHubRepos,
   onSuggestDesignSystems,
+  onDetectFirstParty,
   onDeclareDesignSystems,
 }: NewProjectPageProps) {
   const [source, setSource] = useState<NewProjectSource | null>(initialSource)
@@ -259,6 +272,10 @@ export function NewProjectPage({
   /** Non-null while the add dialog is editing an existing row. */
   const [editingDeclaration, setEditingDeclaration] = useState<DesignSystemDeclaration | null>(null)
   const [suggestLoading, setSuggestLoading] = useState(false)
+  // `undefined` until the scan answers, so the list shows its loading line
+  // rather than flashing the plain empty state before a detection lands.
+  const [firstParty, setFirstParty] = useState<FirstPartyDetection | null | undefined>(undefined)
+  const [firstPartyLoading, setFirstPartyLoading] = useState(false)
   const [declaring, setDeclaring] = useState(false)
   // GitHub browsing. `null` = not asked yet; the load is lazy because it
   // shells out to `gh` and most opens never reach the clone step.
@@ -375,6 +392,23 @@ export function NewProjectPage({
     if (step !== "design-systems" || !chosenPath) return
     let cancelled = false
     setSuggestLoading(true)
+    setFirstPartyLoading(true)
+    setFirstParty(undefined)
+    // Independent of the suggestions: a repo walk, not a node_modules scan.
+    // Whichever lands first is shown first.
+    void onDetectFirstParty(chosenPath)
+      .then((detection) => {
+        if (cancelled) return
+        setFirstParty(detection)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setFirstParty(null)
+      })
+      .finally(() => {
+        if (cancelled) return
+        setFirstPartyLoading(false)
+      })
     void onSuggestDesignSystems(chosenPath).then((result) => {
       if (cancelled) return
       setSuggestLoading(false)
@@ -399,7 +433,7 @@ export function NewProjectPage({
     return () => {
       cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- onSuggestDesignSystems is a stable useCallback from the hook
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onSuggestDesignSystems and onDetectFirstParty are stable useCallbacks from the hook
   }, [step, chosenPath])
 
   /**
@@ -970,7 +1004,8 @@ export function NewProjectPage({
             */}
             <DesignSystemList
               entries={designSystemEntries}
-              loading={suggestLoading}
+              loading={suggestLoading || firstPartyLoading}
+              firstParty={firstParty ?? null}
               busy={stepBusy}
               onAdd={() => {
                 setEditingDeclaration(null)

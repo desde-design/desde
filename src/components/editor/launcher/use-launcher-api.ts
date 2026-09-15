@@ -24,6 +24,9 @@ export type GitHubReposState =
 // `new-project-page.tsx` for the runtime-side consequence (the identity
 // rule is duplicated there rather than imported).
 import type { DesignSystemDeclaration } from "@/editor/core/design-system-declarations"
+import type { FirstPartyDetection } from "@/editor/onboarding/detect-first-party"
+
+export type { FirstPartyDetection }
 import type { LauncherDemoState, LauncherOpenBlock } from "@/types/launcher"
 
 /**
@@ -92,6 +95,8 @@ interface ApiResult {
   /** GET /api/launcher/projects: why the demo could not be created, when it could not. */
   demoSeedError?: string
   suggestions?: DesignSystemSuggestion[]
+  /** POST /api/launcher/design-systems/first-party. */
+  detection?: FirstPartyDetection | null
   appended?: DesignSystemDeclaration[]
   /** `gh` repo listing (see listGitHubRepos). */
   available?: boolean
@@ -241,6 +246,12 @@ export interface UseLauncherApi {
   cloneForNewProject: (repoUrl: string) => Promise<{ path?: string }>
   /** Read-only, pre-open scan for design systems `path` already depends on + imports (safe before any editor boots on it). */
   suggestDesignSystems: (path: string) => Promise<DesignSystemSuggestion[]>
+  /**
+   * What `path` already has: a named copy-in system and the first-party
+   * component count. Feeds the step's empty state; `null` when there is
+   * nothing to say. Read-only, safe before any editor boots on it.
+   */
+  detectFirstParty: (path: string) => Promise<FirstPartyDetection | null>
   /**
    * Persist `declarations` to `path`'s `desde.config.json`
    * (no cloning/installing here — that's the boot reconciliation's job).
@@ -466,6 +477,14 @@ export function useLauncherApi(): UseLauncherApi {
     return res.suggestions ?? []
   }, [])
 
+  const detectFirstParty = useCallback(async (path: string): Promise<FirstPartyDetection | null> => {
+    const res = await post("/api/launcher/design-systems/first-party", { path })
+    // Not an error the user can act on: the step simply keeps its plain
+    // empty state, which is what it showed before this existed.
+    if (!res.ok) return null
+    return res.detection ?? null
+  }, [])
+
   const declareDesignSystems = useCallback(
     async (
       path: string,
@@ -644,6 +663,7 @@ export function useLauncherApi(): UseLauncherApi {
     cloneForNewProject,
     listGitHubRepos,
     suggestDesignSystems,
+    detectFirstParty,
     declareDesignSystems,
     inspectReadRoot,
     pickReadRoot,

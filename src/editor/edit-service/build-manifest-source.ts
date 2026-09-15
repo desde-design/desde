@@ -71,7 +71,13 @@ const SKIP_DIRS = new Set([
  *  that imports `<Link>` is usually not itself a component definition. */
 const IMPORTING_FILE_RE = /\.(vue|[cm]?[jt]sx?)$/i
 
-async function walkFiles(root: string): Promise<{
+/**
+ * Exported for `onboarding/detect-first-party.ts`, which has to count the
+ * SAME files this boot walk feeds `local-react` / `local-vue`. Two walks with
+ * two regex sets would let the New Project step promise a number the
+ * catalog then fails to deliver.
+ */
+export async function walkFiles(root: string): Promise<{
   components: string[]
   reactComponents: string[]
   stories: string[]

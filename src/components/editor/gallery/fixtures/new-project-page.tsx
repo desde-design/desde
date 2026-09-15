@@ -146,6 +146,12 @@ function baseProps(ctx: SurfaceRenderContext): Omit<
         { package: "react-day-picker", componentCount: 26, framework: "react", confidence: "likely" },
       ]
     },
+    onDetectFirstParty: async (path) => {
+      ctx.log("onDetectFirstParty", path)
+      // Only visible when the suggestions above come back empty: the
+      // detection replaces the empty state, it does not sit beside the list.
+      return { system: { id: "shadcn", label: "shadcn/ui", style: "radix-nova" }, componentCount: 35 }
+    },
     onDeclareDesignSystems: async (path, declarations) => {
       ctx.log("onDeclareDesignSystems", path, declarations.length)
       return { ok: true }

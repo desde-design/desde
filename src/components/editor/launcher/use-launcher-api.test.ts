@@ -423,6 +423,49 @@ describe("useLauncherApi — suggestDesignSystems / declareDesignSystems", () =>
     expect(lastPostBody()).toEqual({ path: "/picked/repo" })
   })
 
+  it("posts the path and returns the first-party detection", async () => {
+    const detection = {
+      system: { id: "shadcn", label: "shadcn/ui", style: "radix-nova" },
+      componentCount: 35,
+    }
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith("/projects")) return Promise.resolve(json(200, { ok: true, projects: [] }))
+      if (url.endsWith("/design-systems/first-party")) {
+        return Promise.resolve(json(200, { ok: true, detection }))
+      }
+      return Promise.resolve(json(404, { ok: false }))
+    })
+    const result = await ready()
+
+    let outcome: unknown
+    await act(async () => {
+      outcome = await result.current.detectFirstParty("/picked/repo")
+    })
+    expect(outcome).toEqual(detection)
+    expect(lastPostBody()).toEqual({ path: "/picked/repo" })
+  })
+
+  it("resolves null when the first-party scan fails, without surfacing an error", async () => {
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith("/projects")) return Promise.resolve(json(200, { ok: true, projects: [] }))
+      if (url.endsWith("/design-systems/first-party")) {
+        return Promise.resolve(json(500, { ok: false, reason: "boom" }))
+      }
+      return Promise.resolve(json(404, { ok: false }))
+    })
+    const result = await ready()
+
+    let outcome: unknown = "unset"
+    await act(async () => {
+      outcome = await result.current.detectFirstParty("/picked/repo")
+    })
+    expect(outcome).toBeNull()
+    // The step keeps its plain empty state; this is not an error the user acts on.
+    expect(result.current.error).toBeNull()
+  })
+
   it("posts path + declarations and resolves ok:true on success", async () => {
     fetchMock.mockImplementation((input) => {
       const url = String(input)
