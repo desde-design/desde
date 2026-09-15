@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, type ReactNode } from "react"
+import { createContext, type ReactNode, useContext, useId } from "react"
 import { cn } from "@/lib/utils"
 import { Checkbox } from "@/components/ui/checkbox"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
@@ -116,7 +116,12 @@ export function OptionCard({
   ...props
 }: OptionCardProps) {
   const chrome = useContext(OptionCardChromeContext)
-  const inputId = id ?? `option-card-${value}`
+  // `useId`, not the value: a caller's value can be a whole sentence with
+  // quotes and arrows in it (the chat agent's question cards are), and an id
+  // built from that is legal HTML that no `querySelector` can address, so
+  // accessibility tooling breaks on exactly the cards that ask a question.
+  const generatedId = useId()
+  const inputId = id ?? `option-card-${generatedId}`
   return (
     <label
       htmlFor={inputId}
@@ -223,7 +228,9 @@ export function CheckOptionCard({
   ...props
 }: CheckOptionCardProps) {
   const chrome = useContext(OptionCardChromeContext)
-  const inputId = id ?? `check-option-card-${String(title)}`
+  // Same reasoning as `OptionCard`: a title is prose, not an identifier.
+  const generatedId = useId()
+  const inputId = id ?? `check-option-card-${generatedId}`
   return (
     <label
       htmlFor={inputId}
