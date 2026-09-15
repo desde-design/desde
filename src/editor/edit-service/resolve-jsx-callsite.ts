@@ -22,7 +22,7 @@
  * Pure: no I/O. The CLI handler (`resolve-callsites-handler.ts`) reads the
  * files and applies the root-containment rules.
  */
-import { parseJsxModule, findJsxElementAt, walkJsx, type JsxNode } from "./resolve-jsx-target"
+import { parseJsxModule, findJsxElementAt, type JsxNode } from "./resolve-jsx-target"
 
 export interface JsxCallsite {
   /** 1-based line, Babel's own. */
