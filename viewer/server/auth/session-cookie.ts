@@ -147,20 +147,66 @@ export function countCookie(header: string | undefined, name: string): number {
  * on plain http, where the `__Host-` prefix that closes this on https is not
  * available. Only the plain name can be tossed; the prefixed one cannot
  * carry `Domain` at all.
+ *
+ * Guard it with `canCarryDomainCookie` — on a host where a `Domain` cookie is
+ * not a DISTINCT cookie, this clear deletes the reviewer's real session.
  */
 export function clearTossedSessionCookie(hostname: string): string {
   return `${sessionCookieName(false)}=; Domain=${hostname}; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`
 }
 
 /**
+ * Can a `Domain` attribute produce a cookie the browser keeps SEPARATELY from
+ * this host's own host-only cookie?
+ *
+ * The whole tossed-cookie defence assumes it can: it clears the `Domain`
+ * spelling and deliberately leaves the reviewer's host-only cookie alone, on
+ * the reasoning that a sibling host can only ever plant the former. That
+ * reasoning holds for a normal hostname, and the browser agrees — measured in
+ * Chrome, a `Domain=desde.localhost` clear leaves a host-only
+ * `desde.localhost` cookie untouched.
+ *
+ * It does NOT hold for a hostname that cannot take a `Domain` attribute at
+ * all: a single label (`localhost`, or a bare LAN name) and an IP literal.
+ * There the browser stores the "Domain" cookie as host-only, which makes it
+ * the SAME cookie as the real one, and a `Max-Age=0` on it deletes the
+ * session that was just issued. Measured: on `localhost` and on `127.0.0.1`
+ * the session cookie does not survive the response that sets it, so sign-in
+ * appears to succeed — the `sessions` row is written, the redirect happens —
+ * and every subsequent request is anonymous. `VIEWER_PUBLIC_URL=http://localhost:<port>`
+ * is the documented Safari fallback, so this was reachable by a supported
+ * configuration, not just by a test harness.
+ *
+ * Nothing is lost by skipping the clear there. A host with no dot has no
+ * subdomain siblings to be tossed from in the first place, and a prototype
+ * sharing a bare `localhost` with the shell (loopback mode, where prototypes
+ * differ only by PORT) can set the real host-only cookie directly — which
+ * this clear could never have distinguished anyway.
+ *
+ * curl cannot reproduce the bug, because it keys host-only and `Domain`
+ * cookies separately. A browser is the only thing that shows it.
+ */
+export function canCarryDomainCookie(hostname: string): boolean {
+  // `new URL(...).hostname` brackets an IPv6 literal; be tolerant of both.
+  if (hostname.startsWith("[") || hostname.includes(":")) return false
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return false
+  return hostname.includes(".")
+}
+
+/**
  * Every `Set-Cookie` a sign-in answers with: the session cookie, and on http
  * the clear for a tossed `Domain` copy, so a planted cookie never outlives
  * the reviewer's own sign-in.
+ *
+ * The clear is omitted on https (the `__Host-` name cannot be tossed) and on
+ * a host that cannot carry a `Domain` cookie, where it would delete the very
+ * cookie beside it — see `canCarryDomainCookie`.
  */
 export function sessionCookieHeaders(
   value: string,
   opts: { secure: boolean; maxAgeSeconds: number; publicHostname: string },
 ): string[] {
   const cookie = serializeSessionCookie(value, { secure: opts.secure, maxAgeSeconds: opts.maxAgeSeconds })
-  return opts.secure ? [cookie] : [cookie, clearTossedSessionCookie(opts.publicHostname)]
+  if (opts.secure || !canCarryDomainCookie(opts.publicHostname)) return [cookie]
+  return [cookie, clearTossedSessionCookie(opts.publicHostname)]
 }

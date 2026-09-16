@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   SESSION_COOKIE_NAME,
+  canCarryDomainCookie,
   clearSessionCookie,
   clearTossedSessionCookie,
   countCookie,
@@ -159,5 +160,37 @@ describe("a tossed Domain cookie on http", () => {
     const https = sessionCookieHeaders("v", { secure: true, maxAgeSeconds: 10, publicHostname: "viewer.example.com" })
     expect(https).toHaveLength(1)
     expect(https[0]).toMatch(/^__Host-viewer_session=/)
+  })
+
+  describe("hosts that cannot carry a Domain cookie", () => {
+    it("knows which hostnames a Domain attribute can distinguish", () => {
+      expect(canCarryDomainCookie("desde.localhost")).toBe(true)
+      expect(canCarryDomainCookie("viewer.example.com")).toBe(true)
+      // Single label: the browser stores a `Domain` cookie for it as
+      // host-only, so it is the SAME cookie as the real one.
+      expect(canCarryDomainCookie("localhost")).toBe(false)
+      expect(canCarryDomainCookie("viewer")).toBe(false)
+      // IP literals, which have dots but still cannot take a Domain.
+      expect(canCarryDomainCookie("127.0.0.1")).toBe(false)
+      expect(canCarryDomainCookie("192.168.1.10")).toBe(false)
+      expect(canCarryDomainCookie("[::1]")).toBe(false)
+      expect(canCarryDomainCookie("::1")).toBe(false)
+    })
+
+    it("omits the clear on a single-label host, so sign-in does not delete itself", () => {
+      const onLocalhost = sessionCookieHeaders("v", {
+        secure: false,
+        maxAgeSeconds: 10,
+        publicHostname: "localhost",
+      })
+      expect(onLocalhost).toHaveLength(1)
+      expect(onLocalhost[0]).toMatch(/^viewer_session=v; HttpOnly/)
+    })
+
+    it("omits the clear on an IP literal", () => {
+      for (const publicHostname of ["127.0.0.1", "[::1]"]) {
+        expect(sessionCookieHeaders("v", { secure: false, maxAgeSeconds: 10, publicHostname })).toHaveLength(1)
+      }
+    })
   })
 })

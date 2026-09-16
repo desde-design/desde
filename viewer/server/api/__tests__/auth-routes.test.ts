@@ -346,10 +346,13 @@ describe("auth routes", () => {
     expect(res.headers.location).toBe("/")
     const session = extractCookie(setCookies(res), "viewer_session")
     expect(session).toBeTruthy()
-    // On http, every sign-in also clears a tossed `Domain` copy of the plain
-    // cookie name, so a prototype host's planted cookie never outlives the
-    // reviewer's own sign-in (Task 6).
-    expect(setCookies(res)).toContainEqual(clearTossedSessionCookie("localhost"))
+    // This suite's public URL is bare `localhost`, which CANNOT carry a
+    // `Domain` cookie — so the tossed-copy clear is omitted rather than
+    // riding along. Emitting it there deleted the session cookie in the same
+    // response, and sign-in silently did nothing in the browser. The clear is
+    // still issued on a host that has subdomain siblings; the
+    // `desde.localhost` test below is the positive case.
+    expect(setCookies(res)).not.toContainEqual(clearTossedSessionCookie("localhost"))
     const me = await request(app).get("/api/v1/me").set("Cookie", `viewer_session=${session}`)
     expect(me.body.user.email).toBe("mo@example.com")
     expect(me.body.user.provider).toBe("github")
@@ -1412,9 +1415,9 @@ describe("auth routes", () => {
       expect(res.headers.location).toBe("/")
       const session = extractCookie(setCookies(res), "viewer_session")
       expect(session).toBeTruthy()
-      // Local operator sign-in is a sign-in like any other: on http it also
-      // clears a tossed `Domain` copy of the plain cookie name (Task 6).
-      expect(setCookies(res)).toContainEqual(clearTossedSessionCookie("localhost"))
+      // Bare `localhost` cannot carry a `Domain` cookie, so no clear rides
+      // along — see the callback test above, and the positive case below.
+      expect(setCookies(res)).not.toContainEqual(clearTossedSessionCookie("localhost"))
 
       // The point of the route: an ORDINARY session for an ORDINARY user row,
       // resolvable through the same `/me` every other caller uses. A 302 with
@@ -1426,6 +1429,24 @@ describe("auth routes", () => {
       expect(me.status).toBe(200)
       expect(me.body.user?.email).toBe("operator@localhost")
       expect(me.body.authEnabled).toBe(false)
+    })
+
+    it("DOES clear a tossed Domain copy when the http host has subdomain siblings", async () => {
+      // The defence this route still owes a `.localhost` deployment, where a
+      // prototype on `<slug>.apps.desde.localhost` really can plant
+      // `viewer_session=...; Domain=desde.localhost`. Asserted at the route,
+      // not only in `session-cookie.test.ts`, so the two halves of the
+      // hostname rule stay pinned together.
+      stable.use(
+        createApp({
+          ...baseDeps({ VIEWER_PUBLIC_URL: "http://desde.localhost:3100" }),
+          localOperatorToken: "correct-horse",
+        }),
+      )
+      const res = await request(stable.app).get("/api/v1/auth/local?token=correct-horse")
+      expect(res.status).toBe(302)
+      expect(extractCookie(setCookies(res), "viewer_session")).toBeTruthy()
+      expect(setCookies(res)).toContainEqual(clearTossedSessionCookie("desde.localhost"))
     })
 
     it("401s on a wrong token and sets no cookie", async () => {

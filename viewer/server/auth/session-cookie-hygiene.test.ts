@@ -42,4 +42,21 @@ describe("createSessionCookieHygiene", () => {
       .set("Cookie", "viewer_session=a; viewer_session=b")
     expect(res.headers["set-cookie"]).toBeUndefined()
   })
+
+  it("does nothing on a host that cannot carry a Domain cookie", async () => {
+    // `localhost` is the documented Safari fallback. A `Domain=localhost`
+    // clear there is not a clear of a PLANTED copy — the browser keeps no
+    // separate copy to clear — it deletes the reviewer's own session.
+    for (const publicUrl of ["http://localhost:3100", "http://127.0.0.1:3100"]) {
+      const inner = express()
+      inner.use(createSessionCookieHygiene({ publicUrl }))
+      inner.get("/", (_req, res) => res.status(200).end())
+      stable.use(inner)
+
+      const res = await request(stable.app)
+        .get("/")
+        .set("Cookie", "viewer_session=a; viewer_session=b")
+      expect(res.headers["set-cookie"]).toBeUndefined()
+    }
+  })
 })
