@@ -1,8 +1,14 @@
 import { Router } from "express"
 import type { AppDeps } from "../create-app"
-import { requireProjectRead, requireProjectWrite, resolveReadContext } from "../auth/authorize"
+import {
+  loadProjectReadPolicy,
+  requireProjectRead,
+  requireProjectWrite,
+  resolveReadContext,
+} from "../auth/authorize"
 import type { Participant, StorageAdapter } from "../storage/types"
 import { isProjectInsider } from "./field-visibility"
+import { buildMentionDirectory, type MentionDirectoryEntry } from "./mention-directory"
 import { MAX_NAME_CHARS, normalizeEmailInput } from "./validate-email"
 
 /**
@@ -53,7 +59,7 @@ export interface ParticipantView {
   email?: string
 }
 
-function toParticipantView(participant: Participant, includeEmail: boolean): ParticipantView {
+function toParticipantView(participant: MentionDirectoryEntry, includeEmail: boolean): ParticipantView {
   return {
     id: participant.id,
     displayName: participant.displayName,
@@ -142,7 +148,12 @@ export function createParticipantsRoutes(deps: AppDeps): Router {
       return
     }
     const includeEmail = await isProjectInsider(deps.storage, ctx, project.id)
-    const participants = await deps.storage.listParticipants(project.id)
+    // The project's own participant rows PLUS, for a signed-in caller, the
+    // instance members who can read this project. Before that union the picker
+    // could only offer people who had already commented here, so a freshly
+    // connected project offered nobody at all — see `mention-directory.ts`.
+    const policy = await loadProjectReadPolicy(deps.storage)
+    const participants = await buildMentionDirectory(deps.storage, ctx, project, policy)
     res.json({ participants: participants.map((p) => toParticipantView(p, includeEmail)) })
   })
 

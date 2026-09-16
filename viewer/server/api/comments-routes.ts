@@ -8,10 +8,11 @@ import {
   requireProjectRead,
   requireProjectWrite,
   resolveReadContext,
+  type ProjectReadPolicy,
   type ReadContext,
 } from "../auth/authorize"
 import type { CommentChangeBus } from "../comments/change-bus"
-import type { StorageAdapter } from "../storage/types"
+import type { Project, StorageAdapter } from "../storage/types"
 import { NotFoundError } from "../storage/errors"
 import {
   MAX_CONCURRENT_STREAMS_PER_CLIENT,
@@ -20,6 +21,7 @@ import {
   createFixedWindowCounter,
 } from "../rate-limit"
 import { isProjectInsider } from "./field-visibility"
+import { isMentionableMember, parseUserMentionId } from "./mention-directory"
 import { upsertAuthorParticipant } from "./participants-routes"
 import { MAX_EMAIL_CHARS, MAX_NAME_CHARS } from "./validate-email"
 
@@ -308,13 +310,45 @@ function toCommentView(comment: Comment, includeEmails: boolean): CommentView {
  * other plain-text content in the comment, so it's out of scope by design,
  * not an oversight.
  */
-async function resolveMentionIds(storage: StorageAdapter, projectId: string, mentions: unknown): Promise<string[]> {
+async function resolveMentionIds(
+  storage: StorageAdapter,
+  project: Project,
+  ctx: ReadContext,
+  mentions: unknown,
+): Promise<string[]> {
   if (!Array.isArray(mentions) || mentions.length === 0) return []
-  const participants = await storage.listParticipants(projectId)
+  const participants = await storage.listParticipants(project.id)
   const validIds = new Set(participants.map((p) => p.id))
+  // Loaded once per write, and only if a `user:` id actually turns up — the
+  // common case is a picker that offered nothing but real participants.
+  let policy: ProjectReadPolicy | null = null
   const resolved: string[] = []
   for (const m of mentions) {
-    if (typeof m === "string" && validIds.has(m) && !resolved.includes(m)) resolved.push(m)
+    if (typeof m !== "string") continue
+    if (validIds.has(m)) {
+      if (!resolved.includes(m)) resolved.push(m)
+      continue
+    }
+    const userId = parseUserMentionId(m)
+    // An identified caller only: `buildMentionDirectory` never hands the
+    // instance roster to an anonymous reviewer, so an anonymous `user:` id can
+    // only have been guessed or scraped, and honouring it would put the
+    // operator's From: on mail to a member with no connection to this project
+    // (security audit B5).
+    if (!userId || !(ctx.user || ctx.isAdmin)) continue
+    policy ??= await loadProjectReadPolicy(storage)
+    const member = await isMentionableMember(storage, userId, project, policy)
+    if (!member) continue
+    // Materialize on first mention. The identity is server-derived, so this
+    // is the VERIFIED write path: overwriting a stored display name with the
+    // account's own is correct here, and K07 (an unverified author renaming
+    // somebody) cannot apply.
+    const participant = await storage.upsertParticipant(project.id, {
+      email: member.email,
+      displayName: member.displayName.slice(0, MAX_NAME_CHARS),
+      status: "active",
+    })
+    if (!resolved.includes(participant.id)) resolved.push(participant.id)
   }
   return resolved
 }
@@ -470,7 +504,7 @@ export function createCommentsRoutes(deps: AppDeps & { changeBus: CommentChangeB
       res.status(400).json({ error: resolvedAuthor.error })
       return
     }
-    const resolvedMentions = await resolveMentionIds(deps.storage, project.id, mentions)
+    const resolvedMentions = await resolveMentionIds(deps.storage, project, ctx, mentions)
     const comment = await deps.storage.createComment(project.id, {
       position: sanitizePosition(position as Record<string, unknown>),
       body,
@@ -645,7 +679,7 @@ export function createCommentsRoutes(deps: AppDeps & { changeBus: CommentChangeB
       const comment = await deps.storage.updateComment(commentId, {
         ...(body !== undefined ? { body } : {}),
         ...(resolved !== undefined ? { resolved } : {}),
-        ...(mentions !== undefined ? { mentions: await resolveMentionIds(deps.storage, project.id, mentions) } : {}),
+        ...(mentions !== undefined ? { mentions: await resolveMentionIds(deps.storage, project, ctx, mentions) } : {}),
       })
       deps.changeBus.emit(project.id)
       res.json(toCommentView(comment, await isProjectInsider(deps.storage, ctx, project.id)))
@@ -685,7 +719,7 @@ export function createCommentsRoutes(deps: AppDeps & { changeBus: CommentChangeB
     }
     try {
       const replyAuthor = resolvedReplyAuthor.author
-      const resolvedMentions = await resolveMentionIds(deps.storage, project.id, mentions)
+      const resolvedMentions = await resolveMentionIds(deps.storage, project, ctx, mentions)
       const comment = await deps.storage.addCommentReply(commentId, {
         body,
         author: replyAuthor,
