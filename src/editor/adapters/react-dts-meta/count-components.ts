@@ -128,6 +128,17 @@ export function listReactComponents(
  * members of a hand-written literal cost only what that literal declares.
  * Identity agreed with the printed text on every package measured except
  * heroicons, which the literal rule covers.
+ *
+ * What the member key does NOT carry, by ruling (codex delta review 2,
+ * 2026-09-15): rest and `this` parameter metadata on a literal's call
+ * signatures, so `{ (x: string[]): void }` and `{ (...x: string[]): void }`
+ * share a key. A props type is data; no package measured declares a callable
+ * props literal at all, and reaching the shared-props threshold would take
+ * twenty brand-prefixed components whose props are callable literals that
+ * differ only there. Three review rounds had each found the next omission in
+ * the previous round's fix to this branch, none with a measured case behind
+ * it, which is the loop's stop signal. If a real package ever shows the
+ * shape, add the marker here and a case to `Keys.d.ts`.
  */
 function propsTypeKey(checker: ts.TypeChecker, type: ts.Type, ids: Map<ts.Type, number>): string | null {
   if (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.NonPrimitive)) return null
@@ -143,6 +154,11 @@ function propsTypeKey(checker: ts.TypeChecker, type: ts.Type, ids: Map<ts.Type, 
     const objectFlags = (type as ts.ObjectType).objectFlags
     if (objectFlags & ts.ObjectFlags.Anonymous && !(objectFlags & ts.ObjectFlags.Instantiated)) {
       const decl = type.symbol?.declarations?.[0]
+      // This walk cannot loop. It only descends into a hand-written literal's
+      // members, and a member that is itself a hand-written literal is a
+      // NESTED node, a tree. Any way back to an enclosing literal (`typeof X`,
+      // an alias, an interface, a conditional type) is a type this branch
+      // does not enter, so it is keyed by identity below and the walk ends.
       if (decl && ts.isTypeLiteralNode(decl)) {
         // Every kind of member a literal can declare, modifiers included, so
         // two literals get one key only when they declare the same thing
