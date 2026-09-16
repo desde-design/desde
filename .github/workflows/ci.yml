@@ -55,6 +55,10 @@ jobs:
         with:
           name: verify-artifacts
           path: .verify-artifacts/
+          # The directory is dot-prefixed, and upload-artifact skips hidden
+          # paths unless told otherwise. Without this line the step ran on
+          # every red build and uploaded nothing (run 35143757941).
+          include-hidden-files: true
           if-no-files-found: ignore
 
       - name: Viewer typecheck and tests

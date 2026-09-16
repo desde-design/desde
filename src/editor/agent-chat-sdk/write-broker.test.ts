@@ -924,15 +924,37 @@ describe('brokeredWrite', () => {
         lockManager,
       })
 
-    const [r1, r2] = await Promise.all([call('FROM-A'), call('FROM-B')])
+    // The broker writes its backup journal (real filesystem work) BEFORE it
+    // takes the lock, so two callers started together are not guaranteed to
+    // meet at the lock: on a slow runner the first can finish its whole write
+    // before the second ever attempts to acquire, and "the second caller
+    // queued" below is then false for a reason that has nothing to do with
+    // serialization (CI, 2026-09-16, run 35143757941). Hold the lock here
+    // until BOTH callers have queued behind it, then let go.
+    const target = join(root, 'App.vue')
+    const queued = () =>
+      events.filter((e) => e.type === 'acquire-attempt' && e.queueLength >= 1).length
+    let pending!: Promise<[Awaited<ReturnType<typeof call>>, Awaited<ReturnType<typeof call>>]>
+    await lockManager.withLock(
+      target,
+      async () => {
+        pending = Promise.all([call('FROM-A'), call('FROM-B')])
+        const deadline = Date.now() + 5_000
+        while (queued() < 2) {
+          if (Date.now() > deadline) throw new Error('both callers never queued on App.vue')
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+      },
+      { sessionId: 'test-holder' },
+    )
+    const [r1, r2] = await pending
     expect(r1.ok && r2.ok).toBe(true)
-    const final = readFileSync(join(root, 'App.vue'), 'utf8')
+    const final = readFileSync(target, 'utf8')
     // Last writer wins; the lock guarantees no interleaved corruption.
     expect(['FROM-A', 'FROM-B']).toContain(final)
-    expect(events.filter((e) => e.type === 'acquired')).toHaveLength(2)
-    expect(
-      events.filter((e) => e.type === 'acquire-attempt' && e.queueLength >= 1).length,
-    ).toBeGreaterThanOrEqual(1)
+    // Three acquisitions: the holder, then each caller in turn.
+    expect(events.filter((e) => e.type === 'acquired')).toHaveLength(3)
+    expect(queued()).toBe(2)
   })
 
   it('journal may cover files the ops never write (LLM lane / lockfiles)', async () => {
