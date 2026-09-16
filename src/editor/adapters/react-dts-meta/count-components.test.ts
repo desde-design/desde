@@ -111,3 +111,30 @@ describe('listReactComponents — props-type keys', () => {
     expect(key('EmptyTwo')).toBeNull()
   })
 })
+
+/**
+ * The same type-literal TEXT in two files. Codex (whole-branch review,
+ * 2026-09-15): keying a hand-written literal by its source text merges
+ * `{ value: Value }` across files where `Value` is a different local alias in
+ * each, which would push a brand-prefixed design system of that shape toward
+ * "icons". The key is built from the literal's members instead, so the
+ * heroicons shape still shares and the bound-alias shape does not.
+ */
+describe('listReactComponents — type literals across files', () => {
+  const listed = listReactComponents(
+    TSCONFIG,
+    new Map([['@fixtures/literals', [path.join(FIXTURE_DIR, 'LiteralA.d.ts'), path.join(FIXTURE_DIR, 'LiteralB.d.ts')]]]),
+  ).get('@fixtures/literals')!
+  const key = (name: string) => listed.find((c) => c.name === name)!.propsType
+
+  it('shares a key for identical literals that mean the same thing', () => {
+    expect(key('HeroA')).not.toBeNull()
+    expect(key('HeroB')).toBe(key('HeroA'))
+  })
+
+  it('does not share a key for identical text bound to different local aliases', () => {
+    expect(key('BoundA')).not.toBeNull()
+    expect(key('BoundB')).not.toBeNull()
+    expect(key('BoundB')).not.toBe(key('BoundA'))
+  })
+})

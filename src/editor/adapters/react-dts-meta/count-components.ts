@@ -89,7 +89,7 @@ export function listReactComponents(
           const props = getReactPropsType(checker, type, sf, name)
           if (!props) continue
           seen.add(name)
-          components.push({ name, propsType: propsTypeKey(props, ids) })
+          components.push({ name, propsType: propsTypeKey(checker, props, ids) })
         } catch {
           // One bad export must not poison the count (same posture as the extractor).
         }
@@ -112,33 +112,48 @@ export function listReactComponents(
  * The one shape identity misses is a type literal written out by hand at
  * every declaration: `@heroicons/react` declares each icon as
  * `Omit<SVGProps<…>, "ref"> & { title?: string; titleId?: string } & …`, and
- * every file's `{ title?: …}` is its own anonymous type. Those print the same
- * and mean the same, so a hand-written literal is keyed by its source text
- * instead. Only a literal that was WRITTEN, never one the checker produced by
- * instantiating a generic (`ObjectFlags.Instantiated`): the body of
- * `type Wrap<P> = { inner: P }` has one source text for every `P`.
+ * every file's `{ title?: …}` is its own anonymous type. Those mean the same,
+ * so a hand-written literal is keyed by its MEMBERS instead: each property's
+ * name and the key of its type, recursively, plus any index signatures. Not
+ * by its source text: `{ value: Value }` in two files can bind `Value` to two
+ * different aliases, and the member key tells them apart where the text
+ * would not (codex, whole-branch review, 2026-09-15). Only a literal that was
+ * WRITTEN gets this, never one the checker produced by instantiating a
+ * generic (`ObjectFlags.Instantiated`): the body of `type Wrap<P> = { inner:
+ * P }` is one literal for every `P`, and identity is what tells those apart.
  *
- * `checker.typeToString` would also key by text, but printing a type resolves
- * its members, and MEASURED 2026-09-15 that costs 2.8 s of a 4.2 s scan on
- * `@chakra-ui/react` (775 components). Identity costs nothing and agreed with
- * the printed text on every package measured except heroicons, which the
- * literal rule covers.
+ * `checker.typeToString` would also key by structure, but printing a type
+ * resolves its members, and MEASURED 2026-09-15 that costs 2.8 s of a 4.2 s
+ * scan on `@chakra-ui/react` (775 components). Identity costs nothing, and the
+ * members of a hand-written literal cost only what that literal declares.
+ * Identity agreed with the printed text on every package measured except
+ * heroicons, which the literal rule covers.
  */
-function propsTypeKey(type: ts.Type, ids: Map<ts.Type, number>): string | null {
+function propsTypeKey(checker: ts.TypeChecker, type: ts.Type, ids: Map<ts.Type, number>): string | null {
   if (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.NonPrimitive)) return null
   if (type.isIntersection()) {
-    const parts = type.types.map((t) => propsTypeKey(t, ids))
+    const parts = type.types.map((t) => propsTypeKey(checker, t, ids))
     return parts.some((p) => p === null) ? null : parts.join(' & ')
   }
   if (type.isUnion()) {
-    const parts = type.types.map((t) => propsTypeKey(t, ids))
+    const parts = type.types.map((t) => propsTypeKey(checker, t, ids))
     return parts.some((p) => p === null) ? null : parts.join(' | ')
   }
   if (type.flags & ts.TypeFlags.Object && !type.aliasSymbol) {
     const objectFlags = (type as ts.ObjectType).objectFlags
     if (objectFlags & ts.ObjectFlags.Anonymous && !(objectFlags & ts.ObjectFlags.Instantiated)) {
       const decl = type.symbol?.declarations?.[0]
-      if (decl && ts.isTypeLiteralNode(decl)) return decl.getText().replace(/\s+/g, ' ')
+      if (decl && ts.isTypeLiteralNode(decl)) {
+        const members = type.getProperties().map((prop) => {
+          const at = prop.valueDeclaration ?? prop.declarations?.[0] ?? decl
+          const optional = prop.flags & ts.SymbolFlags.Optional ? '?' : ''
+          return `${prop.getName()}${optional}: ${propsTypeKey(checker, checker.getTypeOfSymbolAtLocation(prop, at), ids)}`
+        })
+        const indexes = checker
+          .getIndexInfosOfType(type)
+          .map((info) => `[${propsTypeKey(checker, info.keyType, ids)}]: ${propsTypeKey(checker, info.type, ids)}`)
+        return `{ ${[...members, ...indexes].join('; ')} }`
+      }
       // `{}` says nothing about sharing either. The checker keeps ONE empty
       // type literal for the whole program, with no declaration behind it.
       if (!decl && type.getProperties().length === 0) return null
