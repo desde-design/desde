@@ -34,7 +34,19 @@ function splitPath(pathname: string): { base: string; route: Route } {
   const segments = pathname.split("/").filter(Boolean)
   const last = segments[segments.length - 1]
   const named = ROUTES.find((r) => r !== "" && r === last)
-  if (named) return { base: "/" + segments.slice(0, -1).join("/") + "/", route: named }
+  if (named) {
+    // Build the base from the PARENT segments, and fall back to "/" when there
+    // are none. The obvious one-liner ("/" + parent.join("/") + "/") is wrong
+    // for a route at the root of an origin: "/settings" has no parent, so it
+    // produced "//". That is a protocol-relative URL, so `href("")` was "//"
+    // and `href("settings")` was "//settings", which the browser reads as the
+    // HOST `settings`. `pushState` then threw a SecurityError, the click
+    // handler had already called `preventDefault`, and every nav link silently
+    // did nothing. It only bit after a full page load ON a named route — a
+    // reload, or the Editor's post-edit RELOAD_PROTOTYPE.
+    const parent = segments.slice(0, -1)
+    return { base: parent.length > 0 ? `/${parent.join("/")}/` : "/", route: named }
+  }
   return { base: pathname.endsWith("/") ? pathname : pathname + "/", route: "" }
 }
 
