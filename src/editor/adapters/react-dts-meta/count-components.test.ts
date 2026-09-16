@@ -23,13 +23,13 @@ describe('listReactComponents', () => {
         ['@fixtures/cards', [CARD]],
       ]),
     )
-    expect(names.get('@fixtures/widgets')).toEqual(['Button', 'Spacer'])
-    expect(names.get('@fixtures/cards')).toEqual(['Card'])
+    expect(names.get('@fixtures/widgets')!.map((c) => c.name)).toEqual(['Button', 'Spacer'])
+    expect(names.get('@fixtures/cards')!.map((c) => c.name)).toEqual(['Card'])
   })
 
   it('builds one program for every candidate, and a package with two entries is not double-counted', () => {
     const names = listReactComponents(TSCONFIG, new Map([['@fixtures/all', [BUTTON, CARD, BUTTON]]]))
-    expect(names.get('@fixtures/all')).toEqual(['Button', 'Spacer', 'Card'])
+    expect(names.get('@fixtures/all')!.map((c) => c.name)).toEqual(['Button', 'Spacer', 'Card'])
   })
 
   it('keeps a key whose entry does not exist, empty', () => {
@@ -63,6 +63,51 @@ describe('listReactComponents — union-typed components', () => {
       TSCONFIG,
       new Map([['@fixtures/unions', [path.join(FIXTURE_DIR, 'Chip.d.ts')]]]),
     )
-    expect(names.get('@fixtures/unions')).toEqual(['Chip', 'Tag', 'Badge'])
+    expect(names.get('@fixtures/unions')!.map((c) => c.name)).toEqual(['Chip', 'Tag', 'Badge'])
+  })
+})
+
+/**
+ * The props-type key the icon guard reads. An icon set declares every
+ * component over ONE props type; a design system declares one per
+ * component. The key has to say which, at no member-resolution cost.
+ */
+describe('listReactComponents — props-type keys', () => {
+  const listed = listReactComponents(
+    TSCONFIG,
+    new Map([['@fixtures/keys', [path.join(FIXTURE_DIR, 'Keys.d.ts')]]]),
+  ).get('@fixtures/keys')!
+  const key = (name: string) => listed.find((c) => c.name === name)!.propsType
+
+  it('lists every component in the fixture', () => {
+    expect(listed.map((c) => c.name)).toEqual([
+      'RiAlarmFill', 'RiAlarmLine', 'RiAlignLeft', 'HeroOne', 'HeroTwo',
+      'Button', 'Card', 'LooseOne', 'LooseTwo', 'EmptyOne', 'EmptyTwo',
+    ])
+  })
+
+  it('gives components that share a props interface the same key', () => {
+    expect(key('RiAlarmFill')).not.toBeNull()
+    expect(key('RiAlarmLine')).toBe(key('RiAlarmFill'))
+    expect(key('RiAlignLeft')).toBe(key('RiAlarmFill'))
+  })
+
+  it('gives components with their own props interfaces different keys', () => {
+    expect(key('Button')).not.toBeNull()
+    expect(key('Card')).not.toBeNull()
+    expect(key('Button')).not.toBe(key('Card'))
+    expect(key('Button')).not.toBe(key('RiAlarmFill'))
+  })
+
+  it('keys a hand-written type literal by its text, so identical literals in different declarations share', () => {
+    expect(key('HeroOne')).not.toBeNull()
+    expect(key('HeroTwo')).toBe(key('HeroOne'))
+  })
+
+  it('gives no key to props that say nothing (`any`, `{}`)', () => {
+    expect(key('LooseOne')).toBeNull()
+    expect(key('LooseTwo')).toBeNull()
+    expect(key('EmptyOne')).toBeNull()
+    expect(key('EmptyTwo')).toBeNull()
   })
 })
