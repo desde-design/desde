@@ -18,6 +18,10 @@
  *     all are callable; the first call-signature parameter is the props.
  *  2. Class components — `Component<P, S>`: the construct signature's
  *     return type (the instance) carries `props`.
+ *  3. Union-typed exports — `ComponentType<P>`, which is
+ *     `ComponentClass<P> | FunctionComponent<P>`: the union has no signature
+ *     of its own, so the props come from the first constituent that is a
+ *     component by rule 1 or 2.
  *
  * Framework/DOM filtering: a React component's props type includes every
  * inherited HTML/DOM/ARIA attribute (via `ComponentPropsWithoutRef<...>`),
@@ -200,7 +204,9 @@ function isObjectLikePropsType(type: ts.Type): boolean {
  * predicate that drifts. Gated on a PascalCase name. Function components (incl.
  * `forwardRef`/`memo`, any return type): the first call-signature parameter,
  * required to be object-like so non-component callables are rejected. Class
- * components: the construct signature's instance `props`.
+ * components: the construct signature's instance `props`. A union
+ * (`ComponentType<P>`, or `Component | undefined`): the first constituent
+ * that is a component by either rule.
  */
 export function getReactPropsType(
   checker: ts.TypeChecker,
@@ -209,6 +215,20 @@ export function getReactPropsType(
   name: string,
 ): ts.Type | null {
   if (!isComponentName(name)) return null
+
+  // A union carries only the signatures its constituents SHARE. React's own
+  // `ComponentType<P>` is `ComponentClass<P> | FunctionComponent<P>`: one
+  // half is constructable and the other callable, so the union has neither,
+  // and every export declared that way read as "not a component" until
+  // 2026-09-15 (`@remixicon/react`: 3,228 exports, counted as zero). Look
+  // inside; the first constituent that is a component wins.
+  if (type.isUnion()) {
+    for (const member of type.types) {
+      const propsType = getReactPropsType(checker, member, fallback, name)
+      if (propsType) return propsType
+    }
+    return null
+  }
 
   for (const sig of type.getCallSignatures()) {
     const param = sig.getParameters()[0]

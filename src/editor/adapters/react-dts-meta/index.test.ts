@@ -153,3 +153,54 @@ describe('ReactDtsMetaManifestSource — no tsconfig', () => {
     ])
   })
 })
+
+/**
+ * Union-typed exports. React's canonical `ComponentType<P>` is
+ * `ComponentClass<P> | FunctionComponent<P>`, and a union carries only the
+ * signatures its constituents SHARE: one half is constructable, the other
+ * callable, so the union has neither. Reading signatures off the union
+ * itself made every export declared that way read as "not a component"
+ * (`@remixicon/react`: 3,228 exports, counted as zero). The extractor has
+ * to look inside the union.
+ */
+const unionSource = new ReactDtsMetaManifestSource({
+  id: 'fixture-react-dts-union',
+  tsconfigPath: TSCONFIG,
+  entryFiles: [path.join(FIXTURE_DIR, 'Chip.d.ts')],
+  framework: 'react',
+  designSystem: 'fixture-ds',
+  importPath: '@fixtures/react-widgets',
+})
+
+describe('ReactDtsMetaManifestSource — union-typed components', () => {
+  it('extracts a component declared as a class-or-function union (the `ComponentType<P>` shape)', async () => {
+    const chip = await unionSource.getComponent('Chip')
+    expect(chip).not.toBeNull()
+    const variant = chip!.props.find((p) => p.name === 'variant')!
+    expect(variant.control.kind).toBe('finite-choice')
+    const options = (variant.control as { options: { value: string }[] }).options
+    expect(options.map((o) => o.value).sort()).toEqual(['filled', 'outlined'])
+    expect(chip!.props.map((p) => p.name)).toContain('label')
+  })
+
+  it('does not care which half of the union comes first', async () => {
+    const tag = await unionSource.getComponent('Tag')
+    expect(tag).not.toBeNull()
+    expect(tag!.props.map((p) => p.name)).toEqual(['text'])
+  })
+
+  it('accepts an optional component (`Component | undefined`)', async () => {
+    const badge = await unionSource.getComponent('Badge')
+    expect(badge).not.toBeNull()
+    expect(badge!.props.map((p) => p.name).sort()).toEqual(['label', 'variant'])
+  })
+
+  it('still rejects a union with no component half', async () => {
+    expect(await unionSource.getComponent('Formatter')).toBeNull()
+  })
+
+  it('lists every union-typed component and nothing else', async () => {
+    const all = (await unionSource.listComponents()).map((m) => m.name).sort()
+    expect(all).toEqual(['Badge', 'Chip', 'Tag'])
+  })
+})

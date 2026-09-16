@@ -22,12 +22,13 @@
  *         component (`listReactComponents`, the extractor's own predicate
  *         over ONE shared TS program), and
  *      3. is it not an icon set: an export list that is mostly `*Icon` /
- *         `Icon*`, or one spread over too many distinct component FAMILIES,
- *         is icons. MEASURED on a shadcn dashboard: the icon package was
- *         the top suggestion by import count (140 files) and would have
- *         arrived with 6,211 "components". This test used to be "the list
- *         is in the hundreds" instead; see {@link looksLikeIconSet} for
- *         why a raw count was the wrong question and what replaced it.
+ *         `Icon*`, one spread over too many distinct component FAMILIES, or
+ *         a brand-prefixed one whose names all take the SAME props, is
+ *         icons. MEASURED on a shadcn dashboard: the icon package was the
+ *         top suggestion by import count (140 files) and would have arrived
+ *         with 6,211 "components". This test used to be "the list is in the
+ *         hundreds" instead; see {@link looksLikeIconSet} for why a raw
+ *         count was the wrong question and what replaced it.
  *
  *         Failing this question does NOT hand the package to the icon
  *         picker. That surface has its own detection pass, at CLI boot,
@@ -68,6 +69,7 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import type { ListedReactComponent } from '@/editor/adapters/react-dts-meta/count-components'
 import type { FrameworkId } from '@/editor/core/manifest'
 
 export interface DesignSystemSuggestion {
@@ -116,9 +118,20 @@ const FLAT_MIN_FAMILIES = 150
 const FLAT_MAX_PARTS_PER_FAMILY = 2
 
 /**
+ * The brand-prefixed pair, applied together: this many names per family or
+ * more (every name starts with the same word, so the list collapses to a
+ * handful of families) AND this many names per distinct props type or more
+ * (the names all take the same props). Catches an icon set the family
+ * signals cannot see, without catching a brand-prefixed design system, whose
+ * components each take their own props. See signal 4 below.
+ */
+const BRAND_PREFIX_MIN_PARTS_PER_FAMILY = 10
+const SHARED_PROPS_MIN_NAMES_PER_TYPE = 20
+
+/**
  * Is this export list an icon set rather than a design system?
  *
- * Three signals. Any one of them on its own is enough:
+ * Four signals. Any one of them on its own is enough:
  *
  *  1. **Most of the names are icon-named** — half or more match `XIcon` or
  *     `IconX`.
@@ -127,6 +140,11 @@ const FLAT_MAX_PARTS_PER_FAMILY = 2
  *     `DialogBackdrop` are one family, `Dialog`.
  *  3. **The names are spread over 150 or more families AND average fewer
  *     than 2 per family.** A flat catalog of mostly one-off names.
+ *  4. **The names are brand-prefixed AND share their props.** Ten or more
+ *     names per family (every name starts with the same word, `Ri…`,
+ *     `Fa…`, `Icon…`), AND twenty or more names per distinct props type
+ *     (the whole list takes `RemixiconProps`). A props type that says
+ *     nothing (`any`, `unknown`, `{}`) counts as unique to its component.
  *
  * A list under 20 names is never judged. A design system may ship a few icons
  * of its own, and a ratio over a handful of names means nothing.
@@ -168,125 +186,226 @@ const FLAT_MAX_PARTS_PER_FAMILY = 2
  * the flattest measured, `antd` and `@arco-design/web-react`, sit at 66 and
  * 68 families, and the largest flat one, `@shopify/polaris`, at 89.
  *
+ * ## Why signal 4 exists, and why it is a PAIR too
+ *
+ * Signals 2 and 3 count families, so they are blind to a list that has
+ * almost none. `@remixicon/react` is 3,227 names that ALL start `Ri`: three
+ * families at 1,076 names each. `react-icons/fa` is 1,611 names in two
+ * families. Neither contains the word `Icon`. The three signals above see a
+ * small, dense list, which is what a design system looks like, and remixicon
+ * would be seeded into the New Project list with 3,227 components, eleven
+ * times the `react-feather` case above. (It was not, only because the
+ * extractor could not see union-typed exports at all; that gap closed on
+ * 2026-09-15, in the same change as this signal. See `getReactPropsType`.)
+ *
+ * The obvious rule, "enormous names-per-family means icons", is WRONG. No
+ * ordinary design system exceeds 6.8 names per family (Chakra), against 103
+ * to 1,076 for the brand-prefixed icon sets, so it looks like a 15x margin.
+ * But that number means "brand-prefixed", not "icons", and design systems
+ * are brand-prefixed too: `@elastic/eui` names everything `Eui*` (262 names,
+ * 7 families, 37 per family), `@coreui/react` everything `C*` (137 names,
+ * ONE family), `@ionic/react` everything `Ion*`, and Stencil- and Lit-built
+ * design systems do it by construction (`@siemens/ix-react`,
+ * `@porsche-design-system/components-react`, `@shoelace-style/shoelace`,
+ * `@baloise/…`, `@swisspost/…`, `igniteui-react`, `@telekom/scale-…`). On
+ * names per family the two groups overlap completely: brand-prefixed design
+ * systems run 19.6 to 221, brand-prefixed icon sets 103 to 1,076.
+ *
+ * What separates them is the PROPS. An icon set declares every export over
+ * one props type: every remixicon export is `ComponentType<RemixiconProps>`,
+ * every tabler export takes `IconProps`, every lucide export `LucideProps`.
+ * A design system declares one props type per component, because a Button
+ * and a Modal do not take the same props. MEASURED (table below): every icon
+ * set has 286 or more names per distinct props type, and every design system
+ * 1.29 or fewer. The brand-prefixed ones on each side: 1,611 and up against
+ * 1.06 and under. That is a 1,000x separation, and the props type is already
+ * in hand: `listReactComponents` reports it as an opaque key next to each
+ * name (`ListedReactComponent.propsType`), at no extra cost, keyed by the
+ * checker's own object identity (see `propsTypeKey` in `count-components.ts`
+ * for the one shape identity misses and how it is covered).
+ *
+ * Both halves are needed. The family half keeps the props half away from
+ * lists that are NOT brand-prefixed, which is every ordinary design system,
+ * so a hypothetical design system whose components share a props type is
+ * still only at risk if it is ALSO brand-prefixed. The props half is what
+ * keeps the brand-prefixed design systems. And a props type of `any` is not
+ * a shared props type: `@telekom/scale-components-react` types all 442 of its
+ * `Scale*` wrappers `any`, and that is 442 components saying nothing, not
+ * 442 components sharing props. So `null` keys count as unique, and Scale
+ * sits at 1.0 name per props type.
+ *
+ * The thresholds: 10 per family sits above Chakra's 6.8 and below Ionic's
+ * 19.6, the lowest brand-prefixed design system. 20 per props type sits 15x
+ * above the highest design system (`theme-ui`, 1.29) and 14x below the
+ * lowest icon set (`react-feather`, 286); `evergreen-ui` at 7.69 is the
+ * ships-both case below, and it is not brand-prefixed (1.65 per family) so
+ * the family half keeps signal 4 out of it either way.
+ *
+ * `package.json` `keywords` was measured as a cheap secondary signal and is
+ * NOT used. Over the icon sets below, a keyword containing "icon" is present
+ * on 10 of the 16 root packages (absent on `@ant-design/icons`,
+ * `@fluentui/react-icons`, `@heroicons/react`, `@radix-ui/react-icons`,
+ * `@tabler/icons-react` and `react-icons`) and on no design system: precision
+ * 100%, recall 62%. The package NAME containing "icon" does better (14 of
+ * 16, missing only `lucide-react` and `react-feather`, no false positive)
+ * and is already the icon picker's own detection rule
+ * (`icon-sets/auto-detect.ts`). Neither is needed once the props type is in
+ * hand, and a name rule here would make two surfaces disagree about the same
+ * package for the wrong reason.
+ *
  * ## MEASURED 2026-09-15
  *
- * 42 packages installed at their current versions and run through the real
- * {@link listReactComponents}. `n` is exported symbols that type as a React
- * component. `icon%` is the share matching `XIcon`/`IconX`. `p/f` is names
- * divided by families. The 34 below are the ones this function actually sees
- * and that could be labelled; the other 8 are accounted for under the table.
+ * 55 packages installed at the versions shown and run through the real
+ * {@link listReactComponents} and this function. `n` is exported symbols that
+ * type as a React component. `icon%` is the share matching `XIcon`/`IconX`.
+ * `p/f` is names divided by families. `props` is distinct props types, with
+ * `+k` for the components whose props type says nothing (`any`, `{}`), and
+ * `n/props` counts those as unique. Every row is classified correctly by the
+ * four signals except the ships-both case at the bottom.
  *
  * ```
- *   design systems                        n   icon%   families   p/f
- *     react-admin 5.15.3                303    0.3%       127   2.39
- *     @chakra-ui/react 3.37.0           775    0.8%       114   6.80
- *     @mantine/core 7.17.8              228    2.2%       106   2.15
- *     @fluentui/react 8.125.7           232    2.2%        91   2.55
- *     @carbon/react 1.116.0             254    2.8%        89   2.85
- *     @douyinfe/semi-ui 2.103.0         113    1.8%        89   1.27
- *     @patternfly/react-core 6.6.1      306    0.7%        89   3.44
- *     @shopify/polaris 13.9.5           110    0.9%        89   1.24
- *     @fluentui/react-components 9.74   256      0%        85   3.01
- *     @salt-ds/core 1.70.0              169    2.4%        84   2.01
- *     @mui/material 6.5.0               146    4.1%        75   1.95
- *     rsuite 5.83.4                      99    1.0%        74   1.34
- *     react-aria-components 1.21.1      150      0%        69   2.17
- *     @arco-design/web-react 2.66.16     71    1.4%        68   1.04
- *     @adobe/react-spectrum 3.47.5      100    1.0%        67   1.49
- *     antd 5.29.3                        68      0%        66   1.03
- *     @blueprintjs/core 5.19.1           94    1.1%        61   1.54
- *     @heroui/react 2.8.10              117    0.9%        56   2.09
- *     @primer/react 37.31.0              68    1.5%        54   1.26
- *     semantic-ui-react 2.1.5           163    2.5%        51   3.20
- *     react-bootstrap 2.10.10           110      0%        43   2.56
- *     @radix-ui/themes 3.3.0             44   13.6%        40   1.10
- *     @tremor/react 3.18.7               67    1.5%        40   1.68
- *     reactstrap 9.2.3                   96      0%        34   2.82
+ *   design systems                             n   icon%   families      p/f   props  n/props
+ *     react-admin 5.15.3                     304    0.3%        127     2.39   287+4     1.04
+ *     @chakra-ui/react 3.37.0                775    0.8%        114      6.8     755     1.03
+ *     @mantine/core 7.17.8                   228    2.2%        106     2.15     227        1
+ *     @patternfly/react-core 6.6.1           306    0.7%         89     3.44     303     1.01
+ *     @carbon/react 1.116.0                  254    2.8%         89     2.85   243+2     1.04
+ *     @shopify/polaris 13.9.5                110    0.9%         89     1.24   109+1        1
+ *     @fluentui/react-components 9.74.7      256      0%         85     3.01   228+1     1.12
+ *     @ui5/webcomponents-react 2.26.3        193      1%         82     2.35     193        1
+ *     @cloudscape-design/components 3.0.1379  95    2.1%         81     1.17      95        1
+ *     @mui/material 6.5.0                    148    4.1%         77     1.92   142+1     1.03
+ *     rsuite 5.83.4                           99      1%         74     1.34      99        1
+ *     @adobe/react-spectrum 3.47.5           100      1%         67     1.49     100        1
+ *     antd 5.29.3                             68      0%         66     1.03      68        1
+ *     grommet 2.57.0                         109      0%         65     1.68    98+5     1.06
+ *     @nordhealth/react 4.12.41 (*)          136    0.7%         63     2.16     136        1
+ *     @blueprintjs/core 5.19.1                95    1.1%         62     1.53    89+2     1.04
+ *     flowbite-react 0.12.17                 125   16.8%         59     2.12     107     1.17
+ *     @heroui/react 2.8.10                   117    0.9%         56     2.09     106      1.1
+ *     @primer/react 37.31.0                   68    1.5%         54     1.26    63+4     1.01
+ *     @vaadin/react-components 25.2.10        94    1.1%         52     1.81      94        1
+ *     semantic-ui-react 2.1.5                163    2.5%         51      3.2     163        1
+ *     react-bootstrap 2.10.10                110      0%         43     2.56     109     1.01
+ *     @radix-ui/themes 3.3.0                  44   13.6%         40      1.1      41     1.07
+ *     @ant-design/pro-components 2.8.10      114      0%         39     2.92   102+3     1.09
+ *     theme-ui 0.17.4                         40      5%         37     1.08      31     1.29
+ *     @headlessui/react 2.2.10                63      0%         24     2.63      61     1.03
  *
- *   icon sets                             n   icon%   families   p/f
- *     @mui/icons-material 6.5.0       10615      0%      1043  10.18
- *     lucide-react 0.460.0             5211   33.4%       730   7.14
- *     @phosphor-icons/react 2.1.10     3042   50.3%       688   4.42
- *     iconoir-react 7.12.1             1671      0%       658   2.54
- *     react-bootstrap-icons 1.11.6     2077      0%       561   3.70
- *     @ant-design/icons 5.6.1           832    0.1%       319   2.61
- *     @radix-ui/react-icons 1.3.2       318    100%       198   1.61
- *     react-feather 2.0.10              286      0%       195   1.47
- *     @tabler/icons-react 3.46.0       6250   99.9%         7 892.86
+ *   brand-prefixed design systems              n   icon%   families      p/f   props  n/props
+ *     @elastic/eui 122.0.0 (*)               262    1.1%          7    37.43   248+2     1.05
+ *     @ionic/react 9.0.3                      98      1%          5     19.6    97+1        1
+ *     @telekom/scale-components-react 3.0.0  442    0.5%          2      221   0+442        1
+ *     @siemens/ix-react 5.2.1                114    0.9%          2       57     114        1
+ *     @porsche-design-system/… 4.7.0          75    1.3%          2     37.5      71     1.06
+ *     @coreui/react 5.13.0                   137      0%          1      137     137        1
+ *     @baloise/design-system-… 15.2.4        128    1.6%          1      128     128        1
+ *     igniteui-react 19.8.1 (*)               73    1.4%          1       73      73        1
+ *     @shoelace-style/shoelace/dist/react (*) 58    1.7%          1       58      58        1
+ *     @swisspost/design-system-… 10.5.0       44    2.3%          1       44      44        1
  *
- *   ships both                            n   icon%   families   p/f
- *     evergreen-ui 7.1.9                623   86.8%       377   1.65
+ *   icon sets                                  n   icon%   families      p/f   props  n/props
+ *     @fluentui/react-icons 2.0.341        26629      0%       2256     11.8       2  13314.5
+ *     @mui/icons-material 6.5.0            10615      0%       1043    10.18       1    10615
+ *     lucide-react 0.460.0                  5211   33.4%        730     7.14       2   2605.5
+ *     @phosphor-icons/react 2.1.10          3042   50.3%        688     4.42       2     1521
+ *     iconoir-react 7.12.1                  1671      0%        658     2.54       2    835.5
+ *     react-bootstrap-icons 1.11.6          2077      0%        561      3.7       1     2077
+ *     @blueprintjs/icons 6.13.0             1413     50%        422     3.35       2    706.5
+ *     @ant-design/icons 5.6.1                832    0.1%        319     2.61       2      416
+ *     @primer/octicons-react 19.35.0         388    100%        217     1.79       1      388
+ *     @radix-ui/react-icons 1.3.2            318    100%        198     1.61       1      318
+ *     react-feather 2.0.10                   286      0%        195     1.47       1      286
+ *     @heroicons/react/24/outline 2.2.0 (*)  324    100%        152     2.13       1      324
+ *
+ *   brand-prefixed icon sets                   n   icon%   families      p/f   props  n/props
+ *     react-icons/md 5.7.0 (*)              4341      0%         42   103.36       1     4341
+ *     @icons-pack/react-simple-icons 13.15  3453      0%         18   191.83       1     3453
+ *     react-icons/bs 5.7.0 (*)              2754      0%         12    229.5       1     2754
+ *     @tabler/icons-react 3.46.0            6250   99.9%          7   892.86       1     6250
+ *     react-icons/ri 5.7.0 (*)              3229      0%          3  1076.33       1     3229
+ *     @remixicon/react 4.9.0                3227      0%          3  1075.67       1     3227
+ *     react-icons/fa 5.7.0 (*)              1611    0.1%          2    805.5       1     1611
+ *
+ *   ships both                                 n   icon%   families      p/f   props  n/props
+ *     evergreen-ui 7.1.9                     623   86.8%        377     1.65      81     7.69
  * ```
  *
- * The other 8 are not in the table because this function never sees them, or
- * sees too little to judge. They are four separate gaps in DISCOVERY, none of
- * them in this rule, and each one means a library a user has installed is
- * invisible to onboarding. Diagnosed 2026-09-15 against the real checker:
+ * Rows marked `(*)` were handed to this function by hand, because
+ * `scanInstalledReactLibraries` cannot reach them today. They are in the
+ * table so the RULE is measured against them even though DISCOVERY is not,
+ * and each is a separate open gap in discovery, none of them in this rule:
  *
  *  - *No declared types, implicit layout* — `grommet` (345 exports behind a
  *    bare root `index.d.ts`, no `types` field) and
  *    `@cloudscape-design/components` (191, behind `exports["."]: "./index.js"`).
- *    FIXED the same day: `discoverReactDtsEntries` now falls back to the
- *    layout TypeScript itself resolves, and both are offered.
- *  - *Types only under subpaths* — `primereact` (`primereact/button`) and
- *    `@heroicons/react` (`./24/outline`). Their package root genuinely has no
- *    declarations. Resolving these means walking `exports` subpaths and
- *    deciding which to scan; still OPEN.
+ *    FIXED 2026-09-15: `discoverReactDtsEntries` now falls back to the layout
+ *    TypeScript itself resolves, and both are offered.
+ *  - *Types only under subpaths* — `react-icons/fa`, `react-icons/md`
+ *    (`react-icons` itself exports 2 things and sits under the 20-name
+ *    floor), `@heroicons/react/24/outline`, `@shoelace-style/shoelace/dist/react`,
+ *    and `primereact/button`. The package root genuinely has no declarations
+ *    for them. Resolving these means walking `exports` subpaths and deciding
+ *    which to scan; still OPEN. When they are reached, the rule already
+ *    classifies every one of them correctly (rows above).
  *  - *Union-typed components* — `@remixicon/react` declares all 3,228 of its
- *    exports as `ComponentType<P>`, which is `ComponentClass | FunctionComponent`.
- *    A union has no call OR construct signatures of its own, so
- *    `getReactPropsType` sees nothing and the package counts zero. This hits
- *    any library that types exports with React's own canonical component type.
- *    Still OPEN, and DELIBERATELY so — the fix is four lines (recurse into the
- *    union's constituents) but it must not land alone. PROTOTYPED and MEASURED
- *    2026-09-15 over 14 installed libraries: `@remixicon/react` goes 0 -> 3,227
- *    and `@mui/material` 146 -> 148, every other count unchanged. The problem
- *    is what 3,227 then does HERE. Remixicon prefixes every name `Ri`, so it
- *    collapses to THREE families at 1,076 names each, and none of the three
- *    signals fires: it would be offered as a design system with 3,227
- *    components, eleven times the `react-feather` case above.
- *
- *    A fourth signal would catch it — no design system measured exceeds 6.8
- *    names per family (Chakra), against 893 for `@tabler/icons-react` and
- *    1,076 for remixicon, so "enormous parts-per-family" separates by 130x and
- *    would also stop tabler depending on the literal word `Icon`. It is not
- *    added here because that signal means "brand-prefixed", not "icons", and
- *    design systems do it too: `@elastic/eui` names everything `Eui*` and
- *    would land in the same box. Untangling that is a classifier change with
- *    its own measurement pass, not a rider on an extractor fix.
+ *    exports as `ComponentType<P>`, which is `ComponentClass | FunctionComponent`,
+ *    and a union has no signatures of its own. FIXED 2026-09-15 in
+ *    `getReactPropsType` (recurse into the union), landed together with
+ *    signal 4 because the fix alone would have seeded remixicon as a
+ *    3,227-component design system. MEASURED: `@remixicon/react` 0 -> 3,227,
+ *    `@mui/material` 146 -> 148, every other count unchanged.
  *  - *Ambient-module bundles* — `@elastic/eui` ships one 31k-line `eui.d.ts`
  *    of `declare module '…'` blocks. The file is not itself a module, so it
- *    has no module symbol to enumerate exports from; still OPEN.
+ *    has no module symbol to enumerate exports from; still OPEN. Its row above
+ *    was measured through `checker.getAmbientModules()`, which is one way the
+ *    gap could be closed.
+ *  - *`react` is not in the package's dependencies* — `igniteui-react` is a
+ *    Lit wrapper that lists `@lit/react` and its web-components package, not
+ *    `react`, so the scan's "depends on react" question excludes it (73
+ *    `Igr*` components). Still OPEN.
+ *  - *A `types` path that does not exist* — `@nordhealth/react` declares
+ *    `lib/index.d.ts`; the file is at `lib/src/index.d.ts`. TypeScript itself
+ *    would not resolve it either. Not ours to fix.
+ *  - *No declarations at all* — `@iconscout/react-unicons` and
+ *    `@syncfusion/ej2-react-buttons` ship no `.d.ts`. Nothing to scan.
  *
  * `baseui` (4 exports) and `react-icons` (2) are not gaps: their root entries
  * really do expose almost nothing, and both land under the 20-name floor.
  *
  * ## How to read the table before changing a number
  *
- * Read `icon%` before trusting signal 1. Five of the nine icon sets are under
- * 50% and four are effectively zero — the largest, `@mui/icons-material`,
- * names nothing `Icon` at all. `@tabler/icons-react` is the mirror image:
- * every name starts `Icon`, so it collapses to 7 families and signal 1 is the
- * only thing that catches it. The signals cover each other's blind spots.
+ * Read `icon%` before trusting signal 1. Most icon sets are under 50% and
+ * many are effectively zero — the largest, `@fluentui/react-icons`, names
+ * nothing `Icon` at all. `@tabler/icons-react` is the mirror image: every
+ * name starts `Icon`, so it collapses to 7 families and signals 1 and 4 are
+ * the only things that catch it. The signals cover each other's blind spots.
  *
- * Read the `families` column for where each threshold sits. The largest design
- * system is `react-admin` at 127. The smallest icon set signal 1 misses is
- * `react-feather` at 195. 150 sits in that gap. 250 sits well above it, as
- * the unconditional catch-all for a spread no design system can reach.
+ * Read the `families` column for where signals 2 and 3 sit. The largest
+ * design system is `react-admin` at 127. The smallest icon set signal 1
+ * misses is `react-feather` at 195. 150 sits in that gap. 250 sits well
+ * above it, as the unconditional catch-all for a spread no design system can
+ * reach.
  *
  * Read `p/f` for why 150 is safe. The design systems at or above 150 families:
- * none. The design systems under 2 p/f: eleven, and the largest of them is 89
+ * none. The design systems under 2 p/f: many, and the largest of them is 89
  * families. Nothing measured is in both halves at once, and the nearest design
  * system, `react-admin`, misses on BOTH — 127 families and 2.39 p/f.
  *
- * The gap is not centered, and that is deliberate. The two mistakes do not cost
- * the same. Calling a design system "icons" removes it from onboarding with no
- * trace. Calling an icon set "a design system" seeds a row the user has to
- * notice and remove — the New Project step adds every detection and ignores
- * `confidence` (`new-project-page.tsx`, Mo 2026-09-08: "found means added;
- * remove what is not a design system") — plus the digest crowding described
- * above. Visible and reversible beats silent, so the design-system side keeps
- * the headroom.
+ * Read `p/f` again for signal 4's family half: 10 separates the ordinary
+ * design systems (6.8 and under) from the brand-prefixed lists (19.6 and up),
+ * and crossing it costs nothing on its own. Then read `n/props` for the half
+ * that decides: 20 separates every design system, brand-prefixed or not
+ * (1.29 and under), from every icon set (286 and up).
+ *
+ * The gaps are not centered, and that is deliberate. The two mistakes do not
+ * cost the same. Calling a design system "icons" removes it from onboarding
+ * with no trace. Calling an icon set "a design system" seeds a row the user
+ * has to notice and remove — the New Project step adds every detection and
+ * ignores `confidence` (`new-project-page.tsx`, Mo 2026-09-08: "found means
+ * added; remove what is not a design system") — plus the digest crowding
+ * described above. Visible and reversible beats silent, so the design-system
+ * side keeps the headroom.
  *
  * ## One known miss
  *
@@ -294,22 +413,35 @@ const FLAT_MAX_PARTS_PER_FAMILY = 2
  * as its components: 623 exports, 541 of them icon-named, 82 real components
  * (`Pane`, `Alert`, `Avatar`, `Button`, `Card`). Signal 1 claims the whole
  * package at 86.8%. It did under the old rule too, so this is not a
- * regression. Fixing it means judging the list with the icon-named names
- * REMOVED, which changes signal 1 for every package and changes what count
- * onboarding reports, so it is its own change.
+ * regression, and signal 4 says nothing about it (1.65 names per family).
+ * Fixing it means judging the list with the icon-named names REMOVED, which
+ * changes signal 1 for every package and changes what count onboarding
+ * reports, so it is its own change.
  */
-export function looksLikeIconSet(componentNames: readonly string[]): boolean {
-  const n = componentNames.length
+export function looksLikeIconSet(components: readonly ListedReactComponent[]): boolean {
+  const n = components.length
   if (n < 20) return false
 
-  const iconNamed = componentNames.filter((name) => ICON_NAME_RE.test(name)).length
+  const iconNamed = components.filter(({ name }) => ICON_NAME_RE.test(name)).length
   if (iconNamed / n >= 0.5) return true
 
   const families = new Set<string>()
-  for (const name of componentNames) families.add(FAMILY_RE.exec(name)?.[0] ?? name)
+  for (const { name } of components) families.add(FAMILY_RE.exec(name)?.[0] ?? name)
   if (families.size >= ICON_SET_MIN_FAMILIES) return true
 
-  return families.size >= FLAT_MIN_FAMILIES && n / families.size < FLAT_MAX_PARTS_PER_FAMILY
+  const partsPerFamily = n / families.size
+  if (families.size >= FLAT_MIN_FAMILIES && partsPerFamily < FLAT_MAX_PARTS_PER_FAMILY) return true
+
+  if (partsPerFamily < BRAND_PREFIX_MIN_PARTS_PER_FAMILY) return false
+  // A props type that says nothing (`null`: `any`, `unknown`, `{}`) is
+  // counted as unique to its component, so it can never look shared.
+  const propsTypes = new Set<string>()
+  let uninformative = 0
+  for (const { propsType } of components) {
+    if (propsType === null) uninformative += 1
+    else propsTypes.add(propsType)
+  }
+  return n / (propsTypes.size + uninformative) >= SHARED_PROPS_MIN_NAMES_PER_TYPE
 }
 
 const SOURCE_FILE_RE = /\.(vue|ts|tsx|js|jsx|mts|cts|mjs|cjs)$/i
