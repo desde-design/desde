@@ -58,7 +58,7 @@ import type { ScreenshotPlan } from "@/editor/core"
 import { useIframeReadRenderedValue } from "@/hooks/useIframeReadRenderedValue"
 import { useIframeReadMeasurements } from "@/hooks/useIframeReadMeasurements"
 import { useEditorBridgeHandlers } from "@/hooks/useEditorBridgeHandlers"
-import { useEditorPinnedSelection } from "@/hooks/useEditorPinnedSelection"
+import { useEditorLiveRoute } from "@/hooks/useEditorLiveRoute"
 import { useEditorBranches } from "@/hooks/useEditorBranches"
 import { useEditorCommentStore } from "@/hooks/useEditorCommentStore"
 import { useEditorCommentBridge } from "@/hooks/useEditorCommentBridge"
@@ -479,15 +479,10 @@ export function EditorSurface({
   // the re-arm hangs off the composer closing rather than off the pin landing.
   useStickyCommentPlacement(syncToolModeToBridge)
 
-  // Live-route mirroring (current-page slice + shell address bar) and the
-  // pinned-selection re-anchor machinery both hang off the bridge's
-  // ROUTE_CHANGED — extracted together into their own hook (Task 21).
-  // `onReAnchorToSession` is handed to the right rail's session detail panel.
-  const { onReAnchorToSession } = useEditorPinnedSelection({
-    iframeRef,
-    prototypeUrl,
-    selectBySelector: editing.handleLayerSelect,
-  })
+  // Live-route mirroring (current-page slice + shell address bar) off the
+  // bridge's ROUTE_CHANGED. Read-only: nothing in the shell drives the iframe
+  // as a side effect of chat state (see the hook header for what used to).
+  useEditorLiveRoute({ iframeRef, prototypeUrl })
 
   // Screenshot capture over the prototype iframe (Phase 2 visualizer) —
   // drives the bridge's existing CAPTURE_ELEMENT_SCREENSHOT round-trip.
@@ -1151,7 +1146,6 @@ export function EditorSurface({
               editing={editing}
               chat={chat}
               chatSessions={chatSessions}
-              onReAnchorToSession={onReAnchorToSession}
               selectionMany={editorSelectionMany}
               iframeRef={iframeRef}
               commentBridge={commentBridge}

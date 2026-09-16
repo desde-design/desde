@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 // The rail fetches a session transcript when it adopts a session on
 // mount. Hoisted so the `vi.mock` factory below can close over it.
@@ -213,10 +213,11 @@ function makeSummary(sessionId: string, updatedAt: string) {
     createdAt: updatedAt,
     updatedAt,
     turnCount: 1,
-    // Every fixture row carries a pinned page. Re-anchoring is gated on
-    // this field, so a row without one would make "mounting does not
-    // re-anchor" pass for the wrong reason.
+    // Every fixture row carries a pinned page and selection. The rail used
+    // to drive the iframe to these on a row click; "switching chats never
+    // touches the iframe" must hold even when the data to do so is there.
     pinnedPage: { url: "http://localhost:5173/settings", route: "/settings" },
+    pinnedSelection: { selector: "button.border-transparent" },
   } as never
 }
 
@@ -321,7 +322,6 @@ function renderRail(overrides: Partial<RailProps> = {}): {
       editing={overrides.editing ?? makeEditing()}
       chat={overrides.chat ?? makeChat()}
       chatSessions={overrides.chatSessions ?? makeChatSessions()}
-      onReAnchorToSession={overrides.onReAnchorToSession}
       selectionMany={overrides.selectionMany ?? null}
       iframeRef={overrides.iframeRef ?? { current: null }}
       commentBridge={overrides.commentBridge ?? commentBridge}
@@ -645,42 +645,42 @@ describe("EditorRightRail", () => {
     )
   })
 
-  it("never re-anchors the iframe on mount", async () => {
-    // Re-anchoring is a response to the user PICKING a chat from the
-    // menu. Doing it on load would navigate the prototype away from the
-    // page they opened, which is the one thing a project open must not
-    // do.
-    //
-    // This assertion predates the mount mint (it guarded the adopt-on-
-    // mount path) and was dropped when that path went away. It is
-    // restored because the hazard did not: any future mount-time
-    // convenience — rehydrating the last chat, restoring a pinned
-    // selection — would reintroduce it, and the fixture rows all carry
-    // a `pinnedPage` so the call is available to be made wrongly.
-    const onReAnchorToSession = vi.fn()
-    renderRail({
-      chatSessions: makeChatSessions({
-        currentSessionId: "minted-1",
-        currentSessionIsNew: true,
-        sessions: [
-          makeSummary("newest", "2026-08-11T00:00:00.000Z"),
-          makeSummary("older", "2026-07-13T00:00:00.000Z"),
-        ],
-      }),
-      onReAnchorToSession,
+  it("switching chats never touches the iframe, on mount or on a row click", async () => {
+    // Bug report 2026-09-16: opening an older chat in the Northwind project
+    // changed the prototype in the iframe. The rail was setting the
+    // iframe's src to the picked chat's pinned page. A chat switch must
+    // change the chat pane only. Both halves are asserted with the same
+    // fixture, whose rows all carry a pinned page AND selection, so the
+    // data to navigate is present and the rail still must not use it.
+    const chatSessions = makeChatSessions({
+      currentSessionId: "minted-1",
+      currentSessionIsNew: true,
+      sessions: [
+        makeSummary("newest", "2026-08-11T00:00:00.000Z"),
+        makeSummary("older", "2026-07-13T00:00:00.000Z"),
+      ],
     })
+    const iframe = { src: "http://localhost:5173/overview" } as HTMLIFrameElement
+    const iframeRef = { current: iframe }
+    const editing = makeEditing({ handleLayerSelect: vi.fn() } as never)
+    renderRail({ chatSessions, iframeRef, editing })
 
-    // Give any stray effect a chance to fire before asserting absence.
     await waitFor(() =>
       expect(screen.getByTestId("chat-session-menu-stub")).toBeInTheDocument(),
     )
-    expect(onReAnchorToSession).not.toHaveBeenCalled()
+    expect(iframe.src).toBe("http://localhost:5173/overview")
 
-    // Same fixture, same handler: picking a row DOES re-anchor. Without
-    // this half, deleting the re-anchor call entirely would leave the
-    // assertion above green.
-    fireEvent.click(screen.getByTestId("session-row-newest"))
-    expect(onReAnchorToSession).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByTestId("session-row-older"))
+    expect(chatSessions.selectSession).toHaveBeenCalledWith("older")
+    // Give any deferred navigation or selection a chance to fire.
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(iframe.src).toBe("http://localhost:5173/overview")
+    expect(
+      (editing as unknown as { handleLayerSelect: ReturnType<typeof vi.fn> })
+        .handleLayerSelect,
+    ).not.toHaveBeenCalled()
   })
 
   it("does not hydrate the freshly minted session", async () => {

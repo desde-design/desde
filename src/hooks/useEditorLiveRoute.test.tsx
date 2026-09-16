@@ -9,7 +9,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook } from "@testing-library/react"
-import { useEditorPinnedSelection } from "./useEditorPinnedSelection"
+import { useEditorLiveRoute } from "./useEditorLiveRoute"
 import { useAppStore } from "@/stores"
 
 const CANONICAL = "http://localhost:5173/"
@@ -39,10 +39,9 @@ function emitRouteChanged(source: object, url: string, origin?: string): void {
 
 function render(ref: { current: HTMLIFrameElement | null }) {
   return renderHook(() =>
-    useEditorPinnedSelection({
+    useEditorLiveRoute({
       iframeRef: ref,
       prototypeUrl: CANONICAL,
-      selectBySelector: undefined,
     }),
   )
 }
@@ -55,7 +54,7 @@ beforeEach(() => {
   })
 })
 
-describe("useEditorPinnedSelection — sender authentication", () => {
+describe("useEditorLiveRoute — sender authentication", () => {
   it("mirrors the live route for a message from the real iframe window", () => {
     const { ref, contentWindow } = makeIframeRef()
     render(ref)

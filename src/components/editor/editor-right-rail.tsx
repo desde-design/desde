@@ -80,14 +80,6 @@ interface EditorRightRailProps {
    * multi-session UI.
    */
   chatSessions: ChatSessionsApi
-  /**
-   * Invoked when the user switches tabs, or clicks "View in iframe" on
-   * the detail panel. Should re-anchor the iframe to the session's
-   * pinned page (and pinned selection when present). Owned by the
-   * surface because the current-page store sits there. Pass undefined
-   * to skip re-anchor — the tab strip still switches the active session.
-   */
-  onReAnchorToSession?: (summary: import("@/editor/agent-chat/session-store").ChatSessionSummary) => void
   selectionMany: Selection[] | null
   /**
    * Iframe ref for the CLI Comments container's bridge channel.
@@ -137,7 +129,6 @@ export function EditorRightRail({
   editing,
   chat,
   chatSessions,
-  onReAnchorToSession,
   selectionMany,
   iframeRef,
   commentBridge,
@@ -235,15 +226,14 @@ export function EditorRightRail({
         hydrationAbortRef.current = controller
         void hydrateChatFromSession(summary.sessionId, chat, controller.signal)
       }
-      // Re-anchor the iframe to the session's pinned context if known.
-      // Editor surface owns the dispatch (it has the current-page
-      // store); we just call through. No-op when the session has no
-      // recorded page.
-      if (summary.pinnedPage) {
-        onReAnchorToSession?.(summary)
-      }
+      // Switching chats changes the chat pane and NOTHING else. Until
+      // 2026-09-16 this also set the iframe's src to the page the picked
+      // chat's last turn was pinned to, which reloaded the prototype (and
+      // dropped whatever the user had on screen) as a side effect of
+      // opening an older conversation. The menu shows no route, so nothing
+      // announced it. See useEditorLiveRoute's header.
     },
-    [chat, chatSessions, onReAnchorToSession],
+    [chat, chatSessions],
   )
 
   const handleNewSession = useCallback(() => {
