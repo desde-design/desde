@@ -1,38 +1,46 @@
 # Desde
 
 A **prototype operations platform** with two surfaces: the Editor and the Viewer.
-The surface table and the Start-here section below cover what each one is and how
-to run it.
+The Start-here section and the table below cover what each one is and how to run it.
+
+A walkthrough in under three minutes: change a prototype in the Editor, share it in the
+Viewer, get mentioned in a comment, and make the fix.
+
+https://github.com/user-attachments/assets/cfbf4ae3-bdef-4f18-93c7-67a19c24e34a
 
 - **Documentation:** [desde.design/docs](https://desde.design/docs)
-- **Editor download (macOS, Apple silicon):** [releases](https://github.com/desde-design/desde-editor-releases/releases)
-- **Viewer Docker image:** `docker pull ghcr.io/desde-design/viewer:latest`, or build it
-  from [viewer/Dockerfile](viewer/Dockerfile); the
-  [deploy guide](https://desde.design/docs/viewer/deploy) walks through it
+- **Editor download (macOS, Apple silicon):** [releases](https://github.com/desde-design/desde-editor-releases/releases/latest)
+- **Viewer Docker image:** `ghcr.io/desde-design/viewer`. The
+  [Viewer quickstart](https://desde.design/docs/quickstart/viewer) runs it with one command,
+  and the [deploy guide](https://desde.design/docs/viewer/deploy) sets it up for a team.
 
 ## Start here
 
-This is a large monorepo. Here are three ways in, depending on what you want to do.
+Desde is in beta. Here are three ways in, depending on what you want to do.
 
-- **Self-host the Viewer.** A self-hosted review app: one Node process, SQLite, local
-  disk, a build pipeline, comments and mentions. The image is published at
-  `ghcr.io/desde-design/viewer`, or you build it from this checkout. See [viewer/README.md](viewer/README.md) or
-  the [deploy guide](https://desde.design/docs/viewer/deploy).
 - **Use the Editor.** Point it at your own prototype's repo and edit its source live.
-  Desde is in beta. The desktop app is a signed macOS build on the
-  [releases page](https://github.com/desde-design/desde-editor-releases/releases);
-  it also runs from a checkout. Start with the
-  [Editor quickstart](https://desde.design/docs/quickstart/editor).
+  The Editor is a signed macOS app for Apple silicon, on the
+  [releases page](https://github.com/desde-design/desde-editor-releases/releases/latest).
+  It keeps itself up to date. Start with the
+  [Editor quickstart](https://desde.design/docs/quickstart/editor). On any other machine,
+  [run it from a checkout](https://desde.design/docs/reference/run-from-a-checkout).
+- **Self-host the Viewer.** A self-hosted review app: one Node process, SQLite, local
+  disk, a build pipeline, comments and mentions. Try it on your own machine with Docker:
+
+  ```bash
+  docker run --rm -p 3100:3100 -v desde-viewer:/data ghcr.io/desde-design/viewer:latest
+  ```
+
+  The [Viewer quickstart](https://desde.design/docs/quickstart/viewer) walks through
+  signing in. The [deploy guide](https://desde.design/docs/viewer/deploy) sets it up for
+  a team. To run it from this checkout instead, see [viewer/README.md](viewer/README.md).
 - **Contribute.** Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the checks to
   run before a pull request. Read [SECURITY.md](SECURITY.md) to report a vulnerability.
 
-| Surface | What it is | How to run it |
-|---|---|---|
-| **Editor** | Local authoring CLI. Supervises your Vite dev server, injects the bridge, edits source through a deterministic-first pipeline. | `node editor-cli/bin/desde.mjs <repo-path>` |
-| **Viewer** | Self-hostable review app: one Node process, SQLite + local disk, GitHub App auth. | `cd viewer && npm run dev:local` (see [viewer/README.md](viewer/README.md)) |
-
-User documentation is at [desde.design/docs](https://desde.design/docs). To
-contribute to Desde itself, start with [CONTRIBUTING.md](CONTRIBUTING.md).
+| Surface | What it is | Install | From a checkout |
+|---|---|---|---|
+| **Editor** | A local app. Starts your prototype's own dev server (Vite, Next.js, Nuxt or React Router), injects the bridge, and edits source through a deterministic-first pipeline. | [Download for macOS](https://github.com/desde-design/desde-editor-releases/releases/latest/download/Desde-arm64.dmg) | `node editor-cli/bin/desde.mjs <repo-path>` |
+| **Viewer** | Self-hostable review app: one Node process, SQLite and local disk, invite-only sign-in. | The Docker image, with the command above | `cd viewer && npm run dev` |
 
 ---
 
@@ -40,11 +48,16 @@ contribute to Desde itself, start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Prerequisites
 
-- Node.js 20+ (developed on 25.x)
-- npm
-- A prototype repo of your own to point the Editor at (Vue or React, on Vite, Nuxt, Next.js or React Router)
+- Node.js 24 or newer. CI and the Viewer image run on 24, and the Viewer needs it for
+  Node's built-in SQLite. The Editor on its own needs 22.12 or newer.
+- npm and git
+- A prototype repo of your own to point the Editor at (Vue 3 or React, on Vite, Nuxt,
+  Next.js or React Router)
 
 ### Install dependencies
+
+The root, `editor-cli` and `viewer` are separate npm projects, so each needs its own
+install:
 
 ```bash
 npm install
@@ -52,34 +65,55 @@ npm --prefix editor-cli install
 npm --prefix viewer install
 ```
 
-### Environment
-
-The root `.env.example` documents the model-provider keys: `ANTHROPIC_API_KEY` and
-`OPENAI_API_KEY`. The Editor's AI features (chat, the edit-repair lane) need one of them;
-everything else, including the inspector, direct edits, comments, Commit and Publish, works
-without any. You can also add a key from the settings gear inside the app. Viewer
-configuration is in `viewer/.env.example`.
-
-For the **viewer**, copy `viewer/.env.example` to `viewer/.env.local` and fill in the
-GitHub App credentials. Then:
+Then build the Editor's interface once. It is not committed, and the Editor refuses to
+start without it:
 
 ```bash
-cd viewer && npm run dev:local
+npm --prefix editor-cli run build:ui
 ```
 
-Use `dev:local`, **not** `start:local`: the latter sets `NODE_ENV=production`, which makes
-the server hand requests to a prebuilt `.next` that may be stale and missing whole routes,
-with no warning.
+You do not need to build the bridge. Its bundle, `dist/bridge-bundle.js`, is committed,
+and CI fails any commit where it does not match the source.
+
+### Environment
+
+The Editor's AI features, such as chat, need a key from Anthropic or OpenAI. Everything
+else, including the inspector, direct edits, comments, Commit and Publish, works without
+one. Add a key from the settings menu inside the app, or export `ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY` in the shell that starts the Editor. The root `.env.example` lists these
+variables, but nothing loads a root `.env` file for you.
+
+The **Viewer** needs no configuration to run locally:
+
+```bash
+cd viewer && npm run dev
+```
+
+It seeds a demo project and prints a sign-in link. To configure it, copy
+`viewer/.env.example` to `viewer/.env.local`, set what you need, and run
+`npm run dev:local` instead, which reads that file. `dev:local` stops at once with
+`.env.local: not found` if the file does not exist.
+
+Use `dev` or `dev:local` for development, **not** `start` or `start:local`. Those set
+`NODE_ENV=production`, which makes the server hand requests to a prebuilt `.next` that may
+be stale and missing whole routes, with no warning.
 
 ### Verify before pushing
 
 ```bash
-npm run typecheck   # TypeScript strict mode check
-npm run lint        # ESLint + Next.js rules
-npm run test        # Vitest unit tests (web app only, see below for editor-cli)
+npm run verify      # typecheck, lint, root and editor-cli tests, knip, bridge checks
 ```
 
-For the editor-cli (sibling package; excluded from the parent's test crawl since it has its own vitest config):
+Or run the stages one at a time:
+
+```bash
+npm run typecheck   # TypeScript strict mode check
+npm run lint        # ESLint, zero errors and zero warnings
+npm run test        # Vitest unit tests for the root src/ only
+```
+
+For the editor-cli (a sibling package with its own vitest config):
+
 ```bash
 cd editor-cli
 npm run typecheck   # TypeScript strict mode (CLI source)
@@ -87,40 +121,52 @@ npm run test        # Vitest unit + parity + Tailwind-coverage tests (fast)
 npm run test:smoke  # Playwright browser smoke (~6s, requires Chrome at /Applications/Google Chrome.app)
 ```
 
-### Run the editor CLI locally
-
-The editor CLI (`desde`) boots a Vite supervisor against a prototype repo and serves the editor UI on `http://localhost:4321`.
+For the Viewer, which `npm run verify` does not cover:
 
 ```bash
-cd editor-cli
-npm run dev -- <repo-path>
+cd viewer && npx vitest run && npx tsc --noEmit -p tsconfig.json
 ```
 
+### Run the Editor from this checkout
+
+After the install steps above, from the repo root:
+
+```bash
+node editor-cli/bin/desde.mjs <repo-path>
+```
+
+It starts your prototype's own dev server and opens the Editor at
+`http://127.0.0.1:4321`. If a port is taken it picks a free one, so use the URL it
+prints. Use that exact URL, host and all: the Editor refuses actions from a page opened
+at `localhost`.
+
 Useful flags (all optional):
-- `--shell-port <n>`: editor UI HTTP port (default `4321`)
-- `--vite-port <n>`: user's Vite dev server port (default `5173`)
-- `--no-open`: don't auto-open the browser
+- `--shell-port <n>`: Editor UI port (default `4321`)
+- `--vite-port <n>`: port for your prototype's dev server (default `5173`)
+- `--attach <url>`: use a dev server you already started instead of booting one
+- `--no-open`: don't open the browser
 - `--bridge-bundle <path>` / `--ui-bundle-root <path>`: override the served bundle paths
 
-Other entry points:
-- `npm start -- <repo-path>`: runs the CLI via the built `desde` bin
-- `npm run dev -- --help`: full usage. There is no platform sign-in; the Editor holds no
-  credentials of its own. See `editor-cli/README.md`.
+`node editor-cli/bin/desde.mjs --help` prints the full usage. The
+[CLI reference](https://desde.design/docs/reference/cli) documents every flag and exit
+code. There is no platform sign-in; the Editor holds no credentials of its own.
 
 ### Rebuilding editor bundles after source changes
 
-The editor CLI serves two pre-built bundles that do **not** hot-reload when their source files change:
+The Editor serves two prebuilt bundles that do **not** hot-reload when their source
+changes:
 
-- **Editor UI bundle**: `editor-cli/ui-src/dist/`. Built from `src/hooks/`, `src/components/editor/`, and the rest of the React surface imported via the `@/` alias.
-- **Bridge bundle**: `dist/bridge-bundle.js` at the repo root. Injected into the user's prototype HTML at Vite serve-time by the editor plugin. Rebuilt by `npm run build:bridge`. Note: `npm run build:editor` below does **not** rebuild it.
+- **Editor UI bundle**: `editor-cli/ui-src/dist/`. Built from `src/hooks/`,
+  `src/components/editor/`, and the rest of the React surface imported via the `@/`
+  alias. Rebuild it with `npm --prefix editor-cli run build:ui`.
+- **Bridge bundle**: `dist/bridge-bundle.js` at the repo root. Injected into the
+  prototype's HTML at serve time. Rebuild it with `npm run build:bridge`, after bumping
+  `BRIDGE_VERSION` (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
-After editing any source under those import graphs, run:
-
-```bash
-npm run build:editor
-```
-
-This rebuilds both bundles (~3s total). The editor CLI's HTTP server reads files from disk per-request, so a CLI restart is not required. **But** hard-refresh the browser (Cmd+Shift+R), since the bundle uses content-hashed filenames and the cached `index.html` may still point at the old hash.
+`npm run build:all` rebuilds both, plus the CLI's server bundle. You do not need to
+restart the Editor. It watches the bridge bundle and reloads the prototype when it
+changes. It serves the UI's `index.html` uncached, so reloading the browser tab picks up
+a new UI build.
 
 ---
 

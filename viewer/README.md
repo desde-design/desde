@@ -8,8 +8,8 @@ the Desde bridge at request time.
 email delivery once SMTP is configured), a GitHub build pipeline (manual
 and push-triggered), and real GitHub sign-in are all live today. The viewer
 also boots with zero configuration: it seeds a demo project on first run and
-prints a one-time sign-in link, so there is something to click before you
-set anything up. See the sections below for each.
+prints a sign-in link, so there is something to click before you set
+anything up. See the sections below for each.
 
 ## License
 
@@ -19,40 +19,39 @@ copy of it themselves. If you modify the Viewer and run that modified version fo
 AGPL requires you to make the modified source available to them. Running it unmodified
 doesn't trigger this. This isn't legal advice; read the license for the authoritative text.
 
-## Requirements
-
-- Node 24+ (uses the built-in `node:sqlite`)
-- The bridge bundle built once from the repo root: `npm run build:bridge`
-
 ## Run it
 
-The quickest way is the published image. It needs one directory to keep its
-database and built prototypes in:
+### With Docker
+
+The quickest way is the published image. This is the same command as the
+[Viewer quickstart](https://desde.design/docs/quickstart/viewer):
 
 ```bash
-docker run -d --name desde-viewer -p 3100:3100 \
-  -v desde-viewer-data:/data \
-  ghcr.io/desde-design/viewer:latest
+docker run --rm -p 3100:3100 -v desde-viewer:/data ghcr.io/desde-design/viewer:latest
 ```
 
-Then open http://desde.localhost:3100 and follow the one-time sign-in link
-the container prints (`docker logs desde-viewer`). Chrome and Firefox
-resolve that address to your own machine, with no setup needed. Safari does
-not resolve `.localhost` names. The paragraph below says what to do there.
+The `desde-viewer` volume keeps the database and built prototypes between
+runs. The last line of the startup log is a sign-in link. Open it and you
+land on the dashboard as an Admin, with a demo project already in it. The
+link keeps working while the container runs. A restart prints a new one,
+and a session you already have survives the restart.
 
-In Safari, open http://localhost:3100 instead, using this run line:
+The address is `http://desde.localhost:3100`. Chrome and Firefox resolve it
+to your own machine, with no setup needed. Safari does not resolve
+`.localhost` names. The paragraph below says what to do there.
+
+In Safari, use `http://localhost:3100` wherever the log says
+`http://desde.localhost:3100`, and publish the prototype ports too:
 
 ```bash
-docker run -d --name desde-viewer -p 3100:3100 -p 127.0.0.1:3101-3120:3101-3120 \
-  -v desde-viewer-data:/data \
-  -e VIEWER_PUBLIC_URL=http://localhost:3100 \
-  ghcr.io/desde-design/viewer:latest
+docker run --rm -p 3100:3100 -p 127.0.0.1:3101-3120:3101-3120 -v desde-viewer:/data ghcr.io/desde-design/viewer:latest
 ```
 
 This is loopback mode. It is the same mode the viewer always used, before
-this default existed. Each prototype is served from its own port, instead
-of its own address. You can choose loopback mode yourself, in any browser,
-by setting `VIEWER_PUBLIC_URL=http://localhost:3100` the same way.
+the `desde.localhost` default existed. Each prototype is served from its own
+port, instead of its own address. You can choose loopback mode for every
+browser by adding `-e VIEWER_PUBLIC_URL=http://localhost:3100` to the run
+line.
 
 The second `-p` publishes the twenty ports prototypes open on (`VIEWER_LOOPBACK_PORT_RANGE`, defaulted from `PORT` inside a container); without it a prototype's page never loads and the review screen names this flag. The `127.0.0.1:` prefix on it keeps those ports on your own machine, which is where a prototype port belongs: a prototype listener has no sign-in of its own, so anyone who can reach the port can open the prototype.
 
@@ -64,38 +63,50 @@ Podman and other runtimes need nothing extra. The image sets `all` for every run
 
 Outside the image, the default is `auto`, and `auto` never widens the bind: the container's interface list cannot tell Docker's ordinary bridge from host networking on a machine whose network card happens to be named `eth0`, and the wrong guess would put the prototype ports on your LAN. So a container you built yourself stays on its own loopback until you say otherwise. If you published ports with `-p`, set `VIEWER_LOOPBACK_BIND=all`. The boot log says so whenever it starts in a container under `auto`.
 
-Everything below is the from-source path, which is what the image is built
-from.
+To run the Viewer for a team, with a real address, sign-in and backups,
+follow the [deploy guide](https://desde.design/docs/viewer/deploy) rather
+than growing this container into a deployment.
 
+### From source
+
+This is the path the image is built from. You need Node 24 or newer, since
+storage uses Node's built-in `node:sqlite`. From the repo root:
 
 ```bash
 npm install                 # repo root first: next and react resolve from here
 npm install --prefix viewer
-npm run build:bridge
 cd viewer
 npm run dev
 ```
 
-The server prints lines like this:
+No configuration is needed. The bridge bundle it injects,
+`dist/bridge-bundle.js` at the repo root, is committed, so there is nothing
+to build first. Among its startup lines, the server prints these:
 
 ```
 [viewer] prototypes are served on their own address under desde.localhost: http://{slug}.apps.desde.localhost:3100 (no DNS needed; Chrome and Firefox resolve *.localhost themselves)
 [viewer] Safari cannot resolve *.localhost names. In Safari open http://localhost:3100 instead; prototypes then use their own loopback ports. In Docker publish those too: -p 127.0.0.1:3101-3120:3101-3120
-[viewer] No GitHub sign-in configured. Open this URL to sign in:
-[viewer]   http://desde.localhost:3100/api/v1/auth/local?token=...
+
+[viewer] No GitHub sign-in configured. Open the URL below in a browser to sign in. It is
+[viewer] regenerated on every restart, and a session you already have survives a restart
+[viewer] either way.
+
+  http://desde.localhost:3100/api/v1/auth/local?token=...
 ```
 
-The first two lines explain the new default address. The last two are the
-one-time sign-in link.
+The first two lines explain the default address. The rest is the sign-in
+link.
 
 Open that URL. It signs you in and lands you on the dashboard, where there
 is already one project: a small demo prototype, seeded automatically on
 first boot. Open it, click the comment tool, then click something in the
 demo to try it.
 
-The link is printed again on every restart, but once you've used it, your
-session survives a restart. Set `VIEWER_DEMO_PROJECT=off` to skip seeding
-the demo. Rebuild the demo fixture itself with `npm run build:demo`.
+Set `VIEWER_DEMO_PROJECT=off` to skip seeding the demo. Rebuild the demo
+fixture itself with `npm run build:demo`.
+
+`npm run dev` reads no env file. To set any of the variables below, copy
+`.env.example` to `.env.local` and run `npm run dev:local`, which reads it.
 
 For production:
 
@@ -107,7 +118,10 @@ npm start
 
 Nothing is compiled ahead of time into a standalone binary. `npm start`
 runs the same `tsx server/index.ts` as `npm run dev`, just with
-`NODE_ENV=production`.
+`NODE_ENV=production`. It reads no env file either, so pass configuration
+as real environment variables. The
+[run without Docker](https://desde.design/docs/viewer/deploy/without-docker)
+guide has a systemd unit for this.
 
 Setting `VIEWER_ADMIN_TOKEN` is optional. Every write endpoint works without
 it. Any signed-in user can mint their own personal access token at
@@ -207,7 +221,7 @@ npm run dev
 | `PORT` | `3100` | HTTP port |
 | `VIEWER_DATA_DIR` | `.desde-viewer` | SQLite database + uploaded assets + the runtime config file (see below) |
 | `VIEWER_DEMO_PROJECT` | unset (seeds a demo) | Seeds a demo project at `/p/demo/` on a genuinely empty first boot. Set to the literal `off` to skip it. Rebuild the fixture itself with `npm run build:demo`. Always created with `access: public-link`, so it's readable by anyone regardless of sign-in. When you boot with no GitHub App configured, the local operator is added to its access list (so they can upload a new build over it); on a deployment that already has GitHub sign-in configured, the demo's access list stays empty: it doesn't need one, since it's public. |
-| `VIEWER_PUBLIC_URL` | `http://localhost:$PORT` | Public origin; also the bridge's shell origin |
+| `VIEWER_PUBLIC_URL` | `http://desde.localhost:$PORT` | Public origin; also the bridge's shell origin. Set it to `http://localhost:$PORT` to turn off the `desde.localhost` default and use loopback mode (see "How prototypes are isolated" below). |
 | `VIEWER_SESSION_SECRET` | unset (generated for you) | HMAC key for signing the session cookie. Usually left unset. The viewer generates one on first boot and stores it in the runtime config file (see below). Set your own to force a rotation: every existing session becomes invalid the moment you do. |
 | `VIEWER_ADMIN_TOKEN` | unset | Bearer token for write endpoints. **Unset does NOT disable writes.** A signed-in Editor or Admin can still mint a write-scoped personal access token at `/settings` and use it for every write endpoint they already have authority for. What's actually unavailable is the admin bearer itself: the unscoped, non-revocable escape hatch that reaches every project regardless of its access setting. |
 | `VIEWER_ALLOWED_EMAIL_DOMAINS` | unset | Comma-separated list of domains, seeded once into stored domain rules at boot. See "Who can sign in, and who gets an account" below. The viewer is invite-only regardless of this variable. |

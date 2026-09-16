@@ -5,7 +5,7 @@ can still change. If something in this guide turns out to be wrong, open an
 issue or a pull request and it will get fixed.
 
 Desde is a **prototype operations platform** with two main surfaces: the
-**Editor**, a local CLI for live authoring, and the **Viewer**, a
+**Editor**, a local app for live authoring, and the **Viewer**, a
 self-hostable app for reviewing prototypes. `README.md` covers how to run
 each one.
 
@@ -16,34 +16,41 @@ agree that your contribution is licensed under the same terms.
 
 ## Setting up
 
-You need Node.js 20 or later (this repo is developed on 25.x). The
-`editor-cli` package additionally requires Node 22.12 or later, set in its
-own `package.json`.
+You need Node.js 24 or later, plus npm and git. CI runs on Node 24, and the
+Viewer needs it for Node's built-in SQLite. The `editor-cli` package on its
+own requires Node 22.12 or later, set in its own `package.json`.
 
 The root, `editor-cli`, and `viewer` are separate npm projects, so each
-needs its own install:
+needs its own install. Then build the Editor's interface once, since it is
+not committed:
 
 ```bash
 npm install
 npm --prefix editor-cli install
 npm --prefix viewer install
+npm --prefix editor-cli run build:ui
 ```
 
-The root `.env.example` documents one optional variable,
-`ANTHROPIC_API_KEY`. The AI features (chat and the edit-repair lane) need it; the
-inspector, direct edits, comments, Commit and Publish work without one. You can
-also add the key from the settings gear in the app.
+The root `.env.example` lists the optional model-provider keys,
+`ANTHROPIC_API_KEY` and `OPENAI_API_KEY`. The Editor's AI features, such as
+chat, need one of them; the inspector, direct edits, comments, Commit and
+Publish work without one. Nothing loads that file for you: export the key in
+your shell, or add it from the settings menu in the app.
 
-To run the Viewer locally, copy `viewer/.env.example` to
-`viewer/.env.local`, fill in GitHub App credentials, then run
-`cd viewer && npm run dev:local`. Full detail, including why to use
-`dev:local` and not `start:local`, is in `README.md`.
-
-To run the Editor CLI against a prototype repository:
+To run the Viewer locally, no configuration is needed:
 
 ```bash
-cd editor-cli
-npm run dev -- <repo-path>
+cd viewer && npm run dev
+```
+
+To configure it, copy `viewer/.env.example` to `viewer/.env.local` and run
+`npm run dev:local` instead. Full detail, including why not to use
+`start:local`, is in `README.md`.
+
+To run the Editor against a prototype repository, from the repo root:
+
+```bash
+node editor-cli/bin/desde.mjs <repo-path>
 ```
 
 ### About the bundled font
