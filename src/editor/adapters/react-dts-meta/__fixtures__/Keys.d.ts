@@ -45,6 +45,13 @@ declare const EmptyOne: (props: {}) => ReactElement;
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 declare const EmptyTwo: (props: {}) => ReactElement;
 
+// Literals that differ only in a modifier or a signature are still different
+// props, and must not share a key.
+declare const ReadonlyOne: (props: { readonly value: string }) => ReactElement;
+declare const MutableOne: (props: { value: string }) => ReactElement;
+declare const CallOne: (props: { (): string }) => ReactElement;
+declare const CallTwo: (props: { (): number }) => ReactElement;
+
 export {
   RiAlarmFill,
   RiAlarmLine,
@@ -57,4 +64,8 @@ export {
   LooseTwo,
   EmptyOne,
   EmptyTwo,
+  ReadonlyOne,
+  MutableOne,
+  CallOne,
+  CallTwo,
 };

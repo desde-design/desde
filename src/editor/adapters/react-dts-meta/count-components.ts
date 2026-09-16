@@ -144,15 +144,31 @@ function propsTypeKey(checker: ts.TypeChecker, type: ts.Type, ids: Map<ts.Type, 
     if (objectFlags & ts.ObjectFlags.Anonymous && !(objectFlags & ts.ObjectFlags.Instantiated)) {
       const decl = type.symbol?.declarations?.[0]
       if (decl && ts.isTypeLiteralNode(decl)) {
+        // Every kind of member a literal can declare, modifiers included, so
+        // two literals get one key only when they declare the same thing
+        // (codex, delta review 1: `readonly value` is not `value`, and
+        // `{ (): string }` is not `{ (): number }`).
+        const key = (t: ts.Type) => propsTypeKey(checker, t, ids)
         const members = type.getProperties().map((prop) => {
           const at = prop.valueDeclaration ?? prop.declarations?.[0] ?? decl
+          const readonly = ts.getCombinedModifierFlags(at) & ts.ModifierFlags.Readonly ? 'readonly ' : ''
           const optional = prop.flags & ts.SymbolFlags.Optional ? '?' : ''
-          return `${prop.getName()}${optional}: ${propsTypeKey(checker, checker.getTypeOfSymbolAtLocation(prop, at), ids)}`
+          return `${readonly}${prop.getName()}${optional}: ${key(checker.getTypeOfSymbolAtLocation(prop, at))}`
         })
         const indexes = checker
           .getIndexInfosOfType(type)
-          .map((info) => `[${propsTypeKey(checker, info.keyType, ids)}]: ${propsTypeKey(checker, info.type, ids)}`)
-        return `{ ${[...members, ...indexes].join('; ')} }`
+          .map((info) => `${info.isReadonly ? 'readonly ' : ''}[${key(info.keyType)}]: ${key(info.type)}`)
+        const signature = (sig: ts.Signature) => {
+          const params = sig
+            .getParameters()
+            .map((p) => key(checker.getTypeOfSymbolAtLocation(p, p.valueDeclaration ?? p.declarations?.[0] ?? decl)))
+          return `(${params.join(', ')}) => ${key(sig.getReturnType())}`
+        }
+        const signatures = [
+          ...type.getCallSignatures().map(signature),
+          ...type.getConstructSignatures().map((sig) => `new ${signature(sig)}`),
+        ]
+        return `{ ${[...members, ...indexes, ...signatures].join('; ')} }`
       }
       // `{}` says nothing about sharing either. The checker keeps ONE empty
       // type literal for the whole program, with no declaration behind it.

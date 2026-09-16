@@ -83,7 +83,18 @@ describe('listReactComponents — props-type keys', () => {
     expect(listed.map((c) => c.name)).toEqual([
       'RiAlarmFill', 'RiAlarmLine', 'RiAlignLeft', 'HeroOne', 'HeroTwo',
       'Button', 'Card', 'LooseOne', 'LooseTwo', 'EmptyOne', 'EmptyTwo',
+      'ReadonlyOne', 'MutableOne', 'CallOne', 'CallTwo',
     ])
+  })
+
+  // Codex, delta review 1: a literal key that drops modifiers and signatures
+  // would merge these, and twenty such collisions in a brand-prefixed
+  // package would read as one shared props type.
+  it('keeps a literal distinct when only a modifier or a signature differs', () => {
+    expect(key('ReadonlyOne')).not.toBeNull()
+    expect(key('ReadonlyOne')).not.toBe(key('MutableOne'))
+    expect(key('CallOne')).not.toBeNull()
+    expect(key('CallOne')).not.toBe(key('CallTwo'))
   })
 
   it('gives components that share a props interface the same key', () => {
