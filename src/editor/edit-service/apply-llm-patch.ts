@@ -12,9 +12,14 @@
  * V1 hard-refuses any mutation whose `resolutionKind !== 'direct'`
  * (Phase A guarantees this is the bridge's policy too, but we re-check
  * here so the service is safe to call in isolation), any mutation
- * targeting a non-`.vue` file, any mutation whose `sourceLoc` file is
- * absent from the input map, and bundles whose per-file mutation count
- * exceeds the configurable cap.
+ * targeting a file that is neither a Vue SFC nor a React module (see
+ * [patch-framework.ts](./patch-framework.ts)), any mutation whose
+ * `sourceLoc` file is absent from the input map, and bundles whose per-file
+ * mutation count exceeds the configurable cap.
+ *
+ * The framework is a per-FILE property, not a per-bundle one: a bundle that
+ * spans a `.vue` and a `.tsx` runs one call per file, each with its own
+ * dialect's system prompt.
  *
  * Tests inject a fake `LLMProvider` through the `provider?:` parameter.
  * One live integration test is gated by `RUN_LIVE_LLM_TESTS=1`.
@@ -26,6 +31,10 @@ import type { ProjectKnowledge } from '../core/project-knowledge'
 import { getProvider } from '../llm-providers/registry'
 import type { CompletionProvider, ContentBlock } from '../llm-providers/types'
 import { buildPatchPrompt, type ProjectStyleContext } from './llm-patch-prompt'
+import {
+  resolvePatchFramework,
+  SUPPORTED_PATCH_EXTENSIONS,
+} from './patch-framework'
 
 export type { ProjectStyleContext } from './llm-patch-prompt'
 
@@ -257,10 +266,14 @@ export async function applyLLMPatch(
       return { ok: false, reason: `Mutation ${m.id} ${fileResult.reason}` }
     }
     const file = fileResult.file
-    if (!file.endsWith('.vue')) {
+    // The lane admits exactly what the deterministic applicators cover: Vue
+    // SFCs and React modules. The dialect the prompt speaks comes off the same
+    // helper, so an admitted file is never described in the wrong framework's
+    // terms. Anything else has no rules and no parser — refuse it.
+    if (resolvePatchFramework(file) === null) {
       return {
         ok: false,
-        reason: `Mutation ${m.id} targets non-.vue file '${file}'; V1 only patches Vue SFCs.`,
+        reason: `Mutation ${m.id} targets '${file}', which is not a supported component file (${SUPPORTED_PATCH_EXTENSIONS.join(', ')}).`,
       }
     }
     if (!files.has(file)) {
@@ -573,15 +586,28 @@ function toNeutralBlocks(
 /**
  * Strip leading/trailing markdown code-fence framing the LLM sometimes
  * adds despite the schema constraint. Catches the common cases: triple-
- * backtick fences with optional `vue`/`html` language tag.
+ * backtick fences with an optional language tag from either dialect — the
+ * React lane gets `tsx`/`jsx`/`typescript` where the Vue lane got `vue`.
+ * A fence left in place would be written to disk verbatim.
  */
 function stripCodeFences(s: string): string {
   let out = s.trim()
-  const opening = out.match(/^```(?:vue|html|xml)?\s*\n/)
+  // `[ \t\r]*` and not `[ \t]*`: narrowing this from the original `\s*` broke
+  // CRLF output, where the tag is followed by `\r\n` and the `\r` has to be
+  // consumed before the newline. `\s*` itself is avoided because it also eats
+  // blank lines, which would swallow a leading blank line of real source.
+  const opening = out.match(
+    /^```(?:vue|html|xml|tsx|jsx|ts|js|typescript|javascript)?[ \t\r]*\n/i,
+  )
   if (opening) {
     out = out.slice(opening[0].length)
     if (out.endsWith('```')) {
-      out = out.slice(0, -3).replace(/\n+$/, '')
+      // `[\r\n]+` and not `\n+`: on CRLF output the newline before the closing
+      // fence is `\r\n`, so stripping only `\n` left a dangling `\r` as the
+      // file's last byte (MEASURED).
+      out = out.slice(0, -3).replace(/[\r\n]+$/, '')
+    } else if (out.endsWith('```\r\n')) {
+      out = out.slice(0, -5)
     } else if (out.endsWith('```\n')) {
       out = out.slice(0, -4)
     }
@@ -604,8 +630,8 @@ export function parseSourceLocFile(sourceLoc: string): string | null {
 }
 
 /**
- * Cross-file 'this-instance' edits route to the parent SFC at
- * `callsiteLoc` instead of the host SFC at `sourceLoc`. This helper
+ * Cross-file 'this-instance' edits route to the parent component's file at
+ * `callsiteLoc` instead of the host's file at `sourceLoc`. This helper
  * gates that decision in one place so the byFile keying and the
  * v-for ambiguity check stay in sync.
  */
@@ -618,10 +644,10 @@ export function isCrossFileInstanceEdit(m: Mutation): boolean {
 }
 
 /**
- * Resolve the *patch file* for a mutation — i.e. which SFC the LLM
- * should rewrite. For cross-file 'this-instance' edits, this is the
- * parent SFC at `callsiteLoc`. Otherwise it's the host SFC at
- * `sourceLoc`. Returns `{ ok: false }` with a reason on malformed input.
+ * Resolve the *patch file* for a mutation — i.e. which source file the LLM
+ * should rewrite. For cross-file 'this-instance' edits, this is the parent
+ * component's file at `callsiteLoc`. Otherwise it's the host component's file
+ * at `sourceLoc`. Returns `{ ok: false }` with a reason on malformed input.
  */
 export function patchFileFor(
   m: Mutation,

@@ -8,8 +8,11 @@
  * css) and injects them here.
  *
  * `classTaxonomy` and `preprocessor` have no grounding-seam equivalent, so
- * this loader keeps the old raw `.vue` file walk verbatim (`scanVueFiles`
- * below, unchanged from the deleted module).
+ * this loader keeps the old raw component-file walk (`scanComponentFiles`
+ * below). It reads `.vue` and `.tsx`/`.jsx`, because a React prototype's
+ * classes live in `className="…"` — scanning only `.vue` handed the edit
+ * lane an EMPTY class taxonomy on every React project, which is the same
+ * Vue-only asymmetry the lane's refusal gate used to have.
  *
  * `rawStyleFallback` — the old loader's raw tailwind-config-text +
  * token-file-fragment behavior — is collected ONLY when `opts.tokens` is
@@ -59,13 +62,26 @@ const DESIGN_TOKEN_PATTERNS: RegExp[] = [
 
 const TOKEN_DIR_NAMES = ['tokens', 'design-tokens']
 
-const CLASS_REGEX = /class="([^"]+)"/g
+/**
+ * Static class attributes in either dialect: Vue `class="…"` and React
+ * `className="…"`, in double OR single quotes (JSX and Vue both allow either,
+ * and matching only double quotes silently skipped every single-quoted file).
+ * Dynamic forms (`:class`, `className={…}`) are not matched — their contents
+ * are expressions, not literals.
+ *
+ * Deliberately a regex and not a parse. This produces "the most-used class
+ * names in this prototype" as a prompt prior, so a `class="…"` inside a string
+ * literal or a comment counts too. That imprecision predates the React support
+ * and is tolerable for a frequency list; it would not be tolerable if anything
+ * routed an edit off it.
+ */
+const CLASS_REGEX = /\bclass(?:Name)?=(?:"([^"]+)"|'([^']+)')/g
 const STYLE_LANG_REGEX = /<style[^>]*\blang=["']([^"']+)["']/
 
 export function loadStyleGrounding(opts: LoadStyleGroundingOptions): ProjectStyleContext {
   const { prototypeRoot, tokens, taxonomyLimit = 50, scanDepthLimit = 6 } = opts
 
-  const { taxonomy, preprocessor } = scanVueFiles(prototypeRoot, scanDepthLimit, taxonomyLimit)
+  const { taxonomy, preprocessor } = scanComponentFiles(prototypeRoot, scanDepthLimit, taxonomyLimit)
 
   if (tokens.length > 0) {
     return {
@@ -146,7 +162,7 @@ function collectDesignTokens(root: string, depth: number): string | undefined {
   return fragments.join('\n\n').slice(0, 32_000)
 }
 
-function scanVueFiles(
+function scanComponentFiles(
   root: string,
   depth: number,
   taxonomyLimit: number,
@@ -154,7 +170,13 @@ function scanVueFiles(
   const classCounts = new Map<string, number>()
   const langCounts = new Map<string, number>()
   walk(root, depth, (absPath) => {
-    if (!absPath.endsWith('.vue')) return
+    if (
+      !absPath.endsWith('.vue') &&
+      !absPath.endsWith('.tsx') &&
+      !absPath.endsWith('.jsx')
+    ) {
+      return
+    }
     let content: string
     try {
       content = fs.readFileSync(absPath, 'utf-8')
@@ -162,18 +184,21 @@ function scanVueFiles(
       return
     }
 
-    // Class name harvesting from static `class="..."` attributes only.
-    // Skips dynamic `:class` bindings (which may be expressions, not literals).
+    // Class name harvesting from static `class=` / `className=` attributes
+    // only. Skips dynamic bindings (`:class`, `className={…}`), whose
+    // contents are expressions rather than literals.
     let match: RegExpExecArray | null
     while ((match = CLASS_REGEX.exec(content)) !== null) {
-      const classes = match[1].split(/\s+/).filter(Boolean)
+      // Group 1 is the double-quoted alternative, group 2 the single-quoted one.
+      const classes = (match[1] ?? match[2] ?? '').split(/\s+/).filter(Boolean)
       for (const c of classes) {
         classCounts.set(c, (classCounts.get(c) ?? 0) + 1)
       }
     }
 
-    // Detect <style lang="...">.
-    const styleMatch = STYLE_LANG_REGEX.exec(content)
+    // Detect <style lang="..."> — an SFC block; React modules have no analog,
+    // so they simply contribute nothing and `preprocessor` stays 'css'.
+    const styleMatch = absPath.endsWith('.vue') ? STYLE_LANG_REGEX.exec(content) : null
     if (styleMatch) {
       const lang = styleMatch[1].toLowerCase()
       langCounts.set(lang, (langCounts.get(lang) ?? 0) + 1)

@@ -124,7 +124,7 @@ describe('applyLLMPatch', () => {
     }
   })
 
-  it('refuses non-.vue target file', async () => {
+  it('refuses a file that is neither a Vue SFC nor a React module', async () => {
     const result = await applyLLMPatch({
       files: new Map([['src/styles.scss', '$primary: red;']]),
       mutations: [makeMutation({ sourceLoc: 'src/styles.scss:1:1' })],
@@ -133,7 +133,155 @@ describe('applyLLMPatch', () => {
     })
     expect(result.ok).toBe(false)
     if (!result.ok) {
-      expect(result.reason).toMatch(/non-\.vue file/)
+      expect(result.reason).toMatch(/not a supported component file/)
+      expect(result.reason).toMatch(/\.vue, \.tsx, \.jsx/)
+    }
+  })
+
+  // The reported defect (2026-09-17): a React text edit whose element has
+  // mixed children (`<button><span/>Sooth</button>`) is refused by the
+  // deterministic JSX applicator BY DESIGN — "deferring to the LLM lane" — and
+  // the LLM lane then refused the file for not being a `.vue`. The Vue side of
+  // the identical shape recovered, so React had a hole Vue did not.
+  it.each([
+    ['.tsx', 'src/components/AppHeader.tsx'],
+    ['.jsx', 'src/components/AppHeader.jsx'],
+  ])('patches a React %s module the deterministic lane deferred', async (_ext, file) => {
+    const original = [
+      'export function AppHeader() {',
+      '  return (',
+      '    <button>',
+      '      <span className="dot" />',
+      '      Sooth',
+      '    </button>',
+      '  );',
+      '}',
+    ].join('\n')
+    const patched = original.replace('Sooth', 'Sayer')
+
+    const result = await applyLLMPatch({
+      files: new Map([[file, original]]),
+      mutations: [
+        makeMutation({ sourceLoc: `${file}:3:4`, before: 'Sooth', after: 'Sayer' }),
+      ],
+      projectStyleContext: STYLE_CONTEXT,
+      provider: makeFakeProvider(
+        new Map([
+          [
+            file,
+            { newSource: patched, perMutationOutcome: [{ mutationId: 'm-1', outcome: 'applied' as const }] },
+          ],
+        ]),
+      ),
+    })
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.patchedFiles.get(file)).toBe(patched)
+      expect(result.perMutationOutcomes).toEqual([{ mutationId: 'm-1', outcome: 'applied' }])
+    }
+  })
+
+  it('speaks each file its own framework dialect in a mixed bundle', async () => {
+    const seen = new Map<string, string>()
+    const vueFile = 'src/components/Card.vue'
+    const reactFile = 'src/components/Header.tsx'
+
+    const result = await applyLLMPatch({
+      files: new Map([
+        [vueFile, '<template><h1>OLD-V</h1></template>'],
+        [reactFile, 'export const H = () => <h1>OLD-R</h1>;'],
+      ]),
+      mutations: [
+        makeMutation({ id: 'm-v', sourceLoc: `${vueFile}:1:1`, before: 'OLD-V', after: 'NEW-V' }),
+        makeMutation({ id: 'm-r', sourceLoc: `${reactFile}:1:1`, before: 'OLD-R', after: 'NEW-R' }),
+      ],
+      projectStyleContext: STYLE_CONTEXT,
+      provider: makeFakeProvider(
+        new Map([
+          [
+            vueFile,
+            { newSource: '<template><h1>NEW-V</h1></template>', perMutationOutcome: [{ mutationId: 'm-v', outcome: 'applied' as const }] },
+          ],
+          [
+            reactFile,
+            { newSource: 'export const H = () => <h1>NEW-R</h1>;', perMutationOutcome: [{ mutationId: 'm-r', outcome: 'applied' as const }] },
+          ],
+        ]),
+        (opts) => {
+          const text = typeof opts.user === 'string' ? opts.user : opts.user.map((b) => b.text).join('\n')
+          const file = /File: `([^`]+)`/.exec(text)![1]
+          const system = typeof opts.system === 'string' ? opts.system : (opts.system ?? []).map((b) => b.text).join('\n')
+          seen.set(file, system)
+        },
+      ),
+      // Sequential, so the assertion below can't race the two calls.
+      maxConcurrency: 1,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(seen.get(vueFile)).toMatch(/Vue Single-File Component/)
+    expect(seen.get(vueFile)).not.toMatch(/React\/JSX source-patching engine/)
+    expect(seen.get(reactFile)).toMatch(/React\/JSX source-patching engine/)
+    expect(seen.get(reactFile)).not.toMatch(/Vue Single-File Component/)
+  })
+
+  // Codex review 2026-09-17, P2: narrowing the fence-stripper's `\s*` to
+  // `[ \t]*` made CRLF output unstrippable, so a fenced reply survived into the
+  // parse gate and 422'd a save that was otherwise fine.
+  it.each([
+    ['LF', '```tsx\n'],
+    ['CRLF', '```tsx\r\n'],
+    ['no language tag', '```\n'],
+    ['uppercase tag', '```TSX\n'],
+  ])('strips a %s code fence from the model\'s newSource', async (_label, opening) => {
+    const file = 'src/App.tsx'
+    const body = 'export const A = () => <h1>Hi</h1>;'
+    const result = await applyLLMPatch({
+      files: new Map([[file, 'export const A = () => <h1>Hello</h1>;']]),
+      mutations: [makeMutation({ sourceLoc: `${file}:1:24`, before: 'Hello', after: 'Hi' })],
+      projectStyleContext: STYLE_CONTEXT,
+      provider: makeFakeProvider(
+        new Map([
+          [
+            file,
+            {
+              newSource: `${opening}${body}\n\`\`\``,
+              perMutationOutcome: [{ mutationId: 'm-1', outcome: 'applied' as const }],
+            },
+          ],
+        ]),
+      ),
+    })
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.patchedFiles.get(file)).toBe(body)
+  })
+
+  // Codex delta review 2026-09-17, P3: the closing-fence strip removed only
+  // `\n`, so CRLF output kept a dangling `\r` as the file's final byte.
+  it('leaves no dangling carriage return when the fenced reply uses CRLF', async () => {
+    const file = 'src/App.tsx'
+    const body = 'export const A = () => <h1>Hi</h1>;'
+    const result = await applyLLMPatch({
+      files: new Map([[file, 'export const A = () => <h1>Hello</h1>;']]),
+      mutations: [makeMutation({ sourceLoc: `${file}:1:24`, before: 'Hello', after: 'Hi' })],
+      projectStyleContext: STYLE_CONTEXT,
+      provider: makeFakeProvider(
+        new Map([
+          [
+            file,
+            {
+              newSource: `\`\`\`tsx\r\n${body}\r\n\`\`\``,
+              perMutationOutcome: [{ mutationId: 'm-1', outcome: 'applied' as const }],
+            },
+          ],
+        ]),
+      ),
+    })
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.patchedFiles.get(file)).toBe(body)
+      expect(result.patchedFiles.get(file)!.endsWith('\r')).toBe(false)
     }
   })
 

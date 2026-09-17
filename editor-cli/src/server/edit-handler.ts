@@ -19,6 +19,7 @@ import {
   resolveCandidateWithinRoot,
   resolveRealpathWithinRoot,
 } from "./resolve-editable-path"
+import { resolvePatchFramework } from "../../../src/editor/edit-service/patch-framework"
 import { checkExtensionGate } from "./edit-extension-gate"
 import { dormantLaneRefusal, type DormantLaneId } from "./enabled-lanes"
 import { resolveLlmConfig } from "./llm-config.js"
@@ -2420,6 +2421,89 @@ async function miniTurnParseError(filePath: string, content: string): Promise<st
 }
 
 /**
+ * Pre-write parse gate for the llm-patch LLM lane: parse each patched source
+ * with the parser its own extension implies, and return the 422 for the first
+ * file that doesn't parse (or `null` when they all do).
+ *
+ * Framework-aware by necessity, not preference. Running `@vue/compiler-sfc`
+ * over a `.tsx` accepts almost anything — an SFC parser sees a React module as
+ * one big run of template text — so before this existed a JSX file got no
+ * validation at all from a lane that hands an LLM the whole file to rewrite.
+ * Babel with the `jsx` + `typescript` plugins is the real gate there, and it is
+ * the same parse the deterministic JSX applicators run post-splice.
+ *
+ * The deterministic fast-path above skips JSX deliberately and still does: its
+ * applicators already re-parsed their own output before returning.
+ *
+ * It also enforces the dynamic-binding post-condition, because parsing alone
+ * cannot tell inert text from live code — see
+ * `src/editor/edit-service/find-new-dynamic-binding.ts`.
+ */
+async function findUnparseablePatch(
+  patchedFiles: ReadonlyMap<string, string>,
+  originals: ReadonlyMap<string, string>,
+): Promise<EditResult | null> {
+  const { findNewDynamicBinding } = await import(
+    "../../../src/editor/edit-service/find-new-dynamic-binding"
+  )
+  for (const [file, newSource] of patchedFiles) {
+    const framework = resolvePatchFramework(file)
+    try {
+      if (framework === "react") {
+        const { parse: parseBabel } = await import("@babel/parser")
+        // `.tsx` needs the typescript plugin and `.jsx` must NOT have it — the
+        // same split `miniTurnParseError` above and the JSX source-tag plugin
+        // use. A uniform `["jsx", "typescript"]` here would ACCEPT a `.jsx`
+        // carrying type annotations that the project's own loader then refuses,
+        // so the gate would be looser than the build.
+        parseBabel(newSource, {
+          sourceType: "module",
+          plugins: file.endsWith(".tsx") ? ["jsx", "typescript"] : ["jsx"],
+        })
+      } else {
+        const { parse: parseSfc } = await import("@vue/compiler-sfc")
+        const { errors, descriptor } = parseSfc(newSource)
+        if (errors.length > 0) {
+          return {
+            ok: false,
+            status: 422,
+            reason: `Patched source for '${file}' failed SFC parse: ${errors.map((e) => e.message).join("; ")}`,
+          }
+        }
+        // Parse alone misses codegen-only failures — `<div v-else>` with no
+        // adjacent v-if parses with ZERO errors and then fails to compile
+        // (MEASURED). Same backstop `miniTurnParseError` and the deterministic
+        // applicators run; without it this gate writes a file Vite rejects.
+        if (descriptor.template) {
+          const { compile } = await import("@vue/compiler-dom")
+          compile(descriptor.template.content)
+        }
+      }
+    } catch (err) {
+      const parser = framework === "react" ? "JSX" : "SFC"
+      return {
+        ok: false,
+        status: 422,
+        reason: `Patched source for '${file}' threw on ${parser} parse: ${(err as Error).message}`,
+      }
+    }
+
+    // Syntax is not the whole gate. A parse accepts output that is valid and
+    // WRONG: the designer's literal `Add {n}` emitted as a live JSX expression,
+    // or `title="x"` rewritten to `title={x}`. This lane only ever carries text
+    // and attr mutations, so a patch that ADDS a binding site is refused.
+    const original = originals.get(file)
+    if (original !== undefined) {
+      const binding = findNewDynamicBinding({ file, original, patched: newSource })
+      if (!binding.ok) {
+        return { ok: false, status: 422, reason: binding.reason }
+      }
+    }
+  }
+  return null
+}
+
+/**
  * Handle an `llm-patch` bundle. Mirrors the Next route's `handleLLMPatch`
  * with CLI-specific I/O (no NextResponse). Uses the shared
  * `cliCachedStyleContext` / `cliCachedStyleContextKey` module-level cache
@@ -2915,29 +2999,13 @@ async function handleLLMPatch(
   // This CLI handler is the single dispatcher for all editor edits (the
   // web `src/app/api/editor/edit/route.ts` this used to mirror was
   // deleted 2026-06-04 with the rest of the web editor surface — see
-  // tasks/web-editor-removal.md). Parse every patched source with
-  // @vue/compiler-sfc before writing ANY of them. Pre-write
-  // parse-validation keeps the all-or-nothing semantics at the
-  // filesystem boundary.
-  const { parse: parseSfc } = await import("@vue/compiler-sfc")
-  for (const [file, newSource] of result.patchedFiles) {
-    try {
-      const { errors } = parseSfc(newSource)
-      if (errors.length > 0) {
-        return {
-          ok: false,
-          status: 422,
-          reason: `Patched source for '${file}' failed SFC parse: ${errors.map((e) => e.message).join("; ")}`,
-        }
-      }
-    } catch (err) {
-      return {
-        ok: false,
-        status: 422,
-        reason: `Patched source for '${file}' threw on SFC parse: ${(err as Error).message}`,
-      }
-    }
-  }
+  // tasks/web-editor-removal.md). Parse every patched source with its OWN
+  // framework's parser before writing ANY of them. Pre-write
+  // parse-validation keeps the all-or-nothing semantics at the filesystem
+  // boundary — and it is the only validation this lane has, since an LLM
+  // writes the whole file rather than splicing a verified span.
+  const invalid = await findUnparseablePatch(result.patchedFiles, filesMap)
+  if (invalid) return invalid
 
   const newHashes: Record<string, string> = {}
   for (const [file, hash] of currentHashes) {

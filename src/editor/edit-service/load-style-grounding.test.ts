@@ -58,6 +58,64 @@ describe('loadStyleGrounding — tokens present', () => {
     expect(ctx.preprocessor).toBe('scss')
   })
 
+  // A React prototype's classes live in `className=`, so scanning `class=` in
+  // `.vue` only handed the LLM edit lane an empty taxonomy on every React
+  // project — the same Vue-only asymmetry the lane's refusal gate had.
+  it.each(['Header.tsx', 'Header.jsx'])(
+    'derives classTaxonomy from className= in %s',
+    (name) => {
+      fs.mkdirSync(path.join(root, 'src', 'components'), { recursive: true })
+      fs.writeFileSync(
+        path.join(root, 'src', 'components', name),
+        [
+          'export function Header() {',
+          '  return (',
+          '    <header className="bar bar-sticky flex">',
+          '      <span className="bar-dot" />',
+          '    </header>',
+          '  );',
+          '}',
+        ].join('\n'),
+        'utf-8',
+      )
+      const ctx = loadStyleGrounding({ prototypeRoot: root, tokens: SAMPLE_TOKENS })
+      expect(ctx.classTaxonomy).toContain('bar')
+      expect(ctx.classTaxonomy).toContain('bar-sticky')
+      expect(ctx.classTaxonomy).toContain('bar-dot')
+      // No SFC <style lang> block exists in JSX, so the default stands.
+      expect(ctx.preprocessor).toBe('css')
+    },
+  )
+
+  // Codex review 2026-09-17, P3: matching only double quotes skipped every
+  // single-quoted file, in both dialects.
+  it('harvests single-quoted class attributes too', () => {
+    fs.writeFileSync(
+      path.join(root, 'Sq.tsx'),
+      "export const S = () => <div className='sq-one sq-two' />;",
+      'utf-8',
+    )
+    fs.writeFileSync(
+      path.join(root, 'Sq.vue'),
+      "<template><div class='sq-vue' /></template>",
+      'utf-8',
+    )
+    const ctx = loadStyleGrounding({ prototypeRoot: root, tokens: SAMPLE_TOKENS })
+    expect(ctx.classTaxonomy).toContain('sq-one')
+    expect(ctx.classTaxonomy).toContain('sq-two')
+    expect(ctx.classTaxonomy).toContain('sq-vue')
+  })
+
+  it('skips dynamic className expressions, as it does dynamic :class', () => {
+    fs.writeFileSync(
+      path.join(root, 'Dyn.tsx'),
+      'export const D = () => <div className={cn("computed-only")} />;',
+      'utf-8',
+    )
+    const ctx = loadStyleGrounding({ prototypeRoot: root, tokens: SAMPLE_TOKENS })
+    expect(ctx.classTaxonomy).not.toContain('computed-only')
+  })
+
   it('defaults preprocessor to css when no <style lang> is found', () => {
     fs.writeFileSync(
       path.join(root, 'App.vue'),

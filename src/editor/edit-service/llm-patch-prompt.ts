@@ -21,6 +21,7 @@ import {
   PROJECT_KNOWLEDGE_GUIDANCE,
   renderProjectKnowledgeBlock,
 } from './render-project-knowledge'
+import { resolvePatchFramework, type PatchFramework } from './patch-framework'
 
 /**
  * Project-level styling priors handed to the LLM patch/repair/agent
@@ -30,14 +31,15 @@ import {
  * instead of this module's own raw-file scan. `rawStyleFallback` is the
  * escape hatch for substrates the token seam can't parse yet — populated
  * ONLY when the caller passed an empty `tokens` array. `classTaxonomy` and
- * `preprocessor` are unchanged: still a raw filesystem walk of `.vue` files
+ * `preprocessor` are unchanged: still a raw filesystem walk of component files
  * (see `load-style-grounding.ts`), since neither has a grounding-seam
  * equivalent.
  */
 export interface ProjectStyleContext {
   /** Structured tokens from the grounding seam (may be empty). */
   tokens: readonly DesignToken[]
-  /** Top-N most-used static class names from first-party `.vue` files. */
+  /** Top-N most-used static class names from first-party component files
+   *  (`class=` in `.vue`, `className=` in `.tsx`/`.jsx`). */
   classTaxonomy: string[]
   /** Detected SFC `<style lang="...">` preprocessor. */
   preprocessor: 'css' | 'scss' | 'sass' | 'less' | 'stylus' | 'unknown'
@@ -122,27 +124,137 @@ const SCHEMA: PatchResponseSchema = {
   additionalProperties: false,
 }
 
-const SYSTEM_PROMPT = `You are a deterministic Vue Single-File Component (SFC) source-patching engine. You receive a Vue SFC source file plus a list of mutations captured from the rendered DOM in a designer's browser. Your job is to translate those mutations into precise edits to the source.
+/**
+ * The framework-varying spans of the system prompt. Everything OUTSIDE this
+ * interface is shared between dialects verbatim, so a rule change to the
+ * shared parts can't drift between Vue and React — which is how the lane ended
+ * up Vue-only in the first place.
+ */
+interface FrameworkPromptDialect {
+  /** Opening sentence: what kind of engine this is and what it receives. */
+  intro: string
+  /** The `scope` contract bullet. */
+  scopeBullet: string
+  /** The `disambiguationChoice` contract bullet. */
+  disambiguationBullet: string
+  /** Body of `# Per-kind rules`. */
+  perKind: string
+  /** Body of `# Patch-file routing (which file you're looking at)`. */
+  routing: string
+  /** Body of `# Cross-file rewriting rules`. */
+  crossFile: string
+  /** Closing line of the routing section, naming this dialect's markup. */
+  definitionFallback: string
+}
+
+const VUE_DIALECT: FrameworkPromptDialect = {
+  intro: `You are a deterministic Vue Single-File Component (SFC) source-patching engine. You receive a Vue SFC source file plus a list of mutations captured from the rendered DOM in a designer's browser. Your job is to translate those mutations into precise edits to the source.`,
+
+  scopeBullet: `- \`scope\` is \`definition\` (apply at the host component's template) or \`callsite\` (apply at the parent component's reference site).`,
+
+  disambiguationBullet: `- \`disambiguationChoice\` is \`this-instance\` (apply only at this call site, even though the v-for template contains multiple instances) or \`all-instances\` (apply to the v-for template, affecting every iteration). Absent when the source line has only one rendered instance.`,
+
+  perKind: `- **text**: locate the element at \`sourceLoc\`'s line. The rendered text may mix static text nodes and Vue interpolations (\`{{ expr }}\`). Compute the \`before\` → \`after\` change and apply the SMALLEST source edit that produces it:
+  - **Static text node** — replace the literal text matching \`before\` with \`after\`.
+  - **Literal characters inside an interpolation** — string literals (\`'...'\`, \`"..."\`) and the static, non-\`\${}\` spans of template literals: when the \`before\` → \`after\` difference is confined to those literal characters, rewrite the literal in place, leaving every \`\${...}\` substitution and the surrounding logic byte-for-byte unchanged. Example: rendered \`Add (3)\` → \`Add 3\`, source \`Add {{ n > 0 ? \`(\${n})\` : '' }}\` → \`Add {{ n > 0 ? \`\${n}\` : '' }}\` (only the literal \`(\` and \`)\` are removed; \`\${n}\` is untouched).
+  - **Refuse** with reason "text edit on bound expression — would require state mutation, not template change" ONLY when producing \`after\` would require changing state-derived output: the value inside a \`\${...}\` substitution, a bare interpolation of an identifier / computed / ref (\`{{ label }}\`, \`{{ user.name }}\`), \`v-text\`, \`v-html\`, or \`:innerText\`. Editing the literal scaffolding around a substitution is a template change and IS allowed; editing the substituted value is NOT.
+  - If the literal \`before\` text cannot be located at that line at all, refuse with reason "text 'before' value not found at sourceLoc".
+- **attr**: locate the element. Replace the static attribute named \`target\` with the new value. If the attribute is a directive (\`:foo\`, \`v-bind:foo\`, \`:class\`, \`:style\`, \`v-model\`), refuse with reason "attribute edit on dynamic binding". \`@click\` and other event handlers also count as dynamic — refuse.`,
+
+  routing: `Each request gives you ONE source file. The mutations targeting that file may have been routed to it via two different paths:
+
+1. **Host-template edits** (the source is the component's own SFC). Patch the element at \`sourceLoc\`'s line:column directly. This applies to:
+   - \`scope === "definition"\` mutations.
+   - \`scope === "callsite"\` AND \`disambiguationChoice === "all-instances"\` (all v-for iterations get the same change → patch the v-for template in the host).
+
+2. **Cross-file call-site edits** (the source is the PARENT SFC where the component is referenced). Patch the call-site element at \`callsiteLoc\`'s line:column. This applies to \`scope === "callsite"\` AND \`disambiguationChoice === "this-instance"\`.`,
+
+  crossFile: `When you patch at \`callsiteLoc\` (case 2 above), the call-site is a component reference like \`<UiButton variant="primary">Submit</UiButton>\`. The mutation captured a DOM change inside the rendered component's tree, but you must express the change at the call-site level (not by editing the component's internals — that file isn't in this request).
+
+Translate per kind:
+
+- **text on the call-site element's default slot** (the mutation's \`sourceLoc\` element corresponds to the call-site's text content / default slot): replace the slot content. \`<UiButton>Submit</UiButton>\` → \`<UiButton>Save</UiButton>\`. If the call-site is self-closing (\`<UiButton variant="primary"/>\`), expand it: \`<UiButton variant="primary">Save</UiButton>\`. If the call-site already has structured slot template syntax (\`<template #default>...\`), edit inside that template.
+
+- **attr on a prop the call-site already passes** (e.g. mutation says \`variant: "primary" → "danger"\` and the call-site has \`variant="primary"\`): rewrite the attribute value at the call-site. Both static (\`variant="primary"\`) and dynamic (\`:variant="'primary'"\` with a literal value) forms work the same. Refuse with reason "attribute edit on dynamic binding" if the call-site has a non-literal binding (\`:variant="someRef"\`, computed, etc).
+
+- **attr on a prop the call-site doesn't yet pass**: add it. \`<UiButton>Save</UiButton>\` + mutation \`variant: "" → "danger"\` → \`<UiButton variant="danger">Save</UiButton>\`. Place new attributes before the closing \`>\` of the open tag, after existing attributes.
+
+- **deep DOM edits** (the mutation's \`sourceLoc\` corresponds to an element nested INSIDE the rendered component, not the component's root): refuse with reason "deep-dom-this-instance-not-supported — call-site override only handles the slot/prop surface, not internal DOM".
+
+- **mutation describes slot content already passed at the call-site**: identify the named slot from the mutation context. \`<UiCard><template #header>Title</template></UiCard>\` + mutation on the header text → edit inside \`<template #header>\`. Refuse if the named slot isn't visible at this call-site with reason "slot-content-needs-instance-edit at <selector>" — the engineer needs to add the slot template first.`,
+
+  definitionFallback: `If \`scope === "definition"\`, edit the host's template directly (case 1, no translation needed).`,
+}
+
+const REACT_DIALECT: FrameworkPromptDialect = {
+  intro: `You are a deterministic React/JSX source-patching engine. You receive one React component module (\`.tsx\` or \`.jsx\`) plus a list of mutations captured from the rendered DOM in a designer's browser. Your job is to translate those mutations into precise edits to the source.`,
+
+  scopeBullet: `- \`scope\` is \`definition\` (apply in the host component's own JSX) or \`callsite\` (apply at the parent component's reference site).`,
+
+  disambiguationBullet: `- \`disambiguationChoice\` is \`this-instance\` (apply only at this call site, even though the rendered list has several instances) or \`all-instances\` (apply to the JSX the list renders from — typically inside a \`.map()\` callback — affecting every iteration). Absent when the source line has only one rendered instance.`,
+
+  perKind: `- **text**: locate the JSX element at \`sourceLoc\`'s line:column. Its children may mix static \`JSXText\` and expression containers (\`{expr}\`). Compute the \`before\` → \`after\` change and apply the SMALLEST source edit that produces it:
+  - **Static JSX text** — replace the literal text matching \`before\` with \`after\`. An element commonly has SEVERAL children (an icon element, then the label text). Touch only the text child that carries \`before\`; leave sibling elements, expression containers, and surrounding whitespace byte-for-byte unchanged.
+  - **Literal characters inside an expression** — string literals (\`'...'\`, \`"..."\`) and the static, non-\`\${}\` spans of template literals: when the \`before\` → \`after\` difference is confined to those literal characters, rewrite the literal in place, leaving every \`\${...}\` substitution and the surrounding logic byte-for-byte unchanged. Example: rendered \`Add (3)\` → \`Add 3\`, source \`Add {n > 0 ? \`(\${n})\` : ''}\` → \`Add {n > 0 ? \`\${n}\` : ''}\` (only the literal \`(\` and \`)\` are removed; \`\${n}\` is untouched).
+  - **Refuse** with reason "text edit on bound expression — would require state mutation, not template change" ONLY when producing \`after\` would require changing state-derived output: the value inside a \`\${...}\` substitution, a bare expression container holding an identifier / prop / state / computed value (\`{label}\`, \`{user.name}\`), or \`dangerouslySetInnerHTML\`. Editing the literal scaffolding around a substitution is a source change and IS allowed; editing the substituted value is NOT.
+  - If the literal \`before\` text cannot be located at that line at all, refuse with reason "text 'before' value not found at sourceLoc".
+  - **Escaping — get this exactly right, it is the one rule that silently corrupts meaning.** \`newSource\` is real JSX, and \`after\` is LITERAL TEXT the designer typed. It must render back character-for-character. Escape, in this order: \`&\` → \`&amp;\` FIRST, then \`<\` → \`&lt;\`, \`>\` → \`&gt;\`, \`{\` → \`&#123;\`, \`}\` → \`&#125;\`. \`&\` comes first or you double-decode.
+    - \`after\` = \`Add {n}\` must be written \`Add &#123;n&#125;\`. Writing \`Add {n}\` makes it a live expression bound to a variable — the designer asked for text and got code. NEVER do this.
+    - \`after\` = \`&lt;b&gt;\` (the designer literally typed those characters) must be written \`&amp;lt;b&amp;gt;\`. Writing \`&lt;b&gt;\` renders as \`<b>\`.
+    - A string expression (\`{"a > b"}\`) is acceptable ONLY where one already exists at that position; do not introduce one, because adding a binding where there was none is refused by a post-check.
+- **attr**: locate the JSX element and replace the static attribute named \`target\` with the new value. Static means a string literal (\`variant="primary"\`) or a literal inside braces (\`variant={"primary"}\`) — rewrite it in the form the source already uses. Refuse with reason "attribute edit on dynamic binding" when the value is any other expression (\`variant={someState}\`, \`className={cn(...)}\`, a value that could only arrive through a \`{...props}\` spread) or an event handler (\`onClick\`, \`onChange\`, …).
+  - JSX attribute names differ from DOM attribute names, so map the mutation's \`target\` to the JSX spelling before looking for the attribute. The rule, not a list: multi-word DOM attributes are camelCase in JSX (\`tabindex\`→\`tabIndex\`, \`maxlength\`→\`maxLength\`, \`readonly\`→\`readOnly\`, \`colspan\`→\`colSpan\`, \`autocomplete\`→\`autoComplete\`, and so on for every such attribute whether or not it is listed here), plus two irregulars: \`class\`→\`className\` and \`for\`→\`htmlFor\`. \`data-*\` and \`aria-*\` keep their hyphens unchanged. If the element already carries the camelCase attribute, edit THAT — never add a second lowercase copy alongside it.`,
+
+  routing: `Each request gives you ONE source file — a module that may define several components and helper elements. Locate elements by \`line:column\`, never by guessing which component "looks right". The mutations targeting that file may have been routed to it via two different paths:
+
+1. **Host-JSX edits** (the source is the component's own module). Patch the element at \`sourceLoc\`'s line:column directly. This applies to:
+   - \`scope === "definition"\` mutations.
+   - \`scope === "callsite"\` AND \`disambiguationChoice === "all-instances"\` (every rendered iteration gets the same change → patch the JSX the list renders from, typically inside the \`.map()\` callback in the host).
+
+2. **Cross-file call-site edits** (the source is the PARENT module where the component is referenced). Patch the call-site element at \`callsiteLoc\`'s line:column. This applies to \`scope === "callsite"\` AND \`disambiguationChoice === "this-instance"\`.`,
+
+  crossFile: `When you patch at \`callsiteLoc\` (case 2 above), the call-site is a component reference like \`<Button variant="primary">Submit</Button>\`. The mutation captured a DOM change inside the rendered component's tree, but you must express the change at the call-site level (not by editing the component's internals — that file isn't in this request).
+
+Translate per kind:
+
+- **text on the call-site element's children** (the mutation's \`sourceLoc\` element corresponds to the call-site's \`children\`): replace the children text. \`<Button>Submit</Button>\` → \`<Button>Save</Button>\`. If the call-site is self-closing (\`<Button variant="primary" />\`), expand it: \`<Button variant="primary">Save</Button>\`.
+
+- **attr on a prop the call-site already passes** (e.g. mutation says \`variant: "primary" → "danger"\` and the call-site has \`variant="primary"\`): rewrite the value at the call-site. Both static (\`variant="primary"\`) and literal-in-braces (\`variant={"primary"}\`) forms work the same; keep whichever the source uses. Refuse with reason "attribute edit on dynamic binding" if the call-site passes a non-literal expression (\`variant={someState}\`, a ternary, etc).
+
+- **attr on a prop the call-site doesn't yet pass**: this depends on the tag, because React has NO attribute fallthrough. Vue forwards an unknown attribute to the component's root element; React hands it to the function as a prop and drops it on the floor unless that component forwards it itself.
+  - **A plain DOM element** — a bare lowercase name with no dot and no colon in it (\`<button>\`, \`<div>\`, \`<input>\`): add the attribute. \`<button>Save</button>\` + \`title: "" → "Tip"\` → \`<button title="Tip">Save</button>\`. Place it before the closing \`>\`, after existing attributes.
+  - **Anything else is a component**: a capitalized tag (\`<Button>\`), a member expression WHATEVER its base case (\`<ui.Button>\`, \`<Icons.Chevron>\` — the dot makes it a component even though \`ui\` is lowercase), or a namespaced tag (\`<svg:rect>\`). Refuse with reason "prop-not-passed-at-callsite — React has no attribute fallthrough, so adding <name> here would be silently ignored unless the component forwards it; the component's own file is not in this request". Do NOT add it. A prop the component does not accept changes the file, passes every syntax check, and renders exactly nothing — which reads to the designer as a successful save that did nothing.
+
+- **deep DOM edits** (the mutation's \`sourceLoc\` corresponds to an element nested INSIDE the rendered component, not the component's root): refuse with reason "deep-dom-this-instance-not-supported — call-site override only handles the children/prop surface, not internal DOM".
+
+- **mutation describes content the call-site passes as a JSX-valued prop** (React's named-slot equivalent — \`<Card header={<span>Title</span>} />\` plus a mutation on the header text): edit inside that prop's JSX. Refuse if the prop isn't present at this call-site with reason "slot-content-needs-instance-edit at <selector>" — the engineer needs to pass it first.`,
+
+  definitionFallback: `If \`scope === "definition"\`, edit the host's JSX directly (case 1, no translation needed).`,
+}
+
+/**
+ * Compose one dialect's frozen system prompt. Called twice at module load, so
+ * each framework gets a stable cached prefix (the Anthropic prompt cache keys
+ * on the prefix, and a project is single-framework in practice, so the two
+ * constants never evict each other in the same session).
+ */
+function renderSystemPrompt(d: FrameworkPromptDialect): string {
+  return `${d.intro}
 
 # Contract
 
 For each mutation:
 - \`kind\` is one of \`text\`, \`attr\`, \`class\`, \`style\`.
 - \`sourceLoc\` is the build-time tag's "file:line:column" — this is where the mutation's host element was emitted. The source you receive contains that line.
-- \`scope\` is \`definition\` (apply at the host component's template) or \`callsite\` (apply at the parent component's reference site).
-- \`disambiguationChoice\` is \`this-instance\` (apply only at this call site, even though the v-for template contains multiple instances) or \`all-instances\` (apply to the v-for template, affecting every iteration). Absent when the source line has only one rendered instance.
+${d.scopeBullet}
+${d.disambiguationBullet}
 - \`before\` and \`after\` are the literal old/new values for that mutation kind.
 
 # Per-kind rules
 
 V1 only handles \`text\` and \`attr\` mutations. The service layer hard-refuses \`class\` and \`style\` before they reach you.
 
-- **text**: locate the element at \`sourceLoc\`'s line. The rendered text may mix static text nodes and Vue interpolations (\`{{ expr }}\`). Compute the \`before\` → \`after\` change and apply the SMALLEST source edit that produces it:
-  - **Static text node** — replace the literal text matching \`before\` with \`after\`.
-  - **Literal characters inside an interpolation** — string literals (\`'...'\`, \`"..."\`) and the static, non-\`\${}\` spans of template literals: when the \`before\` → \`after\` difference is confined to those literal characters, rewrite the literal in place, leaving every \`\${...}\` substitution and the surrounding logic byte-for-byte unchanged. Example: rendered \`Add (3)\` → \`Add 3\`, source \`Add {{ n > 0 ? \`(\${n})\` : '' }}\` → \`Add {{ n > 0 ? \`\${n}\` : '' }}\` (only the literal \`(\` and \`)\` are removed; \`\${n}\` is untouched).
-  - **Refuse** with reason "text edit on bound expression — would require state mutation, not template change" ONLY when producing \`after\` would require changing state-derived output: the value inside a \`\${...}\` substitution, a bare interpolation of an identifier / computed / ref (\`{{ label }}\`, \`{{ user.name }}\`), \`v-text\`, \`v-html\`, or \`:innerText\`. Editing the literal scaffolding around a substitution is a template change and IS allowed; editing the substituted value is NOT.
-  - If the literal \`before\` text cannot be located at that line at all, refuse with reason "text 'before' value not found at sourceLoc".
-- **attr**: locate the element. Replace the static attribute named \`target\` with the new value. If the attribute is a directive (\`:foo\`, \`v-bind:foo\`, \`:class\`, \`:style\`, \`v-model\`), refuse with reason "attribute edit on dynamic binding". \`@click\` and other event handlers also count as dynamic — refuse.
+${d.perKind}
 
 # Outcome semantics (precise)
 
@@ -156,46 +268,42 @@ If multiple mutations target the same file and one refuses, OTHER mutations in t
 
 # Patch-file routing (which file you're looking at)
 
-Each request gives you ONE source file. The mutations targeting that file may have been routed to it via two different paths:
-
-1. **Host-template edits** (the source is the component's own SFC). Patch the element at \`sourceLoc\`'s line:column directly. This applies to:
-   - \`scope === "definition"\` mutations.
-   - \`scope === "callsite"\` AND \`disambiguationChoice === "all-instances"\` (all v-for iterations get the same change → patch the v-for template in the host).
-
-2. **Cross-file call-site edits** (the source is the PARENT SFC where the component is referenced). Patch the call-site element at \`callsiteLoc\`'s line:column. This applies to \`scope === "callsite"\` AND \`disambiguationChoice === "this-instance"\`.
+${d.routing}
 
 # Cross-file rewriting rules
 
-When you patch at \`callsiteLoc\` (case 2 above), the call-site is a component reference like \`<UiButton variant="primary">Submit</UiButton>\`. The mutation captured a DOM change inside the rendered component's tree, but you must express the change at the call-site level (not by editing the component's internals — that file isn't in this request).
+${d.crossFile}
 
-Translate per kind:
-
-- **text on the call-site element's default slot** (the mutation's \`sourceLoc\` element corresponds to the call-site's text content / default slot): replace the slot content. \`<UiButton>Submit</UiButton>\` → \`<UiButton>Save</UiButton>\`. If the call-site is self-closing (\`<UiButton variant="primary"/>\`), expand it: \`<UiButton variant="primary">Save</UiButton>\`. If the call-site already has structured slot template syntax (\`<template #default>...\`), edit inside that template.
-
-- **attr on a prop the call-site already passes** (e.g. mutation says \`variant: "primary" → "danger"\` and the call-site has \`variant="primary"\`): rewrite the attribute value at the call-site. Both static (\`variant="primary"\`) and dynamic (\`:variant="'primary'"\` with a literal value) forms work the same. Refuse with reason "attribute edit on dynamic binding" if the call-site has a non-literal binding (\`:variant="someRef"\`, computed, etc).
-
-- **attr on a prop the call-site doesn't yet pass**: add it. \`<UiButton>Save</UiButton>\` + mutation \`variant: "" → "danger"\` → \`<UiButton variant="danger">Save</UiButton>\`. Place new attributes before the closing \`>\` of the open tag, after existing attributes.
-
-- **deep DOM edits** (the mutation's \`sourceLoc\` corresponds to an element nested INSIDE the rendered component, not the component's root): refuse with reason "deep-dom-this-instance-not-supported — call-site override only handles the slot/prop surface, not internal DOM".
-
-- **mutation describes slot content already passed at the call-site**: identify the named slot from the mutation context. \`<UiCard><template #header>Title</template></UiCard>\` + mutation on the header text → edit inside \`<template #header>\`. Refuse if the named slot isn't visible at this call-site with reason "slot-content-needs-instance-edit at <selector>" — the engineer needs to add the slot template first.
-
-If \`scope === "definition"\`, edit the host's template directly (case 1, no translation needed).
+${d.definitionFallback}
 
 # Output
 
 Respond with JSON conforming to the provided schema:
-- \`newSource\`: the complete patched SFC source. Preserve formatting, indentation, and every byte not covered by an applied mutation. If you applied no mutations, return \`newSource\` equal to the original.
+- \`newSource\`: the complete patched source for this file. Preserve formatting, indentation, and every byte not covered by an applied mutation. If you applied no mutations, return \`newSource\` equal to the original.
 - \`perMutationOutcome\`: one entry per input mutation, in input order. \`outcome\` is \`applied\` / \`skipped\` / \`refused\`; include \`reason\` for skipped/refused (and applied if non-obvious).
 - \`notes\` (optional): any cross-cutting concerns about the patch.
 
 Determinism: re-running with the same inputs MUST produce the same \`newSource\`. Do not add comments, reorder unrelated content, or normalize formatting. Touch only the bytes a mutation requires.
 
 If multiple mutations target the same line, apply them in input order — each subsequent mutation operates on the source-as-modified-by-prior-mutations.`
+}
+
+/** One frozen system prompt per dialect, composed once at module load. */
+const SYSTEM_PROMPT: Record<PatchFramework, string> = {
+  vue: renderSystemPrompt(VUE_DIALECT),
+  react: renderSystemPrompt(REACT_DIALECT),
+}
 
 export function buildPatchPrompt(input: BuildPatchPromptInput): BuildPatchPromptOutput {
   const { file, originalSource, mutations, projectStyleContext, projectKnowledge } =
     input
+
+  // The dialect comes off the file's own extension, through the same helper
+  // the service's refusal gate uses — so a file the gate admitted can never
+  // be described to the model in the other framework's terms. An unsupported
+  // extension can't reach here (the gate refuses it first); falling back to
+  // Vue keeps this function total for direct callers and tests.
+  const framework = resolvePatchFramework(file) ?? 'vue'
 
   const systemBlocks: BuildPatchPromptOutput['systemBlocks'] = [
     {
@@ -203,7 +311,7 @@ export function buildPatchPrompt(input: BuildPatchPromptInput): BuildPatchPrompt
       // The project-knowledge guidance is appended unconditionally — it is
       // harmless when no conventions block is present and keeps the cached
       // system prefix identical whether or not a given prototype has rules.
-      text: `${SYSTEM_PROMPT}\n\n${PROJECT_KNOWLEDGE_GUIDANCE}`,
+      text: `${SYSTEM_PROMPT[framework]}\n\n${PROJECT_KNOWLEDGE_GUIDANCE}`,
       cache_control: { type: 'ephemeral' },
     },
   ]
@@ -351,8 +459,18 @@ export function truncate(s: string, max: number): string {
   return s.slice(0, max) + `\n... [truncated ${s.length - max} chars]`
 }
 
+/** Markdown fence language for the source block, so the model is not told a
+ *  React module is Vue. Unknown extensions fall back to no language tag. */
+function fenceLanguageFor(file: string): string {
+  if (file.endsWith('.vue')) return 'vue'
+  if (file.endsWith('.tsx')) return 'tsx'
+  if (file.endsWith('.jsx')) return 'jsx'
+  return ''
+}
+
 function renderSourceBlock(file: string, source: string): string {
-  return `# Original source\n\nFile: \`${file}\`\n\n\`\`\`vue\n${source}\n\`\`\``
+  const lang = fenceLanguageFor(file)
+  return `# Original source\n\nFile: \`${file}\`\n\n\`\`\`${lang}\n${source}\n\`\`\``
 }
 
 function renderMutationsBlock(mutations: readonly Mutation[]): string {
