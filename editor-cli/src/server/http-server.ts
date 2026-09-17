@@ -30,6 +30,7 @@ import {
   handleViewerProjectsRequest,
 } from "./viewer-probe.js"
 import { VIEWER_PROXY_PREFIX, handleViewerProxy } from "./viewer-proxy.js"
+import { isLauncherAlive } from "./launcher-liveness.js"
 import {
   effectiveViewerConfig,
   getViewerLink,
@@ -3776,16 +3777,30 @@ async function handleLedgerRequest(
  *
  * A failed start clears the holder so a later click retries instead of
  * being wedged on the rejected promise.
+ *
+ * A parent launcher's URL is PROBED before it is handed over, not trusted.
+ * It came from an env var at spawn time, and the launcher is a separate
+ * process that can die while this editor runs on — MEASURED 2026-09-17,
+ * where a desktop update path killed the launcher and left the editor alive.
+ * Home then answered 200 with a port that had nothing behind it, so the
+ * click did nothing at all. A dead parent now falls through to the same
+ * lazy start an editor with no parent uses. See `launcher-liveness.ts`.
  */
 async function handleHomeRequest(
   res: ServerResponse,
   ctx: RouteContext,
 ): Promise<void> {
-  // Spawned by a launcher that is still running: go back to it. Starting a
+  // Spawned by a launcher that is STILL RUNNING: go back to it. Starting a
   // second launcher here leaked one process per project opened, and in the
   // desktop app sent the hop to the system browser, because the shell's
   // navigation guard had only ever been told about the launcher it booted.
-  if (ctx.homeUrl) {
+  //
+  // "Still running" is measured, not assumed — see this function's doc
+  // comment. A dead parent falls through to the lazy start below, which
+  // seeds the new launcher with THIS editor, so clicking this project on it
+  // comes back here instead of booting a second editor in the same
+  // directory.
+  if (ctx.homeUrl && (await isLauncherAlive(ctx.homeUrl))) {
     sendJson(res, 200, { ok: true, url: ctx.homeUrl })
     return
   }

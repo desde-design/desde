@@ -30,6 +30,7 @@ import { createChildTracker, type ChildTracker } from "./child-tracker.js"
 import { launchCwd } from "../launch-cwd.js"
 import { spawnEnvWithInheritedLlmCredentials } from "./inherited-llm-env.js"
 import { homeUrlEnv } from "./home-url.js"
+import { LAUNCHER_ALIVE_PATH, LAUNCHER_ROLE } from "./launcher-liveness.js"
 import { existsSync } from "node:fs"
 import { readFile, stat } from "node:fs/promises"
 import { basename, resolve as resolvePath } from "node:path"
@@ -1197,6 +1198,27 @@ async function route(
   // stayed missing unnoticed. A 404 names the problem at the request.
   if (url.pathname.startsWith("/api/")) {
     sendJson(res, 404, { ok: false, reason: "Unknown endpoint", error: "Not found." })
+    return
+  }
+
+  // Liveness — NOT auth-gated, and deliberately secret-free. This is how an
+  // editor this launcher spawned checks that Home still has somewhere to go
+  // before it navigates the user's window there: the URL it holds came from
+  // an env var at spawn time and says nothing about whether this process is
+  // still running. See `launcher-liveness.ts` for why the answer names a
+  // role rather than just being a 200 — a freed port gets reused, and
+  // "something answered" would send that window to a stranger's page.
+  //
+  // Same posture as the bootstrap route below: the cross-site refusal here,
+  // rebinding covered by `checkHost` above. Nothing is disclosed that the
+  // bootstrap route's own existence does not already disclose.
+  if (req.method === "GET" && url.pathname === LAUNCHER_ALIVE_PATH) {
+    if (isCrossSiteFetch(req)) {
+      sendJson(res, 403, { ok: false, reason: "Cross-site request refused" })
+      return
+    }
+    res.setHeader("Cache-Control", "no-store")
+    sendJson(res, 200, { ok: true, role: LAUNCHER_ROLE })
     return
   }
 

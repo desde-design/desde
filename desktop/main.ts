@@ -948,7 +948,47 @@ if (!gotSingleInstanceLock) {
   nativeAutoUpdater.on("before-quit-for-update", () => {
     if (quitting) return
     quitting = true
-    void childShutdown.ensure()
+    // The quit this event announces does not always arrive (MEASURED
+    // 2026-09-17, a packaged 0.1.16 run). Squirrel.Mac can refuse the very
+    // install it is quitting for — that user's ShipIt log held "Aborting
+    // update attempt because there are 1 running instances of the target
+    // app", and a ShipIt then sat waiting for hours — and by then the event
+    // has already been emitted and this handler has already run.
+    //
+    // Everything above assumes that cannot happen. It killed every child,
+    // `quitting` silenced the "launcher exited unexpectedly" watcher below,
+    // and then nothing quit: the window stayed open over a launcher and an
+    // editor that no longer existed. Clicking Home in that window fetched a
+    // server that was gone, so it did nothing at all, and the click after it
+    // said "Failed to fetch".
+    //
+    // Quitting is the same answer `onInstallNoLongerAuthorized` already
+    // gives for its own version of this ("quitting instead of leaving a dead
+    // window open"): the children are gone by this point either way, so a
+    // dead shell is the one outcome with nothing to recommend it. On the
+    // ordinary path — the quit really is coming — this is a no-op on an app
+    // that is already going down.
+    void childShutdown
+      .ensure()
+      // `ensure()` REJECTS on its deadline, and `.finally()` would pass that
+      // rejection on to a promise nobody holds — an unhandled rejection in
+      // main, on the one path where the log line matters most. Caught here,
+      // so the quit below still runs and the reason is written down.
+      //
+      // Quitting on an unconfirmed shutdown is the deliberate call. The
+      // coordinator only rejects if a child never exited even after SIGKILL,
+      // which `child-tracker.ts` calls near-impossible on a healthy OS, and
+      // the alternative on that path is the dead shell this whole change
+      // exists to stop. Note what is NOT decided here: whether to INSTALL on
+      // an unconfirmed shutdown. That stays refused, by `onShutdownFailed`
+      // on the ordered restart path — this only declines to sit there.
+      .catch((err: unknown) => {
+        console.error(
+          "[desktop] before-quit-for-update: child shutdown did not settle, quitting anyway —",
+          err,
+        )
+      })
+      .finally(() => app.quit())
   })
 }
 
