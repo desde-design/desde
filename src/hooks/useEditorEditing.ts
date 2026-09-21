@@ -86,6 +86,7 @@ import type { ChatHandoffOutcome } from "./apply-edit-with-chat-handoff"
 import {
   afterEscalation,
   buildEditEscalationPrompt,
+  buildUnmappedTextEditHandoffPrompt,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
   coalesceCapturedMutation,
@@ -109,7 +110,11 @@ import {
 } from "@/components/editor/resolve-override-stylesheet"
 import { makeEditId } from "@/editor/edit-service/make-edit-id"
 import { describeEditOutcome } from "./edit-outcome"
-import { handleResolutionFailure } from "./resolution-failure-notice"
+import {
+  handleResolutionFailure,
+  notifyTextHandOffRefused,
+  shouldHandOffToChat,
+} from "./resolution-failure-notice"
 import { offeredDisambiguationChoices } from "./disambiguation-choices"
 import { routeAwaitingDisambiguation } from "./disambiguation-route"
 import { notifySingleChoiceDisambiguation } from "./single-choice-disambiguation-notice"
@@ -4469,9 +4474,28 @@ export function useEditorEditing({
     // signal — so this is the ONLY thing that tells the inspector's style rows
     // to stop reporting the shim's value. Same reasoning as
     // `cancelDisambiguation` below.
-    const unsubResolutionFailed = adapter.onResolutionFailed((failure) =>
-      handleResolutionFailure(failure, useEditorStore.getState().notePreviewSettled),
-    )
+    //
+    // A refused TEXT edit goes to a new chat session instead (see
+    // `shouldHandOffToChat`): no stamp placed the element, but the agent can
+    // search for the text. The bridge has already put the old text back, so the
+    // page shows what source says until the agent's change lands. Under the
+    // session, like every other hand-off, so an answer that arrives after the
+    // page changed is not reported against the new one.
+    const unsubResolutionFailed = adapter.onResolutionFailed((failure) => {
+      const settle = useEditorStore.getState().notePreviewSettled
+      if (!shouldHandOffToChat(failure)) {
+        handleResolutionFailure(failure, settle)
+        return
+      }
+      settle()
+      void session.run(async (ctx) => {
+        const res = await ctx.step(
+          handOffToChat(buildUnmappedTextEditHandoffPrompt(failure), { signal: ctx.signal }),
+        )
+        if (res.stale || res.value) return
+        notifyTextHandOffRefused(failure)
+      })
+    })
     // A live-preview poke the substrate couldn't apply (no component instance
     // for the selector, no props object, assignment refused). Unlike the
     // resolution failure above, the buffered edit is NOT lost — it still
@@ -4604,6 +4628,7 @@ export function useEditorEditing({
     handleResize,
     parkHeldOrDefer,
     requestModal,
+    handOffToChat,
   ])
 
   /**

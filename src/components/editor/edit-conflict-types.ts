@@ -8,13 +8,6 @@ import type { Mutation } from "@/editor/core"
  * removed; they're plain data contracts, not tied to any component.
  */
 
-/** A capture failure: the bridge couldn't resolve a selection into an edit. */
-export interface ResolutionFailure {
-  id: string
-  reason: string
-  selector: string
-}
-
 /**
  * The working tree changed under a set of buffered mutations — the files no
  * longer match what was captured, so a save would clobber external edits.

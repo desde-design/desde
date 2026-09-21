@@ -40,6 +40,7 @@ import type {
   BridgeToShellMessage,
   InspectionData,
   Measurements,
+  MutationResolutionFailure,
   OutlineNode,
   PreviewFailureKind,
   ShellToBridgeMessage,
@@ -82,8 +83,13 @@ import {
  * same pending request a selection reply settles. Both are checked here, so a
  * bridge that does not stamp them would have every one of its answers read as
  * "not the current document" and dropped.
+ *
+ * Raised a fifth time for the reshaped `MUTATION_RESOLUTION_FAILED`: it now
+ * carries a code and the edit itself (kind, before, after, page) in place of a
+ * prose reason. An older bridge's payload fails `readResolutionFailure` and is
+ * dropped, so a refused edit would again reach the user as nothing at all.
  */
-const REQUIRED_BRIDGE_VERSION = '2026-09-10h-commit-names-page'
+const REQUIRED_BRIDGE_VERSION = '2026-09-21a-refused-text-reverts'
 
 /**
  * Phase 6 feature gate. Bridges below this version don't know about
@@ -128,9 +134,7 @@ type SelectionListener = (selection: Selection | null) => void
 type TreeUpdateListener = () => void
 type MutationCapturedListener = (mutation: Mutation) => void
 type MutationAwaitingListener = (pending: PendingMutation) => void
-type ResolutionFailedListener = (
-  failure: { id: string; reason: string; selector: string },
-) => void
+type ResolutionFailedListener = (failure: MutationResolutionFailure) => void
 type OverrideRevertedListener = (event: {
   id: string
   kind: string
@@ -191,6 +195,38 @@ interface BridgeEnvelope {
  */
 function mintRequestId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`
+}
+
+const RESOLUTION_FAILURE_CODES: ReadonlySet<string> = new Set([
+  'isolation-view',
+  'ancestor-only',
+  'no-anchor',
+])
+const MUTATION_KINDS: ReadonlySet<string> = new Set(['text', 'attr', 'class', 'style'])
+
+/**
+ * A `MUTATION_RESOLUTION_FAILED` payload as the shell may act on it, or null
+ * when any field is not what the bridge sends. Exported for its tests.
+ */
+export function readResolutionFailure(payload: unknown): MutationResolutionFailure | null {
+  if (typeof payload !== 'object' || payload === null) return null
+  const p = payload as Record<string, unknown>
+  const { id, code, kind, before, after, selector, page, anchorLoc } = p
+  if (typeof id !== 'string' || typeof selector !== 'string' || typeof page !== 'string') return null
+  if (typeof before !== 'string' || typeof after !== 'string') return null
+  if (typeof code !== 'string' || !RESOLUTION_FAILURE_CODES.has(code)) return null
+  if (typeof kind !== 'string' || !MUTATION_KINDS.has(kind)) return null
+  if (anchorLoc !== null && typeof anchorLoc !== 'string') return null
+  return {
+    id,
+    code: code as MutationResolutionFailure['code'],
+    kind: kind as MutationResolutionFailure['kind'],
+    before,
+    after,
+    selector,
+    page,
+    anchorLoc,
+  }
 }
 
 export class BridgeFrameworkAdapter implements FrameworkAdapter {
@@ -1830,19 +1866,23 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     }
   }
 
-  private handleResolutionFailed(payload: {
-    id: string
-    reason: string
-    selector: string
-    documentId: string
-  }): void {
+  private handleResolutionFailed(payload: MutationResolutionFailure & { documentId: string }): void {
     if (!this.fromCurrentDocument(payload.documentId)) {
       this.warnForeignDocument('MUTATION_RESOLUTION_FAILED', payload.documentId)
       return
     }
+    // Checked field by field, because this payload is page-supplied and the
+    // shell may now act on it (a text refusal is handed to chat). A malformed
+    // one is not evidence that an edit happened, so it is dropped loudly
+    // rather than guessed into a hand-off.
+    const failure = readResolutionFailure(payload)
+    if (!failure) {
+      console.warn('[BridgeFrameworkAdapter] malformed MUTATION_RESOLUTION_FAILED dropped:', payload)
+      return
+    }
     for (const listener of this.resolutionFailedListeners) {
       try {
-        listener({ id: payload.id, reason: payload.reason, selector: payload.selector })
+        listener(failure)
       } catch (err) {
         console.warn(
           '[BridgeFrameworkAdapter] resolution-failed listener threw:',

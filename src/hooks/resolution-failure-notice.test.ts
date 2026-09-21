@@ -1,23 +1,25 @@
 /**
  * Tests for the shell's `MUTATION_RESOLUTION_FAILED` surface.
  *
- * The defect these pin: the bridge wrote a careful reason string for an edit it
- * couldn't map to source and sent it on every such edit, the adapter dispatched
- * it to `onResolutionFailed`, and NOTHING shell-side subscribed — so the user saw
- * a change appear (and, before the paired bridge fix, stick) with no indication it
- * would never persist. These assert the reason reaches the user verbatim, that a
- * repeat attempt on the same element replaces its notice instead of stacking, and
- * that a reason-less payload still says the change wasn't saved.
+ * The defect these pin: the bridge refused to map an edit to source and the
+ * user was told nothing, then (2026-09-21) told in bridge-debugging prose while
+ * the typed text stayed on the page and nothing offered the agent. These assert
+ * which refusals go to chat, that the words are the product's plain ones, that a
+ * repeat attempt replaces its notice instead of stacking, and the settle order.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { toast } from "sonner"
+import type { MutationResolutionFailure } from "@/types/bridge"
 import {
-  RESOLUTION_FAILURE_FALLBACK,
   RESOLUTION_FAILURE_TITLE,
+  TEXT_HANDOFF_REFUSED_DESCRIPTION,
   handleResolutionFailure,
   notifyResolutionFailure,
+  notifyTextHandOffRefused,
+  resolutionFailureDescription,
   resolutionFailureToastId,
+  shouldHandOffToChat,
 } from "./resolution-failure-notice"
 
 vi.mock("sonner", () => ({
@@ -28,81 +30,122 @@ vi.mock("sonner", () => ({
   },
 }))
 
-const ISOLATION_REASON =
-  "Editing isn't supported in isolation view — this is a Storybook-style preview of a packaged component. To customize the appearance, exit isolation view (top toolbar) and edit a real instance in your prototype; the change will scope to that callsite via a CSS override."
+/** The measured case: a date on a Webflow-export page, no stamp on it. */
+const DATE_EDIT: MutationResolutionFailure = {
+  id: "dom-mut-4",
+  code: "ancestor-only",
+  kind: "text",
+  before: "May 2022 - present",
+  after: "May 2022 - Dec 2026",
+  selector: "div.text-block-3.resume-date",
+  page: "/",
+  anchorLoc: "components/ScrollTimeline.tsx:47:9",
+}
+
+describe("shouldHandOffToChat", () => {
+  it("hands a refused text edit to chat, with or without an ancestor stamp", () => {
+    expect(shouldHandOffToChat(DATE_EDIT)).toBe(true)
+    expect(shouldHandOffToChat({ ...DATE_EDIT, code: "no-anchor", anchorLoc: null })).toBe(true)
+  })
+
+  it("keeps isolation view a notice: there is no usage there to edit", () => {
+    expect(shouldHandOffToChat({ ...DATE_EDIT, code: "isolation-view" })).toBe(false)
+  })
+
+  it("keeps non-text kinds a notice: there is no text to search for", () => {
+    for (const kind of ["attr", "class", "style"] as const) {
+      expect(shouldHandOffToChat({ ...DATE_EDIT, kind })).toBe(false)
+    }
+  })
+
+  it("never hands off a no-op", () => {
+    expect(shouldHandOffToChat({ ...DATE_EDIT, after: DATE_EDIT.before })).toBe(false)
+  })
+})
+
+describe("the words", () => {
+  const ALL = [
+    RESOLUTION_FAILURE_TITLE,
+    TEXT_HANDOFF_REFUSED_DESCRIPTION,
+    ...(["isolation-view", "ancestor-only", "no-anchor"] as const).map((code) =>
+      resolutionFailureDescription({ ...DATE_EDIT, code }),
+    ),
+  ]
+
+  it("never leak the bridge's internals", () => {
+    for (const s of ALL) {
+      expect(s).not.toMatch(/data-desde|ancestor|anchor|source-location|map this edit/i)
+    }
+  })
+
+  it("follow the copy rules: no em dash, no me or my", () => {
+    for (const s of ALL) {
+      expect(s).not.toContain("—")
+      expect(s).not.toMatch(/\b(me|my)\b/i)
+    }
+  })
+})
 
 describe("notifyResolutionFailure", () => {
   beforeEach(() => {
     vi.mocked(toast.warning).mockClear()
   })
 
-  it("surfaces the bridge's own reason string as the description", () => {
-    notifyResolutionFailure({
-      id: "dom-mut-4",
-      reason: ISOLATION_REASON,
-      selector: "div.ui-card > span",
-    })
+  it("names the change as not saved, with the code's own description", () => {
+    notifyResolutionFailure({ ...DATE_EDIT, kind: "class" })
 
     expect(toast.warning).toHaveBeenCalledTimes(1)
     const [title, options] = vi.mocked(toast.warning).mock.calls[0]
     expect(title).toBe(RESOLUTION_FAILURE_TITLE)
-    // Verbatim: the bridge's wording is the only place that knows WHY (isolation
-    // view vs ancestor-only anchor), and it names the way out.
-    expect(options?.description).toBe(ISOLATION_REASON)
+    expect(options?.description).toBe(resolutionFailureDescription(DATE_EDIT))
   })
 
   it("keys the toast on the element, so repeat attempts replace rather than stack", () => {
-    const failure = {
-      id: "dom-mut-5",
-      reason: "No source-location ancestor — cannot map this edit to source.",
-      selector: "#row-3 .title",
-    }
-    notifyResolutionFailure(failure)
+    notifyResolutionFailure(DATE_EDIT)
     // A second attempt on the same element mints a FRESH mutation id — the toast
     // id must not follow it, or every swatch click stacks another toast.
-    notifyResolutionFailure({ ...failure, id: "dom-mut-6" })
+    notifyResolutionFailure({ ...DATE_EDIT, id: "dom-mut-5" })
 
     const ids = vi.mocked(toast.warning).mock.calls.map(([, options]) => options?.id)
-    expect(ids).toEqual([
-      resolutionFailureToastId(failure),
-      resolutionFailureToastId(failure),
-    ])
-    expect(new Set(ids).size).toBe(1)
+    expect(ids).toEqual([resolutionFailureToastId(DATE_EDIT), resolutionFailureToastId(DATE_EDIT)])
   })
 
   it("distinguishes different elements", () => {
-    expect(
-      resolutionFailureToastId({ id: "a", reason: "r", selector: "#one" }),
-    ).not.toBe(resolutionFailureToastId({ id: "a", reason: "r", selector: "#two" }))
+    expect(resolutionFailureToastId({ selector: "#one" })).not.toBe(
+      resolutionFailureToastId({ selector: "#two" }),
+    )
+  })
+})
+
+describe("notifyTextHandOffRefused", () => {
+  beforeEach(() => {
+    vi.mocked(toast.warning).mockClear()
+    vi.mocked(toast.success).mockClear()
   })
 
-  it("still tells the user the change wasn't saved when no reason came through", () => {
-    notifyResolutionFailure({ id: "dom-mut-7", reason: "   ", selector: "#x" })
+  it("says the change was not saved, on the element's toast id", () => {
+    notifyTextHandOffRefused(DATE_EDIT)
 
-    const [, options] = vi.mocked(toast.warning).mock.calls[0]
-    expect(options?.description).toBe(RESOLUTION_FAILURE_FALLBACK)
+    expect(toast.success).not.toHaveBeenCalled()
+    const [title, options] = vi.mocked(toast.warning).mock.calls[0]
+    expect(title).toBe(RESOLUTION_FAILURE_TITLE)
+    expect(options?.description).toBe(TEXT_HANDOFF_REFUSED_DESCRIPTION)
+    expect(options?.id).toBe(resolutionFailureToastId(DATE_EDIT))
   })
 })
 
 /**
- * The settle half.
- *
- * Telling the user was only half the fix: the bridge reverts its own preview on
- * this path (`releaseUnownedPreview`), and because no mutation was emitted there
- * is no registered override and therefore no `resolveOverride` to carry the
- * usual settle signal. If the shell doesn't bump the nonce here, the inspector's
- * style rows go on naming the shim's colour after the element has already
- * reverted — the stale swatch `cancelDisambiguation` hit on a live run.
+ * The settle half. No mutation was emitted, so there is no registered override
+ * and no `resolveOverride` to carry the usual settle signal. If the shell
+ * doesn't bump the nonce here, the inspector goes on naming the value the
+ * bridge has already taken back off the element.
  */
 describe("handleResolutionFailure", () => {
-  const FAILURE = {
-    id: "dom-mut-8",
-    reason: "No source-location ancestor — cannot map this edit to source.",
-    selector: "#row-3 .title",
-  }
+  const FAILURE: MutationResolutionFailure = { ...DATE_EDIT, kind: "style", code: "isolation-view" }
 
   beforeEach(() => {
     vi.mocked(toast.warning).mockClear()
+    vi.mocked(toast.warning).mockImplementation(() => "toast-id")
   })
 
   it("settles the preview so the inspector re-reads, not just toasts", () => {
@@ -117,9 +160,6 @@ describe("handleResolutionFailure", () => {
   it("settles once per failure, so repeat attempts each re-read", () => {
     const settle = vi.fn()
 
-    // Every style click in isolation view fails identically. The toast dedupes
-    // by design (same id), but the settle must NOT — each attempt stamps a fresh
-    // shim that the bridge then reverts, and each revert needs its own re-read.
     handleResolutionFailure(FAILURE, settle)
     handleResolutionFailure({ ...FAILURE, id: "dom-mut-9" }, settle)
 
@@ -138,8 +178,6 @@ describe("handleResolutionFailure", () => {
     })
 
     expect(() => handleResolutionFailure(FAILURE, settle)).toThrow("subscriber blew up")
-    // The user still learned the edit won't persist — the one thing this whole
-    // path exists to say.
     expect(order).toEqual(["toast", "settle"])
   })
 })

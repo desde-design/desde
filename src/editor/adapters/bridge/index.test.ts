@@ -18,7 +18,7 @@ import type { BridgeMutation, InspectionData } from "@/types/bridge"
  * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
  * so a handshake fixture has to carry both.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-10h-commit-names-page"
+const CURRENT_BRIDGE_VERSION = "2026-09-21a-refused-text-reverts"
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -1642,10 +1642,16 @@ describe("BridgeFrameworkAdapter — a message names the document it came from",
     })
     emitFromBridge(setup.contentWindow, {
       type: "MUTATION_RESOLUTION_FAILED",
+      // Well-formed, so the only thing that can drop it is the document gate.
       payload: {
         id: "f-1",
-        reason: "No source-location ancestor.",
+        code: "no-anchor",
+        kind: "text",
+        before: "Old",
+        after: "New",
         selector: "div.unanchored",
+        page: "/",
+        anchorLoc: null,
         documentId: "doc-a",
       },
     })

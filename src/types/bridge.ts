@@ -891,10 +891,7 @@ export type BridgeToShellMessage =
     }
   | {
       type: "MUTATION_RESOLUTION_FAILED"
-      payload: {
-        id: string
-        reason: string
-        selector: string
+      payload: MutationResolutionFailure & {
         /**
          * Which document this message was produced in. Required: the shell
          * drops a message from a document that is no longer the one it
@@ -1375,6 +1372,41 @@ export type ShellToBridgeMessage =
     }
 
 export type BridgeMessage = BridgeToShellMessage | ShellToBridgeMessage
+
+/**
+ * Why the bridge refused to map a captured edit to source. The machine half
+ * only: the shell owns the words (`src/hooks/resolution-failure-notice.ts`),
+ * because it also decides what happens next, and a sentence written in the
+ * bridge could not say "sent to Chat".
+ *
+ * - `isolation-view`: the page is the component isolation preview, where no
+ *   usage exists to edit.
+ * - `ancestor-only`: the edited element carries no `data-desde-src`; only an
+ *   element above it does. Typical of markup built at runtime from data (a
+ *   CMS export rendered through `createElement`) or rendered inside a library.
+ * - `no-anchor`: nothing on the way up carries one at all.
+ */
+export type MutationResolutionFailureCode = "isolation-view" | "ancestor-only" | "no-anchor"
+
+/**
+ * An edit the bridge captured and then refused to map to source. Carries
+ * the edit itself, so the shell can hand a text change to chat, where the
+ * agent can search for text the stamps cannot place.
+ */
+export interface MutationResolutionFailure {
+  id: string
+  code: MutationResolutionFailureCode
+  kind: BridgeMutation["kind"]
+  /** Value before the edit. Page text: untrusted, fence it before a prompt. */
+  before: string
+  /** Value the designer typed. Page text too. */
+  after: string
+  selector: string
+  /** `location.pathname` of the page the edit was made on. */
+  page: string
+  /** `file:line:column` of the nearest stamped ancestor, or null. */
+  anchorLoc: string | null
+}
 
 /**
  * Wire-format mutation emitted by the bridge. Mirrors `Mutation` in

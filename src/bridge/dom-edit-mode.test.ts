@@ -196,3 +196,111 @@ describe("dom-edit-mode — a typed edit is never silently dropped", () => {
     expect(message.payload.documentId).toBe(TEST_DOCUMENT_ID)
   })
 })
+
+/**
+ * A refused capture from double-click typing. MEASURED 2026-09-21: a date typed
+ * into a Webflow-export page (JSON tree rendered with `createElement`, so no
+ * stamp on the element) was refused, and the typed text stayed on the page
+ * because the refusal only released previews, and typing has none.
+ */
+describe("a refused typed text edit", () => {
+  function refusal(): { payload: Record<string, unknown> } {
+    const failures = sent.filter((m) => m.type === "MUTATION_RESOLUTION_FAILED")
+    expect(failures).toHaveLength(1)
+    return failures[0] as { payload: Record<string, unknown> }
+  }
+
+  it("runs the capture site's discard once when the edit is refused", () => {
+    // The capture step cannot restore typed text itself: only the inspector saw
+    // the element before the edit began (see inline-text-snapshot.ts).
+    document.body.innerHTML = '<div data-desde-src="components/Timeline.tsx:47:9"><span>After</span></div>'
+    const el = document.body.querySelector("span")!
+    const mode = createDomEditMode(inspector, overridePreview, adapter)
+    const discard = vi.fn()
+
+    mode.captureDirectMutation(el, "text", undefined, "Before", "After", undefined, discard)
+
+    expect(discard).toHaveBeenCalledTimes(1)
+    expect(el.textContent).toBe("After")
+  })
+
+  it("never runs discard for an edit that was captured", () => {
+    document.body.innerHTML = '<p data-desde-src="src/App.tsx:3:5">After</p>'
+    const el = document.body.querySelector("p")!
+    const mode = createDomEditMode(inspector, overridePreview, adapter)
+    const discard = vi.fn()
+
+    mode.captureDirectMutation(el, "text", undefined, "Before", "After", undefined, discard)
+
+    expect(sent.filter((m) => m.type === "MUTATION_CAPTURED")).toHaveLength(1)
+    expect(discard).not.toHaveBeenCalled()
+  })
+
+  describe("a held v-for draft", () => {
+    // Two rows from one template: the capture waits on "this one or all?".
+    function holdDraft(discard: () => void): { mode: ReturnType<typeof createDomEditMode>; pendingId: string } {
+      document.body.innerHTML =
+        '<ul><li data-desde-src="src/App.tsx:5:3">After</li><li data-desde-src="src/App.tsx:5:3">Two</li></ul>'
+      const el = document.body.querySelector("li")!
+      const mode = createDomEditMode(inspector, overridePreview, adapter)
+      mode.captureDirectMutation(el, "text", undefined, "Before", "After", undefined, discard)
+      const held = sent.find((m) => m.type === "MUTATION_AWAITING_DISAMBIGUATION") as
+        | { payload: { pendingId: string } }
+        | undefined
+      expect(held).toBeDefined()
+      return { mode, pendingId: held!.payload.pendingId }
+    }
+
+    it("runs discard when the question is cancelled", () => {
+      const discard = vi.fn()
+      const { mode, pendingId } = holdDraft(discard)
+      expect(discard).not.toHaveBeenCalled()
+
+      mode.resolveDisambiguation(pendingId, "cancel")
+
+      expect(discard).toHaveBeenCalledTimes(1)
+    })
+
+    it("does not run discard when the question is answered", () => {
+      const discard = vi.fn()
+      const { mode, pendingId } = holdDraft(discard)
+
+      mode.resolveDisambiguation(pendingId, "this-instance")
+
+      expect(discard).not.toHaveBeenCalled()
+      expect(sent.filter((m) => m.type === "MUTATION_CAPTURED")).toHaveLength(1)
+    })
+  })
+
+  it("reports the edit itself, so the shell can hand it to chat", () => {
+    document.body.innerHTML = '<div data-desde-src="components/Timeline.tsx:47:9"><span>After</span></div>'
+    const el = document.body.querySelector("span")!
+    const mode = createDomEditMode(inspector, overridePreview, adapter)
+
+    mode.captureDirectMutation(el, "text", undefined, "Before", "After")
+
+    const { payload } = refusal()
+    expect(payload).toMatchObject({
+      code: "ancestor-only",
+      kind: "text",
+      before: "Before",
+      after: "After",
+      page: window.location.pathname,
+      anchorLoc: "components/Timeline.tsx:47:9",
+      documentId: TEST_DOCUMENT_ID,
+    })
+    expect(typeof payload.selector).toBe("string")
+    // The words are the shell's now; the bridge sends no prose.
+    expect(payload).not.toHaveProperty("reason")
+  })
+
+  it("says no-anchor, with no anchor location, when nothing above is stamped", () => {
+    document.body.innerHTML = "<p>After</p>"
+    const el = document.body.querySelector("p")!
+    const mode = createDomEditMode(inspector, overridePreview, adapter)
+
+    mode.captureDirectMutation(el, "text", undefined, "Before", "After")
+
+    expect(refusal().payload).toMatchObject({ code: "no-anchor", anchorLoc: null })
+  })
+})

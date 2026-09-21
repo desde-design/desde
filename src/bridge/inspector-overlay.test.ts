@@ -418,3 +418,88 @@ describe("inspector-overlay — the selection messages name their document", () 
     )
   })
 })
+
+/**
+ * A refused double-click edit leaves the page as source says it is. MEASURED
+ * 2026-09-21: a date typed into a Webflow-export page was refused (no stamp on
+ * the element) and the typed text stayed. The capture now reports `refused`,
+ * and the inspector restores the children it saved when editing began.
+ */
+describe("inspector-overlay — a refused inline text edit is put back", () => {
+  const managers: InspectorOverlayManager[] = []
+
+  beforeEach(() => {
+    configureBridgeRuntime({
+      sendToShell: () => {},
+      inspectElement: () => ({}),
+      attributeElement: () => undefined,
+      documentId: "doc-under-test",
+    })
+  })
+
+  afterEach(() => {
+    for (const m of managers) m.deactivate()
+    managers.length = 0
+    document.body.innerHTML = ""
+  })
+
+  function editAndCommit(
+    outcome: "refused" | "captured",
+    type: (el: HTMLElement) => void,
+  ): { el: HTMLElement; captured: [string, string][] } {
+    document.body.innerHTML = "<p>Before<!--v-if--></p>"
+    const el = document.body.querySelector("p")!
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => el })
+    const captured: [string, string][] = []
+    const m = new InspectorOverlayManager()
+    managers.push(m)
+    m.setEditorMode(true)
+    m.activate()
+    m.setCaptureTextMutation((_el, before, after, discard) => {
+      captured.push([before, after])
+      // What the capture step does on a refusal: run the capture site's undo.
+      if (outcome === "refused") discard()
+    })
+
+    el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }))
+    expect(el.getAttribute("contenteditable")).toBe("plaintext-only")
+    type(el)
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }))
+    return { el, captured }
+  }
+
+  it("restores the original text, in the original node, when the capture is refused", () => {
+    const { el, captured } = editAndCommit("refused", (p) => {
+      // An edit that split the text node: the case the first fix got wrong.
+      p.firstChild!.nodeValue = "Af"
+      p.insertBefore(document.createTextNode("ter"), p.childNodes[1]!)
+    })
+
+    expect(captured).toEqual([["Before", "After"]])
+    expect(el.textContent).toBe("Before")
+    expect(el.childNodes).toHaveLength(2)
+    expect(el.childNodes[1]!.nodeType).toBe(Node.COMMENT_NODE)
+    expect(el.getAttribute("contenteditable")).toBeNull()
+  })
+
+  it("keeps the ORIGINAL snapshot when the designer double-clicks a word mid-edit", () => {
+    // Restarting the edit on that double-click re-took the snapshot from the
+    // typed text, so a refusal "restored" the typing (codex review, 2026-09-21).
+    const { el } = editAndCommit("refused", (p) => {
+      p.firstChild!.nodeValue = "After"
+      p.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }))
+      expect(p.getAttribute("contenteditable")).toBe("plaintext-only")
+      p.firstChild!.nodeValue = "Later"
+    })
+
+    expect(el.textContent).toBe("Before")
+  })
+
+  it("leaves the typed text for a capture that was accepted", () => {
+    const { el } = editAndCommit("captured", (p) => {
+      p.firstChild!.nodeValue = "After"
+    })
+
+    expect(el.textContent).toBe("After")
+  })
+})

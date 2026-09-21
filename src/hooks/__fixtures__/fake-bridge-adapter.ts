@@ -26,7 +26,7 @@ import type {
   StructuralEdit,
 } from "@/editor/core"
 import type { FrameworkId } from "@/editor/core/manifest"
-import type { OutlineNode, StyleOrigin } from "@/types/bridge"
+import type { MutationResolutionFailure, OutlineNode, StyleOrigin } from "@/types/bridge"
 
 export interface RecordedApply {
   edit: StructuralEdit
@@ -364,7 +364,7 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
     return () => {}
   }
   onResolutionFailed(
-    _listener: Listener<{ id: string; reason: string; selector: string }>,
+    _listener: Listener<MutationResolutionFailure>,
   ): AdapterSubscription {
     return () => {}
   }

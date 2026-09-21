@@ -15,13 +15,18 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BridgeFrameworkAdapter } from './index'
+import { BridgeFrameworkAdapter, readResolutionFailure } from './index'
 import type {
   AdapterTarget,
   Mutation,
   PendingMutation,
 } from '../../core'
-import type { BridgeMutation, BridgePendingMutation } from '@/types/bridge'
+import type {
+  BridgeMutation,
+  BridgePendingMutation,
+  BridgeToShellMessage,
+  MutationResolutionFailure,
+} from '@/types/bridge'
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -47,7 +52,7 @@ function emitBridgeReady(
   setup: MockIframeSetup,
   // A version the shell accepts, with the document id every accepted bridge
   // reports (round 16 X3).
-  version = '2026-09-10h-commit-names-page',
+  version = '2026-09-21a-refused-text-reverts',
   documentId = 'doc-a',
 ): void {
   const event = new Event('message') as MessageEvent
@@ -167,22 +172,47 @@ describe('BridgeFrameworkAdapter — DOM-edit-mode (Phase A)', () => {
     expect(listener.mock.calls[0][0].candidates).toHaveLength(2)
   })
 
-  it('MUTATION_RESOLUTION_FAILED dispatches the failure to subscribed listeners', async () => {
-    const listener = vi.fn<(f: { id: string; reason: string; selector: string }) => void>()
+  const FAILURE: MutationResolutionFailure = {
+    id: 'f-1',
+    code: 'ancestor-only',
+    kind: 'text',
+    before: 'May 2022 - present',
+    after: 'May 2022 - Dec 2026',
+    selector: 'div.unanchored',
+    page: '/',
+    anchorLoc: 'components/ScrollTimeline.tsx:47:9',
+  }
+
+  it('MUTATION_RESOLUTION_FAILED dispatches the whole failure to subscribed listeners', async () => {
+    const listener = vi.fn<(f: MutationResolutionFailure) => void>()
     adapter.onResolutionFailed(listener)
 
     emitFromBridge(setup, {
       type: 'MUTATION_RESOLUTION_FAILED',
-      payload: {
-        id: 'f-1',
-        reason: 'No data-desde-src ancestor — cannot map this edit to source.',
-        selector: 'div.unanchored',
-        documentId: 'doc-a',
-      },
+      payload: { ...FAILURE, documentId: 'doc-a' },
     })
 
     expect(listener).toHaveBeenCalledTimes(1)
-    expect(listener.mock.calls[0][0].id).toBe('f-1')
+    // The edit itself rides along: the shell hands a text refusal to chat.
+    expect(listener.mock.calls[0][0]).toEqual(FAILURE)
+  })
+
+  it('drops a malformed MUTATION_RESOLUTION_FAILED rather than guessing at it', async () => {
+    // Page-supplied, and the shell may now start a chat turn from it. A payload
+    // missing the edit (the pre-2026-09-21 shape carried prose instead) is not
+    // evidence an edit happened.
+    const listener = vi.fn()
+    adapter.onResolutionFailed(listener)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    emitFromBridge(setup, {
+      type: 'MUTATION_RESOLUTION_FAILED',
+      payload: { id: 'f-2', reason: 'old prose', selector: 'div', documentId: 'doc-a' },
+    } as unknown as BridgeToShellMessage)
+
+    expect(listener).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
   })
 
   it('listener throw inside onMutationCaptured does not break the adapter', async () => {
@@ -230,5 +260,42 @@ describe('BridgeFrameworkAdapter — DOM-edit-mode (Phase A)', () => {
       payload: makeBridgeMutation(),
     })
     expect(captured).not.toHaveBeenCalled()
+  })
+})
+
+describe('readResolutionFailure', () => {
+  const GOOD = {
+    id: 'f-1',
+    code: 'ancestor-only',
+    kind: 'text',
+    before: 'Old',
+    after: 'New',
+    selector: 'div.x',
+    page: '/',
+    anchorLoc: null,
+    documentId: 'doc-a',
+  }
+
+  it('accepts the shape the bridge sends, and keeps only the failure fields', () => {
+    const { documentId: _documentId, ...failure } = GOOD
+    void _documentId
+    expect(readResolutionFailure(GOOD)).toEqual(failure)
+    expect(readResolutionFailure({ ...GOOD, anchorLoc: 'a.tsx:1:2' })?.anchorLoc).toBe('a.tsx:1:2')
+  })
+
+  // One field wrong at a time: each is page-supplied, and any one of them
+  // malformed means the payload is not an edit the shell should act on.
+  it.each([
+    ['a non-object', null],
+    ['an unknown code', { ...GOOD, code: 'because' }],
+    ['an unknown kind', { ...GOOD, kind: 'html' }],
+    ['a non-string before', { ...GOOD, before: 3 }],
+    ['a missing after', { ...GOOD, after: undefined }],
+    ['a non-string selector', { ...GOOD, selector: ['div'] }],
+    ['a missing page', { ...GOOD, page: undefined }],
+    ['a non-string anchorLoc', { ...GOOD, anchorLoc: 7 }],
+    ['the old prose shape', { id: 'f-1', reason: 'text', selector: 'div', documentId: 'doc-a' }],
+  ])('refuses %s', (_label, payload) => {
+    expect(readResolutionFailure(payload)).toBeNull()
   })
 })

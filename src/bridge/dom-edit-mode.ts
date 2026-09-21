@@ -12,6 +12,7 @@
  * esbuild inlines this back into the single bridge IIFE at bundle time.
  */
 
+import type { MutationResolutionFailureCode } from "../types/bridge"
 import type { FrameworkRuntimeAdapter } from "./leaf-prop-attribution"
 import type { InspectorOverlayManager } from "./inspector-overlay"
 import type { OverridePreview } from "./override-preview"
@@ -71,6 +72,25 @@ export type DomEditModeOptions = {
 }
 
 export type BridgeMutationKind = "text" | "attr" | "class" | "style"
+
+/**
+ * A capture site's own undo, for an edit that ends without being saved: refused
+ * (no source mapping), `buildMutation` threw, or a held v-for draft was
+ * cancelled. `previewOps` covers a preview the capture site stamped; this covers
+ * what it cannot: double-click typing, where the typed text IS the DOM and only
+ * the inspector saw the element before the edit (see `inline-text-snapshot.ts`).
+ * Called by {@link releaseUnownedPreview}, so every such path runs it once.
+ *
+ * Assumes no newer edit starts on the same element while a draft is held. A
+ * held draft waits on the shell's "this item or all?" dialog, which is modal,
+ * and closing it IS the cancel, so the page cannot be edited in between. If
+ * that dialog ever stops being modal, a held draft's discard can restore a
+ * snapshot older than a later edit (codex review round 3, 2026-09-21, ruled
+ * unreachable on this basis). The durable fix is then to route typed text
+ * through the override chain (`chainRegister`), which already rebases a
+ * superseded entry's baseline, instead of a per-edit snapshot.
+ */
+export type DiscardCapture = () => void
 
 /**
  * Precise preview closures for an override registration (WS3, codex
@@ -133,6 +153,8 @@ interface PendingDraft {
    */
   el: Element
   previewOps?: OverridePreviewOps
+  /** The capture site's undo, run if the draft is cancelled or dropped. */
+  discard?: DiscardCapture
 }
 
 export function createDomEditMode(
@@ -176,6 +198,7 @@ export function createDomEditMode(
     before: string,
     after: string,
     previewOps?: OverridePreviewOps,
+    discard?: DiscardCapture,
   ) => void
   /**
    * Shell-pinned variant: same pipeline as `captureDirectMutation`
@@ -195,6 +218,7 @@ export function createDomEditMode(
     before: string,
     after: string,
     previewOps?: OverridePreviewOps,
+    discard?: DiscardCapture,
   ) => void
 } {
   let active = false
@@ -754,38 +778,38 @@ export function createDomEditMode(
   function failResolution(
     mutation: InternalBridgeMutation,
     previewOps: OverridePreviewOps | undefined,
+    discard: DiscardCapture | undefined,
   ): void {
     // Detect F3/F4 isolation view (`/__compose/component/...`): edits there
     // can never resolve to a callsite because the designer is viewing a
     // packaged component mounted directly, with no consumer SFC in the tree.
-    // Surface a message that explains the situation rather than the generic
-    // "no source-location ancestor" error which makes it look like a bug.
-    const inIsolationView =
-      typeof window !== "undefined" &&
-      window.location?.pathname?.startsWith("/__compose/component/")
-    let reason: string
-    if (inIsolationView) {
-      reason =
-        "Editing isn't supported in isolation view — this is a Storybook-style preview of a packaged component. To customize the appearance, exit isolation view (top toolbar) and edit a real instance in your prototype; the change will scope to that callsite via a CSS override."
-    } else if (mutation.resolutionKind === "ancestor") {
-      reason =
-        "Edit applies to an element with no data-desde-src; the only nearby anchor is on an ancestor — cannot reliably map to source."
-    } else {
-      reason = "No source-location ancestor — cannot map this edit to source."
-    }
-    releaseUnownedPreview(previewOps, mutation.before)
+    // The shell turns the code into words; see `MutationResolutionFailureCode`.
+    const page = typeof window !== "undefined" ? (window.location?.pathname ?? "") : ""
+    const code: MutationResolutionFailureCode = page.startsWith("/__compose/component/")
+      ? "isolation-view"
+      : mutation.resolutionKind === "ancestor"
+        ? "ancestor-only"
+        : "no-anchor"
+    // Double-click typing supplies `discard` instead of `previewOps`: the typed
+    // text IS the DOM, and only the inspector can put the element back.
+    releaseUnownedPreview(previewOps, mutation.before, discard)
     sendToShell({
       type: "MUTATION_RESOLUTION_FAILED",
       payload: {
         id: mutation.id,
-        reason,
+        code,
+        kind: mutation.kind,
+        before: mutation.before,
+        after: mutation.after,
         selector: mutation.selector,
+        page,
+        anchorLoc: mutation.resolutionKind === "ancestor" ? mutation.sourceLoc : null,
         documentId: bridgeDocumentId,
       },
     })
   }
 
-  function emit(el: Element, kind: BridgeMutationKind, target: string | undefined, before: string, after: string, previewOps?: OverridePreviewOps): void {
+  function emit(el: Element, kind: BridgeMutationKind, target: string | undefined, before: string, after: string, previewOps?: OverridePreviewOps, discard?: DiscardCapture): void {
     // Compute candidates (always — the origin flag depends on doc-order
     // among same-sourceLoc DOM elements). For unresolvable cases the
     // list is empty/single, and disambiguation never fires.
@@ -803,7 +827,7 @@ export function createDomEditMode(
       // Same reasoning as failResolution: nothing was emitted, so nothing will
       // ever own the preview the capture site stamped. Release it here or it
       // outlives an edit that never happened.
-      releaseUnownedPreview(previewOps, before)
+      releaseUnownedPreview(previewOps, before, discard)
       return
     }
 
@@ -818,7 +842,7 @@ export function createDomEditMode(
     const ancestorOverrideEligible =
       mutation.resolutionKind === "ancestor" && mutation.kind === "class"
     if (mutation.resolutionKind !== "direct" && !ancestorOverrideEligible) {
-      failResolution(mutation, previewOps)
+      failResolution(mutation, previewOps, discard)
       return
     }
 
@@ -832,6 +856,7 @@ export function createDomEditMode(
         originInstancePath: instancePath,
         el,
         ...(previewOps ? { previewOps } : {}),
+        ...(discard ? { discard } : {}),
       })
       sendToShell({
         type: "MUTATION_AWAITING_DISAMBIGUATION",
@@ -868,7 +893,7 @@ export function createDomEditMode(
    * "this-instance"` so the save dispatcher knows the user meant the
    * specific row, not the template.
    */
-  function emitPinned(el: Element, kind: BridgeMutationKind, target: string | undefined, before: string, after: string, previewOps?: OverridePreviewOps): void {
+  function emitPinned(el: Element, kind: BridgeMutationKind, target: string | undefined, before: string, after: string, previewOps?: OverridePreviewOps, discard?: DiscardCapture): void {
     const directSrc = (el as HTMLElement).dataset?.desdeSrc
     const found = directSrc ? findVForCandidates(directSrc, el) : { candidates: [], elements: [] }
     const candidates = found.candidates
@@ -880,14 +905,14 @@ export function createDomEditMode(
       )
     } catch (err) {
       console.warn("[Desde DomEdit] buildMutation failed:", err)
-      releaseUnownedPreview(previewOps, before)
+      releaseUnownedPreview(previewOps, before, discard)
       return
     }
 
     const ancestorOverrideEligible =
       mutation.resolutionKind === "ancestor" && mutation.kind === "class"
     if (mutation.resolutionKind !== "direct" && !ancestorOverrideEligible) {
-      failResolution(mutation, previewOps)
+      failResolution(mutation, previewOps, discard)
       return
     }
 
@@ -976,14 +1001,13 @@ export function createDomEditMode(
    * here is the only release on that path, and it happens exactly once (the
    * pending entry is deleted before this runs).
    *
-   * Only the capture sites that supplied `previewOps` (the shell-initiated
-   * `SET_ELEMENT_CLASSES` / `SET_ELEMENT_TEXT` lanes, which layer the inline
-   * `!important` shim) have a preview to release; in-iframe contentEditable
-   * typing has none — the typed text IS the DOM — and is left untouched, exactly
-   * as before.
+   * The shell-initiated `SET_ELEMENT_CLASSES` / `SET_ELEMENT_TEXT` lanes supply
+   * `previewOps` (the inline `!important` shim). Double-click typing supplies a
+   * `discard` instead: the typed text IS the DOM, and until 2026-09-21 it was
+   * left on the page after "Discard edit", showing words no file held.
    */
   function releasePendingPreview(pending: PendingDraft): void {
-    releaseUnownedPreview(pending.previewOps, pending.draft.before)
+    releaseUnownedPreview(pending.previewOps, pending.draft.before, pending.discard)
   }
 
   /**
@@ -1004,16 +1028,29 @@ export function createDomEditMode(
    * `baseline` is the mutation's `before` — the pre-edit value the capture site
    * measured, which for these paths is also the chain's revert target, since a
    * mutation that was never emitted can never have been superseded.
+   *
+   * `discard` is the capture site's own undo ({@link DiscardCapture}), run on
+   * the same paths for the same reason. It is here rather than at each path so
+   * a new unsaved-edit path cannot release a preview and forget typed text.
    */
   function releaseUnownedPreview(
     previewOps: OverridePreviewOps | undefined,
     baseline: string,
+    discard?: DiscardCapture,
   ): void {
-    if (!previewOps) return
-    try {
-      previewOps.revert(baseline)
-    } catch (err) {
-      console.warn("[Desde DomEdit] releasing an unowned preview failed:", err)
+    if (previewOps) {
+      try {
+        previewOps.revert(baseline)
+      } catch (err) {
+        console.warn("[Desde DomEdit] releasing an unowned preview failed:", err)
+      }
+    }
+    if (discard) {
+      try {
+        discard()
+      } catch (err) {
+        console.warn("[Desde DomEdit] discarding an unsaved capture failed:", err)
+      }
     }
   }
 

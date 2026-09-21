@@ -100,6 +100,56 @@ export function buildEditEscalationPrompt(
 }
 
 /**
+ * A text edit the bridge could not place in source, because the edited
+ * element carries no `data-desde-src`: markup built at runtime from data, or
+ * rendered inside a library. There is no file position to hand over, so the
+ * agent is asked to find the text itself. MEASURED 2026-09-21: a Webflow export
+ * whose page is a JSON tree rendered with `createElement`; the edited date
+ * lived in `content/home.json`, which no stamp can point at.
+ */
+export interface UnmappedTextEditHandoff {
+  before: string
+  after: string
+  selector: string
+  /** `location.pathname` the edit was made on. */
+  page: string
+  /** `file:line:column` of the nearest stamped ancestor, or null. */
+  anchorLoc: string | null
+}
+
+export function buildUnmappedTextEditHandoffPrompt(h: UnmappedTextEditHandoff): string {
+  const anchor = formatLocation(h.anchorLoc)
+  const change = describeMutation({
+    kind: "text",
+    sourceLoc: null,
+    selector: h.selector,
+    before: h.before,
+    after: h.after,
+  })
+  return [
+    EDIT_HANDOFF_MARKER,
+    "",
+    "This text was changed directly on the page, but the Editor could not find where it is written in the source, so nothing was saved.",
+    "",
+    HANDOFF_FENCE_NOTE,
+    "",
+    ...fenceHandoffFacts([
+      `- ${change}`,
+      `- Page: ${sanitizeField(h.page) || "/"}`,
+      ...(anchor ? [`- Nearest element with a known source: ${sanitizeField(anchor)}`] : []),
+    ]),
+    "",
+    [
+      "Find where the old text comes from before changing anything. It may be in a data file (JSON, Markdown, a CMS export) rather than in a component, so search the project for it.",
+      ...(anchor
+        ? ["The nearest element with a known source is listed above; the text may be written there, or in a file that code reads."]
+        : []),
+      "If it appears in more than one place, or the page builds it from several values, ask which one to change. Change only that text, and say which file changed.",
+    ].join(" "),
+  ].join("\n")
+}
+
+/**
  * Strip the `@[Display Name](participantId)` mention encoding back to plain
  * `@Display Name`, so the seed prompt reads naturally: the agent has no use
  * for the id the UI carries for notifications.

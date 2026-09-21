@@ -109,7 +109,7 @@ import { createOverridePreview } from "./override-preview"
   // the viewer's `html-inject`). Keep it a single-use literal;
   // bridge-bundle-version.test.ts fails if that stops holding.
   ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__ =
-    "2026-09-15b-loop-rows-callsite-stamp-move-anchor"
+    "2026-09-21c-refused-text-discard"
   const BRIDGE_VERSION = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__ as string
 
@@ -1227,8 +1227,10 @@ import { createOverridePreview } from "./override-preview"
     // Bridge inspector's double-click text editing through the
     // domEditMode mutation pipeline so sourceLoc resolution + v-for
     // disambiguation + save-on-flush all reuse the existing path.
-    inspector.setCaptureTextMutation((el, before, after) => {
-      domEditMode.captureDirectMutation(el, "text", undefined, before, after)
+    // `discard` is the inspector's own undo: it puts the element back when the
+    // edit ends unsaved (refused, or a held v-for draft is cancelled).
+    inspector.setCaptureTextMutation((el, before, after, discard) => {
+      domEditMode.captureDirectMutation(el, "text", undefined, before, after, undefined, discard)
     })
 
     // Navigation callback subscribers

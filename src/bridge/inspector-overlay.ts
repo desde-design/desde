@@ -13,6 +13,8 @@ import { generateSelector } from "./selector-engine"
 import { isBridgeOwnElement } from "./selector-helpers"
 import { detectFrameworkComponent, detectDirectComponent, buildVue3ComponentTree } from "./framework-component-detection"
 import type { SelectModeOverlay } from "./bridge-types"
+import type { DiscardCapture } from "./dom-edit-mode"
+import { restoreInlineText, snapshotInlineText, type InlineTextSnapshot } from "./inline-text-snapshot"
 
 /**
  * Whether an element is a single-text-run leaf — the gate for inline
@@ -314,8 +316,13 @@ export class InspectorOverlayManager implements SelectModeOverlay {
    * `domEditMode` rather than duplicating it here.
    */
   private captureTextMutation:
-    | ((el: Element, before: string, after: string) => void)
+    | ((el: Element, before: string, after: string, discard: DiscardCapture) => void)
     | null = null
+  /**
+   * The edited element's children as they were when editing began, so a
+   * refused capture can put the page back exactly (see `inline-text-snapshot`).
+   */
+  private editingTextSnapshot: InlineTextSnapshot | null = null
 
   private boundMouseMove: (e: MouseEvent) => void
   private boundMouseDown: (e: MouseEvent) => void
@@ -456,7 +463,7 @@ export class InspectorOverlayManager implements SelectModeOverlay {
    *  routes through `domEditMode.captureDirectMutation` to share the
    *  sourceLoc/v-for/save pipeline with all other DOM mutations. */
   setCaptureTextMutation(
-    fn: ((el: Element, before: string, after: string) => void) | null,
+    fn: ((el: Element, before: string, after: string, discard: DiscardCapture) => void) | null,
   ): void {
     this.captureTextMutation = fn
   }
@@ -741,6 +748,11 @@ export class InspectorOverlayManager implements SelectModeOverlay {
     if (!this.editorMode) return
     const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null
     if (!el || this.isOwnElement(el)) return
+    // A double-click inside the text being edited is the designer selecting a
+    // word. Restarting the edit here re-selected the whole text, stacked a
+    // second pair of listeners, and re-took the snapshot from the TYPED text,
+    // so a refusal would "restore" the typing (codex review, 2026-09-21).
+    if (el === this.editingTextElement) return
     // Only leaf-text elements get inline editing — same gate the
     // inspector uses for its "Text" field + the hover cursor cue.
     if (!isTextEditableLeaf(el)) return
@@ -760,6 +772,7 @@ export class InspectorOverlayManager implements SelectModeOverlay {
     // after values are unaffected by any anchors present.
     this.editingTextOriginalValue = el.textContent ?? ""
     this.editingTextOriginalAttr = el.getAttribute("contenteditable")
+    this.editingTextSnapshot = snapshotInlineText(el)
     // Record framework anchors so a destructive edit can't lose them.
     this.editingTextAnchors = Array.from(el.childNodes)
       .map((node, index) => ({ node, index }))
@@ -872,14 +885,23 @@ export class InspectorOverlayManager implements SelectModeOverlay {
       el.setAttribute("contenteditable", this.editingTextOriginalAttr)
     }
     el.blur()
+    const snapshot = this.editingTextSnapshot
     this.editingTextElement = null
     this.editingTextOriginalValue = ""
     this.editingTextOriginalAttr = null
     this.editingTextAnchors = []
+    this.editingTextSnapshot = null
     this.editingTextBlurHandler = null
     this.editingTextKeydownHandler = null
     if (before !== after && this.captureTextMutation) {
-      this.captureTextMutation(el, before, after)
+      // If the edit ends unsaved (refused, or a held v-for draft is cancelled),
+      // nothing else will take the typed text back, and the page would keep
+      // showing words no source file holds (MEASURED 2026-09-21). The shell is
+      // told separately and may hand the change to chat; the page shows source
+      // until that lands.
+      this.captureTextMutation(el, before, after, () => {
+        if (snapshot) restoreInlineText(el, snapshot)
+      })
     }
   }
 

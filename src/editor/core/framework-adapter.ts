@@ -35,6 +35,7 @@ import type {
 } from './edit'
 import type {
   Measurements,
+  MutationResolutionFailure,
   OutlineNode,
   PreviewFailureKind,
   StyleOrigin,
@@ -485,12 +486,13 @@ export interface FrameworkAdapter {
   ): void
 
   /**
-   * Subscribe to capture failures (e.g., `resolutionKind === 'none'`,
-   * or unsupported mutation kind). Surfaced to the designer as a
-   * non-blocking notice; never silently retargeted.
+   * Subscribe to capture failures: an edit the bridge captured but could not
+   * map to source (no stamp on the element, isolation view). Never silently
+   * retargeted. The failure carries the edit itself, so a text change can be
+   * handed to chat, where the agent can search for text the stamps cannot place.
    */
   onResolutionFailed(
-    listener: (failure: { id: string; reason: string; selector: string }) => void,
+    listener: (failure: MutationResolutionFailure) => void,
   ): AdapterSubscription
 
   /**

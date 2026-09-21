@@ -1,7 +1,8 @@
 import { toast } from "sonner"
 import {
   RESOLUTION_FAILURE_TITLE,
-  RESOLUTION_FAILURE_FALLBACK,
+  TEXT_HANDOFF_REFUSED_DESCRIPTION,
+  resolutionFailureDescription,
 } from "@/hooks/resolution-failure-notice"
 import {
   OVERRIDE_PREVIEW_FAILURE_TITLE,
@@ -15,6 +16,7 @@ import {
 } from "@/hooks/claude-runtime-notice"
 import { buildSessionCompletionToasts } from "@/components/editor/session-completion-toasts"
 import type { SurfaceEntry, SurfaceState } from "../types"
+import type { MutationResolutionFailure } from "@/types/bridge"
 
 /**
  * Editor's toasts, deduped by shape.
@@ -98,6 +100,21 @@ function firePinnedSessionToast(
   }
 }
 
+/**
+ * A refused edit as the bridge reports it. Only `code` reaches the words; the
+ * rest is here because `resolutionFailureDescription` takes the whole failure.
+ */
+const UNMAPPED_EDIT: MutationResolutionFailure = {
+  id: "dom-mut-1",
+  code: "ancestor-only",
+  kind: "class",
+  before: "p-4",
+  after: "p-6",
+  selector: "div.pricing-card",
+  page: "/pricing",
+  anchorLoc: "src/components/PricingCard.tsx:12:5",
+}
+
 /** Build a toast state. `fire` is the whole fixture — toasts render no node. */
 function t(
   slug: string,
@@ -120,9 +137,14 @@ export const TOASTS_SURFACE: SurfaceEntry = {
         description: "src/pages/Settings.vue was modified on disk since it was read.",
       }),
     ),
-    t("edit-unmapped", "Edit couldn't be mapped to source", () =>
+    t("edit-unmapped", "Change not saved: no source found (class or style edit)", () =>
       pinned.warning(RESOLUTION_FAILURE_TITLE, {
-        description: RESOLUTION_FAILURE_FALLBACK,
+        description: resolutionFailureDescription(UNMAPPED_EDIT),
+      }),
+    ),
+    t("edit-unmapped-text-refused", "Change not saved: text edit that couldn't go to Chat", () =>
+      pinned.warning(RESOLUTION_FAILURE_TITLE, {
+        description: TEXT_HANDOFF_REFUSED_DESCRIPTION,
       }),
     ),
     t("preview-not-shown", "Change not shown in the preview", () =>
