@@ -21,7 +21,7 @@ describe("createReadyLineReader", () => {
 
   it("ignores output that is not the sentinel", () => {
     const read = createReadyLineReader()
-    expect(read("▸ Vite running at http://127.0.0.1:5173\n")).toBeNull()
+    expect(read("▸ Prototype running at http://127.0.0.1:5173\n")).toBeNull()
     expect(read("▸ Bridge version 2026-08-11a\n")).toBeNull()
   })
 
@@ -84,7 +84,7 @@ describe("createReadyLineReader", () => {
       // OTHER mode's own preamble lines) before its actual sentinel — proves
       // the broadened regex didn't accidentally start matching everything.
       const read = createReadyLineReader()
-      expect(read("▸ Vite running at http://127.0.0.1:5173\n")).toBeNull()
+      expect(read("▸ Prototype running at http://127.0.0.1:5173\n")).toBeNull()
       expect(read("▸ Bridge version 2026-08-11a\n")).toBeNull()
       expect(read(`▸ Launcher ready at ${URL_}\n`)).toBe(URL_)
     })

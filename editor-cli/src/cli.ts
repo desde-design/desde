@@ -453,7 +453,8 @@ async function main(): Promise<void> {
   if (core.attach) {
     console.log(`▸ Prototype proxied at ${core.viteUrl} → ${core.attach.upstreamUrl}`)
   } else {
-    console.log(`▸ Vite running at ${core.viteUrl}`)
+    // Not "Vite": Next, Nuxt, React Router and Astro print this line too.
+    console.log(`▸ Prototype running at ${core.viteUrl}`)
   }
   console.log(`▸ Editor UI ready at ${core.shellUrl}`)
   console.log(`▸ Bridge version ${core.bridgeVersion}`)

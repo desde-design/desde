@@ -522,8 +522,8 @@ async function runBrowserSmoke(): Promise<StageResult> {
       bootLog.write(`[stdout] ${text}`)
       stdoutLines.push(text)
 
-      // Parse "▸ Vite running at http://127.0.0.1:<PORT>"
-      const match = text.match(/▸ Vite running at (http:\/\/[\w.:]+)/)
+      // Parse "▸ Prototype running at http://127.0.0.1:<PORT>"
+      const match = text.match(/▸ Prototype running at (http:\/\/[\w.:]+)/)
       if (match && !viteUrl) {
         viteUrl = match[1]
         log(`Parsed Vite URL from stdout: ${viteUrl}`)
@@ -650,7 +650,7 @@ async function waitForViteReady(
 
     // Look for the vite URL in accumulated stdout
     for (const line of stdoutLines) {
-      const match = line.match(/▸ Vite running at (http:\/\/[\w.:]+)/)
+      const match = line.match(/▸ Prototype running at (http:\/\/[\w.:]+)/)
       if (match) {
         viteUrl = match[1]
         break
