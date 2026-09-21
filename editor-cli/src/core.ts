@@ -34,6 +34,7 @@ import {
   type StampingPreflightResult,
 } from "./attach-preflight/index.js"
 import { writeStamperFiles } from "./attach/write-stampers.js"
+import { allowShellFramingPlugin } from "./plugins/allow-shell-framing-plugin.js"
 import { bridgeAssetsPlugin, bridgePlugin, readBridgeVersion } from "./plugins/bridge-plugin.js"
 import { sourceTagPlugin } from "./plugins/source-tag-plugin.js"
 import { jsxSourceTagPlugin } from "./plugins/jsx-source-tag-plugin.js"
@@ -1328,16 +1329,24 @@ export async function startCore(opts: CoreOptions): Promise<CoreHandle> {
       // injector instead — so the composed plugin there would name an injection
       // it never performs, and would double-inject the day a Vite release
       // changed that.
-      hostFacts.bridgeTags === "vite-transform-index-html"
-        ? bridgePlugin({
-            bridgeBundlePath,
-            shellOrigin,
-            html2canvasPath: resolveHtml2canvasPath(),
-          })
-        : bridgeAssetsPlugin({
-            bridgeBundlePath,
-            html2canvasPath: resolveHtml2canvasPath(),
-          }),
+      //
+      // Plain Vite also gets the framing plugin: with no proxy in front, nothing
+      // else drops a page's `X-Frame-Options` before the shell's iframe sees it.
+      ...(hostFacts.bridgeTags === "vite-transform-index-html"
+        ? [
+            bridgePlugin({
+              bridgeBundlePath,
+              shellOrigin,
+              html2canvasPath: resolveHtml2canvasPath(),
+            }),
+            allowShellFramingPlugin(),
+          ]
+        : [
+            bridgeAssetsPlugin({
+              bridgeBundlePath,
+              html2canvasPath: resolveHtml2canvasPath(),
+            }),
+          ]),
       // Imported from `./plugins/compose-isolation.js`, which owns the cast
       // between the root package's `Plugin` type and editor-cli's — two physical
       // Vite installs, currently a major apart. That wrapper exists so this file

@@ -84,6 +84,7 @@ const TYPE_IMPORTS_ALLOWED = [
   // stale silently; the import is erased, so it costs nothing at runtime.
   "hosts/types.ts",
   // The injected plugins themselves.
+  "plugins/allow-shell-framing-plugin.ts",
   "plugins/bridge-plugin.ts",
   "plugins/source-tag-plugin.ts",
   "plugins/jsx-source-tag-plugin.ts",

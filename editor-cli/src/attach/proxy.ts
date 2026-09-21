@@ -18,6 +18,7 @@ import {
   isBridgeScriptPath,
   VENDOR_HTML2CANVAS_PATH,
 } from "./bridge-tags.js"
+import { allowShellFraming } from "./framing-headers.js"
 import { createHtmlInjector } from "./inject-stream.js"
 
 /**
@@ -43,6 +44,10 @@ import { createHtmlInjector } from "./inject-stream.js"
  * Plus one refusal upstream cannot make for us: `/.desde/**`. We do not
  * control the foreign server's `fs.deny`, and for a root-serving upstream
  * (Vite, webpack-dev-server) that directory holds chat transcripts and config.
+ *
+ * And one response rewrite: the page's framing refusal (`X-Frame-Options`,
+ * CSP `frame-ancestors`) is dropped, because the shell framing it is always on
+ * another origin. See `framing-headers.ts`.
  */
 export interface AttachProxyOptions {
   /** The user's already-running dev server, e.g. `http://127.0.0.1:3000`. */
@@ -243,7 +248,8 @@ function forwardRequest(
   proxyReq.on("socket", (socket) => socket.setNoDelay(true))
 
   proxyReq.on("response", (proxyRes) => {
-    const headers = stripHopByHop(proxyRes.headers)
+    // Every response, not just html: a frame can hold an SVG or a PDF too.
+    const headers = allowShellFraming(stripHopByHop(proxyRes.headers))
     const status = proxyRes.statusCode ?? 502
 
     if (shouldInject(req, status, proxyRes.headers)) {

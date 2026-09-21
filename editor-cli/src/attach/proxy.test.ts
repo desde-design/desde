@@ -94,6 +94,18 @@ function startUpstream(): Promise<{ server: Server; port: number }> {
       res.end("<div>fragment</div>")
       return
     }
+    if (path === "/framing-denied") {
+      // The shape a Next `headers()` security block produces: the page refuses
+      // any frame from another origin, which the Editor's shell always is.
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "x-frame-options": "SAMEORIGIN",
+        "content-security-policy": "default-src 'self'; frame-ancestors 'none'",
+        "x-content-type-options": "nosniff",
+      })
+      res.end(HEAD_HTML + TAIL_HTML)
+      return
+    }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" })
     res.end(HEAD_HTML + TAIL_HTML)
   })
@@ -267,6 +279,20 @@ describe("bridge injection", () => {
     expect(res.firstByteMs).toBeLessThan(200)
     expect(res.firstChunk).toContain("data-prototype-flow=\"bridge\"")
     expect(res.body).toContain('<div id="app">hi</div>')
+  })
+})
+
+// The Editor shows the page in a frame on another origin (the shell's port).
+// A page that refuses cross-origin framing renders as a blank white frame, with
+// the reason only in the devtools console.
+describe("framing policy", () => {
+  it("drops X-Frame-Options and frame-ancestors, and keeps the rest of the policy", async () => {
+    const res = await get("/framing-denied")
+    expect(res.status).toBe(200)
+    expect(res.headers["x-frame-options"]).toBeUndefined()
+    expect(res.headers["content-security-policy"]).toBe("default-src 'self'")
+    expect(res.headers["x-content-type-options"]).toBe("nosniff")
+    expect(res.body).toContain("data-prototype-flow=\"bridge\"")
   })
 })
 
