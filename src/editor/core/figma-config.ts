@@ -23,7 +23,7 @@
 
 import { readEditorConfigFile } from './config-filename'
 
-import type { McpStdioServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import type { McpStdioServerConfig } from './mcp-server-config'
 
 /**
  * Resolved Figma config passed to `runChatTurnSdk`. Optional — when

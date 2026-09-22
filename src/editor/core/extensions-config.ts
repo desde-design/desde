@@ -29,7 +29,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import type { McpStdioServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import type { McpStdioServerConfig } from './mcp-server-config'
 
 const MCP_FILENAME = '.mcp.json'
 const LEGACY_CONFIG_FILENAME = 'desde.config.json'
