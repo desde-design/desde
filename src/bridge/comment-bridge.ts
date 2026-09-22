@@ -109,7 +109,7 @@ import { createOverridePreview } from "./override-preview"
   // the viewer's `html-inject`). Keep it a single-use literal;
   // bridge-bundle-version.test.ts fails if that stops holding.
   ;(window as unknown as Record<string, unknown>).__DESDE_BRIDGE_VERSION__ =
-    "2026-09-21c-refused-text-discard"
+    "2026-09-21h-route-carries-document"
   const BRIDGE_VERSION = (window as unknown as Record<string, unknown>)
     .__DESDE_BRIDGE_VERSION__ as string
 
@@ -1256,7 +1256,10 @@ import { createOverridePreview } from "./override-preview"
           if (sent) return
           sent = true
           if (navObserver) { navObserver.disconnect(); navObserver = null }
-          sendToShell({ type: "ROUTE_CHANGED", payload: { url: currentUrl, sourceFile } })
+          sendToShell({
+            type: "ROUTE_CHANGED",
+            payload: { url: currentUrl, sourceFile, documentId: DOCUMENT_ID },
+          })
           // Re-check the background here, not at the top of
           // `checkRouteChange`: `pushState` fires before the new route has
           // rendered, so reading it then would sample the OUTGOING page. By
@@ -1447,7 +1450,7 @@ import { createOverridePreview } from "./override-preview"
             // Already on the right page — tell shell bridge is still ready
             sendToShell({
               type: "BRIDGE_READY",
-              payload: { version: BRIDGE_VERSION, documentId: DOCUMENT_ID },
+              payload: { version: BRIDGE_VERSION, documentId: DOCUMENT_ID, url: window.location.href },
             })
           }
           break
@@ -1925,7 +1928,7 @@ import { createOverridePreview } from "./override-preview"
           // moment BRIDGE_READY fires natively, and the shell misses it.
           sendToShell({
             type: "BRIDGE_READY",
-            payload: { version: BRIDGE_VERSION, documentId: DOCUMENT_ID },
+            payload: { version: BRIDGE_VERSION, documentId: DOCUMENT_ID, url: window.location.href },
           })
           // The page background is one-shot too, and loses the SAME race for
           // the same reason (see docs/bridge-protocol.md, "BRIDGE_READY is
@@ -2028,7 +2031,7 @@ import { createOverridePreview } from "./override-preview"
     // Notify shell that bridge is ready
     sendToShell({
       type: "BRIDGE_READY",
-      payload: { version: BRIDGE_VERSION, documentId: DOCUMENT_ID },
+      payload: { version: BRIDGE_VERSION, documentId: DOCUMENT_ID, url: window.location.href },
     })
 
     // Tell the shell what colour this page is painted, so its own chrome can
@@ -2050,7 +2053,7 @@ import { createOverridePreview } from "./override-preview"
         initialSourceSent = true
         sendToShell({
           type: "ROUTE_CHANGED",
-          payload: { url: window.location.href, sourceFile: sf },
+          payload: { url: window.location.href, sourceFile: sf, documentId: DOCUMENT_ID },
         })
         return true
       }

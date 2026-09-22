@@ -20,6 +20,7 @@ export const LEDGER_KINDS: readonly string[] = [
   'prop',
   'token-value',
   'text-branch',
+  'unique-text',
   'swap',
   'detach',
   'move',
@@ -139,6 +140,12 @@ export function describeLedgerEntry(entry: LedgerEditEntry): string {
       return `${s(f.tokenName)} = ${q(f.newValue)}`
     case 'text-branch':
       return `Text = ${q(f.newValue)}`
+    case 'unique-text':
+      // The file is the interesting fact here, not the new value: this
+      // kind exists for text the page could not place, so "which file did
+      // it turn out to live in" is what the reader wants. The before and
+      // after are on the row's own fields.
+      return `Changed text in ${file}`
     case 'swap':
       return `${s(f.fromComponentName)} → ${s(f.toComponentName)}`
     case 'detach':

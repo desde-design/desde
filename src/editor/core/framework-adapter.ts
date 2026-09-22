@@ -149,6 +149,37 @@ export type EditResult =
        */
       newHashes?: Readonly<Record<string, string>>
       /**
+       * The file the edit landed in, when the SERVER decided which file
+       * that was rather than the client naming it. Only the `unique-text`
+       * kind works that way: its search picks the file, and the client
+       * needs the answer to name it in the toast ("Changed in <file>").
+       * Repo-relative. Absent for every kind whose request already carried
+       * a `file`, since the client has it already.
+       */
+      file?: string
+      /**
+       * Id of the edit-ledger row this write produced. The client uses it
+       * to act on that exact row: the unique-text lane's page check calls
+       * the ledger undo route with it when the page did not take the
+       * change. Absent when the ledger append failed, which is
+       * best-effort by contract and does not fail the write, so absence
+       * means "no row to act on", not an error.
+       */
+      ledgerEntryId?: string
+      /**
+       * Repo-relative file the unique-text step placed the edit in, when
+       * the edit reached it as the last rung of the llm-patch text ladder
+       * (route 2 of `docs/superpowers/specs/2026-09-21-unique-text-edit-design.md`)
+       * rather than as its own `unique-text` request. Route 2 has no
+       * client-side page verification of its own — unlike route 1, which
+       * the text lane verifies against the rendered page — so this is what
+       * lets the caller name the ledger row to undo if the designer later
+       * notices the page never picked up the change. Absent for every
+       * other edit, including route 1 (which already has `file` for the
+       * same purpose).
+       */
+      uniqueTextFile?: string
+      /**
        * Trace info surfaced when the LLM ran (omitted for the
        * deterministic fast-path). The save dialog renders this verbatim
        * so the designer can see what the model was asked to do and what

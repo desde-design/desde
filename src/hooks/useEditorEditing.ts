@@ -71,11 +71,16 @@ import { applyClassMutation } from "@/components/editor/align-size"
 import type { PropControlValue } from "@/components/editor/prop-control"
 import { resolveTailwindClasses } from "@/editor/tailwind/tailwind-declarations"
 import { resolveTokenScopeFile } from "@/components/editor/resolve-token-source-file"
-import type { EditableTextField, OutlineNode, StyleOrigin } from "@/types/bridge"
+import type {
+  EditableTextField,
+  MutationResolutionFailure,
+  OutlineNode,
+  StyleOrigin,
+} from "@/types/bridge"
 import { editorFetch } from "@/lib/editor-fetch"
 import { useEditorStore } from "@/stores/editor-only"
 import { useAppStore } from "@/stores"
-import { useEditVerification } from "./useEditVerification"
+import { useEditVerification, type VerificationOutcome } from "./useEditVerification"
 import type { IterationEditKind } from "@/editor/edit-service/iteration-fallback"
 import {
   logIterationScopeChoice,
@@ -87,6 +92,7 @@ import {
   afterEscalation,
   buildEditEscalationPrompt,
   buildUnmappedTextEditHandoffPrompt,
+  type UnmappedTextEditHandoff,
 } from "@/editor/edit-service/build-edit-escalation-prompt"
 import {
   coalesceCapturedMutation,
@@ -113,8 +119,11 @@ import { describeEditOutcome } from "./edit-outcome"
 import {
   handleResolutionFailure,
   notifyTextHandOffRefused,
+  notifyUniqueTextApplied,
+  notifyUniqueTextPlaced,
   shouldHandOffToChat,
 } from "./resolution-failure-notice"
+import { requestLedgerUndo } from "./useEditorLedger"
 import { offeredDisambiguationChoices } from "./disambiguation-choices"
 import { routeAwaitingDisambiguation } from "./disambiguation-route"
 import { notifySingleChoiceDisambiguation } from "./single-choice-disambiguation-notice"
@@ -160,6 +169,7 @@ import type { ModalRequest as SessionModalRequest } from "@/editor/session/modal
 import {
   EditSession,
   type SessionEndResult,
+  type SessionRunContext,
 } from "@/editor/session/edit-session"
 
 /** The one dialog request shape this hook raises, bound to its prompt type. */
@@ -187,6 +197,105 @@ import { parkedSaveRefusal, saveGate } from "./save-gate"
  * re-render the whole panel) for no reason.
  */
 const EMPTY_CONDITIONAL_GROUPS: Map<string, FileConditionalGroups> = new Map()
+
+/**
+ * What the chat hand-off is told when the unique-text step came back
+ * `cancelled` rather than applied or refused.
+ *
+ * `cancelled` is the adapter's answer to an aborted request, and the only
+ * thing that aborts one here is the bridge session ending, which `ctx.step`
+ * has already turned into a stale result by the time the value is readable.
+ * So this sentence is close to unreachable. It exists because a text edit
+ * never dead-ends: an outcome with no reason of its own still has to arrive
+ * in chat as a sentence rather than as "undefined".
+ */
+const UNIQUE_TEXT_CANCELLED_REASON =
+  "The request was cancelled before it finished."
+
+/**
+ * A unique-text write whose page check has to run again after a reload.
+ *
+ * The first check can say "did not take" for two reasons. The search picked a
+ * file the page never reads, which is the case the check exists to catch. Or
+ * the page reads the file in a way its dev server does not watch, so the
+ * bytes are right and only a reload will show them. MEASURED 2026-09-21 on a
+ * Next site that reads `content/home.md` with `fs` at request time: the write
+ * was correct, Fast Refresh never fired, and the first check failed. The two
+ * are told apart by reloading once and reading again in the new document.
+ * The write is undone only when the reloaded page still does not show it.
+ */
+interface UniqueTextRecheck {
+  editId: string
+  selector: string
+  expectedValue: string
+  /**
+   * The page the check was asked on (pathname), or null when the bridge
+   * reported no URL. The document that handshakes next is not always the
+   * reloaded page: the designer may have navigated first. A handshake from
+   * another page drops the check, and the write stays with its file named;
+   * only the same page can say the write is not shown (codex rounds 2
+   * and 3, 2026-09-21).
+   */
+  page: string | null
+  /** What the reloaded page's reading decides. Runs under the NEW session. */
+  settle: (ctx: SessionRunContext, outcome: VerificationOutcome) => void
+  /**
+   * Fires when no handshake follows the reload. Settles as `skipped`: the
+   * write stays on disk and the designer is told which file changed, the
+   * same "no evidence either way" rule a skipped check follows. Cleared when
+   * the recheck runs.
+   */
+  timer: ReturnType<typeof setTimeout>
+  /**
+   * The reloaded document handshaked while the adapter effect was between
+   * runs, so the handshake could not run the check. The effect runs it as
+   * soon as it defines the function again. Two consumers, whichever is
+   * second: a document change re-runs that effect, and the order of the two
+   * is not something this record should depend on.
+   */
+  handshaked?: boolean
+}
+
+/** A route-1 write between its page checks: what the toast, the undo and the hand-off need. */
+interface UniqueTextPending {
+  failure: MutationResolutionFailure
+  editId: string
+  file: string | undefined
+  ledgerEntryId: string | undefined
+}
+
+/** What a caller hands the hook to have a write read again after a reload. */
+export interface RecheckAfterReloadRequest {
+  editId: string
+  selector: string
+  expectedValue: string
+  /**
+   * The pathname the edit was made on, when the caller knows it better than
+   * the adapter does. Route 1 has it on the refusal itself.
+   */
+  page?: string | null
+  settle: (ctx: SessionRunContext, outcome: VerificationOutcome) => void
+}
+
+/**
+ * The pathname of a page URL the bridge reported, or null when it reported
+ * none. Compared, not the whole URL: a reload keeps the query and the hash
+ * as often as not, and a route is the page.
+ */
+function pathnameOfPageUrl(url: string | null): string | null {
+  if (!url) return null
+  try {
+    const pathname = new URL(url).pathname
+    // `/pricing` and `/pricing/` are one page; a reload can canonicalize
+    // either way (codex round 4, 2026-09-21).
+    return pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname
+  } catch {
+    return null
+  }
+}
+
+/** How long a reload may take to hand back a document before the recheck is given up. */
+const UNIQUE_TEXT_RECHECK_TIMEOUT_MS = 20_000
 
 /**
  * `adapter.resolveOverride`, plus the shell-side "the preview shim is gone" edge
@@ -397,6 +506,20 @@ export function useEditorEditing({
   // without re-creating on every render. See `useEditVerification`.
   const { verifyEdit } = useEditVerification(() => adapterRef.current)
   const verifyEditRef = useRef(verifyEdit)
+  // The unique-text write waiting for the reloaded page to answer for it, and
+  // the function that asks. The record is set where the first check fails and
+  // consumed where the next handshake lands, which are two effects; the
+  // function lives in the first one's scope, so the second reaches it here.
+  const uniqueTextRechecksRef = useRef(new Map<string, UniqueTextRecheck>())
+  const runUniqueTextRecheckRef = useRef<((pending: UniqueTextRecheck) => void) | null>(null)
+  // The requester the text lane's deps hand out, defined in the same effect.
+  const recheckAfterReloadRef = useRef<((req: RecheckAfterReloadRequest) => boolean) | null>(null)
+  // The newest unique-text edit per selector. Two refusals on one element in
+  // quick succession are two writes, and only the newest one's page check
+  // may act: the older check reads the newer text, would call its own write
+  // "not shown", undo it (refused, the hash moved) and hand an obsolete edit
+  // to chat while the newer one succeeds (codex review, 2026-09-21).
+  const uniqueTextLatestRef = useRef(new Map<string, string>())
 
   /**
    * Whether the live bridge implements `READ_RENDERED_VALUE`. The agent's
@@ -1099,6 +1222,35 @@ export function useEditorEditing({
       const { resumed } = session.start(documentId, (mutation) =>
         mutationResumeEligibleRef.current(mutation),
       )
+      // A unique-text write whose first page check failed asked for this
+      // reload. The new document is the one that can answer for it, so the
+      // check runs again here, under the session that now owns the page.
+      // Consumed at once: a second handshake must not run it twice.
+      // Every write waiting for this handshake, not one: two edits a few
+      // seconds apart each keep their own record (Fable pass, 2026-09-21).
+      const page = pathnameOfPageUrl(adapter.bridgeDocumentUrl)
+      for (const [key, recheck] of [...uniqueTextRechecksRef.current]) {
+        if (recheck.page === null || page === null || page !== recheck.page) {
+          // Another page handshaked, not the reloaded one, or one of the two
+          // pages is unknown (a URL that did not parse). Nothing here can
+          // speak for the write: it stays, and the check settles as "no
+          // evidence", which names the file. Unknown is treated like
+          // different, never like same: a check on the wrong page can undo a
+          // right write, and no check at all cannot (codex round 4).
+          uniqueTextRechecksRef.current.delete(key)
+          clearTimeout(recheck.timer)
+          void session.run(async (ctx) => {
+            recheck.settle(ctx, "skipped")
+          })
+        } else if (runUniqueTextRecheckRef.current) {
+          uniqueTextRechecksRef.current.delete(key)
+          runUniqueTextRecheckRef.current(recheck)
+        } else {
+          // The adapter effect is between runs (a document change re-runs
+          // it). It picks the record up when it defines the function again.
+          recheck.handshaked = true
+        }
+      }
       // THE SAME DOCUMENT, ANSWERING AGAIN, which is what a non-null
       // `resumed` says. It is either the page's own second handshake or an
       // adapter that detached and came back with the page still on screen.
@@ -4106,6 +4258,23 @@ export function useEditorEditing({
         resolveOverrideSettled(adapter, id, outcome, reason),
       verifyEdit: (request, onOutcome) => verifyEditRef.current(request, onOutcome),
       refreshSelectionStamps: scheduleSelectionStampRefresh,
+      // `.then`, not an await: the lane awaits this through `ctx.step`, and a
+      // bare await here would be one more entry for the await inventory.
+      undoWrite: (ledgerEntryId, file) =>
+        requestLedgerUndo(ledgerEntryId).then((result) => {
+          if (result.ok) {
+            // Same bookkeeping as route 1's undo: the recorded hash names
+            // bytes no longer on disk (Fable pass, 2026-09-21).
+            const next = { ...fileHashesRef.current }
+            delete next[file]
+            fileHashesRef.current = next
+            scheduleSelectionStampRefresh([file])
+          }
+          return result
+        }),
+      recheckAfterReload: (req) => recheckAfterReloadRef.current?.(req) ?? false,
+      notifyTextPlaced: notifyUniqueTextPlaced,
+      handOffToChat: (prompt, signal) => handOffToChat(prompt, { signal }),
       queueForAi: (identityKey) => {
         queuedForAiRef.current.add(identityKey)
         setAiQueueCount(queuedForAiRef.current.size)
@@ -4121,7 +4290,8 @@ export function useEditorEditing({
       },
       debounceMs: BRANCH_TEXT_DISPATCH_DEBOUNCE_MS,
     }),
-    [resolveStyleDestination, scheduleSelectionStampRefresh, session],
+    // `handOffToChat` is `useCallback(…, [])`: stable, listed for the rule.
+    [handOffToChat, resolveStyleDestination, scheduleSelectionStampRefresh, session],
   )
 
   /**
@@ -4475,25 +4645,329 @@ export function useEditorEditing({
     // to stop reporting the shim's value. Same reasoning as
     // `cancelDisambiguation` below.
     //
-    // A refused TEXT edit goes to a new chat session instead (see
-    // `shouldHandOffToChat`): no stamp placed the element, but the agent can
-    // search for the text. The bridge has already put the old text back, so the
-    // page shows what source says until the agent's change lands. Under the
-    // session, like every other hand-off, so an answer that arrives after the
-    // page changed is not reported against the new one.
+    // A refused TEXT edit takes ONE deterministic step before chat (see
+    // `shouldHandOffToChat`): no stamp placed the element, but the old text is
+    // still searchable, so the server looks for it in the project's own files
+    // and replaces it where it appears exactly once. That is about a second,
+    // against the ~24 seconds one model turn took on the measured Webflow-export
+    // page. Anything else goes to a new chat session, which can weigh several
+    // matches and ask. The bridge has already put the old text back, so the page
+    // shows what source says until one of the two lands.
+    //
+    // Under the session, like every other hand-off, so an answer that arrives
+    // after the page changed is not reported against the new one. See
+    // `docs/superpowers/specs/2026-09-21-unique-text-edit-design.md`.
+    //
+    // NOT serialized per element, deliberately. Two refusals on one element in
+    // quick succession are two independent writes, and the server is what
+    // stops the second from splicing against bytes the first already moved:
+    // the step's write carries a whole-file precondition, so a second write
+    // built from the older read refuses with a 409 and that edit goes to chat.
+    // A marker here would have to share the `text` lane's flat key namespace
+    // with the buffered-mutation lane, which is a collision for no gain.
+    /**
+     * Send a refused text edit to a new chat session, with whatever the
+     * unique-text step found out added as one more fenced fact.
+     *
+     * Returns the promise rather than awaiting it, so each call site can
+     * await it THROUGH `ctx.step` and stop on a page change. A helper that
+     * awaited internally would be a bare await inside a run body, which is
+     * the thing `useEditorEditing.await-inventory.test.ts` exists to refuse.
+     */
+    const sendUniqueTextHandOff = (
+      failure: MutationResolutionFailure,
+      extra: Pick<UnmappedTextEditHandoff, "reverted" | "stepRefusal">,
+      signal: AbortSignal,
+    ): Promise<boolean> =>
+      handOffToChat(
+        buildUnmappedTextEditHandoffPrompt({
+          before: failure.before,
+          after: failure.after,
+          selector: failure.selector,
+          page: failure.page,
+          anchorLoc: failure.anchorLoc,
+          ...extra,
+        }),
+        { signal },
+      )
+    /**
+     * The page does not show the write, even after a reload: the file the
+     * search picked is not the one this text comes from. Put it back before
+     * saying anything, so the agent starts from a clean tree.
+     *
+     * No ledger row means nothing to undo through. The append is best-effort
+     * by contract and does not fail the write, so an absent id is "no row to
+     * act on", and the file keeps the change until the agent or the user
+     * deals with it. The chat message says which of the two happened.
+     */
+    const undoAndHandOffUniqueText = async (
+      ctx: SessionRunContext,
+      pending: Pick<UniqueTextPending, "failure" | "file" | "ledgerEntryId">,
+    ): Promise<void> => {
+      let restored = false
+      let undoReason: string | undefined
+      if (pending.ledgerEntryId) {
+        const undone = await ctx.step(requestLedgerUndo(pending.ledgerEntryId))
+        if (undone.stale) return
+        restored = undone.value.ok
+        if (!undone.value.ok) undoReason = undone.value.reason
+      }
+      if (restored && pending.file) {
+        // The hash recorded at write time names bytes no longer on disk, and
+        // the undo route does not report the restored file's hash. Forget it
+        // rather than guess, so the next save does not 409 against this
+        // hook's own undo, and re-read the selection's stamps for the same
+        // reason (codex review, 2026-09-21).
+        const next = { ...fileHashesRef.current }
+        delete next[pending.file]
+        fileHashesRef.current = next
+        scheduleSelectionStampRefresh([pending.file])
+      }
+      const sent = await ctx.step(
+        sendUniqueTextHandOff(
+          pending.failure,
+          {
+            reverted: {
+              file: pending.file ?? "",
+              restored,
+              ...(undoReason ? { reason: undoReason } : {}),
+            },
+          },
+          ctx.signal,
+        ),
+      )
+      if (sent.stale || sent.value) return
+      notifyTextHandOffRefused(pending.failure)
+    }
+    /**
+     * What a page check decides for a unique-text write.
+     *
+     * "verified": the page shows it. "skipped": the page was replaced, or this
+     * bridge cannot read a rendered value, so there is no evidence either way.
+     * The write stays in both cases, which is the rule stamped text edits
+     * already follow. "didnt-take" reloads once first (see
+     * {@link UniqueTextRecheck}) and undoes only when the reloaded page still
+     * does not show it.
+     */
+    const settleUniqueTextCheck = (
+      ctx: SessionRunContext,
+      pending: UniqueTextPending,
+      outcome: VerificationOutcome,
+      reloadOnMiss: boolean,
+    ): void => {
+      // A newer edit on the same element owns the outcome now. Its own check
+      // will speak; this one says nothing and undoes nothing.
+      if (uniqueTextLatestRef.current.get(pending.failure.selector) !== pending.editId) return
+      if (outcome !== "didnt-take") {
+        notifyUniqueTextApplied(pending.failure, pending.file, outcome === "verified")
+        return
+      }
+      if (!reloadOnMiss) {
+        void undoAndHandOffUniqueText(ctx, pending)
+        return
+      }
+      const reloading = recheckAfterReload({
+        editId: pending.editId,
+        selector: pending.failure.selector,
+        expectedValue: pending.failure.after,
+        // The refusal's own pathname. An empty one (a bridge that read none)
+        // falls back to the adapter's URL rather than pretending "/" (codex
+        // round 5).
+        ...(pending.failure.page
+          ? { page: pathnameOfPageUrl(`http://page${pending.failure.page}`) }
+          : {}),
+        settle: (next, outcome) => settleUniqueTextCheck(next, pending, outcome, false),
+      })
+      if (!reloading) void undoAndHandOffUniqueText(ctx, pending)
+    }
+    /**
+     * Reload the prototype and read one write again in the document that
+     * handshakes next. Shared by route 1 (above) and the text lane's
+     * search-placed writes (route 2), which cannot trust an in-place read:
+     * the typed text is still on the page as the live preview, and a write
+     * to a file the page never reads re-renders nothing, so the preview
+     * passes for the truth. MEASURED 2026-09-21 on the Markdown test site.
+     */
+    const recheckAfterReload = (req: RecheckAfterReloadRequest): boolean => {
+      // A reload ends the bridge session, and the session's buffers go with
+      // it: an edit parked for the save-time AI lane, or one still typing,
+      // would be lost. Refuse rather than trade the designer's other work for
+      // this check; the caller then treats the miss as a miss (codex review,
+      // 2026-09-21).
+      const snapshot = session.getSnapshot()
+      if (snapshot.mutations.length > 0 || snapshot.propEdits.length > 0) return false
+      const record: UniqueTextRecheck = {
+        ...req,
+        // The page the edit was made on. The caller's own answer first: the
+        // adapter's URL is the last handshake or route change it heard, and
+        // a refusal carries the pathname the bridge read at the moment.
+        page: req.page !== undefined ? req.page : pathnameOfPageUrl(adapter.bridgeDocumentUrl),
+        timer: setTimeout(() => {
+          if (uniqueTextRechecksRef.current.get(req.editId) !== record) return
+          uniqueTextRechecksRef.current.delete(req.editId)
+          // No document came back to read. Settled under the current
+          // session so the caller's own guards apply.
+          void session.run(async (ctx) => {
+            req.settle(ctx, "skipped")
+          })
+        }, UNIQUE_TEXT_RECHECK_TIMEOUT_MS),
+      }
+      uniqueTextRechecksRef.current.set(req.editId, record)
+      // `force`: this is not the post-edit backstop the flag governs. The
+      // check has already failed, and a reload is the only way to tell a
+      // wrong file from a page its dev server does not refresh.
+      requestPrototypeReload(iframeRef.current, "unique-text-recheck", "force")
+      return true
+    }
+    recheckAfterReloadRef.current = recheckAfterReload
+    // Runs at the handshake that follows the reload, under the NEW session.
+    // The reload ended the old one, so the old `ctx` cannot carry this.
+    runUniqueTextRecheckRef.current = (pending) => {
+      clearTimeout(pending.timer)
+      void session.run(async (ctx) => {
+        verifyEditRef.current(
+          {
+            editId: pending.editId,
+            selector: pending.selector,
+            expectedValue: pending.expectedValue,
+            editKind: "dom-text",
+            // The caller's `settle` speaks for itself.
+            quiet: true,
+            current: () => ctx.current,
+          },
+          (outcome) => {
+            if (!ctx.current) return
+            pending.settle(ctx, outcome)
+          },
+        )
+      })
+    }
+    // The other consumer: the handshake came while this effect was between
+    // runs and left the record for it (see `UniqueTextRecheck.handshaked`).
+    for (const [key, pending] of [...uniqueTextRechecksRef.current]) {
+      if (!pending.handshaked) continue
+      uniqueTextRechecksRef.current.delete(key)
+      runUniqueTextRecheckRef.current(pending)
+    }
     const unsubResolutionFailed = adapter.onResolutionFailed((failure) => {
       const settle = useEditorStore.getState().notePreviewSettled
       if (!shouldHandOffToChat(failure)) {
         handleResolutionFailure(failure, settle)
         return
       }
+      // First, and unchanged: the bridge reverted the element itself and no
+      // override was ever registered, so this is the only thing that tells the
+      // inspector to stop naming the value it no longer shows.
       settle()
+      const sendHandOff = (
+        extra: Pick<UnmappedTextEditHandoff, "reverted" | "stepRefusal">,
+        signal: AbortSignal,
+      ): Promise<boolean> => sendUniqueTextHandOff(failure, extra, signal)
       void session.run(async (ctx) => {
-        const res = await ctx.step(
-          handOffToChat(buildUnmappedTextEditHandoffPrompt(failure), { signal: ctx.signal }),
+        const edit = {
+          kind: "unique-text" as const,
+          id: makeEditId(),
+          // The element has no stamp, which is the whole reason this lane
+          // exists, so there is no `editTarget` to carry. The selector is the
+          // only identity it has, and it is what the ledger row and the
+          // Activity panel show.
+          target: { targetId: failure.selector, selector: failure.selector },
+          before: failure.before,
+          after: failure.after,
+          selector: failure.selector,
+          page: failure.page,
+        }
+        // The hashes come off the PROMISE, before staleness is decided. They
+        // are disk truth: the file is what it is whoever is looking at it, and
+        // dropping them would leave the external-edit guard comparing against
+        // a hash this very write invalidated. Same rule as the text lane's.
+        const write = adapter.applyEdit(edit, { signal: ctx.signal }).then((result) => {
+          if (result.kind === "applied") {
+            // Only a write that LANDED owns this element's outcome. A retry
+            // the server refuses (the text is gone from the file the first
+            // write changed) must not retire the first write's check, or that
+            // write is never verified and never undone (Fable pass,
+            // 2026-09-21).
+            uniqueTextLatestRef.current.set(failure.selector, edit.id)
+            if (result.newHashes) {
+              fileHashesRef.current = { ...fileHashesRef.current, ...result.newHashes }
+            }
+          }
+          return result
+        })
+        const written = await ctx.step(write)
+        // The page this write was for is gone. Nothing below is about the page
+        // in front of the designer now: not the toast, not the verification,
+        // and not a chat message describing an edit made somewhere else.
+        if (written.stale) return
+        const result = written.value
+        if (result.kind !== "applied") {
+          // `needsChat` is the step's own refusal (the text is in no file, in
+          // several, or a limit was hit) and reads as a plain sentence. A
+          // failure without it is a transport or server error, and a
+          // `cancelled` carries nothing at all. All three go to chat with
+          // whatever reason there is: a text edit never dead-ends.
+          const sent = await ctx.step(
+            sendHandOff(
+              {
+                stepRefusal:
+                  result.kind === "failed" ? result.reason : UNIQUE_TEXT_CANCELLED_REASON,
+              },
+              ctx.signal,
+            ),
+          )
+          if (sent.stale || sent.value) return
+          notifyTextHandOffRefused(failure)
+          return
+        }
+        const file = result.file
+        // Refresh the (still-open) selection's stamps so the next edit from it
+        // does not false-409 against this write. Usually a no-op here, since
+        // the selected element has no stamp to refresh, but the file the step
+        // landed in may be the selection's own.
+        if (result.newHashes) {
+          scheduleSelectionStampRefresh(Object.keys(result.newHashes))
+        }
+        // The write is on disk. Now the other half of the design: does the
+        // page actually show it? A single match in a file the page never reads
+        // would otherwise pass silently, which is exactly what "replace, then
+        // verify" was chosen over a list of suspicious paths to avoid.
+        verifyEditRef.current(
+          {
+            editId: edit.id,
+            selector: failure.selector,
+            expectedValue: failure.after,
+            editKind: "dom-text",
+            // A newer refusal on this element retired this check's toast; its
+            // outcome is handled by the same rule in `settleUniqueTextCheck`.
+            isSuperseded: () => uniqueTextLatestRef.current.get(failure.selector) !== edit.id,
+            // A first miss reloads and reads again; the verdict is this lane's.
+            quiet: true,
+            // THE SESSION, read at verification-complete time. The callback
+            // below carries the same guard; this one stops the hook toasting
+            // about a page the designer has already left.
+            current: () => ctx.current,
+          },
+          (outcome) => {
+            // Checked HERE as well: the verification settles 0.85 to 3 seconds
+            // after the write, so this can fire long after the page it was
+            // measuring went away. A departed page is no evidence, and no
+            // evidence still names the file rather than saying nothing
+            // (Fable pass, 2026-09-21).
+            if (!ctx.current) {
+              if (uniqueTextLatestRef.current.get(failure.selector) === edit.id) {
+                notifyUniqueTextApplied(failure, file, false)
+              }
+              return
+            }
+            settleUniqueTextCheck(
+              ctx,
+              { failure, editId: edit.id, file, ledgerEntryId: result.ledgerEntryId },
+              outcome,
+              true,
+            )
+          },
         )
-        if (res.stale || res.value) return
-        notifyTextHandOffRefused(failure)
       })
     })
     // A live-preview poke the substrate couldn't apply (no component instance
@@ -4564,6 +5038,18 @@ export function useEditorEditing({
       unsubCaptured()
       unsubAwaiting()
       unsubResolutionFailed()
+      // A recheck waiting on a reload is NOT cleared here: this cleanup also
+      // runs for the document change the reload itself causes, and the
+      // record is what the next run of this effect checks against. On a real
+      // unmount its timer runs out and the write stays, which is the same
+      // "no evidence either way" answer a skipped check gives. The function
+      // is nulled so the handshake handler leaves the record for the next
+      // run instead of calling into a dead closure. `uniqueTextLatestRef` is
+      // left alone for the same reason: the recheck after a reload reads it,
+      // and clearing it here made that check return silently. Its entries
+      // are one per selector and overwritten, so nothing accumulates.
+      runUniqueTextRecheckRef.current = null
+      recheckAfterReloadRef.current = null
       unsubOverridePreviewFailed()
       unsubDragMove()
       unsubInsertAtPoint()
@@ -4622,6 +5108,9 @@ export function useEditorEditing({
   }, [
     session,
     adapterReadyMarker,
+    // A ref object from props: stable for the life of the pane, listed so
+    // the rule that reads this array can see the reload it feeds.
+    iframeRef,
     scheduleBranchMutationDispatch,
     handleDragMove,
     handleInsertAtPoint,
@@ -4629,6 +5118,9 @@ export function useEditorEditing({
     parkHeldOrDefer,
     requestModal,
     handOffToChat,
+    // Adds no new reason for this effect to re-run: it is
+    // `useCallback(…, [session])`, and `session` is already listed above.
+    scheduleSelectionStampRefresh,
   ])
 
   /**

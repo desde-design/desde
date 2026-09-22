@@ -483,6 +483,22 @@ export function buildEditRequest(
         newValue: edit.newValue,
       },
     }
+  } else if (edit.kind === 'unique-text') {
+    // The ONE kind that names no file, and the only one with nothing to
+    // read off `target.editTarget`: a missing source stamp is the whole
+    // reason this kind exists, so there are no coordinates to send and no
+    // `baseHash` to guard them with. The server's search decides which
+    // file holds the text, and it guards that file by content instead.
+    // Wire-shape matches `UniqueTextEditBody` in validate-edit-request.ts.
+    requestBody = {
+      edit: {
+        kind: 'unique-text',
+        before: edit.before,
+        after: edit.after,
+        selector: edit.selector,
+        page: edit.page,
+      },
+    }
   } else if (edit.kind === 'token-value') {
     // token-value carries its own file (the token CSS file) + the
     // declaration to patch — no editTarget derivation. Wire-shape matches

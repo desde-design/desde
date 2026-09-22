@@ -54,6 +54,13 @@ const ACCEPTED: Record<EditKind, readonly Ext[]> = {
   // llm-patch never reaches the gate (handled before path resolution), but it
   // is part of the kind union, so the table stays total. Vue-only by default.
   "llm-patch": [".vue"],
+  // unique-text never reaches the gate either, and could not use it if it
+  // did: it carries no `file`, and the file its search lands on is a
+  // `.json`, `.md` or `.yaml` that this table has no column for. Which
+  // extensions it may read is `text-encodings.ts`'s answer, and which
+  // files it may read at all is `collect-search-files.ts`'s. The row is
+  // here only to keep the record total, and takes the default.
+  "unique-text": [".vue"],
   // The overwrite lane also admits plain .ts (composables, utilities).
   overwrite: [".vue", ".ts", ".tsx", ".jsx"],
   // React-only styling lane — no Vue analog (that's scoped-css-override).

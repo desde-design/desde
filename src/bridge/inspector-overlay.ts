@@ -605,9 +605,20 @@ export class InspectorOverlayManager implements SelectModeOverlay {
     // caret. Clicks elsewhere commit the edit and fall through to
     // normal selection.
     if (this.editingTextElement) {
+      // Two ways a click can belong to the element being edited. By POINT:
+      // the pointer is over it. By TARGET: the browser dispatched the click
+      // to it without a pointer at all, which is what a `<button>` does on
+      // Space or Enter. MEASURED 2026-09-21 on a next-intl button: typing
+      // "Get Going" ended the edit at "Get", because the keyboard click
+      // carried clientX/Y of 0,0, `elementFromPoint` answered whatever sat
+      // in the page's top-left corner, and that read as a click elsewhere.
+      // The partial text was then committed and written to source.
+      const target = e.target instanceof Node ? e.target : null
       if (
         el === this.editingTextElement ||
-        this.editingTextElement.contains(el)
+        this.editingTextElement.contains(el) ||
+        (target !== null &&
+          (target === this.editingTextElement || this.editingTextElement.contains(target)))
       ) {
         // Pass-through: let the click land so the caret can move. Still
         // preventDefault so a rapid 3rd/4th click during double-click-to-edit
@@ -827,6 +838,20 @@ export class InspectorOverlayManager implements SelectModeOverlay {
         ev.preventDefault()
         ev.stopPropagation()
         this.commitEditingText("enter")
+      } else if (
+        ev.key === " " &&
+        !ev.isComposing &&
+        this.editingTextElement instanceof HTMLButtonElement
+      ) {
+        // Not during IME composition: there the Space belongs to the
+        // candidate list, and a literal space would break the composition.
+        // A button swallows Space as its activation key and inserts nothing,
+        // even while contenteditable. MEASURED 2026-09-21 on a next-intl
+        // button: "Get Going" arrived in source as "GetGoing". Insert the
+        // space by hand; `insertText` keeps the undo stack and the caret.
+        ev.preventDefault()
+        ev.stopPropagation()
+        document.execCommand("insertText", false, " ")
       }
     }
     this.editingTextBlurHandler = blurHandler

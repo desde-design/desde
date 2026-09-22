@@ -121,6 +121,18 @@ describe("llm-patch LLM lane — React source", () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "editor-jsx-llm-lane-"))
     seenFiles = []
+    // Every test here forces the LLM lane by giving the deterministic
+    // ladder a coordinate it cannot use. Since 2026-09-21 the ladder has
+    // one more rung after those: the unique-text step, which searches the
+    // whole project for the old text and places the edit when it appears
+    // exactly once. In these fixtures "Sooth" DOES appear exactly once, so
+    // without this decoy the rung would place every one of these edits and
+    // the LLM lane under test would never run.
+    //
+    // A second copy of the text is the honest way to keep them on the LLM
+    // lane: it is the real refusal ("the text appears 2 times"), not a
+    // stub. See `docs/superpowers/specs/2026-09-21-unique-text-edit-design.md`.
+    writeFileSync(join(dir, "decoy.json"), '{"brand":"Sooth"}\n')
   })
   afterEach(() => rmSync(dir, { recursive: true, force: true }))
 

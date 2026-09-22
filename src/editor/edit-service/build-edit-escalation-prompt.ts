@@ -115,10 +115,36 @@ export interface UnmappedTextEditHandoff {
   page: string
   /** `file:line:column` of the nearest stamped ancestor, or null. */
   anchorLoc: string | null
+  /**
+   * The unique-text step DID write a file, and the page then did not show
+   * the new text, so the write was rolled back through the edit ledger.
+   *
+   * `restored` is whether that rollback landed. The two cases lead the agent
+   * to different places, which is why one optional field carries both rather
+   * than a bare file name: when it is true the file is back as it was and the
+   * agent starts from a clean tree, and when it is false that file still
+   * holds the change and the agent has to reckon with it. Absent when no
+   * write was attempted.
+   *
+   * See `docs/superpowers/specs/2026-09-21-unique-text-edit-design.md`
+   * § "After the write".
+   */
+  reverted?: { file: string; restored: boolean; reason?: string }
+  /**
+   * The unique-text step refused, verbatim, and nothing was written. Carries
+   * the server's own reason (the text appears in no file, or in several, or a
+   * limit was hit), so the agent does not repeat a search that already ran.
+   */
+  stepRefusal?: string
 }
 
 export function buildUnmappedTextEditHandoffPrompt(h: UnmappedTextEditHandoff): string {
   const anchor = formatLocation(h.anchorLoc)
+  // The step names the file it wrote, so this fallback should never be seen.
+  // It is here because the sentence below reads as a broken one without it
+  // ("The Editor changed  but the page did not show it"), and a hand-off is
+  // the last thing that should look broken.
+  const revertedFile = h.reverted ? sanitizeField(h.reverted.file) || "a project file" : ""
   const change = describeMutation({
     kind: "text",
     sourceLoc: null,
@@ -137,6 +163,22 @@ export function buildUnmappedTextEditHandoffPrompt(h: UnmappedTextEditHandoff): 
       `- ${change}`,
       `- Page: ${sanitizeField(h.page) || "/"}`,
       ...(anchor ? [`- Nearest element with a known source: ${sanitizeField(anchor)}`] : []),
+      // Inside the fence with the rest, and sanitized like the rest. A file
+      // path and a refusal both come from the source tree and from the step
+      // that ran over it, neither is authored by us, and this message goes to
+      // an agent with write tools.
+      ...(h.reverted
+        ? [
+            h.reverted.restored
+              ? `- The Editor changed ${revertedFile} but the page did not show it, so the change was put back.`
+              : `- The Editor changed ${revertedFile} but the page did not show it, and the change could not be put back${
+                  h.reverted.reason ? ` (${sanitizeField(h.reverted.reason)})` : ""
+                }, so check that file before editing it.`,
+          ]
+        : []),
+      ...(h.stepRefusal
+        ? [`- Direct replacement was not possible: ${sanitizeField(h.stepRefusal)}`]
+        : []),
     ]),
     "",
     [

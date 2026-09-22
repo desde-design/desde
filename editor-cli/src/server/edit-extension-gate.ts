@@ -52,8 +52,11 @@ export interface EditLaneFlags {
    * flatten-conditional each have a JSX sibling applicator; detach and swap
    * are the lanes that stay Vue-only. scoped-css-override is neither — it is
    * cross-substrate but writes a stylesheet, not a component, so it has its
-   * own flag below. (`llm-patch` is exempt from this gate entirely — the
-   * handler dispatches it away before reaching here, see `edit-handler.ts`.)
+   * own flag below. (`llm-patch` and `unique-text` are exempt from this
+   * gate entirely. The handler dispatches both away before reaching here,
+   * see `edit-handler.ts`. `unique-text` has no `file` to gate at all: its
+   * target is whatever file the search finds, and which extensions are
+   * searchable is decided by `text-encodings.ts` instead.)
    */
   isJsxCapableLane: boolean
   /**

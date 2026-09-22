@@ -58,18 +58,30 @@ async function endsWithNewlineOrAbsent(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * Append one entry. Never throws, never rejects: a ledger failure must not
+ * fail the source write it accompanies.
+ *
+ * Returns whether the line actually reached disk. A caller that hands the
+ * entry's `id` back to a client needs that answer, since quoting an id for a row
+ * nobody can look up is worse than quoting none. Callers that do not care
+ * simply ignore the value, which is every caller that existed before this
+ * returned one.
+ */
 export async function appendLedgerEntry(
   canonicalRoot: string,
   entry: LedgerEntry,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const path = ledgerPath(canonicalRoot)
     await mkdir(dirname(path), { recursive: true })
     const prefix = (await endsWithNewlineOrAbsent(path)) ? '' : '\n'
     await appendFile(path, `${prefix}${JSON.stringify(entry)}\n`, 'utf8')
+    return true
   } catch (err) {
     // Non-fatal by contract: the source write already landed.
     console.warn('edit-ledger: append failed (entry lost):', err)
+    return false
   }
 }
 

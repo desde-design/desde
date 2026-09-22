@@ -346,6 +346,16 @@ export type BrokeredWriteResult<E = void> =
        * failure message, and Undo, looking for a backup that isn't there.
        */
       backupDir?: string
+      /**
+       * The id of the edit-ledger entry this batch wrote, when the append
+       * actually reached disk. Absent when it did not (a symlinked
+       * `.desde`, a read-only repo): the ledger is best-effort by contract,
+       * so the write still succeeded, but there is no row to hand a client
+       * an id for. Callers that surface it (the CLI edit route, so the
+       * client can join an Activity row to its own record) must treat
+       * absence as "no row", never as a failure.
+       */
+      ledgerEntryId?: string
       emitted: E
     }
   | { ok: false; stage: 'backup'; reason: string }
@@ -1617,7 +1627,10 @@ async function brokeredWriteImpl<E = void>(
 
   // The edit ledger. Unconditional — an undescribed write still gets an
   // entry, because an unexplained change is a fact the Activity panel has
-  // to show. `appendLedgerEntry` swallows its own failures.
+  // to show. `appendLedgerEntry` swallows its own failures and reports
+  // whether the line reached disk, which is what decides whether the id
+  // below is safe to hand back.
+  let ledgerEntryId: string | undefined
   {
     const touched = allPaths.filter((p) => repoRelByAbs.has(p))
     const afterHashes: Record<string, string> = {}
@@ -1647,9 +1660,10 @@ async function brokeredWriteImpl<E = void>(
       opts.describe?.reverts !== undefined
         ? ((await headSha(opts.canonicalRoot)) ?? undefined)
         : undefined
-    await appendLedgerEntry(opts.canonicalRoot, {
+    const entryId = randomUUID()
+    const appended = await appendLedgerEntry(opts.canonicalRoot, {
       type: 'edit',
-      id: randomUUID(),
+      id: entryId,
       at: new Date().toISOString(),
       branch: await resolveBranchCached(opts.canonicalRoot),
       kind: opts.describe?.kind ?? 'unknown',
@@ -1682,12 +1696,14 @@ async function brokeredWriteImpl<E = void>(
       // apart from a real commit that lands later.
       headAtWrite,
     })
+    if (appended) ledgerEntryId = entryId
   }
 
   const emitted = (opts.emit ? await opts.emit() : undefined) as E
   return {
     ok: true,
     ...(opts.journal.length > 0 ? { backupDir: backup.backupDir } : {}),
+    ...(ledgerEntryId ? { ledgerEntryId } : {}),
     emitted,
   }
 }

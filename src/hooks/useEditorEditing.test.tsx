@@ -24,7 +24,11 @@ import type {
   PendingMutation,
   Selection,
 } from "@/editor/core"
-import type { OutlineNode, StyleOrigin } from "@/types/bridge"
+import type {
+  MutationResolutionFailure,
+  OutlineNode,
+  StyleOrigin,
+} from "@/types/bridge"
 import { useEditorEditing } from "./useEditorEditing"
 import { useEditorStore } from "@/stores/editor-only"
 import {
@@ -39,6 +43,7 @@ import {
   type RecordedApply,
   resetFakeAdapters,
 } from "./__fixtures__/fake-bridge-adapter"
+import { TEXT_HANDOFF_REFUSED_DESCRIPTION } from "./resolution-failure-notice"
 
 vi.mock("@/editor/adapters/bridge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/editor/adapters/bridge")>()
@@ -212,6 +217,21 @@ let heldProposal: ((body: unknown) => void) | null = null
  */
 let holdCatalog = false
 let heldCatalog: ((body: unknown) => void) | null = null
+
+/**
+ * Every ledger row the hook asked to undo, newest last.
+ *
+ * The unique-text lane rolls its own write back when the page does not show
+ * the new text, and that is a plain POST with no other trace: the ledger
+ * belongs to a different hook, and the Activity panel is not mounted here.
+ */
+const ledgerUndos: string[] = []
+
+/**
+ * What the ledger undo route answers. `ok` by default; a test that wants the
+ * "the file could not be put back" branch sets a refusal.
+ */
+let ledgerUndoAnswer: { ok: boolean; reason?: string } = { ok: true }
 
 function answerCatalog(body: unknown): void {
   const answer = heldCatalog
@@ -459,6 +479,12 @@ beforeEach(() => {
   // rather than in that one test, so the next row that makes the same
   // assertion inherits the guarantee instead of rediscovering the need for it.
   vi.mocked(toast.warning).mockClear()
+  // Same reasoning for the success toast: the unique-text rows below assert
+  // both that it fired and that it did NOT, and a call left over from an
+  // earlier test would decide either one for the wrong reason.
+  vi.mocked(toast.success).mockClear()
+  ledgerUndos.length = 0
+  ledgerUndoAnswer = { ok: true }
   FakeBridgeAdapter.nextDocumentIds = ["doc-a"]
   FakeBridgeAdapter.nextHandshakeError = null
   captured = null
@@ -485,6 +511,15 @@ beforeEach(() => {
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         )
+      }
+      if (url.includes("/api/editor/ledger/") && url.endsWith("/undo")) {
+        ledgerUndos.push(url)
+        return new Response(JSON.stringify(ledgerUndoAnswer), {
+          // The route answers a refusal with a 409 and a reason, and
+          // `requestLedgerUndo` reads BOTH the status and the body's `ok`.
+          status: ledgerUndoAnswer.ok ? 200 : 409,
+          headers: { "content-type": "application/json" },
+        })
       }
       if (url.includes("/api/editor/catalog") && holdCatalog) {
         // Held. The test takes the page away and then answers, which is the
@@ -2738,5 +2773,692 @@ describe("useEditorEditing: the bridge session", () => {
 
     expect(useEditorStore.getState().editorSelection?.selector).toBe("#header")
     expect(useEditorStore.getState().editorSelectionMany).toEqual([])
+  })
+})
+
+/**
+ * The refused-text lane: one deterministic write, then chat.
+ *
+ * A text edit the bridge cannot place in source used to go straight to a new
+ * chat session. On a site whose pages are data that is EVERY text edit, and
+ * MEASURED 2026-09-21 the agent's whole job was one grep and one replacement,
+ * for one model turn and about 24 seconds. The shell now asks the server to
+ * find that exact text in the project's files first
+ * (`docs/superpowers/specs/2026-09-21-unique-text-edit-design.md`).
+ *
+ * What these rows are about is the ORDER and the three verdicts. The step runs
+ * before chat; a write the page then shows is the end of it; a write the page
+ * does not show is rolled back and only then handed over; and every refusal
+ * still reaches chat, because a text edit never dead-ends.
+ */
+describe("useEditorEditing: a text edit the bridge could not place", () => {
+  /** The measured case: a date on a Webflow-export page, carrying no stamp. */
+  const REFUSED: MutationResolutionFailure = {
+    id: "dom-mut-4",
+    code: "ancestor-only",
+    kind: "text",
+    before: "May 2022 - present",
+    after: "May 2022 - Dec 2026",
+    selector: "div.resume-date",
+    page: "/",
+    anchorLoc: "components/ScrollTimeline.tsx:47:9",
+  }
+
+  const DATA_FILE = "content/home.json"
+
+  /** What the server answers when the step found the text in exactly one file. */
+  const stepApplied = (ledgerEntryId?: string, file: string = DATA_FILE): EditResult => ({
+    kind: "applied",
+    appliedEditId: "edit-1",
+    affectedTargetIds: [],
+    file,
+    newHashes: { [file]: "hash-1" },
+    ...(ledgerEntryId ? { ledgerEntryId } : {}),
+  })
+
+  /** The reload telemetry lives on `window`, so it is reset per test. */
+  const hmrStats = () =>
+    (window as unknown as { __EDITOR_HMR_STATS__?: { lastDispatch?: { reason: string } } })
+      .__EDITOR_HMR_STATS__
+  beforeEach(() => {
+    ;(window as unknown as { __EDITOR_HMR_STATS__?: unknown }).__EDITOR_HMR_STATS__ = undefined
+  })
+
+  /** Fire the bridge's refusal and wait for the step to reach the adapter. */
+  async function refuseAndWait(adapter: FakeBridgeAdapter): Promise<RecordedApply> {
+    await act(async () => {
+      adapter.emitResolutionFailed(REFUSED)
+      await Promise.resolve()
+    })
+    return waitForApply()
+  }
+
+  /** The one prompt chat was handed. */
+  function promptSentTo(escalateToChat: ReturnType<typeof vi.fn>): string {
+    expect(escalateToChat).toHaveBeenCalledTimes(1)
+    return escalateToChat.mock.calls[0]![0] as string
+  }
+
+  it("runs the step before chat, and names the file it changed", async () => {
+    // The ordering this lane exists for. Chat is the FALLBACK now, so a
+    // verified write must never reach it: a chat session opened beside a
+    // finished edit is the designer being asked to supervise work that is
+    // already done.
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    // The page reports the new text, which is what makes this `verified`.
+    adapter.renderedValue = REFUSED.after
+
+    const step = await refuseAndWait(adapter)
+    // No chat yet, and the request carries the shape the server validates:
+    // no file and no coordinates, because the search is what names the file.
+    expect(escalateToChat).not.toHaveBeenCalled()
+    expect(step.edit.kind).toBe("unique-text")
+    expect(step.edit).toMatchObject({
+      before: REFUSED.before,
+      after: REFUSED.after,
+      selector: REFUSED.selector,
+      page: REFUSED.page,
+    })
+    // The session's own lifetime rides with it, like every other write.
+    expect(step.signal).toBeDefined()
+
+    await act(async () => {
+      step.settle(stepApplied("ledger-1"))
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1), {
+      timeout: 15000,
+    })
+    const [title, options] = vi.mocked(toast.success).mock.calls[0]!
+    expect(title).toBe("Text updated")
+    expect(options?.description).toBe(`Changed in ${DATA_FILE}`)
+    expect(escalateToChat).not.toHaveBeenCalled()
+    // Nothing was rolled back: the page shows the change.
+    expect(ledgerUndos).toEqual([])
+  }, 30000)
+
+  it("puts the write back and then hands off when the page does not show it", async () => {
+    // A single match in a file the page never reads is exactly the risk the
+    // design accepted by replacing first and verifying second. The recovery is
+    // the other half of that bargain: undo through the ledger row the write
+    // produced, so the agent starts from a clean tree, and say so in the
+    // hand-off rather than leaving it to be discovered.
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    // The page still shows the OLD text after the write, which is the failure.
+    adapter.renderedValue = REFUSED.before
+
+    const step = await refuseAndWait(adapter)
+    await act(async () => {
+      step.settle(stepApplied("ledger-7"))
+      await Promise.resolve()
+    })
+
+    // The first miss is not yet a verdict. MEASURED 2026-09-21: a page that
+    // reads its content with `fs` showed the old text after a correct write
+    // because nothing refreshed it. So the first miss asks the prototype to
+    // reload, and the check runs again in the document that handshakes next.
+    await waitFor(
+      () =>
+        expect(hmrStats()?.lastDispatch?.reason).toBe("unique-text-recheck"),
+      { timeout: 15000 },
+    )
+    expect(ledgerUndos).toEqual([])
+    expect(escalateToChat).not.toHaveBeenCalled()
+    // The reloaded page still shows the old text: now it is a wrong file.
+    await act(async () => {
+      // The handshake that follows reports the same id the page announced,
+      // exactly as the real bridge does; the fake needs telling.
+      FakeBridgeAdapter.nextDocumentIds = ["doc-after-reload"]
+      adapter.emitReady("doc-after-reload")
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(ledgerUndos).toHaveLength(1), { timeout: 15000 })
+    expect(ledgerUndos[0]).toContain("/api/editor/ledger/ledger-7/undo")
+    await waitFor(() => expect(escalateToChat).toHaveBeenCalledTimes(1), {
+      timeout: 15000,
+    })
+    const prompt = promptSentTo(escalateToChat)
+    expect(prompt).toContain(
+      `The Editor changed ${DATA_FILE} but the page did not show it, so the change was put back.`,
+    )
+    // Not a success: the designer is not told the text changed when it did not.
+    expect(toast.success).not.toHaveBeenCalled()
+  }, 30000)
+
+  it("says the file still holds the change when the undo itself refuses", async () => {
+    // A refused undo (the file drifted, the backup was swept) must not stop
+    // the hand-off, and it must not be reported as if it had worked: the agent
+    // is walking into a file that still carries a change nobody can see.
+    FakeBridgeAdapter.verificationEnabled = true
+    ledgerUndoAnswer = { ok: false, reason: "The file changed since that edit." }
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    adapter.renderedValue = REFUSED.before
+
+    const step = await refuseAndWait(adapter)
+    await act(async () => {
+      step.settle(stepApplied("ledger-9"))
+      await Promise.resolve()
+    })
+    // Past the reload, and the page still does not show it.
+    await waitFor(() => expect(ledgerUndos.length + escalateToChat.mock.calls.length).toBe(0), {
+      timeout: 15000,
+    })
+    await waitFor(
+      () =>
+        expect(hmrStats()?.lastDispatch?.reason).toBe("unique-text-recheck"),
+      { timeout: 15000 },
+    )
+    await act(async () => {
+      // The handshake that follows reports the same id the page announced,
+      // exactly as the real bridge does; the fake needs telling.
+      FakeBridgeAdapter.nextDocumentIds = ["doc-after-reload"]
+      adapter.emitReady("doc-after-reload")
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(escalateToChat).toHaveBeenCalledTimes(1), {
+      timeout: 15000,
+    })
+    expect(promptSentTo(escalateToChat)).toContain(
+      `The Editor changed ${DATA_FILE} but the page did not show it, and the change could not be put back (The file changed since that edit.), so check that file before editing it.`,
+    )
+  }, 30000)
+
+  it("confirms the write when the reloaded page shows it", async () => {
+    // The measured case in full: the first check misses because the dev
+    // server never refreshed a page that reads its file with `fs`; the reload
+    // shows the text; the write stays and the file is named. No undo, no chat.
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    adapter.renderedValue = REFUSED.before
+
+    const step = await refuseAndWait(adapter)
+    await act(async () => {
+      step.settle(stepApplied("ledger-11"))
+      await Promise.resolve()
+    })
+    await waitFor(
+      () =>
+        expect(hmrStats()?.lastDispatch?.reason).toBe("unique-text-recheck"),
+      { timeout: 15000 },
+    )
+    // The reloaded document renders the new text.
+    adapter.renderedValue = REFUSED.after
+    await act(async () => {
+      // The handshake that follows reports the same id the page announced,
+      // exactly as the real bridge does; the fake needs telling.
+      FakeBridgeAdapter.nextDocumentIds = ["doc-after-reload"]
+      adapter.emitReady("doc-after-reload")
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1), { timeout: 15000 })
+    expect(vi.mocked(toast.success).mock.calls[0]![1]?.description).toBe(`Changed in ${DATA_FILE}`)
+    expect(ledgerUndos).toEqual([])
+    expect(escalateToChat).not.toHaveBeenCalled()
+  }, 30000)
+
+  it("keeps the write when another page handshakes instead of the reloaded one", async () => {
+    // The handshake that follows the reload is not always the reloaded page:
+    // the designer may have navigated first. That page cannot speak for the
+    // write, whatever it shows, so the write stays and is named.
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    adapter.renderedValue = REFUSED.before
+
+    const step = await refuseAndWait(adapter)
+    await act(async () => {
+      step.settle(stepApplied("ledger-13"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(hmrStats()?.lastDispatch?.reason).toBe("unique-text-recheck"), {
+      timeout: 15000,
+    })
+    // Another route handshakes, and it even shows the OLD text somewhere.
+    adapter.renderedValue = REFUSED.before
+    await act(async () => {
+      FakeBridgeAdapter.nextDocumentIds = ["doc-elsewhere"]
+      adapter.emitReady("doc-elsewhere", "http://prototype.example.com/about")
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1), { timeout: 15000 })
+    expect(ledgerUndos).toEqual([])
+    expect(escalateToChat).not.toHaveBeenCalled()
+  }, 30000)
+
+  it("treats a trailing slash as the same page", async () => {
+    // `/pricing/` after a reload of `/pricing` is the reloaded page, and its
+    // reading counts: still the old text, so a miss (codex round 4).
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    adapter.documentUrl = "http://prototype.example.com/pricing"
+    adapter.renderedValue = REFUSED.before
+
+    await act(async () => {
+      adapter.emitResolutionFailed({ ...REFUSED, page: "/pricing" })
+      await Promise.resolve()
+    })
+    const step = await waitForApply()
+    await act(async () => {
+      step.settle(stepApplied("ledger-16"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(hmrStats()?.lastDispatch?.reason).toBe("unique-text-recheck"), {
+      timeout: 15000,
+    })
+    await act(async () => {
+      FakeBridgeAdapter.nextDocumentIds = ["doc-after-reload"]
+      adapter.emitReady("doc-after-reload", "http://prototype.example.com/pricing/")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(ledgerUndos).toHaveLength(1), { timeout: 15000 })
+    await waitFor(() => expect(escalateToChat).toHaveBeenCalledTimes(1), { timeout: 15000 })
+    expect(toast.success).not.toHaveBeenCalled()
+  }, 30000)
+
+  it("takes an unknown page for no evidence, never for the same page", async () => {
+    // A page whose URL did not parse cannot be the reloaded page as far as
+    // the check knows. A check on the wrong page can undo a right write; no
+    // check cannot. The write stays and the file is named (codex round 4).
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    adapter.renderedValue = REFUSED.before
+
+    const step = await refuseAndWait(adapter)
+    await act(async () => {
+      step.settle(stepApplied("ledger-17"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(hmrStats()?.lastDispatch?.reason).toBe("unique-text-recheck"), {
+      timeout: 15000,
+    })
+    await act(async () => {
+      FakeBridgeAdapter.nextDocumentIds = ["doc-unknown"]
+      adapter.emitReady("doc-unknown", "not a url")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1), { timeout: 15000 })
+    expect(vi.mocked(toast.success).mock.calls[0]![1]?.description).toBe(
+      `Changed in ${DATA_FILE}. The page could not confirm it.`,
+    )
+    expect(ledgerUndos).toEqual([])
+    expect(escalateToChat).not.toHaveBeenCalled()
+  }, 30000)
+
+  it("compares against the page the edit was made on, not the adapter's stale URL", async () => {
+    // A client-side navigation moves the page without a handshake. The
+    // refusal carries the pathname the bridge read at the moment; the record
+    // uses that, so the reloaded page is recognized (Fable pass, 2026-09-21).
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    // The adapter still believes the page that loaded.
+    adapter.documentUrl = "http://prototype.example.com/"
+    adapter.renderedValue = REFUSED.before
+    const ON_ABOUT: MutationResolutionFailure = { ...REFUSED, page: "/about" }
+    await act(async () => {
+      adapter.emitResolutionFailed(ON_ABOUT)
+      await Promise.resolve()
+    })
+    const step = await waitForApply()
+    await act(async () => {
+      step.settle(stepApplied("ledger-18"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(hmrStats()?.lastDispatch?.reason).toBe("unique-text-recheck"), {
+      timeout: 15000,
+    })
+    // The reload lands on /about, still showing the old text: a miss.
+    await act(async () => {
+      FakeBridgeAdapter.nextDocumentIds = ["doc-about"]
+      adapter.emitReady("doc-about", "http://prototype.example.com/about")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(ledgerUndos).toHaveLength(1), { timeout: 15000 })
+    await waitFor(() => expect(escalateToChat).toHaveBeenCalledTimes(1), { timeout: 15000 })
+  }, 30000)
+
+  it("keeps a record per write, so two edits seconds apart are both checked", async () => {
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    adapter.renderedValue = "neither"
+    const SECOND: MutationResolutionFailure = {
+      ...REFUSED,
+      id: "dom-mut-6",
+      selector: "p.subtitle",
+      before: "Old subtitle",
+      after: "New subtitle",
+    }
+    const first = await refuseAndWait(adapter)
+    await act(async () => {
+      adapter.emitResolutionFailed(SECOND)
+      await Promise.resolve()
+    })
+    const second = await waitForApply(1)
+    await act(async () => {
+      first.settle(stepApplied("ledger-19"))
+      second.settle(stepApplied("ledger-20", "content/other.json"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(hmrStats()?.lastDispatch?.reason).toBe("unique-text-recheck"), {
+      timeout: 15000,
+    })
+    // Give the second in-place check time to miss and record itself too.
+    await new Promise((r) => setTimeout(r, 4000))
+    // The reloaded page shows both.
+    adapter.renderedValue = null
+    adapter.renderedValueFor = (selector) =>
+      selector === REFUSED.selector ? REFUSED.after : selector === SECOND.selector ? SECOND.after : null
+    await act(async () => {
+      FakeBridgeAdapter.nextDocumentIds = ["doc-after-reload"]
+      adapter.emitReady("doc-after-reload")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(2), { timeout: 15000 })
+    expect(ledgerUndos).toEqual([])
+    expect(escalateToChat).not.toHaveBeenCalled()
+  }, 45000)
+
+  it("does not let a refused retry retire the first write's check", async () => {
+    // The bridge put the old text back while the first write's check ran;
+    // the designer typed again. The server refuses the retry (the file no
+    // longer holds `before`). The first write still owns its outcome.
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    adapter.renderedValue = REFUSED.before
+    const first = await refuseAndWait(adapter)
+    await act(async () => {
+      adapter.emitResolutionFailed({ ...REFUSED, id: "dom-mut-7", after: "May 2022 - Jan 2027" })
+      await Promise.resolve()
+    })
+    const retry = await waitForApply(1)
+    await act(async () => {
+      first.settle(stepApplied("ledger-21"))
+      retry.settle({ kind: "failed", reason: "That text was not found in any of the project's files.", needsChat: true })
+      await Promise.resolve()
+    })
+    // The retry went to chat; the first write's miss still reloads.
+    await waitFor(() => expect(escalateToChat).toHaveBeenCalledTimes(1), { timeout: 15000 })
+    await waitFor(() => expect(hmrStats()?.lastDispatch?.reason).toBe("unique-text-recheck"), {
+      timeout: 15000,
+    })
+    await act(async () => {
+      FakeBridgeAdapter.nextDocumentIds = ["doc-after-reload"]
+      adapter.emitReady("doc-after-reload")
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(ledgerUndos).toHaveLength(1), { timeout: 15000 })
+    expect(ledgerUndos[0]).toContain("ledger-21")
+  }, 30000)
+
+  it("counts a missing element on the reloaded page itself as a miss", async () => {
+    // Same page, no element: the write may have removed it (a unique string
+    // that also gates rendering), and nothing on the page vouches for it.
+    // That is a miss: undo, and chat (codex round 3, 2026-09-21).
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    adapter.renderedValue = REFUSED.before
+
+    const step = await refuseAndWait(adapter)
+    await act(async () => {
+      step.settle(stepApplied("ledger-15"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(hmrStats()?.lastDispatch?.reason).toBe("unique-text-recheck"), {
+      timeout: 15000,
+    })
+    adapter.renderedValue = null
+    await act(async () => {
+      FakeBridgeAdapter.nextDocumentIds = ["doc-after-reload"]
+      adapter.emitReady("doc-after-reload")
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(ledgerUndos).toHaveLength(1), { timeout: 15000 })
+    await waitFor(() => expect(escalateToChat).toHaveBeenCalledTimes(1), { timeout: 15000 })
+    expect(toast.success).not.toHaveBeenCalled()
+  }, 30000)
+
+  it("does not reload over other buffered edits: a miss is then a miss", async () => {
+    // A reload ends the session and its buffers. With an edit parked in the
+    // buffer, the reload is refused and the first miss goes straight to undo
+    // and chat, so the designer's other work is never traded for this check.
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    adapter.renderedValue = REFUSED.before
+    // Another element's text edit sits in the buffer (its own write is out
+    // and never answers in this test, so the entry stays).
+    adapter.emitCapture({
+      id: "parked-1",
+      kind: "text",
+      selector: "p.other",
+      before: "x",
+      after: "y",
+      sourceLoc: "src/App.vue:3:1",
+      resolutionKind: "direct",
+      scope: "definition",
+      callsiteLoc: null,
+      instancePath: "0",
+    } as unknown as Mutation)
+
+    const step = await refuseAndWait(adapter)
+    await act(async () => {
+      step.settle(stepApplied("ledger-14"))
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(ledgerUndos).toHaveLength(1), { timeout: 15000 })
+    expect(hmrStats()?.lastDispatch?.reason).not.toBe("unique-text-recheck")
+    await waitFor(() => expect(escalateToChat).toHaveBeenCalledTimes(1), { timeout: 15000 })
+  }, 30000)
+
+  it("lets the newest edit on an element own the outcome", async () => {
+    // Two refusals on one element, back to back: A to B, then B to C. Both
+    // write. The first check reads C, which is not B, and without this rule
+    // it would call its own write wrong, try to undo it, and hand A to B to
+    // chat while the second edit is succeeding (codex review, 2026-09-21).
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    const SECOND: MutationResolutionFailure = {
+      ...REFUSED,
+      id: "dom-mut-5",
+      before: REFUSED.after,
+      after: "May 2022 - Jan 2027",
+    }
+    adapter.renderedValue = SECOND.after
+
+    const first = await refuseAndWait(adapter)
+    await act(async () => {
+      adapter.emitResolutionFailed(SECOND)
+      await Promise.resolve()
+    })
+    const second = await waitForApply(1)
+    await act(async () => {
+      first.settle(stepApplied("ledger-a"))
+      second.settle(stepApplied("ledger-b"))
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1), { timeout: 15000 })
+    // Enough time for the retired check to have acted, had it been allowed to.
+    await new Promise((r) => setTimeout(r, 1500))
+    expect(ledgerUndos).toEqual([])
+    expect(escalateToChat).not.toHaveBeenCalled()
+    expect(hmrStats()?.lastDispatch?.reason).not.toBe("unique-text-recheck")
+  }, 30000)
+
+  it("keeps the write and confirms it when nothing could be read back", async () => {
+    // `skipped` is "no evidence either way": this bridge cannot read a
+    // rendered value at all. The write is on disk, so it stays, which is the
+    // rule stamped text edits already follow. Undoing on no evidence would
+    // throw away a good edit on every older bridge.
+    expect(FakeBridgeAdapter.verificationEnabled).toBe(false)
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+
+    const step = await refuseAndWait(adapter)
+    await act(async () => {
+      step.settle(stepApplied("ledger-2"))
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(toast.success).mock.calls[0]![1]?.description).toBe(
+      `Changed in ${DATA_FILE}. The page could not confirm it.`,
+    )
+    expect(ledgerUndos).toEqual([])
+    expect(escalateToChat).not.toHaveBeenCalled()
+  })
+
+  it("hands a refused step to chat with the reason the step gave", async () => {
+    // The step refuses on purpose whenever it is not certain: the text is in
+    // no file, or in several, or a limit was hit. That reason goes into the
+    // hand-off so the agent does not repeat the search that already ran.
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+
+    const step = await refuseAndWait(adapter)
+    await act(async () => {
+      step.settle({
+        kind: "failed",
+        reason: 'The text "May 2022 - present" appears in 8 files.',
+        needsChat: true,
+      })
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(escalateToChat).toHaveBeenCalledTimes(1))
+    const prompt = promptSentTo(escalateToChat)
+    expect(prompt).toContain(
+      'Direct replacement was not possible: The text "May 2022 - present" appears in 8 files.',
+    )
+    // The reason is a fact copied off the server, so it sits INSIDE the fence
+    // with the rest of the data, never in the instruction half.
+    const begin = prompt.indexOf("<<<BEGIN:")
+    const end = prompt.indexOf("<<<END:")
+    expect(begin).toBeGreaterThan(0)
+    expect(prompt.indexOf("Direct replacement was not possible")).toBeGreaterThan(begin)
+    expect(prompt.indexOf("Direct replacement was not possible")).toBeLessThan(end)
+    expect(toast.success).not.toHaveBeenCalled()
+    expect(ledgerUndos).toEqual([])
+  })
+
+  it("hands a plain failure to chat too, so a text edit never dead-ends", async () => {
+    // A 500, or a 409 from the step's whole-file precondition, carries no
+    // `needsChat`. It used to be the one shape with nowhere to go: the write
+    // failed and the old prompt was never sent, so the designer's typing
+    // vanished with a toast at best.
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+
+    const step = await refuseAndWait(adapter)
+    await act(async () => {
+      step.fail("content/home.json changed while this edit was being prepared.")
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(escalateToChat).toHaveBeenCalledTimes(1))
+    expect(promptSentTo(escalateToChat)).toContain(
+      "Direct replacement was not possible: content/home.json changed while this edit was being prepared.",
+    )
+  })
+
+  it("warns when chat will not take it either", async () => {
+    // The one thing the designer must never get is silence. A refused
+    // hand-off (chat busy, no API key) is the end of the line for this edit,
+    // and the notice says so without guessing at why.
+    const escalateToChat = vi.fn(async () => false)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+
+    const step = await refuseAndWait(adapter)
+    await act(async () => {
+      step.settle({ kind: "failed", reason: "no match", needsChat: true })
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(toast.warning).mock.calls[0]![1]?.description).toBe(
+      TEXT_HANDOFF_REFUSED_DESCRIPTION,
+    )
+  })
+
+  it("stops at the step when the page went away while it was out", async () => {
+    // The write is disk truth and stands whatever happens to the page, but
+    // everything AFTER it is about the page: a toast, a verification reading a
+    // document that has been replaced, and a chat message describing an edit
+    // made somewhere else. The step's answer arrives after the boundary here,
+    // and nothing downstream of it may run.
+    FakeBridgeAdapter.verificationEnabled = true
+    const escalateToChat = vi.fn(async () => true)
+    const { rerender } = await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+    adapter.renderedValue = REFUSED.after
+
+    const step = await refuseAndWait(adapter)
+    expect(step.signal?.aborted).toBe(false)
+    await changeDocument(rerender, "doc-b")
+    expect(step.signal?.aborted).toBe(true)
+
+    await act(async () => {
+      step.settle(stepApplied("ledger-3"))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(toast.success).not.toHaveBeenCalled()
+    expect(escalateToChat).not.toHaveBeenCalled()
+    expect(ledgerUndos).toEqual([])
+  })
+
+  it("leaves a non-text refusal a notice, with no step and no chat", async () => {
+    // The control. A class or style refusal has no text to search for, so the
+    // lane must not fire at all: a `unique-text` request built from a class
+    // change would search for a class list and, on a single match, rewrite it.
+    const escalateToChat = vi.fn(async () => true)
+    await mount({ escalateToChat })
+    const adapter = lastFakeAdapter()
+
+    await act(async () => {
+      adapter.emitResolutionFailed({ ...REFUSED, kind: "class" })
+      await Promise.resolve()
+    })
+
+    expect(adapter.applies).toEqual([])
+    expect(escalateToChat).not.toHaveBeenCalled()
+    expect(toast.warning).toHaveBeenCalledTimes(1)
   })
 })

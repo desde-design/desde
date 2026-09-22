@@ -89,7 +89,7 @@ import {
  * prose reason. An older bridge's payload fails `readResolutionFailure` and is
  * dropped, so a refused edit would again reach the user as nothing at all.
  */
-const REQUIRED_BRIDGE_VERSION = '2026-09-21a-refused-text-reverts'
+const REQUIRED_BRIDGE_VERSION = '2026-09-21h-route-carries-document'
 
 /**
  * Phase 6 feature gate. Bridges below this version don't know about
@@ -305,6 +305,8 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    * `bridgeDocumentId` and `shouldEndSessionOnHandshake`.
    */
   private lastBridgeDocumentId: string | null = null
+  /** `location.href` the last accepted BRIDGE_READY reported, or null. */
+  private lastBridgeDocumentUrl: string | null = null
   /**
    * Which selection is newest, as a number that only ever goes up.
    *
@@ -510,6 +512,7 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     }
     this.lastBridgeVersion = null
     this.lastBridgeDocumentId = null
+    this.lastBridgeDocumentUrl = null
     this.documentChangedListeners.clear()
     this.mutationCapturedListeners.clear()
     this.dragMoveListeners.clear()
@@ -988,6 +991,18 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     let llmTrace: SaveLLMTrace | undefined
     let fallbackUsed: 'source-aware-llm' | 'agent-mini-turn' | undefined
     let fallbackNotes: string | undefined
+    // Both are server-decided facts the client cannot derive: which file
+    // the unique-text search landed in, and the id of the ledger row the
+    // write produced. Read for every kind, like the fields above; absent
+    // fields simply stay undefined.
+    let editedFile: string | undefined
+    let ledgerEntryId: string | undefined
+    // Route 2 of the unique-text step (the last rung of the llm-patch text
+    // ladder) has no `file` field of its own on the response — that field
+    // is only ever set by kinds that resolve to exactly one file, and
+    // llm-patch can span several — so it gets this separate, differently-
+    // named field instead. Read the same way as `ledgerEntryId` above.
+    let uniqueTextFile: string | undefined
     // Every successful write now returns `newHashes` (the deterministic
     // single-edit lane included, since the buffered-edit rebase work), so
     // the body is parsed for EVERY kind — dropping hashes for e.g.
@@ -1007,9 +1022,21 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         llmTrace?: SaveLLMTrace
         fallbackUsed?: 'source-aware-llm' | 'agent-mini-turn'
         notes?: string
+        file?: string
+        ledgerEntryId?: string
+        uniqueTextFile?: string
       }
       if (body?.newHashes && typeof body.newHashes === 'object') {
         newHashes = body.newHashes
+      }
+      if (typeof body?.file === 'string' && body.file.length > 0) {
+        editedFile = body.file
+      }
+      if (typeof body?.ledgerEntryId === 'string' && body.ledgerEntryId.length > 0) {
+        ledgerEntryId = body.ledgerEntryId
+      }
+      if (typeof body?.uniqueTextFile === 'string' && body.uniqueTextFile.length > 0) {
+        uniqueTextFile = body.uniqueTextFile
       }
       if (body?.llmTrace && typeof body.llmTrace === 'object') {
         llmTrace = body.llmTrace
@@ -1029,6 +1056,9 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
       appliedEditId: edit.id,
       affectedTargetIds: [edit.target.targetId],
       ...(newHashes ? { newHashes } : {}),
+      ...(editedFile ? { file: editedFile } : {}),
+      ...(ledgerEntryId ? { ledgerEntryId } : {}),
+      ...(uniqueTextFile ? { uniqueTextFile } : {}),
       ...(llmTrace ? { llmTrace } : {}),
       ...(fallbackUsed ? { fallbackUsed } : {}),
       ...(fallbackNotes ? { notes: fallbackNotes } : {}),
@@ -1539,7 +1569,11 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
 
     switch (message.type) {
       case 'BRIDGE_READY':
-        this.handleBridgeReady(message.payload?.version, message.payload?.documentId)
+        this.handleBridgeReady(
+          message.payload?.version,
+          message.payload?.documentId,
+          message.payload?.url,
+        )
         break
       case 'ELEMENT_INSPECTED':
         if (!this.fromCurrentDocument(message.documentId)) {
@@ -1684,6 +1718,21 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
         // event, not a stream.
         break
       case 'ROUTE_CHANGED':
+        // A client-side navigation moves the page without a handshake, so
+        // the page URL is kept current here as well as at BRIDGE_READY. The
+        // reload-and-recheck compares against it (Fable pass, 2026-09-21).
+        // Only from the CURRENT document: a late route change from the page
+        // that just left must not overwrite the new page's URL (codex round
+        // 5). A bridge that stamps no id cannot update it.
+        if (
+          typeof message.payload?.url === 'string' &&
+          message.payload.url.length > 0 &&
+          this.fromCurrentDocument(message.payload.documentId)
+        ) {
+          this.lastBridgeDocumentUrl = message.payload.url
+        }
+        this.notifyTreeUpdateListeners()
+        break
       case 'DOM_MUTATED':
         this.notifyTreeUpdateListeners()
         break
@@ -1985,11 +2034,19 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
    * answering again — an iframe `load` whose subresources finished late does
    * exactly that — and no bridge session ends on it.
    */
+  get bridgeDocumentUrl(): string | null {
+    return this.lastBridgeDocumentUrl
+  }
+
   get bridgeDocumentId(): string | null {
     return this.lastBridgeDocumentId
   }
 
-  private handleBridgeReady(version: string | undefined, documentId?: string): void {
+  private handleBridgeReady(
+    version: string | undefined,
+    documentId?: string,
+    url?: unknown,
+  ): void {
     if (version && this.compareVersions(version, REQUIRED_BRIDGE_VERSION) < 0) {
       if (this.bridgeReadyReject) {
         this.bridgeReadyReject(
@@ -2026,6 +2083,9 @@ export class BridgeFrameworkAdapter implements FrameworkAdapter {
     // refusing to talk to must not be able to move the document id and so end
     // the live session.
     this.lastBridgeDocumentId = documentId
+    // The page's own URL, beside its id. Absent from a bridge older than
+    // 2026-09-21g; a wrong type is treated the same, never trusted.
+    this.lastBridgeDocumentUrl = typeof url === 'string' && url.length > 0 ? url : null
     // A DOCUMENT REPLACEMENT, which is narrower than "the id moved". A first
     // handshake moves it from null, and so does the first handshake after a
     // `dispose()` with the same page still on screen (an attach the shell

@@ -15,10 +15,27 @@ import type { EditRequestBody } from '../edit-service/validate-edit-request'
 
 export function ledgerFieldsForEdit(
   edit: EditRequestBody['edit'],
+  /**
+   * What the write actually landed on, for kinds whose REQUEST does not
+   * name a file. `unique-text` is the only one: the server's search picks
+   * the file, so the caller passes the repo-relative path it resolved.
+   * Absent for every other kind, and absent for `unique-text` too when the
+   * caller has not resolved a file yet (the row then carries no `file`
+   * rather than the string "undefined").
+   */
+  resolved?: { file?: string },
 ): Record<string, unknown> | undefined {
   switch (edit.kind) {
     case 'prop':
       return { propName: edit.propName, value: edit.value }
+    case 'unique-text':
+      return {
+        ...(resolved?.file ? { file: resolved.file } : {}),
+        before: edit.before,
+        after: edit.after,
+        selector: edit.selector,
+        page: edit.page,
+      }
     case 'token-value':
       return { tokenName: edit.tokenName, newValue: edit.newValue }
     case 'text-branch':

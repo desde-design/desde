@@ -351,6 +351,15 @@ describe("CLI handler deterministic fast-path — text→attr inference", () => 
       "",
     ].join("\n")
     writeFileSync(join(dir, "App.vue"), original)
+    // Since 2026-09-21 the text ladder has one more rung after the
+    // inferrer: the unique-text step, which searches the whole project for
+    // the old text and places the edit when it appears exactly once. It
+    // would recover THIS edit without the inferrer, which is a good thing
+    // in production but would stop this test exercising the fall-through
+    // it exists for. A second copy of the string makes the step refuse for
+    // the real reason ("the text appears 2 times"), so the batch reaches
+    // the LLM lane exactly as it did before either rung existed.
+    writeFileSync(join(dir, "copy.json"), '{"empty":"No data plane nodes"}\n')
 
     const loadersWithoutInferrer: ApplicatorLoaders = {
       ...REAL_APPLICATORS,

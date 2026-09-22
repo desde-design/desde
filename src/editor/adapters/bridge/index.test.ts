@@ -18,7 +18,7 @@ import type { BridgeMutation, InspectionData } from "@/types/bridge"
  * reports. `REQUIRED_BRIDGE_VERSION` is the document-id bridge (round 16 X3),
  * so a handshake fixture has to carry both.
  */
-const CURRENT_BRIDGE_VERSION = "2026-09-21a-refused-text-reverts"
+const CURRENT_BRIDGE_VERSION = "2026-09-21h-route-carries-document"
 
 interface MockIframeSetup {
   iframe: HTMLIFrameElement
@@ -2754,5 +2754,42 @@ describe("BridgeFrameworkAdapter: request ids survive a module re-evaluation", (
     const after = await mintFrom(second.BridgeFrameworkAdapter)
 
     expect(new Set([...before, ...after]).size).toBe(before.length + after.length)
+  })
+})
+
+describe("BridgeFrameworkAdapter.bridgeDocumentUrl", () => {
+  // The page URL the reload-and-recheck compares against. It comes from
+  // BRIDGE_READY, and a client-side navigation keeps it current through
+  // ROUTE_CHANGED, but only from the CURRENT document: a late route change
+  // from the page that just left must not overwrite the new page's URL
+  // (codex round 5, 2026-09-21).
+  it("follows ROUTE_CHANGED from the current document and ignores a departed one", async () => {
+    const adapter = new BridgeFrameworkAdapter()
+    const setup = makeMockIframe()
+    const initPromise = adapter.init({ iframe: setup.iframe, origin: "*" })
+    emitFromBridge(setup.contentWindow, {
+      type: "BRIDGE_READY",
+      payload: { version: CURRENT_BRIDGE_VERSION, documentId: "doc-a", url: "http://p.test/" },
+    })
+    await initPromise
+    expect(adapter.bridgeDocumentUrl).toBe("http://p.test/")
+
+    emitFromBridge(setup.contentWindow, {
+      type: "ROUTE_CHANGED",
+      payload: { url: "http://p.test/about", documentId: "doc-a" },
+    })
+    expect(adapter.bridgeDocumentUrl).toBe("http://p.test/about")
+
+    // A late one from the document that left, and one with no id at all.
+    emitFromBridge(setup.contentWindow, {
+      type: "ROUTE_CHANGED",
+      payload: { url: "http://p.test/old", documentId: "doc-departed" },
+    })
+    emitFromBridge(setup.contentWindow, {
+      type: "ROUTE_CHANGED",
+      payload: { url: "http://p.test/unstamped" },
+    })
+    expect(adapter.bridgeDocumentUrl).toBe("http://p.test/about")
+    await adapter.dispose()
   })
 })

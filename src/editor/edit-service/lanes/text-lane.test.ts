@@ -81,6 +81,10 @@ function harness(result: Promise<EditResult>) {
     resolveOverride: vi.fn(),
     verifyEdit: vi.fn(),
     refreshSelectionStamps: vi.fn(),
+    undoWrite: vi.fn(async () => ({ ok: true })),
+    recheckAfterReload: vi.fn(() => true),
+    notifyTextPlaced: vi.fn(),
+    handOffToChat: vi.fn(async () => true),
     queueForAi: vi.fn(),
     forgetEditId: vi.fn(),
     // The class lane's ONE pre-marker await. Resolvable per test.
@@ -223,6 +227,155 @@ describe("dispatchTextMutation", () => {
     expect(deps.resolveOverride).toHaveBeenCalledWith("m1", "confirmed")
     onOutcome!("didnt-take")
     expect(deps.resolveOverride).toHaveBeenCalledWith("m1", "ineffective")
+  })
+
+  it("reads a rung-placed write after a reload, never in place", async () => {
+    // The unique-text rung placed this write by searching the project, not by
+    // the element's stamp. The typed text is still on the page as the live
+    // preview, so an in-place read cannot tell a wrong file from a right one
+    // (MEASURED 2026-09-21). The lane asks for a reload and reads the fresh
+    // document instead. When that shows the text, the file is named.
+    const { session, deps } = harness(
+      Promise.resolve({
+        ...applied({ "messages/en.json": "h1" }),
+        uniqueTextFile: "messages/en.json",
+        ledgerEntryId: "row-7",
+      }),
+    )
+    const m = textMutation("m1")
+    session.updateMutations(() => [m])
+    await dispatchTextMutation(mutationIdentity(m), session.generation, deps)
+    expect(deps.verifyEdit).not.toHaveBeenCalled()
+    expect(deps.resolveOverride).toHaveBeenCalledWith("m1", "confirmed")
+    expect(deps.recheckAfterReload).toHaveBeenCalledTimes(1)
+    const req = vi.mocked(deps.recheckAfterReload).mock.calls[0]![0]
+    expect(req.selector).toBe(m.selector)
+    expect(req.expectedValue).toBe(m.after)
+    // The reloaded page shows it.
+    let settled = false
+    await session.run(async (ctx) => {
+      req.settle(ctx, "verified")
+      settled = true
+    })
+    expect(settled).toBe(true)
+    expect(deps.notifyTextPlaced).toHaveBeenCalledWith("messages/en.json", true)
+    expect(deps.undoWrite).not.toHaveBeenCalled()
+    expect(deps.handOffToChat).not.toHaveBeenCalled()
+  })
+
+  it("puts a rung-placed write back and hands it to chat when the reloaded page does not show it", async () => {
+    const { session, deps } = harness(
+      Promise.resolve({
+        ...applied({ "content/about.md": "h1" }),
+        uniqueTextFile: "content/about.md",
+        ledgerEntryId: "row-8",
+      }),
+    )
+    const m = textMutation("m1")
+    session.updateMutations(() => [m])
+    await dispatchTextMutation(mutationIdentity(m), session.generation, deps)
+    const req = vi.mocked(deps.recheckAfterReload).mock.calls[0]![0]
+    await session.run(async (ctx) => {
+      req.settle(ctx, "didnt-take")
+    })
+    await vi.waitFor(() => expect(deps.undoWrite).toHaveBeenCalledWith("row-8", "content/about.md"))
+    await vi.waitFor(() => expect(deps.handOffToChat).toHaveBeenCalledTimes(1))
+    const prompt = vi.mocked(deps.handOffToChat).mock.calls[0]![0]
+    expect(prompt).toContain(
+      "The Editor changed content/about.md but the page did not show it, so the change was put back.",
+    )
+    expect(prompt).toContain(m.after)
+    expect(deps.notifyTextPlaced).not.toHaveBeenCalled()
+  })
+
+  it("does not ask for the reload while the entry has advanced", async () => {
+    // A reload ends the session and its buffers. If the designer typed more
+    // during the round trip, the entry re-fires and THAT write's check covers
+    // the final text; asking now would discard the text still to be written.
+    const { session, deps } = harness(
+      Promise.resolve({
+        ...applied({ "content/about.md": "h1" }),
+        uniqueTextFile: "content/about.md",
+        ledgerEntryId: "row-10",
+      }),
+    )
+    const m = textMutation("m1")
+    session.updateMutations(() => [m])
+    const running = dispatchTextMutation(mutationIdentity(m), session.generation, deps)
+    // More typing lands while the write is out.
+    session.updateMutations((prev) => prev.map((x) => ({ ...x, after: "bc" })))
+    await running
+    expect(deps.recheckAfterReload).not.toHaveBeenCalled()
+    expect(deps.undoWrite).not.toHaveBeenCalled()
+  })
+
+  it("treats a refused reload as a miss: puts the write back and hands off", async () => {
+    // The hook refuses the reload when other buffered edits would go with the
+    // session. Without a fresh read the write cannot be trusted.
+    const { session, deps } = harness(
+      Promise.resolve({
+        ...applied({ "content/about.md": "h1" }),
+        uniqueTextFile: "content/about.md",
+        ledgerEntryId: "row-11",
+      }),
+    )
+    deps.recheckAfterReload = vi.fn(() => false)
+    const m = textMutation("m1")
+    session.updateMutations(() => [m])
+    await dispatchTextMutation(mutationIdentity(m), session.generation, deps)
+    await vi.waitFor(() => expect(deps.undoWrite).toHaveBeenCalledWith("row-11", "content/about.md"))
+    await vi.waitFor(() => expect(deps.handOffToChat).toHaveBeenCalledTimes(1))
+  })
+
+  it("names the file without claiming the page when the recheck was skipped", async () => {
+    const { session, deps } = harness(
+      Promise.resolve({
+        ...applied({ "messages/en.json": "h1" }),
+        uniqueTextFile: "messages/en.json",
+        ledgerEntryId: "row-12",
+      }),
+    )
+    const m = textMutation("m1")
+    session.updateMutations(() => [m])
+    await dispatchTextMutation(mutationIdentity(m), session.generation, deps)
+    const req = vi.mocked(deps.recheckAfterReload).mock.calls[0]![0]
+    await session.run(async (ctx) => {
+      req.settle(ctx, "skipped")
+    })
+    expect(deps.notifyTextPlaced).toHaveBeenCalledWith("messages/en.json", false)
+  })
+
+  it("carries the undo's own reason into the hand-off when the file could not be put back", async () => {
+    const { session, deps } = harness(
+      Promise.resolve({
+        ...applied({ "content/about.md": "h1" }),
+        uniqueTextFile: "content/about.md",
+        ledgerEntryId: "row-13",
+      }),
+    )
+    deps.undoWrite = vi.fn(async () => ({ ok: false, reason: "The file changed since that edit." }))
+    const m = textMutation("m1")
+    session.updateMutations(() => [m])
+    await dispatchTextMutation(mutationIdentity(m), session.generation, deps)
+    const req = vi.mocked(deps.recheckAfterReload).mock.calls[0]![0]
+    await session.run(async (ctx) => {
+      req.settle(ctx, "didnt-take")
+    })
+    await vi.waitFor(() => expect(deps.handOffToChat).toHaveBeenCalledTimes(1))
+    const prompt = vi.mocked(deps.handOffToChat).mock.calls[0]![0]
+    expect(prompt).toContain("could not be put back (The file changed since that edit.), so check that file before editing it.")
+  })
+
+  it("leaves a stamp-placed write on the in-place read (control)", async () => {
+    // The rule above is scoped to the rung: an ordinary stamped write is read
+    // in place as before, and a miss there is a binding or a shadow that the
+    // verification toast already explains.
+    const { session, deps } = harness(Promise.resolve({ ...applied(), ledgerEntryId: "row-9" }))
+    const m = textMutation("m1")
+    session.updateMutations(() => [m])
+    await dispatchTextMutation(mutationIdentity(m), session.generation, deps)
+    expect(deps.verifyEdit).toHaveBeenCalledTimes(1)
+    expect(deps.recheckAfterReload).not.toHaveBeenCalled()
   })
 
   it("keeps the entry and re-arms the write when the text advanced", async () => {

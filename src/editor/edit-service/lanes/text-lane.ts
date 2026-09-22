@@ -28,6 +28,8 @@ import {
 import { cascadeTargetForStyleEdit } from "@/editor/edit-service/cascade-target-for-style-edit"
 import { reconcileDispatchedValue } from "@/editor/edit-service/dispatch-reconcile"
 import { makeEditId } from "@/editor/edit-service/make-edit-id"
+import { buildUnmappedTextEditHandoffPrompt } from "@/editor/edit-service/build-edit-escalation-prompt"
+import type { SessionRunContext } from "@/editor/session/edit-session"
 
 /**
  * The bundle target when nothing is selected. The llm-patch carries its
@@ -63,6 +65,32 @@ export interface TextLaneDeps {
     onOutcome?: (outcome: VerificationOutcome) => void,
   ) => void
   refreshSelectionStamps: (files: string[]) => void
+  /**
+   * Undo one ledger row. The unique-text rung's write is the one caller: a
+   * write the reloaded page does not show is put back before the edit goes
+   * to chat. Never throws; a refusal comes back as `ok: false`.
+   */
+  undoWrite: (ledgerEntryId: string, file: string) => Promise<{ ok: boolean; reason?: string }>
+  /**
+   * Reload the prototype and read one write again in the document that
+   * handshakes next. The rung's writes are read this way and never in
+   * place: the typed text is still on the page as the live preview, and a
+   * write to a file the page never reads re-renders nothing, so an in-place
+   * read passes the preview off as the truth (MEASURED 2026-09-21).
+   */
+  recheckAfterReload: (req: {
+    editId: string
+    selector: string
+    expectedValue: string
+    settle: (ctx: SessionRunContext, outcome: VerificationOutcome) => void
+  }) => boolean
+  /**
+   * Say which file a rung-placed write changed. `confirmed` is whether the
+   * reloaded page showed it; a skipped check names the file without that.
+   */
+  notifyTextPlaced: (file: string, confirmed: boolean) => void
+  /** Send a rung-placed write the page does not show to a new chat session. */
+  handOffToChat: (prompt: string, signal: AbortSignal) => Promise<boolean>
   /** Park this identity for the save-time AI lane. A `needsChat` refusal. */
   queueForAi: (identityKey: string) => void
   forgetEditId: (id: string) => void
@@ -199,6 +227,130 @@ export async function dispatchTextMutation(
         deps.resolveOverride(normalized.id, "failed", result.reason)
         return
       }
+      /**
+       * Reconcile the buffer with what was dispatched. One copy, called from
+       * the rung path and the ordinary path below.
+       */
+      const reconcileAfterDispatch = (): boolean => {
+        // Reconcile the buffer with what was dispatched (see
+        // dispatch-reconcile.ts for the shared decision). "settled": nothing was
+        // typed during the round trip, so drop the entry; the next keystroke
+        // makes a fresh one against the now-on-disk source. "advanced": the
+        // designer typed more, so keep the entry and rebase its `before` to the
+        // dispatched `after`, because that is what source holds now. Without the
+        // rebase the next dispatch sends the ORIGINAL `before` and the applicator
+        // cannot find it.
+        let needsRefire = false
+        session.updateMutations((prev) => {
+          const idx = prev.findIndex((m) => deps.mutationKey(m) === identityKey)
+          const entry = idx === -1 ? undefined : prev[idx]
+          const decision = reconcileDispatchedValue(idx !== -1, dispatchedAfter, entry?.after)
+          if (decision === "no-entry" || !entry) return prev
+          if (decision === "settled") {
+            // The buffered entry is gone, so the side tables keyed by its id go
+            // with it. An id left behind in them is a wrong answer later, not
+            // just waste.
+            deps.forgetEditId(entry.id)
+            return prev.filter((m) => deps.mutationKey(m) !== identityKey)
+          }
+          needsRefire = true
+          const updated = [...prev]
+          // The stale-target stamp is rebased to THIS write's hash for the same
+          // reason: the re-fire must not 409 against our own write. The full
+          // hash is fine, because the guard compares by prefix.
+          const file = fileOfSourceLoc(entry.sourceLoc)
+          const freshHash =
+            result.kind === "applied" && result.newHashes && file
+              ? result.newHashes[file]
+              : undefined
+          updated[idx] = {
+            ...entry,
+            before: dispatchedAfter,
+            ...(freshHash ? { sourceVersion: freshHash } : {}),
+          }
+          return updated
+        })
+        if (needsRefire) {
+          // In THIS dispatch's session: the re-fire is the rest of the text the
+          // designer was typing on the page this dispatch wrote for.
+          // `session.schedule` refuses to run a callback whose generation has
+          // moved, and the generation it is given is this run's.
+          session.schedule(
+            "text",
+            identityKey,
+            ctx.generation,
+            () => {
+              void dispatchTextMutation(identityKey, ctx.generation, deps)
+            },
+            deps.debounceMs,
+          )
+        }
+        return needsRefire
+      }
+      // A write the unique-text rung placed by SEARCH is read after a reload,
+      // not in place (see `TextLaneDeps.recheckAfterReload`). The preview is
+      // released now as confirmed: the bytes are on disk, and the reload
+      // replaces the document the preview lives in either way.
+      if (result.kind === "applied" && result.uniqueTextFile && result.ledgerEntryId) {
+        const placedFile = result.uniqueTextFile
+        const entryId = result.ledgerEntryId
+        deps.resolveOverride(normalized.id, "confirmed")
+        if (result.newHashes) deps.refreshSelectionStamps(Object.keys(result.newHashes))
+        // Reconcile FIRST. A reload ends the session and its buffers, so the
+        // check is only asked for once nothing newer is waiting for this
+        // identity: an entry that advanced re-fires, and that write's own
+        // check covers the final text. The first row stays in the ledger
+        // for Activity's Undo in that case (codex review, 2026-09-21).
+        const advanced = reconcileAfterDispatch()
+        if (advanced) return
+        const settle = (next: SessionRunContext, outcome: VerificationOutcome): void => {
+            if (outcome !== "didnt-take") {
+              deps.notifyTextPlaced(placedFile, outcome === "verified")
+              return
+            }
+            // The reloaded page does not show it: the search picked a file
+            // the page never reads. Put the file back, then hand the edit to
+            // chat with the nearest stamp, the way a refused text edit goes.
+            void (async () => {
+              const undone = await next.step(deps.undoWrite(entryId, placedFile))
+              if (undone.stale) return
+              const sent = await next.step(
+                deps.handOffToChat(
+                  buildUnmappedTextEditHandoffPrompt({
+                    before: normalized.before,
+                    after: dispatchedAfter,
+                    selector: current.selector,
+                    page: "",
+                    anchorLoc: normalized.sourceLoc,
+                    reverted: {
+                      file: placedFile,
+                      restored: undone.value.ok,
+                      ...(undone.value.ok || !undone.value.reason ? {} : { reason: undone.value.reason }),
+                    },
+                  }),
+                  next.signal,
+                ),
+              )
+              if (sent.stale || sent.value) return
+              deps.setStatus(
+                `Changed ${placedFile}, but the page did not show it${
+                  undone.value.ok ? " and the change was put back" : ""
+                }. Chat did not take the edit.`,
+              )
+            })()
+        }
+        const reloading = deps.recheckAfterReload({
+          editId: edit.id,
+          selector: current.selector,
+          expectedValue: dispatchedAfter,
+          settle,
+        })
+        // The reload was refused (other buffered edits would be lost with the
+        // session). Without a fresh read the write cannot be trusted: treat
+        // the miss as a miss.
+        if (!reloading) settle(ctx, "didnt-take")
+        return
+      }
       // Tier-2 verification: the source write landed and HMR will re-render.
       // Confirm the edited text actually shows up in the live DOM, which
       // catches a value overridden by a binding or gated by a v-if.
@@ -255,59 +407,7 @@ export async function dispatchTextMutation(
       if (result.kind === "applied" && result.newHashes) {
         deps.refreshSelectionStamps(Object.keys(result.newHashes))
       }
-      // Reconcile the buffer with what was dispatched (see
-      // dispatch-reconcile.ts for the shared decision). "settled": nothing was
-      // typed during the round trip, so drop the entry; the next keystroke
-      // makes a fresh one against the now-on-disk source. "advanced": the
-      // designer typed more, so keep the entry and rebase its `before` to the
-      // dispatched `after`, because that is what source holds now. Without the
-      // rebase the next dispatch sends the ORIGINAL `before` and the applicator
-      // cannot find it.
-      let needsRefire = false
-      session.updateMutations((prev) => {
-        const idx = prev.findIndex((m) => deps.mutationKey(m) === identityKey)
-        const entry = idx === -1 ? undefined : prev[idx]
-        const decision = reconcileDispatchedValue(idx !== -1, dispatchedAfter, entry?.after)
-        if (decision === "no-entry" || !entry) return prev
-        if (decision === "settled") {
-          // The buffered entry is gone, so the side tables keyed by its id go
-          // with it. An id left behind in them is a wrong answer later, not
-          // just waste.
-          deps.forgetEditId(entry.id)
-          return prev.filter((m) => deps.mutationKey(m) !== identityKey)
-        }
-        needsRefire = true
-        const updated = [...prev]
-        // The stale-target stamp is rebased to THIS write's hash for the same
-        // reason: the re-fire must not 409 against our own write. The full
-        // hash is fine, because the guard compares by prefix.
-        const file = fileOfSourceLoc(entry.sourceLoc)
-        const freshHash =
-          result.kind === "applied" && result.newHashes && file
-            ? result.newHashes[file]
-            : undefined
-        updated[idx] = {
-          ...entry,
-          before: dispatchedAfter,
-          ...(freshHash ? { sourceVersion: freshHash } : {}),
-        }
-        return updated
-      })
-      if (needsRefire) {
-        // In THIS dispatch's session: the re-fire is the rest of the text the
-        // designer was typing on the page this dispatch wrote for.
-        // `session.schedule` refuses to run a callback whose generation has
-        // moved, and the generation it is given is this run's.
-        session.schedule(
-          "text",
-          identityKey,
-          ctx.generation,
-          () => {
-            void dispatchTextMutation(identityKey, ctx.generation, deps)
-          },
-          deps.debounceMs,
-        )
-      }
+      reconcileAfterDispatch()
     } catch (err) {
       deps.setStatus(`Inline text edit threw: ${(err as Error).message}`)
       deps.resolveOverride(normalized.id, "failed", (err as Error).message)

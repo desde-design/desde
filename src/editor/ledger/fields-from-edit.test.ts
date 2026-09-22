@@ -87,6 +87,39 @@ describe('ledgerFieldsForEdit', () => {
     ).toBe('Detached KCard')
   })
 
+  it('carries the resolved file alongside the text for a unique-text edit', () => {
+    expect(
+      ledgerFieldsForEdit(
+        {
+          kind: 'unique-text',
+          before: 'May 2022 - present',
+          after: 'May 2023 - present',
+          selector: '.role .dates',
+          page: '/',
+        },
+        { file: 'content/home.json' },
+      ),
+    ).toEqual({
+      file: 'content/home.json',
+      before: 'May 2022 - present',
+      after: 'May 2023 - present',
+      selector: '.role .dates',
+      page: '/',
+    })
+  })
+
+  it('omits the file for a unique-text edit when the caller resolved none', () => {
+    expect(
+      ledgerFieldsForEdit({
+        kind: 'unique-text',
+        before: 'a',
+        after: 'b',
+        selector: 'h1',
+        page: '/',
+      }),
+    ).toEqual({ before: 'a', after: 'b', selector: 'h1', page: '/' })
+  })
+
   it('returns undefined for a kind with nothing worth carrying', () => {
     expect(ledgerFieldsForEdit({ kind: 'delete', file: 'a.vue', line: 1, column: 1 }))
       .toBeUndefined()

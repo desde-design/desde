@@ -214,6 +214,13 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
     return this.documentId
   }
 
+  /** The page URL the last ready reported. `emitReady` takes it; `/` by default. */
+  documentUrl: string | null = "http://prototype.example.com/"
+
+  get bridgeDocumentUrl(): string | null {
+    return this.documentUrl
+  }
+
   /** The apply parks until the test settles it. */
   applyEdit(edit: StructuralEdit, opts?: ApplyEditOpts): Promise<EditResult> {
     return new Promise<EditResult>((resolve) => {
@@ -337,8 +344,9 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
    * page's selection at the moment the boundary moved, which the product
    * never does.
    */
-  emitReady(documentId: string): void {
+  emitReady(documentId: string, url: string = "http://prototype.example.com/"): void {
     if (documentId === this.documentId) return
+    this.documentUrl = url
     const replacedDocument = this.documentId !== null
     this.documentId = documentId
     if (replacedDocument) {
@@ -363,10 +371,27 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
   onResizeCommitted(_listener: Listener<ResizeRequest>): AdapterSubscription {
     return () => {}
   }
+  private readonly resolutionFailedListeners = new Set<
+    Listener<MutationResolutionFailure>
+  >()
   onResolutionFailed(
-    _listener: Listener<MutationResolutionFailure>,
+    listener: Listener<MutationResolutionFailure>,
   ): AdapterSubscription {
-    return () => {}
+    this.resolutionFailedListeners.add(listener)
+    return () => {
+      this.resolutionFailedListeners.delete(listener)
+    }
+  }
+  /**
+   * The bridge refusing to map an edit to a source position.
+   *
+   * A real subscription rather than the no-op this used to be, because the
+   * shell now DOES something with it beyond a toast: a refused text edit runs
+   * the unique-text write and then a verification before it reaches chat, and
+   * that whole sequence is invisible without a way to fire the refusal.
+   */
+  emitResolutionFailed(failure: MutationResolutionFailure): void {
+    for (const listener of this.resolutionFailedListeners) listener(failure)
   }
   onOverridePreviewFailed(
     _listener: Listener<OverridePreviewFailure>,
@@ -583,13 +608,20 @@ export class FakeBridgeAdapter implements FrameworkAdapter {
     this.settledOverrides.push({ id, outcome })
   }
   /**
-   * Present but never useful: `useEditVerification` opts out entirely unless
-   * `supportsRenderedValueRead()` agrees, and the value lane is not what this
-   * fixture stages. It exists because the hook checks for the METHOD first and
-   * skips before it ever consults the flag.
+   * What the page reports for every value read, once a test sets one.
+   *
+   * `undefined` is the shape every test written before the unique-text lane
+   * was built against: the read answers null, and with
+   * {@link FakeBridgeAdapter.verificationEnabled} off the value lane never
+   * runs at all. A test that wants a verdict sets this to the text the page
+   * shows, which is what decides `verified` against `didnt-take`.
    */
-  async readRenderedValue(): Promise<string | null> {
-    return null
+  renderedValue: string | null | undefined
+  /** Per-selector answers, for a test with two elements on one page. Wins over `renderedValue`. */
+  renderedValueFor: ((selector: string) => string | null) | null = null
+  async readRenderedValue(selector: string): Promise<string | null> {
+    if (this.renderedValueFor) return this.renderedValueFor(selector)
+    return this.renderedValue ?? null
   }
   supportsRenderedValueRead(): boolean {
     return FakeBridgeAdapter.verificationEnabled

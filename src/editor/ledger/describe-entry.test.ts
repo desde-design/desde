@@ -49,6 +49,18 @@ describe('describeLedgerEntry', () => {
     expect(describeLedgerEntry(entry('overwrite'))).toBe('Rewrote PricingCard.vue')
   })
 
+  it('names the file the unique-text step found the text in', () => {
+    expect(
+      describeLedgerEntry(
+        entry(
+          'unique-text',
+          { file: 'content/home.json', before: 'May 2022', after: 'May 2023' },
+          ['content/home.json'],
+        ),
+      ),
+    ).toBe('Changed text in home.json')
+  })
+
   // P1-2 (round-3 whole-branch review finding, 2026-08-19), corrected by
   // F2 (round-10, a regression IN round 3's own fix): an entry written by
   // an EDITOR PROCESS RUNNING ON WINDOWS can carry a backslash-separated
@@ -112,6 +124,13 @@ describe('describeLedgerEntry', () => {
       prop: { propName: 'a', value: 'b' },
       'token-value': { tokenName: '--a', newValue: 'b' },
       'text-branch': { newValue: 'b' },
+      'unique-text': {
+        file: 'content/home.json',
+        before: 'a',
+        after: 'b',
+        selector: 'h1',
+        page: '/',
+      },
       swap: { fromComponentName: 'A', toComponentName: 'B' },
       detach: { componentName: 'A' },
       move: {},

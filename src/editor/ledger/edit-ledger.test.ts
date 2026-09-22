@@ -143,9 +143,12 @@ describe('edit ledger', () => {
   })
 
   it('never throws when the ledger cannot be written', async () => {
-    // A path that cannot hold `.desde/` — append must swallow it.
+    // A path that cannot hold `.desde/`: append must swallow it. It
+    // resolves `false` rather than `undefined` since the append started
+    // reporting whether the line reached disk; the contract this test
+    // exists for (resolves, never rejects) is unchanged.
     await expect(appendLedgerEntry(join(root, 'no', 'such', '\0bad'), edit('e1', ['a.vue'])))
-      .resolves.toBeUndefined()
+      .resolves.toBe(false)
   })
 
   it('writes nothing outside the worktree when .desde is a symlink', async () => {
@@ -155,7 +158,7 @@ describe('edit ledger', () => {
     // Best-effort by contract (a ledger failure must never fail the
     // source write it accompanies) — it resolves, not rejects, and
     // writes nothing at the symlink target.
-    await expect(appendLedgerEntry(root, edit('e1', ['a.vue']))).resolves.toBeUndefined()
+    await expect(appendLedgerEntry(root, edit('e1', ['a.vue']))).resolves.toBe(false)
     expect(existsSync(join(outside, 'edit-log.jsonl'))).toBe(false)
 
     rmSync(outside, { recursive: true, force: true })

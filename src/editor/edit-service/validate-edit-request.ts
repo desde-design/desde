@@ -339,6 +339,29 @@ export interface TokenValueEditBody {
   selector?: string
 }
 
+/**
+ * Change a piece of page text the Editor could not map to source. The
+ * unique-text step searches the project's own files for `before` and
+ * replaces it only when it appears exactly once
+ * (`docs/superpowers/specs/2026-09-21-unique-text-edit-design.md`).
+ *
+ * Shape-distinct, and the ONE kind with no `file`: which file holds the
+ * text is the step's answer, not the caller's claim. `selector` and `page`
+ * are recorded so the Activity row and the chat hand-off can say where on
+ * the page the change was made; the server never routes on either.
+ */
+export interface UniqueTextEditBody {
+  kind: "unique-text"
+  /** The text as the page rendered it, before the edit. */
+  before: string
+  /** The text the user typed. */
+  after: string
+  /** CSS selector of the element whose text this is. */
+  selector: string
+  /** Page path the element was on (e.g. `/about`). */
+  page: string
+}
+
 export interface EditRequestBody {
   edit:
     | PropEditBody
@@ -355,6 +378,7 @@ export interface EditRequestBody {
     | LLMPatchEditBody
     | TextBranchEditBody
     | TokenValueEditBody
+    | UniqueTextEditBody
   /**
    * Opaque client-chosen join key (Task 4b, `docs/superpowers/plans/2026-08-19-activity-panel.md`).
    * The client's own edit id (`StructuralEditBase.id`, see
@@ -443,14 +467,21 @@ export function validateEditRequest(body: unknown): string | null {
     kind !== "jsx-style" &&
     kind !== "llm-patch" &&
     kind !== "text-branch" &&
-    kind !== "token-value"
+    kind !== "token-value" &&
+    kind !== "unique-text"
   ) {
-    return 'edit.kind must be "prop" | "move" | "detach" | "swap" | "delete" | "insert" | "unwrap" | "flatten-conditional" | "overwrite" | "scoped-css-override" | "jsx-style" | "llm-patch" | "text-branch" | "token-value"'
+    return 'edit.kind must be "prop" | "move" | "detach" | "swap" | "delete" | "insert" | "unwrap" | "flatten-conditional" | "overwrite" | "scoped-css-override" | "jsx-style" | "llm-patch" | "text-branch" | "token-value" | "unique-text"'
   }
 
   // llm-patch is shape-distinct: no file/line/column, just `mutations[]`.
   if (kind === "llm-patch") {
     return validateLLMPatchBody(e)
+  }
+
+  // unique-text is shape-distinct AND file-less: the step decides which
+  // file holds the text, so there is nothing here to path-check.
+  if (kind === "unique-text") {
+    return validateUniqueTextBody(e)
   }
 
   // text-branch is shape-distinct: file + byteStart/byteEnd + value
@@ -856,6 +887,43 @@ export function validateEditRequest(body: unknown): string | null {
     if (e.moveGroup !== undefined && typeof e.moveGroup !== "boolean") {
       return "edit.moveGroup must be a boolean when provided"
     }
+  }
+  return null
+}
+
+/**
+ * Upper bound on the two text fields of a unique-text edit.
+ *
+ * `before` is one element's `textContent` and `after` is what the designer
+ * typed into it, so a real edit is a label, a heading or a paragraph. Ten
+ * thousand characters is far past any of those and still far short of a
+ * file. The cap exists because both strings are searched against every
+ * candidate string in the project and then recorded verbatim in the
+ * append-only ledger: an unbounded one makes a cheap request expensive to
+ * serve and permanent to store.
+ */
+const UNIQUE_TEXT_MAX_CHARS = 10_000
+
+function validateUniqueTextBody(e: Record<string, unknown>): string | null {
+  if (typeof e.before !== "string") return "edit.before must be a string"
+  if (typeof e.after !== "string") return "edit.after must be a string"
+  // Whitespace-only is the same refusal as empty: the step compares
+  // whitespace-collapsed text, so "   " is a needle that matches nothing
+  // and an empty `before` would match far too easily.
+  if (e.before.trim().length === 0) {
+    return "edit.before must not be empty or only whitespace"
+  }
+  if (e.before === e.after) {
+    return "edit.after must differ from edit.before"
+  }
+  if (e.before.length > UNIQUE_TEXT_MAX_CHARS || e.after.length > UNIQUE_TEXT_MAX_CHARS) {
+    return `edit.before and edit.after must each be at most ${UNIQUE_TEXT_MAX_CHARS} characters`
+  }
+  if (typeof e.selector !== "string" || e.selector.length === 0) {
+    return "edit.selector required"
+  }
+  if (typeof e.page !== "string" || e.page.length === 0) {
+    return "edit.page required"
   }
   return null
 }

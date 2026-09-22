@@ -157,11 +157,54 @@ const JSON_HEADERS = { "Content-Type": "application/json" }
 const LEDGER_URL = "/api/editor/ledger"
 
 /**
- * The hook is the only thing that knows the ledger URLs — nothing
+ * This module is the only thing that knows the ledger URLs — nothing
  * downstream should build one itself.
  */
 function undoUrl(id: string): string {
   return `${LEDGER_URL}/${encodeURIComponent(id)}/undo`
+}
+
+/**
+ * Undo one ledger row, as a plain function.
+ *
+ * Split out of the hook's `undo` so a caller that is NOT the Activity panel
+ * can reach the same request. The unique-text lane in `useEditorEditing` is
+ * that caller: when its write landed on disk and the page did not show the
+ * new text, it rolls the write back through this route before handing the
+ * edit to chat. A second copy of the fetch there would be a second place for
+ * the URL, the refusal shape and the "a refusal is not an error" rule to
+ * drift.
+ *
+ * What stays in the hook is the part that is about the hook: refreshing
+ * `rows` after a successful undo. A refusal deliberately does not refresh —
+ * nothing on disk changed, so the ledger has nothing new to say.
+ *
+ * Never throws: a thrown fetch (a network blip, the CLI gone) comes back as
+ * an ordinary refusal, because every caller has to say something either way.
+ */
+export async function requestLedgerUndo(id: string): Promise<UndoResult> {
+  try {
+    const res = await editorFetch(undoUrl(id), {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: "{}",
+    })
+    const body = (await res.json().catch(() => null)) as
+      | { ok?: boolean; reason?: string; code?: LedgerUndoRefusal }
+      | null
+    if (!res.ok || !body?.ok) {
+      // Refused (404 unknown id, 409 drifted/backup-gone/unverifiable, or a
+      // 500) — surface the server's `reason` verbatim.
+      return {
+        ok: false,
+        reason: body?.reason ?? `Could not undo (${res.status})`,
+        code: body?.code,
+      }
+    }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, reason: (e as Error).message }
+  }
 }
 
 /**
@@ -287,35 +330,15 @@ export function useEditorLedger(): LedgerApi {
 
   const undo = useCallback(
     async (id: string): Promise<UndoResult> => {
-      try {
-        const res = await editorFetch(undoUrl(id), {
-          method: "POST",
-          headers: JSON_HEADERS,
-          body: "{}",
-        })
-        const body = (await res.json().catch(() => null)) as
-          | { ok?: boolean; reason?: string; code?: LedgerUndoRefusal }
-          | null
-        if (!res.ok || !body?.ok) {
-          // Refused (404 unknown id, 409 drifted/backup-gone/unverifiable,
-          // or a 500) — surface the server's `reason` verbatim and do NOT
-          // refresh: nothing on disk changed, so the ledger has nothing
-          // new to say, and refreshing here would race the caller's own
-          // read of this result with a background poll's.
-          return {
-            ok: false,
-            reason: body?.reason ?? `Could not undo (${res.status})`,
-            code: body?.code,
-          }
-        }
-        // Undo appended a new `undo` entry and (on the common path)
-        // rewrote a file — refresh so `rows` reflects both immediately
-        // rather than waiting for the next background poll.
-        await refresh()
-        return { ok: true }
-      } catch (e) {
-        return { ok: false, reason: (e as Error).message }
-      }
+      const result = await requestLedgerUndo(id)
+      // A refusal does NOT refresh: nothing on disk changed, so the ledger
+      // has nothing new to say, and refreshing here would race the caller's
+      // own read of this result with a background poll's. A success DOES:
+      // undo appended a new `undo` entry and (on the common path) rewrote a
+      // file, so `rows` should reflect both immediately rather than waiting
+      // for the next background poll.
+      if (result.ok) await refresh()
+      return result
     },
     [refresh],
   )

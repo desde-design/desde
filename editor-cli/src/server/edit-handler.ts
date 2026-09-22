@@ -21,6 +21,7 @@ import {
 } from "./resolve-editable-path"
 import { resolvePatchFramework } from "../../../src/editor/edit-service/patch-framework"
 import { checkExtensionGate } from "./edit-extension-gate"
+import { runUniqueTextStep } from "./unique-text-step.js"
 import { dormantLaneRefusal, type DormantLaneId } from "./enabled-lanes"
 import { resolveLlmConfig } from "./llm-config.js"
 import { resolveChatRuntime, type RunChatTurn } from "./chat-runtime-dispatch.js"
@@ -173,6 +174,27 @@ export interface EditResult {
    * engineer can recover the previous state.
    */
   backupDir?: string
+  /**
+   * Id of the edit-ledger row this write produced, when the ledger append
+   * reached disk. The client uses it to act on that exact row (the
+   * unique-text lane's "the page did not show it" recovery calls the
+   * ledger undo route with it). Absent when the append failed, which is
+   * best-effort by contract and does not fail the write, so the client
+   * must treat absence as "no row to act on", never as an error.
+   */
+  ledgerEntryId?: string
+  /**
+   * Repo-relative file the unique-text rung (route 2 of
+   * `docs/superpowers/specs/2026-09-21-unique-text-edit-design.md`) placed
+   * the edit in, when it was that rung — rather than a coordinate splice —
+   * that located the mutation inside an `llm-patch` batch. Set alongside
+   * `ledgerEntryId` and for the same reason: route 2 has no client-side
+   * page verification of its own (unlike the `unique-text` kind's own
+   * route 1, which the client's text lane verifies against the rendered
+   * page), so this is what lets the client name the row to undo if the
+   * page never shows the change. Absent for every other edit.
+   */
+  uniqueTextFile?: string
   /**
    * Set when the deterministic lane couldn't apply the edit AND the
    * request opted into `'chat'` fallback mode (`edit.llmFallback`): the
@@ -376,6 +398,18 @@ export async function applyEdit(
       body.correlationId,
       opts.getLlmProvider,
     )
+  }
+
+  // The unique-text lane is the OTHER shape-distinct kind, and it is the
+  // only one that carries no `file` at all: the step's search decides
+  // which file holds the text. It therefore has to dispatch BEFORE the
+  // generic file-resolution block below, which reads `body.edit.file`.
+  if (body.edit.kind === "unique-text") {
+    return handleUniqueText({
+      edit: body.edit,
+      repoRoot,
+      correlationId: body.correlationId,
+    })
   }
 
   const file = body.edit.file
@@ -587,6 +621,127 @@ export async function applyEdit(
   return result.warnings && result.warnings.length > 0
     ? { ok: true, status: 200, file, warnings: result.warnings, newHashes, backupDir: broker.backupDir }
     : { ok: true, status: 200, file, newHashes, backupDir: broker.backupDir }
+}
+
+/**
+ * Route 1 of the unique-text edit: a text edit the bridge could not map to
+ * source at all (no `data-desde-src` stamp on the element or any useful
+ * ancestor). On a site whose pages ARE data (a Webflow export rendering a
+ * JSON tree, a translated site, a Markdown content site) that is every
+ * text edit. MEASURED 2026-09-21 on `~/Documents/modesigns`: the edit that
+ * took one model turn and about 24 seconds needed one grep and one
+ * replacement in `content/home.json:327`.
+ *
+ * So before the client hands the edit to chat, it tries this: find the old
+ * text in the project's own files, and replace it if it appears exactly
+ * once. Anything else refuses with a plain reason, and the client hands
+ * the edit to chat with that reason appended.
+ *
+ * Terminal, like `handleAllowCreate`: the generic file-resolution block in
+ * `applyEdit` reads `body.edit.file`, and this kind has none: the step's
+ * search is what names the file. The resolved file then goes through the
+ * SAME containment and symlink guards every other kind uses, and the write
+ * goes through the same broker (journal, lock, ledger).
+ *
+ * See `docs/superpowers/specs/2026-09-21-unique-text-edit-design.md`.
+ */
+async function handleUniqueText(args: {
+  edit: Extract<EditRequestBody["edit"], { kind: "unique-text" }>
+  repoRoot: string
+  /** See `EditRequestBody.correlationId`. */
+  correlationId?: string
+}): Promise<EditResult> {
+  const { edit, repoRoot } = args
+
+  const rootResolution = await resolvePrototypeRoot(repoRoot)
+  if (!rootResolution.ok) return rootResolution
+  const { rootReal } = rootResolution
+
+  const step = await runUniqueTextStep(rootReal, edit.before, edit.after)
+  if (!step.ok) {
+    // `needsChat` is the whole point of the refusal: the client escalates
+    // to a new chat session with this reason appended to its prompt,
+    // rather than showing a save error the designer can do nothing with.
+    return { ok: false, status: 422, needsChat: true, reason: step.reason }
+  }
+
+  // The step collected the file by walking the repo, which already skips
+  // symlinks, but the write must not depend on that. Re-resolve the path
+  // it named through the same two guards every other kind goes through:
+  // lexical containment first, then realpath containment, so neither a
+  // traversal spelling nor a symlink out of the root can be written to.
+  const candidateResolution = resolveCandidateWithinRoot(step.file, rootResolution)
+  if (!candidateResolution.ok) return candidateResolution
+  const realpathResolution = await resolveRealpathWithinRoot(
+    candidateResolution.candidate,
+    rootResolution,
+  )
+  if (!realpathResolution.ok) return realpathResolution
+  const targetPath = realpathResolution.targetPath
+
+  // No-op guard, same contract as every other lane: a write that changes
+  // nothing must refuse rather than report success, or the client toasts
+  // "Text updated" over an unchanged file.
+  if (step.newSource === step.source) {
+    return {
+      ok: false,
+      status: 422,
+      needsChat: true,
+      reason: "The change would leave the file exactly as it is.",
+    }
+  }
+
+  const { brokeredWrite, rollbackWarning } = await loadBrokeredWrite()
+  const repoRel = repoRelOf(rootReal, targetPath)
+  const broker = await brokeredWrite({
+    canonicalRoot: rootReal,
+    journal: [{ file: repoRel, content: step.source }],
+    ops: [{ kind: "write", repoRel, absPath: targetPath, content: step.newSource }],
+    // The step read these bytes outside the broker's locks, and the new
+    // contents are that read spliced at a byte range. A precondition makes
+    // the splice atomic with the read: if the file changed in between, the
+    // batch refuses instead of writing bytes computed from a file that no
+    // longer exists in that form.
+    preconditions: [
+      { repoRel, absPath: targetPath, expect: { exists: true, content: Buffer.from(step.source, "utf8") } },
+    ],
+    record: { history: getSharedEditHistory(), label: `unique-text: ${step.file}` },
+    describe: {
+      kind: "unique-text",
+      lane: "direct",
+      fields: ledgerFieldsForEdit(edit, { file: repoRel }),
+      correlationId: args.correlationId,
+    },
+  })
+  if (!broker.ok) {
+    if (broker.stage === "refused") {
+      return { ok: false, status: 403, reason: broker.reason }
+    }
+    if (broker.stage === "precondition") {
+      return {
+        ok: false,
+        status: 409,
+        reason: `${step.file} changed while this edit was being prepared. Nothing was written. Try the edit again.`,
+      }
+    }
+    return {
+      ok: false,
+      status: 500,
+      reason:
+        broker.stage === "backup"
+          ? `${broker.reason}. Edit aborted; no source files modified.`
+          : `Could not write file: ${broker.reason}${rollbackWarning(broker)}`,
+    }
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    file: step.file,
+    newHashes: { [step.file]: sha256Hex(step.newSource) },
+    ...(broker.backupDir ? { backupDir: broker.backupDir } : {}),
+    ...(broker.ledgerEntryId ? { ledgerEntryId: broker.ledgerEntryId } : {}),
+  }
 }
 
 /**
@@ -2504,6 +2659,71 @@ async function findUnparseablePatch(
 }
 
 /**
+ * Admit the file the unique-text rung found into an `llm-patch` batch that
+ * never read it, so the write, journal and hash bookkeeping treat it like
+ * any other target.
+ *
+ * The batch's file set comes from the mutations' own `sourceLoc` /
+ * `callsiteLoc`, and this file is by definition at neither: a
+ * `messages/en.json` carries no source stamp. So it is missing from
+ * `filesMap` (needed for the journal and the no-op compare) and from
+ * `targetPaths` (needed for the write op), and adding it is what keeps the
+ * shared write path unchanged.
+ *
+ * Returns false when the file must NOT be admitted, in which case the
+ * caller drops the rung:
+ *
+ *   - The path fails either containment guard. `collectSearchFiles` never
+ *     follows a symlink, so it should not name one, but the write must not
+ *     depend on that: the guards run here exactly as they do for a
+ *     coordinate-named file.
+ *   - Another mutation in this same batch already patched the file. The
+ *     step's byte offsets were computed against the file ON DISK, and the
+ *     working copy has moved past that, so splicing at them could land
+ *     anywhere. Refusing sends the batch to chat rather than guessing.
+ *
+ * Note what is NOT a concern here: the external-edit `baseHashes` check
+ * ran before the deterministic loop, over the files the CLIENT knew about.
+ * A file admitted now was never in that map and never in the client's
+ * `baseHashes`, so admitting it cannot produce a 409 for a file the client
+ * has never heard of.
+ */
+async function placeUniqueTextTarget(args: {
+  file: string
+  source: string
+  rootReal: string
+  rootWithSep: string
+  filesMap: Map<string, string>
+  targetPaths: Map<string, string>
+  working: Map<string, string>
+}): Promise<boolean> {
+  const { file, source, rootReal, rootWithSep, filesMap, targetPaths, working } = args
+
+  const current = working.get(file)
+  if (typeof current === "string" && current !== source) return false
+
+
+  if (!targetPaths.has(file)) {
+    const root = { rootReal, rootWithSep }
+    const candidateResolution = resolveCandidateWithinRoot(file, root)
+    if (!candidateResolution.ok) return false
+    const realpathResolution = await resolveRealpathWithinRoot(
+      candidateResolution.candidate,
+      root,
+    )
+    if (!realpathResolution.ok) return false
+    targetPaths.set(file, realpathResolution.targetPath)
+  }
+
+  if (!filesMap.has(file)) filesMap.set(file, source)
+  // Already read for this batch under a different lane, and its bytes
+  // disagree with what the step read: same stale-offset risk as above.
+  else if (filesMap.get(file) !== source) return false
+
+  return true
+}
+
+/**
  * Handle an `llm-patch` bundle. Mirrors the Next route's `handleLLMPatch`
  * with CLI-specific I/O (no NextResponse). Uses the shared
  * `cliCachedStyleContext` / `cliCachedStyleContextKey` module-level cache
@@ -2675,6 +2895,29 @@ async function handleLLMPatch(
   // stays consistent across writers.
   const deterministicPatched = new Map<string, string>()
   let allDeterministic = mutations.length > 0
+  // Whether the unique-text rung (route 2, below) placed at least one
+  // mutation in this batch. Recorded on the ledger entry so an Activity row
+  // states how the edit was located, rather than reading as an ordinary
+  // coordinate splice.
+  let placedByUniqueText = false
+  // The file the rung placed a mutation in, surfaced to the client as
+  // `uniqueTextFile` alongside `ledgerEntryId` — see that field's doc
+  // comment on `EditResult` above. Only route 2 sets this; route 1 (the
+  // standalone `unique-text` kind) already has the generic `file` field.
+  let uniqueTextFile: string | undefined
+  // The step's own refusal reason, the LAST time it ran and failed to
+  // place a mutation in this batch. Threaded onto the eventual `needsChat`
+  // reason below (P3, codex review 2026-09-21) so the chat hand-off prompt
+  // says WHY the deterministic ladder gave up, not just that it did.
+  let uniqueTextRefusalReason: string | undefined
+  // The exact bytes the rung read for each file it placed a mutation in,
+  // keyed by that file. The write path below (`writePatchedFilesThroughBroker`)
+  // turns this into a write-broker precondition per file (P1, codex review
+  // 2026-09-21): the rung reads outside this function's locks, so nothing
+  // before the broker's own write has proven the file is still those exact
+  // bytes, and a second writer landing in that gap must not be silently
+  // overwritten by a patch computed from what is now stale content.
+  const uniqueTextSources = new Map<string, string>()
   if (allDeterministic && applicatorLoaders.loadApplySlotTextEdit) {
     const { applySlotTextEdit } = await applicatorLoaders.loadApplySlotTextEdit()
     const { applyPropEdit } = await applicatorLoaders.loadApplyPropEdit()
@@ -2816,6 +3059,58 @@ async function handleLLMPatch(
             }
           }
         }
+
+        // ── Unique-text rung (route 2) ──────────────────────────────────
+        //
+        // Both coordinate-based rungs have failed, so the element IS
+        // stamped but the bytes it renders are not at either coordinate.
+        // The common shape is a translated app: the stamp names a
+        // `t("key")` call and the English string lives in
+        // `messages/en.json`, which no `data-desde-src` will ever point
+        // at. Search the project's own files for the old text and take it
+        // only when it appears EXACTLY ONCE
+        // (`docs/superpowers/specs/2026-09-21-unique-text-edit-design.md`).
+        //
+        // Last, deliberately: it matches on TEXT rather than position, so
+        // it must never pre-empt a coordinate that still works. Same
+        // empty-needle guard as the rung above, for the same reason.
+        //
+        // P1 (codex review, 2026-09-21): this rung runs ONLY in `'chat'`
+        // fallback mode. Route 1 (the standalone `unique-text` kind) is
+        // verified against the rendered page by the client's own text
+        // lane, and a wrong file can be undone through the ledger before
+        // the designer notices anything else. This rung has neither: it
+        // runs inside `handleLLMPatch`, which is also reached from the
+        // save-time AI queue (`llmFallback` absent or `'patch'`) with no
+        // page to check against. Gating it to `'chat'` mode means a
+        // `'patch'`-mode batch falls through to the LLM lane exactly as it
+        // did before this rung existed, and only the typing-time path
+        // (which the client verifies and can undo) gets the fast rung.
+        if (llmFallback === "chat" && m.before.trim().length > 0) {
+          const step = await runUniqueTextStep(rootReal, m.before, m.after)
+          if (step.ok) {
+            const placed = await placeUniqueTextTarget({
+              file: step.file,
+              source: step.source,
+              rootReal,
+              rootWithSep,
+              filesMap,
+              targetPaths,
+              working,
+            })
+            if (placed) {
+              working.set(step.file, step.newSource)
+              placedByUniqueText = true
+              uniqueTextFile = step.file
+              uniqueTextSources.set(step.file, step.source)
+              continue
+            }
+          } else {
+            // P3: carried into the `needsChat` refusal below so the chat
+            // hand-off prompt says WHY, not just THAT.
+            uniqueTextRefusalReason = step.reason
+          }
+        }
         allDeterministic = false
         break
       }
@@ -2853,12 +3148,19 @@ async function handleLLMPatch(
 
     // Parse-validate every patched source before writing any of them —
     // mirrors the LLM-path validator below for all-or-nothing FS safety.
-    // JSX (.tsx/.jsx) is skipped: @vue/compiler-sfc would wrongly reject valid
-    // JSX as a malformed SFC. Vite surfaces real JSX syntax errors via the HMR
-    // overlay (same as the .ts overwrite lane, which also writes-as-is).
+    // ONLY `.vue` is parsed, because `@vue/compiler-sfc` is the only parser
+    // wired here and an SFC is the only thing it can judge. It was written
+    // as "skip .tsx/.jsx", which was equivalent while a patched file could
+    // only ever be .vue/.tsx/.jsx. The unique-text rung ends that, since
+    // its target is a .json, .md or .yaml. Running an SFC parse over a
+    // JSON file rejects a perfectly good edit as a malformed SFC; that is
+    // exactly the shape of the 2026-09-17 DOM-mutation-lane bug, where a
+    // pre-write validator built for Vue refused every valid React module.
+    // Vite surfaces real syntax errors in the other formats via the HMR
+    // overlay, same as the .ts overwrite lane, which also writes as-is.
     const { parse: parseSfc } = await import("@vue/compiler-sfc")
     for (const [file, newSource] of deterministicPatched) {
-      if (file.endsWith(".tsx") || file.endsWith(".jsx")) continue
+      if (!file.endsWith(".vue")) continue
       try {
         const { errors } = parseSfc(newSource)
         if (errors.length > 0) {
@@ -2890,6 +3192,8 @@ async function handleLLMPatch(
       label: `edit: ${[...deterministicPatched.keys()].join(", ")}`,
       mutationCount: mutations.length,
       correlationId,
+      ...(placedByUniqueText ? { placedBy: "unique-text" as const } : {}),
+      ...(uniqueTextSources.size > 0 ? { uniqueTextSources } : {}),
     })
     if (!written.ok) return written.error
     for (const [file, newSource] of deterministicPatched) {
@@ -2900,6 +3204,12 @@ async function handleLLMPatch(
       status: 200,
       newHashes,
       backupDir: written.backupDir,
+      // Both server-decided facts a client can't derive on its own: which
+      // ledger row this write produced, and — only when the unique-text
+      // rung placed it — which file that row is about. See `EditResult`'s
+      // doc comments on these two fields.
+      ...(written.ledgerEntryId ? { ledgerEntryId: written.ledgerEntryId } : {}),
+      ...(uniqueTextFile ? { uniqueTextFile } : {}),
     }
   }
 
@@ -2909,11 +3219,19 @@ async function handleLLMPatch(
   // the edit to the chat agent. Additive: absent/`'patch'` keeps the
   // legacy LLM-patch behavior below.
   if (llmFallback === "chat") {
+    // P3 (codex review, 2026-09-21): when the unique-text rung was the
+    // reason the deterministic ladder gave up, its own reason is more
+    // useful to the designer than the generic sentence alone — "the text
+    // appears in 3 files" says something the chat agent can act on, while
+    // the generic sentence by itself says only that something is wrong.
+    // Absent whenever the rung never ran at all (a non-text mutation, or
+    // an empty `before`), so those cases are unaffected.
+    const generic = "This edit needs interpretation, so it is going to the chat agent."
     return {
       ok: false,
       status: 422,
       needsChat: true,
-      reason: "This edit needs interpretation, so it is going to the chat agent.",
+      reason: uniqueTextRefusalReason ? `${generic} ${uniqueTextRefusalReason}` : generic,
     }
   }
 
@@ -3076,8 +3394,35 @@ async function writePatchedFilesThroughBroker(args: {
   mutationCount: number
   /** See `EditRequestBody.correlationId`. */
   correlationId?: string
+  /**
+   * How a mutation in this batch was LOCATED, when it was not located by
+   * its own coordinates. Only the unique-text rung sets it (`"unique-text"`),
+   * and only the deterministic fast-path can reach that rung. Recorded on
+   * the ledger `fields` so an Activity row can say the text was found by
+   * searching the project rather than spliced at a stamp, which is the
+   * one thing a reader could not otherwise tell about such a row.
+   */
+  placedBy?: "unique-text"
+  /**
+   * Per-file bytes the unique-text rung read for a file it placed a
+   * mutation in, keyed by that file (same keys as `patchedFiles`, a
+   * subset of it). Only the deterministic fast-path call site ever sets
+   * this — the plain LLM-result call site below never reaches the rung.
+   *
+   * P1 (codex review, 2026-09-21): the rung reads its target file OUTSIDE
+   * this function's locks, as its own search-and-splice pass rather than
+   * through the coordinate-matched `baseHashes`/`data-desde-v` checks
+   * earlier in `handleLLMPatch` — so nothing before this call has proven
+   * the file is still those exact bytes. Turned into a write-broker
+   * precondition per file below: a precondition miss means a second
+   * writer landed in that gap, and writing the rung's patch anyway would
+   * silently discard that writer's change while the backup journal
+   * recorded the WRONG "original" for it.
+   */
+  uniqueTextSources?: Map<string, string>
 }): Promise<
-  { ok: true; backupDir?: string } | { ok: false; error: EditResult }
+  | { ok: true; backupDir?: string; ledgerEntryId?: string }
+  | { ok: false; error: EditResult }
 > {
   // Journal + op keys use `repoRelOf` (derived from each file's already-
   // resolved absolute target path), NEVER the raw sourceLoc-derived
@@ -3123,16 +3468,45 @@ async function writePatchedFilesThroughBroker(args: {
       content: newSource,
     })
   }
+  // Preconditions for the unique-text rung's files only (see the param's
+  // doc comment). Every other file in this batch was already checked
+  // upstream — `baseHashes` and the per-mutation `data-desde-v` stale-
+  // target guard both ran before the deterministic loop — so this is
+  // additive, not a duplicate of either.
+  const preconditions: Array<{
+    repoRel: string
+    absPath: string
+    expect: { exists: boolean; content: Buffer | null }
+  }> = []
+  for (const [file, expectedSource] of args.uniqueTextSources ?? []) {
+    // Only a file this call is actually about to write needs a
+    // precondition; `uniqueTextSources` can in principle name a file the
+    // rung read but that never ended up in `patchedFiles` (e.g. every
+    // mutation targeting it turned out to be a no-op).
+    if (!args.patchedFiles.has(file)) continue
+    const target = args.targetPaths.get(file)
+    if (!target) continue
+    preconditions.push({
+      repoRel: repoRelOf(args.rootReal, target),
+      absPath: target,
+      expect: { exists: true, content: Buffer.from(expectedSource, "utf8") },
+    })
+  }
+
   const { brokeredWrite, rollbackWarning } = await loadBrokeredWrite()
   const broker = await brokeredWrite({
     canonicalRoot: args.rootReal,
     journal,
     ops,
+    ...(preconditions.length > 0 ? { preconditions } : {}),
     record: { history: getSharedEditHistory(), label: args.label },
     describe: {
       kind: "llm-patch",
       lane: "direct",
-      fields: { mutationCount: args.mutationCount },
+      fields: {
+        mutationCount: args.mutationCount,
+        ...(args.placedBy ? { placedBy: args.placedBy } : {}),
+      },
       correlationId: args.correlationId,
     },
   })
@@ -3140,6 +3514,24 @@ async function writePatchedFilesThroughBroker(args: {
     // Policy refusal, not a server fault — see the sibling handlers above.
     if (broker.stage === "refused") {
       return { ok: false, error: { ok: false, status: 403, reason: broker.reason } }
+    }
+    // P1 (codex review, 2026-09-21): the unique-text rung's precondition
+    // missed, meaning the file changed on disk after the rung read it and
+    // before this write ran. Nothing was written — `brokeredWrite` checks
+    // preconditions before any mutation — so the simplest correct move is
+    // to hand the ORIGINAL edit to chat rather than retry or overwrite the
+    // other writer's change; the designer can re-trigger it once the file
+    // settles.
+    if (broker.stage === "precondition") {
+      return {
+        ok: false,
+        error: {
+          ok: false,
+          status: 422,
+          needsChat: true,
+          reason: `${broker.repoRel} changed while this edit was being placed. Nothing was written.`,
+        },
+      }
     }
     return {
       ok: false,
@@ -3162,7 +3554,11 @@ async function writePatchedFilesThroughBroker(args: {
       },
     }
   }
-  return { ok: true, backupDir: broker.backupDir }
+  return {
+    ok: true,
+    backupDir: broker.backupDir,
+    ...(broker.ledgerEntryId ? { ledgerEntryId: broker.ledgerEntryId } : {}),
+  }
 }
 
 function sha256Hex(s: string): string {

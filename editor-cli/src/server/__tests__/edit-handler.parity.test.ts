@@ -64,7 +64,7 @@ const VALIDATION_CASES: Case[] = [
     expect: {
       status: 400,
       reason:
-        'edit.kind must be "prop" | "move" | "detach" | "swap" | "delete" | "insert" | "unwrap" | "flatten-conditional" | "overwrite" | "scoped-css-override" | "jsx-style" | "llm-patch" | "text-branch" | "token-value"',
+        'edit.kind must be "prop" | "move" | "detach" | "swap" | "delete" | "insert" | "unwrap" | "flatten-conditional" | "overwrite" | "scoped-css-override" | "jsx-style" | "llm-patch" | "text-branch" | "token-value" | "unique-text"',
     },
   },
   {

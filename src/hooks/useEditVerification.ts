@@ -105,6 +105,13 @@ export interface VerifyEditInput extends ExpectationInput {
    * it against the wrong page.
    */
   current?: () => boolean
+  /**
+   * Skip the failure toast. For a caller that reports the outcome itself: the
+   * unique-text lane reloads the page and checks again before it calls a miss
+   * a miss, so a toast at the first read would say "didn't take" about a
+   * change the reloaded page then shows. The Checks record is still written.
+   */
+  quiet?: boolean
 }
 
 export interface UseEditVerificationResult {
@@ -127,7 +134,7 @@ export function useEditVerification(
 ): UseEditVerificationResult {
   const verifyEdit = useCallback(
     (input: VerifyEditInput, onOutcome?: (outcome: VerificationOutcome) => void) => {
-      const { isSuperseded, current, ...expectationInput } = input
+      const { isSuperseded, current, quiet, ...expectationInput } = input
       // Deliver the coarse outcome AT MOST ONCE, and never let a throwing
       // callback escape (M7). Callers may use `onOutcome` to resolve a bridge
       // override, where a second delivery is a double-resolve and a missing
@@ -234,7 +241,7 @@ export function useEditVerification(
                 }
             try {
               useEditorStore.getState().completeVerification(editId, recorded)
-              if (recorded.status === "fail" && stillCurrent && !isSuperseded?.()) {
+              if (recorded.status === "fail" && stillCurrent && !quiet && !isSuperseded?.()) {
                 toast.warning("Edit didn't take effect", {
                   description: recorded.detail,
                 })

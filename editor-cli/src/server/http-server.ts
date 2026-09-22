@@ -4933,6 +4933,16 @@ async function handleEditRequest(
     // a deterministic-looking success. (Found during WS4 research.)
     fallbackUsed: result.fallbackUsed,
     notes: result.notes,
+    // The unique-text lane undoes its own write through this id when the
+    // page does not show the new text. MEASURED 2026-09-21: the handler set
+    // it and this list dropped it, so the client saw no row to undo and the
+    // file kept a change the page never showed.
+    ledgerEntryId: result.ledgerEntryId,
+    // Route 2 of the unique-text step (the llm-patch text ladder's last
+    // rung) has no page-verification of its own, so the client needs the
+    // file name to go with `ledgerEntryId` above if it ever has to undo
+    // this row on the designer's behalf.
+    uniqueTextFile: result.uniqueTextFile,
     autoCommit,
   })
 

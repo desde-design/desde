@@ -750,6 +750,37 @@ export type StructuralEdit =
   | DataBindingEdit
   | LLMPatchEdit
   | TextBranchEdit
+  | UniqueTextEdit
+
+/**
+ * Change a piece of page text the bridge could not map to source, by
+ * finding that exact text in the project's own files. The server replaces
+ * it only when it appears EXACTLY ONCE across the whole search scope;
+ * zero, or two or more, refuses and the edit goes to chat. See
+ * `docs/superpowers/specs/2026-09-21-unique-text-edit-design.md`.
+ *
+ * Framework- and design-system-neutral by construction: the match is over
+ * text as a file stores it (a JSON string, a Markdown line, a YAML
+ * scalar), never over a template AST. That is why it belongs in core at
+ * all: the pages it serves are the ones with no component to inspect.
+ *
+ * The one variant with NO `file`: which file holds the text is the
+ * server's answer, not the client's claim. `target.editTarget` is
+ * likewise absent in practice, since a missing source stamp is the whole
+ * reason this kind exists; `target` is still carried for parity with
+ * every other StructuralEdit (id, undo bookkeeping, label rendering).
+ */
+export interface UniqueTextEdit extends StructuralEditBase {
+  kind: 'unique-text'
+  /** The text as the page rendered it, before the edit. */
+  before: string
+  /** The text the user typed. */
+  after: string
+  /** CSS selector of the element whose text this is. */
+  selector: string
+  /** Page path the element was on (e.g. `/about`). */
+  page: string
+}
 
 /**
  * Edit one branch of a `{{ test ? a : b }}` Vue interpolation. The

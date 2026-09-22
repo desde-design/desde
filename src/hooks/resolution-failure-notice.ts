@@ -14,14 +14,21 @@ import type { MutationResolutionFailure, MutationResolutionFailureCode } from "@
  * existed in no source file. The bridge now puts the element back
  * (`dom-edit-mode.ts`, `failResolution`), and this module says what happened.
  *
- * ## Text edits go to chat
+ * ## Text edits try one deterministic step, then go to chat
  *
- * A refused TEXT edit is handed to a new chat session instead of dead-ending
- * (Mo's rule from 2026-09-08: an edit the direct path cannot make goes to
- * chat). The bridge refuses because no stamp places the element, but the
- * agent can search for the text. MEASURED 2026-09-21: a date on a Webflow-export
- * page lived in `content/home.json` and nowhere a stamp could point. Other
- * kinds stay a notice: a class or style change has no text to search for.
+ * A refused TEXT edit never dead-ends (Mo's rule from 2026-09-08: an edit the
+ * direct path cannot make goes to chat). The bridge refuses because no stamp
+ * places the element, but the text itself is still searchable. MEASURED
+ * 2026-09-21: a date on a Webflow-export page lived in `content/home.json` and
+ * nowhere a stamp could point.
+ *
+ * So the shell first asks the server to find that exact text in the project's
+ * own files and replace it, but only where it appears exactly once
+ * (`docs/superpowers/specs/2026-09-21-unique-text-edit-design.md`). That
+ * succeeds in about a second and toasts which file changed. Anything else
+ * goes to a new chat session, where the agent can search, weigh several
+ * matches and ask. Other kinds stay a notice: a class or style change has no
+ * text to search for.
  *
  * ## Why a toast, and not the Checks tab
  *
@@ -89,6 +96,50 @@ export function notifyResolutionFailure(failure: MutationResolutionFailure): voi
   })
 }
 
+/** The unique-text step found the text, replaced it, and the page shows it. */
+export const UNIQUE_TEXT_APPLIED_TITLE = "Text updated"
+
+/**
+ * Which file the change landed in, named outright.
+ *
+ * The step searches the whole project and takes the one file the text appears
+ * in, which may not be the file the designer would have guessed: on a site
+ * whose pages are data it is a JSON or Markdown file rather than a component.
+ * Naming it is what makes a surprising answer visible at the moment it
+ * happens, and it is why the design settled on "replace, then verify" instead
+ * of a list of paths to be suspicious of.
+ *
+ * `file` is optional for one reason: a CLI older than this feature answers a
+ * write without naming a file. That CLI refuses the kind outright today, so
+ * the fallback is unreachable in practice and exists so the toast cannot read
+ * "Changed in undefined".
+ */
+export function uniqueTextAppliedDescription(file: string | undefined, confirmed: boolean): string {
+  const where = file ? `Changed in ${file}` : "The text was changed in the project's files"
+  // "Not confirmed" is the truth of a skipped check: no handshake came back,
+  // or another page answered. The write stays; the toast does not claim a
+  // page showed it (Fable pass, 2026-09-21).
+  return confirmed ? where : `${where}. The page could not confirm it.`
+}
+
+/**
+ * The success notice for a unique-text write the page then showed.
+ *
+ * On the SAME toast id as the two warnings above, so a retry after a refusal
+ * replaces that refusal rather than leaving a stale "Change not saved" beside
+ * the confirmation that it now is.
+ */
+export function notifyUniqueTextApplied(
+  failure: Pick<MutationResolutionFailure, "selector">,
+  file: string | undefined,
+  confirmed: boolean,
+): void {
+  toast.success(UNIQUE_TEXT_APPLIED_TITLE, {
+    id: resolutionFailureToastId(failure),
+    description: uniqueTextAppliedDescription(file, confirmed),
+  })
+}
+
 /**
  * A text hand-off chat did not take. Nothing is said when it DID take: the
  * shell's own escalation handler already toasts "Sent this edit to chat" for
@@ -124,4 +175,16 @@ export function handleResolutionFailure(
 ): void {
   notifyResolutionFailure(failure)
   settle()
+}
+
+/**
+ * The same notice for a STAMPED text edit the unique-text rung placed by
+ * search (route 2), keyed by file: there is no refusal to replace here, and
+ * two rung writes to one file within a few seconds are one fact.
+ */
+export function notifyUniqueTextPlaced(file: string, confirmed: boolean): void {
+  toast.success(UNIQUE_TEXT_APPLIED_TITLE, {
+    id: `unique-text-placed:${file}`,
+    description: uniqueTextAppliedDescription(file, confirmed),
+  })
 }

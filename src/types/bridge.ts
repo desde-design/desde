@@ -670,7 +670,20 @@ export type BridgeToShellMessage =
   // (the iframe's `load` event) could not decide the case it existed for, so it
   // is gone. Such a bridge is refused at the handshake by
   // `REQUIRED_BRIDGE_VERSION` instead, and there is no installed base of them.
-  | { type: "BRIDGE_READY"; payload: { version?: string; documentId: string } }
+  | {
+      type: "BRIDGE_READY"
+      payload: {
+        version?: string
+        documentId: string
+        /**
+         * `location.href` of the page that is ready. The shell's reload-and-
+         * recheck compares its pathname with the page a check was asked on,
+         * because the document that handshakes next is not always the
+         * reloaded page. Optional only for a bridge older than 2026-09-21g.
+         */
+        url?: string
+      }
+    }
   // Tier-2 edit verification response (paired with a READ_RENDERED_VALUE
   // requestId). `value` is null when the selector matched nothing.
   | { type: "RENDERED_VALUE_READ"; payload: { value: string | null }; requestId: string }
@@ -758,7 +771,20 @@ export type BridgeToShellMessage =
         elementRect: DOMRectJSON
       }
     }
-  | { type: "ROUTE_CHANGED"; payload: { url: string; sourceFile?: string } }
+  | {
+      type: "ROUTE_CHANGED"
+      payload: {
+        url: string
+        sourceFile?: string
+        /**
+         * The document this route change happened in. The adapter keeps the
+         * page URL current from this message, and a late one from a departed
+         * document must not overwrite the new page's (codex round 5,
+         * 2026-09-21). Absent from a bridge older than 2026-09-21h.
+         */
+        documentId?: string
+      }
+    }
   /**
    * The colour the prototype's page is painted, as a resolved CSS colour
    * string (`rgb(…)` / `rgba(…)`), so a shell can carry its own chrome on the
