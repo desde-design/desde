@@ -14,21 +14,21 @@
  * breakpoints under the `anthropic` provider-options key; `AiSdkProviderOptions`
  * has no `cacheControl` field yet, so this file does not reach for one.
  *
- * `@ai-sdk/anthropic` 4.0.60 pins `@ai-sdk/provider@4.0.17` exactly, while
- * `ai@7.0.92` and `@ai-sdk/openai@4.0.58` both pin `@ai-sdk/provider@4.0.10`
- * exactly. npm cannot dedupe two exact, differing pins, so this repo installs
- * BOTH copies, and TypeScript treats their `LanguageModelV4` as two distinct
- * (if structurally near-identical) types. The cast below is that version
- * skew made visible, not a behavioral claim: `anthropic(modelId)` returns a
- * real `LanguageModelV4` that `streamText`/`generateText` (built against the
- * SAME nested `@ai-sdk/provider@4.0.17` `@ai-sdk/anthropic` itself imports
- * from) accept at runtime. `AiSdkProvider.languageModel`'s param type is
- * `ai`'s own `LanguageModel`, resolved against the OTHER copy, which is the
- * only reason this needs a cast rather than a plain return.
+ * `@ai-sdk/anthropic` pins `@ai-sdk/provider@4.0.17` exactly. `ai` and
+ * `@ai-sdk/openai` are pinned here (`package.json`) to the versions that pin
+ * the SAME `@ai-sdk/provider@4.0.17` exactly (`ai@7.0.111`,
+ * `@ai-sdk/openai@4.0.72`), so npm dedupes to one copy on disk and
+ * `anthropic(modelId)`'s `LanguageModelV4` is the same type `AiSdkProvider`
+ * expects — no cast needed. Bumping any one of these three packages again
+ * must keep the other two on a `@ai-sdk/provider` version that matches, or
+ * this file (and `ai-sdk-openai.ts`) stop typechecking without a cast.
+ * `ai-sdk-packages.test.ts` fails if any of the three top-level pins drifts
+ * from what is actually installed; it does not check the `@ai-sdk/provider`
+ * sub-pin directly, so a bump that breaks the alignment above is caught by
+ * `npm run typecheck`, not by that test.
  */
 
 import { createAnthropic } from '@ai-sdk/anthropic'
-import type { LanguageModel } from 'ai'
 import { AiSdkProvider } from './ai-sdk-provider'
 import type { LLMProvider } from './types'
 
@@ -62,9 +62,7 @@ export function buildAnthropicProvider(input: BuildAnthropicProviderInput): LLMP
   return new AiSdkProvider({
     name: 'anthropic',
     defaultModel: input.model ?? ANTHROPIC_AI_SDK_DEFAULT_MODEL,
-    // See the file header: two pinned copies of `@ai-sdk/provider`, not a
-    // real behavioral gap.
-    languageModel: (modelId) => anthropic(modelId) as unknown as LanguageModel,
+    languageModel: (modelId) => anthropic(modelId),
     providerOptionsKey: ANTHROPIC_PROVIDER_OPTIONS_KEY,
   })
 }
