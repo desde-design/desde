@@ -19,9 +19,13 @@
  * is that a bump stays a one-file migration.
  *
  * Deliberate behaviour notes:
- *  - `TextBlock.cacheHint` is dropped, as it was on the fetch provider. OpenAI
- *    has automatic prefix caching and no breakpoint API, so the caller still
- *    benefits without a marker on the wire.
+ *  - `TextBlock.cacheHint` is dropped unless the descriptor sets `cacheControl:
+ *    'anthropic'`, as it was on the fetch provider. OpenAI has automatic prefix
+ *    caching and no breakpoint API, so the caller still benefits without a
+ *    marker on the wire and `cacheControl` is left unset for it. Anthropic's
+ *    caching is breakpoint-based, so a marked system block is sent as a
+ *    `SystemModelMessage` carrying `providerOptions.anthropic.cacheControl`
+ *    instead of being flattened to a plain string.
  *  - Reasoning deltas are emitted as events but are NOT appended to the
  *    assistant message. They are display-only; replaying a reasoning summary
  *    as assistant text on the next step would corrupt the transcript.
@@ -54,6 +58,7 @@ import {
   type LanguageModel,
   type LanguageModelUsage,
   type ModelMessage,
+  type SystemModelMessage,
   type ToolSet,
 } from 'ai'
 
@@ -108,6 +113,13 @@ export interface AiSdkProviderOptions {
    * retention, is set here for exactly that reason.
    */
   defaultProviderOptions?: Record<string, JSONValue>
+  /**
+   * Which vendor's breakpoint caching `TextBlock.cacheHint` maps to. Absent
+   * means the hint is dropped (OpenAI caches prefixes automatically and has no
+   * breakpoint API). 'anthropic' emits `providerOptions.anthropic.cacheControl`
+   * on the marked system block.
+   */
+  cacheControl?: 'anthropic'
 }
 
 export class AiSdkProvider implements LLMProvider {
@@ -116,6 +128,7 @@ export class AiSdkProvider implements LLMProvider {
   private readonly languageModel: (modelId: string) => LanguageModel
   private readonly providerOptionsKey: string
   private readonly defaultProviderOptions: Record<string, JSONValue> | undefined
+  private readonly cacheControl: 'anthropic' | undefined
 
   constructor(opts: AiSdkProviderOptions) {
     this.name = opts.name
@@ -123,6 +136,32 @@ export class AiSdkProvider implements LLMProvider {
     this.languageModel = opts.languageModel
     this.providerOptionsKey = opts.providerOptionsKey
     this.defaultProviderOptions = opts.defaultProviderOptions
+    this.cacheControl = opts.cacheControl
+  }
+
+  /**
+   * The `system` argument for one request. A plain string unless the
+   * descriptor was built with `cacheControl: 'anthropic'` AND at least one
+   * block is marked `cacheHint: 'ephemeral'` — otherwise this is exactly
+   * `flattenToString`, so OpenAI (and Anthropic without a marked block) keeps
+   * today's behaviour byte-for-byte. When it does apply, EVERY block becomes
+   * its own `SystemModelMessage` (not just the marked one) because the SDK's
+   * `system` argument is either a single string or a full array of system
+   * messages — there is no way to send "some of the system prompt as a
+   * string, the rest as messages" in one request.
+   */
+  private toSystem(system: SystemContent): string | SystemModelMessage[] {
+    if (typeof system === 'string') return system
+    if (this.cacheControl !== 'anthropic' || !system.some((b) => b.cacheHint === 'ephemeral')) {
+      return flattenToString(system)
+    }
+    return system.map((b) => ({
+      role: 'system' as const,
+      content: b.text,
+      ...(b.cacheHint === 'ephemeral'
+        ? { providerOptions: { [this.providerOptionsKey]: { cacheControl: { type: 'ephemeral' } } } }
+        : {}),
+    }))
   }
 
   /**
@@ -146,7 +185,7 @@ export class AiSdkProvider implements LLMProvider {
     const model = this.languageModel(opts.model ?? this.defaultModel)
     const base = {
       model,
-      system: flattenToString(opts.system),
+      system: this.toSystem(opts.system),
       prompt: flattenToString(opts.user),
       maxOutputTokens: opts.maxTokens ?? 8000,
       abortSignal: opts.signal,
@@ -200,7 +239,7 @@ export class AiSdkProvider implements LLMProvider {
       opts.responseFormat?.kind === 'json_schema' ? opts.responseFormat.schema : undefined
     const result = streamText({
       model,
-      system: flattenToString(opts.system),
+      system: this.toSystem(opts.system),
       prompt: flattenToString(opts.user),
       maxOutputTokens: opts.maxTokens ?? 8000,
       abortSignal: opts.signal,
@@ -238,7 +277,7 @@ export class AiSdkProvider implements LLMProvider {
     const model = this.languageModel(opts.model ?? this.defaultModel)
     const result = streamText({
       model,
-      system: flattenToString(opts.system),
+      system: this.toSystem(opts.system),
       messages: toModelMessages(opts.messages),
       tools: toToolSet(opts.tools),
       ...(opts.maxTokens !== undefined ? { maxOutputTokens: opts.maxTokens } : {}),
@@ -515,7 +554,9 @@ function markAsError(value: string): string {
 
 function flattenToString(content: SystemContent | UserContent): string {
   if (typeof content === 'string') return content
-  // Cache hints are dropped here. See the file header.
+  // Cache hints are dropped here unless `cacheControl` is set. See the file
+  // header and `toSystem`, which is what routes a marked system block away
+  // from this function.
   return content.map((b) => b.text).join('\n\n')
 }
 

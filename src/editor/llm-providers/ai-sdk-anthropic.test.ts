@@ -86,6 +86,13 @@ describe('buildAnthropicProvider', () => {
     expect(opts.providerOptionsKey).toBe(ANTHROPIC_PROVIDER_OPTIONS_KEY)
   })
 
+  it('builds the provider with cacheControl set, so a marked system block reaches the wire as breakpoint caching', () => {
+    aiSdkProviderCtorMock.mockClear()
+    buildAnthropicProvider({ apiKey: 'sk-ant-test' })
+    const opts = aiSdkProviderCtorMock.mock.calls.at(-1)?.[0] as { cacheControl?: string }
+    expect(opts.cacheControl).toBe('anthropic')
+  })
+
   it('builds an LLMProvider named anthropic with the default model', () => {
     aiSdkProviderCtorMock.mockClear()
     const p = buildAnthropicProvider({ apiKey: 'sk-ant-test' })

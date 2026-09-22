@@ -499,6 +499,52 @@ describe('AiSdkProvider.streamConversation', () => {
     expect(model.doStreamCalls[0]!.providerOptions).toEqual({ openai: { reasoningEffort: 'high' } })
   })
 
+  it('maps an ephemeral cache hint on a system block to anthropic cacheControl', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: answeredStream(),
+    })
+    const provider = new AiSdkProvider({
+      name: 'anthropic',
+      defaultModel: 'm',
+      languageModel: () => model,
+      providerOptionsKey: 'anthropic',
+      cacheControl: 'anthropic',
+    })
+    await collect(
+      provider.streamConversation({
+        system: [{ type: 'text', text: 'SYS', cacheHint: 'ephemeral' }],
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+      }),
+    )
+    const prompt = model.doStreamCalls[0]!.prompt
+    const sys = prompt.filter((m) => m.role === 'system')
+    expect(sys).toHaveLength(1)
+    expect(sys[0]).toMatchObject({
+      role: 'system',
+      content: 'SYS',
+      providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
+    })
+  })
+
+  it('drops the hint when cacheControl is not configured (OpenAI)', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: answeredStream(),
+    })
+    await collect(
+      providerFor(model).streamConversation({
+        system: [{ type: 'text', text: 'SYS', cacheHint: 'ephemeral' }],
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+      }),
+    )
+    const prompt = model.doStreamCalls[0]!.prompt
+    const sys = prompt.filter((m) => m.role === 'system')
+    expect(sys).toHaveLength(1)
+    expect(sys[0]).toMatchObject({ role: 'system', content: 'SYS' })
+    expect((sys[0] as { providerOptions?: unknown }).providerOptions).toBeUndefined()
+  })
+
   it('reports an aborted stream as an error stop with the work so far preserved', async () => {
     // `controller.abort()` used to run BEFORE `streamConversation` was even
     // called, which only ever exercised the `opts.signal?.aborted` fallback

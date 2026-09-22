@@ -10,9 +10,11 @@
  * (see that file's header): Anthropic has one API, and this transport
  * talks to it directly.
  *
- * No `defaultProviderOptions` are set here. A later task adds prompt-cache
- * breakpoints under the `anthropic` provider-options key; `AiSdkProviderOptions`
- * has no `cacheControl` field yet, so this file does not reach for one.
+ * No `defaultProviderOptions` are set here. `cacheControl: 'anthropic'` is set
+ * instead, which is narrower: it only tells `AiSdkProvider.toSystem` to emit
+ * `providerOptions.anthropic.cacheControl` on a system block the caller
+ * marked `cacheHint: 'ephemeral'`, rather than sending a provider option on
+ * every request regardless of what the caller asked for.
  *
  * `@ai-sdk/anthropic` pins `@ai-sdk/provider@4.0.17` exactly. `ai` and
  * `@ai-sdk/openai` are pinned here (`package.json`) to the versions that pin
@@ -64,5 +66,6 @@ export function buildAnthropicProvider(input: BuildAnthropicProviderInput): LLMP
     defaultModel: input.model ?? ANTHROPIC_AI_SDK_DEFAULT_MODEL,
     languageModel: (modelId) => anthropic(modelId),
     providerOptionsKey: ANTHROPIC_PROVIDER_OPTIONS_KEY,
+    cacheControl: 'anthropic',
   })
 }
