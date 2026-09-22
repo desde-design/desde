@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { ANTHROPIC_MODEL_CATALOG } from './anthropic-model-catalog'
 import { defaultModelConfig } from '../core/model-catalog'
 import { DEFAULT_SDK_MODEL } from '../agent-chat-sdk/run-chat-turn-sdk'
+import { getRateCard, UNKNOWN_MODEL_RATE } from './rate-cards'
 
 describe('ANTHROPIC_MODEL_CATALOG', () => {
   it('has providerId anthropic and a non-empty model list', () => {
@@ -29,5 +30,17 @@ describe('ANTHROPIC_MODEL_CATALOG', () => {
   it('has unique model ids', () => {
     const ids = ANTHROPIC_MODEL_CATALOG.models.map((m) => m.id)
     expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it('names Opus 5.5 with the full effort ladder', () => {
+    const m = ANTHROPIC_MODEL_CATALOG.models.find((x) => x.id === 'claude-opus-5-5')
+    expect(m?.label).toBe('Opus 5.5')
+    expect(m?.effortLevels).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+
+  it('every static Anthropic model has a rate card', () => {
+    for (const m of ANTHROPIC_MODEL_CATALOG.models) {
+      expect(getRateCard(m.id), m.id).not.toBe(UNKNOWN_MODEL_RATE)
+    }
   })
 })

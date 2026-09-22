@@ -60,7 +60,7 @@ const RATE_CARDS: Record<string, ModelRateCard> = {
   // Bare catalog ids used by ANTHROPIC_MODEL_CATALOG /
   // ChatSession.modelConfig.model — see anthropic-model-catalog.ts.
   // Published first-party rates as of 2026-06-24 (Anthropic's model table):
-  // Fable 5.1 $10/$50, Opus 5 and 4.8 $5/$25, Sonnet 5 $2/$10, Haiku 4.5
+  // Fable 5.1 $10/$50, Opus 5.5 $4/$20, Opus 5 and 4.8 $5/$25, Sonnet 5 $2/$10, Haiku 4.5
   // $1/$5 per million input/output tokens. The estimates that sat here
   // before were the older Opus tier ($15/$75) applied to every Opus id.
   'claude-fable-5-1': { inputPerM: 10, outputPerM: 50 },
@@ -68,6 +68,7 @@ const RATE_CARDS: Record<string, ModelRateCard> = {
   'claude-haiku-4-5': { inputPerM: 1, outputPerM: 5 },
   'claude-sonnet-5': { inputPerM: 2, outputPerM: 10 },
   'claude-opus-4-8': { inputPerM: 5, outputPerM: 25 },
+  'claude-opus-5-5': { inputPerM: 4, outputPerM: 20 },
   'claude-opus-5': { inputPerM: 5, outputPerM: 25 },
   // OpenAI — published rates from developers.openai.com/api/docs/pricing,
   // measured 2026-09-03, USD per 1M input / output tokens. The two rows that

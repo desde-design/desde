@@ -29,6 +29,12 @@ export const ANTHROPIC_MODEL_CATALOG: ProviderModelCatalog = {
       effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
     },
     {
+      id: 'claude-opus-5-5',
+      label: 'Opus 5.5',
+      description: 'Deep reasoning, long-horizon work',
+      effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    },
+    {
       id: 'claude-opus-5',
       label: 'Opus 5',
       description: 'Deep reasoning, long-horizon work',
