@@ -36,6 +36,7 @@ import { ANTHROPIC_MODEL_CATALOG } from '../llm-providers/anthropic-model-catalo
  */
 const EXPECTED_ADAPTIVE: Record<string, boolean> = {
   'claude-fable-5-1': true,
+  'claude-opus-5-5': true,
   'claude-opus-5': true,
   'claude-opus-4-8': true,
   'claude-sonnet-5': true,
@@ -96,6 +97,7 @@ describe('supportsAnthropicAdaptiveThinking', () => {
       'claude-opus-4-6',
       'claude-opus-4-7',
       'claude-opus-4-8',
+      'claude-opus-5-5',
       'claude-opus-5',
       'claude-sonnet-4-6',
       'claude-sonnet-5',
