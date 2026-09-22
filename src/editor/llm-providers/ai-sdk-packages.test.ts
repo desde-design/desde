@@ -17,6 +17,7 @@
  */
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { createAnthropic } from '@ai-sdk/anthropic'
 import { createOpenAI } from '@ai-sdk/openai'
 import { generateText, streamText } from 'ai'
 import { describe, expect, it } from 'vitest'
@@ -59,11 +60,13 @@ describe('AI SDK package pins', () => {
     expect(typeof streamText).toBe('function')
     expect(typeof generateText).toBe('function')
     expect(typeof createOpenAI).toBe('function')
+    expect(typeof createAnthropic).toBe('function')
   })
 
   it.each([
     ['ai', 'ai'],
     ['@ai-sdk/openai', join('@ai-sdk', 'openai')],
+    ['@ai-sdk/anthropic', join('@ai-sdk', 'anthropic')],
   ])('%s is installed at the exact version pinned in package.json', async (dependencyName, packageDir) => {
     const [installed, pinned] = await Promise.all([
       installedVersion(packageDir),
