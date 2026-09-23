@@ -48,12 +48,13 @@ export type CapabilityActivation = 'next-message' | 'cli-restart'
  *
  * Two exist. `claude-agent-sdk` registers MCP servers and ships WebSearch and
  * WebFetch. `neutral` is Desde's own loop on the `LLMProvider` seam: its tool
- * catalog is builtins plus the editor tools and NOTHING else — it never reads
- * `extensions` or `figmaConfig`, and `builtin-tools.ts` says in its own header
- * that it has no WebFetch and no WebSearch.
+ * catalog is builtins plus the editor tools, plus the web tools the provider's
+ * VENDOR runs server-side (declared per descriptor, see `webTools` in
+ * `provider-descriptor.ts`). It never reads `extensions` or `figmaConfig`, so
+ * MCP-backed capabilities stay `claude-agent-sdk`-only.
  *
- * So the whole catalog is `claude-agent-sdk`-only today, and this field exists
- * because that was being reported as false. `computeEnabledCapabilityIds` had
+ * This field exists because the catalog used to be reported as served by
+ * both lanes, and that was false. `computeEnabledCapabilityIds` had
  * no idea which lane it was answering for, and its own comment claimed
  * "'enabled' here means the same thing the runtime means" — which was true on
  * one lane and untrue on the other. A user turned Figma on, the panel said it
@@ -138,9 +139,10 @@ export const CAPABILITY_CATALOG: ReadonlyArray<CapabilityDescriptor> = [
     summary: 'Look things up online while building.',
     target: 'web-search',
     activation: 'next-message',
-    // The neutral lane ships no WebSearch and no WebFetch — see the header of
-    // `agent-chat-neutral/builtin-tools.ts`, which says so and points here.
-    runtimes: ['claude-agent-sdk'],
+    // The neutral lane declares web search as a provider server tool when the
+    // chosen provider's descriptor lists `web_search` in `webTools`. Both
+    // shipped providers do.
+    runtimes: ['claude-agent-sdk', 'neutral'],
   },
 ]
 
@@ -295,8 +297,8 @@ export function describeDisabledCapabilities(
     sections.push(
       '',
       'These cannot be used with the model this conversation is running on, so',
-      'the Extensions panel will not help. Say that switching to a Claude model',
-      'is what would make them available:',
+      'the Extensions panel will not help. Say that a model from a provider that',
+      'offers them is what would make them available:',
       '',
       ...unavailable.map(line),
     )

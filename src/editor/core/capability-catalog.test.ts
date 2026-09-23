@@ -73,11 +73,18 @@ describe('computeEnabledCapabilityIds', () => {
     const on = computeEnabledCapabilityIds({
       ...NONE,
       enabledExtensionIds: ['figma'],
-      webSearchEnabled: true,
       chatRuntime: 'neutral',
     })
     expect(on.has('figma')).toBe(false)
-    expect(on.has('web-search')).toBe(false)
+  })
+
+  it('reports web search as on for the neutral lane, which declares it as a provider server tool', () => {
+    const on = computeEnabledCapabilityIds({
+      ...NONE,
+      webSearchEnabled: true,
+      chatRuntime: 'neutral',
+    })
+    expect(on.has('web-search')).toBe(true)
   })
 
   it('is unchanged on the SDK lane, which does register them', () => {
@@ -91,10 +98,10 @@ describe('computeEnabledCapabilityIds', () => {
 })
 
 describe('runtimeSupportsCapability', () => {
-  it('says every catalog entry needs the Claude runtime today', () => {
+  it('serves every entry on the SDK lane, and only web search on the neutral lane', () => {
     for (const c of CAPABILITY_CATALOG) {
       expect(runtimeSupportsCapability(c, 'claude-agent-sdk'), c.id).toBe(true)
-      expect(runtimeSupportsCapability(c, 'neutral'), c.id).toBe(false)
+      expect(runtimeSupportsCapability(c, 'neutral'), c.id).toBe(c.id === 'web-search')
     }
   })
 
@@ -174,6 +181,21 @@ describe('describeDisabledCapabilities', () => {
     const block = describeDisabledCapabilities(new Set(), 'neutral')!
     expect(block).toContain('Figma')
     expect(block).toMatch(/cannot be used with the model/i)
+  })
+
+  it('lists web search on the neutral lane under available-but-OFF, not under cannot-be-used', () => {
+    const block = describeDisabledCapabilities(new Set(), 'neutral')!
+    const [enableable, unavailable] = block.split(/cannot be used with the model/i)
+    expect(enableable).toContain('**Web search**')
+    expect(unavailable).not.toContain('**Web search**')
+    expect(unavailable).toContain('**Figma**')
+  })
+
+  it('names no vendor in the unavailable remedy', () => {
+    const block = describeDisabledCapabilities(new Set(), 'neutral')!
+    expect(block).not.toMatch(/Claude/)
+    // The prompt wraps at ~76 columns, so the phrase is read with line breaks folded.
+    expect(block.replace(/\s+/g, ' ')).toContain('a model from a provider that offers them')
   })
 
   it('keeps the panel wording on the SDK lane', () => {
