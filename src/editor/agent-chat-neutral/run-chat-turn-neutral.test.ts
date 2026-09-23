@@ -1685,7 +1685,38 @@ describe('MCP servers on the neutral lane (Figma, .mcp.json)', () => {
       // raises a separate one of its own.)
       const ghostWarnings = warn.mock.calls.filter((c) => String(c[0]).includes('"ghost"'))
       expect(ghostWarnings).toHaveLength(1)
-      expect(String(ghostWarnings[0]![0])).toMatch(/MCP server "ghost" could not be started/)
+      expect(String(ghostWarnings[0]![0])).toMatch(/could not start MCP server "ghost"/)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('refuses an id that would split inside mcp__<id>__<tool>, so its tools never appear', async () => {
+    // `editor__x` would name its tools `mcp__editor__x__<tool>`, which the
+    // gate reads as the built-in editor namespace and allows outright,
+    // whatever `allowedToolPrefixes` says. The loader refuses such an id;
+    // this is the runtime's own guard for a config that did not come
+    // through it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { events, calls, result } = await run(
+        [toolStep('tu_1', 'mcp__editor__x__echo', { text: 'hi' }), textStep('ok')],
+        {
+          extensions: [
+            { id: 'editor__x', mcpServer: echoServer, allowedToolPrefixes: ['get_'] },
+          ],
+        },
+      )
+      const names = calls[0]!.tools!.map((t) => ('name' in t ? t.name : ''))
+      expect(names.some((n) => n.includes('editor__x'))).toBe(false)
+      const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; error: string }
+      expect(res.ok).toBe(false)
+      expect(res.error).toMatch(/no tool named 'mcp__editor__x__echo'/)
+      expect((calls[0]!.system as TextBlock[])[0]!.text).toContain(
+        'The MCP server "editor__x" could not be started this turn, so its tools are unavailable.',
+      )
+      expect(result.turn.error).toBeUndefined()
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/"editor__x": its id is not allowed/)
     } finally {
       warn.mockRestore()
     }
@@ -1706,6 +1737,19 @@ describe('MCP servers on the neutral lane (Figma, .mcp.json)', () => {
     })
     const pid = Number(readFileSync(pidFile, 'utf8'))
     expect(pid).toBeGreaterThan(0)
-    expect(() => process.kill(pid, 0)).toThrow()
+    // Polled: `close()` stops waiting after 1.5s while the SDK's own
+    // SIGTERM/SIGKILL escalation carries on, so on a loaded machine the child
+    // can outlive the turn by a moment.
+    const alive = (): boolean => {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
+    const until = Date.now() + 5_000
+    while (alive() && Date.now() < until) await new Promise((r) => setTimeout(r, 50))
+    expect(alive()).toBe(false)
   })
 })

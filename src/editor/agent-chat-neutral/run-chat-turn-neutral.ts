@@ -95,14 +95,13 @@ import type {
   ToolDef,
   Usage,
 } from '../llm-providers/types'
-import type { McpStdioServerConfig } from '../core/mcp-server-config'
 import type { WebPolicy } from '../core/web-policy'
 import { branchModeRootCommitSha } from '../worktree/git-branches'
 
 import { applyContextBudget, capToolResultImageBytes } from './context-budget'
 import { createCostGuard } from './cost-guard'
 import { replayHistory } from './history-replay'
-import { connectMcpClientTools, type McpClientTools } from './mcp-client-tools'
+import type { McpClientTools } from './mcp-client-tools'
 import {
   createNeutralEventAdapter,
   toolResultContent,
@@ -111,6 +110,7 @@ import {
 } from './neutral-event-adapter'
 import { buildNeutralSystemPrompt } from './system-prompt-neutral'
 import { buildNeutralToolCatalog } from './tool-catalog'
+import { closeMcpSessions, connectTurnMcpServers } from './turn-mcp-servers'
 
 /**
  * Hard cap on model steps in one turn. Nothing else stops a tool-loop
@@ -933,63 +933,6 @@ async function runInner(
     ...(Object.keys(conflicts).length > 0 ? { conflicts } : {}),
   }
   return { session, turn }
-}
-
-/**
- * Start this turn's MCP servers: the legacy `figma` block (id `figma`) and
- * every `.mcp.json` extension (its own id). An extension with the id `figma`
- * replaces the legacy block, the same precedence the SDK lane's `mcpServers`
- * map gives it.
- *
- * All start at once. A server that fails to start or to list its tools does
- * NOT end the turn: chat has to keep working when an optional capability is
- * broken. It is logged once with its error, left out, and named in one
- * sentence of the system prompt so the model can tell the user rather than
- * fail with no idea why. Each server that did start is pushed onto
- * `sessions` for the caller to close.
- */
-async function connectTurnMcpServers(
-  opts: RunChatTurnOpts,
-  sessions: McpClientTools[],
-): Promise<{ specs: ToolSpec[]; connectedIds: Set<string>; startupNotices: string[] }> {
-  const servers = new Map<string, McpStdioServerConfig>()
-  if (opts.figmaConfig) servers.set('figma', opts.figmaConfig.mcpServer)
-  for (const e of opts.extensions ?? []) servers.set(e.id, e.mcpServer)
-
-  const entries = [...servers]
-  const settled = await Promise.allSettled(
-    entries.map(([id, server]) =>
-      connectMcpClientTools({
-        id,
-        server,
-        env: process.env,
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      }),
-    ),
-  )
-  const specs: ToolSpec[] = []
-  const connectedIds = new Set<string>()
-  const startupNotices: string[] = []
-  settled.forEach((outcome, i) => {
-    const id = entries[i]![0]
-    if (outcome.status === 'fulfilled') {
-      sessions.push(outcome.value)
-      connectedIds.add(id)
-      specs.push(...outcome.value.specs)
-    } else {
-      const reason =
-        outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)
-      console.warn(`[runChatTurnNeutral] MCP server "${id}" could not be started: ${reason}`)
-      startupNotices.push(
-        `The MCP server "${id}" could not be started this turn, so its tools are unavailable.`,
-      )
-    }
-  })
-  return { specs, connectedIds, startupNotices }
-}
-
-async function closeMcpSessions(sessions: readonly McpClientTools[]): Promise<void> {
-  await Promise.all(sessions.map((s) => s.close()))
 }
 
 /**
