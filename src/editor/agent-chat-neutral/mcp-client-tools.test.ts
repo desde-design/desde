@@ -80,8 +80,27 @@ describe('connectMcpClientTools', () => {
         server: { command: '/nonexistent-binary' },
         env: process.env,
       }),
-    ).rejects.toThrow()
+    ).rejects.toThrow(/MCP server "ghost"/)
   })
+
+  it.each([
+    ['repeat', /MCP server "pager": it returned the same tools\/list cursor twice/],
+    ['endless', /MCP server "pager": it listed more than 20 pages of tools/],
+  ])(
+    'rejects a server whose tools/list cursor never ends (%s), instead of following it forever',
+    async (mode, message) => {
+      const started = Date.now()
+      await expect(
+        connectMcpClientTools({
+          id: 'pager',
+          server: { ...echoServer, env: { ECHO_MCP_CURSOR: mode } },
+          env: process.env,
+        }),
+      ).rejects.toThrow(message)
+      // Ended by the cap, not by the 30s startup deadline.
+      expect(Date.now() - started).toBeLessThan(10_000)
+    },
+  )
 
   it('rejects when the server exits before answering, with its stderr in the message', async () => {
     await expect(
@@ -93,6 +112,6 @@ describe('connectMcpClientTools', () => {
         },
         env: process.env,
       }),
-    ).rejects.toThrow(/boom: missing token/)
+    ).rejects.toThrow(/MCP server "crasher": [\s\S]*boom: missing token/)
   })
 })

@@ -59,11 +59,23 @@ export interface McpClientTools {
 }
 
 /**
- * Ceiling on the startup handshake (initialize plus tool listing). A server
- * that has not answered by then is treated as failed for the turn. Generous
- * because `npx -y <server>` downloads the package on its first run.
+ * One deadline for the WHOLE startup: spawn, initialize and every page of
+ * `tools/list` together. A server that has not finished by then is treated as
+ * failed for the turn. Generous because `npx -y <server>` downloads the
+ * package on its first run.
+ *
+ * It is one deadline and not a per-request timeout, because a per-request
+ * timeout bounds nothing: a server that answers each page promptly and always
+ * returns another cursor would hold the turn before `turn_start` forever.
  */
 const MCP_STARTUP_TIMEOUT_MS = 30_000
+
+/**
+ * Ceiling on `tools/list` pages. A server with more than this many pages of
+ * tools is misbehaving, not large: the SDK's own servers list every tool on
+ * one page.
+ */
+const MCP_MAX_TOOL_PAGES = 20
 
 /** How long `close()` waits for the child before returning. */
 const MCP_CLOSE_WAIT_MS = 1_500
@@ -102,9 +114,13 @@ export async function connectMcpClientTools(
   })
 
   const client = new Client({ name: 'desde-editor', version: '1' })
+  const deadline = AbortSignal.timeout(MCP_STARTUP_TIMEOUT_MS)
   const requestOpts = {
+    // The per-request timeout is the SDK's own knob, set to the same value so
+    // its default (60s) never outlasts the deadline. The signal is what
+    // actually bounds startup as a whole.
     timeout: MCP_STARTUP_TIMEOUT_MS,
-    ...(input.signal ? { signal: input.signal } : {}),
+    signal: input.signal ? AbortSignal.any([input.signal, deadline]) : deadline,
   }
 
   let closing: Promise<void> | null = null
@@ -120,17 +136,36 @@ export async function connectMcpClientTools(
   try {
     await client.connect(transport, requestOpts)
     listed = []
+    const seenCursors = new Set<string>()
     let cursor: string | undefined
-    do {
-      const page = await client.listTools(cursor ? { cursor } : undefined, requestOpts)
-      listed.push(...page.tools)
-      cursor = page.nextCursor
-    } while (cursor)
+    for (let page = 0; ; page++) {
+      if (page >= MCP_MAX_TOOL_PAGES) {
+        throw new Error(`it listed more than ${MCP_MAX_TOOL_PAGES} pages of tools`)
+      }
+      const res = await client.listTools(cursor ? { cursor } : undefined, requestOpts)
+      listed.push(...res.tools)
+      cursor = res.nextCursor
+      if (!cursor) break
+      // The same cursor twice is a loop the server will never leave.
+      if (seenCursors.has(cursor)) {
+        throw new Error('it returned the same tools/list cursor twice')
+      }
+      seenCursors.add(cursor)
+    }
   } catch (err) {
     await close()
-    const reason = err instanceof Error ? err.message : String(err)
+    const reason =
+      deadline.aborted && input.signal?.aborted !== true
+        ? `it did not finish starting within ${MCP_STARTUP_TIMEOUT_MS / 1000}s`
+        : err instanceof Error
+          ? err.message
+          : String(err)
     const stderr = stderrTail.trim()
-    throw new Error(`${reason}${stderr ? `\n${stderr}` : ''}`, { cause: err })
+    // Names the server, because a caller that starts several logs these side
+    // by side.
+    throw new Error(`MCP server "${input.id}": ${reason}${stderr ? `\n${stderr}` : ''}`, {
+      cause: err,
+    })
   }
 
   const specs: ToolSpec[] = []
