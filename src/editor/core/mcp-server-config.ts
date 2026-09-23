@@ -26,3 +26,22 @@ export function isMcpStdioServerConfig(v: unknown): v is McpStdioServerConfig {
   const o = v as Record<string, unknown>
   return typeof o.command === 'string' && (o.args === undefined || Array.isArray(o.args))
 }
+
+/**
+ * The rule an MCP server id must meet, stated for error messages.
+ *
+ * An id becomes the middle of every tool name, `mcp__<id>__<tool>`, and the
+ * permission gate finds the id again by reading up to the first `__` after
+ * `mcp__`. An id containing `__` therefore splits in the wrong place: id
+ * `editor__figma` reads as the built-in `editor` namespace and skips the
+ * read-only policy, and id `a__b` inherits the policy of `a`. Letters, digits
+ * and `-` cannot form `__`, and `.` is refused by model providers anyway.
+ */
+export const MCP_SERVER_ID_RULE = 'letters, digits and "-" only'
+
+const MCP_SERVER_ID = /^[A-Za-z0-9-]+$/
+
+/** Whether `id` meets {@link MCP_SERVER_ID_RULE}. Used at load AND at connect. */
+export function isValidMcpServerId(id: string): boolean {
+  return MCP_SERVER_ID.test(id)
+}

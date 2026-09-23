@@ -29,7 +29,11 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import type { McpStdioServerConfig } from './mcp-server-config'
+import {
+  isValidMcpServerId,
+  MCP_SERVER_ID_RULE,
+  type McpStdioServerConfig,
+} from './mcp-server-config'
 
 const MCP_FILENAME = '.mcp.json'
 const LEGACY_CONFIG_FILENAME = 'desde.config.json'
@@ -135,6 +139,13 @@ function parseServer(
 ): EditorExtension | null {
   if (RESERVED_IDS.has(id)) {
     errors.push(`${id}: "${id}" is a reserved extension id`)
+    return null
+  }
+  // Refused at load so BOTH lanes are protected: the id is spliced into
+  // `mcp__<id>__<tool>`, and one containing `__` would be read back by the
+  // permission gate as a different id. See `MCP_SERVER_ID_RULE`.
+  if (!isValidMcpServerId(id)) {
+    errors.push(`${id}: extension id "${id}" is not allowed. An id may use ${MCP_SERVER_ID_RULE}.`)
     return null
   }
   if (typeof raw.command !== 'string' || raw.command.trim() === '') {
