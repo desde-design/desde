@@ -13,7 +13,7 @@ import {
   CLAUDE_CODE_LLM_CONFIG,
   type LLMConfig,
 } from './registry'
-import { AnthropicProvider } from './anthropic-provider'
+import { AiSdkProvider } from './ai-sdk-provider'
 import { ClaudeAgentSdkProvider } from '../agent-chat-sidecar/claude-agent-sdk-provider'
 import { registerDescriptorForTests } from './provider-registry'
 import { OPENAI_DESCRIPTOR } from './descriptors/openai'
@@ -52,7 +52,7 @@ describe('getProvider', () => {
       env: { ANTHROPIC_API_KEY: 'sk-fake' } as unknown as NodeJS.ProcessEnv,
     })
     expect(p.name).toBe('anthropic')
-    expect(p).toBeInstanceOf(AnthropicProvider)
+    expect(p).toBeInstanceOf(AiSdkProvider)
   })
 
   /**
@@ -158,8 +158,8 @@ describe('getProvider', () => {
     // The shared env stays clean — no key was mutated onto
     // ANTHROPIC_API_KEY. Each provider holds its own.
     expect(process.env.ANTHROPIC_API_KEY).toBeUndefined()
-    expect(a).toBeInstanceOf(AnthropicProvider)
-    expect(b).toBeInstanceOf(AnthropicProvider)
+    expect(a).toBeInstanceOf(AiSdkProvider)
+    expect(b).toBeInstanceOf(AiSdkProvider)
   })
 })
 

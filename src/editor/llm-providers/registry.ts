@@ -25,7 +25,7 @@
  * the runtime that owns it.
  */
 
-import { ANTHROPIC_DEFAULT_MODEL } from './anthropic-provider'
+import { ANTHROPIC_DEFAULT_MODEL } from './anthropic-model-catalog'
 import {
   ClaudeAgentSdkProvider,
   CLAUDE_AGENT_SDK_DEFAULT_MODEL,

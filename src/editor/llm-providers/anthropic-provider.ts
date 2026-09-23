@@ -17,6 +17,8 @@
 
 import Anthropic from '@anthropic-ai/sdk'
 
+import { ANTHROPIC_DEFAULT_MODEL } from './anthropic-model-catalog'
+
 import type {
   AssistantContent,
   CompleteOpts,
@@ -53,8 +55,6 @@ export interface AnthropicProviderOptions {
    */
   apiKey?: string
 }
-
-export const ANTHROPIC_DEFAULT_MODEL = 'claude-sonnet-4-6'
 
 export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic'
