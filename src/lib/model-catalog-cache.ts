@@ -34,8 +34,8 @@ export interface ModelCatalogCapabilitiesLike {
  * is server-only, so this is a copy of the string union, not an import —
  * same reasoning as `ModelCatalogCapabilitiesLike` above). `'cli'` is the
  * one value the chip cares about: it means the catalog came from the
- * bundled `claude` binary's own sign-in (dev mode / the subscription
- * sidecar), not from an API key — see `model-picker-chip.tsx`'s
+ * `claude` command line tool on PATH's own sign-in (dev mode / the
+ * subscription sidecar), not from an API key — see `model-picker-chip.tsx`'s
  * "subscription (dev)" badge.
  */
 export type ModelCatalogSourceLike = "api" | "cli" | "static"
@@ -59,8 +59,8 @@ export interface ModelCatalogResponse {
    */
   lastChosenModel?: SessionModelConfig | null
   /**
-   * Where the catalogs came from. `'cli'` means the bundled `claude`
-   * binary's own sign-in answered, not an API key — see
+   * Where the catalogs came from. `'cli'` means the `claude` command line
+   * tool on PATH's own sign-in answered, not an API key — see
    * `ModelCatalogSourceLike`.
    */
   source?: ModelCatalogSourceLike

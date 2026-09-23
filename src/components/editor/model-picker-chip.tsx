@@ -378,9 +378,10 @@ export function ModelPickerChip({
     : -1
   const effortIndex = chosenEffortIndex >= 0 ? chosenEffortIndex : defaultEffortIndex
 
-  // The catalog came from the bundled `claude` binary's own sign-in, not an
-  // API key — dev mode or the subscription sidecar. The badge names that so
-  // a chat that stops working when the binary signs out is not a surprise.
+  // The catalog came from the `claude` command line tool on PATH's own
+  // sign-in, not an API key — dev mode or the subscription sidecar. The badge
+  // names that so a chat that stops working when that sign-in ends is not a
+  // surprise.
   const runsOnSubscription = catalog.source === "cli"
 
   return (

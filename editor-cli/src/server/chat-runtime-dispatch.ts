@@ -6,8 +6,8 @@
  * product's chat runtime for every provider, and the Claude Agent SDK
  * sidecar (`src/editor/agent-chat-sidecar/run-chat-turn-sidecar.ts`), a
  * dev-only lane for the person running Desde for themselves who would
- * rather spend the Claude subscription the bundled `claude` binary is
- * signed into. `resolveChatRuntimeKind` decides which; both loaders stay
+ * rather spend the Claude subscription the `claude` command line tool on
+ * PATH is signed into. `resolveChatRuntimeKind` decides which; both loaders stay
  * lazy dynamic imports so DISPATCHING a chat turn never imports
  * `@anthropic-ai/claude-agent-sdk` unless the turn actually routes to the
  * sidecar. That laziness is the reason this is a function taking loaders

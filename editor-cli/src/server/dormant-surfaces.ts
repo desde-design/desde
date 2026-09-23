@@ -196,8 +196,8 @@ export function isSecretReadsBlocked(ctx: DormantSurfaceConfig): boolean {
 export function sidecarRefusal(): string {
   return (
     `The Claude subscription sidecar is off. Set ${CLAUDE_SUBSCRIPTION_ENV}=1 and remove ` +
-    "any configured Anthropic API key to run chat on the bundled `claude` binary's own " +
-    "sign-in instead."
+    "any configured Anthropic API key to run chat on the sign-in of the `claude` " +
+    "command line tool on your PATH instead."
   )
 }
 

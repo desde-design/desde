@@ -37,9 +37,9 @@ import { handleModelCatalogRequest } from "../model-catalog-handler.js"
 import { assertChatCredentials } from "../../../../src/editor/llm-providers/assert-chat-credentials.js"
 
 // The BYO-key cutover: chat dispatch now refuses without a model credential,
-// because the SDK would otherwise spawn the bundled `claude` binary and run on
-// whatever Claude subscription it is signed in with, which a distributed
-// product may not offer. These tests exercise dispatch mechanics rather than
+// because the SDK would otherwise spawn the `claude` command line tool on
+// PATH and run on whatever Claude subscription it is signed in with, which a
+// distributed product may not offer. These tests exercise dispatch mechanics rather than
 // auth, so they supply a key. The refusal itself is covered by
 // `src/editor/llm-providers/assert-chat-credentials.test.ts` and by the
 // dedicated case in `chat-handler.test.ts`.
@@ -268,7 +268,7 @@ describe("handleChatRequest", () => {
     // The server half of the BYO-key cutover. The client already stops
     // presenting chat as configured, but a stale or hand-built client must not
     // be able to start a turn that would run on whatever Claude subscription
-    // the bundled `claude` binary happens to be signed in with. Anthropic's
+    // the `claude` command line tool on PATH happens to be signed in with. Anthropic's
     // Agent SDK terms are why: a distributed third-party product may not offer
     // claude.ai login.
     //
@@ -293,12 +293,12 @@ describe("handleChatRequest", () => {
     // untested.
     //
     // It asserts the DISPATCH, not the absence of a phrase. It used to pass no
-    // loaders, so it ran the real bundled `claude` binary, and it asserted the
-    // response never said "Anthropic API key". Both halves were wrong. The
-    // phrase appears in two unrelated places — the refusal this case exists to
-    // rule out, raised BEFORE dispatch, and the remediation copy for a vendor
-    // 401 raised AFTER a successful dispatch — so the assertion could not tell
-    // the two apart. On any machine whose bundled binary is not signed in the
+    // loaders, so it ran the real `claude` command line tool on PATH, and it
+    // asserted the response never said "Anthropic API key". Both halves were
+    // wrong. The phrase appears in two unrelated places — the refusal this case
+    // exists to rule out, raised BEFORE dispatch, and the remediation copy for a
+    // vendor 401 raised AFTER a successful dispatch — so the assertion could not
+    // tell the two apart. On any machine whose `claude` on PATH is not signed in the
     // turn dispatched, 401'd, and failed this case; it blocked a release on
     // 2026-09-07 and fails identically on commits from before that work.
     vi.stubEnv("ANTHROPIC_API_KEY", "")

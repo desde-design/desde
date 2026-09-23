@@ -92,8 +92,8 @@ const RATE_LIMITED_PATTERNS = [
 ]
 
 // Authentication-failure detection. Editor's SDK runtime authenticates
-// through the bundled `claude` CLI's subscription credentials (or an
-// `ANTHROPIC_API_KEY` when set). When those credentials are expired /
+// through the `claude` command line tool on PATH's subscription credentials
+// (or an `ANTHROPIC_API_KEY` when set). When those credentials are expired /
 // missing / rejected, Anthropic returns HTTP 401 and the SDK surfaces a
 // throw whose message contains the shapes below. The raw string
 // ("Failed to authenticate. API Error: 401 …") is accurate but
@@ -132,10 +132,9 @@ export const AUTH_REAUTH_MESSAGE =
 
 /**
  * The same 401, when the turn ran on the Claude subscription the `claude`
- * binary is signed in with (`EDITOR_USE_CLAUDE_SUBSCRIPTION`, which desktop
- * dev mode sets). The login is repaired in a terminal, never from the settings
- * gear: the desktop's downloaded runtime and the user's own `claude` share one
- * keychain entry, so `/login` in either fixes both.
+ * command line tool on PATH is signed in with (`EDITOR_USE_CLAUDE_SUBSCRIPTION`,
+ * which desktop dev mode sets). The login is repaired in a terminal: run
+ * `claude` then `/login`, which fixes the same sign-in Editor's sidecar reads.
  */
 export const AUTH_REAUTH_SUBSCRIPTION_MESSAGE =
   'Authentication failed (401). Chat is running on the Claude subscription signed ' +

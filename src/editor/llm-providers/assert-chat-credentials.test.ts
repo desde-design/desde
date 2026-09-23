@@ -10,8 +10,8 @@ import {
 /**
  * The BYO-key cutover for the chat lane, now per provider (Task 14).
  *
- * Before this gate existed, chat ran on whatever the bundled `claude` binary
- * was signed in with. Someone with a Claude subscription got a fully working
+ * Before this gate existed, chat ran on whatever the `claude` command line
+ * tool on PATH was signed in with. Someone with a Claude subscription got a fully working
  * product without being asked for anything, billed against their own
  * subscription by our software. That is what Anthropic's Agent SDK terms
  * forbid a distributed product from offering, and the old quickstart

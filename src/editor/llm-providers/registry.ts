@@ -109,9 +109,9 @@ export function getProvider(opts: GetProviderOpts = {}): LLMProvider {
  * The `LLMConfig` a provider id implies, before any project overrides.
  *
  * The subscription special case lives HERE and nowhere else: with no Anthropic
- * key but an explicit opt-in, the config routes through the bundled `claude`
- * binary instead. Duplicating that rule in `resolveLlmConfig` is how the two
- * would come to disagree about what "no key" means.
+ * key but an explicit opt-in, the config routes through the `claude` command
+ * line tool on PATH instead. Duplicating that rule in `resolveLlmConfig` is how
+ * the two would come to disagree about what "no key" means.
  */
 export function configForProvider(
   providerId: string,
@@ -189,7 +189,7 @@ function buildProvider(config: LLMConfig, env: NodeJS.ProcessEnv): LLMProvider {
     const envVar = apiKeyEnvVar ?? descriptor.credentials.apiKeyEnvVar
     const subscriptionHint =
       descriptor.credentials.hasSubscriptionRuntime === true
-        ? ` Or set ${CLAUDE_SUBSCRIPTION_ENV}=1 to use the Claude subscription of the bundled \`claude\` CLI (only appropriate when you are running Editor for yourself. See the README).`
+        ? ` Or set ${CLAUDE_SUBSCRIPTION_ENV}=1 to use the Claude subscription of the \`claude\` command line tool on your PATH (only appropriate when you are running Editor for yourself. See the README).`
         : ''
     throw new Error(
       `Missing ${envVar}. Set it to use Editor's AI features with ${descriptor.label}, ` +

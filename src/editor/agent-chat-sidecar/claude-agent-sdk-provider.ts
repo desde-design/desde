@@ -1,8 +1,8 @@
 /**
  * LLMProvider implementation backed by `@anthropic-ai/claude-agent-sdk`.
  *
- * The Agent SDK routes through the bundled `claude` binary which uses
- * whichever credentials are configured for `claude` itself: a logged-in
+ * The Agent SDK routes through the `claude` command line tool found on
+ * PATH, which uses whichever credentials are configured for `claude` itself: a logged-in
  * subscription via `claude /login`, or `ANTHROPIC_API_KEY` if that's
  * the auth the binary was configured with. The headline use case is
  * "no API key set in the env → fall through to the user's Claude

@@ -1231,11 +1231,11 @@ describe("the effort row is operable from the keyboard", () => {
 })
 
 /**
- * `source: "cli"` on the catalog response means the bundled `claude` binary's
- * own sign-in answered it, not an API key (dev mode / the subscription
- * sidecar) — see `resolveChatRuntimeKind` in
+ * `source: "cli"` on the catalog response means the `claude` command line
+ * tool on PATH's own sign-in answered it, not an API key (dev mode / the
+ * subscription sidecar) — see `resolveChatRuntimeKind` in
  * `editor-cli/src/server/chat-runtime-dispatch.ts`. The chip marks that so a
- * chat that stops working when the binary signs out is not a surprise.
+ * chat that stops working when that sign-in ends is not a surprise.
  */
 describe("ModelPickerChip — subscription (dev) badge", () => {
   it("shows the badge when the catalog's source is 'cli'", async () => {

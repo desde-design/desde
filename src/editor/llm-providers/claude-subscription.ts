@@ -1,5 +1,6 @@
 /**
- * The opt-in for the bundled-`claude` subscription path.
+ * The opt-in for the subscription path that uses the `claude` command line
+ * tool on PATH.
  *
  * A LEAF module on purpose. It lived in `registry.ts`, which now reads the
  * descriptor table, while the descriptor table needs this flag: leaving it

@@ -80,7 +80,7 @@ export interface ChatHandlerLoaders {
   /**
    * Loads the Claude Agent SDK sidecar — dev-only, for the person running
    * Desde for themselves who would rather spend the Claude subscription the
-   * bundled `claude` binary is signed into than configure an
+   * `claude` command line tool on PATH is signed into than configure an
    * `ANTHROPIC_API_KEY`. `resolveChatRuntimeKind` decides when a turn
    * reaches this lane; the product runtime for everyone else is
    * `loadRunChatTurnNeutral` below.

@@ -12,8 +12,8 @@
  *
  *  - The Anthropic Models API (`GET /v1/models`), when an API key is active.
  *    It reports ids, display names, and a per-level effort capability tree.
- *  - The bundled `claude` binary, through the Agent SDK's `supportedModels()`
- *    control request, when dev mode / the subscription opt-in is active and
+ *  - The `claude` command line tool on PATH, through the Agent SDK's
+ *    `supportedModels()` control request, when dev mode / the subscription opt-in is active and
  *    there is no key to call the API with. It reports ids, display names,
  *    descriptions, and a single "supports effort" flag.
  */

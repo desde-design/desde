@@ -28,9 +28,9 @@ import {
 import type { ChatSession, ChatTurn } from "../../../../src/editor/agent-chat/types.js"
 
 // The BYO-key cutover: chat dispatch now refuses without a model credential,
-// because the SDK would otherwise spawn the bundled `claude` binary and run on
-// whatever Claude subscription it is signed in with, which a distributed
-// product may not offer. These tests exercise dispatch mechanics rather than
+// because the SDK would otherwise spawn the `claude` command line tool on
+// PATH and run on whatever Claude subscription it is signed in with, which a
+// distributed product may not offer. These tests exercise dispatch mechanics rather than
 // auth, so they supply a key. The refusal itself is covered by
 // `src/editor/llm-providers/assert-chat-credentials.test.ts` and by the
 // dedicated case in `chat-handler.test.ts`.

@@ -1,7 +1,7 @@
 /**
  * Anthropic. The descriptor records what the product does today, unchanged:
- * the Claude Agent SDK serves its chat, a bundled `claude` binary gives it the
- * only subscription runtime any provider has, and its key validates against
+ * the Claude Agent SDK serves its chat, the `claude` command line tool on
+ * PATH gives it the only subscription runtime any provider has, and its key validates against
  * `/v1/models`.
  *
  * `hasSubscriptionRuntime` is the one flag that must never be copied onto

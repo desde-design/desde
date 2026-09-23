@@ -220,7 +220,7 @@ export async function handleLLMFallback(
 ): Promise<LLMFallbackResult> {
   // No API-key gate here — the provider registry falls back to whichever
   // provider `resolveLlmConfig` names for this project (the Claude Agent SDK,
-  // via the bundled `claude` binary's subscription auth, when that's the
+  // via the `claude` command line tool on PATH's subscription auth, when that's the
   // resolved provider and no API key is set). If the resolved provider has
   // neither a key nor a logged-in `claude`, the call itself fails with a
   // useful auth error rather than a stale "no env var" message.

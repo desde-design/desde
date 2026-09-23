@@ -52,8 +52,8 @@ export interface ProviderCredentialSpec {
   consoleUrl: string
   /**
    * True only for a provider with a local subscription runtime (Anthropic's
-   * bundled `claude` binary). Gates the dev-mode rungs of the credential
-   * ladder and `isClaudeOnPath`. Never generalise this.
+   * `claude` command line tool on PATH). Gates the dev-mode rungs of the
+   * credential ladder and `isClaudeOnPath`. Never generalise this.
    */
   hasSubscriptionRuntime?: boolean
 }

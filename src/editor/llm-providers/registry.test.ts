@@ -57,7 +57,7 @@ describe('getProvider', () => {
 
   /**
    * This test previously asserted the OPPOSITE — that no key silently fell
-   * back to the bundled `claude` binary's subscription. That was fine while
+   * back to the `claude` command line tool on PATH's subscription. That was fine while
    * Editor was a single-user internal tool and wrong the moment it ships:
    * it spends the END USER's personal Claude subscription, which the Agent
    * SDK terms do not permit for distributed software. Inverted deliberately.

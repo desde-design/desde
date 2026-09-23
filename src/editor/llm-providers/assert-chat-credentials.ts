@@ -9,9 +9,9 @@ import type { ProviderDescriptor } from './provider-descriptor'
  *
  * ## Why this exists
  *
- * Chat runs on the Claude Agent SDK, which spawns the bundled `claude`
- * binary, which authenticates with whatever it is already configured with.
- * That is a genuinely nice property when you are the developer: sign in once
+ * Chat runs on the Claude Agent SDK, which spawns the `claude` command line
+ * tool found on the user's PATH, which authenticates with whatever it is
+ * already configured with. That is a genuinely nice property when you are the developer: sign in once
  * in a terminal and every tool works. It is also the exact thing Anthropic's
  * Agent SDK terms do not allow a distributed product to do — third-party
  * developers may not offer claude.ai login for products built on the SDK,
@@ -72,7 +72,7 @@ export function hasChatCredentials(env: NodeJS.ProcessEnv, providerId: string): 
 export function chatCredentialsMessage(descriptor: ProviderDescriptor): string {
   const subscription =
     descriptor.credentials.hasSubscriptionRuntime === true
-      ? ` If you are running Desde only for yourself and would rather use the Claude subscription the bundled \`claude\` binary is signed in with, set ${CLAUDE_SUBSCRIPTION_ENV}=1.`
+      ? ` If you are running Desde only for yourself and would rather use the Claude subscription the \`claude\` command line tool on your PATH is signed in with, set ${CLAUDE_SUBSCRIPTION_ENV}=1.`
       : ''
   return (
     `Chat needs an ${descriptor.label} API key for this model. ` +

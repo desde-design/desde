@@ -16,8 +16,8 @@
  *    where `apply-llm-credentials.ts` puts a stored key too). The
  *    descriptor's `listLiveModels` lists what that key can use.
  *  - `cli`: Anthropic only, and only when no key is active but dev mode /
- *    `EDITOR_USE_CLAUDE_SUBSCRIPTION` is on. The bundled `claude` binary is
- *    asked, through the Agent SDK's `supportedModels()` control request,
+ *    `EDITOR_USE_CLAUDE_SUBSCRIPTION` is on. The `claude` command line tool on
+ *    PATH is asked, through the Agent SDK's `supportedModels()` control request,
  *    what it offers on the account it is signed into. That is the only
  *    source that can see a subscription, and only Anthropic has one.
  *  - `static`: neither, the descriptor has no live source, or a live source
@@ -184,7 +184,7 @@ function effortFallbackFor(descriptor: ProviderDescriptor) {
 }
 
 /**
- * Live list from the `claude` binary. A query is opened on a prompt stream
+ * Live list from the `claude` command line tool on PATH. A query is opened on a prompt stream
  * that never yields, the models control request is answered, and the process
  * is closed: no turn runs, no tokens are spent. The spawn is the cost, which
  * is why this is cached and bounded by the resolver's timeout.
