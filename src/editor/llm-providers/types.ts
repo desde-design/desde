@@ -107,6 +107,19 @@ export type StopReason =
 export interface Usage {
   inputTokens: number
   outputTokens: number
+  /**
+   * Tokens served from the provider's prompt cache. Disjoint from
+   * `inputTokens` — a cache-read token is never also counted as a fresh
+   * input token. Optional: absent on providers/turns that never reported
+   * a figure, not zero.
+   */
+  cacheReadInputTokens?: number
+  /**
+   * Tokens written to the provider's prompt cache on this call. Additive
+   * against `inputTokens` the same way `cacheReadInputTokens` is
+   * disjoint. Optional for the same reason.
+   */
+  cacheCreationInputTokens?: number
 }
 
 export interface CompleteResult {
@@ -264,7 +277,13 @@ export type ProviderEvent =
   | { kind: 'text_delta'; delta: string }
   | { kind: 'reasoning_delta'; delta: string }
   | { kind: 'tool_use'; id: string; name: string; input: unknown }
-  | { kind: 'usage'; inputTokens: number; outputTokens: number }
+  | {
+      kind: 'usage'
+      inputTokens: number
+      outputTokens: number
+      cacheReadInputTokens?: number
+      cacheCreationInputTokens?: number
+    }
   | {
       kind: 'message_complete'
       stopReason: StopReason

@@ -171,6 +171,77 @@ describe('runChatTurnNeutral: one text turn', () => {
     expect(result.turn.usage).toEqual({ inputTokens: 10, outputTokens: 2 })
   })
 
+  it('accumulates cache-read and cache-creation tokens onto the persisted turn usage', async () => {
+    const step: ProviderEvent[] = [
+      { kind: 'text_delta', delta: 'done' },
+      {
+        kind: 'usage',
+        inputTokens: 10,
+        outputTokens: 2,
+        cacheReadInputTokens: 1000,
+        cacheCreationInputTokens: 500,
+      },
+      {
+        kind: 'message_complete',
+        stopReason: 'end_turn',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+        usage: {
+          inputTokens: 10,
+          outputTokens: 2,
+          cacheReadInputTokens: 1000,
+          cacheCreationInputTokens: 500,
+        },
+      },
+    ]
+    const { events, result } = await run([step])
+    const usageEvent = events.find((e) => e.kind === 'usage')
+    if (usageEvent?.kind !== 'usage') throw new Error('expected usage')
+    expect(usageEvent.cacheReadInputTokens).toBe(1000)
+    expect(usageEvent.cacheCreationInputTokens).toBe(500)
+    expect(result.turn.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadInputTokens: 1000,
+      cacheCreationInputTokens: 500,
+    })
+  })
+
+  it('emits a shortfall usage event when message_complete.usage reports more cache tokens than were streamed', async () => {
+    // Mirrors the existing inputTokens/outputTokens shortfall reconciliation:
+    // a provider that only reports usage on its final message still gets its
+    // cache counters counted, via the same "extra" math.
+    const step: ProviderEvent[] = [
+      { kind: 'text_delta', delta: 'done' },
+      { kind: 'usage', inputTokens: 10, outputTokens: 2, cacheReadInputTokens: 100 },
+      {
+        kind: 'message_complete',
+        stopReason: 'end_turn',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+        usage: {
+          inputTokens: 10,
+          outputTokens: 2,
+          cacheReadInputTokens: 400,
+          cacheCreationInputTokens: 50,
+        },
+      },
+    ]
+    const { events, result } = await run([step])
+    const usageEvents = events.filter((e): e is Extract<ChatStreamEvent, { kind: 'usage' }> => e.kind === 'usage')
+    expect(usageEvents).toHaveLength(2)
+    expect(usageEvents[1]).toMatchObject({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 300,
+      cacheCreationInputTokens: 50,
+    })
+    expect(result.turn.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadInputTokens: 400,
+      cacheCreationInputTokens: 50,
+    })
+  })
+
   it('appends the turn to the session and NEVER sets sdkSessionId', async () => {
     const { result } = await run([textStep('done')])
     expect(result.session.turns).toHaveLength(1)

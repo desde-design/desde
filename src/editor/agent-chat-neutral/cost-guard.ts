@@ -25,6 +25,7 @@
  */
 
 import { estimateUsageCost } from '../llm-providers/rate-cards'
+import type { Usage } from '../llm-providers/types'
 
 export interface CostGuardInput {
   model: string
@@ -35,7 +36,7 @@ export interface CostGuardInput {
 }
 
 export interface CostGuard {
-  record(usage: { inputTokens: number; outputTokens: number }): void
+  record(usage: Usage): void
   /** True once prior spend plus this turn's estimate crosses the ceiling. */
   readonly exceeded: boolean
   /** This turn's estimated cost so far. */

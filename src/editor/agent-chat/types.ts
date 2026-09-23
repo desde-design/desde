@@ -12,6 +12,7 @@
  */
 
 import type { EffortLevel } from '../core/model-catalog'
+import type { Usage } from '../llm-providers/types'
 
 /**
  * Stable identifier for a chat session.
@@ -83,8 +84,12 @@ export interface ChatTurn {
    * (e.g. session resume after editor restart).
    */
   editProposals: ChatEditProposalRef[]
-  /** Token usage aggregated across all model calls in this turn. */
-  usage?: { inputTokens: number; outputTokens: number }
+  /**
+   * Token usage aggregated across all model calls in this turn. Carries
+   * cache-read / cache-creation counts too, when the provider reported
+   * them, so `costOfTurn`'s rate-card estimate can price them.
+   */
+  usage?: Usage
   /**
    * Model id used for this turn. Persisted so the session's
    * cost-ceiling computation can look up the right rate card — older

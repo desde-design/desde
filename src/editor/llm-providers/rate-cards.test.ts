@@ -13,7 +13,7 @@
  * turns the user has the budget for.
  */
 import { describe, expect, it } from 'vitest'
-import { getRateCard, UNKNOWN_MODEL_RATE } from './rate-cards'
+import { estimateUsageCost, getRateCard, UNKNOWN_MODEL_RATE } from './rate-cards'
 import { PROVIDER_DESCRIPTORS } from './provider-registry'
 
 describe('getRateCard — descriptor-table coverage', () => {
@@ -41,5 +41,45 @@ describe('getRateCard — descriptor-table coverage', () => {
     // wrong by a factor of three in the cheap direction, which is the direction
     // that lets a session overrun its ceiling.
     expect(getRateCard('gpt-5.2')).toEqual({ inputPerM: 1.75, outputPerM: 14 })
+  })
+})
+
+describe('estimateUsageCost — cache tokens', () => {
+  it('prices cache reads at a tenth and cache writes at 1.25x of the input rate by default', () => {
+    // gpt-5.6 has no explicit cacheReadPerM/cacheWritePerM, so this proves
+    // the fallback multiplier rather than a per-card override.
+    expect(getRateCard('gpt-5.6').cacheReadPerM).toBeUndefined()
+    expect(getRateCard('gpt-5.6').cacheWritePerM).toBeUndefined()
+    const readCost = estimateUsageCost('gpt-5.6', {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 1_000_000,
+    })
+    const writeCost = estimateUsageCost('gpt-5.6', {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 1_000_000,
+    })
+    // inputPerM is 4: a tenth is 0.4, 1.25x is 5.
+    expect(readCost).toBeCloseTo(0.4, 6)
+    expect(writeCost).toBeCloseTo(5, 6)
+  })
+
+  it('prices claude-opus-5-5 cache reads and writes at their published explicit rates', () => {
+    // Controller correction (measured on claude.com/pricing 2026-09-22): this
+    // card's cache ratios are NOT the 0.1x/1.25x default — cacheReadPerM is
+    // 0.20 and cacheWritePerM is 5, set explicitly on the RATE_CARDS entry.
+    const readCost = estimateUsageCost('claude-opus-5-5', {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 1_000_000,
+    })
+    const writeCost = estimateUsageCost('claude-opus-5-5', {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 1_000_000,
+    })
+    expect(readCost).toBeCloseTo(0.2, 6)
+    expect(writeCost).toBeCloseTo(5, 6)
   })
 })

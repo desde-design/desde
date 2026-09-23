@@ -344,7 +344,7 @@ export class AiSdkProvider implements LLMProvider {
 
     if (opts.signal?.aborted) aborted = true
 
-    yield { kind: 'usage', inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }
+    yield { kind: 'usage', ...usage }
 
     // A finished response that said nothing is a failed step, not an empty
     // successful one.
@@ -570,9 +570,30 @@ function safeJsonParse(text: string): unknown {
 }
 
 function toUsage(usage: LanguageModelUsage | undefined): Usage {
+  // `LanguageModelUsage.inputTokenDetails` is the normalized shape every
+  // provider's usage lands in (confirmed against the installed `ai`
+  // package's d.ts, and against both `@ai-sdk/anthropic` and
+  // `@ai-sdk/openai`'s usage converters): `cacheReadTokens` and
+  // `cacheWriteTokens` are populated straight off the vendor's own
+  // cache-read / cache-creation counters, so no provider-specific
+  // `providerMetadata` read is needed here.
+  //
+  // `usage.inputTokens` itself (the top-level field) is the GRAND TOTAL —
+  // fresh input tokens PLUS cache-read PLUS cache-write, confirmed in both
+  // converters above. `Usage.inputTokens` here must stay disjoint from the
+  // two cache counters, or `estimateUsageCost` double-bills cache tokens
+  // (once inside `inputTokens` at the full input rate, again at the cache
+  // rate). So this reads `noCacheTokens` — the split-out fresh count —
+  // and only falls back to the grand total for a provider that never
+  // reported cache details at all, where the total IS the fresh count.
+  const details = usage?.inputTokenDetails
+  const cacheRead = details?.cacheReadTokens
+  const cacheWrite = details?.cacheWriteTokens
   return {
-    inputTokens: usage?.inputTokens ?? 0,
+    inputTokens: details?.noCacheTokens ?? usage?.inputTokens ?? 0,
     outputTokens: usage?.outputTokens ?? 0,
+    ...(cacheRead !== undefined ? { cacheReadInputTokens: cacheRead } : {}),
+    ...(cacheWrite !== undefined ? { cacheCreationInputTokens: cacheWrite } : {}),
   }
 }
 

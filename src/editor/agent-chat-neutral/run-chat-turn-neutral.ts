@@ -507,6 +507,8 @@ async function runInner(
   })
   let inputTokens = 0
   let outputTokens = 0
+  let cacheReadInputTokens = 0
+  let cacheCreationInputTokens = 0
   let stopReason: 'end_turn' | 'error' = 'end_turn'
   let vendorStopReason: string | undefined
   let errorMessage: string | undefined
@@ -616,6 +618,8 @@ async function runInner(
       let finalUsage: Usage | undefined
       let streamedIn = 0
       let streamedOut = 0
+      let streamedCacheRead = 0
+      let streamedCacheCreation = 0
       let lastStep = false
 
       const streamOpts: StreamOpts = {
@@ -634,7 +638,24 @@ async function runInner(
           streamedOut += ev.outputTokens
           inputTokens += ev.inputTokens
           outputTokens += ev.outputTokens
-          costGuard.record({ inputTokens: ev.inputTokens, outputTokens: ev.outputTokens })
+          if (ev.cacheReadInputTokens !== undefined) {
+            streamedCacheRead += ev.cacheReadInputTokens
+            cacheReadInputTokens += ev.cacheReadInputTokens
+          }
+          if (ev.cacheCreationInputTokens !== undefined) {
+            streamedCacheCreation += ev.cacheCreationInputTokens
+            cacheCreationInputTokens += ev.cacheCreationInputTokens
+          }
+          costGuard.record({
+            inputTokens: ev.inputTokens,
+            outputTokens: ev.outputTokens,
+            ...(ev.cacheReadInputTokens !== undefined
+              ? { cacheReadInputTokens: ev.cacheReadInputTokens }
+              : {}),
+            ...(ev.cacheCreationInputTokens !== undefined
+              ? { cacheCreationInputTokens: ev.cacheCreationInputTokens }
+              : {}),
+          })
         } else if (ev.kind === 'message_complete') {
           assistantMessage = ev.message
           finalUsage = ev.usage
@@ -745,11 +766,33 @@ async function runInner(
       // which is the case this exists for.
       const extraIn = Math.max(0, (finalUsage?.inputTokens ?? 0) - streamedIn)
       const extraOut = Math.max(0, (finalUsage?.outputTokens ?? 0) - streamedOut)
-      if (extraIn > 0 || extraOut > 0) {
+      const extraCacheRead = Math.max(
+        0,
+        (finalUsage?.cacheReadInputTokens ?? 0) - streamedCacheRead,
+      )
+      const extraCacheCreation = Math.max(
+        0,
+        (finalUsage?.cacheCreationInputTokens ?? 0) - streamedCacheCreation,
+      )
+      if (extraIn > 0 || extraOut > 0 || extraCacheRead > 0 || extraCacheCreation > 0) {
         inputTokens += extraIn
         outputTokens += extraOut
-        costGuard.record({ inputTokens: extraIn, outputTokens: extraOut })
-        opts.emit({ kind: 'usage', turnId, inputTokens: extraIn, outputTokens: extraOut })
+        cacheReadInputTokens += extraCacheRead
+        cacheCreationInputTokens += extraCacheCreation
+        costGuard.record({
+          inputTokens: extraIn,
+          outputTokens: extraOut,
+          ...(extraCacheRead > 0 ? { cacheReadInputTokens: extraCacheRead } : {}),
+          ...(extraCacheCreation > 0 ? { cacheCreationInputTokens: extraCacheCreation } : {}),
+        })
+        opts.emit({
+          kind: 'usage',
+          turnId,
+          inputTokens: extraIn,
+          outputTokens: extraOut,
+          ...(extraCacheRead > 0 ? { cacheReadInputTokens: extraCacheRead } : {}),
+          ...(extraCacheCreation > 0 ? { cacheCreationInputTokens: extraCacheCreation } : {}),
+        })
       }
 
       if (lastStep) break
@@ -817,7 +860,15 @@ async function runInner(
     // Omitted entirely when nothing was steered, so a turn that took no
     // steers serializes exactly as it did before this field existed.
     ...(steerRecords.length > 0 ? { steers: steerRecords } : {}),
-    usage: inputTokens > 0 || outputTokens > 0 ? { inputTokens, outputTokens } : undefined,
+    usage:
+      inputTokens > 0 || outputTokens > 0 || cacheReadInputTokens > 0 || cacheCreationInputTokens > 0
+        ? {
+            inputTokens,
+            outputTokens,
+            ...(cacheReadInputTokens > 0 ? { cacheReadInputTokens } : {}),
+            ...(cacheCreationInputTokens > 0 ? { cacheCreationInputTokens } : {}),
+          }
+        : undefined,
     costUsd: costGuard.turnCostUsd > 0 ? costGuard.turnCostUsd : undefined,
     model,
     ...(opts.effort ? { effort: opts.effort } : {}),

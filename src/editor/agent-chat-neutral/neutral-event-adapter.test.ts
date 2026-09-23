@@ -41,6 +41,27 @@ describe('createNeutralEventAdapter', () => {
     ])
   })
 
+  it('carries cache-read and cache-creation tokens through when the provider reports them', () => {
+    expect(
+      take({
+        kind: 'usage',
+        inputTokens: 10,
+        outputTokens: 3,
+        cacheReadInputTokens: 1000,
+        cacheCreationInputTokens: 500,
+      }),
+    ).toEqual([
+      {
+        kind: 'usage',
+        turnId: TURN,
+        inputTokens: 10,
+        outputTokens: 3,
+        cacheReadInputTokens: 1000,
+        cacheCreationInputTokens: 500,
+      },
+    ])
+  })
+
   it('emits nothing for message_complete, because the LOOP decides whether the turn ended', () => {
     expect(
       take({

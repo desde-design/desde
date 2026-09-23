@@ -60,6 +60,12 @@ export function createNeutralEventAdapter(turnId: string): NeutralEventAdapter {
             turnId,
             inputTokens: ev.inputTokens,
             outputTokens: ev.outputTokens,
+            ...(ev.cacheReadInputTokens !== undefined
+              ? { cacheReadInputTokens: ev.cacheReadInputTokens }
+              : {}),
+            ...(ev.cacheCreationInputTokens !== undefined
+              ? { cacheCreationInputTokens: ev.cacheCreationInputTokens }
+              : {}),
           }
           return
         case 'message_complete':

@@ -75,6 +75,33 @@ function usageOf(inputTokens: number, outputTokens: number) {
   }
 }
 
+/**
+ * Same v4 raw usage shape as `usageOf`, but with the cache-read/cache-write
+ * nested fields populated. This is what `@ai-sdk/anthropic`'s
+ * `convertAnthropicUsage` produces from the vendor's own
+ * `cache_read_input_tokens` / `cache_creation_input_tokens` fields
+ * (checked against the installed `@ai-sdk/anthropic` source): the `ai`
+ * package's `streamText` then normalizes it via `asLanguageModelUsage`
+ * into the `finish` stream part's `totalUsage.inputTokenDetails`
+ * (`cacheReadTokens` / `cacheWriteTokens`), which is what `toUsage` reads.
+ */
+function usageWithCacheOf(
+  inputTokens: number,
+  outputTokens: number,
+  cacheRead: number,
+  cacheWrite: number,
+) {
+  return {
+    inputTokens: {
+      total: inputTokens + cacheRead + cacheWrite,
+      noCache: inputTokens,
+      cacheRead,
+      cacheWrite,
+    },
+    outputTokens: { total: outputTokens, text: outputTokens, reasoning: undefined },
+  }
+}
+
 function finishOf(reason: string) {
   return { unified: reason as 'stop', raw: reason }
 }
@@ -353,6 +380,51 @@ describe('AiSdkProvider.streamConversation', () => {
       { type: 'tool_use', id: 'call_1', name: 'get_selection', input: {} },
     ])
     expect(done.usage).toEqual({ inputTokens: 9, outputTokens: 7 })
+  })
+
+  it('reads cache-read and cache-creation tokens off the finish part and includes them on both usage events', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: streamOf([
+        { type: 'stream-start', warnings: [] },
+        { type: 'text-start', id: '1' },
+        { type: 'text-delta', id: '1', delta: 'ok' },
+        { type: 'text-end', id: '1' },
+        {
+          type: 'finish',
+          finishReason: finishOf('stop'),
+          usage: usageWithCacheOf(10, 2, 1000, 500),
+        },
+      ]),
+    })
+    const events = await collect(
+      providerFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [],
+      }),
+    )
+    // `inputTokens` stays the NON-cached count (10), disjoint from the two
+    // cache counters below — the raw v4 usage's `total` field (1510) folds
+    // fresh + cache-read + cache-write together, and `toUsage` un-folds it
+    // via `inputTokenDetails.noCacheTokens` so pricing never double-bills
+    // a cache token once as a full-rate input token and again at the
+    // cache rate.
+    const usageEvent = events.find((e) => e.kind === 'usage')
+    if (usageEvent?.kind !== 'usage') throw new Error('expected usage')
+    expect(usageEvent).toMatchObject({
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadInputTokens: 1000,
+      cacheCreationInputTokens: 500,
+    })
+    const done = events.find((e) => e.kind === 'message_complete')
+    if (done?.kind !== 'message_complete') throw new Error('expected message_complete')
+    expect(done.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadInputTokens: 1000,
+      cacheCreationInputTokens: 500,
+    })
   })
 
   it('passes tools as definitions with no execute, so the library returns the call instead of running it', async () => {
