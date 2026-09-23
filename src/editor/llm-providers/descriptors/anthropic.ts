@@ -13,6 +13,7 @@ import { EFFORT_LEVELS } from '../../core/model-catalog'
 import { ANTHROPIC_MODEL_CATALOG } from '../anthropic-model-catalog'
 import { AnthropicProvider, ANTHROPIC_DEFAULT_MODEL } from '../anthropic-provider'
 import { listAnthropicLiveModels } from '../anthropic-live-models'
+import { resolveAnthropicThinkingConfig } from '../anthropic-adaptive-thinking'
 import type { ProviderDescriptor } from '../provider-descriptor'
 import { claudeReauthMessage } from '../../agent-chat/classify-turn-error'
 
@@ -94,9 +95,17 @@ export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
     // `thinking` is still resolved from the model id by
     // `resolveAnthropicThinkingConfig`.
     defaultLevel: 'medium',
-    // The SDK lane resolves thinking from the model id
-    // (`resolveAnthropicThinkingConfig`), so nothing rides provider options.
-    toRequest: () => ({}),
+    // The SDK lane still resolves thinking itself and ignores this. The
+    // neutral lane (`run-chat-turn-neutral.ts`'s `providerOptionsFor`) is the
+    // one that puts these on the wire, as `StreamOpts.providerOptions`: the
+    // AI SDK's Anthropic adapter nests them under the `anthropic` key. Keys
+    // match `anthropicLanguageModelOptions` in `@ai-sdk/anthropic`.
+    toRequest(effort, model) {
+      return {
+        thinking: resolveAnthropicThinkingConfig(model ?? ANTHROPIC_DEFAULT_MODEL),
+        ...(effort ? { effort } : {}),
+      }
+    },
   },
   errorPatterns: {
     auth: [/invalid authentication credentials/i, /\bauthentication_error\b/i, /failed to authenticate/i],

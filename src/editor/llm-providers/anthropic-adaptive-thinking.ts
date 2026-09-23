@@ -58,3 +58,27 @@ export function supportsAnthropicAdaptiveThinking(model: string): boolean {
     (family) => model === family || model.startsWith(`${family}-`),
   )
 }
+
+/**
+ * Pick the extended-thinking config for an ANTHROPIC model. Adaptive-thinking
+ * models get `{type:'adaptive'}`, which is what `effort` modulates; older
+ * generations get a bounded fixed budget so thinking still surfaces.
+ *
+ * Not reachable for a non-Anthropic session: the SDK runtime is the only
+ * caller of the fixed-budget branch, and `resolveChatRuntime` only routes
+ * `claude-agent-sdk` descriptors to it. The Anthropic descriptor's
+ * `effort.toRequest` (neutral lane) also calls this, for the same model id.
+ */
+export function resolveAnthropicThinkingConfig(
+  model: string,
+  adaptiveHint?: boolean,
+):
+  | { type: 'adaptive'; display: 'summarized' }
+  | { type: 'enabled'; budgetTokens: number; display: 'summarized' } {
+  // The catalog's own answer wins over the family rule: a live source that
+  // says `sonnet` thinks adaptively knows which Sonnet it means.
+  if (adaptiveHint ?? supportsAnthropicAdaptiveThinking(model)) {
+    return { type: 'adaptive', display: 'summarized' }
+  }
+  return { type: 'enabled', budgetTokens: 4000, display: 'summarized' }
+}

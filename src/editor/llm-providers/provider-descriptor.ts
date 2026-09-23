@@ -113,7 +113,13 @@ export interface ProviderDescriptor {
      * It reaches the client as `defaultEffort` on each catalog model.
      */
     defaultLevel: EffortLevel | null
-    toRequest(effort: EffortLevel | undefined): Record<string, unknown>
+    /**
+     * `model` is the resolved model id for the turn (falls back to the
+     * descriptor's own default when the caller has none pinned yet). A
+     * vendor whose provider-options shape does not depend on the model
+     * ignores the second argument.
+     */
+    toRequest(effort: EffortLevel | undefined, model?: string): Record<string, unknown>
   }
   /** Patterns merged into classify-turn-error's generic sets, plus the remediation copy. */
   readonly errorPatterns?: ProviderErrorPatterns

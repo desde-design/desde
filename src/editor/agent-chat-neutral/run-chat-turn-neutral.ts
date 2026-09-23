@@ -523,7 +523,7 @@ async function runInner(
     tools,
     ...(model ? { model } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
-    ...providerOptionsFor(descriptor, opts.effort),
+    ...providerOptionsFor(descriptor, opts.effort, model),
   }
 
   try {
@@ -1041,8 +1041,9 @@ function isRetryableError(err: unknown): boolean {
 function providerOptionsFor(
   descriptor: ProviderDescriptor,
   effort: EffortLevel | undefined,
+  model: string | undefined,
 ): { providerOptions?: Record<string, unknown> } {
-  const fields = descriptor.effort.toRequest(effort)
+  const fields = descriptor.effort.toRequest(effort, model)
   return Object.keys(fields).length > 0 ? { providerOptions: fields } : {}
 }
 

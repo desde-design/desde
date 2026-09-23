@@ -56,9 +56,12 @@ import {
 // file imports the Agent SDK at module scope, and
 // `model-catalog-source.ts` (on the boot graph) needs this predicate
 // WITHOUT that import coming along for the ride.
-import { supportsAnthropicAdaptiveThinking } from '../llm-providers/anthropic-adaptive-thinking'
+import {
+  resolveAnthropicThinkingConfig,
+  supportsAnthropicAdaptiveThinking,
+} from '../llm-providers/anthropic-adaptive-thinking'
 
-export { supportsAnthropicAdaptiveThinking }
+export { resolveAnthropicThinkingConfig, supportsAnthropicAdaptiveThinking }
 
 import { buildEditorToolServer } from './editor-tools'
 import {
@@ -1217,27 +1220,14 @@ function buildUserMessageWithContext(
 }
 
 /**
- * Pick the extended-thinking config for an ANTHROPIC model. Adaptive-thinking
- * models get `{type:'adaptive'}`, which is what `effort` modulates; older
- * generations get a bounded fixed budget so thinking still surfaces.
- *
- * Not reachable for a non-Anthropic session: the SDK runtime is the only
- * caller, and `resolveChatRuntime` only routes `claude-agent-sdk` descriptors
- * to it.
+ * `resolveAnthropicThinkingConfig` moved to
+ * `../llm-providers/anthropic-adaptive-thinking` (imported and re-exported
+ * near the top of this file, alongside `supportsAnthropicAdaptiveThinking`)
+ * so the Anthropic descriptor's `effort.toRequest` (neutral lane) can call it
+ * without pulling in the Agent SDK. Existing importers of this file
+ * (this file's own call above, and `resolve-thinking-config.test.ts`) are
+ * unaffected.
  */
-export function resolveAnthropicThinkingConfig(
-  model: string,
-  adaptiveHint?: boolean,
-):
-  | { type: 'adaptive'; display: 'summarized' }
-  | { type: 'enabled'; budgetTokens: number; display: 'summarized' } {
-  // The catalog's own answer wins over the family rule: a live source that
-  // says `sonnet` thinks adaptively knows which Sonnet it means.
-  if (adaptiveHint ?? supportsAnthropicAdaptiveThinking(model)) {
-    return { type: 'adaptive', display: 'summarized' }
-  }
-  return { type: 'enabled', budgetTokens: 4000, display: 'summarized' }
-}
 
 /*
  * `buildSdkPrompt` used to live here. It branched: a plain string for a text

@@ -45,7 +45,7 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
     }
   })
 
-  it('offers the five-level effort ladder and puts nothing on the wire', () => {
+  it('offers the five-level effort ladder', () => {
     expect(ANTHROPIC_DESCRIPTOR.effort.levels).toEqual([
       'low',
       'medium',
@@ -53,9 +53,25 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
       'xhigh',
       'max',
     ])
-    // The SDK runtime resolves thinking itself; `toRequest` is the neutral
-    // lane's channel and Anthropic never travels it.
-    expect(ANTHROPIC_DESCRIPTOR.effort.toRequest('high')).toEqual({})
+  })
+
+  it('puts adaptive thinking and the chosen effort on provider options', () => {
+    // The SDK lane resolves thinking itself and ignores this; the neutral
+    // lane's `providerOptionsFor` is what reads it, as
+    // `StreamOpts.providerOptions`.
+    expect(ANTHROPIC_DESCRIPTOR.effort.toRequest('high', 'claude-opus-5')).toEqual({
+      thinking: { type: 'adaptive', display: 'summarized' },
+      effort: 'high',
+    })
+    expect(ANTHROPIC_DESCRIPTOR.effort.toRequest(undefined, 'claude-opus-5')).toEqual({
+      thinking: { type: 'adaptive', display: 'summarized' },
+    })
+  })
+
+  it('falls back to the default model when none is given', () => {
+    expect(ANTHROPIC_DESCRIPTOR.effort.toRequest(undefined)).toEqual({
+      thinking: { type: 'adaptive', display: 'summarized' },
+    })
   })
 })
 
