@@ -20,7 +20,7 @@ import { makeEmptySession } from '../agent-chat/types'
 // generator queryMock returns.
 type QueryArgs = { prompt: unknown; options?: Record<string, unknown> }
 
-const { queryMock, scriptedMessages } = vi.hoisted(() => {
+const { queryMock, scriptedMessages, createSdkMcpServerMock } = vi.hoisted(() => {
   const scriptedMessages: unknown[] = []
   const queryMock = vi.fn<(args: QueryArgs) => AsyncGenerator<unknown, void, void>>(
     () => {
@@ -29,20 +29,39 @@ const { queryMock, scriptedMessages } = vi.hoisted(() => {
       })()
     },
   )
-  return { queryMock, scriptedMessages }
+  // Captures the `tools` the runner registers on each MCP server, so tests
+  // can list their names and call their handlers the way the SDK would.
+  const createSdkMcpServerMock = vi.fn(
+    (cfg: { name: string; tools?: Array<{ name: string; handler: RegisteredHandler }> }) => ({
+      type: 'sdk',
+      name: cfg.name,
+      instance: {},
+    }),
+  )
+  return { queryMock, scriptedMessages, createSdkMcpServerMock }
 })
+
+type RegisteredHandler = (input: Record<string, unknown>) => Promise<{
+  content: Array<{ type: string; text?: string }>
+  isError?: boolean
+}>
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: queryMock,
-  // The orchestrator pulls these too — return shape doesn't matter
-  // for tests; we never assert on the returned MCP server instance.
-  createSdkMcpServer: vi.fn(() => ({
-    type: 'sdk',
-    name: 'editor',
-    instance: {},
+  createSdkMcpServer: createSdkMcpServerMock,
+  // `tool(name, description, shape, handler)`: keep the name and the handler.
+  tool: vi.fn((name: string, _description: string, _shape: unknown, handler: RegisteredHandler) => ({
+    name,
+    handler,
   })),
-  tool: vi.fn((name: string) => ({ name })),
 }))
+
+/** The tools registered on the `editor` MCP server by the most recent turn. */
+function registeredEditorTools(): Map<string, RegisteredHandler> {
+  const calls = createSdkMcpServerMock.mock.calls
+  const cfg = [...calls].reverse().find((c) => c[0].name === 'editor')?.[0]
+  return new Map((cfg?.tools ?? []).map((t) => [t.name, t.handler]))
+}
 
 // Now import. The mock has been registered, so the orchestrator's
 // `import {query}` will resolve to `queryMock`.
@@ -62,6 +81,7 @@ beforeEach(() => {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'editor-sdk-test-')))
   scriptedMessages.length = 0
   queryMock.mockClear()
+  createSdkMcpServerMock.mockClear()
 })
 
 afterEach(() => {
@@ -466,35 +486,112 @@ describe('runChatTurnSdk', () => {
     // If this ever goes back to a non-empty array, B6 is reopened.
     expect(opts?.settingSources).toEqual([])
     expect(opts?.includePartialMessages).toBe(true)
-    // `tools` only filters built-in tools — MCP names must NOT
-    // appear here (Codex round-2 B1). The 4 MCP tools are exposed
-    // via mcpServers.editor registration instead.
-    expect(opts?.tools).toEqual([
-      'Read',
-      'Edit',
-      'Write',
-      'Glob',
-      'Grep',
-      'TodoWrite',
-      'WebFetch',
-      'WebSearch',
-    ])
+    // Only the two SDK built-ins that never touch the repository. Every tool
+    // that does is Desde's own, on the `editor` MCP server. Was the SDK's
+    // Read/Edit/Write/Glob/Grep/TodoWrite + web pair until the slim sidecar.
+    expect(opts?.tools).toEqual(['WebFetch', 'WebSearch'])
     expect(opts?.tools).not.toContain('Bash')
     const toolsArr = opts?.tools as string[]
     expect(toolsArr.some((t) => t.startsWith('mcp__'))).toBe(false)
     expect(typeof opts?.canUseTool).toBe('function')
     const mcpServers = opts?.mcpServers as Record<string, unknown> | undefined
     expect(mcpServers?.editor).toBeDefined()
-    // Phase 2: systemPrompt is preset+append, not a custom string.
-    // Keeps the SDK's built-in tool descriptions; our append only
-    // adds Editor-specific net-new content.
-    const sp = opts?.systemPrompt as
-      | { type?: string; preset?: string; append?: string }
+    // Only the MCP servers passed here, and none from the developer's account.
+    expect(opts?.strictMcpConfig).toBe(true)
+    expect(opts?.settings).toEqual({ disableClaudeAiConnectors: true })
+    // The neutral lane's prompt, as a plain string. Was the `claude_code`
+    // preset plus an append until the slim sidecar.
+    const sp = opts?.systemPrompt
+    expect(typeof sp).toBe('string')
+    expect(sp).toContain('# Who you are')
+    expect(sp).toContain('mcp__editor__get_selection')
+    expect(sp).not.toContain('claude_code')
+  })
+
+  it('registers no hooks around Read, Write or Edit (the tools do that work themselves)', async () => {
+    scriptedMessages.push({
+      type: 'result',
+      subtype: 'success',
+      usage: { input_tokens: 0, output_tokens: 0 },
+      stop_reason: 'end_turn',
+    })
+
+    await runChatTurnSdk({
+      bridge: makeBridge(),
+      worktreeRoot: root,
+      session: makeEmptySession('proj-1'),
+      userMessage: 'hooks',
+      emit: () => {},
+      invalidateFiles: () => {},
+      acquireWriteLock: async () => () => {},
+    })
+
+    const opts = queryMock.mock.calls[0]?.[0]?.options as
+      | { hooks?: Record<string, Array<{ matcher?: string }> | undefined> }
       | undefined
-    expect(sp?.type).toBe('preset')
-    expect(sp?.preset).toBe('claude_code')
-    expect(typeof sp?.append).toBe('string')
-    expect(sp?.append).toContain('mcp__editor__get_selection')
+    const hooks = opts?.hooks ?? {}
+    for (const event of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionDenied']) {
+      const matchers = hooks[event] ?? []
+      expect(matchers.some((m) => m.matcher === 'Write|Edit')).toBe(false)
+      expect(matchers.some((m) => m.matcher === 'Read')).toBe(false)
+      // An unmatched hook fires for every tool, Read and Write included.
+      expect(matchers.some((m) => m.matcher === undefined)).toBe(false)
+    }
+  })
+
+  it('registers the whole neutral catalog on the editor MCP server, built-ins included', async () => {
+    scriptedMessages.push({
+      type: 'result',
+      subtype: 'success',
+      usage: { input_tokens: 0, output_tokens: 0 },
+      stop_reason: 'end_turn',
+    })
+
+    await runChatTurnSdk({
+      bridge: makeBridge(),
+      worktreeRoot: root,
+      session: makeEmptySession('proj-1'),
+      userMessage: 'catalog',
+      emit: () => {},
+    })
+
+    const names = [...registeredEditorTools().keys()]
+    // Bare here; the SDK adds `mcp__editor__`, so the model sees
+    // `mcp__editor__Read` and so on.
+    for (const name of ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite']) {
+      expect(names).toContain(name)
+    }
+    for (const name of ['get_selection', 'propose_prop_edit', 'read_file_at_commit']) {
+      expect(names).toContain(name)
+    }
+    expect(names.some((n) => n.startsWith('mcp__'))).toBe(false)
+  })
+
+  it('narrows both the MCP built-ins and the SDK built-ins to a caller-supplied builtinTools list', async () => {
+    scriptedMessages.push({
+      type: 'result',
+      subtype: 'success',
+      usage: { input_tokens: 0, output_tokens: 0 },
+      stop_reason: 'end_turn',
+    })
+
+    await runChatTurnSdk({
+      bridge: makeBridge(),
+      worktreeRoot: root,
+      session: makeEmptySession('proj-1'),
+      userMessage: 'mini-turn shape',
+      emit: () => {},
+      // The edit-fix mini-turn's list.
+      builtinTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep'],
+      disallowedTools: ['mcp__editor__ask_user_question'],
+    })
+
+    const opts = queryMock.mock.calls[0]?.[0]?.options
+    expect(opts?.tools).toEqual([])
+    const names = [...registeredEditorTools().keys()]
+    expect(names).toContain('Write')
+    expect(names).not.toContain('TodoWrite')
+    expect(names).not.toContain('ask_user_question')
   })
 
   it('does NOT register mcpServers.figma when figmaConfig is omitted', async () => {
@@ -517,8 +614,7 @@ describe('runChatTurnSdk', () => {
     const mcpServers = opts?.mcpServers as Record<string, unknown> | undefined
     expect(mcpServers?.editor).toBeDefined()
     expect(mcpServers?.figma).toBeUndefined()
-    const sp = opts?.systemPrompt as { append?: string } | undefined
-    expect(sp?.append).not.toContain('# Figma (configured)')
+    expect(opts?.systemPrompt).not.toContain('# Figma (configured)')
   })
 
   it('registers mcpServers.figma and appends the Figma block when figmaConfig is set', async () => {
@@ -549,9 +645,8 @@ describe('runChatTurnSdk', () => {
       command: 'npx',
       args: ['-y', 'figma-mcp'],
     })
-    const sp = opts?.systemPrompt as { append?: string } | undefined
-    expect(sp?.append).toContain('# Figma (configured)')
-    expect(sp?.append).toContain('mcpServers.figma')
+    expect(opts?.systemPrompt).toContain('# Figma (configured)')
+    expect(opts?.systemPrompt).toContain('mcpServers.figma')
   })
 
   it('does NOT append the screenshot-plan block when canvasEnabled is omitted (dormant by default, 2026-08-04)', async () => {
@@ -571,9 +666,8 @@ describe('runChatTurnSdk', () => {
     })
 
     const opts = queryMock.mock.calls[0]?.[0]?.options
-    const sp = opts?.systemPrompt as { append?: string } | undefined
-    expect(sp?.append).not.toContain('# Building a screenshot flow')
-    expect(sp?.append).not.toContain('save_screenshot_plan')
+    expect(opts?.systemPrompt).not.toContain('# Building a screenshot flow')
+    expect(opts?.systemPrompt).not.toContain('save_screenshot_plan')
   })
 
   it('appends the screenshot-plan block when canvasEnabled is true', async () => {
@@ -594,9 +688,8 @@ describe('runChatTurnSdk', () => {
     })
 
     const opts = queryMock.mock.calls[0]?.[0]?.options
-    const sp = opts?.systemPrompt as { append?: string } | undefined
-    expect(sp?.append).toContain('# Building a screenshot flow')
-    expect(sp?.append).toContain('mcp__editor__save_screenshot_plan')
+    expect(opts?.systemPrompt).toContain('# Building a screenshot flow')
+    expect(opts?.systemPrompt).toContain('mcp__editor__save_screenshot_plan')
   })
 
   it('captures SDK session_id from init and persists it on the session (Phase 3)', async () => {
@@ -1493,29 +1586,37 @@ describe('runChatTurnSdk', () => {
   })
 
   describe('Phase 4a — fileReads + conflict wiring', () => {
-    it('wires a PreToolUse hook on Read so the SDK can snapshot read files', async () => {
-      scriptedMessages.push({
-        type: 'result',
-        subtype: 'success',
-        usage: { input_tokens: 0, output_tokens: 0 },
-        stop_reason: 'end_turn',
-      })
+    it('records a read through the registered Read tool on the persisted session', async () => {
+      // Was: "wires a PreToolUse hook on Read". The SDK's Read is off; Desde's
+      // own Read records the snapshot itself, through `onFileRead`.
+      const fs = await import('node:fs')
+      fs.mkdirSync(join(root, 'src'), { recursive: true })
+      fs.writeFileSync(join(root, 'src/Seen.vue'), '<template>seen</template>')
 
-      await runChatTurnSdk({
+      queryMock.mockImplementationOnce(() =>
+        (async function* () {
+          const out = await registeredEditorTools().get('Read')!({ file_path: 'src/Seen.vue' })
+          expect(out.isError).toBeFalsy()
+          yield {
+            type: 'result',
+            subtype: 'success',
+            usage: { input_tokens: 0, output_tokens: 0 },
+            stop_reason: 'end_turn',
+          }
+        })(),
+      )
+
+      const result = await runChatTurnSdk({
         bridge: makeBridge(),
         worktreeRoot: root,
         session: makeEmptySession('proj-1'),
-        userMessage: 'noop',
+        userMessage: 'read it',
         emit: () => {},
       })
 
-      const opts = queryMock.mock.calls[0]?.[0]?.options as
-        | { hooks?: { PreToolUse?: Array<{ matcher?: string; hooks?: unknown[] }> } }
-        | undefined
-      const preToolUse = opts?.hooks?.PreToolUse
-      expect(preToolUse).toBeDefined()
-      expect(preToolUse?.[0]?.matcher).toBe('Read')
-      expect(Array.isArray(preToolUse?.[0]?.hooks)).toBe(true)
+      const record = result.session.fileReads?.[join(root, 'src/Seen.vue')]
+      expect(record).toBeDefined()
+      expect(record!.baseContentPath).not.toBe('')
     })
 
     it('persists pre-existing session.fileReads forward when the turn ends', async () => {
@@ -1568,21 +1669,16 @@ describe('runChatTurnSdk', () => {
       expect(result.session.conflicts).toBeUndefined()
     })
 
-    it('end-to-end: hook fires for a Read, then canUseTool detects a stale-base Write and emits the warning before the proposal (codex #7)', async () => {
-      // Set up a real on-disk file the registered Read hook can snapshot.
+    it('end-to-end: Read, a concurrent change, then Write raises the overwrite warning (codex #7)', async () => {
+      // Was driven through the Read hook and `canUseTool`. Both jobs moved
+      // into Desde's own tools: Read records the base, and Write detects the
+      // stale base against the bytes it replaces.
       const fs = await import('node:fs')
       const file = 'src/Stale.vue'
       const target = join(root, file)
       fs.mkdirSync(join(root, 'src'), { recursive: true })
       fs.writeFileSync(target, 'session-saw-this')
-      // The "concurrent overwrite" — the on-disk content changes
-      // between the Read and the Write. The hook snapshots the value
-      // it sees at Read time; the Write fires after the change.
-      // We change the file AFTER the hook fires but BEFORE canUseTool.
 
-      // Drive a single scripted turn — content doesn't matter; we
-      // invoke the wired hook + canUseTool directly off the captured
-      // SDK options, the way the real SDK runtime would.
       scriptedMessages.push({
         type: 'result',
         subtype: 'success',
@@ -1599,57 +1695,29 @@ describe('runChatTurnSdk', () => {
         emit: (e) => events.push(e),
       })
 
-      const opts = queryMock.mock.calls[0]?.[0]?.options as
-        | {
-            hooks?: {
-              PreToolUse?: Array<{ matcher?: string; hooks?: Array<(input: unknown) => Promise<unknown>> }>
-            }
-            canUseTool?: (
-              name: string,
-              input: Record<string, unknown>,
-              o: { signal: AbortSignal; toolUseID: string },
-            ) => Promise<{ behavior: string; updatedInput?: unknown; message?: string }>
-          }
-        | undefined
-      const hookFn = opts?.hooks?.PreToolUse?.[0]?.hooks?.[0]
-      expect(typeof hookFn).toBe('function')
-      expect(typeof opts?.canUseTool).toBe('function')
-
-      // 1. Invoke the registered Read hook the same way the SDK would.
-      await hookFn!({
-        hook_event_name: 'PreToolUse',
-        tool_name: 'Read',
-        tool_input: { file_path: target },
-      })
-
-      // 2. Simulate a parallel writer changing the file on disk.
+      const tools = registeredEditorTools()
+      // 1. The model reads the file.
+      await tools.get('Read')!({ file_path: file })
+      // 2. Someone else changes it.
       fs.writeFileSync(target, 'changed by someone else')
-
-      // 3. Invoke canUseTool for a Write — should detect conflict.
+      // 3. The model writes it.
       const eventsBeforeWrite = events.length
-      const r = await opts!.canUseTool!(
-        'Write',
-        { file_path: target, content: 'this session\'s patch' },
-        { signal: new AbortController().signal, toolUseID: 'tu-1' },
-      )
-      expect(r.behavior).toBe('allow')
+      const out = await tools.get('Write')!({ file_path: file, content: "this session's patch" })
+      expect(out.isError).toBeFalsy()
 
-      // The warning + the proposal should both have fired during the
-      // canUseTool call.
       const newEvents = events.slice(eventsBeforeWrite)
       const warningIdx = newEvents.findIndex((e) => e.kind === 'edit_overwrite_warning')
       const proposalIdx = newEvents.findIndex((e) => e.kind === 'edit_proposed')
       expect(warningIdx).toBeGreaterThanOrEqual(0)
       expect(proposalIdx).toBeGreaterThanOrEqual(0)
-      // SSE ordering invariant — warning lands before the matching
-      // proposal so the UI can attribute the conflict to the right
-      // edit row.
-      expect(warningIdx).toBeLessThan(proposalIdx)
-      const warning = newEvents[warningIdx]
-      expect(warning).toMatchObject({
-        kind: 'edit_overwrite_warning',
-        file,
-      })
+      // The order is now proposal THEN warning, as on the neutral lane: the
+      // tool reports the conflict against the bytes it replaced, which it only
+      // knows once `brokeredWrite` (which emits the proposal) has run. It used
+      // to be the reverse, because the gate detected it before the SDK wrote.
+      // The client keys the banner by file, not by position.
+      expect(proposalIdx).toBeLessThan(warningIdx)
+      expect(newEvents[warningIdx]).toMatchObject({ kind: 'edit_overwrite_warning', file })
+      expect(fs.readFileSync(target, 'utf8')).toBe("this session's patch")
     })
 
     it('persists proposed newSource to .desde/.../proposals/<editId>.txt on Write (Phase 4 §4)', async () => {
@@ -1677,6 +1745,39 @@ describe('runChatTurnSdk', () => {
         emit: (e) => events.push(e),
       })
 
+      const out = await registeredEditorTools().get('Write')!({
+        file_path: 'src/Target.vue',
+        content: '<template>after</template>',
+      })
+      expect(out.isError).toBeFalsy()
+
+      const proposals = events.filter((e) => e.kind === 'edit_proposed') as Array<
+        ChatStreamEvent & { editId: string }
+      >
+      // Exactly one diff card per write: the gate no longer emits its own.
+      expect(proposals).toHaveLength(1)
+      const blobPath = proposalBlobPath(root, 'sess-blob', proposals[0]!.editId)
+      expect(fs.existsSync(blobPath)).toBe(true)
+      expect(fs.readFileSync(blobPath, 'utf8')).toBe('<template>after</template>')
+    })
+
+    it('canUseTool decides mcp__editor__Write but never emits a proposal itself', async () => {
+      scriptedMessages.push({
+        type: 'result',
+        subtype: 'success',
+        usage: { input_tokens: 0, output_tokens: 0 },
+        stop_reason: 'end_turn',
+      })
+
+      const events: ChatStreamEvent[] = []
+      await runChatTurnSdk({
+        bridge: makeBridge(),
+        worktreeRoot: root,
+        session: makeEmptySession('proj-1'),
+        userMessage: 'gate',
+        emit: (e) => events.push(e),
+      })
+
       const opts = queryMock.mock.calls[0]?.[0]?.options as {
         canUseTool?: (
           name: string,
@@ -1684,20 +1785,20 @@ describe('runChatTurnSdk', () => {
           ctx: { signal: AbortSignal; toolUseID: string },
         ) => Promise<{ behavior: string }>
       }
-      const r = await opts.canUseTool!(
-        'Write',
-        { file_path: target, content: '<template>after</template>' },
-        { signal: new AbortController().signal, toolUseID: 'tu-blob' },
+      const ctx = { signal: new AbortController().signal, toolUseID: 'tu-gate' }
+      const allowed = await opts.canUseTool!(
+        'mcp__editor__Write',
+        { file_path: 'src/New.vue', content: '<template/>' },
+        ctx,
       )
-      expect(r.behavior).toBe('allow')
-
-      const proposalEvent = events.find((e) => e.kind === 'edit_proposed') as
-        | (ChatStreamEvent & { editId: string })
-        | undefined
-      expect(proposalEvent).toBeDefined()
-      const blobPath = proposalBlobPath(root, 'sess-blob', proposalEvent!.editId)
-      expect(fs.existsSync(blobPath)).toBe(true)
-      expect(fs.readFileSync(blobPath, 'utf8')).toBe('<template>after</template>')
+      expect(allowed.behavior).toBe('allow')
+      const protectedWrite = await opts.canUseTool!(
+        'mcp__editor__Write',
+        { file_path: '.mcp.json', content: '{}' },
+        ctx,
+      )
+      expect(protectedWrite.behavior).toBe('deny')
+      expect(events.some((e) => e.kind === 'edit_proposed')).toBe(false)
     })
 
     it('does NOT persist a blob on edits that get denied (no edit_proposed event fired)', async () => {
@@ -1728,9 +1829,10 @@ describe('runChatTurnSdk', () => {
           ctx: { signal: AbortSignal; toolUseID: string },
         ) => Promise<{ behavior: string }>
       }
-      // Path-traversal — resolveRepoPath will deny.
+      // Path-traversal — resolveRepoPath will deny. The namespaced name is
+      // the one the SDK sends now that its own Write is off.
       const r = await opts.canUseTool!(
-        'Write',
+        'mcp__editor__Write',
         { file_path: target, content: 'forbidden' },
         { signal: new AbortController().signal, toolUseID: 'tu-deny' },
       )
@@ -1744,9 +1846,17 @@ describe('runChatTurnSdk', () => {
         'proposals',
       )
       expect(fs.existsSync(proposalsDir)).toBe(false)
+      expect(events.some((e) => e.kind === 'edit_proposed')).toBe(false)
     })
 
-    it('passes a getFileReads accessor to canUseTool that reflects in-turn snapshot updates', async () => {
+    it("counts a PRIOR turn's read as the base for this turn's write", async () => {
+      // Was: "passes a getFileReads accessor to canUseTool". The accessor now
+      // goes to the write tools, which do the conflict check themselves.
+      const fs = await import('node:fs')
+      fs.mkdirSync(join(root, 'src'), { recursive: true })
+      const target = join(root, 'src/X.vue')
+      fs.writeFileSync(target, 'changed since that read')
+
       scriptedMessages.push({
         type: 'result',
         subtype: 'success',
@@ -1756,59 +1866,32 @@ describe('runChatTurnSdk', () => {
 
       const session = makeEmptySession('proj-1')
       session.fileReads = {
-        '/abs/X.vue': {
+        [target]: {
           hashAtRead: 'seedhash',
-          baseContentPath: '/sidecar/seedhash.txt',
+          baseContentPath: '',
           readAt: '2026-05-23T00:00:00.000Z',
         },
       }
+      const events: ChatStreamEvent[] = []
       await runChatTurnSdk({
         bridge: makeBridge(),
         worktreeRoot: root,
         session,
         userMessage: 'noop',
-        emit: () => {},
+        emit: (e) => events.push(e),
       })
 
-      // canUseTool is built with a getFileReads accessor. We can't easily
-      // invoke canUseTool from this scripted test (no Write/Edit
-      // surfaces), but we can prove the wiring landed by checking that
-      // the options object holds a callable canUseTool. The
-      // edit-ack.test.ts suite exercises the conflict-detection path
-      // directly against buildCanUseTool with synthetic reads.
-      const opts = queryMock.mock.calls[0]?.[0]?.options
-      expect(typeof opts?.canUseTool).toBe('function')
+      await registeredEditorTools().get('Write')!({ file_path: 'src/X.vue', content: 'mine' })
+      expect(events.some((e) => e.kind === 'edit_overwrite_warning')).toBe(true)
     })
   })
 
-  describe('Task 13 — SDK built-in Write/Edit guard wiring', () => {
-    type HookMatcher = {
-      matcher?: string
-      hooks?: Array<
-        (input: unknown, toolUseID: string | undefined, o: { signal: AbortSignal }) => Promise<unknown>
-      >
-    }
-    type HookedOptions = {
-      hooks?: {
-        PreToolUse?: HookMatcher[]
-        PostToolUse?: HookMatcher[]
-        PostToolUseFailure?: HookMatcher[]
-        PermissionDenied?: HookMatcher[]
-      }
-    }
-
-    const HOOK_ARGS = { signal: new AbortController().signal }
-
-    function writePre(target: string): unknown {
-      return {
-        hook_event_name: 'PreToolUse',
-        tool_name: 'Write',
-        tool_input: { file_path: target, content: 'next' },
-        tool_use_id: 'tu-w1',
-      }
-    }
-
-    it('journals the original and holds the per-file lock across the tool call', async () => {
+  describe('Write safety on the sidecar (was: Task 13 write-guard wiring)', () => {
+    // The Task 13 guard bracketed the SDK's OWN Write/Edit with a PreToolUse
+    // journal + file lock and a PostToolUse release. Those built-ins are off.
+    // Desde's own Write goes through `brokeredWrite`, which journals and
+    // locks inside the tool, so there is no hold to leak across a crash.
+    it('journals the original before a Write through the registered tool', async () => {
       const fs = await import('node:fs')
       const target = join(root, 'App.vue')
       fs.writeFileSync(target, 'ORIGINAL')
@@ -1820,88 +1903,25 @@ describe('runChatTurnSdk', () => {
         stop_reason: 'end_turn',
       })
 
-      const release = vi.fn()
-      const acquireWriteLock = vi.fn(async () => release)
+      const invalidated: string[][] = []
       await runChatTurnSdk({
         bridge: makeBridge(),
         worktreeRoot: root,
         session: makeEmptySession('proj-1'),
         userMessage: 'noop',
         emit: () => {},
-        acquireWriteLock,
+        invalidateFiles: (files) => invalidated.push(files),
       })
 
-      const opts = queryMock.mock.calls[0]?.[0]?.options as HookedOptions | undefined
-      const pre = opts?.hooks?.PreToolUse?.find((m) => m.matcher === 'Write|Edit')?.hooks?.[0]
-      const post = opts?.hooks?.PostToolUse?.find((m) => m.matcher === 'Write|Edit')?.hooks
-      expect(typeof pre).toBe('function')
-      // PostToolUse carries the write-guard release; the Vite-invalidate hook
-      // is only added when `invalidateFiles` is wired (not here).
-      expect(post).toHaveLength(1)
-      expect(opts?.hooks?.PostToolUseFailure?.[0]?.hooks).toHaveLength(1)
-      expect(opts?.hooks?.PermissionDenied?.[0]?.hooks).toHaveLength(1)
-
-      await pre!(writePre(target), 'tu-w1', HOOK_ARGS)
-      expect(acquireWriteLock).toHaveBeenCalledExactlyOnceWith('App.vue')
-      // Original recoverable before the SDK executes the write.
+      const out = await registeredEditorTools().get('Write')!({ file_path: 'App.vue', content: 'NEXT' })
+      expect(out.isError).toBeFalsy()
+      expect(fs.readFileSync(target, 'utf8')).toBe('NEXT')
       const backupsRoot = join(root, '.desde', 'backups')
       const dirs = fs.readdirSync(backupsRoot)
       expect(dirs).toHaveLength(1)
-      expect(fs.readFileSync(join(backupsRoot, dirs[0], 'App.vue'), 'utf8')).toBe('ORIGINAL')
-      // …and still held while the tool runs.
-      expect(release).not.toHaveBeenCalled()
-
-      await post![0]!(
-        {
-          hook_event_name: 'PostToolUse',
-          tool_name: 'Write',
-          tool_input: { file_path: target },
-          tool_response: {},
-          tool_use_id: 'tu-w1',
-        },
-        'tu-w1',
-        HOOK_ARGS,
-      )
-      expect(release).toHaveBeenCalledOnce()
-    })
-
-    it('leaks no lock when the turn dies mid-write', async () => {
-      const fs = await import('node:fs')
-      const target = join(root, 'Boom.vue')
-      fs.writeFileSync(target, 'ORIGINAL')
-
-      const release = vi.fn()
-      const acquireWriteLock = vi.fn(async () => release)
-
-      // Drive the guard's PreToolUse from INSIDE the SDK stream, then throw —
-      // the shape of an SDK crash / abort between the write hook and its
-      // PostToolUse. Only the turn-end sweep can release the hold.
-      queryMock.mockImplementationOnce((args) => {
-        const opts = args.options as HookedOptions | undefined
-        const pre = opts?.hooks?.PreToolUse?.find((m) => m.matcher === 'Write|Edit')?.hooks?.[0]
-        return (async function* () {
-          await pre!(writePre(target), 'tu-w1', HOOK_ARGS)
-          expect(release).not.toHaveBeenCalled()
-          throw new Error('SDK exploded mid-write')
-        })()
-      })
-
-      const events: ChatStreamEvent[] = []
-      const result = await runChatTurnSdk({
-        bridge: makeBridge(),
-        worktreeRoot: root,
-        session: makeEmptySession('proj-1'),
-        userMessage: 'noop',
-        emit: (e) => events.push(e),
-        acquireWriteLock,
-      })
-
-      expect(result.turn.error).toContain('SDK exploded mid-write')
-      expect(events.some((e) => e.kind === 'error')).toBe(true)
-      // The sweep ran in the finally — the file is writable again.
-      await Promise.resolve()
-      expect(acquireWriteLock).toHaveBeenCalledOnce()
-      expect(release).toHaveBeenCalledOnce()
+      expect(fs.readFileSync(join(backupsRoot, dirs[0]!, 'App.vue'), 'utf8')).toBe('ORIGINAL')
+      // The dev server is told, which the write-invalidate hook used to do.
+      expect(invalidated.flat()).toContain('App.vue')
     })
   })
 })

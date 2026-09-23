@@ -1,23 +1,41 @@
 /**
- * SDK-backed chat orchestrator — the only chat runtime (the legacy in-house
- * orchestrator was removed 2026-07-21; see `tasks/worktree-mode-decommission.md`).
- * Runs one user turn through the Claude Agent SDK and emits `ChatStreamEvent`s
- * the chat UI consumes.
+ * The Claude Agent SDK sidecar: one user turn through the local `claude`
+ * binary, so the person running Desde for themselves can spend their Claude
+ * subscription. Dev-only. The product's chat runtime is the neutral loop in
+ * `../agent-chat-neutral/run-chat-turn-neutral.ts`.
  *
- * Built-in `Read`/`Edit`/`Write`/`Glob`/`Grep` plus the in-process MCP tools
- * from `editor-tools.ts` (bridge round-trips, `propose_prop_edit`, the
- * read-root/verification family, the filesystem-structural write tools, and
- * design-system grounding queries). `canUseTool` translates each Write/Edit
- * into an `edit_proposed` SSE event with reconstructed `newSource` +
- * `baseHash`. The system prompt uses `{preset: 'claude_code', append: ...}`
- * so the model keeps Claude Code's built-in tool descriptions and the
- * Editor-specific append only carries net-new content (domain framing,
- * MCP tools, branch-mode lifecycle, context envelope, project conventions —
- * see `system-prompt.ts`). SDK session resume: the first turn captures
- * `session_id` from the SDKSystemMessage init event; subsequent turns pass
- * it back via `options.resume` so the SDK rebuilds full conversation state
- * from its own JSONL store — Editor's session record links to it via
- * `ChatSession.sdkSessionId`.
+ * The sidecar is deliberately thin. The SDK supplies the model loop, the
+ * transport and session resume. Desde supplies everything else, and it is the
+ * SAME everything else the neutral lane uses:
+ *
+ *  - Tools. The SDK's own built-ins are OFF except `WebFetch` and
+ *    `WebSearch`, the two that never touch the repository (`canUseTool` still
+ *    gates them by `webPolicy`). Desde's whole neutral tool catalog
+ *    (`buildNeutralToolCatalog`: its own `Read`, `Glob`, `Grep`, `TodoWrite`,
+ *    `Write`, `Edit`, plus every editor tool) is registered as the in-process
+ *    `editor` MCP server. Those built-ins journal, lock, snapshot, broker and
+ *    invalidate inside the tool, so this file needs none of the hooks it used
+ *    to wire around the SDK's own Read/Write/Edit.
+ *  - The system prompt. `buildNeutralSystemPrompt`, as a plain string. No
+ *    `claude_code` preset.
+ *  - The permission gate. `canUseTool` is `buildToolPermissionGate`, the
+ *    neutral lane's closure. Under `permissionMode: 'default'` the SDK fires
+ *    it for every MCP tool, Read included.
+ *
+ * **Naming difference from the neutral lane.** The SDK prefixes every tool on
+ * an MCP server with the server's namespace, and there is no way to register
+ * an MCP tool under a bare name. So the model sees `mcp__editor__Read`,
+ * `mcp__editor__Write`, `mcp__editor__Edit`, `mcp__editor__Glob`,
+ * `mcp__editor__Grep` and `mcp__editor__TodoWrite` here, where the neutral lane
+ * shows `Read`, `Write` and so on. The permission gate matches both spellings
+ * (`bareToolName` in `../agent-chat/edit-ack.ts`). A model that still asks for
+ * the SDK's bare `Read` by name is refused by the SDK (it is not in `tools`)
+ * and falls back to the MCP tool (measured, Task 21 spike).
+ *
+ * SDK session resume: the first turn captures `session_id` from the
+ * SDKSystemMessage init event; later turns pass it back via `options.resume`
+ * so the SDK rebuilds conversation state from its own JSONL store. Desde's
+ * session record links to it via `ChatSession.sdkSessionId`.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -44,7 +62,6 @@ import type {
 import { computeSessionCost } from '../agent-chat/session-cost'
 
 import { runWithChatSession } from '../edit-service/chat-session-context'
-import { getSharedEditHistory } from '../edit-service/edit-history'
 import { findRecentWriterForFile } from '../agent-chat/session-store'
 import { branchModeRootCommitSha } from '../worktree/git-branches'
 import { resolveClaudeOnPath, SIDECAR_NO_BINARY_MESSAGE } from './resolve-claude-on-path'
@@ -59,16 +76,13 @@ import {
 
 export { resolveAnthropicThinkingConfig, supportsAnthropicAdaptiveThinking }
 
-import { buildEditorToolServer } from './editor-tool-server'
+import { buildSidecarToolServer } from './editor-tool-server'
 import {
   lookupRecentCrossSessionWriter,
   recordCrossSessionWrite,
 } from '../agent-chat/cross-session-write-log'
 import { buildCanUseTool, type OverwriteConflictDetected } from '../agent-chat/edit-ack'
-import { createReadSnapshotHook, type FileReadRecord } from '../agent-chat/file-read-snapshot'
-import { createSecretReadGuard } from '../agent-chat/secret-read-guard'
-import { createSdkWriteGuard } from './sdk-write-guard'
-import { createWriteInvalidateHook } from './write-invalidate-hook'
+import { captureReadSnapshot } from '../agent-chat/file-read-snapshot'
 import { writeProposalBlob } from '../agent-chat/proposal-blob-store'
 import { createSdkEventAdapter } from './sdk-event-adapter'
 import { flattenSdkMessage } from './sdk-message-flatten'
@@ -77,12 +91,17 @@ import {
   createTurnInputChannel,
   readAssistantMessageBoundaryId,
 } from '../agent-chat/turn-input-channel'
-import { buildSdkSystemPrompt } from '../agent-chat/system-prompt'
 import { buildGroundingDigest } from '../agent-chat/grounding-tools'
+import { buildNeutralSystemPrompt } from '../agent-chat-neutral/system-prompt-neutral'
+import { buildNeutralToolCatalog } from '../agent-chat-neutral/tool-catalog'
 import type { RunChatTurnOpts, RunChatTurnResult } from '../agent-chat/run-chat-turn'
 
-/** Built-in tools we expose to the model on the SDK runtime. */
-const BUILTIN_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite', 'WebFetch', 'WebSearch'] as const
+/**
+ * The only SDK built-ins left on. Neither touches the repository, and
+ * `canUseTool` gates both by `webPolicy`. Every tool that does touch it is
+ * Desde's own, registered on the `editor` MCP server.
+ */
+const SIDECAR_SDK_BUILTINS = ['WebFetch', 'WebSearch'] as const
 
 /** SDK default model when none is specified. Exported so the model
  * catalog can assert it stays in sync (anthropic-model-catalog.test.ts). */
@@ -104,14 +123,8 @@ export async function runChatTurnSdk(
   // so the FileLockManager's persistence sink routes events to
   // <worktreeRoot>/.desde/chat-sessions/<sessionId>/lock-events.jsonl.
   // Direct bridge mutations that fire DURING the turn inherit this scope
-  // and show up on the timeline.
-  //
-  // The SDK's BUILT-IN Write/Edit still execute inside the SDK runtime, so
-  // they never reach FileLockManager.withWriteLock and won't appear on that
-  // timeline — but they are no longer unguarded (audit Task 13): a
-  // PreToolUse hook journals the original to .desde/backups/ and holds
-  // the CLI's per-file edit lock across the tool's execution. See
-  // `sdk-write-guard.ts`.
+  // and show up on the timeline. So do this lane's Write and Edit now: they
+  // are Desde's own tools and go through `brokeredWrite`, not the SDK's.
   return runWithChatSession(
     { sessionId: opts.session.id.sessionId, repoRoot: opts.worktreeRoot },
     () => runChatTurnSdkInner(opts),
@@ -161,19 +174,18 @@ async function runChatTurnSdkInner(
   }
 
   // ── Edit-proposal plumbing ─────────────────────────────────────────
-  // Two emit paths because the two surfaces have different semantics:
+  // ONE emit path, shared by every tool that proposes an edit: the built-in
+  // Write and Edit (which call it after `brokeredWrite` has put the bytes on
+  // disk, with `appliedByAgent: true` so the shell skips its own write),
+  // the structural write tools, and `propose_prop_edit` (no disk write; the
+  // shell applies it as a DOM overlay and acks). Same closure as the neutral
+  // lane: one turn's `editProposals` list, one `edit_proposed` shape, one ack
+  // round-trip.
   //
-  //   - `canUseTool` Write/Edit: SDK does the disk write after we
-  //     return `allow`. We fire-and-forget the SSE event for diff
-  //     display and mark the carrier `appliedByAgent: true` so the
-  //     shell skips its own `adapter.applyEdit` write (which would
-  //     race the SDK's).
-  //
-  //   - `propose_prop_edit` MCP tool: no underlying disk write — the
-  //     shell applies prop edits as DOM overlays. The model needs to
-  //     learn about selection drift or shell rejection, so this path
-  //     awaits the shell's ack (same plumbing as the legacy
-  //     orchestrator's `awaitEditAck`).
+  // It used to be two. The SDK's own Write/Edit got a fire-and-forget emitter
+  // called from `canUseTool`, because the SDK owned the write syscall and the
+  // permission callback was the only place to see it. Those built-ins are off
+  // now, so that emitter had no caller left.
   const editProposalRefs: ChatTurn['editProposals'] = []
   const recordProposal = (editId: string, payload: EditProposalPayload): void => {
     let kind: ChatTurn['editProposals'][number]['kind']
@@ -203,9 +215,9 @@ async function runChatTurnSdkInner(
     })
   }
 
-  const emitWriteEditProposal = async (
+  const emitEditProposal = async (
     payload: EditProposalPayload,
-  ): Promise<{ ok: true; editId: string }> => {
+  ): Promise<{ ok: true; editId: string } | { ok: false; reason: string }> => {
     const editId = randomUUID()
     // Phase 4 §4 of tasks/editor-detached-sessions.md — persist
     // the proposed newSource to disk BEFORE the SSE event fires so
@@ -237,69 +249,19 @@ async function runChatTurnSdkInner(
       }
     }
     opts.emit({ kind: 'edit_proposed', turnId, editId, edit: payload })
-    recordProposal(editId, payload)
-    return { ok: true, editId }
-  }
-
-  const emitPropEditProposal = async (
-    payload: EditProposalPayload,
-  ): Promise<{ ok: true; editId: string } | { ok: false; reason: string }> => {
-    const editId = randomUUID()
-    opts.emit({ kind: 'edit_proposed', turnId, editId, edit: payload })
-    if (!opts.awaitEditAck) {
-      // No round-trip configured — auto-accept (matches the legacy
-      // orchestrator's behavior for unit-test callers).
-      recordProposal(editId, payload)
-      return { ok: true, editId }
-    }
-    const ack = await opts.awaitEditAck(editId)
-    if (!ack.ok) {
-      return { ok: false, reason: ack.reason }
+    if (opts.awaitEditAck) {
+      const ack = await opts.awaitEditAck(editId)
+      if (!ack.ok) return { ok: false, reason: ack.reason }
     }
     recordProposal(editId, payload)
     return { ok: true, editId }
   }
 
-  // ── SDK option assembly ────────────────────────────────────────────
-  // Branch mode has no pinned worktree-session base commit, so
-  // `session_status`/`session_diff` ("what have I changed?") resolve
-  // against the merge-base with the default branch instead — recomputed
-  // fresh each turn since the user can switch branches between turns.
-  // Undefined (no default branch, detached HEAD, git error) leaves those
-  // tools registered but refusing with their existing "not configured"
-  // error rather than a wrong answer.
-  const rootCommitSha = (await branchModeRootCommitSha(opts.worktreeRoot)) ?? undefined
-  const editorToolServer = buildEditorToolServer({
-    bridge: opts.bridge,
-    signal: opts.signal,
-    emitEdit: emitPropEditProposal,
-    readRoots: opts.readRoots,
-    rootCommitSha,
-    verificationAdapter: opts.verificationAdapter,
-    worktreeRoot: opts.worktreeRoot,
-    invalidateFiles: opts.invalidateFiles,
-    // download_asset reuses the WebFetch host allowlist — same trust
-    // boundary, deliberately not a wider one.
-    ...(opts.webPolicy ? { webPolicy: opts.webPolicy } : {}),
-    packageManagerAdapter: opts.packageManagerAdapter,
-    getGrounding: opts.getGrounding,
-    reviewSurface: opts.reviewSurface,
-    // `verify_goal`'s translate step. Pass-through only; the SDK runtime never
-    // calls it itself.
-    resolveLlmProvider: opts.resolveLlmProvider,
-    canvasEnabled: opts.canvasEnabled,
-    acquireTreeGate: opts.acquireTreeGate,
-    // The tool-side half of the secret-read policy: `rename_file`'s
-    // source check (FX17 item 5), and the resolved-path filters in
-    // `search_external_files` and `session_diff` (FX20 item 1).
-    ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
-  })
-
+  // ── Per-turn read/conflict state ───────────────────────────────────
   // Phase 4a §2 — per-turn fileReads accumulator. Seeded from any
   // pre-existing session.fileReads so a prior turn's Reads still count
-  // as the base for this turn's Writes. Mutated by the PreToolUse hook
-  // (Read → snapshot) and queried by canUseTool (Write/Edit →
-  // conflict check).
+  // as the base for this turn's Writes. Filled by the Read tool's
+  // `onFileRead` and advanced by the write tools' `recordOwnWrite`.
   const fileReads: Record<string, ChatFileReadRecord> = {
     ...(opts.session.fileReads ?? {}),
   }
@@ -308,49 +270,12 @@ async function runChatTurnSdkInner(
     ...(opts.session.conflicts ?? {}),
   }
 
-  const readSnapshotHook = createReadSnapshotHook({
-    worktreeRoot: opts.worktreeRoot,
-    sessionId: opts.session.id.sessionId,
-    onReadObserved: (record: FileReadRecord) => {
-      fileReads[record.absolutePath] = {
-        hashAtRead: record.hashAtRead,
-        baseContentPath: record.baseContentPath,
-        readAt: record.readAt,
-      }
-    },
-  })
-
-  // FX15 — the read policy's enforcement point on THIS lane. It has to be a
-  // hook rather than a `canUseTool` branch: the SDK auto-allows Read without
-  // firing the permission callback (measured; see `file-read-snapshot.ts`),
-  // so the gate's own copy of this check never runs for the SDK's Read.
-  // `PreToolUse` fires for every tool and runs before the permission system.
-  const secretReadGuard = createSecretReadGuard({
-    worktreeRoot: opts.worktreeRoot,
-    ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
-  })
-
-  // Audit Task 13 — write safety for the SDK's BUILT-IN Write/Edit, which
-  // execute inside the SDK runtime and so bypass FileLockManager and the
-  // backup journal every other Editor lane goes through. The guard
-  // journals the original + holds the CLI's per-file edit lock across each
-  // individual tool execution (a short window — NOT the whole turn, which
-  // would block Commit for minutes). See sdk-write-guard.ts.
-  const writeGuard = createSdkWriteGuard({
-    worktreeRoot: opts.worktreeRoot,
-    ...(opts.acquireWriteLock ? { acquireWriteLock: opts.acquireWriteLock } : {}),
-    // Toolbar undo/redo (Task 5) — a successful built-in Write/Edit records
-    // an undo step the same way every other editor mutation lane does.
-    // This is the only production call site for `createSdkWriteGuard`, and
-    // by default the edit-fix mini-turn (edit-fix-mini-turn.ts) would pick
-    // this up too by re-entering through `runChatTurnSdk` — but its writes
-    // are PROVISIONAL until the handler's post-turn validation passes (see
-    // `recordHistory` above), so it explicitly opts out with
-    // `recordHistory: false` and records its own consolidated step once a
-    // fix is verified durable.
-    ...(opts.recordHistory !== false ? { history: getSharedEditHistory() } : {}),
-  })
-
+  /**
+   * Raised by the write tools themselves, against the bytes they actually
+   * replaced (FX14 item 2, see `reportOverwriteConflict` in
+   * `builtin-edit.ts`). Not by the permission gate: the gate runs before the
+   * tool's own read, so a writer landing in between would escape it.
+   */
   const onConflictDetected = async (
     detected: OverwriteConflictDetected,
   ): Promise<void> => {
@@ -417,65 +342,143 @@ async function runChatTurnSdkInner(
     })
   }
 
+  // ── Tools ──────────────────────────────────────────────────────────
+  // Branch mode has no pinned worktree-session base commit, so
+  // `session_status`/`session_diff` ("what have I changed?") resolve
+  // against the merge-base with the default branch instead — recomputed
+  // fresh each turn since the user can switch branches between turns.
+  // Undefined (no default branch, detached HEAD, git error) leaves those
+  // tools registered but refusing with their existing "not configured"
+  // error rather than a wrong answer.
+  const rootCommitSha = (await branchModeRootCommitSha(opts.worktreeRoot)) ?? undefined
+
+  // The neutral lane's catalog, built the way the neutral lane builds it. See
+  // `run-chat-turn-neutral.ts` for the reasoning behind each option; the
+  // comments here only note where this lane differs.
+  const catalog = buildNeutralToolCatalog({
+    worktreeRoot: opts.worktreeRoot,
+    onFileRead: async (r) => {
+      // The read-time base, so `resolve-conflict.ts` has something to merge
+      // against. Recorded only when the snapshot describes the same bytes
+      // the tool returned to the model.
+      const snapshot = await captureReadSnapshot(r.repoRel, {
+        worktreeRoot: opts.worktreeRoot,
+        sessionId: opts.session.id.sessionId,
+      })
+      fileReads[r.absolutePath] = {
+        hashAtRead: r.hashAtRead,
+        baseContentPath:
+          snapshot !== null && snapshot.hashAtRead === r.hashAtRead
+            ? snapshot.baseContentPath
+            : '',
+        readAt: r.readAt,
+      }
+    },
+    writeToolsEnabled: true,
+    writeOpts: {
+      worktreeRoot: opts.worktreeRoot,
+      emitEdit: emitEditProposal,
+      getFileReads: () => fileReads,
+      onConflictDetected,
+      // Advance the baseline once the bytes are on disk (FX11 item 2), so a
+      // later same-session write isn't false-flagged against our own write.
+      //
+      // Differs from the neutral lane: also record the write in the
+      // process-global cross-session log (PR3), so OTHER concurrent sessions
+      // can name this one in their conflict banner before our turn persists.
+      recordOwnWrite: (absPath: string, nextHash: string) => {
+        fileReads[absPath] = {
+          hashAtRead: nextHash,
+          baseContentPath: fileReads[absPath]?.baseContentPath ?? '',
+          readAt: new Date().toISOString(),
+        }
+        // Mirror the "first user message" semantic of
+        // `findRecentWriterForFile` so the in-memory log's attribution
+        // looks identical to the persisted-scan path. On the FIRST
+        // turn `opts.session.turns` is empty (the current turn hasn't
+        // been appended yet), so fall back to `opts.userMessage`
+        // — that's what will become `turns[0]` once the turn persists.
+        const firstUserMessageRaw =
+          typeof opts.session.turns[0]?.userMessage === 'string'
+            ? opts.session.turns[0].userMessage
+            : opts.userMessage
+        const firstUserMessage = firstUserMessageRaw
+          ? firstUserMessageRaw.slice(0, 60)
+          : undefined
+        recordCrossSessionWrite(absPath, {
+          sessionId: opts.session.id.sessionId,
+          ...(firstUserMessage ? { firstUserMessagePreview: firstUserMessage } : {}),
+          at: new Date().toISOString(),
+        })
+      },
+      ...(opts.invalidateFiles ? { invalidateFiles: opts.invalidateFiles } : {}),
+      ...(opts.acquireTreeGate ? { acquireTreeGate: opts.acquireTreeGate } : {}),
+      ...(opts.recordHistory !== undefined ? { recordHistory: opts.recordHistory } : {}),
+      // `acquireWriteLock` is NOT threaded, for the neutral lane's reason:
+      // `brokeredWrite` takes its own per-path lock, and taking the CLI's
+      // file lock on top of the shared tree gate can deadlock against a
+      // pending Commit or Publish. It was only ever needed while the SDK
+      // owned the write syscall.
+    },
+    editorToolOpts: {
+      bridge: opts.bridge,
+      signal: opts.signal,
+      emitEdit: emitEditProposal,
+      readRoots: opts.readRoots,
+      rootCommitSha,
+      verificationAdapter: opts.verificationAdapter,
+      worktreeRoot: opts.worktreeRoot,
+      invalidateFiles: opts.invalidateFiles,
+      // download_asset reuses the WebFetch host allowlist — same trust
+      // boundary, deliberately not a wider one.
+      ...(opts.webPolicy ? { webPolicy: opts.webPolicy } : {}),
+      packageManagerAdapter: opts.packageManagerAdapter,
+      getGrounding: opts.getGrounding,
+      reviewSurface: opts.reviewSurface,
+      // `verify_goal`'s translate step. Pass-through only; this runtime
+      // never calls it itself.
+      resolveLlmProvider: opts.resolveLlmProvider,
+      canvasEnabled: opts.canvasEnabled,
+      acquireTreeGate: opts.acquireTreeGate,
+      // The tool-side half of the secret-read policy: `rename_file`'s
+      // source check (FX17 item 5), and the resolved-path filters in
+      // `search_external_files` and `session_diff` (FX20 item 1).
+      ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
+    },
+    ...(opts.builtinTools ? { builtinTools: opts.builtinTools } : {}),
+    ...(opts.disallowedTools ? { disallowedTools: opts.disallowedTools } : {}),
+    // Secret-file reads. Passed to the TOOLS as well as to the gate below:
+    // the gate is the policy, and the tool is the code that opens the file.
+    ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
+  })
+  const editorToolServer = buildSidecarToolServer(catalog, opts.signal)
+
+  // The SDK built-ins still on: the web pair, narrowed by the caller's own
+  // built-in list when it passes one (the edit-fix mini-turn names neither).
+  const sdkBuiltins = SIDECAR_SDK_BUILTINS.filter(
+    (name) => opts.builtinTools === undefined || opts.builtinTools.includes(name),
+  )
+
+  // The neutral lane's gate, configured the way the neutral lane configures
+  // it. It never emits and never detects conflicts: on this lane, as there,
+  // the write tools call `brokeredWrite`, whose `emit` is the single source of
+  // `edit_proposed` and which reports conflicts against the bytes it
+  // replaced. A second emit here would double every diff card.
   const canUseTool = buildCanUseTool({
     worktreeRoot: opts.worktreeRoot,
-    emitEditProposal: emitWriteEditProposal,
+    emitEditProposal: async () => ({ ok: true, editId: '' }),
     readRoots: opts.readRoots,
     webPolicy: opts.webPolicy,
     ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
     figmaAllowedToolPrefixes: opts.figmaConfig?.allowedToolPrefixes,
     // Per-extension read-only policy, keyed by MCP namespace id. Built from
-    // the SAME list that gets registered above, so a server can never be
+    // the SAME list that gets registered below, so a server can never be
     // reachable without a policy governing it.
     extensionToolPolicy: new Map(
       (opts.extensions ?? []).map((e) => [e.id, e.allowedToolPrefixes]),
     ),
-    getFileReads: () => fileReads,
-    onConflictDetected,
-    // Codex round-1 fix for finding #2: after every allowed Write/Edit,
-    // overwrite the per-file baseline with the post-write hash so a
-    // subsequent same-session write isn't false-flagged. The path key
-    // mirrors what `createReadSnapshotHook` uses (post-`resolveRepoPath`
-    // absolute), so the entry replaces the prior Read snapshot cleanly.
-    //
-    // PR3: also record the write in the process-global cross-session
-    // log so OTHER concurrent sessions can attribute their conflict
-    // warnings against us BEFORE our turn persists. The log entry is
-    // small (sessionId + first-message preview + timestamp) and the
-    // log itself is FIFO-bounded per file.
-    recordOwnWrite: (absPath, nextHash) => {
-      fileReads[absPath] = {
-        hashAtRead: nextHash,
-        baseContentPath: fileReads[absPath]?.baseContentPath ?? '',
-        readAt: new Date().toISOString(),
-      }
-      // Mirror the "first user message" semantic of
-      // `findRecentWriterForFile` so the in-memory log's attribution
-      // looks identical to the persisted-scan path. On the FIRST
-      // turn `opts.session.turns` is empty (the current turn hasn't
-      // been appended yet), so fall back to `opts.userMessage`
-      // — that's what will become `turns[0]` once the turn persists.
-      const firstUserMessageRaw =
-        typeof opts.session.turns[0]?.userMessage === 'string'
-          ? opts.session.turns[0].userMessage
-          : opts.userMessage
-      const firstUserMessage = firstUserMessageRaw
-        ? firstUserMessageRaw.slice(0, 60)
-        : undefined
-      recordCrossSessionWrite(absPath, {
-        sessionId: opts.session.id.sessionId,
-        ...(firstUserMessage ? { firstUserMessagePreview: firstUserMessage } : {}),
-        at: new Date().toISOString(),
-      })
-    },
   })
 
-  // Phase 2: pass Editor-specific instructions as `append` to the
-  // SDK's `claude_code` preset rather than overriding the whole
-  // system prompt. The preset keeps Claude Code's tool-use guidance
-  // for the built-ins (Read/Edit/Write/Glob/Grep/TodoWrite); our
-  // append covers domain context + the 4 MCP tools + worktree-
-  // session edit lifecycle + envelope warning + project conventions.
   // Per-session design-system discovery digest (component names + token
   // categories). Best-effort + byte-stable; the grounding sources are memoized
   // so this is ~instant after the first build. Computed before the prompt so it
@@ -483,20 +486,22 @@ async function runChatTurnSdkInner(
   const groundingDigest = opts.getGrounding
     ? await buildGroundingDigest(opts.getGrounding)
     : null
-  const sdkAppend = buildSdkSystemPrompt({
-    projectKnowledge: opts.projectKnowledge,
-    // BUG FIX: this was `opts.figmaConfig !== undefined`, i.e. the LEGACY
-    // `figma` block only. A `figma` server declared the modern way in
-    // `.mcp.json` is registered and callable but got no prompt section at
-    // all, so the model was never told how to use it.
+  // The neutral lane's prompt, as a plain string: no `claude_code` preset.
+  // No `webTools` option: that block describes PROVIDER server tools, and
+  // this lane's web tools are the SDK's own WebFetch/WebSearch instead.
+  const systemPrompt = buildNeutralSystemPrompt({
+    writeToolsEnabled: catalog.some((spec) => spec.name === 'Write'),
+    groundingEnabled: opts.getGrounding !== undefined,
+    ...(groundingDigest ? { groundingDigest } : {}),
+    canvasEnabled: opts.canvasEnabled === true,
+    blockSecretReads: opts.blockSecretReads === true,
+    ...(opts.projectKnowledge ? { projectKnowledge: opts.projectKnowledge } : {}),
+    disabledCapabilities: opts.disabledCapabilities ?? null,
+    // The legacy `figma` block OR a `figma` server declared in `.mcp.json`:
+    // both are registered below, so both get the prompt section.
     figmaEnabled:
       opts.figmaConfig !== undefined ||
       (opts.extensions ?? []).some((e) => e.id === 'figma'),
-    disabledCapabilities: opts.disabledCapabilities ?? null,
-    groundingEnabled: opts.getGrounding !== undefined,
-    groundingDigest: groundingDigest ?? undefined,
-    canvasEnabled: opts.canvasEnabled === true,
-    blockSecretReads: opts.blockSecretReads === true,
   })
 
   const userMessageWithContext = buildUserMessageWithContext(
@@ -650,17 +655,21 @@ async function runChatTurnSdkInner(
         // concise rather than dumping the full raw chain.
         thinking: resolveAnthropicThinkingConfig(model, opts.adaptiveThinking),
         ...(opts.effort ? { effort: opts.effort } : {}),
-        systemPrompt: { type: 'preset', preset: 'claude_code', append: sdkAppend },
-        // `tools` only filters built-in tools (sdk.d.ts:1257 — "the
-        // base set of available built-in tools"). MCP-namespaced
-        // names there are no-ops. Our 4 custom tools are exposed
-        // purely via mcpServers.editor registration below.
-        tools: [...(opts.builtinTools ?? BUILTIN_TOOLS)],
+        systemPrompt,
+        // `tools` filters the SDK's BUILT-IN tools only (MCP-namespaced names
+        // there are no-ops). Everything that touches the repository is off:
+        // Desde's own Read/Write/Edit/Glob/Grep/TodoWrite are on the `editor`
+        // MCP server below instead. `tools: []` turns a built-in off for
+        // execution but not for the model's imagination: it may still ask
+        // for `Read` by name, which the SDK refuses (Task 21 spike).
+        tools: [...sdkBuiltins],
         ...(opts.disallowedTools?.length
           ? { disallowedTools: [...opts.disallowedTools] }
           : {}),
         ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
         mcpServers: {
+          // Desde's whole neutral tool catalog: its own built-ins plus every
+          // editor tool. See the file header for the naming difference.
           editor: editorToolServer,
           // Customer-supplied Figma MCP server, opt-in per
           // desde.config.json. Read-only by contract
@@ -681,85 +690,27 @@ async function runChatTurnSdkInner(
             (opts.extensions ?? []).map((e) => [e.id, e.mcpServer]),
           ),
         },
+        // Only the servers above. The Task 21 spike saw servers from the
+        // developer's own account (claude.ai connectors) show up in the tool
+        // list despite `settingSources: []`. `strictMcpConfig` is the CLI's
+        // `--strict-mcp-config`: ignore every MCP configuration that was not
+        // passed in `mcpServers`. Its documented list names `.mcp.json`, user
+        // settings, plugins and agent frontmatter, not claude.ai connectors,
+        // so `disableClaudeAiConnectors` covers those separately. It is a
+        // settings key, applied through the flag-settings layer, which
+        // `settingSources: []` does not turn off. NOT yet re-measured live.
+        strictMcpConfig: true,
+        settings: { disableClaudeAiConnectors: true },
         canUseTool,
-        // Phase 4a §2: PreToolUse hook on Read snapshots the file the
-        // SDK is about to read. We use the snapshot as the conflict-
-        // detection base for any subsequent Write/Edit to the same
-        // file. The hook is pure-observation — always continues — so
-        // it can't break the SDK's Read path.
+        // No `hooks`. The read-snapshot hook, the secret-read guard, the
+        // write guard and the write-invalidate hook existed only because the
+        // SDK ran Read, Write and Edit inside its own runtime. Those
+        // built-ins are off; Desde's own tools snapshot, refuse secrets,
+        // journal, lock and invalidate inside the tool.
         //
-        // PostToolUse hook on Write/Edit deterministically replays each
-        // successful built-in write into the Vite dev pipeline
-        // (write-invalidate-hook.ts) — same fsevents-independence the
-        // CLI edit lane and the editor structural tools already have.
-        // Registered only when the CLI wired `invalidateFiles`.
-        //
-        // Branch mode edits the working tree in place with no per-write
-        // auto-commit — the user commits via the nav bar's Commit action.
-        //
-        // The Write|Edit brackets are the audit Task 13 write guard:
-        // PreToolUse journals the original + takes the per-file edit lock,
-        // and the three terminal events release it (PostToolUse on success,
-        // PostToolUseFailure on a failed execution, PermissionDenied when
-        // canUseTool refuses — a routine outcome here). `releaseAll()` in the
-        // finally below is the backstop for anything that fires none of them.
-        hooks: {
-          PreToolUse: [
-            { matcher: 'Read', hooks: [readSnapshotHook] },
-            // Registered SEPARATELY from the snapshot hook above, and after
-            // it, because the two do different jobs: that one observes and
-            // always continues, this one refuses.
-            //
-            // Deliberately UNMATCHED (FX17 item 4). It used to carry
-            // `matcher: 'Read|Glob|Grep'`, which is exactly the list someone
-            // writes when they are thinking about the built-in read tools —
-            // and it left Editor's OWN read tools, `mcp__editor__*`, outside
-            // the policy on this lane. Rather than lengthen the list and
-            // leave the next tool outside it too, the guard now sees every
-            // call and decides for itself; it returns allow immediately for
-            // any tool it has no rule for. Same reasoning as the
-            // `PermissionDenied` registration below.
-            { hooks: [secretReadGuard] },
-            {
-              matcher: 'Write|Edit',
-              hooks: [writeGuard.preToolUse],
-              // SECONDS (HookCallbackMatcher.timeout). Set explicitly and well
-              // ABOVE the guard's own 10s lock-acquisition budget so the
-              // degradation path is defined by OUR code: the guard gives up
-              // waiting for the lock and proceeds journal-only with a warning,
-              // rather than the SDK timing the hook out — which would run the
-              // tool unserialized AND leave the late acquisition orphaned.
-              timeout: 60,
-            },
-          ],
-          PostToolUse: [
-            {
-              matcher: 'Write|Edit',
-              hooks: [
-                ...(opts.invalidateFiles
-                  ? [
-                      createWriteInvalidateHook({
-                        worktreeRoot: opts.worktreeRoot,
-                        invalidateFiles: opts.invalidateFiles,
-                      }),
-                    ]
-                  : []),
-                writeGuard.release,
-              ],
-            },
-          ],
-          PostToolUseFailure: [
-            { matcher: 'Write|Edit', hooks: [writeGuard.release] },
-          ],
-          // Deliberately UNMATCHED: PermissionDenied is a less-trodden hook
-          // event than PostToolUse, and we'd rather it fire for every tool
-          // than risk a matcher semantic that silently never matches — the
-          // callback is a no-op for any tool_use_id it isn't holding.
-          PermissionDenied: [{ hooks: [writeGuard.release] }],
-        },
-        // permissionMode 'default' fires canUseTool for every Write/
-        // Edit. `acceptEdits` mode would auto-approve and skip the
-        // callback, dropping our `edit_proposed` events.
+        // permissionMode 'default' fires canUseTool for every MCP tool,
+        // which is every tool that touches the repository. `acceptEdits`
+        // mode would auto-approve edits and skip the gate.
         permissionMode: 'default',
         // NO settings sources at all.
         //
@@ -929,11 +880,6 @@ async function runChatTurnSdkInner(
     opts.emit({ kind: 'error', turnId, reason: errorMessage })
     opts.emit({ kind: 'turn_complete', turnId, stopReason: 'error' })
   } finally {
-    // Task 13 safety net: a per-file edit lock must NEVER outlive the turn
-    // that took it. A turn that crashes, is aborted mid-write, or is killed
-    // by the SDK fires no PostToolUse — without this sweep the file would
-    // stay locked for the life of the CLI process.
-    writeGuard.releaseAll('turn end')
     // Backstop for every path that reaches neither the result close nor the
     // abort listener: a thrown query, a stream that ends without a result, a
     // turn killed by the SDK. Closing twice is a no-op and the steer drain is
