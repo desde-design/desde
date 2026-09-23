@@ -623,6 +623,36 @@ describe('streamConversation: additive provider-seam extensions', () => {
     })
   })
 
+  it('sends a user document block as an Anthropic base64 document source', async () => {
+    const captured: Array<Record<string, unknown>> = []
+    const provider = new AnthropicProvider({
+      apiKey: 'test',
+      client: fakeAnthropicClient(captured, []) as unknown as Anthropic,
+    })
+    const events = []
+    for await (const ev of provider.streamConversation({
+      system: 'sys',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'summarize this' },
+            { type: 'document', mediaType: 'application/pdf', data: 'QUJD', name: 'a.pdf' },
+          ],
+        },
+      ],
+      tools: [],
+    })) {
+      events.push(ev)
+    }
+    const sent = captured[0] as { messages: Array<{ content: unknown[] }> }
+    expect(sent.messages[0].content[1]).toEqual({
+      type: 'document',
+      source: { type: 'base64', media_type: 'application/pdf', data: 'QUJD' },
+      title: 'a.pdf',
+    })
+  })
+
   it('merges providerOptions into the request body', async () => {
     const captured: Array<Record<string, unknown>> = []
     const provider = new AnthropicProvider({

@@ -673,7 +673,7 @@ function toModelMessages(messages: readonly Message[]): ModelMessage[] {
     // on every vision turn for no difference on the wire.
     const userParts: Array<
       | { type: 'text'; text: string }
-      | { type: 'file'; data: string; mediaType: string }
+      | { type: 'file'; data: string; mediaType: string; filename?: string }
     > = []
     const toolParts: Array<{
       type: 'tool-result'
@@ -704,6 +704,13 @@ function toModelMessages(messages: readonly Message[]): ModelMessage[] {
         userParts.push({ type: 'text', text: block.text })
       } else if (block.type === 'image') {
         userParts.push({ type: 'file', data: block.data, mediaType: block.mediaType })
+      } else if (block.type === 'document') {
+        userParts.push({
+          type: 'file',
+          data: block.data,
+          mediaType: block.mediaType,
+          ...(block.name ? { filename: block.name } : {}),
+        })
       } else {
         const parts = typeof block.content === 'string' ? [] : block.content
         const images = parts.filter((c) => c.type === 'image')

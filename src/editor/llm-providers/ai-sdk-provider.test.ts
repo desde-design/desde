@@ -556,6 +556,33 @@ describe('AiSdkProvider.streamConversation', () => {
     expect(user.content[1]).toMatchObject({ type: 'file', mediaType: 'image/png' })
   })
 
+  it('sends a DocumentContent block as a file part with its filename', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: answeredStream(),
+    })
+    await collect(
+      providerFor(model).streamConversation({
+        system: 's',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'document', mediaType: 'application/pdf', data: 'QUJD', name: 'a.pdf' },
+            ],
+          },
+        ],
+        tools: [],
+      }),
+    )
+    const prompt = model.doStreamCalls[0]!.prompt
+    const user = prompt[1] as unknown as { content: Array<Record<string, unknown>> }
+    expect(user.content[0]).toMatchObject({
+      type: 'file',
+      mediaType: 'application/pdf',
+      filename: 'a.pdf',
+    })
+  })
+
   it('nests StreamOpts.providerOptions under the descriptor key', async () => {
     const model = new MockLanguageModelV4({
       doStream: answeredStream(),

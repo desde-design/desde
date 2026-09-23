@@ -483,6 +483,20 @@ function toAnthropicMessage(msg: Message): Anthropic.Messages.MessageParam {
           },
         }
       }
+      if (b.type === 'document') {
+        // Small arm: the transport spike hasn't decided this provider's
+        // fate yet, so this only needs to satisfy the widened
+        // `ChatUserContent` union without dropping the block.
+        return {
+          type: 'document' as const,
+          source: {
+            type: 'base64' as const,
+            media_type: 'application/pdf' as const,
+            data: b.data,
+          },
+          ...(b.name ? { title: b.name } : {}),
+        }
+      }
       // tool_result
       return {
         type: 'tool_result' as const,

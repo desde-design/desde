@@ -214,8 +214,28 @@ export interface ImageContent {
   data: string
 }
 
+/**
+ * A PDF document input block on a user message.
+ *
+ * `data` is base64 WITHOUT the `data:` prefix, matching {@link ImageContent}.
+ * `mediaType` is narrowed to the one type both wire formats accept today
+ * (Anthropic's `document` block, the AI SDK's `file` part) — widen it if a
+ * second document MIME type is ever needed. `name` is an optional display
+ * name for the document (maps to the AI SDK's `filename` and Anthropic's
+ * `title`); omit it and neither field is sent.
+ */
+export interface DocumentContent {
+  type: 'document'
+  /** MIME type; PDF is the only value both wire formats accept today. */
+  mediaType: 'application/pdf'
+  /** Base64 payload, no `data:` prefix. */
+  data: string
+  /** Optional display name for the document. */
+  name?: string
+}
+
 export type AssistantContent = TextContent | ToolUseContent
-export type ChatUserContent = TextContent | ToolResultContent | ImageContent
+export type ChatUserContent = TextContent | ToolResultContent | ImageContent | DocumentContent
 
 /**
  * A turn in the conversation. Roles alternate user → assistant → user
