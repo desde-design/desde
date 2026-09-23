@@ -95,7 +95,8 @@ import {
   lookupRecentCrossSessionWriter,
   recordCrossSessionWrite,
 } from '../agent-chat/cross-session-write-log'
-import { buildCanUseTool, type OverwriteConflictDetected } from '../agent-chat/edit-ack'
+import type { OverwriteConflictDetected } from '../agent-chat/edit-ack'
+import { buildCanUseTool } from './can-use-tool'
 import { captureReadSnapshot } from '../agent-chat/file-read-snapshot'
 import { writeProposalBlob } from '../agent-chat/proposal-blob-store'
 import { createSdkEventAdapter } from './sdk-event-adapter'
