@@ -18,7 +18,7 @@ import { promisify } from "node:util"
 import { execFile } from "node:child_process"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { resolveClaudeExecutablePathIn, resolveClaudeRuntimeDir } from "../../src/editor/llm-providers/claude-runtime-location.js"
+import { resolveClaudeExecutablePathIn, resolveClaudeRuntimeDir } from "../claude-runtime-location.js"
 import { classifyInstallError, ClaudeRuntimeInstallError, ensureClaudeRuntime, type ExtractFn } from "../claude-runtime-installer.js"
 
 const execFileAsync = promisify(execFile)

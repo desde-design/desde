@@ -35,7 +35,7 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
-import { isWellFormedSri } from "../src/editor/llm-providers/claude-runtime-verify.js"
+import { isWellFormedSri } from "./claude-runtime-verify.js"
 
 export interface ResolveAnchorPayloadDirInput {
   /** The payload `main.ts` will actually RUN — possibly a `--payload`/env override. */

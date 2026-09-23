@@ -50,7 +50,7 @@ import {
   claudeAgentSdkPlatformCandidates,
   readInstalledClaudeAgentSdkVersion,
   resolveAppSupportDir,
-} from "../src/editor/llm-providers/claude-runtime-location.js"
+} from "./claude-runtime-location.js"
 import { readClaudeRuntimeExpectedIntegrity, resolveAnchorPayloadDir } from "./claude-runtime-expectation.js"
 
 // __dirname here is `desktop/dist/` (this file's bundled location, CJS

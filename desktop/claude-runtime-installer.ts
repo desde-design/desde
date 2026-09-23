@@ -84,7 +84,7 @@ import {
   claudeAgentSdkPlatformCandidates,
   resolveClaudeExecutablePathIn,
   resolveClaudeRuntimeDir,
-} from "../src/editor/llm-providers/claude-runtime-location.js"
+} from "./claude-runtime-location.js"
 import {
   CLAUDE_RUNTIME_MANIFEST_FILE,
   hashFileSha256Sync,
@@ -92,7 +92,7 @@ import {
   serializeClaudeRuntimeManifest,
   sriIntersects,
   verifyInstalledClaudeRuntime,
-} from "../src/editor/llm-providers/claude-runtime-verify.js"
+} from "./claude-runtime-verify.js"
 
 const execFileAsync = promisify(execFile)
 
