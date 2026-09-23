@@ -37,7 +37,7 @@
  * treated as foreign, so an unattributed payload is never sent anywhere.
  */
 
-import type { ChatSession, ChatTurn } from '../agent-chat/types'
+import type { ChatSession, ChatSteeredMessage, ChatTurn } from '../agent-chat/types'
 import { readArchivedTurns } from '../agent-chat/session-turns-archive'
 import type { AssistantContent, ChatUserContent, Message } from '../llm-providers/types'
 
@@ -116,7 +116,21 @@ function replayTurn(turn: ChatTurn, providerId: string | undefined): Message[] {
         : [],
     ),
   )
-  for (const block of turn.assistantContent) {
+  // Each steer goes back where it landed in the turn. `afterAssistantBlocks`
+  // is the number of persisted blocks that came before it, so a steer at `n`
+  // is replayed just before block `n`: the assistant message so far and its
+  // pending tool results are flushed first, then the steer, exactly the order
+  // the loop sent them in. Without this, the model was shown its answer to a
+  // correction BEFORE the correction itself, and the correction as still open.
+  const steersAt = placeSteers(turn.steers ?? [], turn.assistantContent.length)
+  const pushSteersAt = (index: number): void => {
+    const here = steersAt.get(index)
+    if (here === undefined) return
+    flush()
+    for (const text of here) out.push({ role: 'user', content: [{ type: 'text', text }] })
+  }
+  for (const [index, block] of turn.assistantContent.entries()) {
+    pushSteersAt(index)
     if (block.type === 'server_tool_use' || block.type === 'server_tool_result') {
       if (!pairedServerIds.has(block.toolUseId)) continue
       // Same step rule as text: after a function tool's result, anything the
@@ -180,12 +194,33 @@ function replayTurn(turn: ChatTurn, providerId: string | undefined): Message[] {
     )
   }
   flush()
-  // Steers the user typed during the turn are their own words and belong in
-  // the transcript, at the end of the turn they were answered in.
-  for (const steer of turn.steers ?? []) {
-    out.push({ role: 'user', content: [{ type: 'text', text: steer.text }] })
-  }
+  // A steer at the end: typed while the last step was finishing.
+  pushSteersAt(turn.assistantContent.length)
   return out
+}
+
+/**
+ * Where each steer is replayed, by block index, in recorded order.
+ *
+ * The same reading `turnsToChatMessages` in `useEditorChat.ts` makes, so the
+ * model and the user's screen agree after a reload: positions never go
+ * backwards (a smaller one is read as the position before it) and never
+ * pass the end. A session file with nonsense positions therefore degrades
+ * to odd ordering, never to a dropped steer.
+ */
+function placeSteers(
+  steers: readonly ChatSteeredMessage[],
+  blockCount: number,
+): Map<number, string[]> {
+  const at = new Map<number, string[]>()
+  let cursor = 0
+  for (const steer of steers) {
+    cursor = Math.min(Math.max(steer.afterAssistantBlocks, cursor), blockCount)
+    const list = at.get(cursor) ?? []
+    list.push(steer.text)
+    at.set(cursor, list)
+  }
+  return at
 }
 
 function stringify(output: unknown): string {

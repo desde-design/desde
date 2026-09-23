@@ -14,6 +14,7 @@ import type { BridgeClient } from '../agent-tools/types'
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
 import { resolveSessionConflict } from '../agent-chat/resolve-conflict'
 import { ELIDED_TOOL_IMAGE } from './context-budget'
+import { replayHistory } from './history-replay'
 import { makeEmptySession } from '../agent-chat/types'
 import { readProposalBlob } from '../agent-chat/proposal-blob-store'
 import { createTurnInputChannel } from '../agent-chat/turn-input-channel'
@@ -1444,6 +1445,41 @@ describe('runChatTurnNeutral: a steer interrupts the step in flight', () => {
     ])
     expect(events.filter((e) => e.kind === 'resubmit_required')).toEqual([])
     expect(events.filter((e) => e.kind === 'error')).toEqual([])
+  })
+
+  it('replays the interrupting steer on the next turn where the model saw it in this one', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Working on the header. ' }
+        channel.push('no, the sidebar')
+        await abortedBy(o.signal!)
+      }
+      if (i === 1) {
+        yield* toolStep('tu_1', 'Read', { file_path: 'src/App.vue' })
+        return
+      }
+      yield* textStep('Sidebar done.')
+    })
+    const { result } = await runSteered(provider, channel)
+    expect(result.turn.error).toBeUndefined()
+    expect(result.turn.steers).toEqual([{ text: 'no, the sidebar', afterAssistantBlocks: 1 }])
+
+    // What the model saw on this turn's last step, plus the answer it gave.
+    const inTurn = [
+      ...calls[2].messages,
+      { role: 'assistant', content: [{ type: 'text', text: 'Sidebar done.' }] },
+    ]
+    // What it will be shown on the next turn. The opening message carries a
+    // per-turn context envelope live and only the user's words on replay, so
+    // the first message is compared by role alone.
+    const replayed = await replayHistory({
+      session: result.session,
+      repoRoot: root,
+      providerId: 'anthropic',
+    })
+    expect(replayed.map((m) => m.role)).toEqual(inTurn.map((m) => m.role))
+    expect(replayed.slice(1)).toEqual(inTurn.slice(1))
   })
 
   it('gives each step a signal of its own, so an interrupt never aborts the turn', async () => {

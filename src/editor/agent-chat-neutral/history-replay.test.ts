@@ -285,6 +285,136 @@ describe('replayHistory', () => {
     })
   })
 
+  describe('puts each steer where it landed in the turn', () => {
+    const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }] })
+    const say = (text: string) => ({ type: 'text' as const, text })
+    const read = (id: string) => ({
+      type: 'tool_use' as const,
+      toolUseId: id,
+      name: 'Read',
+      input: { file_path: 'a.vue' },
+    })
+    const replayOne = (over: Partial<ChatTurn>) =>
+      replayHistory({ repoRoot: root, session: sessionWith([turn({ userMessage: 'first', ...over })]) })
+
+    it('a steer in the middle of the answer splits it at that point', async () => {
+      const messages = await replayOne({
+        assistantContent: [say('Working on the header.'), read('tu_1'), say('Sidebar done.')],
+        toolResults: { tu_1: { ok: true, output: 'ok' } },
+        steers: [{ text: 'no, the sidebar', afterAssistantBlocks: 1 }],
+      })
+      expect(messages).toEqual([
+        user('first'),
+        { role: 'assistant', content: [{ type: 'text', text: 'Working on the header.' }] },
+        user('no, the sidebar'),
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'a.vue' } }],
+        },
+        { role: 'user', content: [{ type: 'tool_result', toolUseId: 'tu_1', content: 'ok' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Sidebar done.' }] },
+      ])
+    })
+
+    it('two steers keep their own positions and their order', async () => {
+      const messages = await replayOne({
+        assistantContent: [say('one'), say('two'), say('three')],
+        steers: [
+          { text: 'steer A', afterAssistantBlocks: 1 },
+          { text: 'steer B', afterAssistantBlocks: 1 },
+          { text: 'steer C', afterAssistantBlocks: 2 },
+        ],
+      })
+      expect(messages).toEqual([
+        user('first'),
+        { role: 'assistant', content: [{ type: 'text', text: 'one' }] },
+        user('steer A'),
+        user('steer B'),
+        { role: 'assistant', content: [{ type: 'text', text: 'two' }] },
+        user('steer C'),
+        { role: 'assistant', content: [{ type: 'text', text: 'three' }] },
+      ])
+    })
+
+    it('a steer at the end replays exactly as it did before positions were read', async () => {
+      const assistantContent = [say('reading'), read('tu_1'), say('done')]
+      const messages = await replayOne({
+        assistantContent,
+        toolResults: { tu_1: { ok: true, output: 'ok' } },
+        steers: [{ text: 'thanks', afterAssistantBlocks: assistantContent.length }],
+      })
+      const unsteered = await replayOne({
+        assistantContent,
+        toolResults: { tu_1: { ok: true, output: 'ok' } },
+      })
+      expect(messages).toEqual([...unsteered, user('thanks')])
+    })
+
+    it('a steer after a tool call goes after that call\'s result, not between them', async () => {
+      const messages = await replayOne({
+        assistantContent: [say('reading'), read('tu_1'), say('found it')],
+        toolResults: { tu_1: { ok: true, output: 'ok' } },
+        steers: [{ text: 'look at b.vue too', afterAssistantBlocks: 2 }],
+      })
+      expect(messages).toEqual([
+        user('first'),
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'reading' },
+            { type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'a.vue' } },
+          ],
+        },
+        { role: 'user', content: [{ type: 'tool_result', toolUseId: 'tu_1', content: 'ok' }] },
+        user('look at b.vue too'),
+        { role: 'assistant', content: [{ type: 'text', text: 'found it' }] },
+      ])
+    })
+
+    it('a steer before the first block goes straight after the opening message', async () => {
+      const messages = await replayOne({
+        assistantContent: [say('X done.')],
+        steers: [{ text: 'do X instead', afterAssistantBlocks: 0 }],
+      })
+      expect(messages).toEqual([
+        user('first'),
+        user('do X instead'),
+        { role: 'assistant', content: [{ type: 'text', text: 'X done.' }] },
+      ])
+    })
+
+    it('a turn with no assistant blocks keeps its steers after the opening message', async () => {
+      // The recovery turn `chat-handler.ts` writes when the runtime threw:
+      // every steer is recorded at 0 and there is nothing to split.
+      const messages = await replayOne({
+        assistantContent: [],
+        steers: [
+          { text: 'steer A', afterAssistantBlocks: 0 },
+          { text: 'steer B', afterAssistantBlocks: 0 },
+        ],
+      })
+      expect(messages).toEqual([user('first'), user('steer A'), user('steer B')])
+    })
+
+    it('reads a position past the end, or one that goes backwards, the way the client does', async () => {
+      const messages = await replayOne({
+        assistantContent: [say('one'), say('two')],
+        steers: [
+          { text: 'late', afterAssistantBlocks: 2 },
+          { text: 'backwards', afterAssistantBlocks: 1 },
+          { text: 'beyond', afterAssistantBlocks: 99 },
+        ],
+      })
+      expect(messages).toEqual([
+        user('first'),
+        { role: 'assistant', content: [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }] },
+        user('late'),
+        user('backwards'),
+        user('beyond'),
+      ])
+    })
+  })
+
   it('drops an empty assistant message rather than sending one the API rejects', async () => {
     const messages = await replayHistory({
       repoRoot: root,

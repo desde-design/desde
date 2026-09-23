@@ -166,7 +166,8 @@ export interface ChatSteeredMessage {
    * Stored rather than derived because there is nothing to derive it from
    * later — the ordering only exists while the turn is streaming. A renderer
    * splits `assistantContent` here so the steer appears where it happened
-   * instead of after the whole reply.
+   * instead of after the whole reply, and the neutral lane's history replay
+   * (`history-replay.ts`) splits it the same way for the model.
    */
   afterAssistantBlocks: number
 }
