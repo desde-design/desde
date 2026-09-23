@@ -1229,3 +1229,51 @@ describe("the effort row is operable from the keyboard", () => {
     expect(menuDismissals).toEqual([])
   })
 })
+
+/**
+ * `source: "cli"` on the catalog response means the bundled `claude` binary's
+ * own sign-in answered it, not an API key (dev mode / the subscription
+ * sidecar) — see `resolveChatRuntimeKind` in
+ * `editor-cli/src/server/chat-runtime-dispatch.ts`. The chip marks that so a
+ * chat that stops working when the binary signs out is not a surprise.
+ */
+describe("ModelPickerChip — subscription (dev) badge", () => {
+  it("shows the badge when the catalog's source is 'cli'", async () => {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    const { editorFetch } = await import("@/lib/editor-fetch")
+    vi.mocked(editorFetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ...CATALOG_RESPONSE, source: "cli" }),
+    } as unknown as Response)
+    render(<ModelPickerChip value={null} onChange={() => {}} />)
+    await waitFor(() => {
+      expect(screen.getByTestId("editor-model-subscription-badge")).toHaveTextContent(
+        "subscription (dev)",
+      )
+    })
+  })
+
+  it("does not show the badge when the catalog's source is 'api'", async () => {
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    const { editorFetch } = await import("@/lib/editor-fetch")
+    vi.mocked(editorFetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ...CATALOG_RESPONSE, source: "api" }),
+    } as unknown as Response)
+    render(<ModelPickerChip value={null} onChange={() => {}} />)
+    await waitFor(() => screen.getByTestId("editor-model-chip"))
+    expect(screen.queryByTestId("editor-model-subscription-badge")).not.toBeInTheDocument()
+  })
+
+  it("does not show the badge when the catalog response omits source", async () => {
+    // The default fetch mock at the top of this file answers with the plain
+    // CATALOG_RESPONSE — no `source` field at all.
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    render(<ModelPickerChip value={null} onChange={() => {}} />)
+    await waitFor(() => screen.getByTestId("editor-model-chip"))
+    expect(screen.queryByTestId("editor-model-subscription-badge")).not.toBeInTheDocument()
+  })
+})

@@ -58,6 +58,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Slider } from "@/components/ui/slider"
+import { Badge } from "@/components/ui/badge"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { reconcileSessionModelConfig } from "@/editor/core/model-catalog"
 import type { EffortLevel, SessionModelConfig } from "@/editor/core/model-catalog"
 import {
@@ -376,7 +378,13 @@ export function ModelPickerChip({
     : -1
   const effortIndex = chosenEffortIndex >= 0 ? chosenEffortIndex : defaultEffortIndex
 
+  // The catalog came from the bundled `claude` binary's own sign-in, not an
+  // API key — dev mode or the subscription sidecar. The badge names that so
+  // a chat that stops working when the binary signs out is not a surprise.
+  const runsOnSubscription = catalog.source === "cli"
+
   return (
+    <span className="inline-flex shrink-0 items-center gap-1">
     <DropdownMenu
       onOpenChange={(open) => {
         // Reopening shows the running model's provider again, not wherever
@@ -574,5 +582,21 @@ export function ModelPickerChip({
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
+    {runsOnSubscription ? (
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="secondary" className="text-2xs" data-testid="editor-model-subscription-badge">
+              subscription (dev)
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs">
+            Chat runs on the claude command line tool&apos;s sign-in. Add an API key to use the
+            product path.
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    ) : null}
+    </span>
   )
 }

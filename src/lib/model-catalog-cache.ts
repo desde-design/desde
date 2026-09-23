@@ -28,6 +28,18 @@ export interface ModelCatalogCapabilitiesLike {
   vendorRateLimitEvents: boolean
 }
 
+/**
+ * Where the served catalog came from, mirroring `ModelCatalogSource` in
+ * `editor-cli/src/server/model-catalog-source.ts` structurally (that module
+ * is server-only, so this is a copy of the string union, not an import —
+ * same reasoning as `ModelCatalogCapabilitiesLike` above). `'cli'` is the
+ * one value the chip cares about: it means the catalog came from the
+ * bundled `claude` binary's own sign-in (dev mode / the subscription
+ * sidecar), not from an API key — see `model-picker-chip.tsx`'s
+ * "subscription (dev)" badge.
+ */
+export type ModelCatalogSourceLike = "api" | "cli" | "static"
+
 export interface ModelCatalogResponse {
   catalogs: Array<ProviderModelCatalog & { capabilities?: ModelCatalogCapabilitiesLike }>
   default: SessionModelConfig
@@ -46,6 +58,12 @@ export interface ModelCatalogResponse {
    * saved one is gone) → runtime default.
    */
   lastChosenModel?: SessionModelConfig | null
+  /**
+   * Where the catalogs came from. `'cli'` means the bundled `claude`
+   * binary's own sign-in answered, not an API key — see
+   * `ModelCatalogSourceLike`.
+   */
+  source?: ModelCatalogSourceLike
 }
 
 let catalogCache: ModelCatalogResponse | null = null
