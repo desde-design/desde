@@ -54,7 +54,9 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
   it('puts adaptive thinking and the chosen effort on provider options', () => {
     // The SDK lane resolves thinking itself and ignores this; the neutral
     // lane's `providerOptionsFor` is what reads it, as
-    // `StreamOpts.providerOptions`.
+    // `StreamOpts.providerOptions`. This is the AI SDK's dialect, not the
+    // wire: the direct provider translates it to `output_config.effort`
+    // (see `anthropic-provider.test.ts`).
     expect(ANTHROPIC_DESCRIPTOR.effort.toRequest('high', 'claude-opus-5')).toEqual({
       thinking: { type: 'adaptive', display: 'summarized' },
       effort: 'high',

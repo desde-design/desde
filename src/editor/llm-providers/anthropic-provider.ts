@@ -290,10 +290,12 @@ export class AnthropicProvider implements LLMProvider {
       // retires, so it declares function tools only and the loop's server
       // defs are left out rather than half-supported here.
       tools: opts.tools.flatMap((t) => (t.kind === 'server' ? [] : [toAnthropicTool(t)])),
-      // Descriptor-supplied vendor fields (`thinking`, cache knobs). Spread
+      // Descriptor-supplied vendor fields (`thinking`, `effort`). Spread
       // LAST so a descriptor can override a default we set above, and never
-      // the other way round: the descriptor is the thing that knows.
-      ...(opts.providerOptions ?? {}),
+      // the other way round: the descriptor is the thing that knows. The
+      // descriptor writes the AI SDK's field names, so they are translated
+      // to the Messages API's own names first.
+      ...toMessagesApiOptions(opts.providerOptions),
     }
 
     // The SDK exposes both `.stream()` (returns MessageStream helper)
@@ -460,6 +462,45 @@ export class AnthropicProvider implements LLMProvider {
       vendorStopReason,
     }
   }
+}
+
+/**
+ * Translate descriptor provider options from the AI SDK dialect into the
+ * Messages API body this provider sends.
+ *
+ * The Anthropic descriptor's `effort.toRequest` writes the field names that
+ * `@ai-sdk/anthropic` takes: `effort` at the top level and
+ * `thinking.budgetTokens`. The raw Messages API has no top-level `effort`
+ * (it is `output_config.effort`), its fixed-budget thinking takes
+ * `budget_tokens`, and it refuses unknown fields with a 400. The descriptor
+ * stays in the AI SDK dialect because the AI SDK transport reads it as is;
+ * this provider is the one that speaks the raw API, so it translates.
+ *
+ * Every other key passes through unchanged.
+ */
+function toMessagesApiOptions(
+  providerOptions: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!providerOptions) return {}
+  const { effort, thinking, output_config: outputConfig, ...rest } = providerOptions
+  const out: Record<string, unknown> = { ...rest }
+  if (thinking !== undefined) out.thinking = toMessagesApiThinking(thinking)
+  const mergedOutputConfig: Record<string, unknown> = isPlainRecord(outputConfig)
+    ? { ...outputConfig }
+    : {}
+  if (effort !== undefined) mergedOutputConfig.effort = effort
+  if (Object.keys(mergedOutputConfig).length > 0) out.output_config = mergedOutputConfig
+  return out
+}
+
+function toMessagesApiThinking(thinking: unknown): unknown {
+  if (!isPlainRecord(thinking) || !('budgetTokens' in thinking)) return thinking
+  const { budgetTokens, ...rest } = thinking
+  return { ...rest, budget_tokens: budgetTokens }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function toAnthropicSystem(system: SystemContent): string | AnthropicTextBlock[] {

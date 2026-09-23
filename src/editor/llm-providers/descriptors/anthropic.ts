@@ -99,7 +99,9 @@ export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
     // neutral lane (`run-chat-turn-neutral.ts`'s `providerOptionsFor`) is the
     // one that puts these on the wire, as `StreamOpts.providerOptions`: the
     // AI SDK's Anthropic adapter nests them under the `anthropic` key. Keys
-    // match `anthropicLanguageModelOptions` in `@ai-sdk/anthropic`.
+    // match `anthropicLanguageModelOptions` in `@ai-sdk/anthropic`. The
+    // direct provider (`anthropic-provider.ts`) translates them to the
+    // Messages API's names (`output_config.effort`, `budget_tokens`).
     toRequest(effort, model) {
       return {
         thinking: resolveAnthropicThinkingConfig(model ?? ANTHROPIC_DEFAULT_MODEL),

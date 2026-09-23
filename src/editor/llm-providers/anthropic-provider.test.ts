@@ -18,6 +18,7 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import { describe, expect, it, vi } from 'vitest'
 import { AnthropicProvider } from './anthropic-provider'
+import { ANTHROPIC_DESCRIPTOR } from './descriptors/anthropic'
 import type { ProviderEvent } from './types'
 
 interface CapturedCall {
@@ -731,6 +732,63 @@ describe('streamConversation: additive provider-seam extensions', () => {
       void _
     }
     expect(captured[0].thinking).toEqual({ type: 'adaptive' })
+  })
+
+  it('translates the descriptor\'s effort options into the Messages API field names', async () => {
+    // The descriptor speaks the AI SDK dialect (`effort` at the top level,
+    // `thinking.budgetTokens`). The raw Messages API takes
+    // `output_config.effort` and `thinking.budget_tokens`, and refuses an
+    // unknown top-level field. This provider is the one that talks to the raw
+    // API, so it translates.
+    const captured: Array<Record<string, unknown>> = []
+    const provider = new AnthropicProvider({
+      apiKey: 'test',
+      client: fakeAnthropicClient(captured, []) as unknown as Anthropic,
+    })
+    for (const model of ['claude-opus-4-8', 'claude-haiku-4-5']) {
+      for await (const _ of provider.streamConversation({
+        system: 'sys',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+        model,
+        providerOptions: ANTHROPIC_DESCRIPTOR.effort.toRequest('high', model),
+      })) {
+        void _
+      }
+    }
+    const [opus, haiku] = captured
+    expect(opus).not.toHaveProperty('effort')
+    expect(opus.output_config).toEqual({ effort: 'high' })
+    expect(opus.thinking).toEqual({
+      type: 'adaptive',
+      display: 'summarized',
+    } satisfies Anthropic.Messages.ThinkingConfigParam)
+
+    expect(haiku).not.toHaveProperty('effort')
+    expect(haiku.output_config).toEqual({ effort: 'high' })
+    expect(haiku.thinking).toEqual({
+      type: 'enabled',
+      budget_tokens: 4000,
+    } satisfies Anthropic.Messages.ThinkingConfigParam)
+  })
+
+  it('sends no output_config when no effort is chosen', async () => {
+    const captured: Array<Record<string, unknown>> = []
+    const provider = new AnthropicProvider({
+      apiKey: 'test',
+      client: fakeAnthropicClient(captured, []) as unknown as Anthropic,
+    })
+    for await (const _ of provider.streamConversation({
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [],
+      model: 'claude-haiku-4-5',
+      providerOptions: ANTHROPIC_DESCRIPTOR.effort.toRequest(undefined, 'claude-haiku-4-5'),
+    })) {
+      void _
+    }
+    expect(captured[0]).not.toHaveProperty('output_config')
+    expect(captured[0].thinking).toEqual({ type: 'enabled', budget_tokens: 4000 })
   })
 
   it('emits reasoning_delta for a thinking_delta and never puts it in the assistant message', async () => {
