@@ -49,7 +49,10 @@ const FIGMA_OFF = {
   enabled: false,
   enableable: true,
   envReady: false,
-  claudeModelsOnly: true,
+  // Both chat runtimes serve every catalog entry since the neutral lane gained
+  // its own MCP client, so the API reports false for all of them. The field
+  // goes when only one runtime remains.
+  claudeModelsOnly: false,
 }
 
 const WEB_SEARCH_ON = {
@@ -64,7 +67,7 @@ const WEB_SEARCH_ON = {
   enabled: true,
   enableable: false,
   envReady: true,
-  claudeModelsOnly: true,
+  claudeModelsOnly: false,
 }
 
 /**
