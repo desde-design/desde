@@ -580,6 +580,18 @@ function normalizeSchemaNode(node: unknown, makeNullable: boolean): unknown {
 /** Widen one schema node so `null` is a legal value for it. */
 function withNullAllowed(node: Record<string, unknown>): Record<string, unknown> {
   const out = { ...node }
+  // An enum constrains the VALUES as well as the type. Anthropic's
+  // structured-output validator refuses an enum next to a type ARRAY
+  // ("Enum value 'left' does not match declared type ['string', 'null']",
+  // measured live 2026-09-23 on the translate-goal schema), so a nullable
+  // enum is written as two branches instead: the caller's enum, or null.
+  if (Array.isArray(out.enum) && !out.enum.includes(null)) {
+    const { enum: values, type: enumType, ...rest } = out
+    return {
+      ...rest,
+      anyOf: [{ ...(enumType !== undefined ? { type: enumType } : {}), enum: values }, { type: 'null' }],
+    }
+  }
   const type = out.type
   if (typeof type === 'string') {
     if (type !== 'null') out.type = [type, 'null']
@@ -598,9 +610,6 @@ function withNullAllowed(node: Record<string, unknown>): Record<string, unknown>
     // there is nothing to widen. Leave it exactly as the caller wrote it.
     return out
   }
-  // An enum constrains the VALUES as well as the type, so a nullable enum
-  // has to list null among them or the vendor rejects the pair.
-  if (Array.isArray(out.enum) && !out.enum.includes(null)) out.enum = [...out.enum, null]
   return out
 }
 
