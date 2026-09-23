@@ -741,6 +741,12 @@ async function runInner(
       // Every `text_delta` of THIS step, concatenated. It is what an
       // interrupted step keeps: the words already on the user's screen.
       let streamedText = ''
+      // Vendor-run calls this step STARTED, and the ones whose result
+      // arrived. Their frames go to the client the moment they happen (a
+      // search takes seconds, and holding them would hide its progress), so
+      // an interrupt has to close any row still waiting on a result.
+      const serverToolsStarted: string[] = []
+      const serverToolsFinished = new Set<string>()
       let lastStep = false
 
       // This step's own abort. A steer fires it through `onAccepted`; the
@@ -774,7 +780,13 @@ async function runInner(
         for (const held of heldToolStarts.splice(0)) opts.emit(held)
       }
       try {
-        for await (const ev of streamStepWithRetry(provider, streamOpts, opts.emit, interrupted)) {
+        for await (const ev of streamStepWithRetry(
+          provider,
+          streamOpts,
+          opts.emit,
+          interrupted,
+          step,
+        )) {
           for (const out of adapter.adapt(ev)) {
             if (ev.kind === 'tool_use') {
               heldToolStarts.push(out)
@@ -787,6 +799,10 @@ async function runInner(
             streamedText += ev.delta
           } else if (ev.kind === 'tool_use') {
             pending.push({ id: ev.id, name: ev.name, input: ev.input })
+          } else if (ev.kind === 'server_tool_use') {
+            serverToolsStarted.push(ev.id)
+          } else if (ev.kind === 'server_tool_result') {
+            serverToolsFinished.add(ev.toolUseId)
           } else if (ev.kind === 'usage') {
             streamedIn += ev.inputTokens
             streamedOut += ev.outputTokens
@@ -845,10 +861,27 @@ async function runInner(
         // `server_tool_use` / `server_tool_result` (a partial response's
         // vendor blocks are not safe to send back). Their held
         // `tool_use_start` frames are discarded unsent.
-        if (streamedText.length > 0) {
+        //
+        // Whitespace-only text is dropped too: Anthropic answers a request
+        // carrying an all-whitespace text block with a 400.
+        if (streamedText.trim().length > 0) {
           assistantContent.push({ type: 'text', text: streamedText })
           messages.push({ role: 'assistant', content: [{ type: 'text', text: streamedText }] })
           turnChannel.noteAssistantMessage(randomUUID())
+        }
+        // A vendor-run call that started and never delivered its result
+        // would leave its row spinning on screen. Close each one. The
+        // persisted turn has no server blocks from this step, so a reload
+        // shows no row at all; that divergence is known (Task 16's table).
+        for (const toolUseId of serverToolsStarted) {
+          if (serverToolsFinished.has(toolUseId)) continue
+          opts.emit({
+            kind: 'tool_result',
+            turnId,
+            toolUseId,
+            ok: false,
+            error: 'interrupted before the result arrived',
+          })
         }
         // The interrupted request was made, so it is billed and counted.
         settleStepUsage(complete?.usage, {
@@ -861,7 +894,10 @@ async function runInner(
         // emits `steered`. The step counts against the cap like any other.
         continue
       }
-      releaseToolStarts()
+      // Only a step that COMPLETED shows its calls. A stream that ended with
+      // no `message_complete` fails the turn just below, runs no tool, and
+      // would otherwise leave rows that no result ever resolves.
+      if (complete !== null) releaseToolStarts()
 
       if (complete !== null) {
         assistantMessage = complete.message
@@ -1163,6 +1199,7 @@ async function* streamStepWithRetry(
   streamOpts: StreamOpts,
   emit: (event: ChatStreamEvent) => void,
   interrupted: () => boolean,
+  step: number,
 ): AsyncGenerator<ProviderEvent> {
   for (let attempt = 1; ; attempt++) {
     let yielded = false
@@ -1173,7 +1210,10 @@ async function* streamStepWithRetry(
       }
       return
     } catch (err) {
-      if (interrupted()) return
+      if (interrupted()) {
+        logInterruptedStepError(step, err)
+        return
+      }
       if (streamOpts.signal?.aborted) throw err
       const status = httpStatusOf(err)
       const retriable =
@@ -1194,10 +1234,27 @@ async function* streamStepWithRetry(
       // during, so it ends on abort and the turn stops here rather than paying
       // for another request. A steer ends it too: the stale request is not
       // sent again, the steered one goes out instead.
-      if (interrupted()) return
+      if (interrupted()) {
+        logInterruptedStepError(step, err)
+        return
+      }
       if (streamOpts.signal?.aborted) throw err
     }
   }
+}
+
+/**
+ * The error an interrupted step ended with, which the loop does not surface:
+ * the steer is what the user asked for, and the next step is a fresh request.
+ * Debug level, so a genuine failure that coincided with an interrupt can
+ * still be found in a verbose log rather than vanishing.
+ */
+function logInterruptedStepError(step: number, err: unknown): void {
+  const cause = unwrapProviderError(err)
+  const message = cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause)
+  console.debug(
+    `[runChatTurnNeutral] step ${step} interrupted by a steer; its error is not surfaced: ${redactSecrets(message)}`,
+  )
 }
 
 /**

@@ -146,7 +146,7 @@ Only fall back to asking the user to select something if step 2 turns up two or 
 
 export const NEUTRAL_STEERING_BLOCK = `# Messages the user sends WHILE you are working
 
-The chat box does not lock while you work. When the user types during a turn, Desde hands that message to you as an ordinary user message as soon as it can. If you are part way through writing a reply, the reply is cut off where it had got to and the message comes right after it. If a tool is running, the message comes once the tool has finished. Nothing is wrapped around it. It appears in the conversation exactly where a message from the user appears.
+The chat box does not lock while you work. When the user types during a turn, Desde hands that message to you as an ordinary user message as soon as it can. If you are part way through writing a reply, the reply is cut off at the point it had reached and the message comes right after it. If a tool is running, the message comes once the tool has finished. Nothing is wrapped around it. It appears in the conversation exactly where a message from the user appears.
 
 That is the real user talking, and it carries their full authority. It is the same person who started this turn, typing into the same chat box. It is also their most recent instruction, so where it conflicts with something you were told earlier in the turn, the newer message wins.
 

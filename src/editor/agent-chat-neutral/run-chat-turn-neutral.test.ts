@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // Re-exported from the one file allowed to import the AI SDK, rather than
 // importing `ai` here directly — see the fence in `ai-sdk-provider.ts`.
 import { APICallError, RetryError } from '../llm-providers/ai-sdk-provider'
+// The Anthropic SDK's own abort error, whose `name` is plain 'Error'. Built
+// from the installed package, not hand-shaped, because the interrupt path's
+// reason for not keying on `name === 'AbortError'` is this class.
+import { APIUserAbortError } from '@anthropic-ai/sdk'
 
 import type { BridgeClient } from '../agent-tools/types'
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
@@ -1247,8 +1251,12 @@ async function abortedBy(signal: AbortSignal): Promise<never> {
  */
 function* adapterAbortTail(
   content: ReadonlyArray<{ type: 'text'; text: string }>,
+  { streamsUsage }: { streamsUsage: boolean },
 ): Generator<ProviderEvent> {
-  yield { kind: 'usage', inputTokens: 3, outputTokens: 1 }
+  // `ai-sdk-provider.ts` yields a `usage` event before the completion;
+  // `anthropic-provider.ts` does not on abort, so for that shape the step's
+  // cost reaches the turn only through `message_complete.usage`.
+  if (streamsUsage) yield { kind: 'usage', inputTokens: 3, outputTokens: 1 }
   yield {
     kind: 'message_complete',
     stopReason: 'error',
@@ -1430,17 +1438,21 @@ describe('runChatTurnNeutral: a steer interrupts the step in flight', () => {
   })
 
   it.each([
-    ['keeps the blocks it assembled (ai-sdk-provider)', [{ type: 'text' as const, text: 'Hel' }]],
-    ['sends no blocks (anthropic-provider)', []],
+    [
+      'keeps the blocks it assembled and streams usage (ai-sdk-provider)',
+      [{ type: 'text' as const, text: 'Hel' }],
+      true,
+    ],
+    ['sends no blocks and no usage event (anthropic-provider)', [], false],
   ])(
     'treats a stream that ENDS on the abort as an interrupt too, when the transport %s',
-    async (_label, content) => {
+    async (_label, content, streamsUsage) => {
       const channel = createTurnInputChannel()
       const { provider, calls } = stepwiseProvider(async function* (_o, i) {
         if (i === 0) {
           yield { kind: 'text_delta', delta: 'Hel' }
           channel.push('stop, do X')
-          yield* adapterAbortTail(content)
+          yield* adapterAbortTail(content, { streamsUsage })
           return
         }
         yield* textStep('done')
@@ -1467,19 +1479,30 @@ describe('runChatTurnNeutral: a steer interrupts the step in flight', () => {
 
   it('does not retry an interrupted step: the next request is the steered one', async () => {
     const channel = createTurnInputChannel()
-    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+    const { provider, calls } = stepwiseProvider(async function* (_o, i) {
       if (i === 0) {
-        yield { kind: 'text_delta', delta: 'Hel' }
         channel.push('stop, do X')
-        // A retriable-looking failure after the interrupt. Retrying would send
-        // the stale request again; the steer must go out instead.
+        // A RETRIABLE failure, thrown before anything was yielded: exactly
+        // the case the retry loop would otherwise try again. Retrying would
+        // send the stale request; the steer must go out instead.
         await new Promise((r) => setTimeout(r, 0))
-        throw Object.assign(new Error('503 service unavailable'), { status: 503 })
+        throw new APICallError({
+          message: 'service unavailable',
+          url: 'https://api.openai.com/v1/responses',
+          requestBodyValues: {},
+          statusCode: 503,
+          isRetryable: true,
+        })
       }
       yield* textStep('done')
     })
-    const { result } = await runSteered(provider, channel)
+    const events: ChatStreamEvent[] = []
+    const { result } = await runSteered(provider, channel, {
+      emit: (e: ChatStreamEvent) => events.push(e),
+    })
+    // Two calls, not three: the 503 was not retried, and no wait was taken.
     expect(calls).toHaveLength(2)
+    expect(events.filter((e) => e.kind === 'api_retry')).toEqual([])
     expect(calls[1].messages.at(-1)).toEqual({
       role: 'user',
       content: [{ type: 'text', text: 'stop, do X' }],
@@ -1491,8 +1514,13 @@ describe('runChatTurnNeutral: a steer interrupts the step in flight', () => {
     const channel = createTurnInputChannel()
     const { provider, calls } = stepwiseProvider(async function* (_o, i) {
       if (i === 0) {
-        throw Object.assign(new Error('429 too many requests'), {
-          headers: { 'retry-after': '3600' },
+        throw new APICallError({
+          message: 'Rate limit reached. Please try again later.',
+          url: 'https://api.openai.com/v1/responses',
+          requestBodyValues: {},
+          statusCode: 429,
+          responseHeaders: { 'retry-after': '3600' },
+          isRetryable: true,
         })
       }
       yield* textStep('done')
@@ -1516,6 +1544,104 @@ describe('runChatTurnNeutral: a steer interrupts the step in flight', () => {
     })
     expect(result.turn.steers).toEqual([{ text: 'stop, do X', afterAssistantBlocks: 0 }])
     expect(result.turn.error).toBeUndefined()
+  })
+
+  it("treats the Anthropic SDK's APIUserAbortError, whose name is plain Error, as the interrupt", async () => {
+    const channel = createTurnInputChannel()
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      const { provider, calls } = stepwiseProvider(async function* (o, i) {
+        if (i === 0) {
+          channel.push('stop, do X')
+          // What `messages.create` throws when its signal fires before the
+          // response arrives. Nothing has been yielded yet.
+          expect(o.signal!.aborted).toBe(true)
+          const err = new APIUserAbortError()
+          expect(err.name).not.toBe('AbortError')
+          throw err
+        }
+        yield* textStep('done')
+      })
+      const { events, result } = await runSteered(provider, channel)
+
+      expect(calls).toHaveLength(2)
+      expect(calls[1].messages).toHaveLength(2)
+      expect(calls[1].messages.at(-1)).toEqual({
+        role: 'user',
+        content: [{ type: 'text', text: 'stop, do X' }],
+      })
+      expect(result.turn.error).toBeUndefined()
+      expect(result.turn.steers).toEqual([{ text: 'stop, do X', afterAssistantBlocks: 0 }])
+      expect(events.filter((e) => e.kind === 'error')).toEqual([])
+      // Not surfaced, but not silent either.
+      expect(debug).toHaveBeenCalledWith(expect.stringMatching(/step 0 interrupted.*Request was aborted/))
+    } finally {
+      debug.mockRestore()
+    }
+  })
+
+  it('closes a vendor-run tool row the interrupt cut off, and persists no server blocks from that step', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Searching. ' }
+        yield {
+          kind: 'server_tool_use',
+          id: 'srv_1',
+          name: 'web_search',
+          input: { query: 'vue sidebar' },
+        }
+        // The search is still running when the steer lands.
+        channel.push('stop, do X')
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('done')
+    })
+    const { events, result } = await runSteered(provider, channel)
+
+    expect(calls).toHaveLength(2)
+    expect(events.filter((e) => e.kind === 'tool_result')).toEqual([
+      {
+        kind: 'tool_result',
+        turnId: expect.any(String),
+        toolUseId: 'srv_1',
+        ok: false,
+        error: 'interrupted before the result arrived',
+      },
+    ])
+    // The reload will not show the row: nothing from that step's vendor
+    // blocks is persisted or sent back. Recorded as a known divergence.
+    expect(JSON.stringify(result.turn.assistantContent)).not.toContain('srv_1')
+    expect(JSON.stringify(calls[1].messages)).not.toContain('srv_1')
+    expect(result.turn.assistantContent).toEqual([
+      { type: 'text', text: 'Searching. ' },
+      { type: 'text', text: 'done' },
+    ])
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it('drops whitespace-only partial text, which Anthropic refuses as a text block', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: '\n  ' }
+        channel.push('stop, do X')
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('done')
+    })
+    const { result } = await runSteered(provider, channel)
+    expect(calls[1].messages).toHaveLength(2)
+    expect(result.turn.steers).toEqual([{ text: 'stop, do X', afterAssistantBlocks: 0 }])
+    expect(result.turn.assistantContent).toEqual([{ type: 'text', text: 'done' }])
+  })
+
+  it('shows no tool row for a step that ended without completing its message', async () => {
+    const { events, result } = await run([
+      [{ kind: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'src/App.vue' } }],
+    ])
+    expect(result.turn.error).toMatch(/without completing a message/)
+    expect(events.filter((e) => e.kind === 'tool_use_start')).toEqual([])
   })
 
   it('does not interrupt a tool that is running: the steer waits for the step boundary', async () => {
