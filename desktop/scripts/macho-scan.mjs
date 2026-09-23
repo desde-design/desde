@@ -89,8 +89,10 @@ async function listCandidateFiles(rootDir) {
  * without it reports the link itself, never the target, so a symlinked
  * Mach-O (`listCandidateFiles` pushes the symlink's own path, per its doc
  * comment) would silently and permanently fail to be found as one. Harmless
- * today only because the three real Mach-Os this scanner currently sees are
- * all regular files, not symlinks — exactly the future case this flag (and
+ * today only because the real Mach-Os this scanner currently sees (two, as
+ * of chat-runtime-consolidation task 28 dropping the bundled `claude`
+ * binary — see electron-builder.config.mjs's own doc comment) are all
+ * regular files, not symlinks — exactly the future case this flag (and
  * `listCandidateFiles`'s own claim to follow symlinks "for classification")
  * exists to cover.
  */

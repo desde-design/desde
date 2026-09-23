@@ -46,7 +46,6 @@ import { ProjectSettingsPage } from "@/components/editor/launcher/project-settin
 import { demoDeleteMessage } from "@/components/editor/launcher/demo-delete-message"
 import { useDesktopUpdates } from "@/hooks/useDesktopUpdates"
 import { Toaster } from "@/components/ui/sonner"
-import { useClaudeRuntimeStatus } from "@/hooks/useClaudeRuntimeStatus"
 
 /**
  * Trim a repo path from the FRONT so its identifying tail survives.
@@ -135,10 +134,6 @@ export function LauncherPage({
   const { columns, style: gridStyle } = useProjectGrid()
   const api = useLauncherApi()
   const updates = useDesktopUpdates()
-  // Side-effect-only (toast on downloading/error) — the launcher is the
-  // FIRST screen a user sees, so this is where a first-ever install's
-  // "downloading" toast is most likely to actually fire.
-  useClaudeRuntimeStatus()
   // The create flow is a VIEW of this page, addressed by `#/new`, not a modal
   // over it. See `use-launcher-route.ts` for why the hash and why the view
   // rather than the step.
@@ -230,10 +225,9 @@ export function LauncherPage({
         <LauncherSettingsMenu updates={updates} />
       </AppHeader>
       {/* The launcher's toast outlet, matching `editor-page.tsx`. Without it
-          every notice raised on this page (the runtime install's "Setting up
-          AI chat", a failed update-setting write) rendered into nothing:
-          sonner needs a mounted Toaster on the page, and this page had none
-          until 2026-09-02. */}
+          every notice raised on this page (a failed update-setting write)
+          rendered into nothing: sonner needs a mounted Toaster on the page,
+          and this page had none until 2026-09-02. */}
       <Toaster position="bottom-left" richColors closeButton />
 
       {/*

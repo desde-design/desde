@@ -9,7 +9,7 @@
  * one window's unsubscribe must never touch the other's listener.
  */
 import { describe, expect, it, vi } from "vitest"
-import type { DesktopClaudeRuntimeState, DesktopUpdateState } from "../../src/types/desktop-bridge.js"
+import type { DesktopUpdateState } from "../../src/types/desktop-bridge.js"
 
 // preload.ts's top-level module body calls
 // `contextBridge.exposeInMainWorld(...)` as a real side effect (see its own
@@ -145,45 +145,5 @@ describe("buildDesktopBridge — the rest of the updates API delegates to the ri
     expect(ipc.invoke).toHaveBeenCalledWith("desktop:settings:get-auto-download")
     void bridge.updates.setAutoDownload(false)
     expect(ipc.invoke).toHaveBeenCalledWith("desktop:settings:set-auto-download", false)
-  })
-})
-
-describe("buildDesktopBridge — claudeRuntime", () => {
-  it("getState() invokes desktop:claude-runtime:get-state", () => {
-    const ipc = fakeIpc()
-    void buildDesktopBridge(ipc, []).claudeRuntime.getState()
-    expect(ipc.invoke).toHaveBeenCalledWith("desktop:claude-runtime:get-state")
-  })
-
-  it("retry() invokes desktop:claude-runtime:retry and forwards its reply", async () => {
-    const ipc = fakeIpc()
-    ipc.invoke = vi.fn(async () => ({ started: false, skippedReason: "not wanted" }))
-    const result = await buildDesktopBridge(ipc, []).claudeRuntime.retry()
-    expect(ipc.invoke).toHaveBeenCalledWith("desktop:claude-runtime:retry")
-    expect(result).toEqual({ started: false, skippedReason: "not wanted" })
-  })
-
-  it("onState subscribe/unsubscribe: each window's unsubscribe removes only its own listener", () => {
-    const windowAIpc = fakeIpc()
-    const windowBIpc = fakeIpc()
-    const bridgeA = buildDesktopBridge(windowAIpc, [])
-    const bridgeB = buildDesktopBridge(windowBIpc, [])
-
-    const statesA: DesktopClaudeRuntimeState[] = []
-    const statesB: DesktopClaudeRuntimeState[] = []
-    const unsubA = bridgeA.claudeRuntime.onState((s) => statesA.push(s))
-    bridgeB.claudeRuntime.onState((s) => statesB.push(s))
-
-    expect(windowAIpc.listenerCount("desktop:claude-runtime:state")).toBe(1)
-    expect(windowBIpc.listenerCount("desktop:claude-runtime:state")).toBe(1)
-
-    unsubA()
-    expect(windowAIpc.listenerCount("desktop:claude-runtime:state")).toBe(0)
-    expect(windowBIpc.listenerCount("desktop:claude-runtime:state")).toBe(1)
-
-    windowAIpc.emit("desktop:claude-runtime:state", { phase: "ready" })
-    windowBIpc.emit("desktop:claude-runtime:state", { phase: "ready" })
-    expect(statesA).toEqual([])
-    expect(statesB).toEqual([{ phase: "ready" }])
   })
 })

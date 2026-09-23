@@ -663,15 +663,17 @@ function runDemoNpmInstall(out: string): void {
 /**
  * Removes the platform-specific `@anthropic-ai/claude-agent-sdk-<platform>-
  * <arch>[-musl]` package `npm install` staged into the payload as an
- * optional dependency of `@anthropic-ai/claude-agent-sdk` — see
- * `tasks/electron-app.md`'s "stop bundling the claude binary, fetch it on
- * first run" work. That package's only real content is the ~198MB `claude`
- * native binary. Anthropic's npm package for it states "© Anthropic PBC.
- * All rights reserved" with no clear grant to redistribute it through a
- * THIRD PARTY's own distribution channel (Desde) — so Desde no longer
- * ships it. `desktop/claude-runtime-installer.ts` instead fetches it
- * directly from npm onto the user's OWN machine on first run: the user
- * obtains the binary from Anthropic, and we never redistribute it.
+ * optional dependency of `@anthropic-ai/claude-agent-sdk`. That package's
+ * only real content is the ~198MB `claude` native binary. Anthropic's npm
+ * package for it states "© Anthropic PBC. All rights reserved" with no
+ * clear grant to redistribute it through a THIRD PARTY's own distribution
+ * channel (Desde) — so Desde never ships it. The desktop shell used to
+ * fetch it separately onto the user's OWN machine on first run (the
+ * now-removed `desktop/claude-runtime-installer.ts` — see
+ * chat-runtime-consolidation task 28); today, both the desktop shell and a
+ * terminal-CLI run resolve `claude` off the user's own `PATH` instead (see
+ * `src/editor/agent-chat-sidecar/resolve-claude-on-path.ts`), so this
+ * platform package is simply never needed at runtime and stays stripped.
  *
  * The SDK's own JS package (`@anthropic-ai/claude-agent-sdk` — no platform
  * suffix) is untouched: that one IS a normal runtime dependency of our own
@@ -717,34 +719,6 @@ async function stripClaudeAgentSdkPlatformPackages(
     removed.push(entry)
   }
   return { removed, bytes }
-}
-
-/**
- * BUILD-TIME gate for the claude-runtime download anchor (the desktop
- * installer's F1 fix): after staging + stripping, prove the staged
- * `package-lock.json` actually carries the `integrity` expectation
- * `desktop/main.ts` will read at runtime for THIS build machine's
- * platform+arch — using the REAL reader (`claude-runtime-expectation.ts`),
- * not a reimplementation. Without this, a payload whose lockfile went
- * missing (or recorded a different SDK version) would assemble cleanly,
- * ship, and only fail on the user's machine at first-run install — with a
- * refusal, because the installer fails closed, but a refusal the build
- * could have caught for free. The dynamic import matches
- * `generatePackageJson`'s CJS-interop pattern below and keeps this module's
- * static import surface unchanged for the unit tests that import it.
- */
-export async function assertClaudeRuntimeAnchor(out: string): Promise<void> {
-  console.log("\n▸ Verifying the claude-runtime integrity anchor in the staged lockfile")
-  const { readInstalledClaudeAgentSdkVersion, claudeAgentSdkPlatformCandidates, claudeAgentSdkPackageName } =
-    await import("../src/editor/llm-providers/claude-runtime-location.js")
-  const { readClaudeRuntimeExpectedIntegrity } = await import("../desktop/claude-runtime-expectation.js")
-  const sdkVersion = readInstalledClaudeAgentSdkVersion(pathToFileURL(join(out, "package.json")).href)
-  const [suffix] = claudeAgentSdkPlatformCandidates(process.platform, process.arch)
-  const packageName = claudeAgentSdkPackageName(suffix)
-  // Throws (failing the build) when the lockfile is missing, records a
-  // different version, or carries no well-formed SRI for the platform package.
-  const integrity = readClaudeRuntimeExpectedIntegrity({ payloadDir: out, packageName, sdkVersion })
-  console.log(`  ${packageName}@${sdkVersion} → ${integrity.slice(0, 24)}…`)
 }
 
 /**
@@ -979,11 +953,11 @@ async function main(): Promise<void> {
       console.log("  (none found — nothing to strip)")
     } else {
       console.log(
-        `  Removed ${stripped.removed.join(", ")} (${humanBytes(stripped.bytes)}). Desde's ` +
-          "installer fetches it on first run instead — see claude-runtime-installer.ts.",
+        `  Removed ${stripped.removed.join(", ")} (${humanBytes(stripped.bytes)}). The user's own ` +
+          "`claude` CLI on PATH is what the subscription lane uses instead — see " +
+          "src/editor/agent-chat-sidecar/resolve-claude-on-path.ts.",
       )
     }
-    await assertClaudeRuntimeAnchor(args.out)
     console.log("\n▸ Pruning the payload's node_modules")
     const pruned = await pruneNodeModules(join(args.out, "node_modules"))
     console.log(`  Removed ${pruned.files} file(s) and ${pruned.dirs} test director(ies) (${humanBytes(pruned.bytes)})`)

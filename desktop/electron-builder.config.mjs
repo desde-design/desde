@@ -20,21 +20,25 @@
 //     process needs except `electron` itself, which Electron's own loader
 //     resolves regardless of where main.js sits.
 //   - `extraResources` places the Phase-1 CLI payload at Resources/server,
-//     OUTSIDE the asar — deliberately, not incidentally. It holds a spawned
-//     ~198MB `claude` binary and native `.node` modules, none of which can be
-//     `exec()`'d or `dlopen()`'d from inside an asar archive
-//     (tasks/electron-app.md C3). `payload-resolve.ts` asserts this invariant
-//     at runtime rather than trusting this config alone — see its
+//     OUTSIDE the asar — deliberately, not incidentally. It holds native
+//     `.node` modules, which cannot be `dlopen()`'d from inside an asar
+//     archive (tasks/electron-app.md C3). `payload-resolve.ts` asserts this
+//     invariant at runtime rather than trusting this config alone — see its
 //     `assertOutsidePackagedAsar`. C3's original estimate (written before
 //     Phase 1 measured the true dependency graph) named "esbuild's Go binary
 //     and six `.node` modules" — MEASURED at Phase 5 signing time, the actual
-//     count on this payload is smaller: exactly 3 Mach-Os total (`claude`,
+//     count on this payload was smaller: exactly 3 Mach-Os total (`claude`,
 //     `lightningcss-darwin-arm64`, `@rolldown/binding-darwin-arm64`), zero
-//     esbuild. Vite 8 here is rolldown-vite (native Rolldown, not esbuild,
-//     as its bundler) and neither fsevents nor `@tailwindcss/oxide` turned
-//     out to be runtime deps of the SERVER payload specifically — don't
-//     trust either number by hand; `scripts/macho-scan.mjs` derives the
-//     live count from whatever payload is actually staged.
+//     esbuild. The payload no longer holds a bundled `claude` binary at all
+//     (chat-runtime-consolidation task 28: the desktop shell stopped
+//     downloading one and the sidecar resolves `claude` off the user's own
+//     `PATH` instead), so the count is now 2: `lightningcss-darwin-arm64`
+//     and `@rolldown/binding-darwin-arm64`. Vite 8 here is rolldown-vite
+//     (native Rolldown, not esbuild, as its bundler) and neither fsevents
+//     nor `@tailwindcss/oxide` turned out to be runtime deps of the SERVER
+//     payload specifically — don't trust either number by hand;
+//     `scripts/macho-scan.mjs` derives the live count from whatever payload
+//     is actually staged.
 //
 //     TWO entries, not one — MEASURED, not a style choice.
 //     electron-builder's file copier (`app-builder-lib/out/util/filter.js`,

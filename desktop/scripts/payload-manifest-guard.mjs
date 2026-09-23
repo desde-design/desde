@@ -6,8 +6,8 @@
 // one staged on a different architecture. electron-builder's own target is
 // picked from `process.arch` (this packaging host), so an arm64 host handed
 // a stale x64 payload directory would happily wrap an arm64 Electron shell
-// around an x64 `claude` binary and x64 `.node` modules: it builds cleanly,
-// installs cleanly, and only fails at runtime on the user's machine.
+// around x64 native `.node` modules: it builds cleanly, installs cleanly,
+// and only fails at runtime on the user's machine.
 //
 // `build-server-package.mts` already writes `payload-manifest.json` at the
 // payload root with the `platform`/`arch` it was staged for (read straight
@@ -186,8 +186,8 @@ export function checkPayloadHostMatch(manifestResult, hostPlatform, hostArch, pa
       message:
         `Payload at ${payloadDir} was staged for ${manifestResult.platform}/${manifestResult.arch}, ` +
         `but this packaging host is ${hostPlatform}/${hostArch}. Packaging would produce a ` +
-        `${hostArch} Electron shell wrapping a ${manifestResult.arch} \`claude\` binary and native ` +
-        `modules — it would build and install cleanly and fail only at runtime, on the user's machine.\n\n${rebuildHint}`,
+        `${hostArch} Electron shell wrapping ${manifestResult.arch} native modules — it would ` +
+        `build and install cleanly and fail only at runtime, on the user's machine.\n\n${rebuildHint}`,
     }
   }
   return { ok: true }

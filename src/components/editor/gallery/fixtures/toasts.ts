@@ -8,12 +8,6 @@ import {
   OVERRIDE_PREVIEW_FAILURE_TITLE,
   OVERRIDE_PREVIEW_FAILURE_CONSEQUENCE,
 } from "@/hooks/override-preview-notice"
-import {
-  CLAUDE_RUNTIME_DOWNLOADING_TITLE,
-  CLAUDE_RUNTIME_DOWNLOADING_DESCRIPTION,
-  CLAUDE_RUNTIME_ERROR_TITLE,
-  CLAUDE_RUNTIME_ERROR_FALLBACK_DESCRIPTION,
-} from "@/hooks/claude-runtime-notice"
 import { buildSessionCompletionToasts } from "@/components/editor/session-completion-toasts"
 import type { SurfaceEntry, SurfaceState } from "../types"
 import type { MutationResolutionFailure } from "@/types/bridge"
@@ -230,22 +224,6 @@ export const TOASTS_SURFACE: SurfaceEntry = {
     t("copy-failed", "Couldn't copy to clipboard", () =>
       pinned.error("Couldn't copy to clipboard"),
     ),
-    t("runtime-setup-failed", "AI chat setup failed, with a Retry", () =>
-      // The richest error shape in the product: title, description AND an
-      // action. Nothing else combines all three, and this is the toast a user
-      // meets on first run when the runtime download fails — the point at which
-      // the product is least able to explain itself any other way.
-      pinned.error(CLAUDE_RUNTIME_ERROR_TITLE, {
-        description: CLAUDE_RUNTIME_ERROR_FALLBACK_DESCRIPTION,
-        action: {
-          label: "Retry",
-          onClick: () => {
-            /* The gallery does not re-run the real install. */
-          },
-        },
-      }),
-    ),
-
     // -------------------------------------------------------------- warnings
     t("smoke-routes-failed", "Smoke test: some routes failed", () =>
       pinned.warning("Smoke test: 2/7 routes failed"),
@@ -305,11 +283,6 @@ export const TOASTS_SURFACE: SurfaceEntry = {
     t("link-copied", "Project link copied", () => pinned.success("Project link copied")),
 
     // -------------------------------------------------------------- progress
-    t("runtime-downloading", "Setting up AI chat (spinner, one-time)", () =>
-      pinned.loading(CLAUDE_RUNTIME_DOWNLOADING_TITLE, {
-        description: CLAUDE_RUNTIME_DOWNLOADING_DESCRIPTION,
-      }),
-    ),
     t("bridge-connecting", "Connecting to the prototype bridge", () =>
       // Pinned here, transient in the product: it is dismissed by id the moment
       // the bridge answers. Its failure sibling (`bridge-connection-failed`

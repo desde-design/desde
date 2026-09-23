@@ -152,11 +152,6 @@ describe("EditorSettingsMenu", () => {
         getAutoDownload: async () => true,
         setAutoDownload: async () => {},
       },
-      claudeRuntime: {
-        getState: async () => ({ phase: "ready" }),
-        onState: () => () => {},
-        retry: async () => ({ started: true }),
-      },
       pickFolder: async () => null,
     }
     ;(window as unknown as { desdeDesktop: DesktopBridge }).desdeDesktop = bridge
@@ -182,11 +177,6 @@ describe("EditorSettingsMenu", () => {
         checkForUpdates: async () => ({ performed: true }),
         getAutoDownload: async () => true,
         setAutoDownload: async () => {},
-      },
-      claudeRuntime: {
-        getState: async () => ({ phase: "ready" }),
-        onState: () => () => {},
-        retry: async () => ({ started: true }),
       },
       pickFolder: async () => null,
     }
@@ -360,11 +350,6 @@ describe("EditorSettingsMenu gear indicator", () => {
         getAutoDownload: async () => true,
         setAutoDownload: async () => {},
       },
-      claudeRuntime: {
-        getState: async () => ({ phase: "ready" }),
-        onState: () => () => {},
-        retry: async () => ({ started: true }),
-      },
       pickFolder: async () => null,
     }
     ;(window as unknown as { desdeDesktop: DesktopBridge }).desdeDesktop = bridge
@@ -401,11 +386,6 @@ describe("EditorSettingsMenu — Check for updates opens the check dialog", () =
         checkForUpdates: () => new Promise((resolve) => { settle = resolve }),
         getAutoDownload: async () => true,
         setAutoDownload: async () => {},
-      },
-      claudeRuntime: {
-        getState: async () => ({ phase: "ready" }),
-        onState: () => () => {},
-        retry: async () => ({ started: true }),
       },
       pickFolder: async () => null,
     }

@@ -13,7 +13,7 @@ vi.mock("sonner", () => ({
 
 import { toast } from "sonner"
 import { AUTO_DOWNLOAD_WRITE_FAILED_TOAST_ID, useDesktopUpdates } from "./useDesktopUpdates"
-import type { DesktopBridge, DesktopClaudeRuntimeState, DesktopUpdateState } from "@/types/desktop-bridge"
+import type { DesktopBridge, DesktopUpdateState } from "@/types/desktop-bridge"
 
 // The mock is module-scoped and would otherwise accumulate calls across
 // every `it` in this file.
@@ -40,11 +40,6 @@ function installBridge(overrides: Partial<DesktopBridge["updates"]> = {}): {
       getAutoDownload: vi.fn(async () => true),
       setAutoDownload: vi.fn(async () => {}),
       ...overrides,
-    },
-    claudeRuntime: {
-      getState: vi.fn(async () => ({ phase: "ready" }) as DesktopClaudeRuntimeState),
-      onState: () => () => {},
-      retry: vi.fn(async () => ({ started: true })),
     },
     pickFolder: vi.fn(async () => null),
   }

@@ -170,23 +170,7 @@ describe("spawnPayloadChild", () => {
     await expect(handle.shutdown()).resolves.toBeUndefined()
   })
 
-  it("sets EDITOR_CLAUDE_EXECUTABLE_PATH on the child when claudeExecutablePath is given", async () => {
-    const dumpDir = mkdtempSync(join(tmpdir(), "child-env-dump-"))
-    const dumpPath = join(dumpDir, "env.txt")
-    const handle = await spawnFake({
-      claudeExecutablePath: "/fake/Library/Application Support/Desde/claude-runtime/1.2.3/claude",
-      env: { ...process.env, FIXTURE_MODE: "ready", FIXTURE_ENV_DUMP_EXEC_PATH: dumpPath },
-    })
-    spawnedForCleanup.push(handle.child)
-    await handle.shutdown()
-
-    expect(readFileSync(dumpPath, "utf8")).toBe(
-      "/fake/Library/Application Support/Desde/claude-runtime/1.2.3/claude",
-    )
-    rmSync(dumpDir, { recursive: true, force: true })
-  })
-
-  it("SCRUBS an inherited EDITOR_CLAUDE_EXECUTABLE_PATH from the child env when the desktop supplies no override of its own (F5 — the override must not reach a desktop child)", async () => {
+  it("SCRUBS an inherited EDITOR_CLAUDE_EXECUTABLE_PATH from the child env (F5 — an inherited override must never reach a desktop child)", async () => {
     const dumpDir = mkdtempSync(join(tmpdir(), "child-env-dump-"))
     const dumpPath = join(dumpDir, "env.txt")
     const handle = await spawnFake({
@@ -206,31 +190,7 @@ describe("spawnPayloadChild", () => {
     rmSync(dumpDir, { recursive: true, force: true })
   })
 
-  it("a desktop-supplied claudeExecutablePath overrides an inherited EDITOR_CLAUDE_EXECUTABLE_PATH", async () => {
-    const dumpDir = mkdtempSync(join(tmpdir(), "child-env-dump-"))
-    const dumpPath = join(dumpDir, "env.txt")
-    const handle = await spawnFake({
-      claudeExecutablePath: "/fake/Library/Application Support/Desde/claude-runtime/1.2.3/claude",
-      env: {
-        ...process.env,
-        FIXTURE_MODE: "ready",
-        FIXTURE_ENV_DUMP_EXEC_PATH: dumpPath,
-        // An inherited value must not win even when the desktop ALSO
-        // supplies its own verified one — the desktop's own value is the
-        // one that reaches the child either way.
-        EDITOR_CLAUDE_EXECUTABLE_PATH: "/tmp/definitely-not-verified-claude",
-      },
-    })
-    spawnedForCleanup.push(handle.child)
-    await handle.shutdown()
-
-    expect(readFileSync(dumpPath, "utf8")).toBe(
-      "/fake/Library/Application Support/Desde/claude-runtime/1.2.3/claude",
-    )
-    rmSync(dumpDir, { recursive: true, force: true })
-  })
-
-  it("omits EDITOR_CLAUDE_EXECUTABLE_PATH entirely when claudeExecutablePath is not given (terminal-CLI parity)", async () => {
+  it("omits EDITOR_CLAUDE_EXECUTABLE_PATH entirely when nothing inherited it (terminal-CLI parity — desktop no longer sets it itself)", async () => {
     const dumpDir = mkdtempSync(join(tmpdir(), "child-env-dump-"))
     const dumpPath = join(dumpDir, "env.txt")
     const handle = await spawnFake({

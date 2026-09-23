@@ -18,11 +18,11 @@
 // is also (by construction — see build-desktop-app.mts) the architecture the
 // payload at DESDE_PAYLOAD_DIR was staged for. There is no `--arch`
 // flag here: cross-arch packaging would silently ship one arch's Electron
-// shell wrapped around a DIFFERENT arch's `claude` binary / esbuild / `.node`
-// modules (npm only fetches the host's own platform binaries when the
-// payload was staged — tasks/electron-app.md's explicit constraint). Asking
-// for a specific arch belongs one layer up, in build-desktop-app.mts, where
-// it can be validated against the actual host before any building starts.
+// shell wrapped around DIFFERENT-arch native `.node` modules (npm only
+// fetches the host's own platform binaries when the payload was staged —
+// tasks/electron-app.md's explicit constraint). Asking for a specific arch
+// belongs one layer up, in build-desktop-app.mts, where it can be validated
+// against the actual host before any building starts.
 import { Arch, Platform, build } from "electron-builder"
 import { execFileSync } from "node:child_process"
 import { existsSync } from "node:fs"

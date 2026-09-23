@@ -21,11 +21,11 @@
 // child.test.ts assert on env propagation via a file instead of racing the
 // stdout stream (a listener attached AFTER the ready-line promise resolves
 // would miss data already emitted on an already-flowing stream). Proves
-// two things depending on the test: that spawnPayloadChild SCRUBS an
-// INHERITED override (the F5 fix) rather than passing it down to a child
-// whose resolver would otherwise be offered an arbitrary,
-// content-unverified executable, and that it sets the variable to the
-// desktop's OWN verified `claudeExecutablePath` when one is supplied.
+// that spawnPayloadChild SCRUBS an INHERITED override (the F5 fix) rather
+// than passing it down to a child whose resolver would otherwise be
+// offered an arbitrary, content-unverified executable — desktop no longer
+// sets this variable itself (chat-runtime-consolidation task 28 removed
+// its own bundled `claude` install), so the scrub is now unconditional.
 const mode = process.env.FIXTURE_MODE ?? "ready"
 
 if (mode === "fail") {

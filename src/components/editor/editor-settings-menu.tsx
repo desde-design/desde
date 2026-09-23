@@ -59,7 +59,6 @@ import {
 import { SettingsStatusDot } from "@/components/editor/settings-status-dot"
 import { useProjectKnowledge } from "@/hooks/useProjectKnowledge"
 import { useDesktopUpdates } from "@/hooks/useDesktopUpdates"
-import { useClaudeRuntimeStatus } from "@/hooks/useClaudeRuntimeStatus"
 import { everyProviderUncredentialed, useLlmCredentials } from "@/hooks/useLlmCredentials"
 import { useViewerAuthStatus } from "@/hooks/useViewerAuthStatus"
 import { ViewerProjectDialog } from "@/components/editor/viewer-project-dialog"
@@ -99,9 +98,6 @@ export function EditorSettingsMenu({
   // select, so a dialog rendered inside it would unmount with the menu.
   const [checkDialogOpen, setCheckDialogOpen] = useState(false)
   const updates = useDesktopUpdates()
-  // Side-effect-only (toast on downloading/error) — see the hook's own doc
-  // comment for why this has no return value the menu needs to render.
-  useClaudeRuntimeStatus()
 
   // ONE owner of credential state. The dialog receives it as a prop rather
   // than calling the hook itself, so a save or removal in the dialog updates

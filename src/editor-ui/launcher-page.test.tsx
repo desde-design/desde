@@ -161,11 +161,6 @@ describe("LauncherPage — the settings gear and its update chrome", () => {
         getAutoDownload: async () => true,
         setAutoDownload: async () => {},
       },
-      claudeRuntime: {
-        getState: async () => ({ phase: "ready" }),
-        onState: () => () => {},
-        retry: async () => ({ started: true }),
-      },
       pickFolder: async () => null,
     }
     ;(window as unknown as { desdeDesktop: DesktopBridge }).desdeDesktop = bridge
@@ -189,11 +184,6 @@ describe("LauncherPage — the settings gear and its update chrome", () => {
         checkForUpdates: async () => ({ performed: true }),
         getAutoDownload: async () => true,
         setAutoDownload: async () => {},
-      },
-      claudeRuntime: {
-        getState: async () => ({ phase: "ready" }),
-        onState: () => () => {},
-        retry: async () => ({ started: true }),
       },
       pickFolder: async () => null,
     }
@@ -558,11 +548,6 @@ describe("LauncherPage — Check for updates", () => {
         checkForUpdates: check,
         getAutoDownload: async () => true,
         setAutoDownload: async () => {},
-      },
-      claudeRuntime: {
-        getState: async () => ({ phase: "ready" }),
-        onState: () => () => {},
-        retry: async () => ({ started: true }),
       },
       pickFolder: async () => null,
     }
