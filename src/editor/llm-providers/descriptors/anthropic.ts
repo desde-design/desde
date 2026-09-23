@@ -1,10 +1,15 @@
 /**
- * Anthropic. Chat runs on the neutral loop, same as every other provider —
- * the transport is `buildProvider` below (the AI SDK path it can opt into is
- * spike-gated, see `EDITOR_ANTHROPIC_TRANSPORT_SPIKE`). The `claude` command
- * line tool on PATH gives it the only subscription runtime any provider has,
- * a dev-only sidecar lane reached separately (`resolveChatRuntimeKind`), and
- * its key validates against `/v1/models`.
+ * Anthropic. Chat and completion both run on the neutral loop, over the AI
+ * SDK transport (`buildAnthropicProvider`, in `ai-sdk-anthropic.ts`). The
+ * direct provider that used to speak the Messages API by hand
+ * (`anthropic-provider.ts`) was deleted 2026-09-23, after the transport
+ * spike passed 16/16 assertions and the parity matrix held 8/8 rows against
+ * the sidecar.
+ *
+ * The `claude` command line tool on PATH is a separate concern: it backs
+ * only the dev-only sidecar lane (`resolveChatRuntimeKind`), not this
+ * descriptor's `buildProvider`. This descriptor's key still validates
+ * against `/v1/models`.
  *
  * `hasSubscriptionRuntime` is the one flag that must never be copied onto
  * another vendor. It is what makes the credential ladder's dev-mode rungs and
@@ -12,8 +17,7 @@
  * rather than by an `if`.
  */
 import { EFFORT_LEVELS } from '../../core/model-catalog'
-import { ANTHROPIC_MODEL_CATALOG } from '../anthropic-model-catalog'
-import { AnthropicProvider, ANTHROPIC_DEFAULT_MODEL } from '../anthropic-provider'
+import { ANTHROPIC_MODEL_CATALOG, ANTHROPIC_DEFAULT_MODEL } from '../anthropic-model-catalog'
 import { listAnthropicLiveModels } from '../anthropic-live-models'
 import { resolveAnthropicThinkingConfig } from '../anthropic-adaptive-thinking'
 import type { ProviderDescriptor } from '../provider-descriptor'
@@ -40,11 +44,7 @@ export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
     hasSubscriptionRuntime: true,
   },
   buildProvider(input) {
-    if (process.env.EDITOR_ANTHROPIC_TRANSPORT_SPIKE === 'ai-sdk') return buildAnthropicProvider(input)
-    return new AnthropicProvider({
-      ...(input.apiKey ? { apiKey: input.apiKey } : {}),
-      defaultModel: input.model ?? ANTHROPIC_DEFAULT_MODEL,
-    })
+    return buildAnthropicProvider(input)
   },
   staticCatalog: ANTHROPIC_MODEL_CATALOG,
   // The vendor retires a bare alias by continuing to serve it under its own
@@ -99,9 +99,7 @@ export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
     // neutral lane (`run-chat-turn-neutral.ts`'s `providerOptionsFor`) is the
     // one that puts these on the wire, as `StreamOpts.providerOptions`: the
     // AI SDK's Anthropic adapter nests them under the `anthropic` key. Keys
-    // match `anthropicLanguageModelOptions` in `@ai-sdk/anthropic`. The
-    // direct provider (`anthropic-provider.ts`) translates them to the
-    // Messages API's names (`output_config.effort`, `budget_tokens`).
+    // match `anthropicLanguageModelOptions` in `@ai-sdk/anthropic`.
     toRequest(effort, model) {
       return {
         thinking: resolveAnthropicThinkingConfig(model ?? ANTHROPIC_DEFAULT_MODEL),

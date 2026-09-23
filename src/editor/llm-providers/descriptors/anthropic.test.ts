@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ANTHROPIC_DESCRIPTOR } from './anthropic'
 import { ANTHROPIC_MODEL_CATALOG } from '../anthropic-model-catalog'
+import { AiSdkProvider } from '../ai-sdk-provider'
 
 describe('ANTHROPIC_DESCRIPTOR', () => {
   it('keeps today\'s identity and credential facts', () => {
@@ -25,7 +26,7 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
     })
   })
 
-  it('builds a provider bound to the key it is given, reading no process.env', () => {
+  it('builds the AI SDK transport, bound to the key it is given, reading no process.env', () => {
     const before = process.env.ANTHROPIC_API_KEY
     process.env.ANTHROPIC_API_KEY = 'sk-ant-from-the-process'
     try {
@@ -33,6 +34,7 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
         apiKey: 'sk-ant-explicit',
         model: 'claude-opus-5',
       })
+      expect(provider).toBeInstanceOf(AiSdkProvider)
       expect(provider.name).toBe('anthropic')
       expect(provider.defaultModel).toBe('claude-opus-5')
     } finally {
@@ -54,9 +56,9 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
   it('puts adaptive thinking and the chosen effort on provider options', () => {
     // The SDK lane resolves thinking itself and ignores this; the neutral
     // lane's `providerOptionsFor` is what reads it, as
-    // `StreamOpts.providerOptions`. This is the AI SDK's dialect, not the
-    // wire: the direct provider translates it to `output_config.effort`
-    // (see `anthropic-provider.test.ts`).
+    // `StreamOpts.providerOptions`. This is the AI SDK's dialect, and since
+    // Task 11 it is exactly what the wire takes: the AI SDK transport
+    // (`buildAnthropicProvider`) is the only provider left.
     expect(ANTHROPIC_DESCRIPTOR.effort.toRequest('high', 'claude-opus-5')).toEqual({
       thinking: { type: 'adaptive', display: 'summarized' },
       effort: 'high',
