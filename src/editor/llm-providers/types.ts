@@ -172,8 +172,20 @@ export interface FunctionToolDef {
   inputSchema: Record<string, unknown>
 }
 
+/** Every server-side tool id the seam knows. */
+export const SERVER_TOOL_IDS = ['web_search', 'web_fetch'] as const
+
 /** Server-side tool ids a provider may serve. */
-export type ServerToolId = 'web_search' | 'web_fetch'
+export type ServerToolId = (typeof SERVER_TOOL_IDS)[number]
+
+/**
+ * Cap on server-tool uses per request, sent wherever the vendor accepts one.
+ *
+ * Vendors bill each search or fetch separately from tokens, and those fees are
+ * NOT in the rate cards (`rate-cards.ts` prices tokens only). So the cost
+ * ceiling cannot see them, and this cap is the only bound on them.
+ */
+export const SERVER_TOOL_MAX_USES = 8
 
 export interface ServerToolDef {
   kind: 'server'
@@ -460,4 +472,12 @@ export interface LLMProvider {
    * new stream with the results appended as user content.
    */
   streamConversation(opts: StreamOpts): AsyncIterable<ProviderEvent>
+  /**
+   * The server tools THIS provider object can actually declare. Absent means
+   * none. The descriptor's `webTools` says what the vendor offers; this says
+   * what the transport that was built will send, and the two can differ (the
+   * direct Anthropic provider strips server tools). The neutral loop declares
+   * only ids present in both.
+   */
+  readonly serverToolIds?: ReadonlyArray<ServerToolId>
 }

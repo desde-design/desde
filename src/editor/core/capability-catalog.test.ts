@@ -78,6 +78,23 @@ describe('computeEnabledCapabilityIds', () => {
     expect(on.has('figma')).toBe(false)
   })
 
+  it('reports web search OFF on the neutral lane when the provider serves no server tools', () => {
+    const on = computeEnabledCapabilityIds({
+      ...NONE,
+      webSearchEnabled: true,
+      chatRuntime: 'neutral',
+      serverToolIds: [],
+    })
+    expect(on.has('web-search')).toBe(false)
+    const withSearch = computeEnabledCapabilityIds({
+      ...NONE,
+      webSearchEnabled: true,
+      chatRuntime: 'neutral',
+      serverToolIds: ['web_search'],
+    })
+    expect(withSearch.has('web-search')).toBe(true)
+  })
+
   it('reports web search as on for the neutral lane, which declares it as a provider server tool', () => {
     const on = computeEnabledCapabilityIds({
       ...NONE,
@@ -189,6 +206,13 @@ describe('describeDisabledCapabilities', () => {
     expect(enableable).toContain('**Web search**')
     expect(unavailable).not.toContain('**Web search**')
     expect(unavailable).toContain('**Figma**')
+  })
+
+  it('moves web search under cannot-be-used when the provider serves no server tools', () => {
+    const block = describeDisabledCapabilities(new Set(), 'neutral', [])!
+    const [enableable, unavailable] = block.split(/cannot be used with the model/i)
+    expect(enableable).not.toContain('**Web search**')
+    expect(unavailable).toContain('**Web search**')
   })
 
   it('names no vendor in the unavailable remedy', () => {

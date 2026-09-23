@@ -96,19 +96,25 @@ describe('buildAnthropicProvider', () => {
   it("hands the adapter a serverTool factory built on this instance's own tools", () => {
     // `createAnthropic` is mocked, so its return value carries a stand-in
     // `tools` namespace here; the factory must read it off THIS instance.
+    // Scoped to this test: the stand-in is removed in `finally`, so the
+    // shared `languageModelMock` is back to a bare function for later tests.
     const webSearch = vi.fn(() => ({ type: 'provider' }))
     const webFetch = vi.fn(() => ({ type: 'provider' }))
     Object.assign(languageModelMock, { tools: { webSearch_20260318: webSearch, webFetch_20260318: webFetch } })
-    aiSdkProviderCtorMock.mockClear()
-    buildAnthropicProvider({ apiKey: 'sk-ant-test' })
-    const opts = aiSdkProviderCtorMock.mock.calls.at(-1)?.[0] as {
-      serverTool?: (def: unknown) => unknown
+    try {
+      aiSdkProviderCtorMock.mockClear()
+      buildAnthropicProvider({ apiKey: 'sk-ant-test' })
+      const opts = aiSdkProviderCtorMock.mock.calls.at(-1)?.[0] as {
+        serverTool?: (def: unknown) => unknown
+      }
+      expect(typeof opts.serverTool).toBe('function')
+      opts.serverTool!({ kind: 'server', id: 'web_fetch', allowedDomains: ['example.com'] })
+      expect(webFetch).toHaveBeenCalledWith({ allowedDomains: ['example.com'], maxUses: 8 })
+      opts.serverTool!({ kind: 'server', id: 'web_search' })
+      expect(webSearch).toHaveBeenCalledWith({ maxUses: 8 })
+    } finally {
+      delete (languageModelMock as unknown as { tools?: unknown }).tools
     }
-    expect(typeof opts.serverTool).toBe('function')
-    opts.serverTool!({ kind: 'server', id: 'web_fetch', allowedDomains: ['example.com'] })
-    expect(webFetch).toHaveBeenCalledWith({ allowedDomains: ['example.com'] })
-    opts.serverTool!({ kind: 'server', id: 'web_search' })
-    expect(webSearch).toHaveBeenCalledWith({})
   })
 
   it('builds an LLMProvider named anthropic with the default model', () => {

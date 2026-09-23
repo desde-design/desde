@@ -94,6 +94,7 @@ describe('replayHistory', () => {
     const fetched = { type: 'web_fetch_result', url: 'https://example.com/', content: { title: 'Example Domain' } }
     const messages = await replayHistory({
       repoRoot: root,
+      providerId: 'anthropic',
       session: sessionWith([
         turn({
           userMessage: 'fetch it',
@@ -101,12 +102,13 @@ describe('replayHistory', () => {
             { type: 'text', text: 'Fetching.' },
             {
               type: 'server_tool_use',
+              provider: 'anthropic',
               toolUseId: 'srv_1',
               name: 'web_fetch',
               input: { url: 'https://example.com/' },
               providerMetadata: { anthropic: { caller: { type: 'direct' } } },
             },
-            { type: 'server_tool_result', toolUseId: 'srv_1', name: 'web_fetch', output: fetched },
+            { type: 'server_tool_result', provider: 'anthropic', toolUseId: 'srv_1', name: 'web_fetch', output: fetched },
             { type: 'text', text: 'It is Example Domain.' },
           ],
         }),
@@ -135,12 +137,14 @@ describe('replayHistory', () => {
   it('keeps an errored server result marked as an error on replay', async () => {
     const messages = await replayHistory({
       repoRoot: root,
+      providerId: 'anthropic',
       session: sessionWith([
         turn({
           assistantContent: [
-            { type: 'server_tool_use', toolUseId: 'srv_1', name: 'web_fetch', input: {} },
+            { type: 'server_tool_use', provider: 'anthropic', toolUseId: 'srv_1', name: 'web_fetch', input: {} },
             {
               type: 'server_tool_result',
+              provider: 'anthropic',
               toolUseId: 'srv_1',
               name: 'web_fetch',
               output: { errorCode: 'url_not_accessible' },
@@ -165,12 +169,13 @@ describe('replayHistory', () => {
     // search BEFORE the Read result that the model had already seen.
     const messages = await replayHistory({
       repoRoot: root,
+      providerId: 'anthropic',
       session: sessionWith([
         turn({
           assistantContent: [
             { type: 'tool_use', toolUseId: 'tu_1', name: 'Read', input: {} },
-            { type: 'server_tool_use', toolUseId: 'srv_1', name: 'web_search', input: { query: 'q' } },
-            { type: 'server_tool_result', toolUseId: 'srv_1', name: 'web_search', output: [] },
+            { type: 'server_tool_use', provider: 'anthropic', toolUseId: 'srv_1', name: 'web_search', input: { query: 'q' } },
+            { type: 'server_tool_result', provider: 'anthropic', toolUseId: 'srv_1', name: 'web_search', output: [] },
             { type: 'text', text: 'done' },
           ],
           toolResults: { tu_1: { ok: true, output: 'x' } },
@@ -188,17 +193,78 @@ describe('replayHistory', () => {
   it('drops a server call whose result never arrived, because the vendor rejects an unpaired one', async () => {
     const messages = await replayHistory({
       repoRoot: root,
+      providerId: 'anthropic',
       session: sessionWith([
         turn({
           assistantContent: [
             { type: 'text', text: 'Searching.' },
-            { type: 'server_tool_use', toolUseId: 'srv_1', name: 'web_search', input: { query: 'q' } },
+            { type: 'server_tool_use', provider: 'anthropic', toolUseId: 'srv_1', name: 'web_search', input: { query: 'q' } },
           ],
           error: 'turn aborted',
         }),
       ]),
     })
     expect(messages[1]).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'Searching.' }] })
+  })
+
+  it('drops a server pair written by another provider, both halves, and keeps the text', async () => {
+    // Measured: an OpenAI search result replayed into the Anthropic transport
+    // throws a type validation error before any request is sent.
+    const persisted = turn({
+      userMessage: 'look it up',
+      assistantContent: [
+        { type: 'text', text: 'Searching.' },
+        { type: 'server_tool_use', provider: 'openai', toolUseId: 'ws_1', name: 'web_search', input: {} },
+        {
+          type: 'server_tool_result',
+          provider: 'openai',
+          toolUseId: 'ws_1',
+          name: 'web_search',
+          output: { action: { type: 'search' }, sources: [] },
+        },
+        { type: 'text', text: 'Found it.' },
+      ],
+    })
+    const intoAnthropic = await replayHistory({
+      repoRoot: root,
+      providerId: 'anthropic',
+      session: sessionWith([persisted]),
+    })
+    expect(intoAnthropic[1]).toEqual({
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'Searching.' },
+        { type: 'text', text: 'Found it.' },
+      ],
+    })
+    const intoOpenAi = await replayHistory({
+      repoRoot: root,
+      providerId: 'openai',
+      session: sessionWith([persisted]),
+    })
+    expect((intoOpenAi[1].content as ReadonlyArray<{ type: string }>).map((b) => b.type)).toEqual([
+      'text',
+      'server_tool_use',
+      'server_tool_result',
+      'text',
+    ])
+  })
+
+  it('treats a server block with no provider recorded as foreign', async () => {
+    const messages = await replayHistory({
+      repoRoot: root,
+      providerId: 'anthropic',
+      session: sessionWith([
+        turn({
+          assistantContent: [
+            { type: 'server_tool_use', toolUseId: 'srv_1', name: 'web_search', input: {} },
+            { type: 'server_tool_result', toolUseId: 'srv_1', name: 'web_search', output: [] },
+            { type: 'text', text: 'done' },
+          ],
+        }),
+      ]),
+    })
+    expect(messages[1]).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'done' }] })
   })
 
   it('replays steers as their own user messages, in recorded order', async () => {

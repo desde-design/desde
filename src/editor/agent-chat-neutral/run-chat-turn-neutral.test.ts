@@ -34,13 +34,17 @@ afterEach(() => rmSync(root, { recursive: true, force: true }))
 const bridge: BridgeClient = { send: async () => null }
 
 /** A provider driven by a script: one array of ProviderEvents per model step. */
-function scriptedProvider(steps: ProviderEvent[][]): {
+function scriptedProvider(
+  steps: ProviderEvent[][],
+  extras: Partial<Pick<LLMProvider, 'serverToolIds'>> = {},
+): {
   provider: LLMProvider
   calls: StreamOpts[]
 } {
   const calls: StreamOpts[] = []
   let i = 0
   const provider: LLMProvider = {
+    ...extras,
     name: 'scripted',
     defaultModel: 'scripted-1',
     complete: async () => ({ text: '', stopReason: 'end_turn' }),
@@ -79,8 +83,9 @@ const toolStep = (id: string, name: string, input: unknown): ProviderEvent[] => 
 async function run(
   steps: ProviderEvent[][],
   overrides: Record<string, unknown> = {},
+  providerExtras: Partial<Pick<LLMProvider, 'serverToolIds'>> = {},
 ): Promise<{ events: ChatStreamEvent[]; result: Awaited<ReturnType<typeof runChatTurnNeutral>>; calls: StreamOpts[] }> {
-  const { provider, calls } = scriptedProvider(steps)
+  const { provider, calls } = scriptedProvider(steps, providerExtras)
   const events: ChatStreamEvent[] = []
   const result = await runChatTurnNeutral(
     minimalOpts({ emit: (e: ChatStreamEvent) => events.push(e), ...overrides }) as never,
@@ -433,6 +438,22 @@ function alwaysRateLimited(retryAfter: string): {
 describe('runChatTurnNeutral: provider server-side web tools', () => {
   const serverDefs = (calls: StreamOpts[]) =>
     calls[0]!.tools.filter((t) => t.kind === 'server')
+  /** A provider object that sends both server tools, like the AI SDK transport. */
+  const SENDS_BOTH = { serverToolIds: ['web_search', 'web_fetch'] as const }
+
+  it('declares nothing when the built provider reports no server tools', async () => {
+    // The direct Anthropic provider strips server tools. The descriptor says
+    // the vendor has both; offering them anyway would promise the model tools
+    // that never reach the request.
+    const { calls } = await run([textStep('done')], {
+      providerId: 'anthropic',
+      webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: true },
+    })
+    expect(serverDefs(calls)).toEqual([])
+    expect(calls[0]!.system).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining('# Web tools') })]),
+    )
+  })
 
   it('declares nothing when the web policy turns nothing on', async () => {
     const { calls } = await run([textStep('done')], {
@@ -445,7 +466,7 @@ describe('runChatTurnNeutral: provider server-side web tools', () => {
     const { calls } = await run([textStep('done')], {
       providerId: 'anthropic',
       webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: true },
-    })
+    }, SENDS_BOTH)
     expect(serverDefs(calls)).toEqual([
       { kind: 'server', id: 'web_search' },
       { kind: 'server', id: 'web_fetch', allowedDomains: ['example.com'] },
@@ -458,14 +479,14 @@ describe('runChatTurnNeutral: provider server-side web tools', () => {
     const { calls } = await run([textStep('done')], {
       providerId: 'openai',
       webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: true },
-    })
+    }, SENDS_BOTH)
     expect(serverDefs(calls)).toEqual([{ kind: 'server', id: 'web_search' }])
   })
 
   it('does not declare fetch when the allowlist is empty, even with search on', async () => {
     const { calls } = await run([textStep('done')], {
       webPolicy: { webFetchAllowedHosts: [], webSearchEnabled: true },
-    })
+    }, SENDS_BOTH)
     expect(serverDefs(calls)).toEqual([{ kind: 'server', id: 'web_search' }])
   })
 
@@ -495,7 +516,7 @@ describe('runChatTurnNeutral: provider server-side web tools', () => {
     ]
     const { events, result, calls } = await run([step], {
       webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: false },
-    })
+    }, SENDS_BOTH)
     // One request: the vendor ran the fetch, so there is no second step.
     expect(calls).toHaveLength(1)
     expect(result.turn.error).toBeUndefined()
@@ -515,9 +536,17 @@ describe('runChatTurnNeutral: provider server-side web tools', () => {
         output: 'Fetched https://example.com/: Example Domain',
       },
     ])
+    // Tagged with the provider that produced them, so a later turn on a
+    // different provider leaves them out of replay.
     expect(result.turn.assistantContent).toEqual([
-      { type: 'server_tool_use', toolUseId: 'srv_1', name: 'web_fetch', input: { url: 'https://example.com/' } },
-      { type: 'server_tool_result', toolUseId: 'srv_1', name: 'web_fetch', output },
+      {
+        type: 'server_tool_use',
+        provider: 'anthropic',
+        toolUseId: 'srv_1',
+        name: 'web_fetch',
+        input: { url: 'https://example.com/' },
+      },
+      { type: 'server_tool_result', provider: 'anthropic', toolUseId: 'srv_1', name: 'web_fetch', output },
       { type: 'text', text: 'Example Domain.' },
     ])
     // Nothing was recorded as a Desde-run tool result.

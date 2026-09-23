@@ -1055,15 +1055,29 @@ export async function handleChatRequest(
     // `extensions` nor `figmaConfig`, so reporting Figma or Web search as ON
     // there told the user about tools the model could not call.
     const capabilityRuntime = resolveChatRuntimeKind(turnProviderId, process.env)
+    // On the neutral lane web search is a PROVIDER server tool, so whether it
+    // is served depends on the provider too. The provider object is not built
+    // yet at this point (the runtime builds it), so the descriptor's
+    // `webTools` is the honest upper bound available here. The runtime then
+    // narrows it again to what the built provider actually sends
+    // (`serverToolDefs` in `run-chat-turn-neutral.ts`), so a provider that
+    // strips server tools still declares none. On the SDK lane web search is
+    // the SDK's own built-in and this list does not apply.
+    const capabilityServerToolIds =
+      capabilityRuntime === "neutral"
+        ? (getDescriptor(turnProviderId)?.capabilities.webTools ?? [])
+        : undefined
     const enabledCapabilityIds = computeEnabledCapabilityIds({
       enabledExtensionIds: (extensions ?? []).map((e) => e.id),
       webFetchAllowedHosts: webPolicy?.webFetchAllowedHosts ?? [],
       webSearchEnabled: webPolicy?.webSearchEnabled ?? false,
       chatRuntime: capabilityRuntime,
+      ...(capabilityServerToolIds ? { serverToolIds: capabilityServerToolIds } : {}),
     })
     const disabledCapabilities = describeDisabledCapabilities(
       enabledCapabilityIds,
       capabilityRuntime,
+      capabilityServerToolIds,
     )
 
     // Offer the fix in the flow. Detection reads the USER's message and

@@ -174,6 +174,28 @@ export function runtimeSupportsCapability(
 }
 
 /**
+ * Can this turn actually serve this capability: the lane, and for web search
+ * on a lane where the PROVIDER runs it, the provider too.
+ *
+ * `serverToolIds` is the provider server tools this turn can declare
+ * (`ServerToolId` values; a plain string list here because `core/` imports no
+ * provider type). Absent means "not a question for this lane", which is the
+ * SDK lane, where WebSearch is the SDK's own built-in. Given, web search is
+ * served only when it lists `web_search`.
+ */
+function servesCapability(
+  descriptor: CapabilityDescriptor,
+  runtime: CapabilityRuntimeId,
+  serverToolIds: ReadonlyArray<string> | undefined,
+): boolean {
+  if (!runtimeSupportsCapability(descriptor, runtime)) return false
+  if (descriptor.target === 'web-search' && serverToolIds !== undefined) {
+    return serverToolIds.includes('web_search')
+  }
+  return true
+}
+
+/**
  * Which catalog ids are already on, given what the CLI loaded this turn.
  *
  * Two inputs, not one. `enabledExtensionIds` says what the CONFIG declares.
@@ -190,11 +212,13 @@ export function computeEnabledCapabilityIds(input: {
   webFetchAllowedHosts: ReadonlyArray<string>
   webSearchEnabled: boolean
   chatRuntime?: CapabilityRuntimeId
+  /** See {@link servesCapability}. */
+  serverToolIds?: ReadonlyArray<string>
 }): Set<string> {
   const runtime = input.chatRuntime ?? 'claude-agent-sdk'
   const on = new Set<string>()
   for (const descriptor of CAPABILITY_CATALOG) {
-    if (!runtimeSupportsCapability(descriptor, runtime)) continue
+    if (!servesCapability(descriptor, runtime, input.serverToolIds)) continue
     if (
       descriptor.target === 'mcp-extension' &&
       input.enabledExtensionIds.includes(descriptor.id)
@@ -263,6 +287,8 @@ export function findCapability(id: string): CapabilityDescriptor | undefined {
 export function describeDisabledCapabilities(
   enabledIds: ReadonlySet<string>,
   chatRuntime: CapabilityRuntimeId = 'claude-agent-sdk',
+  /** See {@link servesCapability}. */
+  serverToolIds?: ReadonlyArray<string>,
 ): string | null {
   const off = CAPABILITY_CATALOG.filter((c) => !enabledIds.has(c.id))
   if (off.length === 0) return null
@@ -271,8 +297,8 @@ export function describeDisabledCapabilities(
   // model the wrong one sends the user to a panel that cannot help. A
   // capability this runtime does not serve stays off however the config is
   // written; only a different model brings it back.
-  const enableable = off.filter((c) => runtimeSupportsCapability(c, chatRuntime))
-  const unavailable = off.filter((c) => !runtimeSupportsCapability(c, chatRuntime))
+  const enableable = off.filter((c) => servesCapability(c, chatRuntime, serverToolIds))
+  const unavailable = off.filter((c) => !servesCapability(c, chatRuntime, serverToolIds))
   const line = (c: CapabilityDescriptor) => `- **${c.label}** (\`${c.id}\`) — ${c.summary}`
 
   const sections: string[] = [

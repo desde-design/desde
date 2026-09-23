@@ -94,12 +94,14 @@ import type {
   ProviderEvent,
   StopReason,
   ServerToolDef,
+  ServerToolId,
   StreamOpts,
   SystemContent,
   ToolDef,
   Usage,
   UserContent,
 } from './types'
+import { SERVER_TOOL_IDS } from './types'
 
 export interface AiSdkProviderOptions {
   /** Stable provider id, e.g. 'openai'. Becomes `LLMProvider.name`. */
@@ -157,6 +159,25 @@ export class AiSdkProvider implements LLMProvider {
     this.defaultProviderOptions = opts.defaultProviderOptions
     this.cacheControl = opts.cacheControl
     this.serverTool = opts.serverTool
+  }
+
+  private cachedServerToolIds: ReadonlyArray<ServerToolId> | undefined
+
+  /**
+   * The ids the `serverTool` factory accepts, found by asking it. Derived
+   * rather than declared beside the factory, so the two cannot drift: the
+   * factory IS what decides whether a def reaches the request. The vendor
+   * factories are pure option mappings, so asking has no side effect.
+   * Computed on first read, not in the constructor.
+   */
+  get serverToolIds(): ReadonlyArray<ServerToolId> {
+    if (this.cachedServerToolIds === undefined) {
+      const factory = this.serverTool
+      this.cachedServerToolIds = factory
+        ? SERVER_TOOL_IDS.filter((id) => factory({ kind: 'server', id }) !== undefined)
+        : []
+    }
+    return this.cachedServerToolIds
   }
 
   /**

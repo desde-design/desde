@@ -448,7 +448,11 @@ async function runInner(
   })
   const gate = deps.wrapGate ? deps.wrapGate(builtGate) : builtGate
 
-  const serverTools = serverToolDefs(opts.webPolicy, descriptor.capabilities.webTools)
+  const serverTools = serverToolDefs(
+    opts.webPolicy,
+    descriptor.capabilities.webTools,
+    provider.serverToolIds ?? [],
+  )
   const system = buildNeutralSystemPrompt({
     writeToolsEnabled: byName.has('Write'),
     ...(serverTools.length > 0 ? { webTools: serverTools.map((t) => t.id) } : {}),
@@ -464,6 +468,10 @@ async function runInner(
   const history = await replayHistory({
     session: opts.session,
     repoRoot: opts.worktreeRoot,
+    // Server blocks persisted by a DIFFERENT provider are dropped on replay:
+    // each vendor validates the payload against its own schema, so a foreign
+    // one fails the request before it is sent.
+    providerId: descriptor.id,
   })
   const opening: Message = {
     role: 'user',
@@ -695,7 +703,9 @@ async function runInner(
         break
       }
 
-      for (const block of assistantMessage.content) assistantContent.push(toChatBlock(block))
+      for (const block of assistantMessage.content) {
+        assistantContent.push(toChatBlock(block, descriptor.id))
+      }
       messages.push(assistantMessage)
 
       // The observable "a new request was assembled" marker the channel's
@@ -1108,9 +1118,12 @@ function providerOptionsFor(
  * The provider server tools this turn declares: web search and web fetch,
  * which the VENDOR runs inside its own response.
  *
- * Two gates, both required. The web policy (`desde.config.json`) is the
- * user's decision and is off by default; the descriptor's `webTools` says
- * which of the two this provider's vendor actually has. Fetch is declared
+ * Three gates, all required. The web policy (`desde.config.json`) is the
+ * user's decision and is off by default. The descriptor's `webTools` says
+ * which of the two this provider's vendor has. `LLMProvider.serverToolIds`
+ * says which ones the provider object that was actually BUILT will send: the
+ * direct Anthropic provider sends none, so offering them there would promise
+ * the model tools that are stripped on the way out. Fetch is declared
  * only with a non-empty allowlist, passed as the vendor's `allowedDomains`,
  * because on this lane the vendor does the fetching and that list is the
  * only control Desde still holds over where it goes. The policy's own
@@ -1118,9 +1131,11 @@ function providerOptionsFor(
  */
 function serverToolDefs(
   policy: WebPolicy | undefined,
-  offered: ReadonlyArray<ServerToolId>,
+  vendorOffers: ReadonlyArray<ServerToolId>,
+  providerSends: ReadonlyArray<ServerToolId>,
 ): ServerToolDef[] {
   if (!policy) return []
+  const offered = vendorOffers.filter((id) => providerSends.includes(id))
   const defs: ServerToolDef[] = []
   if (policy.webSearchEnabled && offered.includes('web_search')) {
     defs.push({ kind: 'server', id: 'web_search' })
@@ -1131,7 +1146,12 @@ function serverToolDefs(
   return defs
 }
 
-function toChatBlock(block: AssistantContent): ChatAssistantBlock {
+/**
+ * `providerId` tags a server block with the provider that produced it, so a
+ * later turn on a different provider can leave it out of replay (see
+ * `history-replay.ts`).
+ */
+function toChatBlock(block: AssistantContent, providerId: string): ChatAssistantBlock {
   switch (block.type) {
     case 'text':
       return { type: 'text', text: block.text }
@@ -1140,6 +1160,7 @@ function toChatBlock(block: AssistantContent): ChatAssistantBlock {
     case 'server_tool_use':
       return {
         type: 'server_tool_use',
+        provider: providerId,
         toolUseId: block.id,
         name: block.name,
         input: block.input,
@@ -1148,6 +1169,7 @@ function toChatBlock(block: AssistantContent): ChatAssistantBlock {
     case 'server_tool_result':
       return {
         type: 'server_tool_result',
+        provider: providerId,
         toolUseId: block.toolUseId,
         name: block.name,
         output: block.output,

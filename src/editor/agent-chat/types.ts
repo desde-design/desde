@@ -188,6 +188,14 @@ export type ChatAssistantBlock =
   | { type: 'tool_use'; toolUseId: string; name: string; input: unknown }
   | {
       type: 'server_tool_use'
+      /**
+       * The provider id that produced it. Replay drops a server block whose
+       * provider differs from the current turn's, because each vendor
+       * validates the payload against its own schema. Optional only so a
+       * record written without it still loads; such a block is treated as
+       * foreign and dropped.
+       */
+      provider?: string
       toolUseId: string
       name: string
       input: unknown
@@ -195,6 +203,8 @@ export type ChatAssistantBlock =
     }
   | {
       type: 'server_tool_result'
+      /** See `server_tool_use.provider`. */
+      provider?: string
       toolUseId: string
       name: string
       output: unknown

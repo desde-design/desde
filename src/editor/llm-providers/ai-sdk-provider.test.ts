@@ -16,7 +16,7 @@ import { createOpenAI } from '@ai-sdk/openai'
 import { AiSdkProvider, APICallError, RetryError } from './ai-sdk-provider'
 import { anthropicServerTool } from './ai-sdk-anthropic'
 import { openAiServerTool } from './ai-sdk-openai'
-import type { Message, ProviderEvent } from './types'
+import { SERVER_TOOL_MAX_USES, type Message, type ProviderEvent } from './types'
 
 /**
  * `streamText` itself, mocked so ONE test (the mid-stream abort case below)
@@ -1006,6 +1006,40 @@ describe('AiSdkProvider server tools', () => {
     })
   }
 
+  it('reports the server tool ids its factory accepts, and none without a factory', () => {
+    const noModel = new MockLanguageModelV4({ doStream: answeredStream() })
+    expect(anthropicProviderFor(noModel).serverToolIds).toEqual(['web_search', 'web_fetch'])
+    const openai = new AiSdkProvider({
+      name: 'openai',
+      defaultModel: 'gpt-5.6',
+      languageModel: () => noModel,
+      providerOptionsKey: 'openai',
+      serverTool: (def) => openAiServerTool(def, openaiTools),
+    })
+    expect(openai.serverToolIds).toEqual(['web_search'])
+    expect(providerFor(noModel).serverToolIds).toEqual([])
+  })
+
+  it('bounds web_search at SERVER_TOOL_MAX_USES when the def names no cap', async () => {
+    const model = new MockLanguageModelV4({ doStream: answeredStream() })
+    await collect(
+      anthropicProviderFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [{ kind: 'server', id: 'web_search' }],
+      }),
+    )
+    expect(model.doStreamCalls[0]!.tools).toEqual([
+      {
+        type: 'provider',
+        id: 'anthropic.web_search_20260318',
+        name: 'web_search',
+        args: { maxUses: SERVER_TOOL_MAX_USES },
+      },
+    ])
+    expect(SERVER_TOOL_MAX_USES).toBe(8)
+  })
+
   it('declares a web_search server def as the vendor provider tool, with its options', async () => {
     const model = new MockLanguageModelV4({ doStream: answeredStream() })
     await collect(
@@ -1043,7 +1077,7 @@ describe('AiSdkProvider server tools', () => {
         type: 'provider',
         id: 'anthropic.web_fetch_20260318',
         name: 'web_fetch',
-        args: { allowedDomains: ['example.com'] },
+        args: { allowedDomains: ['example.com'], maxUses: SERVER_TOOL_MAX_USES },
       },
     ])
   })

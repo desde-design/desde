@@ -32,7 +32,7 @@
 
 import { createAnthropic, type AnthropicProvider } from '@ai-sdk/anthropic'
 import { AiSdkProvider } from './ai-sdk-provider'
-import type { LLMProvider, ServerToolDef } from './types'
+import { SERVER_TOOL_MAX_USES, type LLMProvider, type ServerToolDef } from './types'
 
 /**
  * Provider-options key. `@ai-sdk/anthropic` looks its own options
@@ -94,7 +94,8 @@ export function anthropicServerTool(
 ): ReturnType<AnthropicProvider['tools']['webSearch_20260318']> | ReturnType<AnthropicProvider['tools']['webFetch_20260318']> {
   const opts = {
     ...(def.allowedDomains ? { allowedDomains: def.allowedDomains } : {}),
-    ...(def.maxUses ? { maxUses: def.maxUses } : {}),
+    // Always bounded: see `SERVER_TOOL_MAX_USES` for why this is the only cap.
+    maxUses: def.maxUses ?? SERVER_TOOL_MAX_USES,
   }
   return def.id === 'web_search' ? tools.webSearch_20260318(opts) : tools.webFetch_20260318(opts)
 }

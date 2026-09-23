@@ -27,6 +27,14 @@
  * no result on the turn (the user stopped it mid-search) is dropped, because
  * the vendor rejects an unpaired one the same way it rejects an orphan
  * `tool_use`.
+ *
+ * A server block written by a DIFFERENT provider is dropped too, both halves
+ * together, keeping the text around it. Each vendor validates a replayed
+ * payload against its own schema: an OpenAI search result replayed into
+ * Anthropic failed with a type validation error before any request was sent,
+ * and since the last twenty turns are replayed every time, one switch of
+ * model broke the session for good. A block with no `provider` recorded is
+ * treated as foreign, so an unattributed payload is never sent anywhere.
  */
 
 import type { ChatSession, ChatTurn } from '../agent-chat/types'
@@ -45,6 +53,12 @@ export interface ReplayHistoryInput {
   session: ChatSession
   repoRoot: string
   maxTurns?: number
+  /**
+   * The provider this replay is FOR. Server blocks tagged with any other
+   * provider, or with none, are left out. Absent means no server block is
+   * replayed at all.
+   */
+  providerId?: string
 }
 
 export async function replayHistory(input: ReplayHistoryInput): Promise<Message[]> {
@@ -66,10 +80,10 @@ export async function replayHistory(input: ReplayHistoryInput): Promise<Message[
     first !== undefined && !recent.includes(first)
       ? [{ role: 'user' as const, content: [{ type: 'text' as const, text: first.userMessage }] }]
       : []
-  return [...head, ...recent.flatMap(replayTurn)]
+  return [...head, ...recent.flatMap((turn) => replayTurn(turn, input.providerId))]
 }
 
-function replayTurn(turn: ChatTurn): Message[] {
+function replayTurn(turn: ChatTurn, providerId: string | undefined): Message[] {
   const out: Message[] = [
     { role: 'user', content: [{ type: 'text', text: turn.userMessage }] },
   ]
@@ -85,14 +99,21 @@ function replayTurn(turn: ChatTurn): Message[] {
       pendingResults.length = 0
     }
   }
-  // Server calls that got a result on this turn. A call without one is
-  // dropped below, and so is a result whose call is missing.
+  // Server calls that got a result on this turn, both halves written by the
+  // provider this replay is for. Anything else is dropped below: a call with
+  // no result, a result with no call, and a pair from another provider.
+  const ours = (b: { provider?: string }): boolean =>
+    providerId !== undefined && b.provider === providerId
   const serverCalls = new Set(
-    turn.assistantContent.flatMap((b) => (b.type === 'server_tool_use' ? [b.toolUseId] : [])),
+    turn.assistantContent.flatMap((b) =>
+      b.type === 'server_tool_use' && ours(b) ? [b.toolUseId] : [],
+    ),
   )
   const pairedServerIds = new Set(
     turn.assistantContent.flatMap((b) =>
-      b.type === 'server_tool_result' && serverCalls.has(b.toolUseId) ? [b.toolUseId] : [],
+      b.type === 'server_tool_result' && ours(b) && serverCalls.has(b.toolUseId)
+        ? [b.toolUseId]
+        : [],
     ),
   )
   for (const block of turn.assistantContent) {
