@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { startHttpServer, type HttpServerHandle } from "../http-server.js"
 import { newSecurityContext } from "../auth.js"
 import { modelCatalogResolver, setModelCatalogLiveSourcesForTests } from "../model-catalog-source.js"
+import { SIDECAR_NO_BINARY_MESSAGE } from "../../../../src/editor/agent-chat-sidecar/resolve-claude-on-path.js"
 
 /**
  * The sidecar dispatch, asserted against the real world.
@@ -155,9 +156,7 @@ describe("POST /api/editor/chat — the sidecar gate", () => {
     try {
       const res = await postAnthropicChat()
       const body = await readSse(res)
-      expect(body).toContain(
-        "The Claude subscription path needs the claude command line tool on your PATH",
-      )
+      expect(body).toContain(SIDECAR_NO_BINARY_MESSAGE)
       expect(body).not.toContain('"kind":"assistant_delta"')
     } finally {
       if (previousPath === undefined) delete process.env.PATH

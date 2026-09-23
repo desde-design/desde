@@ -5,7 +5,6 @@ import {
   isCanvasEnabled,
   isNotesEnabled,
   isSecretReadsBlocked,
-  sidecarRefusal,
 } from "../dormant-surfaces.js"
 
 // Every gate's env var, because this list does double duty: `setEnv` is typed
@@ -156,20 +155,6 @@ describe("the two gates are independent", () => {
     setEnv("EDITOR_NOTES", "1")
     expect(isNotesEnabled({})).toBe(true)
     expect(isCodeViewEnabled({})).toBe(false)
-  })
-})
-
-describe("sidecarRefusal", () => {
-  it("names the switch so a caller can act on it", () => {
-    const reason = sidecarRefusal()
-    expect(reason).toContain("EDITOR_USE_CLAUDE_SUBSCRIPTION")
-    expect(reason).toContain("sidecar")
-  })
-
-  it("reads as a sentence, per the repo's copy rules", () => {
-    const reason = sidecarRefusal()
-    expect(reason).not.toContain("—")
-    expect(reason.endsWith(".")).toBe(true)
   })
 })
 

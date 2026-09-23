@@ -47,7 +47,6 @@
 import type { RunChatTurn } from "../../../src/editor/agent-chat/run-chat-turn.js"
 import { getDescriptor } from "../../../src/editor/llm-providers/provider-registry.js"
 import { isClaudeSubscriptionOptIn } from "../../../src/editor/llm-providers/claude-subscription.js"
-import { sidecarRefusal } from "./dormant-surfaces.js"
 import type { ChatHandlerLoaders } from "./chat-handler.js"
 
 export type { RunChatTurn }
@@ -65,11 +64,12 @@ export type { RunChatTurn }
  * or Anthropic with neither the opt-in nor a key (where chat is refused
  * before dispatch even runs, by `assertChatCredentials`) — is `'neutral'`.
  *
- * Exported so `chat-handler.ts` can know the lane before loading it: the
- * capability catalog reads it to decide which tools the model is told about
- * (`capabilityRuntime` there), and both runtimes now emit their own
- * `steered` frame at the moment they know where a mid-turn steer landed, so
- * neither the route nor this function needs to arbitrate who announces one.
+ * Exported so `chat-handler.ts` can know the lane before loading it: it reads
+ * this to decide whether web search is a provider server tool this turn can
+ * declare (`capabilityServerToolIds` there), and both runtimes now emit their
+ * own `steered` frame at the moment they know where a mid-turn steer landed,
+ * so neither the route nor this function needs to arbitrate who announces
+ * one.
  */
 export function resolveChatRuntimeKind(
   providerId: string,
@@ -88,26 +88,14 @@ export function resolveChatRuntimeKind(
 /**
  * Resolve and load the runtime for this turn.
  *
- * `requestedRuntime` is an optional hint a caller can pass when it already
- * knows which lane it wants confirmed — the one case today is a stale
- * client that saw the sidecar available a moment ago (its opt-in flag or its
- * key changed since) and asks for it by name. When that hint says
- * `'sidecar'` but the computed kind disagrees, this refuses with
- * {@link sidecarRefusal} rather than silently downgrading the turn onto the
- * neutral runtime the caller did not ask for. Most callers pass nothing, and
- * the computed kind alone decides.
+ * No request carries a runtime hint — `resolveChatRuntimeKind` alone decides
+ * which lane serves it.
  */
 export async function resolveChatRuntime(
   providerId: string,
   loaders: ChatHandlerLoaders,
-  requestedRuntime?: "neutral" | "sidecar",
 ): Promise<RunChatTurn> {
   const kind = resolveChatRuntimeKind(providerId, process.env)
-  if (requestedRuntime === "sidecar" && kind !== "sidecar") {
-    // Refused BEFORE any loader runs, so a refusal never pays for a module
-    // import.
-    throw new Error(sidecarRefusal())
-  }
   if (kind === "sidecar") {
     // Lazy on purpose: only the sidecar loader ever imports
     // @anthropic-ai/claude-agent-sdk, and only Anthropic, opted into the

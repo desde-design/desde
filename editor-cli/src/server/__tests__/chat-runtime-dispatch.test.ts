@@ -80,36 +80,4 @@ describe("resolveChatRuntime", () => {
   it("refuses a provider nobody registered", async () => {
     await expect(resolveChatRuntime("moonshot", loaders())).rejects.toThrow(/moonshot/)
   })
-
-  /**
-   * The rare stale client: it saw the sidecar available (opt-in on, no key)
-   * a moment ago and asks for it by name. If the switch has since gone off —
-   * a key got configured, or the opt-in got unset — the computed kind is
-   * `'neutral'` and this refuses rather than silently downgrading the turn
-   * onto a runtime the caller never asked to run on.
-   */
-  it("refuses a stale sidecar request once the switch is off, naming the switch", async () => {
-    // No EDITOR_USE_CLAUDE_SUBSCRIPTION set: the switch is off, so the
-    // computed kind is neutral even though the request explicitly names the
-    // sidecar.
-    await expect(
-      resolveChatRuntime("anthropic", loaders(), "sidecar"),
-    ).rejects.toThrow(/EDITOR_USE_CLAUDE_SUBSCRIPTION/)
-  })
-
-  it("does not load either runtime when it refuses a stale sidecar request", async () => {
-    const l = loaders()
-    await expect(resolveChatRuntime("anthropic", l, "sidecar")).rejects.toThrow()
-    expect(
-      (l as unknown as { loadRunChatTurnSidecar: ReturnType<typeof vi.fn> }).loadRunChatTurnSidecar,
-    ).not.toHaveBeenCalled()
-    expect(
-      (l as unknown as { loadRunChatTurnNeutral: ReturnType<typeof vi.fn> }).loadRunChatTurnNeutral,
-    ).not.toHaveBeenCalled()
-  })
-
-  it("a sidecar request is a no-op once the computed kind already agrees", async () => {
-    process.env.EDITOR_USE_CLAUDE_SUBSCRIPTION = "1"
-    expect(await resolveChatRuntime("anthropic", loaders(), "sidecar")).toBe(sidecarRuntime)
-  })
 })

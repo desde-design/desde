@@ -259,19 +259,14 @@ interface ServerRun {
 }
 
 /**
- * Push a steer the way `handleSteerRequest` does: enqueue on the turn's input
- * channel, then announce it on the SAME stream the turn's own events go out
- * on. The two lines are adjacent and synchronous in the route
- * (`editor-cli/src/server/chat-handler.ts`), and that adjacency is what makes
- * the announcement land at the exact stream position the runtime stamped —
- * so it is reproduced here rather than stubbed. The route's own validation
- * and 409 handling are covered by the CLI suite.
+ * Push a steer the way `handleSteerRequest` does: enqueue it on the turn's
+ * input channel and nothing else. Task 26 deleted the route's own `steered`
+ * announcement — both runtimes now emit their own `steered` frame at the
+ * moment they know where the steer landed, so the route no longer arbitrates
+ * who announces one. The route's own validation and 409 handling are covered
+ * by the CLI suite.
  */
-function steerNow(
-  channel: ReturnType<typeof createTurnInputChannel>,
-  _events: ChatStreamEvent[],
-  text: string,
-): void {
+function steerNow(channel: ReturnType<typeof createTurnInputChannel>, text: string): void {
   // Does NOT also synthesize a `steered` event. Task 26: the sidecar
   // announces a delivered steer ITSELF, from the input channel's
   // `onAccepted` hook — `runChatTurnSdk` below is handed the real
@@ -299,7 +294,7 @@ async function runServer(script: ScriptStep[], repoRoot: string): Promise<Server
 
       for (const step of script) {
         if (step.step === "steer") {
-          steerNow(channel, events, step.text)
+          steerNow(channel, step.text)
           await settle()
           continue
         }
@@ -318,7 +313,7 @@ async function runServer(script: ScriptStep[], repoRoot: string): Promise<Server
             continue
           }
           if (part.part === "steer") {
-            steerNow(channel, events, part.text)
+            steerNow(channel, part.text)
             await settle()
             continue
           }

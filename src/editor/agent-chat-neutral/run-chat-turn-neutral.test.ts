@@ -1218,10 +1218,12 @@ describe('runChatTurnNeutral: steering', () => {
       content: [{ type: 'text', text: 'actually the sidebar' }],
     })
     // This lane emits `steered` itself, at the boundary where it delivers the
-    // steer, and the steer route suppresses its own frame for a neutral turn
-    // (`LiveTurn.runtimeEmitsSteered`) so the client still sees exactly one.
-    // The emitter must be the side that knows the position: the client cuts
-    // its transcript on this frame, and `result.turn.steers` records the same
+    // steer. Both runtimes now emit their own `steered` frame at the moment
+    // they know where a mid-turn steer landed (Task 26 deleted the steer
+    // route's runtimeEmitsSteered/laneConfirmed reconciliation machinery that
+    // used to decide which side announces), so the client sees exactly one
+    // either way. The emitter must be the side that knows the position: the
+    // client cuts its transcript on this frame, and `result.turn.steers` records the same
     // moment. Emitting from the route instead cut the live transcript at
     // accept time while hydration replayed the delivery position, which
     // `useEditorChat-turn-ordering.test.ts` caught as a live/hydrated

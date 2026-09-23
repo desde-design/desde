@@ -58,8 +58,6 @@
  * of the drift. It is opt-IN and follows the `=== true` rule.
  */
 
-import { CLAUDE_SUBSCRIPTION_ENV } from "../../../src/editor/llm-providers/claude-subscription.js"
-
 /**
  * The slice of the server context these gates read. Narrow on purpose: the
  * helper should not need the whole context to answer a yes or no.
@@ -174,31 +172,6 @@ export function isVscodeLinkEnabled(ctx: DormantSurfaceConfig): boolean {
 export function isSecretReadsBlocked(ctx: DormantSurfaceConfig): boolean {
   // `enabled()` is deliberately NOT used here — see the paragraph above.
   return ctx.editor?.blockSecretReads === true
-}
-
-/**
- * The refusal a request answers with when it names the Claude-subscription
- * sidecar (a client's `runtime: 'sidecar'` hint, for the rare stale client
- * that saw it available a moment ago) while the switch that dispatch reads
- * is off.
- *
- * It names the switch rather than 404-ing, for the same reason
- * `dormantSurfaceRefusal` gives about its own surfaces: a stale or
- * direct caller should learn what to flip instead of guessing the route is
- * gone. The switch is `CLAUDE_SUBSCRIPTION_ENV`
- * (`EDITOR_USE_CLAUDE_SUBSCRIPTION`, from `claude-subscription.ts`) — the
- * exact one `resolveChatRuntimeKind` reads via `isClaudeSubscriptionOptIn`.
- * There is no config key: the sidecar is a dev-only, single-user escape
- * hatch, never a per-project setting, so an environment variable is the
- * whole gate, same as `neutralChatRefusal` used to be for its own surface
- * before Task 26 folded neutral chat into the only chat runtime.
- */
-export function sidecarRefusal(): string {
-  return (
-    `The Claude subscription sidecar is off. Set ${CLAUDE_SUBSCRIPTION_ENV}=1 and remove ` +
-    "any configured Anthropic API key to run chat on the sign-in of the `claude` " +
-    "command line tool on your PATH instead."
-  )
 }
 
 /**
