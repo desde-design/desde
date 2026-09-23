@@ -17,20 +17,23 @@
  *     and appends to the ledger.
  *  3. Steer delivery is OBSERVED, not inferred. The loop appends a steer as a
  *     user message itself, so it knows the message reached the request rather
- *     than watching for assistant-message boundaries as evidence.
+ *     than watching for assistant-message boundaries as evidence. A steer
+ *     that arrives while a provider step is streaming INTERRUPTS that step:
+ *     the loop aborts the step (not the turn), keeps the text received so
+ *     far, drops the step's unrun tool calls, and issues the next step with
+ *     the steer appended. See `currentStepAbort` below.
  *
- * What is genuinely lost is named in the spec and enforced by tests: no
- * mid-generation steering (delivery is at a step boundary), no SDK context
- * compaction (this truncates instead), no vendor in-flight budget stop (the
- * loop stops between steps), and no `rate_limit_warning`.
+ * What is genuinely lost is named in the spec and enforced by tests: no SDK
+ * context compaction (this truncates instead), no vendor in-flight budget
+ * stop (the loop stops between steps), and no `rate_limit_warning`.
  *
  * This runtime NEVER sets `session.sdkSessionId`, and it does not persist the
  * session. It returns `{ session, turn }` and `chat-handler.ts` saves, exactly
  * as it does for the SDK lane.
  *
- * History replay and the cost ceiling are wired in (`history-replay.ts`,
- * `cost-guard.ts`). Steering is not: each of those was its own task and its
- * own tests.
+ * History replay, the cost ceiling and steering are wired in
+ * (`history-replay.ts`, `cost-guard.ts`, the channel from
+ * `turn-input-channel.ts`), each as its own task with its own tests.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -527,6 +530,20 @@ async function runInner(
 
   const steerRecords: ChatSteeredMessage[] = []
   const turnChannel = opts.inputChannel ?? createTurnInputChannel()
+  // The controller of the provider step that is streaming right now, or null
+  // between steps (while tools run, and before the first step starts).
+  //
+  // Turn-scoped because `begin` is called ONCE per turn, so its `onAccepted`
+  // has to reach whichever step is current when a steer lands. Aborting it is
+  // the whole interrupt: the step's stream ends, the loop sees that its own
+  // controller fired while the user's signal did not, and treats the step as
+  // interrupted rather than failed. See the step loop.
+  //
+  // Null outside a stream on purpose. A steer accepted while a tool runs must
+  // not cancel the tool: it waits for the step boundary, where the drain
+  // delivers it. A steer accepted before step 0 is replayed to `onAccepted`
+  // inside `begin` itself, and there is nothing to interrupt yet.
+  let currentStepAbort: AbortController | null = null
   // Seeded so the channel's own lifecycle matches the SDK lane's: steers
   // accepted before the runtime was reached are already queued behind it, and
   // `begin` puts the opening prompt at the head of that queue.
@@ -535,11 +552,15 @@ async function runInner(
       text: opts.userMessage,
       ...(opts.images?.length ? { images: opts.images } : {}),
     },
-    // No `onAccepted`: this lane records a steer where it delivers it, in the
-    // boundary-delivery block below, not at accept time. Accept time is not
-    // useful here — a steer can be accepted before the turn's first request
-    // is even built, and this lane knows the position it will actually land
-    // at because it appends the message itself.
+    {
+      // Interrupt only. The steer itself is NOT recorded here: this lane
+      // records a steer where it delivers it, in the drain at the top of the
+      // step loop, because only there does it know the position the message
+      // actually lands at. The steer stays queued in the channel until then.
+      onAccepted: () => {
+        currentStepAbort?.abort()
+      },
+    },
   )
 
   // Shared with the SDK lane: see `attachSteerReconciliation` in
@@ -566,12 +587,57 @@ async function runInner(
   // Everything about a step's request except the conversation so far. Built
   // once so the stable prefix is byte-identical across steps, which is what a
   // provider with automatic prompt caching needs to keep hitting.
+  //
+  // The signal is NOT part of it: each step gets its own, so a steer can
+  // abort one step without aborting the turn. See `currentStepAbort`.
   const stepRequest = {
     system: systemWithNotice,
     tools,
     ...(model ? { model } : {}),
-    ...(opts.signal ? { signal: opts.signal } : {}),
     ...providerOptionsFor(descriptor, opts.effort, model),
+  }
+
+  // Closes a step's accounting. Only the SHORTFALL is emitted.
+  // `message_complete.usage` is the authoritative figure for the step, but a
+  // provider that already streamed `usage` events during the step has
+  // reported those tokens once already (both shipped providers do exactly
+  // that), and adding the final figure on top would double every turn's
+  // count. A provider that reports usage only on its final message still gets
+  // counted, which is the case this exists for.
+  const settleStepUsage = (
+    finalUsage: Usage | undefined,
+    streamed: { in: number; out: number; cacheRead: number; cacheCreation: number },
+  ): void => {
+    const extraIn = Math.max(0, (finalUsage?.inputTokens ?? 0) - streamed.in)
+    const extraOut = Math.max(0, (finalUsage?.outputTokens ?? 0) - streamed.out)
+    const extraCacheRead = Math.max(
+      0,
+      (finalUsage?.cacheReadInputTokens ?? 0) - streamed.cacheRead,
+    )
+    const extraCacheCreation = Math.max(
+      0,
+      (finalUsage?.cacheCreationInputTokens ?? 0) - streamed.cacheCreation,
+    )
+    if (extraIn > 0 || extraOut > 0 || extraCacheRead > 0 || extraCacheCreation > 0) {
+      inputTokens += extraIn
+      outputTokens += extraOut
+      cacheReadInputTokens += extraCacheRead
+      cacheCreationInputTokens += extraCacheCreation
+      costGuard.record({
+        inputTokens: extraIn,
+        outputTokens: extraOut,
+        ...(extraCacheRead > 0 ? { cacheReadInputTokens: extraCacheRead } : {}),
+        ...(extraCacheCreation > 0 ? { cacheCreationInputTokens: extraCacheCreation } : {}),
+      })
+      opts.emit({
+        kind: 'usage',
+        turnId,
+        inputTokens: extraIn,
+        outputTokens: extraOut,
+        ...(extraCacheRead > 0 ? { cacheReadInputTokens: extraCacheRead } : {}),
+        ...(extraCacheCreation > 0 ? { cacheCreationInputTokens: extraCacheCreation } : {}),
+      })
+    }
   }
 
   try {
@@ -592,10 +658,15 @@ async function runInner(
         break
       }
 
-      // Boundary delivery. Drain before the step is assembled, so anything the
-      // user typed during the previous step is part of THIS request. Step 0
-      // has no previous step — its request is the turn's opening prompt,
-      // already built above — so nothing is drained until step 1.
+      // Delivery. Drain before the step is assembled, so anything the user
+      // typed during the previous step is part of THIS request. That covers
+      // both ways a steer gets here: it arrived while tools ran (the step
+      // boundary), or it arrived while the previous step was streaming and
+      // interrupted it (see below). An interrupt `continue`s the loop, which
+      // advances `step`, so `step > 0` holds after one and the interrupting
+      // steer is drained right here. Step 0 has no previous step (its request
+      // is the turn's opening prompt, already built above), so nothing is
+      // drained until step 1.
       //
       // A steer accepted during turn SETUP (the channel is live before the
       // first await, so the route can push into it) therefore misses step 0.
@@ -661,12 +732,26 @@ async function runInner(
       const pending: Array<{ id: string; name: string; input: unknown }> = []
       let assistantMessage: { role: 'assistant'; content: readonly AssistantContent[] } | null =
         null
+      let complete: Extract<ProviderEvent, { kind: 'message_complete' }> | null = null
       let finalUsage: Usage | undefined
       let streamedIn = 0
       let streamedOut = 0
       let streamedCacheRead = 0
       let streamedCacheCreation = 0
+      // Every `text_delta` of THIS step, concatenated. It is what an
+      // interrupted step keeps: the words already on the user's screen.
+      let streamedText = ''
       let lastStep = false
+
+      // This step's own abort. A steer fires it through `onAccepted`; the
+      // user's Stop reaches the step through `opts.signal`, combined in.
+      const stepAbort = new AbortController()
+      currentStepAbort = stepAbort
+      // Interrupted means the STEP's controller fired and the user's did not.
+      // When both fired, Stop wins: the turn ends as aborted, and the steer is
+      // handed back for resubmission by `attachSteerReconciliation`.
+      const interrupted = (): boolean =>
+        stepAbort.signal.aborted && opts.signal?.aborted !== true
 
       const streamOpts: StreamOpts = {
         ...stepRequest,
@@ -674,57 +759,132 @@ async function runInner(
         // hands it over, and a provider that read it lazily (or a caller that
         // recorded it) would otherwise see a conversation from the future.
         messages: [...messages],
+        signal: opts.signal
+          ? AbortSignal.any([opts.signal, stepAbort.signal])
+          : stepAbort.signal,
       }
-      for await (const ev of streamStepWithRetry(provider, streamOpts, opts.emit)) {
-        for (const out of adapter.adapt(ev)) opts.emit(out)
-        if (ev.kind === 'tool_use') {
-          pending.push({ id: ev.id, name: ev.name, input: ev.input })
-        } else if (ev.kind === 'usage') {
-          streamedIn += ev.inputTokens
-          streamedOut += ev.outputTokens
-          inputTokens += ev.inputTokens
-          outputTokens += ev.outputTokens
-          if (ev.cacheReadInputTokens !== undefined) {
-            streamedCacheRead += ev.cacheReadInputTokens
-            cacheReadInputTokens += ev.cacheReadInputTokens
-          }
-          if (ev.cacheCreationInputTokens !== undefined) {
-            streamedCacheCreation += ev.cacheCreationInputTokens
-            cacheCreationInputTokens += ev.cacheCreationInputTokens
-          }
-          costGuard.record({
-            inputTokens: ev.inputTokens,
-            outputTokens: ev.outputTokens,
-            ...(ev.cacheReadInputTokens !== undefined
-              ? { cacheReadInputTokens: ev.cacheReadInputTokens }
-              : {}),
-            ...(ev.cacheCreationInputTokens !== undefined
-              ? { cacheCreationInputTokens: ev.cacheCreationInputTokens }
-              : {}),
-          })
-        } else if (ev.kind === 'message_complete') {
-          assistantMessage = ev.message
-          finalUsage = ev.usage
-          if (ev.stopReason !== 'tool_use') {
-            lastStep = true
-            if (ev.stopReason !== 'end_turn') {
-              stopReason = 'error'
-              vendorStopReason = ev.vendorStopReason ?? ev.stopReason
-              // A cancelled turn is the USER's doing, and it must not read as
-              // the model giving up. Both providers COMPLETE the message on
-              // abort rather than throwing (`vendorStopReason: 'aborted'`), so
-              // the loop breaks normally and the catch's 'turn aborted' path
-              // below never runs. Without this branch, pressing Stop
-              // mid-generation put "The model stopped before finishing the
-              // turn: aborted." in the banner.
-              errorMessage =
-                vendorStopReason === 'aborted' || opts.signal?.aborted === true
-                  ? 'turn aborted'
-                  : // Name the reason otherwise. "The turn did not finish"
-                    // tells the user nothing they can act on, and 'max_tokens'
-                    // and 'refusal' are two very different next steps.
-                    `The model stopped before finishing the turn: ${vendorStopReason}.`
+      // `tool_use_start` frames for Desde-run calls, held until the step is
+      // known to have finished rather than been interrupted. An interrupted
+      // step drops its calls unrun, and a disclosure the client had already
+      // drawn would never get a result: it would spin live and be missing on
+      // reload. Released before the next content frame, so the order the
+      // client sees is unchanged; only a trailing `usage` can pass them.
+      const heldToolStarts: ChatStreamEvent[] = []
+      const releaseToolStarts = (): void => {
+        for (const held of heldToolStarts.splice(0)) opts.emit(held)
+      }
+      try {
+        for await (const ev of streamStepWithRetry(provider, streamOpts, opts.emit, interrupted)) {
+          for (const out of adapter.adapt(ev)) {
+            if (ev.kind === 'tool_use') {
+              heldToolStarts.push(out)
+              continue
             }
+            if (out.kind !== 'usage') releaseToolStarts()
+            opts.emit(out)
+          }
+          if (ev.kind === 'text_delta') {
+            streamedText += ev.delta
+          } else if (ev.kind === 'tool_use') {
+            pending.push({ id: ev.id, name: ev.name, input: ev.input })
+          } else if (ev.kind === 'usage') {
+            streamedIn += ev.inputTokens
+            streamedOut += ev.outputTokens
+            inputTokens += ev.inputTokens
+            outputTokens += ev.outputTokens
+            if (ev.cacheReadInputTokens !== undefined) {
+              streamedCacheRead += ev.cacheReadInputTokens
+              cacheReadInputTokens += ev.cacheReadInputTokens
+            }
+            if (ev.cacheCreationInputTokens !== undefined) {
+              streamedCacheCreation += ev.cacheCreationInputTokens
+              cacheCreationInputTokens += ev.cacheCreationInputTokens
+            }
+            costGuard.record({
+              inputTokens: ev.inputTokens,
+              outputTokens: ev.outputTokens,
+              ...(ev.cacheReadInputTokens !== undefined
+                ? { cacheReadInputTokens: ev.cacheReadInputTokens }
+                : {}),
+              ...(ev.cacheCreationInputTokens !== undefined
+                ? { cacheCreationInputTokens: ev.cacheCreationInputTokens }
+                : {}),
+            })
+          } else if (ev.kind === 'message_complete') {
+            complete = ev
+          }
+        }
+      } finally {
+        currentStepAbort = null
+      }
+
+      // ── Interrupt ───────────────────────────────────────────────────
+      // A steer landed while this step streamed. The transport reports that in
+      // one of two shapes, depending on when the abort caught it: the stream
+      // THROWS (fetch's AbortError before the response, Anthropic's
+      // APIUserAbortError), which `streamStepWithRetry` turns into a clean end
+      // with no `message_complete`; or the stream ENDS with a
+      // `message_complete` whose stop reason is `'error'` and whose
+      // `vendorStopReason` is `'aborted'`. Both land here.
+      //
+      // A step that completed as `end_turn` or `tool_use` before the abort
+      // reached it is NOT interrupted: it finished, and it is handled below
+      // like any other step. A steer on a finished last step is reported for
+      // resubmission, and one on a finished tool step waits for the boundary.
+      if (
+        interrupted() &&
+        (complete === null ||
+          (complete.stopReason !== 'end_turn' && complete.stopReason !== 'tool_use'))
+      ) {
+        // Kept: the text already on the user's screen, as ONE block. The
+        // client coalesced the same deltas into one block live, so the
+        // persisted turn replays to the same shape.
+        //
+        // Dropped: every `tool_use` of this step (never run, and a call with
+        // no result is a request every vendor refuses), and any vendor-run
+        // `server_tool_use` / `server_tool_result` (a partial response's
+        // vendor blocks are not safe to send back). Their held
+        // `tool_use_start` frames are discarded unsent.
+        if (streamedText.length > 0) {
+          assistantContent.push({ type: 'text', text: streamedText })
+          messages.push({ role: 'assistant', content: [{ type: 'text', text: streamedText }] })
+          turnChannel.noteAssistantMessage(randomUUID())
+        }
+        // The interrupted request was made, so it is billed and counted.
+        settleStepUsage(complete?.usage, {
+          in: streamedIn,
+          out: streamedOut,
+          cacheRead: streamedCacheRead,
+          cacheCreation: streamedCacheCreation,
+        })
+        // The drain at the top of the loop appends the steer, records it and
+        // emits `steered`. The step counts against the cap like any other.
+        continue
+      }
+      releaseToolStarts()
+
+      if (complete !== null) {
+        assistantMessage = complete.message
+        finalUsage = complete.usage
+        if (complete.stopReason !== 'tool_use') {
+          lastStep = true
+          if (complete.stopReason !== 'end_turn') {
+            stopReason = 'error'
+            vendorStopReason = complete.vendorStopReason ?? complete.stopReason
+            // A cancelled turn is the USER's doing, and it must not read as
+            // the model giving up. Both providers COMPLETE the message on
+            // abort rather than throwing (`vendorStopReason: 'aborted'`), so
+            // the loop breaks normally and the catch's 'turn aborted' path
+            // below never runs. Without this branch, pressing Stop
+            // mid-generation put "The model stopped before finishing the
+            // turn: aborted." in the banner.
+            errorMessage =
+              vendorStopReason === 'aborted' || opts.signal?.aborted === true
+                ? 'turn aborted'
+                : // Name the reason otherwise. "The turn did not finish"
+                  // tells the user nothing they can act on, and 'max_tokens'
+                  // and 'refusal' are two very different next steps.
+                  `The model stopped before finishing the turn: ${vendorStopReason}.`
           }
         }
       }
@@ -804,44 +964,12 @@ async function runInner(
 
       // The step's accounting closes here, after its tool results, so the
       // transcript shows a step's cost attached to the end of that step.
-      //
-      // Only the SHORTFALL is emitted. `message_complete.usage` is the
-      // authoritative figure for the step, but a provider that already
-      // streamed `usage` events during the step has reported those tokens
-      // once already (both shipped providers do exactly that), and adding
-      // the final figure on top would double every turn's count. A provider
-      // that reports usage only on its final message still gets counted,
-      // which is the case this exists for.
-      const extraIn = Math.max(0, (finalUsage?.inputTokens ?? 0) - streamedIn)
-      const extraOut = Math.max(0, (finalUsage?.outputTokens ?? 0) - streamedOut)
-      const extraCacheRead = Math.max(
-        0,
-        (finalUsage?.cacheReadInputTokens ?? 0) - streamedCacheRead,
-      )
-      const extraCacheCreation = Math.max(
-        0,
-        (finalUsage?.cacheCreationInputTokens ?? 0) - streamedCacheCreation,
-      )
-      if (extraIn > 0 || extraOut > 0 || extraCacheRead > 0 || extraCacheCreation > 0) {
-        inputTokens += extraIn
-        outputTokens += extraOut
-        cacheReadInputTokens += extraCacheRead
-        cacheCreationInputTokens += extraCacheCreation
-        costGuard.record({
-          inputTokens: extraIn,
-          outputTokens: extraOut,
-          ...(extraCacheRead > 0 ? { cacheReadInputTokens: extraCacheRead } : {}),
-          ...(extraCacheCreation > 0 ? { cacheCreationInputTokens: extraCacheCreation } : {}),
-        })
-        opts.emit({
-          kind: 'usage',
-          turnId,
-          inputTokens: extraIn,
-          outputTokens: extraOut,
-          ...(extraCacheRead > 0 ? { cacheReadInputTokens: extraCacheRead } : {}),
-          ...(extraCacheCreation > 0 ? { cacheCreationInputTokens: extraCacheCreation } : {}),
-        })
-      }
+      settleStepUsage(finalUsage, {
+        in: streamedIn,
+        out: streamedOut,
+        cacheRead: streamedCacheRead,
+        cacheCreation: streamedCacheCreation,
+      })
 
       if (lastStep) break
     }
@@ -1020,11 +1148,21 @@ async function runOneTool(
  * ours, so the event carries real numbers rather than an estimate. Retries
  * only fire before any event has been yielded for the step: once text is on
  * the user's screen, restarting would duplicate it.
+ *
+ * An interrupt is never retried. When `interrupted()` is true the step ENDS
+ * (returns, no `message_complete`) whatever the failure was, and the loop
+ * issues the next step with the steer. Any error is attributed to the
+ * interrupt, not only one named `AbortError`: the transports do not agree on
+ * a name (fetch throws a DOMException `AbortError`; the Anthropic SDK throws
+ * `APIUserAbortError`, whose `name` is plain `'Error'`), and a genuine
+ * failure that happened to coincide is not hidden, because the next step is
+ * a fresh request with its own retry budget.
  */
 async function* streamStepWithRetry(
   provider: LLMProvider,
   streamOpts: StreamOpts,
   emit: (event: ChatStreamEvent) => void,
+  interrupted: () => boolean,
 ): AsyncGenerator<ProviderEvent> {
   for (let attempt = 1; ; attempt++) {
     let yielded = false
@@ -1035,6 +1173,7 @@ async function* streamStepWithRetry(
       }
       return
     } catch (err) {
+      if (interrupted()) return
       if (streamOpts.signal?.aborted) throw err
       const status = httpStatusOf(err)
       const retriable =
@@ -1053,7 +1192,9 @@ async function* streamStepWithRetry(
       await waitOrAbort(retryDelayMs, streamOpts.signal)
       // The wait is the one blocking point long enough for a user to give up
       // during, so it ends on abort and the turn stops here rather than paying
-      // for another request.
+      // for another request. A steer ends it too: the stale request is not
+      // sent again, the steered one goes out instead.
+      if (interrupted()) return
       if (streamOpts.signal?.aborted) throw err
     }
   }
