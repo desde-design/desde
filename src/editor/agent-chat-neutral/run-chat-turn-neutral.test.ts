@@ -701,6 +701,137 @@ describe('runChatTurnNeutral: failures', () => {
     expect(result.turn.error).toBeUndefined()
   })
 
+  it('raises rate_limit_warning ahead of api_retry on a 429, carrying the retry-after seconds', async () => {
+    // The neutral loop's only rate-limit signal is this transport error —
+    // there is no SDK telemetry to read a tier or a reset timestamp off of.
+    // `retryAfterSeconds` is this lane's stand-in for `resetsAt`.
+    let attempts = 0
+    const provider: LLMProvider = {
+      name: 'flaky',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () => {
+        const firstAttempt = ++attempts === 1
+        return (async function* () {
+          if (firstAttempt) {
+            throw new APICallError({
+              message: 'Rate limit reached. Please try again later.',
+              url: 'https://api.openai.com/v1/responses',
+              requestBodyValues: {},
+              statusCode: 429,
+              responseHeaders: { 'retry-after': '7' },
+              isRetryable: true,
+            })
+          }
+          for (const ev of textStep('recovered')) yield ev
+        })()
+      },
+    }
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(attempts).toBe(2)
+    const rateLimitIndex = events.findIndex((e) => e.kind === 'rate_limit_warning')
+    const retryIndex = events.findIndex((e) => e.kind === 'api_retry')
+    expect(rateLimitIndex).toBeGreaterThanOrEqual(0)
+    expect(retryIndex).toBeGreaterThan(rateLimitIndex)
+    expect(events[rateLimitIndex]).toMatchObject({
+      kind: 'rate_limit_warning',
+      status: 'rejected',
+      retryAfterSeconds: 7,
+    })
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it('raises rate_limit_warning on a 429 with no retry-after header, without retryAfterSeconds', async () => {
+    let attempts = 0
+    const provider: LLMProvider = {
+      name: 'flaky',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () => {
+        const firstAttempt = ++attempts === 1
+        return (async function* () {
+          if (firstAttempt) {
+            throw new APICallError({
+              message: 'Rate limit reached. Please try again later.',
+              url: 'https://api.openai.com/v1/responses',
+              requestBodyValues: {},
+              statusCode: 429,
+              isRetryable: true,
+            })
+          }
+          for (const ev of textStep('recovered')) yield ev
+        })()
+      },
+    }
+    const events: ChatStreamEvent[] = []
+    await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(attempts).toBe(2)
+    const event = events.find((e) => e.kind === 'rate_limit_warning')
+    expect(event).toMatchObject({ kind: 'rate_limit_warning', status: 'rejected' })
+    expect(event).not.toHaveProperty('retryAfterSeconds')
+  })
+
+  it('does not raise rate_limit_warning on a retried 503: it is not a rate limit', async () => {
+    let attempts = 0
+    const provider: LLMProvider = {
+      name: 'flaky',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () => {
+        const firstAttempt = ++attempts === 1
+        return (async function* () {
+          if (firstAttempt) {
+            throw new APICallError({
+              message: 'service unavailable',
+              url: 'https://api.openai.com/v1/responses',
+              requestBodyValues: {},
+              statusCode: 503,
+              isRetryable: true,
+            })
+          }
+          for (const ev of textStep('recovered')) yield ev
+        })()
+      },
+    }
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(attempts).toBe(2)
+    expect(events.filter((e) => e.kind === 'rate_limit_warning')).toEqual([])
+    expect(events.find((e) => e.kind === 'api_retry')).toMatchObject({ errorStatus: 503 })
+    expect(result.turn.error).toBeUndefined()
+  })
+
   it('retries on `isRetryable` alone, when the status is not one this code recognizes', async () => {
     // A gateway can mark an error retriable at a status (or with no status
     // at all) this code's own 429/5xx check would not catch. `isRetryable`

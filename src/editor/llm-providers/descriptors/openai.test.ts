@@ -17,7 +17,10 @@ describe('OPENAI_DESCRIPTOR', () => {
 
   it('reports the asymmetries the neutral lane will have', () => {
     expect(OPENAI_DESCRIPTOR.capabilities.midTurnSteering).toBe(false)
-    expect(OPENAI_DESCRIPTOR.capabilities.vendorRateLimitEvents).toBe(false)
+    // The neutral loop raises `rate_limit_warning` itself off a 429's
+    // transport error, so this is true for every provider on that lane now
+    // — see `streamStepWithRetry` in `run-chat-turn-neutral.ts`.
+    expect(OPENAI_DESCRIPTOR.capabilities.vendorRateLimitEvents).toBe(true)
     expect(OPENAI_DESCRIPTOR.capabilities.inTurnBudgetStop).toBe('step-boundary')
     expect(OPENAI_DESCRIPTOR.capabilities.webTools).toEqual(['web_search'])
   })

@@ -39,7 +39,12 @@ export const OPENAI_DESCRIPTOR: ProviderDescriptor = {
     vendorReportedCostUsd: false,
     inTurnBudgetStop: 'step-boundary',
     reasoningVisibility: true,
-    vendorRateLimitEvents: false,
+    // Used to be false: this event came only from the `claude` binary's own
+    // telemetry, which OpenAI has no equivalent of. Now the neutral loop
+    // raises it itself from a 429's transport error (see
+    // `streamStepWithRetry` in `run-chat-turn-neutral.ts`), so every
+    // provider on the neutral lane gets it, OpenAI included.
+    vendorRateLimitEvents: true,
     imagesInPrompt: true,
     webTools: ['web_search'],
   },

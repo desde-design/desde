@@ -25,7 +25,12 @@
  *
  * What is genuinely lost is named in the spec and enforced by tests: no SDK
  * context compaction (this truncates instead), no vendor in-flight budget
- * stop (the loop stops between steps), and no `rate_limit_warning`.
+ * stop (the loop stops between steps), and no STRUCTURED `rate_limit_warning`
+ * — no tier, no `resetsAt`, no utilization, none of the subscription-overage
+ * detail the Claude Agent SDK lane gets from the `claude` binary. What this
+ * loop DOES raise, from `streamStepWithRetry`, is the same event kind with a
+ * bare signal: a 429 happened, and the `retry-after` header's value if the
+ * vendor sent one. See that function for why it stops at that.
  *
  * This runtime NEVER sets `session.sdkSessionId`, and it does not persist the
  * session. It returns `{ session, turn }` and `chat-handler.ts` saves, exactly
@@ -1219,9 +1224,24 @@ async function* streamStepWithRetry(
       const retriable =
         isRetryableError(err) || status === 429 || (status !== null && status >= 500)
       if (yielded || !retriable || attempt >= API_RETRY_MAX_ATTEMPTS) throw err
-      const requestedMs =
-        (extractRetryAfterFromError(unwrapProviderError(err)) ?? 2 ** attempt) * 1000
+      const retryAfterSeconds = extractRetryAfterFromError(unwrapProviderError(err))
+      const requestedMs = (retryAfterSeconds ?? 2 ** attempt) * 1000
       const retryDelayMs = Math.min(requestedMs, MAX_RETRY_SLEEP_MS)
+      // Raised ahead of `api_retry` so the shell's rate-limit banner (which
+      // only that event's `kind` triggers) can show before the retry copy
+      // does. This is the transport-error equivalent of the structured
+      // signal the Claude Agent SDK lane gets from the `claude` binary: no
+      // `resetsAt`, no utilization, just "the vendor rejected this with a
+      // 429" plus whatever `retry-after` it sent. A 5xx never emits this —
+      // it is not a rate limit, and the SDK lane does not emit one for it
+      // either.
+      if (status === 429) {
+        emit({
+          kind: 'rate_limit_warning',
+          status: 'rejected',
+          ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+        })
+      }
       emit({
         kind: 'api_retry',
         retryDelayMs,

@@ -387,6 +387,15 @@ export type ChatStreamEvent =
       overageStatus?: 'allowed_warning' | 'rejected'
       /** Epoch ms when the overage window resets. */
       overageResetsAt?: number
+      /**
+       * Seconds until the vendor says a retry is safe, read off a 429's
+       * `retry-after` header. Only the neutral loop's `streamStepWithRetry`
+       * sets this — it has no `resetsAt` timestamp to report, only the raw
+       * transport error, so this is its equivalent of that field. Undefined
+       * when the 429 carried no `retry-after`, and always undefined on the
+       * Claude Agent SDK lane's own emissions of this event.
+       */
+      retryAfterSeconds?: number
     }
   | {
       /**
