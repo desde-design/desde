@@ -54,11 +54,24 @@
  * the unaccounted-for ones back to the client for resubmission.
  */
 
-import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
-import type { MessageParam } from '@anthropic-ai/sdk/resources'
-
 import type { ChatStreamEvent } from './chat-stream-events'
 import type { ModelImageContent } from './media-content'
+
+/**
+ * One message this channel yields from `stream()` — the turn's opening prompt
+ * or a mid-turn push, before any SDK-specific envelope is applied.
+ *
+ * Neutral on purpose: this is the whole point of the SDK-free split. The SDK
+ * lane (`agent-chat-sidecar/run-chat-turn-sidecar.ts`) maps each one to an
+ * `SDKUserMessage` via `buildUserMessage` right before handing it to `query()`
+ * — see `agent-chat-sidecar/sdk-user-message.ts`. The neutral lane never sees
+ * this shape at all; it only ever calls `drainSteers()`, which already
+ * returned {@link SteeredMessage}, the same `{text, images}` shape.
+ */
+export interface TurnInputMessage {
+  text: string
+  images?: ModelImageContent[]
+}
 
 /**
  * A steer the channel accepted, in the form needed to send it again.
@@ -151,6 +164,10 @@ export interface TurnInputChannel {
    * say is that a request assembled before a steer existed cannot contain it,
    * and a request assembled after the hand-off probably does. A new assistant
    * message id is that second request. See {@link takeUndeliveredSteers}.
+   *
+   * The id itself is read off a raw SDK message by
+   * `readAssistantMessageBoundaryId` in `agent-chat-sidecar/sdk-user-message.ts`
+   * — SDK-typed, so it lives with the sidecar, not here.
    */
   noteAssistantMessage(messageId: string): void
   /**
@@ -231,11 +248,16 @@ export interface TurnInputChannel {
    */
   drainSteers(): SteeredMessage[]
   /**
-   * The generator handed to `query({ prompt })`. Repeated calls return the SAME
-   * iterator — two consumers pulling from one queue would split the messages
-   * between them, which is not a mode anything wants.
+   * The generator the SDK lane wraps for `query({ prompt })`. Repeated calls
+   * return the SAME iterator — two consumers pulling from one queue would
+   * split the messages between them, which is not a mode anything wants.
+   *
+   * Yields the neutral {@link TurnInputMessage} shape, not an SDK message —
+   * this channel is SDK-free. `agent-chat-sidecar/run-chat-turn-sidecar.ts`
+   * maps each one to an `SDKUserMessage` via `buildUserMessage` before handing
+   * it to `query()`.
    */
-  stream(): AsyncGenerator<SDKUserMessage>
+  stream(): AsyncGenerator<TurnInputMessage>
 }
 
 /**
@@ -266,7 +288,7 @@ interface TrackedSteer {
 
 /** A queued message plus its tracking record; the initial message has none. */
 interface QueueEntry {
-  message: SDKUserMessage
+  message: TurnInputMessage
   steer: TrackedSteer | null
 }
 
@@ -324,7 +346,7 @@ export function createTurnInputChannel(): TurnInputChannel {
     resolve?.()
   }
 
-  const iterator = (async function* (): AsyncGenerator<SDKUserMessage> {
+  const iterator = (async function* (): AsyncGenerator<TurnInputMessage> {
     for (;;) {
       // Drain before looking at `closed` — that ordering IS the no-discard
       // guarantee described on `close()`.
@@ -366,7 +388,10 @@ export function createTurnInputChannel(): TurnInputChannel {
       onAccepted = options.onAccepted
       // HEAD, not tail — see `begin`'s contract. Anything already queued was
       // typed while the turn was still starting up and belongs after the prompt.
-      queue.unshift({ message: buildUserMessage(first.text, first.images), steer: null })
+      queue.unshift({
+        message: { text: first.text, ...(first.images ? { images: first.images } : {}) },
+        steer: null,
+      })
       // Replay in accept order. A steer accepted before the runtime attached its
       // observer is still text the user typed, and the transcript rule is the
       // same as for delivery: it must survive. Not wrapped in a try — an
@@ -390,7 +415,7 @@ export function createTurnInputChannel(): TurnInputChannel {
         handedOffAtMessageCount: null,
       }
       steers.push(steer)
-      queue.push({ message: buildUserMessage(text, images), steer })
+      queue.push({ message: { text, ...(images ? { images } : {}) }, steer })
       notify()
       // Last, and outside the delivery path — see `onAccepted`'s contract.
       // Undefined before `begin()`; those pushes are replayed to the observer
@@ -447,7 +472,7 @@ export function createTurnInputChannel(): TurnInputChannel {
       }
       return out
     },
-    stream(): AsyncGenerator<SDKUserMessage> {
+    stream(): AsyncGenerator<TurnInputMessage> {
       return iterator
     },
   }
@@ -530,89 +555,11 @@ export function attachSteerReconciliation(params: {
   return closeChannelAndReportUndelivered
 }
 
-/**
- * The id of the assistant message an SDK message belongs to, when that message
- * can mark a NEW inference request — otherwise null.
- *
- * Lives here rather than in the turn runtime because it IS the evidence rule
- * that {@link TurnInputChannel.takeUndeliveredSteers} depends on, and splitting
- * the rule from the accounting it feeds is how the previous version went wrong.
- *
- * Two SDK shapes are read, and reading both is deliberate:
- *
- *  - `stream_event` with `event.type === 'message_start'` — the earliest
- *    signal, and the only one that arrives before a long message finishes.
- *    Present only because the turn runtime sets `includePartialMessages: true`.
- *  - a completed `assistant` message — the backstop for any message the SDK
- *    surfaces without partials (an error message, a replayed one, a future
- *    non-streaming path). Without it such a turn would look request-free and
- *    every steer on it would be resubmitted.
- *
- * Reading both costs nothing because the caller de-duplicates by id: the
- * `message_start` and the completed `assistant` for one message share an id and
- * count once. Every OTHER `stream_event` (`content_block_delta` and friends) is
- * a partial of a message already counted and returns null here — that is the
- * defect this function exists to close.
- *
- * Subagent output is excluded by `parent_tool_use_id !== null` (the SDK's
- * `forwardSubagentText` option describes exactly this tagging). A subagent's
- * request is assembled from the SUBAGENT's context, which never contains a
- * steer sent to the main loop, so counting it would call a steer delivered on
- * evidence about a different conversation. Excluding it can only cause a
- * resubmit, which is the direction to be wrong in.
- */
-export function readAssistantMessageBoundaryId(msg: SDKMessage): string | null {
-  if (msg.type === 'assistant') {
-    return msg.parent_tool_use_id === null ? msg.message.id : null
-  }
-  if (msg.type === 'stream_event' && msg.event.type === 'message_start') {
-    return msg.parent_tool_use_id === null ? msg.event.message.id : null
-  }
-  return null
-}
-
-/**
- * Reshape a validated media-content image into the Anthropic
- * `ImageBlockParam` a user message carries. `media-content.ts` already
- * produced the MCP image-block shape (`{type:'image', data, mimeType}`)
- * with the base64 payload stripped of its `data:` prefix; here we map it
- * to the base64-source form the Messages API expects on a USER message.
- * Same bytes, different envelope — there is no second image path.
- */
-function toImageBlockParam(
-  image: ModelImageContent,
-): Extract<MessageParam['content'], unknown[]>[number] {
-  return {
-    type: 'image',
-    source: {
-      type: 'base64',
-      // media-content only ever emits SUPPORTED_IMAGE_MIME_TYPES, which is
-      // exactly the set Base64ImageSource['media_type'] accepts.
-      media_type: image.mimeType as 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp',
-      data: image.data,
-    },
-  }
-}
-
-/**
- * Build one `SDKUserMessage`: the text followed by one vision block per image.
- *
- * The empty-text omission is load-bearing, not tidiness — the Messages API
- * rejects `{type:'text', text:''}`, and an image-only message (the user
- * attached a screenshot with no prompt) is a real turn we have to be able to
- * send.
- */
-function buildUserMessage(
-  text: string,
-  images: ModelImageContent[] | undefined,
-): SDKUserMessage {
-  const content: Extract<MessageParam['content'], unknown[]> = [
-    ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
-    ...(images ?? []).map(toImageBlockParam),
-  ]
-  return {
-    type: 'user',
-    message: { role: 'user', content },
-    parent_tool_use_id: null,
-  }
-}
+// `readAssistantMessageBoundaryId`, `toImageBlockParam` and `buildUserMessage`
+// used to live here. All three are SDK-typed (`SDKMessage`, `SDKUserMessage`,
+// the Anthropic `ImageBlockParam` envelope), and this channel is SDK-free —
+// it yields the neutral `TurnInputMessage` shape, not an SDK message. They
+// moved, unchanged, to `agent-chat-sidecar/sdk-user-message.ts`: the ONE
+// place that maps a `TurnInputMessage` / channel-pulled message to the shape
+// `query()` needs, and the ONE place that reads an assistant-message boundary
+// off a raw SDK message for `noteAssistantMessage`.

@@ -100,11 +100,8 @@ import { captureReadSnapshot } from '../agent-chat/file-read-snapshot'
 import { writeProposalBlob } from '../agent-chat/proposal-blob-store'
 import { createSdkEventAdapter } from './sdk-event-adapter'
 import { flattenSdkMessage } from './sdk-message-flatten'
-import {
-  attachSteerReconciliation,
-  createTurnInputChannel,
-  readAssistantMessageBoundaryId,
-} from '../agent-chat/turn-input-channel'
+import { attachSteerReconciliation, createTurnInputChannel } from '../agent-chat/turn-input-channel'
+import { readAssistantMessageBoundaryId, toSdkPrompt } from './sdk-user-message'
 import { buildGroundingDigest } from '../agent-chat/grounding-tools'
 import { buildNeutralSystemPrompt } from '../agent-chat-neutral/system-prompt-neutral'
 import { buildNeutralToolCatalog } from '../agent-chat-neutral/tool-catalog'
@@ -680,7 +677,7 @@ async function runChatTurnSdkInner(
     }
 
     const q = query({
-      prompt: turnChannel.stream(),
+      prompt: toSdkPrompt(turnChannel.stream()),
       options: {
         cwd: opts.worktreeRoot,
         model,
@@ -1231,9 +1228,12 @@ function buildUserMessageWithContext(
  * makes that class of bug unreachable rather than merely guarded against.
  *
  * The message-building itself (context-enveloped text block, empty text block
- * omitted because the Messages API rejects it, one vision block per image) moved
- * verbatim into `turn-input-channel.ts` — same bytes, same envelope, now used
- * for pushed messages too.
+ * omitted because the Messages API rejects it, one vision block per image) is
+ * `buildUserMessage` in `./sdk-user-message.ts` — same bytes, same envelope,
+ * used for the opening message and every pushed message alike. The turn's
+ * input channel (`../agent-chat/turn-input-channel.ts`) yields the neutral
+ * `TurnInputMessage` shape; `toSdkPrompt` here wraps its `stream()` and maps
+ * each one through `buildUserMessage` before it reaches `query()`.
  */
 
 /**

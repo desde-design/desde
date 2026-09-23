@@ -2229,10 +2229,8 @@ describe("handleSteerRequest — mid-turn steering", () => {
             opts.onRegistered()
             const drained = (async () => {
               for await (const m of channel.stream()) {
-                const content = m.message.content
-                const blocks = Array.isArray(content) ? content : []
-                const text = blocks.map((b) => (b.type === "text" ? b.text : "")).join("")
-                const imageBlocks = blocks.filter((b) => b.type === "image").length
+                const text = m.text
+                const imageBlocks = m.images?.length ?? 0
                 opts.received.push({ text, imageBlocks })
                 // The opening prompt is not a steer; everything after it is.
                 if (announceSteers && opts.received.length > 1) {

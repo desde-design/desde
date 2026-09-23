@@ -7,32 +7,18 @@
  * with no error, so "two corrections in a row" — ordinary user behaviour —
  * silently loses the second one. Pushing into one long-lived generator is what
  * fixes that, and this file pins the generator's half of the contract.
+ *
+ * This channel is SDK-free: `stream()` yields the neutral `TurnInputMessage`
+ * shape (`{text, images}`), not an SDK message. The mapping to an
+ * `SDKUserMessage` — including the empty-text-block omission and
+ * `readAssistantMessageBoundaryId` — lives in
+ * `agent-chat-sidecar/sdk-user-message.ts` and is covered by
+ * `sdk-user-message.test.ts`, not here.
  */
 
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
 
-import {
-  createTurnInputChannel,
-  readAssistantMessageBoundaryId,
-} from './turn-input-channel'
-
-/**
- * Narrow an SDK-message-shaped literal to `SDKMessage`.
- *
- * A real `BetaMessage` carries a dozen fields (usage, model, container, …) that
- * `readAssistantMessageBoundaryId` never reads, and spelling them out would
- * make each case unreadable without testing anything more. The cast is scoped
- * to this helper so no test body carries one.
- */
-function asSdkMessage(shape: Record<string, unknown>): SDKMessage {
-  return shape as unknown as SDKMessage
-}
-
-/** Shorthand for the content array of a yielded user message. */
-function contentOf(msg: { message: { content: unknown } }): unknown {
-  return msg.message.content
-}
+import { createTurnInputChannel } from './turn-input-channel'
 
 /**
  * The ordinary lifecycle in one line: create, then seed the opening message.
@@ -54,15 +40,14 @@ describe('createTurnInputChannel', () => {
     const first = await it.next()
 
     expect(first.done).toBe(false)
-    expect(first.value.type).toBe('user')
-    expect(first.value.parent_tool_use_id).toBeNull()
-    expect(first.value.message.role).toBe('user')
-    expect(contentOf(first.value)).toEqual([{ type: 'text', text: 'hello there' }])
+    expect(first.value).toEqual({ text: 'hello there' })
   })
 
-  it('yields the first message with images, and omits the empty text block', async () => {
+  it('yields the first message with images, keeping the text as given', async () => {
     // Image-only turn: the user attached a screenshot with no prompt. The
-    // Messages API rejects `{type:'text', text:''}`, so no text block at all.
+    // channel is a neutral pass-through — it does not omit the empty text
+    // field. The SDK's `{type:'text', text:''}` rejection is a mapping
+    // concern handled by `buildUserMessage`; see `sdk-user-message.test.ts`.
     const channel = createTurnInputChannel()
     channel.begin({
       text: '',
@@ -74,13 +59,16 @@ describe('createTurnInputChannel', () => {
 
     const first = await channel.stream().next()
 
-    expect(contentOf(first.value)).toEqual([
-      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
-      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'BBBB' } },
-    ])
+    expect(first.value).toEqual({
+      text: '',
+      images: [
+        { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+        { type: 'image', data: 'BBBB', mimeType: 'image/jpeg' },
+      ],
+    })
   })
 
-  it('keeps the text block ahead of the images when both are present', async () => {
+  it('carries text and images together', async () => {
     const channel = createTurnInputChannel()
     channel.begin({
       text: 'match this',
@@ -89,10 +77,10 @@ describe('createTurnInputChannel', () => {
 
     const first = await channel.stream().next()
 
-    expect(contentOf(first.value)).toEqual([
-      { type: 'text', text: 'match this' },
-      { type: 'image', source: { type: 'base64', media_type: 'image/webp', data: 'CCCC' } },
-    ])
+    expect(first.value).toEqual({
+      text: 'match this',
+      images: [{ type: 'image', data: 'CCCC', mimeType: 'image/webp' }],
+    })
   })
 
   it('yields a push that lands while the consumer is parked', async () => {
@@ -107,7 +95,7 @@ describe('createTurnInputChannel', () => {
 
     const second = await pending
     expect(second.done).toBe(false)
-    expect(contentOf(second.value)).toEqual([{ type: 'text', text: 'steered' }])
+    expect(second.value).toEqual({ text: 'steered' })
   })
 
   it('yields a push that landed before the consumer asked for it', async () => {
@@ -118,7 +106,7 @@ describe('createTurnInputChannel', () => {
     channel.push('steered')
     const second = await it.next()
 
-    expect(contentOf(second.value)).toEqual([{ type: 'text', text: 'steered' }])
+    expect(second.value).toEqual({ text: 'steered' })
   })
 
   it('yields MULTIPLE pushes, all of them, in order', async () => {
@@ -132,9 +120,9 @@ describe('createTurnInputChannel', () => {
     channel.push('bravo')
     channel.push('charlie')
 
-    expect(contentOf((await it.next()).value)).toEqual([{ type: 'text', text: 'alpha' }])
-    expect(contentOf((await it.next()).value)).toEqual([{ type: 'text', text: 'bravo' }])
-    expect(contentOf((await it.next()).value)).toEqual([{ type: 'text', text: 'charlie' }])
+    expect((await it.next()).value).toEqual({ text: 'alpha' })
+    expect((await it.next()).value).toEqual({ text: 'bravo' })
+    expect((await it.next()).value).toEqual({ text: 'charlie' })
   })
 
   it('yields multiple pushes interleaved with consumption, in order', async () => {
@@ -143,11 +131,11 @@ describe('createTurnInputChannel', () => {
     await it.next()
 
     channel.push('alpha')
-    expect(contentOf((await it.next()).value)).toEqual([{ type: 'text', text: 'alpha' }])
+    expect((await it.next()).value).toEqual({ text: 'alpha' })
 
     const parked = it.next()
     channel.push('bravo')
-    expect(contentOf((await parked).value)).toEqual([{ type: 'text', text: 'bravo' }])
+    expect((await parked).value).toEqual({ text: 'bravo' })
   })
 
   it('carries images on a pushed message too', async () => {
@@ -157,10 +145,10 @@ describe('createTurnInputChannel', () => {
 
     channel.push('look at this', [{ type: 'image', data: 'DDDD', mimeType: 'image/png' }])
 
-    expect(contentOf((await it.next()).value)).toEqual([
-      { type: 'text', text: 'look at this' },
-      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'DDDD' } },
-    ])
+    expect((await it.next()).value).toEqual({
+      text: 'look at this',
+      images: [{ type: 'image', data: 'DDDD', mimeType: 'image/png' }],
+    })
   })
 
   it('close() after a push still yields that push before returning', async () => {
@@ -175,9 +163,7 @@ describe('createTurnInputChannel', () => {
 
     const drained = await it.next()
     expect(drained.done).toBe(false)
-    expect(contentOf(drained.value)).toEqual([
-      { type: 'text', text: 'landed just before close' },
-    ])
+    expect(drained.value).toEqual({ text: 'landed just before close' })
     expect((await it.next()).done).toBe(true)
   })
 
@@ -190,8 +176,8 @@ describe('createTurnInputChannel', () => {
     channel.push('bravo')
     channel.close()
 
-    expect(contentOf((await it.next()).value)).toEqual([{ type: 'text', text: 'alpha' }])
-    expect(contentOf((await it.next()).value)).toEqual([{ type: 'text', text: 'bravo' }])
+    expect((await it.next()).value).toEqual({ text: 'alpha' })
+    expect((await it.next()).value).toEqual({ text: 'bravo' })
     expect((await it.next()).done).toBe(true)
   })
 
@@ -225,7 +211,7 @@ describe('createTurnInputChannel', () => {
     channel.close()
 
     const it = channel.stream()
-    expect(contentOf((await it.next()).value)).toEqual([{ type: 'text', text: 'first' }])
+    expect((await it.next()).value).toEqual({ text: 'first' })
     expect((await it.next()).done).toBe(true)
   })
 
@@ -276,12 +262,10 @@ describe('createTurnInputChannel', () => {
       channel.begin({ text: 'the original prompt' })
 
       const it = channel.stream()
-      expect(contentOf((await it.next()).value)).toEqual([
-        { type: 'text', text: 'the original prompt' },
-      ])
-      expect(contentOf((await it.next()).value)).toEqual([
-        { type: 'text', text: 'typed while the turn was still starting up' },
-      ])
+      expect((await it.next()).value).toEqual({ text: 'the original prompt' })
+      expect((await it.next()).value).toEqual({
+        text: 'typed while the turn was still starting up',
+      })
     })
 
     it('yields NOTHING before begin(), even with messages queued', async () => {
@@ -301,9 +285,7 @@ describe('createTurnInputChannel', () => {
       expect(settled).toBe(false)
 
       channel.begin({ text: 'the original prompt' })
-      expect(contentOf((await parked).value)).toEqual([
-        { type: 'text', text: 'the original prompt' },
-      ])
+      expect((await parked).value).toEqual({ text: 'the original prompt' })
     })
 
     it('replays pre-begin steers to onAccepted, in order, exactly once', async () => {
@@ -590,91 +572,13 @@ describe('createTurnInputChannel', () => {
     })
   })
 
-  describe('readAssistantMessageBoundaryId', () => {
-    it('reads the id off a message_start stream event', () => {
-      expect(
-        readAssistantMessageBoundaryId(
-          asSdkMessage({
-            type: 'stream_event',
-            parent_tool_use_id: null,
-            event: { type: 'message_start', message: { id: 'msg_01' } },
-          }),
-        ),
-      ).toBe('msg_01')
-    })
-
-    it('reads the id off a completed assistant message', () => {
-      // The backstop for a message the SDK surfaces without partials. Same id
-      // as its own `message_start`, so the channel counts the pair once.
-      expect(
-        readAssistantMessageBoundaryId(
-          asSdkMessage({
-            type: 'assistant',
-            parent_tool_use_id: null,
-            message: { id: 'msg_01' },
-          }),
-        ),
-      ).toBe('msg_01')
-    })
-
-    it('returns null for every other stream event — this IS the defect', () => {
-      // A token delta is a partial of a message already counted. Treating it
-      // as a boundary is exactly what made the evidential half inert.
-      for (const type of [
-        'content_block_start',
-        'content_block_delta',
-        'content_block_stop',
-        'message_delta',
-        'message_stop',
-      ]) {
-        expect(
-          readAssistantMessageBoundaryId(
-            asSdkMessage({ type: 'stream_event', parent_tool_use_id: null, event: { type } }),
-          ),
-        ).toBeNull()
-      }
-    })
-
-    it('returns null for subagent output, on both shapes', () => {
-      // A subagent's request is built from the SUBAGENT's context, which never
-      // holds a steer sent to the main loop. Excluding it can only cause a
-      // resubmit — the direction to be wrong in.
-      expect(
-        readAssistantMessageBoundaryId(
-          asSdkMessage({
-            type: 'assistant',
-            parent_tool_use_id: 'toolu_task_01',
-            message: { id: 'msg_sub' },
-          }),
-        ),
-      ).toBeNull()
-      expect(
-        readAssistantMessageBoundaryId(
-          asSdkMessage({
-            type: 'stream_event',
-            parent_tool_use_id: 'toolu_task_01',
-            event: { type: 'message_start', message: { id: 'msg_sub' } },
-          }),
-        ),
-      ).toBeNull()
-    })
-
-    it('returns null for non-assistant messages', () => {
-      for (const type of ['user', 'result', 'system']) {
-        expect(
-          readAssistantMessageBoundaryId(asSdkMessage({ type, parent_tool_use_id: null })),
-        ).toBeNull()
-      }
-    })
-  })
-
   it('hands back the same iterator on every stream() call', async () => {
     // Two consumers over one queue would split messages between them.
     const channel = openChannel('first')
     expect(channel.stream()).toBe(channel.stream())
 
     const first = await channel.stream().next()
-    expect(contentOf(first.value)).toEqual([{ type: 'text', text: 'first' }])
+    expect(first.value).toEqual({ text: 'first' })
     // The second stream() call hands back the SAME iterator, so it resumes
     // where the first left off rather than replaying the initial message.
     channel.close()
