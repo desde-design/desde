@@ -50,8 +50,10 @@ export type CapabilityActivation = 'next-message' | 'cli-restart'
  * WebFetch. `neutral` is Desde's own loop on the `LLMProvider` seam: its tool
  * catalog is builtins plus the editor tools, plus the web tools the provider's
  * VENDOR runs server-side (declared per descriptor, see `webTools` in
- * `provider-descriptor.ts`). It never reads `extensions` or `figmaConfig`, so
- * MCP-backed capabilities stay `claude-agent-sdk`-only.
+ * `provider-descriptor.ts`), plus the tools of every configured MCP server,
+ * which it spawns through its own stdio client
+ * (`agent-chat-neutral/mcp-client-tools.ts`). So every entry is served by both
+ * lanes today; the field stays until only one lane remains.
  *
  * This field exists because the catalog used to be reported as served by
  * both lanes, and that was false. `computeEnabledCapabilityIds` had
@@ -122,9 +124,9 @@ export const CAPABILITY_CATALOG: ReadonlyArray<CapabilityDescriptor> = [
     summary: 'Build a screen from a Figma frame, using the project\'s own components.',
     target: 'mcp-extension',
     activation: 'next-message',
-    // The SDK lane registers this as an MCP server; the neutral lane composes
-    // builtins plus editor tools and never reads `opts.extensions`.
-    runtimes: ['claude-agent-sdk'],
+    // Both lanes register it as an MCP server: the SDK lane through the
+    // binary's `mcpServers`, the neutral lane through its own stdio client.
+    runtimes: ['claude-agent-sdk', 'neutral'],
     requiresEnv: 'FIGMA_API_KEY',
     mcpServer: {
       command: 'npx',

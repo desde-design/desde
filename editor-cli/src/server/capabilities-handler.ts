@@ -91,8 +91,9 @@ export async function handleCapabilitiesRoute(
         // change models per message, so the row states the standing fact
         // rather than guessing which lane the next message takes. Saying
         // nothing was the defect: a row read "Active" while a turn on the
-        // neutral lane had no such tools, because that lane composes builtins
-        // plus editor tools and registers no MCP server.
+        // neutral lane had no such tools. Since that lane gained its own MCP
+        // client every catalog entry lists both runtimes, so this is false for
+        // all of them today; it stays derived rather than hard-coded.
         claudeModelsOnly: !c.runtimes.includes("neutral"),
         // Whether WE hold a key for it. Drives the difference between "Add
         // key" and "Replace key", and whether Remove is offered at all —

@@ -1051,9 +1051,10 @@ export async function handleChatRequest(
     )
     // The LANE is half the answer, not a refinement of it. `.mcp.json` says a
     // server is declared; only the runtime says whether anything registers it.
-    // The neutral lane composes builtins plus editor tools and reads neither
-    // `extensions` nor `figmaConfig`, so reporting Figma or Web search as ON
-    // there told the user about tools the model could not call.
+    // Both lanes now register MCP servers (the neutral lane through its own
+    // stdio client), but web search on the neutral lane still depends on the
+    // provider, below, and reporting a capability as ON that the model cannot
+    // call is the failure this guards against.
     const capabilityRuntime = resolveChatRuntimeKind(turnProviderId, process.env)
     // On the neutral lane web search is a PROVIDER server tool, so whether it
     // is served depends on the provider too. The provider object is not built

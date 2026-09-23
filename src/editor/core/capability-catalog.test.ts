@@ -66,16 +66,16 @@ describe('computeEnabledCapabilityIds', () => {
     expect([...on]).toEqual([])
   })
 
-  it('does not report an extension as enabled on a runtime that cannot run it', () => {
-    // The neutral lane composes builtins plus editor tools only: it never
-    // registers an MCP server. Reporting Figma as on there told the user a
-    // tool existed that the model could not call.
+  it('reports Figma as on for the neutral lane, which connects MCP servers itself', () => {
+    // The neutral lane spawns `.mcp.json` servers through its own stdio
+    // client (`agent-chat-neutral/mcp-client-tools.ts`), under the same
+    // `mcp__figma__*` names the SDK lane registers.
     const on = computeEnabledCapabilityIds({
       ...NONE,
       enabledExtensionIds: ['figma'],
       chatRuntime: 'neutral',
     })
-    expect(on.has('figma')).toBe(false)
+    expect(on.has('figma')).toBe(true)
   })
 
   it('reports web search OFF on the neutral lane when the provider serves no server tools', () => {
@@ -115,10 +115,10 @@ describe('computeEnabledCapabilityIds', () => {
 })
 
 describe('runtimeSupportsCapability', () => {
-  it('serves every entry on the SDK lane, and only web search on the neutral lane', () => {
+  it('serves every entry on both lanes', () => {
     for (const c of CAPABILITY_CATALOG) {
       expect(runtimeSupportsCapability(c, 'claude-agent-sdk'), c.id).toBe(true)
-      expect(runtimeSupportsCapability(c, 'neutral'), c.id).toBe(c.id === 'web-search')
+      expect(runtimeSupportsCapability(c, 'neutral'), c.id).toBe(true)
     }
   })
 
@@ -194,29 +194,25 @@ describe('describeDisabledCapabilities', () => {
     expect(block).not.toContain('**Figma**')
   })
 
-  it('does not tell a neutral-lane model to point at a panel that cannot help', () => {
+  it('lists Figma and web search on the neutral lane under available-but-OFF, with no cannot-be-used section', () => {
     const block = describeDisabledCapabilities(new Set(), 'neutral')!
-    expect(block).toContain('Figma')
-    expect(block).toMatch(/cannot be used with the model/i)
+    expect(block).toContain('**Figma**')
+    expect(block).toContain('**Web search**')
+    expect(block).toContain('Extensions panel')
+    expect(block).not.toMatch(/cannot be used with the model/i)
   })
 
-  it('lists web search on the neutral lane under available-but-OFF, not under cannot-be-used', () => {
-    const block = describeDisabledCapabilities(new Set(), 'neutral')!
-    const [enableable, unavailable] = block.split(/cannot be used with the model/i)
-    expect(enableable).toContain('**Web search**')
-    expect(unavailable).not.toContain('**Web search**')
-    expect(unavailable).toContain('**Figma**')
-  })
-
-  it('moves web search under cannot-be-used when the provider serves no server tools', () => {
+  it('moves web search under cannot-be-used when the provider serves no server tools, leaving Figma enableable', () => {
     const block = describeDisabledCapabilities(new Set(), 'neutral', [])!
     const [enableable, unavailable] = block.split(/cannot be used with the model/i)
     expect(enableable).not.toContain('**Web search**')
+    expect(enableable).toContain('**Figma**')
     expect(unavailable).toContain('**Web search**')
+    expect(unavailable).not.toContain('**Figma**')
   })
 
   it('names no vendor in the unavailable remedy', () => {
-    const block = describeDisabledCapabilities(new Set(), 'neutral')!
+    const block = describeDisabledCapabilities(new Set(), 'neutral', [])!
     expect(block).not.toMatch(/Claude/)
     // The prompt wraps at ~76 columns, so the phrase is read with line breaks folded.
     expect(block.replace(/\s+/g, ' ')).toContain('a model from a provider that offers them')
