@@ -1404,12 +1404,18 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
           break
         }
         case "api_retry":
+          // Latest-wins over an earlier retry, always. Over a rate-limit
+          // warning only when this retry is for something else: a 429 arrives
+          // as `rate_limit_warning` THEN `api_retry`, and the warning is the
+          // one that carries the vendor's wait (`retryAfterSeconds`).
+          // Replacing it showed the generic retry banner for the whole wait.
           updateBucket(turnId, (b) => ({
             ...b,
             messages: [
               ...b.messages.filter(
                 (m) =>
-                  m.kind !== "rate_limit_warning" && m.kind !== "api_retry",
+                  m.kind !== "api_retry" &&
+                  (m.kind !== "rate_limit_warning" || event.errorStatus === 429),
               ),
               {
                 kind: "api_retry",
