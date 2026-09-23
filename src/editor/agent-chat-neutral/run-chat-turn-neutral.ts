@@ -794,9 +794,18 @@ async function runInner(
       // drawn would never get a result: it would spin live and be missing on
       // reload. Released before the next content frame, so the order the
       // client sees is unchanged; only a trailing `usage` can pass them.
+      //
+      // The hold does not survive a later content frame in the same step (a
+      // model can write text or reasoning after a call). Once released, the
+      // row is on the client's screen, so an interrupt that then drops the
+      // call has to close it: `releasedToolStarts` is how it knows which.
       const heldToolStarts: ChatStreamEvent[] = []
+      const releasedToolStarts: string[] = []
       const releaseToolStarts = (): void => {
-        for (const held of heldToolStarts.splice(0)) opts.emit(held)
+        for (const held of heldToolStarts.splice(0)) {
+          if (held.kind === 'tool_use_start') releasedToolStarts.push(held.toolUseId)
+          opts.emit(held)
+        }
       }
       try {
         for await (const ev of streamStepWithRetry(
@@ -919,7 +928,8 @@ async function runInner(
         // no result is a request every vendor refuses), and any vendor-run
         // `server_tool_use` / `server_tool_result` (a partial response's
         // vendor blocks are not safe to send back). Their held
-        // `tool_use_start` frames are discarded unsent.
+        // `tool_use_start` frames are discarded unsent. One a later frame
+        // already released is closed below instead.
         //
         // Whitespace-only text is dropped too: Anthropic answers a request
         // carrying an all-whitespace text block with a 400.
@@ -940,6 +950,19 @@ async function runInner(
             toolUseId,
             ok: false,
             error: 'interrupted before the result arrived',
+          })
+        }
+        // The same for a Desde-run call whose start frame was already
+        // released by a later text or reasoning frame: the call is dropped
+        // unrun, and its row must not spin forever. As with the vendor-run
+        // rows above, a reload shows no row at all.
+        for (const toolUseId of releasedToolStarts) {
+          opts.emit({
+            kind: 'tool_result',
+            turnId,
+            toolUseId,
+            ok: false,
+            error: 'interrupted before this call ran',
           })
         }
         // The interrupted request was made, so it is billed and counted:

@@ -1850,6 +1850,44 @@ describe('runChatTurnNeutral: a steer interrupts the step in flight', () => {
     expect(events.filter((e) => e.kind === 'tool_use_start')).toEqual([])
   })
 
+  it.each([
+    ['text', { kind: 'text_delta', delta: 'and after that I will ' }],
+    ['reasoning', { kind: 'reasoning_delta', delta: 'hmm' }],
+  ] as const)(
+    'closes the row of a call that later %s had already shown, when the steer then drops the call',
+    async (_label, after) => {
+      const channel = createTurnInputChannel()
+      const write = { file_path: 'src/Late.vue', content: 'nope\n' }
+      const { provider, calls } = stepwiseProvider(async function* (o, i) {
+        if (i === 0) {
+          yield { kind: 'tool_use', id: 'tu_1', name: 'Write', input: write }
+          // A content frame after the call releases its held start frame.
+          yield after
+          channel.push('stop, do X')
+          await abortedBy(o.signal!)
+        }
+        yield* textStep('done')
+      })
+      const { events, result } = await runSteered(provider, channel)
+
+      // The call is dropped unrun, from history and from the persisted turn.
+      expect(existsSync(join(root, 'src/Late.vue'))).toBe(false)
+      expect(JSON.stringify(calls[1].messages)).not.toContain('tu_1')
+      expect(JSON.stringify(result.turn.assistantContent)).not.toContain('tu_1')
+      // The row the client already drew is closed, as a failure, exactly once.
+      expect(events.filter((e) => e.kind === 'tool_use_start')).toHaveLength(1)
+      expect(events.filter((e) => e.kind === 'tool_result')).toEqual([
+        {
+          kind: 'tool_result',
+          turnId: expect.any(String),
+          toolUseId: 'tu_1',
+          ok: false,
+          error: 'interrupted before this call ran',
+        },
+      ])
+    },
+  )
+
   it('does not interrupt a tool that is running: the steer waits for the step boundary', async () => {
     const channel = createTurnInputChannel()
     const { provider, calls } = scriptedProvider([
