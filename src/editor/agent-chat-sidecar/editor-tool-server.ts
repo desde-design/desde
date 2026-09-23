@@ -37,7 +37,7 @@ import { EDITOR_TOOL_NAMESPACE } from '../agent-chat-neutral/tool-catalog'
  * model to call first when the user says "this". Everything else stays
  * deferred, so a long tool list still costs nothing per turn.
  */
-export const ALWAYS_LOADED_TOOLS: ReadonlySet<string> = new Set([
+const ALWAYS_LOADED_TOOLS: ReadonlySet<string> = new Set([
   'Read',
   'Edit',
   'Write',

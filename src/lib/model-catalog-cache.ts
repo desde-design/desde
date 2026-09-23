@@ -38,7 +38,7 @@ export interface ModelCatalogCapabilitiesLike {
  * subscription sidecar), not from an API key — see `model-picker-chip.tsx`'s
  * "subscription (dev)" badge.
  */
-export type ModelCatalogSourceLike = "api" | "cli" | "static"
+type ModelCatalogSourceLike = "api" | "cli" | "static"
 
 export interface ModelCatalogResponse {
   catalogs: Array<

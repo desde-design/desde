@@ -297,7 +297,7 @@ export interface DocumentContent {
  * call came from (`caller`), and replaying the call without it changes what
  * the vendor is told happened.
  */
-export interface ServerToolUseContent {
+interface ServerToolUseContent {
   type: 'server_tool_use'
   id: string
   name: string
@@ -316,7 +316,7 @@ export interface ServerToolUseContent {
  * a 400. `isError` marks a vendor-reported failure (a fetch the vendor could
  * not complete), which is replayed as an error so the vendor reads it as one.
  */
-export interface ServerToolResultContent {
+interface ServerToolResultContent {
   type: 'server_tool_result'
   toolUseId: string
   name: string

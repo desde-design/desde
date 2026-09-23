@@ -27,9 +27,6 @@ import {
   type BuildToolPermissionGateOpts,
 } from '../agent-chat/edit-ack'
 
-/** @deprecated Use `BuildToolPermissionGateOpts` from `../agent-chat/edit-ack`. */
-export type BuildCanUseToolOpts = BuildToolPermissionGateOpts
-
 export function buildCanUseTool(opts: BuildToolPermissionGateOpts): CanUseTool {
   const gate = buildToolPermissionGate(opts)
   return async (toolName, toolInput, options) => {

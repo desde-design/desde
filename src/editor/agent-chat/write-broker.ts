@@ -173,7 +173,7 @@ export type BrokerOp =
  * `src/editor/edit-service/edit-history.ts` — kept in sync by shared
  * test coverage across both files, not by import (see {@link HistoryRecorder}).
  */
-export interface HistoryFileState {
+interface HistoryFileState {
   exists: boolean
   content: Buffer | null
 }

@@ -24,7 +24,7 @@
  */
 import { vi } from 'vitest'
 
-export type SdkQueryArgs = { prompt: unknown; options?: Record<string, unknown> }
+type SdkQueryArgs = { prompt: unknown; options?: Record<string, unknown> }
 
 const { queryMock } = vi.hoisted(() => ({
   queryMock: vi.fn<(args: SdkQueryArgs) => AsyncGenerator<unknown, void, void>>(),
