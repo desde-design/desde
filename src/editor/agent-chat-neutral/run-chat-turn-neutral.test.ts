@@ -14,6 +14,7 @@ import { makeEmptySession } from '../agent-chat/types'
 import { readProposalBlob } from '../agent-chat-sdk/proposal-blob-store'
 import { createTurnInputChannel } from '../agent-chat-sdk/turn-input-channel'
 import { OPENAI_DESCRIPTOR } from '../llm-providers/descriptors/openai'
+import { resolveAnthropicThinkingConfig } from '../llm-providers/anthropic-adaptive-thinking'
 import type { LLMProvider, ProviderEvent, StreamOpts, TextBlock } from '../llm-providers/types'
 import {
   API_RETRY_MAX_ATTEMPTS,
@@ -150,6 +151,25 @@ describe('the default provider path', () => {
       spy.mockRestore()
       vi.unstubAllEnvs()
     }
+  })
+})
+
+describe('runChatTurnNeutral: provider options', () => {
+  it("carries the turn's own model into the Anthropic descriptor's toRequest, not the descriptor's default", async () => {
+    // claude-opus-5 is one of ADAPTIVE_THINKING_MODELS
+    // (anthropic-adaptive-thinking.ts), distinct from ANTHROPIC_DEFAULT_MODEL
+    // (claude-sonnet-4-6) — so this only passes if `model` actually travels
+    // from the loop's own opts through providerOptionsFor to toRequest,
+    // rather than toRequest quietly falling back to its own default.
+    const { calls } = await run([textStep('done')], {
+      model: 'claude-opus-5',
+      effort: 'high',
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls[0].providerOptions).toEqual({
+      thinking: resolveAnthropicThinkingConfig('claude-opus-5'),
+      effort: 'high',
+    })
   })
 })
 
