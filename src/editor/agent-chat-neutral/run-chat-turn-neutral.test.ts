@@ -2578,6 +2578,30 @@ describe('MCP servers on the neutral lane (Figma, .mcp.json)', () => {
     }
   })
 
+  it('refuses the reserved id `editor`, so a server cannot take over the built-in tool namespace', async () => {
+    // `editor` passes the character rule, but its tools would be named
+    // `mcp__editor__<tool>`: the gate treats that namespace as first-party
+    // and never applies the server's own read-only policy. The loader
+    // refuses the id; this is the runtime's guard for a config that did not
+    // come through it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { calls, result } = await run([textStep('ok')], {
+        extensions: [{ id: 'editor', mcpServer: echoServer, allowedToolPrefixes: ['echo'] }],
+      })
+      const names = calls[0]!.tools!.map((t) => ('name' in t ? t.name : ''))
+      expect(names).not.toContain('mcp__editor__echo')
+      expect(names).not.toContain('mcp__editor__fail')
+      expect((calls[0]!.system as TextBlock[])[0]!.text).toContain(
+        'The MCP server "editor" could not be started this turn, so its tools are unavailable.',
+      )
+      expect(result.turn.error).toBeUndefined()
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/"editor": its id is reserved/)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('starts an id with a single inner underscore, and refuses one with a leading or trailing underscore', async () => {
     // `x_` would name its tools `mcp__x___echo`, which the gate reads as id
     // `x`. `my_server` cannot be misread: a single `_` never forms `__`.

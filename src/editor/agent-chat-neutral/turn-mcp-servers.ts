@@ -10,6 +10,7 @@
 import type { RunChatTurnOpts } from '../agent-chat/run-chat-turn'
 import type { ToolSpec } from '../agent-chat/tool-spec'
 import {
+  isReservedMcpServerId,
   isValidMcpServerId,
   MCP_SERVER_ID_RULE,
   type McpStdioServerConfig,
@@ -38,11 +39,14 @@ export interface TurnMcpServers {
  * fail with no idea why. Each server that did start is pushed onto
  * `sessions` for the caller to close.
  *
- * An id that fails `isValidMcpServerId` is never started. `loadExtensions`
- * already refuses one, so this is the guard for a config that reached the
- * runtime some other way: such an id splits in the wrong place inside
+ * An id that fails `isValidMcpServerId`, or that is reserved
+ * (`isReservedMcpServerId`: `editor`), is never started. `loadExtensions`
+ * already refuses both, so this is the guard for a config that reached the
+ * runtime some other way. A bad id splits in the wrong place inside
  * `mcp__<id>__<tool>`, and the permission gate would apply another id's
- * policy to its tools, or none.
+ * policy to its tools, or none. A reserved id lands in the built-in
+ * `mcp__editor__*` namespace, which the gate treats as first-party and never
+ * applies the server's read-only policy to.
  */
 export async function connectTurnMcpServers(
   opts: RunChatTurnOpts,
@@ -54,19 +58,27 @@ export async function connectTurnMcpServers(
 
   const entries = [...servers]
   const settled = await Promise.allSettled(
-    entries.map(([id, server]) =>
-      isValidMcpServerId(id)
-        ? connectMcpClientTools({
-            id,
-            server,
-            ...(opts.signal ? { signal: opts.signal } : {}),
-          })
-        : Promise.reject(
-            new Error(
-              `MCP server ${JSON.stringify(id)}: its id is not allowed. An id may use ${MCP_SERVER_ID_RULE}.`,
-            ),
+    entries.map(([id, server]) => {
+      if (!isValidMcpServerId(id)) {
+        return Promise.reject(
+          new Error(
+            `MCP server ${JSON.stringify(id)}: its id is not allowed. An id may use ${MCP_SERVER_ID_RULE}.`,
           ),
-    ),
+        )
+      }
+      if (isReservedMcpServerId(id)) {
+        return Promise.reject(
+          new Error(
+            `MCP server ${JSON.stringify(id)}: its id is reserved for the Editor's own tools.`,
+          ),
+        )
+      }
+      return connectMcpClientTools({
+        id,
+        server,
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      })
+    }),
   )
   const specs: ToolSpec[] = []
   const connectedIds = new Set<string>()

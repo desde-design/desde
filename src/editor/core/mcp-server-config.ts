@@ -54,3 +54,30 @@ const MCP_SERVER_ID = /^[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*$/
 export function isValidMcpServerId(id: string): boolean {
   return MCP_SERVER_ID.test(id)
 }
+
+/**
+ * Ids we register ourselves. A customer server taking one of these would
+ * shadow the Editor's own tools, so the collision is refused rather than
+ * silently resolved. `editor` passes {@link MCP_SERVER_ID_RULE}, so this is a
+ * separate check.
+ *
+ * Was `['composer', 'editor']` pre-rename, guarding both the legacy and
+ * current names of the built-in tool namespace (`mcp__composer__*` /
+ * `mcp__editor__*`). The 2026-08-08 Composer→Editor sweep (commit
+ * a3177b0b) blindly replaced the remaining literal `'composer'` with
+ * `'editor'`, collapsing this into a duplicate-valued set. Unlike
+ * `LEGACY_CONFIG_FILENAME`, which that same commit deliberately protected
+ * because old repos read it from disk, nothing on disk still depends on
+ * `'composer'` being a reserved *extension id*: the built-in namespace is
+ * `mcp__editor__*` only, so a customer's `.mcp.json` is free to name an
+ * extension `composer` without colliding with anything.
+ *
+ * Lives here, next to the character rule, so the loader (`loadExtensions`)
+ * and the runtime (`connectTurnMcpServers`) refuse the same ids.
+ */
+const RESERVED_IDS: ReadonlySet<string> = new Set(['editor'])
+
+/** Whether `id` is one we register ourselves. Used at load AND at connect. */
+export function isReservedMcpServerId(id: string): boolean {
+  return RESERVED_IDS.has(id)
+}

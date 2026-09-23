@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { isMcpStdioServerConfig, isValidMcpServerId } from './mcp-server-config'
+import {
+  isMcpStdioServerConfig,
+  isReservedMcpServerId,
+  isValidMcpServerId,
+} from './mcp-server-config'
 
 describe('isMcpStdioServerConfig', () => {
   it('accepts command with optional args and env', () => {
@@ -48,6 +52,19 @@ describe('isValidMcpServerId', () => {
       expect(isValidMcpServerId(id), id).toBe(true)
       expect(idOf(`mcp__${id}__get_thing`), id).toBe(id)
       expect(idOf(`mcp__${id}___leading_underscore_tool`), id).toBe(id)
+    }
+  })
+})
+
+describe('isReservedMcpServerId', () => {
+  it('reserves the built-in namespace, which the character rule alone lets through', () => {
+    expect(isValidMcpServerId('editor')).toBe(true)
+    expect(isReservedMcpServerId('editor')).toBe(true)
+  })
+
+  it('leaves every other id alone, including the pre-rename name', () => {
+    for (const id of ['composer', 'figma', 'my_server', 'editor-2']) {
+      expect(isReservedMcpServerId(id), id).toBe(false)
     }
   })
 })
