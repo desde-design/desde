@@ -17,10 +17,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
  * interleaving AND hand-built the persisted turn it was compared against. A
  * hand-built `ChatTurn` cannot disagree with the live path, so it proved
  * nothing about the code that writes one. Here the persisted turn is produced
- * by the REAL turn runtime (`runChatTurnSdk`) from a scripted SDK message
- * stream, and the live list is produced by the REAL hook from the SSE events
- * that same run emitted. Both halves come from one script, so a new
- * interleaving is one row rather than one test.
+ * by a REAL turn runtime — `runChatTurnSdk` from a scripted SDK message
+ * stream for the SDK lane (Tables 1-2 below), `runChatTurnNeutral` from a
+ * scripted provider for the neutral lane (Tables 3-4) — and the live list is
+ * produced by the REAL hook from the SSE events that same run emitted. Both
+ * halves come from one script, so a new interleaving is one row rather than
+ * one test.
  *
  * ---------------------------------------------------------------------------
  * TWO TABLES. The split is the point, so read the names.
@@ -149,8 +151,10 @@ type MessagePart =
   /**
    * A web tool the VENDOR runs inside the response (neutral lane only): its
    * call and its result stream back together, and the loop runs nothing.
+   * `noResult` streams the call alone and withholds the result — used to
+   * script a steer landing while the vendor's own tool is still running.
    */
-  | { part: "server"; id: string; name: string; error?: boolean }
+  | { part: "server"; id: string; name: string; error?: boolean; noResult?: boolean }
   /** The user hits Enter at exactly this point in the stream. */
   | { part: "steer"; text: string }
 
@@ -344,67 +348,135 @@ async function runServer(script: ScriptStep[], repoRoot: string): Promise<Server
 }
 
 /**
- * The neutral lane over the same script DSL.
- *
- * Two shapes cannot occur on this lane, and the table says so by not carrying
- * rows for them rather than by carrying rows that assert something false:
- *
- *  - `{ part: "steer" }` inside a message. On this lane a steer cannot land
- *    mid-generation; it lands at the next step boundary. A mid-message row
- *    would be testing a delivery mode that does not exist here.
- *  - `{ part: "reasoning" }` interleaved with a steer. Same reason.
- *
- * `{ step: "steer" }` BETWEEN messages is the boundary case and is covered.
+ * One provider call the neutral lane's script compiles down to: the parts it
+ * streams, and — when a scripted `steer` part fell inside the source message
+ * — the text that interrupts this call instead of letting it complete.
  */
-function neutralProvider(script: ScriptStep[], channel: ReturnType<typeof createTurnInputChannel>): LLMProvider {
-  const steps: ScriptStep[][] = []
-  let current: ScriptStep[] = []
+interface NeutralCall {
+  parts: MessagePart[]
+  /** Set when this call must push a steer, then abort, instead of finishing. */
+  interrupt?: string
+}
+
+/**
+ * Compile the script into the sequence of provider calls the neutral loop
+ * will make.
+ *
+ * A message's `tool` part ends a call the same way it always did: the loop
+ * runs the tool and calls again. A message's inline `steer` part ALSO ends a
+ * call, but as an interrupt rather than a completion — everything streamed
+ * before it is kept as this call's parts, and everything AFTER it in that
+ * same script message is pushed into the NEXT call, as the continuation the
+ * real loop requests once the interrupted step ends. That is why a "steer
+ * mid-text" row is one script message but becomes two provider calls: the
+ * split IS the point being tested.
+ *
+ * A top-level `{ step: "steer" }` (between messages) is the boundary case,
+ * unchanged from before: pushed into the channel right away, at compile time,
+ * and drained by the RUNTIME itself at the next step boundary rather than
+ * interrupting anything. See the comment inline below for why faking a
+ * `steered` event for it here would hide the exact divergence this file
+ * exists to catch.
+ */
+function buildNeutralCalls(
+  script: ScriptStep[],
+  channel: ReturnType<typeof createTurnInputChannel>,
+): NeutralCall[] {
+  const calls: NeutralCall[] = []
+  let current: MessagePart[] = []
   for (const step of script) {
     if (step.step === "steer") {
-      // Unlike the SDK lane's `steerNow`, this does NOT also synthesize a
-      // `steered` event. On this lane `steered` is emitted by the RUNTIME
-      // ITSELF, only at the step boundary where it actually drains the
-      // channel (`run-chat-turn-neutral.ts`: "nothing is drained until step
-      // 1"). Faking the event here would desync `live` from `hydrated` for
-      // any steer this lane cannot yet deliver within the turn — exactly the
-      // divergence this test exists to catch, not paper over.
+      // Does NOT also synthesize a `steered` event. On this lane `steered`
+      // is emitted by the RUNTIME ITSELF, either at the step boundary where
+      // it drains the channel, or from the interrupt branch that records the
+      // delivery position at the moment it cuts the step. Faking the event
+      // here would desync `live` from `hydrated` for any steer this lane
+      // cannot yet deliver within the turn — exactly the divergence this
+      // test exists to catch, not paper over.
       channel.push(step.text)
       continue
     }
-    current.push(step)
-    if (step.step === "message" && step.parts.some((p) => p.part === "tool")) {
-      steps.push(current)
+    if (step.step === "toolResult") continue
+    let interrupted = false
+    for (const part of step.parts) {
+      if (part.part === "steer") {
+        calls.push({ parts: current, interrupt: part.text })
+        current = []
+        interrupted = true
+        continue
+      }
+      current.push(part)
+    }
+    if (interrupted) continue
+    if (step.parts.some((p) => p.part === "tool")) {
+      calls.push({ parts: current })
       current = []
     }
   }
-  if (current.length > 0) steps.push(current)
+  if (current.length > 0 || calls.length === 0) calls.push({ parts: current })
+  return calls
+}
+
+/** Park until `signal` fires, mirroring what a real transport does on abort. */
+async function parkUntilAborted(signal: AbortSignal | undefined): Promise<void> {
+  if (!signal || signal.aborted) return
+  await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }))
+}
+
+/**
+ * The neutral lane over the same script DSL.
+ *
+ * A scripted `{ part: "steer" }` inside a message now interrupts the call it
+ * falls in: `buildNeutralCalls` pushes it into the channel — which, once the
+ * turn runtime has called `channel.begin`, synchronously fires `onAccepted`
+ * and aborts the step's own controller (`run-chat-turn-neutral.ts`,
+ * `currentStepAbort`) — and this generator then parks on the step's `signal`
+ * until that abort reaches it, and throws the same shape a real transport
+ * throws on abort. The product loop's `interrupted()` keys on its OWN
+ * controller having fired, never on the thrown error's name or message, so
+ * any AbortError-shaped throw here is faithful to it. This mirrors
+ * `abortedBy` in `run-chat-turn-neutral.test.ts`'s own interrupt tests.
+ *
+ * `{ step: "steer" }` BETWEEN messages is still the boundary case: pushed
+ * directly at compile time, drained by the runtime itself at the next step
+ * boundary, no interrupt.
+ */
+function neutralProvider(script: ScriptStep[], channel: ReturnType<typeof createTurnInputChannel>): LLMProvider {
+  const calls = buildNeutralCalls(script, channel)
   let i = 0
   return {
     name: "scripted",
     defaultModel: "x",
     complete: async () => ({ text: "", stopReason: "end_turn" }),
-    streamConversation: () =>
+    streamConversation: (o) =>
       (async function* (): AsyncGenerator<ProviderEvent> {
-        const group = steps[i++] ?? []
+        // Honored up front too, not only for a scripted interrupt: a call
+        // this generator is never asked to make (the turn already aborted)
+        // must not stream as if nothing happened.
+        if (o.signal?.aborted) throw new DOMException("aborted", "AbortError")
+        const call = calls[i++] ?? { parts: [] }
         const content: Array<Record<string, unknown>> = []
         let sawTool = false
-        for (const step of group) {
-          if (step.step !== "message") continue
-          for (const part of step.parts) {
-            if (part.part === "delta") {
-              yield { kind: "text_delta", delta: part.text }
-              content.push({ type: "text", text: part.text })
-            } else if (part.part === "reasoning") {
-              yield { kind: "reasoning_delta", delta: part.text }
-            } else if (part.part === "tool") {
-              sawTool = true
-              yield { kind: "tool_use", id: part.id, name: part.name, input: {} }
-              content.push({ type: "tool_use", id: part.id, name: part.name, input: {} })
-            } else if (part.part === "server") {
-              const output = part.error
-                ? { errorCode: "url_not_accessible" }
-                : { url: "https://example.com/", content: { title: "Example Domain" } }
-              yield { kind: "server_tool_use", id: part.id, name: part.name, input: {} }
+        for (const part of call.parts) {
+          if (part.part === "delta") {
+            yield { kind: "text_delta", delta: part.text }
+            content.push({ type: "text", text: part.text })
+          } else if (part.part === "reasoning") {
+            yield { kind: "reasoning_delta", delta: part.text }
+          } else if (part.part === "tool") {
+            sawTool = true
+            yield { kind: "tool_use", id: part.id, name: part.name, input: {} }
+            content.push({ type: "tool_use", id: part.id, name: part.name, input: {} })
+          } else if (part.part === "server") {
+            const output = part.error
+              ? { errorCode: "url_not_accessible" }
+              : { url: "https://example.com/", content: { title: "Example Domain" } }
+            yield { kind: "server_tool_use", id: part.id, name: part.name, input: {} }
+            content.push({ type: "server_tool_use", id: part.id, name: part.name, input: {} })
+            // A steer that lands while the vendor's own tool is still
+            // running scripts `noResult: true` so no result ever streams —
+            // see the known-divergence row below.
+            if (!part.noResult) {
               yield {
                 kind: "server_tool_result",
                 toolUseId: part.id,
@@ -412,7 +484,6 @@ function neutralProvider(script: ScriptStep[], channel: ReturnType<typeof create
                 output,
                 ...(part.error ? { isError: true } : {}),
               }
-              content.push({ type: "server_tool_use", id: part.id, name: part.name, input: {} })
               content.push({
                 type: "server_tool_result",
                 toolUseId: part.id,
@@ -422,6 +493,11 @@ function neutralProvider(script: ScriptStep[], channel: ReturnType<typeof create
               })
             }
           }
+        }
+        if (call.interrupt !== undefined) {
+          channel.push(call.interrupt)
+          await parkUntilAborted(o.signal)
+          throw new DOMException("aborted", "AbortError")
         }
         yield {
           kind: "message_complete",
@@ -1087,6 +1163,47 @@ const NEUTRAL_EQUAL_CASES: Array<{ name: string; script: ScriptStep[] }> = [
       { step: "message", id: "m2", parts: [{ part: "delta", text: "understood" }] },
     ],
   },
+  // --- Interrupt rows: a steer that lands INSIDE a step, which only this
+  // --- lane can do (the SDK lane keeps going in the same message instead —
+  // --- see the SDK table's "steer mid-text" row for the contrast). Each of
+  // --- these aborts the step in flight, per `run-chat-turn-neutral.ts`'s
+  // --- `currentStepAbort`.
+  {
+    name: "steer mid-text (interrupted: text kept, steer, then a continuation)",
+    script: [
+      {
+        step: "message",
+        id: "m1",
+        parts: [
+          { part: "delta", text: "Chang" },
+          { part: "steer", text: "make it 12px" },
+        ],
+      },
+      { step: "message", id: "m2", parts: [{ part: "delta", text: "ing the padding now." }] },
+    ],
+  },
+  {
+    name: "steer before any block (interrupted before anything streamed)",
+    script: [
+      { step: "message", id: "m1", parts: [{ part: "steer", text: "actually use the sidebar" }] },
+      { step: "message", id: "m2", parts: [{ part: "delta", text: "on it" }] },
+    ],
+  },
+  {
+    name: "steer after a complete tool_use was streamed: the call is dropped, never run",
+    script: [
+      {
+        step: "message",
+        id: "m1",
+        parts: [
+          { part: "delta", text: "writing it now" },
+          { part: "tool", id: "tu_1", name: "Write" },
+          { part: "steer", text: "stop, do X" },
+        ],
+      },
+      { step: "message", id: "m2", parts: [{ part: "delta", text: "done" }] },
+    ],
+  },
 ]
 
 describe("neutral lane: live stream === re-hydrated transcript", () => {
@@ -1095,5 +1212,72 @@ describe("neutral lane: live stream === re-hydrated transcript", () => {
     expect(run.liveEmpties).toEqual([])
     expect(run.hydratedEmpties).toEqual([])
     expect(run.hydrated).toEqual(run.live)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Table 4 — the neutral lane, known divergences
+// ---------------------------------------------------------------------------
+
+const NEUTRAL_KNOWN_DIVERGENCES: DivergenceCase[] = [
+  {
+    name: "a vendor-run tool interrupted before its result: live shows a failed row, reload shows nothing",
+    why:
+      "KNOWN and explicit in `run-chat-turn-neutral.ts` (the interrupt branch, " +
+      "comment: 'that divergence is known (Task 16's table)'). A vendor-run " +
+      "call's `tool_use_start` is emitted the moment it streams — not held, " +
+      "unlike a Desde-run tool call, because holding would hide the search's " +
+      "progress from the user for as long as it runs. When a steer interrupts " +
+      "the step before the result arrives, the loop closes that row live with " +
+      "an explicit failed `tool_result` ('interrupted before the result " +
+      "arrived'), but persists NO server blocks from the interrupted step at " +
+      "all — a partial vendor response is not safe to replay back to the " +
+      "vendor on the next turn. So live shows the search as a failed row; a " +
+      "reload of the SAME turn shows no row for it whatsoever. Tolerated " +
+      "because the information that failed is exactly the search: there is no " +
+      "result to persist, and inventing one would be dishonest about what the " +
+      "vendor was asked. Closing it would mean persisting a placeholder " +
+      "'cancelled' block, which is a product decision about what a session " +
+      "file stores, not an ordering fix.",
+    script: [
+      {
+        step: "message",
+        id: "m1",
+        parts: [
+          { part: "delta", text: "Searching. " },
+          { part: "server", id: "srv_1", name: "web_search", noResult: true },
+          { part: "steer", text: "stop, do X" },
+        ],
+      },
+      { step: "message", id: "m2", parts: [{ part: "delta", text: "done" }] },
+    ],
+    shapes: (turnId) => ({
+      live: [
+        user("first"),
+        assistant(turnId, "text:Searching. ", "tool:srv_1:err"),
+        user("stop, do X"),
+        assistant(`${turnId}:cont-1`, "text:done"),
+      ],
+      hydrated: [
+        user("first"),
+        assistant(turnId, "text:Searching. "),
+        user("stop, do X"),
+        assistant(`${turnId}:cont-1`, "text:done"),
+      ],
+    }),
+  },
+]
+
+describe("neutral lane: known divergences", () => {
+  it.each(NEUTRAL_KNOWN_DIVERGENCES)("$name", async ({ script, shapes }) => {
+    const run = await runScript(script, root, runNeutralServer)
+    const expected = shapes(run.turnId)
+
+    expect(run.live).toEqual(expected.live)
+    expect(run.hydrated).toEqual(expected.hydrated)
+    expect(run.hydrated).not.toEqual(run.live)
+
+    expect(run.liveEmpties).toEqual([])
+    expect(run.hydratedEmpties).toEqual([])
   })
 })
