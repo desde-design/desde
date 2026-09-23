@@ -2,10 +2,11 @@
  * Shared classifier for "does this `path.relative` result actually
  * escape the base it was computed against" — used by every repo-relative
  * helper in this directory that has to answer that question
- * (`edit-ack.ts`'s `toRel` + `findMatchingExternalRoot`,
- * `sdk-write-guard.ts`'s `toRepoRelative`,
- * `write-invalidate-hook.ts`'s `resolveRepoRelative`) so they can't
- * drift out of sync again.
+ * (`edit-ack.ts`'s `toRel` + `findMatchingExternalRoot`) so they can't
+ * drift out of sync again. Two other former callers, `sdk-write-guard.ts`'s
+ * `toRepoRelative` and `write-invalidate-hook.ts`'s `resolveRepoRelative`,
+ * were deleted along with those SDK-only hook modules once the SDK lane
+ * stopped running the SDK's built-in Write/Edit.
  *
  * History:
  * - `toRel` originally checked a blunt `rel.startsWith('..')`, which also

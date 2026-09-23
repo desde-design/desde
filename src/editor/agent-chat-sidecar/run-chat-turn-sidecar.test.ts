@@ -563,7 +563,6 @@ describe('runChatTurnSdk', () => {
       userMessage: 'hooks',
       emit: () => {},
       invalidateFiles: () => {},
-      acquireWriteLock: async () => () => {},
     })
 
     const opts = queryMock.mock.calls[0]?.[0]?.options as

@@ -23,14 +23,14 @@
  *  - no-op emit (no SSE, no transcript),
  *  - awaitEditAck omitted → SDK Write/Edit apply directly.
  *
- * Write safety (audit Task 13). SDK built-in writes still bypass
- * FileLockManager — they execute inside the SDK runtime — but they are no
- * longer unjournalled: `run-chat-turn-sdk`'s PreToolUse write guard
- * (`sdk-write-guard.ts`) backs the original up to `.desde/backups/`
- * before each one. What this lane deliberately does NOT get is the guard's
- * per-file EDIT LOCK: `runChatTurnSdk` only takes it when a caller injects
- * `acquireWriteLock`, and we pass none, because the CLI edit route already
- * re-enters under the EXCLUSIVE tree gate (`withTreeLock`) before running the
+ * Write safety (audit Task 13, updated once the built-ins-off spike
+ * shipped). The SDK lane no longer runs the SDK's built-in Write/Edit at
+ * all — it has its own Write/Edit tool, the same one the neutral lane
+ * uses, which journals to `.desde/backups/` and takes its own per-path
+ * `FileLockManager` lock (`brokeredWrite` in `write-broker.ts`) on every
+ * write. This lane deliberately does NOT ALSO acquire the CLI's tree gate
+ * or per-file edit lock, because the CLI edit route already re-enters
+ * under the EXCLUSIVE tree gate (`withTreeLock`) before running the
  * mini-turn — acquiring the SHARED gate from inside that exclusive holder
  * would deadlock against ourselves. Exclusivity gives this lane strictly
  * stronger serialization than a per-file lock would, and the handler keeps

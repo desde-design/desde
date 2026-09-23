@@ -1882,17 +1882,16 @@ async function restoreMiniTurnSideEffects(
  * outcomes (success, or agent-side refusal we want to surface), or `null`
  * to fall through to the deterministic refusal response.
  *
- * The mini-turn runs the SAME SDK runtime chat uses (Read/Grep for
+ * The mini-turn runs the SAME chat runtime chat uses (Read/Grep for
  * cross-file binding traces, manifest/token grounding, Edit/Write),
- * headless and budget-bounded. This handler owns write safety around it: the
- * SDK's built-in Write/Edit execute inside the SDK runtime and so never reach
- * FileLockManager, so we snapshot the target pre-turn, refuse agent "success"
- * that changed nothing, parse-validate a changed target, and journal the
- * original to .desde/backups/. (Since audit Task 13 the SDK runtime ALSO
- * journals each built-in write from a PreToolUse hook — see
- * `src/editor/agent-chat-sidecar/sdk-write-guard.ts`. That guard's per-file
- * lock is intentionally NOT wired for this lane: we already run under the
- * EXCLUSIVE tree gate, and its shared acquisition would self-deadlock.)
+ * headless and budget-bounded. Its Write/Edit is Desde's OWN tool
+ * (`builtin-edit.ts`, the same one both chat lanes use — neither runs the
+ * SDK's built-in Write/Edit any more), which journals, ledgers and
+ * FileLockManager-locks around every write itself. This handler ALSO owns
+ * write safety around the whole turn on top of that: it snapshots the
+ * target pre-turn, refuses agent "success" that changed nothing,
+ * parse-validates a changed target, and journals the original to
+ * `.desde/backups/`.
  *
  * CALLER CONTRACT (Task 11): this runs whole-repo `git status` snapshot
  * diffing and `git checkout --` rollback, so it assumes NOTHING else in the
@@ -1902,23 +1901,20 @@ async function restoreMiniTurnSideEffects(
  * discard lane's `git reset`/`checkout`/`clean`, so no `withGitIndexLock`
  * acquisition is needed here. Any new caller must hold the same exclusivity.
  *
- * RESIDUAL (I1, audit-fixes wave, documented not fixed): "nothing else is
- * writing the working tree" is a policy the CLI enforces for its OWN write
- * paths, not a hard guarantee against every writer. A concurrent chat turn's
- * built-in `Write`/`Edit` (a DIFFERENT session, going through
- * `sdk-write-guard.ts`'s `PreToolUse` hook) tries to take the same per-file
- * lock this mini-turn's EXCLUSIVE tree gate is blocking; if that acquisition
- * doesn't land within the guard's `acquireBudgetMs` (10s default — well
- * under this mini-turn's up-to-90s exclusive window), the guard gives up and
- * lets the SDK execute the write anyway, JOURNAL-ONLY and unserialized (see
- * `noteJournalOnlyMode`/`acquirePathBounded` there). That write lands on disk
- * DURING this function's exclusive window, so `snapshotWorkingState`'s
- * before/after diff can't tell it apart from a side effect the mini-turn's
- * own agent produced: `cleanupAllWrites`'s whole-repo rollback can revert
- * that other turn's legitimate change, and the "the agent also modified …"
- * note can misattribute it to this mini-turn. Full fix is scoping the
- * rollback/attribution to paths `sdk-write-guard.ts` actually journaled for
- * THIS mini-turn's tool-use ids — tracked as follow-up, not implemented here.
+ * RESIDUAL (I1, audit-fixes wave, documented not fixed). Originally: "nothing
+ * else is writing the working tree" is a policy the CLI enforces for its OWN
+ * write paths, not a hard guarantee against every writer, and a concurrent
+ * chat turn's SDK-built-in write could land mid-window, JOURNAL-ONLY and
+ * unserialized, once the old `sdk-write-guard.ts`'s bounded lock acquisition
+ * gave up. That specific mechanism no longer exists: `sdk-write-guard.ts` was
+ * deleted once the SDK lane stopped running the SDK's built-in Write/Edit.
+ * A concurrent chat turn's OWN write now goes through `builtin-edit.ts` /
+ * `brokeredWrite`, which takes the repo's tree gate SHARED via
+ * `acquireTreeGate` when the caller supplies one (every chat turn except this
+ * mini-turn does) — so it now queues behind this mini-turn's EXCLUSIVE hold
+ * rather than timing out and writing unserialized. Not re-measured against a
+ * concurrent turn since that change; flagging rather than asserting I1 is
+ * closed.
  */
 async function tryPropEditLLMFallback(args: {
   file: string
@@ -2381,8 +2377,8 @@ async function tryPropEditLLMFallback(args: {
   }
 
   // The edit ledger (P1-1 follow-up, whole-branch review finding
-  // 2026-08-18). The mini-turn's OWN `sdk-write-guard.ts` instance never
-  // records a ledger entry per write — it runs with no `history` injected
+  // 2026-08-18). The mini-turn's OWN Write/Edit tool never records a
+  // ledger entry per write — it runs with no `history` injected
   // (`recordHistory: false` on the `runChatTurnSdk` call inside
   // `runEditFixMiniTurn`), for the SAME reason it records no undo/redo
   // step there: its writes are PROVISIONAL until every gate above (no-op

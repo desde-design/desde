@@ -2,25 +2,15 @@
  * Phase 4 of tasks/editor-detached-sessions.md — base-content capture
  * for git-flavored conflict resolution.
  *
- * Provides a `PreToolUse` SDK hook that snapshots file content whenever
- * the SDK is about to call its built-in `Read` tool. The snapshot is
- * the "base" against which we later detect stale-base overwrites
- * (Phase 4 §1) and run 3-way merges (§5).
- *
- * Why PreToolUse (not canUseTool):
- *   - The SDK's `canUseTool` permission callback only fires for
- *     "dangerous operations" (Write/Edit/etc.) under `permissionMode:
- *     'default'`. Read is auto-allowed without invoking canUseTool — so
- *     decorating canUseTool would never see Read calls. Verified
- *     end-to-end by `scripts/editor-detached-sessions-phase-4-spike.ts`.
- *   - `hooks.PreToolUse` fires for every tool, including Read. That's
- *     the right primitive for non-permission-related instrumentation.
- *
- * Why not a custom Read tool:
- *   - The SDK's built-in Read emits the line-numbered format the model
- *     was trained on. Replacing it with a custom tool would degrade
- *     model performance for no semantic gain — we'd reimplement the
- *     same formatter, plus our snapshot side-channel.
+ * `captureReadSnapshot` snapshots one file's content as the "base"
+ * against which we later detect stale-base overwrites (Phase 4 §1) and
+ * run 3-way merges (§5). Both chat lanes call it directly from their own
+ * read observer (the neutral lane's own `Read` tool; the SDK lane's
+ * `onFileRead` in `run-chat-turn-sidecar.ts`) — there is no SDK hook
+ * here any more. The built-in-Read `PreToolUse` hook this module used to
+ * export (`createReadSnapshotHook`) was deleted once the SDK lane
+ * stopped running the SDK's built-in Read at all; see
+ * `run-chat-turn-sidecar.ts` for that cutover.
  *
  * Best-effort by design: any failure to read the file, write the
  * sidecar, or resolve the path is silently swallowed. The conflict
@@ -32,8 +22,6 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-
-import type { HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk'
 
 import { resolveRepoPath } from '../agent-tools/read-tools'
 import { desdePath } from '../worktree/desde-dir'
@@ -63,43 +51,6 @@ export interface ReadSnapshotOptions {
    * line would take the turn down instead of skipping one snapshot.
    */
   sessionId: string
-  /**
-   * Optional in-process observer. Fires every time a Read snapshot is
-   * successfully captured. Phase 4's `ChatSession.fileReads` map is the
-   * intended consumer — the orchestrator can subscribe and persist the
-   * record onto the session record.
-   */
-  onReadObserved?: (record: FileReadRecord) => void
-}
-
-/**
- * Build a `PreToolUse` hook callback that snapshots file content when
- * the SDK is about to run its built-in `Read` tool. Pass through
- * `hooks: { PreToolUse: [{ matcher: 'Read', hooks: [callback] }] }` to
- * the SDK's `query()` options.
- *
- * The hook is a pure observer — always returns `{ continue: true }` so
- * the SDK proceeds with the Read. Snapshot side-effects are awaited
- * (Phase 4 §1's conflict detection requires the snapshot to be on
- * disk before the next write).
- */
-export function createReadSnapshotHook(opts: ReadSnapshotOptions): HookCallback {
-  return async (input) => {
-    if (input.hook_event_name !== 'PreToolUse') {
-      return { continue: true }
-    }
-    const preInput = input as PreToolUseHookInput
-    if (preInput.tool_name !== 'Read') {
-      return { continue: true }
-    }
-    const toolInput = preInput.tool_input as { file_path?: unknown } | undefined
-    const filePath = toolInput?.file_path
-    if (typeof filePath === 'string' && filePath.length > 0) {
-      const record = await captureReadSnapshot(filePath, opts)
-      if (record) opts.onReadObserved?.(record)
-    }
-    return { continue: true }
-  }
 }
 
 /**

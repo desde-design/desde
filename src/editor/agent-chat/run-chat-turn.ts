@@ -6,18 +6,6 @@
  * field is vendor-shaped and stays as an optional hint: `adaptiveThinking`,
  * which only the Anthropic lane reads. Everything else already described
  * work rather than a vendor.
- *
- * ## Why the type-only import of `AcquireWriteLock` is not a layering leak
- *
- * `TurnInputChannel`, `AcquireTreeGate` and `ModelImageContent` are
- * colocated here in `agent-chat/` (they're shared by both chat lanes).
- * `AcquireWriteLock` alone still lives in `agent-chat-sidecar/sdk-write-guard.ts`
- * (the Claude Agent SDK write-lock acquisition helper) and is imported here
- * with `import type`, which TypeScript erases entirely. So a boot that never
- * touches the Anthropic lane still never loads `@anthropic-ai/claude-agent-sdk`,
- * which is the property the lazy dispatch in `chat-runtime-dispatch.ts` exists
- * to protect. Re-declaring it here instead would buy nothing and create a
- * second shape that can drift.
  */
 
 import type { BridgeClient } from '../agent-tools/types'
@@ -34,7 +22,6 @@ import type { ProjectKnowledge } from '../core/project-knowledge'
 import type { ReadRootRegistry } from '../core/read-roots'
 import type { ModelImageContent } from '../agent-chat/media-content'
 import type { TurnInputChannel } from '../agent-chat/turn-input-channel'
-import type { AcquireWriteLock } from '../agent-chat-sidecar/sdk-write-guard'
 import type { AcquireTreeGate } from '../agent-chat/write-broker'
 
 export interface RunChatTurnOpts {
@@ -45,65 +32,46 @@ export interface RunChatTurnOpts {
    * Deterministically replays a editor write into the Vite dev
    * pipeline (the CLI wires `invalidateViteModules`). Passed through
    * to the structural write tools (insert_component, scaffold_route,
-   * delete_file, …) AND to a PostToolUse hook on the SDK's built-in
-   * Write/Edit (write-invalidate-hook.ts), so the dev server re-serves
-   * an edited file immediately instead of waiting on the OS watcher.
-   * Optional — tests / non-CLI callers omit it.
+   * delete_file, …) and to each lane's own Write/Edit tool, so the dev
+   * server re-serves an edited file immediately instead of waiting on
+   * the OS watcher. Optional — tests / non-CLI callers omit it.
    */
   invalidateFiles?: (files: string[]) => void
-  /**
-   * Acquires the CLI's per-file edit lock for a repo-relative path and
-   * resolves with its release function (`acquireFileEditLock` in
-   * editor-cli/src/server/session-lock.ts). Injected rather than imported so
-   * this package stays free of `editor-cli/` dependencies while chat writes
-   * still land in the SAME lock namespace as `/api/editor/edit` writes.
-   *
-   * Wired by the CLI chat route for FOREGROUND turns only. Deliberately
-   * absent for the edit-fix mini-turn, which the edit route already runs under
-   * the EXCLUSIVE tree gate (`withTreeLock`) — acquiring the SHARED gate from
-   * inside that exclusive holder would self-deadlock. Without it the write
-   * guard still journals originals; serialization comes from the tree gate.
-   *
-   * See `sdk-write-guard.ts` for the hold window and release paths.
-   */
-  acquireWriteLock?: AcquireWriteLock
   /**
    * Acquires the repo's SHARED tree gate for the structural write tools'
    * `brokeredWrite` calls (`acquireTreeGateShared` in
    * editor-cli/src/server/session-lock.ts) — A2, round-2 whole-branch
-   * review finding, 2026-08-19. Injected for the SAME reason
-   * `acquireWriteLock` is: this package stays free of `editor-cli/`
-   * dependencies (see `AcquireTreeGate`'s doc comment in
-   * `write-broker.ts`).
+   * review finding, 2026-08-19. Injected rather than imported so this
+   * package stays free of `editor-cli/` dependencies (see
+   * `AcquireTreeGate`'s doc comment in `write-broker.ts`).
    *
-   * Wired by the CLI chat route for FOREGROUND turns only — SAME
-   * restriction as `acquireWriteLock` above, and for the identical
-   * reason: the edit-fix mini-turn already runs under the EXCLUSIVE tree
-   * gate (`withTreeLock`, held by the CLI edit route around
-   * `tryPropEditLLMFallback`), so acquiring the SHARED gate from inside
-   * that exclusive holder would self-deadlock — the exclusive holder
-   * cannot release until the inner call returns, and the inner shared
-   * acquisition cannot proceed until the exclusive holder releases.
-   * Without it, structural-tool ledger appends from the mini-turn fall
-   * back to the pre-A2 behavior (unordered against a concurrent tree
-   * op) — an acceptable narrowing, since the mini-turn's own caller
-   * already holds the exclusive gate for its whole duration, which is a
-   * STRONGER guarantee than the shared-gate ordering this option adds.
+   * Wired by the CLI chat route for FOREGROUND turns only. Deliberately
+   * absent for the edit-fix mini-turn, which the edit route already runs
+   * under the EXCLUSIVE tree gate (`withTreeLock`, held by the CLI edit
+   * route around `tryPropEditLLMFallback`), so acquiring the SHARED gate
+   * from inside that exclusive holder would self-deadlock — the
+   * exclusive holder cannot release until the inner call returns, and
+   * the inner shared acquisition cannot proceed until the exclusive
+   * holder releases. Without it, structural-tool ledger appends from the
+   * mini-turn fall back to the pre-A2 behavior (unordered against a
+   * concurrent tree op) — an acceptable narrowing, since the mini-turn's
+   * own caller already holds the exclusive gate for its whole duration,
+   * which is a STRONGER guarantee than the shared-gate ordering this
+   * option adds.
    */
   acquireTreeGate?: AcquireTreeGate
   /**
-   * Whether the SDK write guard should record undo/redo history steps for
-   * this turn's built-in Write/Edit calls. Default `true`. The edit-fix
-   * mini-turn passes `false`: its writes are provisional until the CLI
-   * handler's post-turn validation passes (`tryPropEditLLMFallback` in
-   * editor-cli/src/server/edit-handler.ts) — a refused/unparseable
-   * outcome rolls the working tree back via `cleanupAllWrites`, and a step
-   * recorded from the guard's PostToolUse would capture the now-reverted
-   * bytes as its "after", jamming `undo` forever (it would never see the
-   * disk state it expects). The handler records its OWN consolidated step
-   * on the SUCCESS path instead, once the write is verified durable — see
-   * the `getSharedEditHistory().record(...)` call at the end of
-   * `tryPropEditLLMFallback`.
+   * Whether this turn's own Write/Edit tool should record undo/redo history
+   * steps. Default `true`. The edit-fix mini-turn passes `false`: its writes
+   * are provisional until the CLI handler's post-turn validation passes
+   * (`tryPropEditLLMFallback` in editor-cli/src/server/edit-handler.ts) — a
+   * refused/unparseable outcome rolls the working tree back via
+   * `cleanupAllWrites`, and a step recorded before that rollback would
+   * capture the now-reverted bytes as its "after", jamming `undo` forever
+   * (it would never see the disk state it expects). The handler records its
+   * OWN consolidated step on the SUCCESS path instead, once the write is
+   * verified durable — see the `getSharedEditHistory().record(...)` call at
+   * the end of `tryPropEditLLMFallback`.
    */
   recordHistory?: boolean
   session: ChatSession
@@ -210,11 +178,10 @@ export interface RunChatTurnOpts {
    * prompt-injection payload that needs no user request to fire. The product
    * owner weighed that against the work the refusals block and chose not to
    * impose it by default (FX18, 2026-09-05), so it is the project's call.
-   * Threaded to both lanes and enforced in three places that read this one
-   * value: the shared permission gate, the neutral lane's own Read/Glob/Grep,
-   * and the SDK lane's PreToolUse guard (which is the only one the SDK's Read
-   * actually passes through — `canUseTool` never fires for it; see
-   * `file-read-snapshot.ts`).
+   * Threaded to both lanes and enforced in two places that read this one
+   * value: the shared permission gate (`canUseTool`, used by both lanes
+   * since neither runs the SDK's built-in Read/Glob/Grep any more), and
+   * each lane's own Read/Glob/Grep tool implementation.
    *
    * The CLI computes it from `editor.blockSecretReads` in
    * `.desde/config.json` and nothing else, through `isSecretReadsBlocked` in

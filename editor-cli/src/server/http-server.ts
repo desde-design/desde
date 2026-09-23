@@ -4956,22 +4956,21 @@ async function handleEditRequest(
   // acceptable for an advisory-only signal ("deterministic edits are
   // instant" + "never delay the edit"). `fireManifestValueMismatchDriftCheck`
   // is genuinely fire-and-forget (not awaited) and guarantees no unhandled
-  // rejection. NOTE: because this runs after the lock is released, an SDK
+  // rejection. NOTE: because this runs after the lock is released, an
   // agent-chat write to the SAME file racing in right after this edit could
   // theoretically re-read a newer version of the file than the one this edit
   // actually produced, mis-naming which edit an advisory entry is attributed
-  // to. Corrected 2026-08-05 (final audit-fixes wave, item 5): "agent-chat
-  // writes bypass the CLI edit locks entirely" is now only HALF true — since
-  // Task 13's `sdk-write-guard.ts`, the SDK's built-in `Write`/`Edit` DO take
-  // this same per-file lock (via an injected `acquireWriteLock`, budget-
-  // bounded — see that module's "Bounded acquisition" residual for when it
-  // still degrades journal-only). The six MCP *structural* tools
-  // (`insert_component`, `scaffold_route`, `delete_file`, `rename_file`,
-  // `insert_element`, `manage_package`) still bypass this lock entirely —
-  // they go through `brokeredWrite` (write-broker.ts), which is
-  // `FileLockManager`-only, not `withFileEditLocks`. Pre-existing gap,
-  // harmless for a signal that's advisory-only and coalesced by component
-  // identity anyway; recorded here rather than silently accepted.
+  // to. Chat writes bypass the CLI's per-file edit locks entirely: both chat
+  // lanes run their own Write/Edit tool (neither runs the SDK's built-in
+  // Write/Edit any more — Task 13's `sdk-write-guard.ts`, which briefly took
+  // this same per-file lock for the SDK lane, was removed once that lane
+  // stopped needing it), and go through `brokeredWrite` (write-broker.ts),
+  // which is `FileLockManager`-only, not `withFileEditLocks`. Same
+  // bypass applies to the six MCP *structural* tools (`insert_component`,
+  // `scaffold_route`, `delete_file`, `rename_file`, `insert_element`,
+  // `manage_package`). Pre-existing gap, harmless for a signal that's
+  // advisory-only and coalesced by component identity anyway; recorded
+  // here rather than silently accepted.
   if (result.ok && body.edit.kind === "prop") {
     fireManifestValueMismatchDriftCheck(body.edit, ctx)
   }

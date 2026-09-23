@@ -59,7 +59,7 @@ import {
 } from "../../../src/editor/core/model-catalog.js"
 import { modelCatalogResolver, resolvedDefaultModelFor } from "./model-catalog-source.js"
 import { resolveCostCeilingUsd } from "../../../src/editor/core/chat-cost-ceiling.js"
-import { acquireFileEditLock, acquireTreeGateShared } from "./session-lock.js"
+import { acquireTreeGateShared } from "./session-lock.js"
 import { openSseStream } from "./sse.js"
 import { readRawBody } from "./http-body.js"
 
@@ -1200,30 +1200,14 @@ export async function handleChatRequest(
       // Deterministic Vite invalidation for the structural write
       // tools (branch mode — see vite-invalidate.ts).
       invalidateFiles: ctx.invalidateFiles,
-      // Audit Task 13 — the SDK's BUILT-IN Write/Edit run inside the SDK
-      // runtime, so the only way they can serialize against a concurrent
-      // `/api/editor/edit` write is a lock held across the tool call by
-      // the runtime's PreToolUse/PostToolUse hooks. Injecting the acquirer
-      // here (rather than importing session-lock inside agent-chat-sidecar)
-      // keeps the lock namespace owned by the CLI while putting chat writes
-      // in the SAME namespace as route edits.
-      //
-      // Foreground chat holds NO tree gate, so the guard takes tree-SHARED +
-      // the per-file mutex around each individual write (milliseconds), never
-      // for the whole turn — a chat turn can run for minutes and holding the
-      // gate that long would block Commit/Publish for its duration.
-      acquireWriteLock: (repoRelPath: string) =>
-        acquireFileEditLock(ctx.repoRoot, repoRelPath),
-      // A2 (round-2 whole-branch review finding, 2026-08-19) — same
-      // reasoning as `acquireWriteLock` just above, for the SDK's
-      // *structural* write tools (insert_component, delete_file, …):
-      // without this their `brokeredWrite` calls had no ordering against
+      // A2 (round-2 whole-branch review finding, 2026-08-19) — for the
+      // SDK's *structural* write tools (insert_component, delete_file, …):
+      // without this their `brokeredWrite` calls have no ordering against
       // a concurrent Commit/Publish/branch mutation at all. Foreground
-      // chat only, for the same reason `acquireWriteLock` is foreground
-      // only — the edit-fix mini-turn already runs under the EXCLUSIVE
-      // tree gate, and acquiring the SHARED gate from inside that would
-      // self-deadlock (see `RunChatTurnSdkOpts.acquireTreeGate`'s doc
-      // comment).
+      // chat only — the edit-fix mini-turn already runs under the
+      // EXCLUSIVE tree gate, and acquiring the SHARED gate from inside
+      // that would self-deadlock (see `RunChatTurnOpts.acquireTreeGate`'s
+      // doc comment).
       acquireTreeGate: () => acquireTreeGateShared(ctx.repoRoot),
       session,
       userMessage: body.userMessage,

@@ -376,50 +376,6 @@ export async function withFileEditLocks<T>(
 }
 
 /**
- * Acquire/release form of {@link withFileEditLocks} for ONE file (Task 13).
- *
- * The scoped form can't serve the SDK chat lane: the Agent SDK executes its
- * built-in `Write`/`Edit` inside its own runtime, so Editor's only
- * bracketing points are two separate hook callbacks (`PreToolUse` →
- * `PostToolUse`). This returns the release function instead of running a
- * callback, so the acquisition can span them. It is otherwise the SAME
- * acquisition — tree gate SHARED plus the per-file mutex, in the same key
- * namespace — so a chat write and a `/api/editor/edit` write to the same
- * file serialize against each other.
- *
- * The caller MUST release. `createSdkWriteGuard`
- * (src/editor/agent-chat-sidecar/sdk-write-guard.ts) releases on
- * PostToolUse/PostToolUseFailure/PermissionDenied, on a watchdog timeout, and
- * on a turn-end sweep. A leaked hold blocks every later edit to that file for
- * the life of the process — which is why the guard has three independent
- * release paths rather than one.
- *
- * Do NOT call this from a context that already holds the tree gate
- * EXCLUSIVELY (`withTreeLock`): the shared acquisition inside would wait on
- * the exclusive holder that is itself.
- */
-export async function acquireFileEditLock(
-  repoRoot: string,
-  filePath: string,
-): Promise<() => void> {
-  return new Promise<() => void>((resolveAcquired, rejectAcquired) => {
-    let signalRelease!: () => void
-    const heldUntilReleased = new Promise<void>((r) => {
-      signalRelease = r
-    })
-    let released = false
-    withFileEditLocks(repoRoot, [filePath], async () => {
-      resolveAcquired(() => {
-        if (released) return
-        released = true
-        signalRelease()
-      })
-      await heldUntilReleased
-    }).catch(rejectAcquired)
-  })
-}
-
-/**
  * Acquire/release form of the repo's tree gate in SHARED mode ALONE — no
  * per-file mutex (A2, round-2 whole-branch review finding, 2026-08-19).
  *
@@ -436,12 +392,12 @@ export async function acquireFileEditLock(
  * structural tool's write was mid-flight, or between the write landing and
  * its ledger line landing, with nothing serializing the two.
  *
- * Deliberately SHARED-gate-only, not the `acquireFileEditLock` pairing
- * used for the SDK's built-in Write/Edit: `brokeredWrite` already takes
- * its own `FileLockManager` per-path locks internally (that's what
- * `write-broker.ts`'s "Layering" note calls the inner write-serialization
- * layer). Also acquiring `fileEditLockKey` here would double-lock the same
- * path under two different mutexes for no benefit — the tree gate is the
+ * Deliberately SHARED-gate-only, not paired with a per-file mutex:
+ * `brokeredWrite` already takes its own `FileLockManager` per-path locks
+ * internally (that's what `write-broker.ts`'s "Layering" note calls the
+ * inner write-serialization layer). Also acquiring `fileEditLockKey` here
+ * would double-lock the same path under two different mutexes for no
+ * benefit — the tree gate is the
  * only piece `brokeredWrite` doesn't already have.
  *
  * The caller MUST release, exactly once, after `brokeredWrite` (including

@@ -1,12 +1,14 @@
 /**
  * Desde's own `Write` and `Edit`.
  *
- * These are the reason three modules on the SDK lane do not exist on this one.
- * `sdk-write-guard.ts`, `write-invalidate-hook.ts` and `file-read-snapshot.ts`
- * all exist because the SDK owns the write syscall, so the only way to
- * journal, lock, invalidate and ledger around it is a hook bracket whose
- * ordering guarantees that module's doc describes as "verified against the
- * installed SDK" rather than contracted.
+ * The SDK lane used to need two extra hook modules for exactly this reason —
+ * `sdk-write-guard.ts` and `write-invalidate-hook.ts`, both deleted once the
+ * SDK lane stopped running the SDK's built-in Write/Edit and got its own
+ * Write/Edit tool instead (the same shape as this one). While the SDK owned
+ * the write syscall, the only way to journal, lock, invalidate and ledger
+ * around it was a hook bracket whose ordering guarantees those modules'
+ * docs described as "verified against the installed SDK" rather than
+ * contracted.
  *
  * Here the tool performs the write, so it simply calls `brokeredWrite`, which
  * is documented as being free of HTTP and CLI dependencies precisely so a
