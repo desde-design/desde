@@ -25,7 +25,6 @@ import type { ProviderModelCatalog, SessionModelConfig } from "@/editor/core/mod
  * hand-copied full duplicate would.
  */
 export interface ModelCatalogCapabilitiesLike {
-  midTurnSteering: boolean
   vendorRateLimitEvents: boolean
 }
 

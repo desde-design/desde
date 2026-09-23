@@ -335,9 +335,12 @@ export interface UseEditorChatReturn {
   /**
    * Deliver a message INTO the turn that is currently running, instead of
    * aborting that turn and starting a new one (which is what `submit` does to
-   * an in-flight turn on the same bucket). The agent receives it at the turn's
-   * next model boundary and decides what to do with it — we never hold a
-   * message back and never decide on the user's behalf whether it interrupts.
+   * an in-flight turn on the same bucket). While a tool is running, the agent
+   * gets the message once that tool call finishes. While the agent is only
+   * writing text, the runtime stops the stream right there, keeps the text
+   * written so far, and hands the agent the message next. Either way, the
+   * agent decides what to do with it. This code never holds a message back
+   * and never decides on the user's behalf whether it interrupts.
    *
    * Never throws and never rejects: every failure path funnels into the
    * pending-steer ledger, which resubmits the message as an ordinary turn. See
