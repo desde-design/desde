@@ -431,6 +431,25 @@ describe('AiSdkProvider.streamConversation', () => {
     })
   })
 
+  it('keeps input disjoint from the cache when a vendor reports a cache read but no fresh count', async () => {
+    // `noCacheTokens` is optional on its own. A provider package or gateway
+    // that reports `cacheRead` without it must not have the GRAND TOTAL read
+    // as fresh input, or the cache read is billed twice.
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => ({
+        content: [{ type: 'text', text: 'ok' }],
+        finishReason: { unified: 'stop', raw: 'stop' },
+        usage: {
+          inputTokens: { total: 1000, noCache: undefined, cacheRead: 800, cacheWrite: undefined },
+          outputTokens: { total: 5, text: 5, reasoning: undefined },
+        },
+        warnings: [],
+      }),
+    })
+    const res = await providerFor(model).complete({ system: 's', user: 'u' })
+    expect(res.usage).toEqual({ inputTokens: 200, outputTokens: 5, cacheReadInputTokens: 800 })
+  })
+
   it('passes tools as definitions with no execute, so the library returns the call instead of running it', async () => {
     const model = new MockLanguageModelV4({
       doStream: answeredStream(),

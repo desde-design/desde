@@ -677,14 +677,21 @@ function toUsage(usage: LanguageModelUsage | undefined): Usage {
   // converters above. `Usage.inputTokens` here must stay disjoint from the
   // two cache counters, or `estimateUsageCost` double-bills cache tokens
   // (once inside `inputTokens` at the full input rate, again at the cache
-  // rate). So this reads `noCacheTokens` — the split-out fresh count —
-  // and only falls back to the grand total for a provider that never
-  // reported cache details at all, where the total IS the fresh count.
+  // rate). So this reads `noCacheTokens` — the split-out fresh count.
+  //
+  // `noCacheTokens` is optional independently of the cache counters, so the
+  // fallback subtracts whatever cache figures WERE reported from the total.
+  // Falling back to the bare total double-billed a vendor that reported a
+  // cache read without the fresh count. For a provider that reported no
+  // cache details at all, the subtraction takes nothing and the total IS the
+  // fresh count, as before.
   const details = usage?.inputTokenDetails
   const cacheRead = details?.cacheReadTokens
   const cacheWrite = details?.cacheWriteTokens
   return {
-    inputTokens: details?.noCacheTokens ?? usage?.inputTokens ?? 0,
+    inputTokens:
+      details?.noCacheTokens ??
+      Math.max(0, (usage?.inputTokens ?? 0) - (cacheRead ?? 0) - (cacheWrite ?? 0)),
     outputTokens: usage?.outputTokens ?? 0,
     ...(cacheRead !== undefined ? { cacheReadInputTokens: cacheRead } : {}),
     ...(cacheWrite !== undefined ? { cacheCreationInputTokens: cacheWrite } : {}),
