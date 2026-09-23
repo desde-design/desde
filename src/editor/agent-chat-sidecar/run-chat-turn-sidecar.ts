@@ -24,13 +24,27 @@
  *
  * **Naming difference from the neutral lane.** The SDK prefixes every tool on
  * an MCP server with the server's namespace, and there is no way to register
- * an MCP tool under a bare name. So the model sees `mcp__editor__Read`,
- * `mcp__editor__Write`, `mcp__editor__Edit`, `mcp__editor__Glob`,
- * `mcp__editor__Grep` and `mcp__editor__TodoWrite` here, where the neutral lane
- * shows `Read`, `Write` and so on. The permission gate matches both spellings
- * (`bareToolName` in `../agent-chat/edit-ack.ts`). A model that still asks for
- * the SDK's bare `Read` by name is refused by the SDK (it is not in `tools`)
- * and falls back to the MCP tool (measured, Task 21 spike).
+ * an MCP tool under a bare name. So the model's tool list here carries
+ * `mcp__editor__Read`, `mcp__editor__Write`, `mcp__editor__Edit`,
+ * `mcp__editor__Glob`, `mcp__editor__Grep` and `mcp__editor__TodoWrite`, where
+ * the neutral lane lists `Read`, `Write` and so on. Three things keep the
+ * shared prompt's bare names working:
+ *
+ *  - `toolAliases` maps each bare name to its namespaced tool, so a
+ *    model-emitted bare `Read` runs Desde's Read instead of failing as
+ *    unknown. It changes name lookup only, not the tool list.
+ *  - The six built-ins and `get_selection` register with `alwaysLoad`, so
+ *    they are in the turn-one tool list rather than deferred behind search.
+ *  - The permission gate matches both spellings (`bareToolName` in
+ *    `../agent-chat/edit-ack.ts`).
+ *
+ * MEASURED 2026-09-23 (`tasks/scripts/sidecar-read-naming-probe.mts`, Sonnet
+ * 4.6): asked to read a file, the model called `mcp__editor__Read` directly,
+ * with no refused attempt and no tool-search call, and `canUseTool` received
+ * `mcp__editor__Read`. Told three times to emit the bare `Read`, it still
+ * chose `mcp__editor__Read`, so the alias path itself was not exercised live.
+ * The SDK documents it as resolving the mapped name before execution; the
+ * gate decides both spellings identically either way.
  *
  * SDK session resume: the first turn captures `session_id` from the
  * SDKSystemMessage init event; later turns pass it back via `options.resume`
@@ -102,6 +116,14 @@ import type { RunChatTurnOpts, RunChatTurnResult } from '../agent-chat/run-chat-
  * Desde's own, registered on the `editor` MCP server.
  */
 const SIDECAR_SDK_BUILTINS = ['WebFetch', 'WebSearch'] as const
+
+/**
+ * Bare built-in name to the namespaced MCP tool that implements it on this
+ * lane. See `toolAliases` in the query options.
+ */
+const SIDECAR_TOOL_ALIASES: Record<string, string> = Object.fromEntries(
+  ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite'].map((n) => [n, `mcp__editor__${n}`]),
+)
 
 /** SDK default model when none is specified. Exported so the model
  * catalog can assert it stays in sync (anthropic-model-catalog.test.ts). */
@@ -486,10 +508,26 @@ async function runChatTurnSdkInner(
   const groundingDigest = opts.getGrounding
     ? await buildGroundingDigest(opts.getGrounding)
     : null
+  // The web built-ins this turn can actually use: on in `tools` AND turned on
+  // by the project's web policy. The prompt describes only these, because its
+  // web section says "the user turned these on". The rest stay in `tools` and
+  // `canUseTool` refuses them with a message naming the config key.
+  const enabledWebBuiltins = sdkBuiltins.filter((name) =>
+    name === 'WebFetch'
+      ? (opts.webPolicy?.webFetchAllowedHosts.length ?? 0) > 0
+      : opts.webPolicy?.webSearchEnabled === true,
+  )
   // The neutral lane's prompt, as a plain string: no `claude_code` preset.
-  // No `webTools` option: that block describes PROVIDER server tools, and
-  // this lane's web tools are the SDK's own WebFetch/WebSearch instead.
   const systemPrompt = buildNeutralSystemPrompt({
+    // The `claude` binary delivers a mid-turn message wrapped in a
+    // <system-reminder>; the default wording would call that channel
+    // untrusted. See `SDK_REMINDER_STEERING_BLOCK`.
+    steering: 'sdk-reminder',
+    // The SDK's own WebFetch/WebSearch, by those names, not the provider
+    // server tools the neutral loop declares.
+    ...(enabledWebBuiltins.length > 0
+      ? { webTools: { style: 'builtin' as const, names: enabledWebBuiltins } }
+      : {}),
     writeToolsEnabled: catalog.some((spec) => spec.name === 'Write'),
     groundingEnabled: opts.getGrounding !== undefined,
     ...(groundingDigest ? { groundingDigest } : {}),
@@ -663,6 +701,13 @@ async function runChatTurnSdkInner(
         // execution but not for the model's imagination: it may still ask
         // for `Read` by name, which the SDK refuses (Task 21 spike).
         tools: [...sdkBuiltins],
+        // The prompt describes the built-ins by their bare names (`Read`,
+        // `Edit`, ...), but on this lane they live on the `editor` MCP server
+        // as `mcp__editor__Read` and so on. An alias routes a model-emitted
+        // bare `Read` to Desde's tool instead of failing as unknown. It only
+        // affects name lookup of the model's tool_use: the tool list the
+        // model sees still carries the namespaced names.
+        toolAliases: SIDECAR_TOOL_ALIASES,
         ...(opts.disallowedTools?.length
           ? { disallowedTools: [...opts.disallowedTools] }
           : {}),

@@ -506,6 +506,46 @@ describe('runChatTurnSdk', () => {
     expect(sp).toContain('# Who you are')
     expect(sp).toContain('mcp__editor__get_selection')
     expect(sp).not.toContain('claude_code')
+    // The binary wraps a mid-turn message in <system-reminder>; the prompt
+    // must name that channel as the user, not call it untrusted.
+    expect(sp).toContain('The user sent a new message while you were working')
+    expect(sp).not.toContain('Nothing is wrapped around it')
+    // No web section while the web policy turns nothing on.
+    expect(sp).not.toContain('# Web tools')
+    // A model-emitted bare `Read` routes to Desde's tool.
+    expect(opts?.toolAliases).toEqual({
+      Read: 'mcp__editor__Read',
+      Edit: 'mcp__editor__Edit',
+      Write: 'mcp__editor__Write',
+      Glob: 'mcp__editor__Glob',
+      Grep: 'mcp__editor__Grep',
+      TodoWrite: 'mcp__editor__TodoWrite',
+    })
+  })
+
+  it('describes exactly the web built-ins the web policy turns on, by their SDK names', async () => {
+    scriptedMessages.push({
+      type: 'result',
+      subtype: 'success',
+      usage: { input_tokens: 0, output_tokens: 0 },
+      stop_reason: 'end_turn',
+    })
+
+    await runChatTurnSdk({
+      bridge: makeBridge(),
+      worktreeRoot: root,
+      session: makeEmptySession('proj-1'),
+      userMessage: 'web',
+      emit: () => {},
+      webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: false },
+    })
+
+    const sp = queryMock.mock.calls[0]?.[0]?.options?.systemPrompt as string
+    expect(sp).toContain('# Web tools')
+    expect(sp).toContain('- `WebFetch`: fetch a page.')
+    expect(sp).not.toContain('- `WebSearch`')
+    expect(sp).toMatch(/UNTRUSTED third-party content/)
+    expect(sp).not.toContain('`web_fetch`')
   })
 
   it('registers no hooks around Read, Write or Edit (the tools do that work themselves)', async () => {
