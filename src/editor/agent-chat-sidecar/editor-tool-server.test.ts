@@ -234,6 +234,19 @@ describe('buildSidecarToolServer', () => {
     expect(names).toEqual(specs.map((s) => s.name.replace(/^mcp__editor__/, '')))
   })
 
+  it('always loads the six built-ins and get_selection, and defers everything else', () => {
+    const instance = buildSidecarToolServer(catalog()).instance as unknown as {
+      _registeredTools: Record<string, { _meta?: Record<string, unknown> }>
+    }
+    const alwaysLoaded = Object.entries(instance._registeredTools)
+      .filter(([, def]) => def._meta?.['anthropic/alwaysLoad'] === true)
+      .map(([name]) => name)
+      .sort()
+    expect(alwaysLoaded).toEqual(
+      ['Edit', 'Glob', 'Grep', 'Read', 'TodoWrite', 'Write', 'get_selection'].sort(),
+    )
+  })
+
   it('refuses a spec that carries a raw JSON Schema rather than registering it unvalidated', () => {
     expect(() =>
       buildSidecarToolServer([

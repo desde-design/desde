@@ -378,27 +378,22 @@ export function buildToolPermissionGate(
     // control is worse than no refusal, because the next reader trusts it.
     //
     // What remains is decided on RESOLVED PATHS, which have no spellings:
-    // the neutral lane owns its Glob and Grep and drops every enumerated
-    // path the policy refuses, counting them (`secretPathOmissionNote`), and
-    // the content-returning shape below is refused unless its scope is one
-    // provable file. Names — not contents — can still reach the model from
-    // the SDK's own Glob, which no `PreToolUse` hook can filter; that was
-    // already true of every broad pattern and is stated in
-    // `secret-read-guard.ts`'s header.
+    // both lanes now run Desde's own Glob and Grep (the Claude Agent SDK
+    // sidecar registers them as `mcp__editor__Glob`/`mcp__editor__Grep`,
+    // with the SDK's built-ins off), and those tools drop every enumerated
+    // path the policy refuses, counting them (`secretPathOmissionNote`).
+    // The content-returning shape below is refused unless its scope is one
+    // provable file.
     if (builtin === 'Glob' || builtin === 'Grep') {
       if (opts.blockSecretReads === true) {
         const input = toolInput as { glob?: unknown; path?: unknown; output_mode?: unknown }
-        // FX17 item 3b. The SDK's Grep in `output_mode: "content"` returns
-        // matching LINES, and a `PreToolUse` hook cannot filter a result it
-        // runs before, so on that lane a broad content search returned `.env`
-        // lines verbatim with no clever spelling needed at all. This is the
-        // shared gate's copy of the refusal; the SDK lane's own copy is in
-        // `secret-read-guard.ts`, because the SDK does not always route these
-        // tools through the permission callback.
-        //
-        // The neutral lane never reaches it: its Grep declares no
-        // `output_mode` at all, so the branch is false for every call it
-        // makes, and its result filter stays the mechanism there.
+        // FX17 item 3b. The SDK's own Grep in `output_mode: "content"`
+        // returned matching LINES that no `PreToolUse` hook could filter, so
+        // a broad content search returned `.env` lines verbatim. That Grep is
+        // off on every lane now. Desde's Grep declares no `output_mode`, so
+        // this branch is false for every call either lane makes today, and
+        // the tool's result filter is the mechanism. It stays as a backstop
+        // for any caller that turns an SDK Grep back on.
         if (builtin === 'Grep' && input.output_mode === 'content') {
           const free = await grepContentScopeIsSecretFree(opts.worktreeRoot, input as GrepScope)
           if (!free) return deny(grepContentDenial())

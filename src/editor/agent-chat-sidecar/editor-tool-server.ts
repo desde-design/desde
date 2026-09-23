@@ -30,6 +30,24 @@ import type { ToolSpec } from '../agent-chat/tool-spec'
 import { EDITOR_TOOL_NAMESPACE } from '../agent-chat-neutral/tool-catalog'
 
 /**
+ * Tools the model sees on turn one, never deferred behind the SDK's tool
+ * search. MCP tools are deferred by default, so without this every Read would
+ * cost a tool-search round trip first. The six built-ins are what almost
+ * every turn starts with, and `get_selection` is what the prompt tells the
+ * model to call first when the user says "this". Everything else stays
+ * deferred, so a long tool list still costs nothing per turn.
+ */
+export const ALWAYS_LOADED_TOOLS: ReadonlySet<string> = new Set([
+  'Read',
+  'Edit',
+  'Write',
+  'Glob',
+  'Grep',
+  'TodoWrite',
+  'get_selection',
+])
+
+/**
  * Register `specs` as the `editor` MCP server.
  *
  * A name that already carries the `mcp__editor__` namespace has it removed
@@ -62,11 +80,16 @@ export function buildSidecarToolServer(
       const name = spec.name.startsWith(EDITOR_TOOL_NAMESPACE)
         ? spec.name.slice(EDITOR_TOOL_NAMESPACE.length)
         : spec.name
-      return tool(name, spec.description, spec.inputShape, (input) =>
-        // `ToolHandlerResult` is structurally a subset of the SDK's
-        // `CallToolResult` (see tool-spec.ts) but lacks its forward-compat
-        // index signature; the runtime shape is identical.
-        spec.handler(input as Record<string, unknown>, { signal }) as Promise<CallToolResult>,
+      return tool(
+        name,
+        spec.description,
+        spec.inputShape,
+        (input) =>
+          // `ToolHandlerResult` is structurally a subset of the SDK's
+          // `CallToolResult` (see tool-spec.ts) but lacks its forward-compat
+          // index signature; the runtime shape is identical.
+          spec.handler(input as Record<string, unknown>, { signal }) as Promise<CallToolResult>,
+        ALWAYS_LOADED_TOOLS.has(name) ? { alwaysLoad: true } : undefined,
       )
     }),
   })
