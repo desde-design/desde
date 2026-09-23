@@ -194,7 +194,7 @@ export interface RunChatTurnOpts {
    * `editor.canvas` in `.desde/config.json` OR `EDITOR_CANVAS=1`
    * (either enables) and threads it through here; web/tests that omit it
    * get the tools-off behavior. Passed straight through to
-   * `buildEditorToolServer` and `buildSdkSystemPrompt`.
+   * the tool catalog and `buildNeutralSystemPrompt`.
    */
   canvasEnabled?: boolean
   /**

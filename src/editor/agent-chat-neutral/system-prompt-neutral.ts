@@ -1,10 +1,12 @@
 /**
- * The full standalone system prompt for the neutral chat runtime.
+ * The full standalone system prompt for BOTH chat runtimes: the neutral loop,
+ * and (since the chat-runtime consolidation, Task 22) the Claude Agent SDK
+ * sidecar, which sends it as a plain string with no `claude_code` preset.
  *
  * ## Why this file is large, and why it had to be written rather than ported
  *
- * The SDK lane passes `systemPrompt: { type: 'preset', preset: 'claude_code',
- * append: buildSdkSystemPrompt(...) }`. The preset supplies three things for
+ * The SDK lane used to pass `systemPrompt: { type: 'preset', preset:
+ * 'claude_code', append: buildSdkSystemPrompt(...) }`. The preset supplies three things for
  * free, and nothing in Desde's source records what they say: an identity, the
  * semantics and safety rules of the built-in tools, and general working-style
  * guidance for code tasks. The neutral lane has no preset, so all three are
@@ -16,7 +18,9 @@
  * two lanes cannot describe the editor tools, the edit lifecycle, the context
  * envelope or the verification discipline differently.
  *
- * Three sections are deliberately NOT reused:
+ * Three sections were deliberately NOT reused. All three were deleted with
+ * `buildSdkSystemPrompt` in Task 22; the reasons are kept because they still
+ * explain the shape of this file:
  *
  *  - `WEB_TOOLS_BLOCK`. It describes the SDK's own WebFetch and WebSearch
  *    built-ins and their deny messages. This lane's web tools are different:
