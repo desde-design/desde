@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import {
   mkdirSync,
   mkdtempSync,
@@ -16,10 +15,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { EditProposalPayload } from '../agent-tools/types'
 import type { ReadRoot, ReadRootRegistry } from '../core/read-roots'
+import type { PermissionDecision, ToolPermissionContext, ToolPermissionGate } from './tool-permission'
 import {
   ALLOWED_COMPONENT_EXTENSIONS,
   ALLOWED_NEW_FILE_EXTENSIONS,
-  buildCanUseTool,
   bareToolName,
   buildToolPermissionGate,
   reconstructWriteEdit,
@@ -70,21 +69,21 @@ describe('canUseTool — non-Write/Edit tools', () => {
 
   it('allows Read for an in-root path', async () => {
     writeFileSync(join(h.root, 'app.vue'), 'x')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Read', { file_path: join(h.root, 'app.vue') }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(h.emitted).toHaveLength(0)
   })
 
   it('denies Read for a path that escapes the worktree', async () => {
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Read', { file_path: '/etc/passwd' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/Read denied/)
   })
 
   it('hints at the worktree-relative form when Read escapes without matching an external root', async () => {
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Read', { file_path: '/etc/passwd' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     const msg = (r as { message: string }).message
@@ -110,7 +109,7 @@ describe('canUseTool — non-Write/Edit tools', () => {
           isWorktree: false, isGit: true, gitPrefix: '',
         },
       ])
-      const cut = buildCanUseTool({
+      const cut = buildToolPermissionGate({
         worktreeRoot: h.root,
         emitEditProposal: h.emit,
         readRoots: registry,
@@ -130,7 +129,7 @@ describe('canUseTool — non-Write/Edit tools', () => {
   })
 
   it('falls back to the generic hint when readRoots is undefined', async () => {
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Read', { file_path: '/some/external/path' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     const msg = (r as { message: string }).message
@@ -161,7 +160,7 @@ describe('canUseTool — non-Write/Edit tools', () => {
           isWorktree: false, isGit: true, gitPrefix: '',
         },
       ])
-      const cut = buildCanUseTool({
+      const cut = buildToolPermissionGate({
         worktreeRoot: h.root,
         emitEditProposal: h.emit,
         readRoots: registry,
@@ -197,7 +196,7 @@ describe('canUseTool — non-Write/Edit tools', () => {
         { name: 'prod', path: outerDir, isWorktree: false, isGit: true, gitPrefix: '' },
         { name: 'ui', path: innerDir, isWorktree: false, isGit: true, gitPrefix: '' },
       ])
-      const cut = buildCanUseTool({
+      const cut = buildToolPermissionGate({
         worktreeRoot: h.root,
         emitEditProposal: h.emit,
         readRoots: registry,
@@ -223,7 +222,7 @@ describe('canUseTool — non-Write/Edit tools', () => {
         { name: 'worktree', path: h.root, isWorktree: true, isGit: true, gitPrefix: '' },
         { name: 'production', path: externalDir, isWorktree: false, isGit: true, gitPrefix: '' },
       ])
-      const cut = buildCanUseTool({
+      const cut = buildToolPermissionGate({
         worktreeRoot: h.root,
         emitEditProposal: h.emit,
         readRoots: registry,
@@ -243,20 +242,20 @@ describe('canUseTool — non-Write/Edit tools', () => {
   })
 
   it('allows Read with no file_path (Read shape variant)', async () => {
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Read', {}, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
   })
 
   it('allows MCP tools without emitting', async () => {
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'mcp__editor__get_selection', {}, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(h.emitted).toHaveLength(0)
   })
 
   it('denies when SDK passes blockedPath (B2)', async () => {
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 
       'Read',
       { file_path: '/some/path' },
@@ -278,7 +277,7 @@ describe('canUseTool — Write', () => {
     mkdirSync(dirname(target), { recursive: true })
     writeFileSync(target, 'old contents')
 
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Write', { file_path: target, content: 'new contents' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(h.emitted).toHaveLength(1)
@@ -296,7 +295,7 @@ describe('canUseTool — Write', () => {
   it('denies no-op Write (NIT2)', async () => {
     const target = join(h.root, 'X.vue')
     writeFileSync(target, 'same')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Write', { file_path: target, content: 'same' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/no change/)
@@ -305,7 +304,7 @@ describe('canUseTool — Write', () => {
 
   it('allows new-file write with .vue extension and marks allowCreate + appliedByAgent', async () => {
     const target = join(h.root, 'NewComponent.vue')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Write', { file_path: target, content: '<template/>' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     const payload = asOverwrite(h.emitted[0])
@@ -321,7 +320,7 @@ describe('canUseTool — Write', () => {
 
   it('allows new-file write with .ts extension', async () => {
     const target = join(h.root, 'useThing.ts')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Write', { file_path: target, content: 'export {}' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(asOverwrite(h.emitted[0]).allowCreate).toBe(true)
@@ -331,7 +330,7 @@ describe('canUseTool — Write', () => {
     for (const name of ['Card.tsx', 'Legacy.jsx']) {
       const local = makeHarness()
       const target = join(local.root, name)
-      const cut = buildCanUseTool({ worktreeRoot: local.root, emitEditProposal: local.emit })
+      const cut = buildToolPermissionGate({ worktreeRoot: local.root, emitEditProposal: local.emit })
       const r = await call(cut, 
         'Write',
         { file_path: target, content: 'export const C = () => <div/>' },
@@ -345,7 +344,7 @@ describe('canUseTool — Write', () => {
 
   it('allows new-file write with .md extension (plans / docs)', async () => {
     const target = join(h.root, 'docs/plan.md')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Write', { file_path: target, content: '# Plan\n' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     expect(asOverwrite(h.emitted[0])).toMatchObject({
@@ -357,7 +356,7 @@ describe('canUseTool — Write', () => {
 
   it('denies new-file write with a disallowed extension (binary/script/secret)', async () => {
     const target = join(h.root, 'malware.exe')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Write', { file_path: target, content: 'x' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/extension '\.exe'/)
@@ -366,13 +365,13 @@ describe('canUseTool — Write', () => {
 
   it('denies write with missing content', async () => {
     const target = join(h.root, 'X.vue')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Write', { file_path: target }, fakeOpts())
     expect(r.behavior).toBe('deny')
   })
 
   it('denies path that escapes worktree root', async () => {
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Write', { file_path: '../escape.vue', content: 'x' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/escapes|denied/)
@@ -385,7 +384,7 @@ describe('canUseTool — Write', () => {
     try {
       symlinkSync(outside, join(h.root, 'sneaky'))
       const target = join(h.root, 'sneaky', 'X.vue')
-      const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+      const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
       const r = await call(cut, 'Write', { file_path: target, content: '<template/>' }, fakeOpts())
       expect(r.behavior).toBe('deny')
       expect((r as { message: string }).message).toMatch(/symlink|denied/)
@@ -405,7 +404,7 @@ describe('canUseTool — Edit', () => {
     const target = join(h.root, file)
     writeFileSync(target, 'before X after')
 
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 
       'Edit',
       { file_path: target, old_string: 'X', new_string: 'Y' },
@@ -425,7 +424,7 @@ describe('canUseTool — Edit', () => {
   it('honors replace_all', async () => {
     const file = 'X.vue'
     writeFileSync(join(h.root, file), 'X X X')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, file), old_string: 'X', new_string: 'Y', replace_all: true },
@@ -438,7 +437,7 @@ describe('canUseTool — Edit', () => {
   it('denies when old_string not found', async () => {
     const file = 'X.vue'
     writeFileSync(join(h.root, file), 'abc')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, file), old_string: 'XYZ', new_string: 'Y' },
@@ -451,7 +450,7 @@ describe('canUseTool — Edit', () => {
   it('denies when old_string is not unique without replace_all', async () => {
     const file = 'X.vue'
     writeFileSync(join(h.root, file), 'X X')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, file), old_string: 'X', new_string: 'Y' },
@@ -464,7 +463,7 @@ describe('canUseTool — Edit', () => {
   it('denies empty old_string', async () => {
     const file = 'X.vue'
     writeFileSync(join(h.root, file), 'abc')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, file), old_string: '', new_string: 'Y' },
@@ -477,7 +476,7 @@ describe('canUseTool — Edit', () => {
   it('denies edit producing no change', async () => {
     const file = 'X.vue'
     writeFileSync(join(h.root, file), 'abc')
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, file), old_string: 'abc', new_string: 'abc' },
@@ -488,7 +487,7 @@ describe('canUseTool — Edit', () => {
   })
 
   it('denies edit to nonexistent file', async () => {
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 
       'Edit',
       { file_path: join(h.root, 'ghost.vue'), old_string: 'x', new_string: 'y' },
@@ -506,7 +505,7 @@ describe('canUseTool — Edit', () => {
     writeFileSync(outsideFile, 'outside content')
     try {
       symlinkSync(outsideFile, join(h.root, 'evil.vue'))
-      const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+      const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
       const r = await call(cut, 
         'Edit',
         { file_path: join(h.root, 'evil.vue'), old_string: 'outside', new_string: 'x' },
@@ -526,7 +525,7 @@ describe('canUseTool — emitEditProposal rejection', () => {
     try {
       const target = join(h.root, 'X.vue')
       writeFileSync(target, 'old')
-      const cut = buildCanUseTool({
+      const cut = buildToolPermissionGate({
         worktreeRoot: h.root,
         emitEditProposal: async () => ({ ok: false, reason: 'shell offline' }),
       })
@@ -549,7 +548,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
   afterEach(() => h.cleanup())
 
   function buildCutWithReads(reads: Record<string, { hashAtRead: string }>) {
-    return buildCanUseTool({
+    return buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       getFileReads: () => reads,
@@ -638,7 +637,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
     mkdirSync(dirname(target), { recursive: true })
     writeFileSync(target, 'old contents')
 
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Write', { file_path: target, content: 'new contents' }, fakeOpts())
     expect(r).toEqual({ behavior: 'allow', updatedInput: {} })
     // No conflicts surfaced because no callback registered.
@@ -657,7 +656,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
     const reads: Record<string, { hashAtRead: string }> = {
       [target]: { hashAtRead: sha256('old contents') },
     }
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       getFileReads: () => reads,
@@ -704,7 +703,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
     const reads: Record<string, { hashAtRead: string }> = {
       [target]: { hashAtRead: sha256('old contents') },
     }
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       // emit rejects — write doesn't land — baseline must stay put.
       emitEditProposal: async () => ({ ok: false, reason: 'shell offline' }),
@@ -731,7 +730,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
       [target]: { hashAtRead: sha256('content the session previously saw') },
     }
     // … but another writer deleted it; the file is now absent.
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       getFileReads: () => reads,
@@ -755,7 +754,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
 
   it('does not flag a clean new-file create (no prior Read record for the path)', async () => {
     const target = join(h.root, 'GenuinelyNew.vue')
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       getFileReads: () => ({}),
@@ -796,7 +795,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
       // file-read-snapshot.ts records.
       [readSafe.absolute]: { hashAtRead: sha256('original different content') },
     }
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       getFileReads: () => reads,
@@ -820,7 +819,7 @@ describe('canUseTool — Phase 4a conflict detection', () => {
     mkdirSync(dirname(target), { recursive: true })
     writeFileSync(target, 'on-disk')
 
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       getFileReads: () => ({
@@ -870,28 +869,23 @@ describe('ALLOWED_NEW_FILE_EXTENSIONS', () => {
   })
 })
 
-function fakeOpts(): Parameters<CanUseTool>[2] {
+// Placeholder `ToolPermissionContext`. The SDK-specific translation into
+// this shape (blockedPath extraction, the null-resolution guard) is tested
+// against the real wrapper in
+// `src/editor/agent-chat-sidecar/can-use-tool.test.ts`, not here — this
+// file exercises `buildToolPermissionGate` directly, which both lanes share.
+function fakeOpts(): ToolPermissionContext {
   return {
     signal: new AbortController().signal,
-    toolUseID: 'tu-1',
-    // Required since SDK 0.3.259: the control_request envelope id a host
-    // echoes when answering out-of-band. Unused by `buildCanUseTool`.
-    requestId: 'req-1',
+    toolUseId: 'tu-1',
   }
 }
 
-/**
- * `CanUseTool` may resolve `null` since SDK 0.3.259 (the host declining to
- * decide). `buildCanUseTool` always decides, so a `null` here is a failure
- * the assertions below should see as one, not silently narrow around.
- */
 async function call(
-  cut: CanUseTool,
-  ...args: Parameters<CanUseTool>
-): Promise<PermissionResult> {
-  const r = await cut(...args)
-  if (r === null) throw new Error('canUseTool resolved null')
-  return r
+  gate: ToolPermissionGate,
+  ...args: Parameters<ToolPermissionGate>
+): Promise<PermissionDecision> {
+  return gate(...args)
 }
 
 function asOverwrite(p: EditProposalPayload): Extract<EditProposalPayload, { type: 'overwrite' }> {
@@ -905,14 +899,14 @@ describe('canUseTool — WebFetch / WebSearch', () => {
   afterEach(() => h.cleanup())
 
   it('denies WebFetch when no policy is wired (default off)', async () => {
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'WebFetch', { url: 'https://vuejs.org/' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/no web policy configured/)
   })
 
   it('denies WebFetch when the host is not in the allowlist', async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       webPolicy: { webFetchAllowedHosts: ['vuejs.org'], webSearchEnabled: false },
@@ -923,7 +917,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
   })
 
   it('allows WebFetch for an allowlisted host', async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       webPolicy: { webFetchAllowedHosts: ['vuejs.org'], webSearchEnabled: false },
@@ -933,7 +927,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
   })
 
   it('denies WebFetch for non-http(s) URLs even when the host appears allowlisted', async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       webPolicy: { webFetchAllowedHosts: ['vuejs.org'], webSearchEnabled: false },
@@ -944,14 +938,14 @@ describe('canUseTool — WebFetch / WebSearch', () => {
   })
 
   it('denies WebSearch when no policy is wired', async () => {
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'WebSearch', { query: 'how to vue' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/WebSearch is disabled/)
   })
 
   it('denies WebSearch when explicitly disabled', async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       webPolicy: { webFetchAllowedHosts: [], webSearchEnabled: false },
@@ -961,7 +955,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
   })
 
   it('allows WebSearch when enabled', async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       webPolicy: { webFetchAllowedHosts: [], webSearchEnabled: true },
@@ -976,14 +970,14 @@ describe('canUseTool — WebFetch / WebSearch', () => {
     // call should deny. (Shouldn't happen in production — we register
     // mcpServers.figma only when figmaConfig is set — but belt+
     // suspenders.)
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'mcp__figma__get_file', { fileId: 'x' }, fakeOpts())
     expect(r.behavior).toBe('deny')
     expect((r as { message: string }).message).toMatch(/no extension named 'figma' is configured/)
   })
 
   it('allows a figma tool whose bare name starts with an allowed prefix', async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       figmaAllowedToolPrefixes: ['get_', 'list_'],
@@ -993,7 +987,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
   })
 
   it('denies a figma tool whose bare name does not match any allowed prefix', async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       figmaAllowedToolPrefixes: ['get_', 'list_'],
@@ -1010,7 +1004,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
     // we trust the customer's prefix list — but the safety hatch is
     // that the default list is conservative (verbs that are
     // unambiguously read-only in Figma MCP convention).
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       figmaAllowedToolPrefixes: ['list_'],
@@ -1021,7 +1015,7 @@ describe('canUseTool — WebFetch / WebSearch', () => {
   })
 
   it('does not affect non-figma MCP tool calls (editor namespace still flows through)', async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       // Even with figma denied, editor tools must be untouched.
@@ -1075,7 +1069,7 @@ describe('canUseTool — MCP extensions (generalised)', () => {
     new Map<string, ReadonlyArray<string> | null>(entries)
 
   it('allows a read-verb tool on a configured extension', async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       extensionToolPolicy: policy([['tracker', ['get_', 'list_']]]),
@@ -1084,7 +1078,7 @@ describe('canUseTool — MCP extensions (generalised)', () => {
   })
 
   it('denies a write-verb tool on a read-only extension', async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       extensionToolPolicy: policy([['tracker', ['get_', 'list_']]]),
@@ -1095,7 +1089,7 @@ describe('canUseTool — MCP extensions (generalised)', () => {
   })
 
   it('allows writes on an extension explicitly opted OUT of read-only', async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       extensionToolPolicy: policy([['tracker', null]]),
@@ -1106,7 +1100,7 @@ describe('canUseTool — MCP extensions (generalised)', () => {
   it('denies an extension that is not configured at all', async () => {
     // Reaching a server we hold no policy for means a stale registration or
     // something we never configured; neither should get tool access.
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       extensionToolPolicy: policy([['tracker', ['get_']]]),
@@ -1117,7 +1111,7 @@ describe('canUseTool — MCP extensions (generalised)', () => {
   })
 
   it("never gates the Editor's own in-process tools", async () => {
-    const cut = buildCanUseTool({
+    const cut = buildToolPermissionGate({
       worktreeRoot: h.root,
       emitEditProposal: h.emit,
       extensionToolPolicy: policy([]),
@@ -1168,7 +1162,7 @@ describe('canUseTool — protected config files', () => {
 
   for (const rel of PROTECTED) {
     it(`denies Write that CREATES ${rel}`, async () => {
-      const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+      const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
       const r = await call(cut, 
         'Write',
         { file_path: join(h.root, rel), content: '{"mcpServers":{"x":{"command":"sh"}}}' },
@@ -1183,7 +1177,7 @@ describe('canUseTool — protected config files', () => {
       const target = join(h.root, rel)
       mkdirSync(dirname(target), { recursive: true })
       writeFileSync(target, '{}')
-      const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+      const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
       const r = await call(cut, 
         'Write',
         { file_path: target, content: '{"mcpServers":{"x":{"command":"sh"}}}' },
@@ -1197,7 +1191,7 @@ describe('canUseTool — protected config files', () => {
       const target = join(h.root, rel)
       mkdirSync(dirname(target), { recursive: true })
       writeFileSync(target, '{"a":1}')
-      const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+      const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
       const r = await call(cut, 
         'Edit',
         { file_path: target, old_string: '{"a":1}', new_string: '{"a":2}' },
@@ -1211,13 +1205,13 @@ describe('canUseTool — protected config files', () => {
   it('still allows an ordinary .json file', async () => {
     const target = join(h.root, 'src/data.json')
     mkdirSync(dirname(target), { recursive: true })
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 'Write', { file_path: target, content: '{"ok":true}' }, fakeOpts())
     expect(r.behavior).toBe('allow')
   })
 
   it('is not fooled by a path that reaches the same file indirectly', async () => {
-    const cut = buildCanUseTool({ worktreeRoot: h.root, emitEditProposal: h.emit })
+    const cut = buildToolPermissionGate({ worktreeRoot: h.root, emitEditProposal: h.emit })
     const r = await call(cut, 
       'Write',
       { file_path: join(h.root, 'src', '..', '.mcp.json'), content: '{}' },
@@ -1269,21 +1263,10 @@ describe('buildToolPermissionGate', () => {
     expect((decision as { message: string }).message).toMatch(/out of bounds/)
   })
 
-  it('is the same closure buildCanUseTool wraps: a protected path is denied on both', async () => {
-    const opts = {
-      worktreeRoot: root,
-      emitEditProposal: async () => ({ ok: true as const, editId: 'e1' }),
-    }
-    const gate = buildToolPermissionGate(opts)
-    const canUseTool = buildCanUseTool(opts)
-    const input = { file_path: '.mcp.json', content: '{}' }
-    const viaGate = await gate('Write', input, {})
-    const viaSdk = await canUseTool('Write', input, {} as never)
-    expect(viaGate.behavior).toBe('deny')
-    expect(viaSdk).not.toBeNull()
-    expect(viaSdk!.behavior).toBe('deny')
-    expect((viaSdk as { message: string }).message).toBe((viaGate as { message: string }).message)
-  })
+  // The comparison against the SDK-shaped `buildCanUseTool` wrapper (same
+  // closure, same decision) lives in
+  // `src/editor/agent-chat-sidecar/can-use-tool.test.ts`, next to the
+  // wrapper itself — this file has no SDK import.
 })
 
 // The Claude Agent SDK sidecar registers Desde's OWN built-ins on its

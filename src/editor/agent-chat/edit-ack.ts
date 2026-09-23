@@ -41,8 +41,6 @@ import type { Stats } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve as resolvePath, sep as pathSep } from 'node:path'
 
-import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
-
 import { resolveRepoPath } from '../agent-tools/read-tools'
 import {
   isProtectedAgentPath,
@@ -164,7 +162,7 @@ export interface OverwriteConflictDetected {
   hashAtWrite: string
 }
 
-export interface BuildCanUseToolOpts {
+export interface BuildToolPermissionGateOpts {
   /** Absolute path to the worktree the SDK is running against. */
   worktreeRoot: string
   /**
@@ -276,11 +274,12 @@ export interface BuildCanUseToolOpts {
  * uniqueness, and stale-base conflict detection.
  *
  * The neutral lane calls this for EVERY tool including Read. The SDK lane
- * reaches the identical closure through `buildCanUseTool` below, so a rule
- * added here is added to both lanes at once and neither can be forgotten.
+ * reaches the identical closure through `buildCanUseTool`
+ * (`src/editor/agent-chat-sidecar/can-use-tool.ts`), so a rule added here is
+ * added to both lanes at once and neither can be forgotten.
  */
 export function buildToolPermissionGate(
-  opts: BuildCanUseToolOpts,
+  opts: BuildToolPermissionGateOpts,
 ): ToolPermissionGate {
   return async (toolName, toolInput, ctx: ToolPermissionContext) => {
     // Always honour a runtime's own out-of-bounds signal. The SDK sets it on
@@ -433,23 +432,13 @@ const NAMESPACED_BUILTINS: ReadonlySet<string> = new Set(
 )
 
 /**
- * The SDK binding. `PermissionResult` and `PermissionDecision` are
- * structurally identical, so this is a type cast around one call, not a
- * translation: there is nowhere for the two lanes to disagree.
+ * The SDK binding lives in `src/editor/agent-chat-sidecar/can-use-tool.ts`
+ * (`buildCanUseTool`), the one place allowed to import
+ * `@anthropic-ai/claude-agent-sdk`. It wraps `buildToolPermissionGate`
+ * above with a type cast around one call — `PermissionResult` and
+ * `PermissionDecision` are structurally identical, so there is nowhere for
+ * the two lanes to disagree.
  */
-export function buildCanUseTool(opts: BuildCanUseToolOpts): CanUseTool {
-  const gate = buildToolPermissionGate(opts)
-  return async (toolName, toolInput, options) => {
-    const blockedPath =
-      options && typeof options.blockedPath === 'string' && options.blockedPath.length > 0
-        ? options.blockedPath
-        : undefined
-    const decision = await gate(toolName, toolInput, {
-      ...(blockedPath !== undefined ? { blockedPath } : {}),
-    })
-    return decision as PermissionResult
-  }
-}
 
 /**
  * Compose a deny message for a rejected Read. When the path resolves
@@ -580,7 +569,7 @@ function findMatchingExternalRoot(
 
 function handleWebFetch(
   toolInput: Record<string, unknown>,
-  opts: BuildCanUseToolOpts,
+  opts: BuildToolPermissionGateOpts,
 ): PermissionDecision {
   const policy = opts.webPolicy
   if (!policy) {
@@ -596,7 +585,7 @@ function handleWebFetch(
   return allow()
 }
 
-function handleWebSearch(opts: BuildCanUseToolOpts): PermissionDecision {
+function handleWebSearch(opts: BuildToolPermissionGateOpts): PermissionDecision {
   const policy = opts.webPolicy
   if (!policy || !policy.webSearchEnabled) {
     return deny(
@@ -616,7 +605,7 @@ function handleWebSearch(opts: BuildCanUseToolOpts): PermissionDecision {
  */
 function handleExtensionTool(
   toolName: string,
-  opts: BuildCanUseToolOpts,
+  opts: BuildToolPermissionGateOpts,
 ): PermissionDecision {
   const rest = toolName.slice('mcp__'.length)
   const sep = rest.indexOf('__')
@@ -960,7 +949,7 @@ async function reconstructEdit(
 
 async function handleWrite(
   toolInput: Record<string, unknown>,
-  opts: BuildCanUseToolOpts,
+  opts: BuildToolPermissionGateOpts,
 ): Promise<PermissionDecision> {
   const built = await reconstructWriteEdit('Write', toolInput, opts.worktreeRoot)
   if (!built.ok) return deny(built.reason)
@@ -1007,7 +996,7 @@ async function handleWrite(
 
 async function handleEdit(
   toolInput: Record<string, unknown>,
-  opts: BuildCanUseToolOpts,
+  opts: BuildToolPermissionGateOpts,
 ): Promise<PermissionDecision> {
   const built = await reconstructWriteEdit('Edit', toolInput, opts.worktreeRoot)
   if (!built.ok) return deny(built.reason)
@@ -1048,7 +1037,7 @@ async function detectOverwriteConflict(args: {
   file: string
   absolutePath: string
   currentHash: string
-  opts: BuildCanUseToolOpts
+  opts: BuildToolPermissionGateOpts
 }): Promise<void> {
   const fileReads = args.opts.getFileReads?.()
   const previous = fileReads?.[args.absolutePath]
@@ -1068,7 +1057,7 @@ async function detectOverwriteConflict(args: {
 
 async function emit(
   payload: EditProposalPayload,
-  opts: BuildCanUseToolOpts,
+  opts: BuildToolPermissionGateOpts,
   advance?: { absPath: string; nextHash: string },
 ): Promise<PermissionDecision> {
   const ack = await opts.emitEditProposal(payload)
