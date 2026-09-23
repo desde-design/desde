@@ -2040,12 +2040,12 @@ async function tryPropEditLLMFallback(args: {
   // mini-turn's own built-in default (the Claude Agent SDK runtime), same as
   // before this change.
   //
-  // `resolveChatRuntime` can throw (an unknown provider id, or a neutral
-  // runtime refused by `EDITOR_NEUTRAL_CHAT=0`). Before this task that exact
-  // configuration returned a clean 422 with an actionable reason; an uncaught
-  // throw here would turn it into a 500 raised deep inside a save flow, which
-  // is the one thing this fallback exists to avoid. Route it back through the
-  // same `escalateToChatOnRefusal` every other refusal in this function uses.
+  // `resolveChatRuntime` can throw (an unknown provider id, or a stale
+  // `runtime: 'sidecar'` request refused by `sidecarRefusal()`). An uncaught
+  // throw here would turn that into a 500 raised deep inside a save flow,
+  // which is the one thing this fallback exists to avoid. Route it back
+  // through the same `escalateToChatOnRefusal` every other refusal in this
+  // function uses.
   let runTurn: RunChatTurn | undefined
   if (args.chatLoaders) {
     try {

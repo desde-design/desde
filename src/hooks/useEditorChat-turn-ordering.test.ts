@@ -269,16 +269,18 @@ interface ServerRun {
  */
 function steerNow(
   channel: ReturnType<typeof createTurnInputChannel>,
-  events: ChatStreamEvent[],
+  _events: ChatStreamEvent[],
   text: string,
 ): void {
+  // Does NOT also synthesize a `steered` event. Task 26: the sidecar
+  // announces a delivered steer ITSELF, from the input channel's
+  // `onAccepted` hook — `runChatTurnSdk` below is handed the real
+  // `emit` that appends to `events`, so pushing one here too would double
+  // it, exactly the "steer at a tool boundary" divergence this file exists
+  // to catch. Matches `buildNeutralCalls`'s identical comment for the
+  // neutral lane, which has emitted its own `steered` since before this
+  // task.
   channel.push(text)
-  events.push({
-    kind: "steered",
-    sessionId: SESSION_ID,
-    userMessage: text,
-    imageCount: 0,
-  })
 }
 
 async function runServer(script: ScriptStep[], repoRoot: string): Promise<ServerRun> {

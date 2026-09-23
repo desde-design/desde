@@ -1,8 +1,11 @@
 /**
  * Which model lists the chat picker gets, and where each comes from.
  *
- * One entry per SERVABLE provider descriptor (`chatRuntimeServable` below),
- * each resolved independently and merged into the response together. Per
+ * One entry per registered provider descriptor, each resolved independently
+ * and merged into the response together (every descriptor's chat runtime can
+ * dispatch today — Task 26 folded the one gated lane, neutral chat, into the
+ * product's only runtime — so nothing filters the set any more; see
+ * `includeDescriptor` below for the seam that still exists for tests). Per
  * provider, three answers are tried in this order (Mo, 2026-09-02, said of
  * Anthropic originally: "add the live functionality and have the hard coded
  * as a back up ... the live list should also work in dev mode, using the
@@ -23,12 +26,6 @@
  * A live list is merged over the static one (`live-model-catalog.ts`), so a
  * model a vendor ships appears here without a code change, and a model the
  * static file still names but the account cannot use does not.
- *
- * A provider whose chat runtime cannot dispatch today is filtered out
- * entirely before any of this runs (`chatRuntimeServable`). It reads the
- * environment only, same as the dispatch half in `chat-runtime-dispatch.ts`
- * (see the comment there for why) — see `chatRuntimeServable`'s own doc
- * comment for why that is the client half of a both-ends gate.
  *
  * **Only a credentialed provider is served** (codex fix, 2026-09-04). A
  * provider whose chat runtime CAN dispatch but has no key and no
@@ -85,7 +82,6 @@ import {
 } from "../../../src/editor/llm-providers/provider-registry.js"
 import type { ProviderDescriptor } from "../../../src/editor/llm-providers/provider-descriptor.js"
 import { getRateCard, UNKNOWN_MODEL_RATE } from "../../../src/editor/llm-providers/rate-cards.js"
-import { isNeutralChatEnabled } from "./dormant-surfaces.js"
 
 /**
  * `source` describes the WEAKEST live source among the providers this
@@ -151,8 +147,11 @@ export interface ModelCatalogResolverDeps {
   log?: (message: string) => void
   /**
    * Which descriptors this resolution may serve at all. Defaults to
-   * `chatRuntimeServable`. Tests override this to reach a second provider
-   * without needing the neutral-chat flag on.
+   * including every registered descriptor — every provider's chat runtime
+   * can dispatch today (Task 26). Kept as a seam for tests that want to
+   * narrow the servable set without touching credentials, e.g. proving the
+   * nothing-credentialed fallback walks precedence rather than trusting
+   * `DEFAULT_PROVIDER_PRECEDENCE[0]` unconditionally.
    */
   includeDescriptor?: (d: ProviderDescriptor) => boolean
 }
@@ -182,24 +181,6 @@ function effortFallbackFor(descriptor: ProviderDescriptor) {
     return (id: string) => (supportsAnthropicAdaptiveThinking(id) ? [...EFFORT_LEVELS] : null)
   }
   return () => descriptor.effort.levels
-}
-
-/**
- * Which providers this resolution may serve at all.
- *
- * A provider whose chat runtime cannot dispatch yet must not appear in the
- * picker, or the picker offers a model the chat handler refuses a second
- * later. That is the client half of a both-ends gate whose server half is
- * `resolveChatRuntime`. Env-only: the resolver is a process-wide singleton
- * created once at import time, with no project config in scope, so there is
- * no `.desde/config.json` key for this gate at all — see
- * `isNeutralChatEnabled`'s own doc comment in `dormant-surfaces.ts` for why.
- * The dispatch half reads the identical environment variable independently,
- * which is what keeps the two halves from drifting.
- */
-export function chatRuntimeServable(descriptor: ProviderDescriptor): boolean {
-  if (descriptor.chatRuntime === "claude-agent-sdk") return true
-  return isNeutralChatEnabled()
 }
 
 /**
@@ -265,7 +246,7 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
   const failureTtlMs = deps.failureTtlMs ?? 60_000
   const timeoutMs = deps.timeoutMs ?? 8_000
   const log = deps.log ?? ((message: string) => console.error(`[model-catalog] ${message}`))
-  const includeDescriptor = deps.includeDescriptor ?? chatRuntimeServable
+  const includeDescriptor = deps.includeDescriptor ?? (() => true)
 
   let cached: { key: string; value: ResolvedModelCatalogs; at: number } | null = null
   let inFlight: { key: string; promise: Promise<ResolvedModelCatalogs> } | null = null
@@ -363,10 +344,10 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
       // it always has — this is display-only.
       //
       // The precedence id itself may not be SERVABLE (`descriptors` is
-      // already filtered by `chatRuntimeServable`, e.g. a neutral-chat-only
-      // provider with the flag off) — pick the first precedence id that IS
-      // in `descriptors`, falling back to whichever descriptor is servable
-      // at all, rather than unconditionally trusting
+      // already filtered by `includeDescriptor`, e.g. a test that narrows
+      // the servable set) — pick the first precedence id that IS in
+      // `descriptors`, falling back to whichever descriptor is servable at
+      // all, rather than unconditionally trusting
       // `DEFAULT_PROVIDER_PRECEDENCE[0]`.
       const precedenceId = DEFAULT_PROVIDER_PRECEDENCE.find((id) =>
         descriptors.some((d) => d.id === id),

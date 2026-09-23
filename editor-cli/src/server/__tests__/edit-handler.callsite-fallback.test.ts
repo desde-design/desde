@@ -345,34 +345,36 @@ describe("the edit-fix mini-turn runs on the project's own provider", () => {
   })
 
   it("a refused chat runtime answers with a clean refusal, not a throw", async () => {
-    vi.stubEnv("EDITOR_NEUTRAL_CHAT", "0")
-    try {
-      const loadRunEditFixMiniTurn = vi.fn(async () => ({
-        runEditFixMiniTurn: async () => {
-          throw new Error("should not be called — resolveChatRuntime refuses first")
-        },
-      }))
-      const loadRunChatTurnNeutral = vi.fn(async () => {
-        throw new Error("should not be called — resolveChatRuntime refuses before any loader runs")
-      })
-      const result = await applyEdit(
-        propEditBodyThatRefuses,
-        dir,
-        { ...applicatorLoaders, loadRunEditFixMiniTurn } as unknown as ApplicatorLoaders,
-        undefined,
-        {
-          llmProviderId: "openai",
-          chatLoaders: { loadRunChatTurnNeutral } as unknown as ChatHandlerLoaders,
-        },
-      )
-      expect(result.ok).toBe(false)
-      expect(result.status).toBeGreaterThanOrEqual(400)
-      expect(result.status).toBeLessThan(500)
-      expect(result.reason).toMatch(/neutral|turned off|not available/i)
-      expect(JSON.stringify(result)).not.toMatch(/at .*\.ts:\d+/)
-      expect(loadRunChatTurnNeutral).not.toHaveBeenCalled()
-    } finally {
-      vi.unstubAllEnvs()
-    }
+    // Task 26 removed the only gate `resolveChatRuntime` used to refuse a
+    // KNOWN provider on (`EDITOR_NEUTRAL_CHAT=0`); every registered provider
+    // now dispatches. The throw path this test pins — a `resolveChatRuntime`
+    // rejection turning into a clean 4xx refusal rather than an uncaught
+    // exception out of `applyEdit` — is still reachable, from an unknown
+    // provider id, which is exactly what `getDescriptor` inside
+    // `resolveChatRuntimeKind` refuses on.
+    const loadRunEditFixMiniTurn = vi.fn(async () => ({
+      runEditFixMiniTurn: async () => {
+        throw new Error("should not be called — resolveChatRuntime refuses first")
+      },
+    }))
+    const loadRunChatTurnNeutral = vi.fn(async () => {
+      throw new Error("should not be called — resolveChatRuntime refuses before any loader runs")
+    })
+    const result = await applyEdit(
+      propEditBodyThatRefuses,
+      dir,
+      { ...applicatorLoaders, loadRunEditFixMiniTurn } as unknown as ApplicatorLoaders,
+      undefined,
+      {
+        llmProviderId: "not-a-real-provider",
+        chatLoaders: { loadRunChatTurnNeutral } as unknown as ChatHandlerLoaders,
+      },
+    )
+    expect(result.ok).toBe(false)
+    expect(result.status).toBeGreaterThanOrEqual(400)
+    expect(result.status).toBeLessThan(500)
+    expect(result.reason).toMatch(/no provider named/i)
+    expect(JSON.stringify(result)).not.toMatch(/at .*\.ts:\d+/)
+    expect(loadRunChatTurnNeutral).not.toHaveBeenCalled()
   })
 })

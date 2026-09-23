@@ -1616,7 +1616,7 @@ describe("the edit-fix mini-turn runs on the project's default provider (Task 43
   // hands the mini-turn, not what the loaded runtime itself does.
   const STUB_CHAT_LOADERS = {
     loadSessionStore: async () => ({}) as never,
-    loadRunChatTurnSdk: async () => ({ runChatTurnSdk: async () => ({}) }) as never,
+    loadRunChatTurnSidecar: async () => ({ runChatTurnSdk: async () => ({}) }) as never,
     loadRunChatTurnNeutral: async () => ({ runChatTurnNeutral: async () => ({}) }) as never,
   }
 
@@ -1680,9 +1680,8 @@ describe("the edit-fix mini-turn runs on the project's default provider (Task 43
   })
 
   it("turns a resolveChatRuntime failure into a 422 refusal instead of an uncaught throw", async () => {
-    // Before this task, a refused or unknown runtime (e.g.
-    // EDITOR_NEUTRAL_CHAT=0 against an OpenAI project, or any other
-    // resolveChatRuntime throw) surfaced as a clean 422 via
+    // A refused or unknown runtime (an unknown provider id, or any other
+    // resolveChatRuntime throw) surfaces as a clean 422 via
     // escalateToChatOnRefusal. An unguarded await turned that into an
     // uncaught exception out of applyEdit. This proves the guard is back:
     // an unresolvable provider id must not crash the save flow.

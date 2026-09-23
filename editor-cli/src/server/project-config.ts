@@ -200,12 +200,6 @@ export interface ProjectConfig {
      * `dormant-surfaces.ts`.
      */
     vscodeLink?: boolean
-    // No `neutralChat` key here. The Desde-owned neutral chat runtime gate
-    // (every non-Anthropic provider's chat dispatch) is now opt-OUT by
-    // default and env-only: `EDITOR_NEUTRAL_CHAT=0` is the only way to turn
-    // it off, and there is deliberately no project-config equivalent. See
-    // `isNeutralChatEnabled`'s doc comment in `dormant-surfaces.ts` for why
-    // a config key here could only ever half-work.
   }
   /**
    * Audit Task 15 — on-disk retention for the growth points that had no
@@ -651,11 +645,6 @@ export async function readProjectConfig(
       }
       out.vscodeLink = co.vscodeLink
     }
-    // No `neutralChat` key: that gate is env-only (`EDITOR_NEUTRAL_CHAT`),
-    // with no project-config equivalent — see the type declaration above.
-    // A stray `neutralChat` key in an existing `.desde/config.json` is
-    // silently ignored here rather than rejected, since it already had no
-    // effect before this change either.
     editor = Object.keys(out).length > 0 ? out : undefined
   }
 

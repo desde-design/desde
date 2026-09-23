@@ -1,10 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ANTHROPIC_MODEL_CATALOG } from '../../../../src/editor/llm-providers/anthropic-model-catalog.js'
 import type { LiveModel } from '../../../../src/editor/llm-providers/live-model-catalog.js'
-import { getDescriptor } from '../../../../src/editor/llm-providers/provider-registry.js'
-import { createModelCatalogResolver, chatRuntimeServable } from '../model-catalog-source.js'
-
-const OPENAI_DESCRIPTOR = getDescriptor('openai')!
+import { createModelCatalogResolver } from '../model-catalog-source.js'
 
 const API_LIST: LiveModel[] = [
   { id: 'claude-opus-5', label: 'Opus 5', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
@@ -145,15 +142,11 @@ describe('createModelCatalogResolver', () => {
 })
 
 describe("the resolver loops the descriptor table", () => {
-  afterEach(() => {
-    delete process.env.EDITOR_NEUTRAL_CHAT
-  })
-
   it("serves every provider whose chat runtime can dispatch, by default", async () => {
-    // The neutral gate is opt-OUT now (Task 40), so with no configuration at
-    // all the OpenAI group is servable and appears alongside Anthropic's —
-    // both are credentialed here. Keyed per provider so neither call ever
-    // reaches a real vendor.
+    // Every registered provider is servable today, so with no configuration
+    // at all the OpenAI group appears alongside Anthropic's — both are
+    // credentialed here. Keyed per provider so neither call ever reaches a
+    // real vendor.
     const resolver = createModelCatalogResolver({
       env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }),
       listViaApi: { anthropic: async () => [], openai: async () => [] },
@@ -161,20 +154,6 @@ describe("the resolver loops the descriptor table", () => {
     })
     const resolved = await resolver.get()
     expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic', 'openai'])
-  })
-
-  it("stops serving a provider whose chat runtime cannot dispatch, once the gate is off", async () => {
-    // OpenAI's descriptor declares `chatRuntime: 'neutral'`. Serving its
-    // catalog while the neutral runtime is off would let the picker offer a
-    // model the chat handler refuses one second later.
-    process.env.EDITOR_NEUTRAL_CHAT = '0'
-    const resolver = createModelCatalogResolver({
-      env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-y' }),
-      listViaApi: async () => [],
-      listViaCli: async () => [],
-    })
-    const resolved = await resolver.get()
-    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic'])
   })
 
   it("serves a second provider's static catalog once it is included", async () => {
@@ -226,9 +205,8 @@ describe("the resolver loops the descriptor table", () => {
   })
 
   it("serves both providers' real catalogs when both are credentialed", async () => {
-    // Explicit, and independent of the neutral gate: this case is about the
-    // CATALOG being right, not about when it is offered. `chatRuntimeServable`
-    // itself is asserted directly, elsewhere.
+    // Explicit: this case is about the CATALOG being right, not about when
+    // it is offered — every registered provider is servable today.
     const resolver = createModelCatalogResolver({
       env: () => ({ ANTHROPIC_API_KEY: 'sk-ant-test', OPENAI_API_KEY: 'sk-test' }),
       listViaApi: { anthropic: async () => [], openai: async () => [] },
@@ -336,51 +314,14 @@ describe('every effort-capable served model carries the vendor default effort', 
   })
 })
 
-describe('chatRuntimeServable', () => {
-  afterEach(() => {
-    delete process.env.EDITOR_NEUTRAL_CHAT
-  })
-
-  it('serves the OpenAI catalog once the neutral gate is on', async () => {
-    // `chatRuntimeServable` is the `includeDescriptor` default, and
-    // production passes nothing, so the gate flipping to opt-OUT (Task 40)
-    // is the whole mechanism by which an OpenAI group appears in the
-    // picker. No handler edit, and no second switch to keep in step with
-    // this one. No ANTHROPIC_API_KEY here, so Anthropic is uncredentialed
-    // and does not appear — only OpenAI, which does.
-    expect(chatRuntimeServable(OPENAI_DESCRIPTOR)).toBe(true)
-    const resolver = createModelCatalogResolver({
-      env: () => ({ OPENAI_API_KEY: 'sk-test' }),
-      listViaApi: { openai: async () => [] },
-      listViaCli: async () => [],
-    })
-    const resolved = await resolver.get()
-    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['openai'])
-  })
-
-  it('does not serve it while the gate is explicitly off', async () => {
-    process.env.EDITOR_NEUTRAL_CHAT = '0'
-    expect(chatRuntimeServable(OPENAI_DESCRIPTOR)).toBe(false)
-    // OpenAI is excluded before credentials are even considered (the gate),
-    // and Anthropic has no key here either, so nothing is credentialed and
-    // the precedence default's static catalog is served alone.
-    const resolver = createModelCatalogResolver({
-      env: () => ({ OPENAI_API_KEY: 'sk-test' }),
-      listViaApi: async () => [],
-      listViaCli: async () => [],
-    })
-    const resolved = await resolver.get()
-    expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic'])
-  })
-
+describe('includeDescriptor narrows the servable set (test-only seam)', () => {
   it('CX7 item 4: the nothing-credentialed fallback picks a SERVABLE precedence id, not DEFAULT_PROVIDER_PRECEDENCE[0] unconditionally', async () => {
     // Anthropic is excluded from THIS resolution's servable set (via
-    // `includeDescriptor`, the same seam the two tests above use), and
-    // nobody is credentialed. `DEFAULT_PROVIDER_PRECEDENCE[0]` is
-    // 'anthropic' — unconditionally trusting it would serve a provider this
-    // resolution was never allowed to serve at all. The fallback must walk
-    // the precedence list for the first id that IS in the servable set
-    // (openai here).
+    // `includeDescriptor`), and nobody is credentialed.
+    // `DEFAULT_PROVIDER_PRECEDENCE[0]` is 'anthropic' — unconditionally
+    // trusting it would serve a provider this resolution was never allowed
+    // to serve at all. The fallback must walk the precedence list for the
+    // first id that IS in the servable set (openai here).
     const resolver = createModelCatalogResolver({
       env: () => ({}),
       listViaApi: async () => [],
@@ -393,10 +334,6 @@ describe('chatRuntimeServable', () => {
 })
 
 describe('every provider is injectable, so no unit test reaches a real vendor', () => {
-  afterEach(() => {
-    delete process.env.EDITOR_NEUTRAL_CHAT
-  })
-
   it('never reaches the network from a unit test, for any provider', async () => {
     const realFetch = globalThis.fetch
     globalThis.fetch = (async (input: RequestInfo | URL) => {

@@ -4,9 +4,8 @@ import {
   isCodeViewEnabled,
   isCanvasEnabled,
   isNotesEnabled,
-  isNeutralChatEnabled,
   isSecretReadsBlocked,
-  chatRuntimeOverride,
+  sidecarRefusal,
 } from "../dormant-surfaces.js"
 
 // Every gate's env var, because this list does double duty: `setEnv` is typed
@@ -18,7 +17,6 @@ const ENV_KEYS = [
   "EDITOR_NOTES",
   "EDITOR_CANVAS",
   "EDITOR_BLOCK_SECRET_READS",
-  "EDITOR_NEUTRAL_CHAT",
 ] as const
 const saved = new Map<string, string | undefined>()
 
@@ -161,65 +159,17 @@ describe("the two gates are independent", () => {
   })
 })
 
-describe("chatRuntimeOverride", () => {
-  it("is undefined when the env var is unset", () => {
-    expect(chatRuntimeOverride({})).toBeUndefined()
+describe("sidecarRefusal", () => {
+  it("names the switch so a caller can act on it", () => {
+    const reason = sidecarRefusal()
+    expect(reason).toContain("EDITOR_USE_CLAUDE_SUBSCRIPTION")
+    expect(reason).toContain("sidecar")
   })
 
-  it("returns 'neutral' only for the exact value 'neutral'", () => {
-    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "neutral" })).toBe("neutral")
-    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "1" })).toBeUndefined()
-    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "true" })).toBeUndefined()
-  })
-
-  it("is a separate switch from isNeutralChatEnabled", () => {
-    // Forcing the override does not depend on the lane's own on/off switch,
-    // and the lane's switch does not itself force a provider onto it.
-    expect(isNeutralChatEnabled()).toBe(true)
-    expect(chatRuntimeOverride({ EDITOR_CHAT_RUNTIME_OVERRIDE: "neutral" })).toBe("neutral")
-  })
-})
-
-describe("isNeutralChatEnabled", () => {
-  it("is ON with no configuration at all", () => {
-    // The inversion, and the one line that changes what users get. Every other
-    // surface in this module is opt-IN because it is unfinished. This one is
-    // finished, so it is opt-OUT: the absent state means enabled.
-    expect(isNeutralChatEnabled()).toBe(true)
-  })
-
-  // No "is off when the project config says so" case: this gate takes no
-  // `DormantSurfaceConfig` at all and has no config-key off-switch. See the
-  // function's own doc comment for why (the model catalog resolver is a
-  // process-wide singleton with no project config in scope, so a config key
-  // could only ever reach the dispatch half). The off-switch this module
-  // must prove is the env var, and proving it through this direct call is
-  // exactly what let the dead config branch go unnoticed before — see
-  // `chatRuntimeServable`'s and `resolveChatRuntime`'s own test suites for
-  // the off-switch proven through the real callers instead.
-
-  it("is off when EDITOR_NEUTRAL_CHAT is exactly 0", () => {
-    const previous = process.env.EDITOR_NEUTRAL_CHAT
-    process.env.EDITOR_NEUTRAL_CHAT = "0"
-    try {
-      expect(isNeutralChatEnabled()).toBe(false)
-    } finally {
-      if (previous === undefined) delete process.env.EDITOR_NEUTRAL_CHAT
-      else process.env.EDITOR_NEUTRAL_CHAT = previous
-    }
-  })
-
-  it("stays on for any other value of the variable", () => {
-    const previous = process.env.EDITOR_NEUTRAL_CHAT
-    process.env.EDITOR_NEUTRAL_CHAT = "yes"
-    try {
-      // Only an exact "0" disables, mirroring the exact-"1" rule the opt-in
-      // surfaces use. A typo must not silently turn chat off for a provider.
-      expect(isNeutralChatEnabled()).toBe(true)
-    } finally {
-      if (previous === undefined) delete process.env.EDITOR_NEUTRAL_CHAT
-      else process.env.EDITOR_NEUTRAL_CHAT = previous
-    }
+  it("reads as a sentence, per the repo's copy rules", () => {
+    const reason = sidecarRefusal()
+    expect(reason).not.toContain("—")
+    expect(reason.endsWith(".")).toBe(true)
   })
 })
 

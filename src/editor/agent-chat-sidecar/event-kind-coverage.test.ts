@@ -55,7 +55,7 @@ describe('ChatStreamEvent kind coverage', () => {
     expect([...ANTHROPIC_ONLY_EVENT_KINDS]).toEqual([])
   })
 
-  it('emits `steered` exactly once per steer, from the side that knows the position', () => {
+  it('emits `steered` exactly once per steer, from the runtime that knows the position', () => {
     // One frame per steer must reach the client: it draws the user bubble on
     // that frame AND cuts the transcript there, so two frames mean a duplicate
     // bubble and a double cut (final review I1), while zero means the live
@@ -63,11 +63,13 @@ describe('ChatStreamEvent kind coverage', () => {
     // (`useEditorChat-turn-ordering.test.ts`, the "steer at a tool boundary"
     // row, which is how deleting the neutral emitter was caught).
     //
-    // Which side emits is decided by which side knows WHERE the steer landed.
-    // The SDK runtime cannot observe delivery, so the route emits at accept
-    // time for that lane. The neutral runtime appends the message itself at a
-    // step boundary and stamps `afterAssistantBlocks` there, so it emits, and
-    // the route stands down for that lane via `LiveTurn.runtimeEmitsSteered`.
+    // Task 26: the route no longer arbitrates who emits. BOTH runtimes now
+    // announce a delivered steer themselves, at the moment each one actually
+    // knows where it landed — the neutral loop at the step boundary where it
+    // drains the channel, the sidecar in the input channel's `onAccepted`
+    // hook (its only moment, since a sidecar turn has no later step boundary
+    // the way the neutral loop does). The route (`handleSteerRequest` in
+    // `chat-handler.ts`) emits none at all.
     //
     // Each runtime's own script drives one lane in isolation and never sees
     // the other side's frame, so neither can catch a regression here; this
@@ -83,15 +85,10 @@ describe('ChatStreamEvent kind coverage', () => {
     )
     const emitters = (src: string): number => (src.match(/kind:\s*['"]steered['"]/g) ?? []).length
 
-    // The neutral lane's emitter, and the route's, and no third one.
+    // Both runtimes' own emitters, and none on the route.
     expect(emitters(neutralSrc)).toBe(1)
-    expect(emitters(sdkSrc)).toBe(0)
-    expect(emitters(routeSrc)).toBe(1)
-
-    // The route's single emitter is guarded, so a neutral turn gets the
-    // runtime's frame and only that one. A guard that stopped matching this
-    // would put two frames back on the OpenAI lane.
-    expect(routeSrc).toMatch(/if\s*\(!live\.runtimeEmitsSteered\)\s*\{/)
+    expect(emitters(sdkSrc)).toBe(1)
+    expect(emitters(routeSrc)).toBe(0)
   })
 
   it('accounts for every declared kind', async () => {

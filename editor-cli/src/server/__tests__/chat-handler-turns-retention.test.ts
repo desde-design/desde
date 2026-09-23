@@ -179,20 +179,21 @@ describe("handleChatRequest — turns-retention wiring (audit Task 15 codex roun
     // stale pre-save snapshot).
     let capturedSessionAtCallTime: ChatSession | undefined
     const loaders: ChatHandlerLoaders = {
-      loadRunChatTurnNeutral: async () => ({
-        runChatTurnNeutral: async () => {
-          throw new Error(
-            "this suite's turns run on the SDK loader, not neutral",
-          )
-        },
-      }),
+      loadRunChatTurnSidecar: async () =>
+        ({
+          runChatTurnSdk: async () => {
+            throw new Error(
+              "this suite's turns run on the neutral loader (the default dispatch for a keyed Anthropic session), not the sidecar",
+            )
+          },
+        }) as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnSidecar"]>>,
       // REAL session-store.ts — no mocking. The whole point is to
       // exercise saveSession's actual archive/trim logic.
       loadSessionStore: () =>
         import("../../../../src/editor/agent-chat/session-store.js"),
-      loadRunChatTurnSdk: async () => {
+      loadRunChatTurnNeutral: async () => {
         return {
-          runChatTurnSdk: async (callOpts: {
+          runChatTurnNeutral: async (callOpts: {
             session: ChatSession
             emit: (ev: { kind: string; [k: string]: unknown }) => void
           }) => {
@@ -200,17 +201,16 @@ describe("handleChatRequest — turns-retention wiring (audit Task 15 codex roun
             const newTurn = turn("t9", 1)
             callOpts.emit({ kind: "turn_complete", turnId: newTurn.id, stopReason: "end_turn" })
             const updatedSession: ChatSession = {
-              // Mirrors run-chat-turn-sdk.ts's real `updatedSession`
-              // construction: spread the INPUT session, append ONE
-              // new turn. Nothing here touches archivedTurnCount/
-              // archivedCostUsd — they ride through unchanged, exactly
-              // like the real orchestrator.
+              // Mirrors the real runtime's `updatedSession` construction:
+              // spread the INPUT session, append ONE new turn. Nothing here
+              // touches archivedTurnCount/archivedCostUsd — they ride
+              // through unchanged, exactly like the real orchestrator.
               ...callOpts.session,
               turns: [...callOpts.session.turns, newTurn],
             }
             return { session: updatedSession, turn: newTurn }
           },
-        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>>
+        } as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>>
       },
     }
 

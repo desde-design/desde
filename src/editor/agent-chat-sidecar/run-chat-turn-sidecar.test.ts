@@ -1166,6 +1166,48 @@ describe('runChatTurnSdk', () => {
       expect(resubmitsFrom(events)).toEqual([])
     })
 
+    it('emits `steered` from the channel\'s onAccepted hook when a steer is accepted mid-turn', async () => {
+      // Task 26: the sidecar announces a delivered steer ITSELF — the
+      // `/api/editor/chat/steer` route emits nothing for either lane any
+      // more. `onAccepted` fires at accept time (`channel.push`), which is
+      // this runtime's only observation point: a sidecar turn has no later
+      // step boundary the way the neutral loop does.
+      const delivered: string[] = []
+      const channel = createTurnInputChannel()
+
+      queryMock.mockImplementationOnce((args) =>
+        (async function* () {
+          const consumed = consumeEagerly(args.prompt, delivered)
+          yield assistantMessage('msg_1')
+          channel.push('also fix the header')
+          await settle()
+          yield assistantMessage('msg_2')
+          yield RESULT
+          await consumed
+        })(),
+      )
+
+      const events: ChatStreamEvent[] = []
+      await runChatTurnSdk({
+        bridge: makeBridge(),
+        worktreeRoot: root,
+        session: makeEmptySession('proj-steered'),
+        userMessage: 'fix the footer',
+        inputChannel: channel,
+        emit: (e) => events.push(e),
+      })
+
+      const steered = events.filter((e) => e.kind === 'steered')
+      expect(steered).toEqual([
+        {
+          kind: 'steered',
+          sessionId: 'proj-steered',
+          userMessage: 'also fix the header',
+          imageCount: 0,
+        },
+      ])
+    })
+
     it('asks for a resubmit when the turn ends with no new message after the steer', async () => {
       // THE uncovered interleaving. The steer was written to the child's stdin
       // — `delivered` proves it left this process — and the model then went

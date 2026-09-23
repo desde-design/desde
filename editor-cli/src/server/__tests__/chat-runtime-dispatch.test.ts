@@ -1,83 +1,80 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import * as dormantSurfaces from "../dormant-surfaces.js"
-import { resolveChatRuntime } from "../chat-runtime-dispatch.js"
+import { resolveChatRuntime, resolveChatRuntimeKind } from "../chat-runtime-dispatch.js"
 
-const sdkRuntime = vi.fn()
+const sidecarRuntime = vi.fn()
 const neutralRuntime = vi.fn()
 
 function loaders(overrides: Record<string, unknown> = {}) {
   return {
     loadSessionStore: vi.fn(),
-    loadRunChatTurnSdk: vi.fn(async () => ({ runChatTurnSdk: sdkRuntime })),
-    // Required now that `agent-chat-neutral/` exists — a real caller always
-    // supplies this. Overridable per test so a case can swap in its own spy.
+    loadRunChatTurnSidecar: vi.fn(async () => ({ runChatTurnSdk: sidecarRuntime })),
     loadRunChatTurnNeutral: vi.fn(async () => ({ runChatTurnNeutral: neutralRuntime })),
     ...overrides,
   } as never
 }
 
 afterEach(() => {
-  delete process.env.EDITOR_NEUTRAL_CHAT
-  delete process.env.EDITOR_CHAT_RUNTIME_OVERRIDE
+  delete process.env.ANTHROPIC_API_KEY
+  delete process.env.EDITOR_USE_CLAUDE_SUBSCRIPTION
   vi.clearAllMocks()
 })
 
+describe("resolveChatRuntimeKind", () => {
+  it("is neutral for OpenAI regardless of the subscription opt-in", () => {
+    process.env.EDITOR_USE_CLAUDE_SUBSCRIPTION = "1"
+    expect(resolveChatRuntimeKind("openai", process.env)).toBe("neutral")
+  })
+
+  it("is neutral for Anthropic with a configured key, even with the opt-in set", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test"
+    process.env.EDITOR_USE_CLAUDE_SUBSCRIPTION = "1"
+    expect(resolveChatRuntimeKind("anthropic", process.env)).toBe("neutral")
+  })
+
+  it("is neutral for Anthropic with no key and no opt-in", () => {
+    expect(resolveChatRuntimeKind("anthropic", process.env)).toBe("neutral")
+  })
+
+  it("is sidecar for Anthropic with the subscription opt-in and no key", () => {
+    process.env.EDITOR_USE_CLAUDE_SUBSCRIPTION = "1"
+    expect(resolveChatRuntimeKind("anthropic", process.env)).toBe("sidecar")
+  })
+
+  it("throws for a provider nobody registered", () => {
+    expect(() => resolveChatRuntimeKind("moonshot", process.env)).toThrow(/moonshot/)
+  })
+})
+
 describe("resolveChatRuntime", () => {
-  it("returns the SDK runtime for a claude-agent-sdk provider", async () => {
-    expect(await resolveChatRuntime("anthropic", loaders())).toBe(sdkRuntime)
+  it("uses the neutral loader for OpenAI", async () => {
+    expect(await resolveChatRuntime("openai", loaders())).toBe(neutralRuntime)
   })
 
-  /**
-   * The dispatch half of a both-ends gate. The client half is that the catalog
-   * resolver does not serve a neutral provider's group, so no picker offers
-   * this model. A stale or hand-built request must be refused here anyway.
-   *
-   * The gate is opt-OUT now (Task 40): the flag must be explicitly set to
-   * "0" to reach this refusal, not merely left unset.
-   */
-  it("refuses a neutral provider while the flag is explicitly off, naming the flag", async () => {
-    process.env.EDITOR_NEUTRAL_CHAT = "0"
-    await expect(resolveChatRuntime("openai", loaders())).rejects.toThrow(
-      /EDITOR_NEUTRAL_CHAT/,
-    )
+  it("uses the neutral loader for Anthropic with a configured key", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test"
+    expect(await resolveChatRuntime("anthropic", loaders())).toBe(neutralRuntime)
   })
 
-  it("does not import the SDK module when it refuses", async () => {
-    process.env.EDITOR_NEUTRAL_CHAT = "0"
-    const l = loaders()
-    await expect(resolveChatRuntime("openai", l)).rejects.toThrow()
-    expect((l as unknown as { loadRunChatTurnSdk: ReturnType<typeof vi.fn> }).loadRunChatTurnSdk)
-      .not.toHaveBeenCalled()
+  it("uses the sidecar loader for Anthropic opted into the subscription with no key", async () => {
+    process.env.EDITOR_USE_CLAUDE_SUBSCRIPTION = "1"
+    expect(await resolveChatRuntime("anthropic", loaders())).toBe(sidecarRuntime)
   })
 
-  it("uses the neutral loader with no configuration at all", async () => {
-    const l = loaders()
-    expect(await resolveChatRuntime("openai", l)).toBe(neutralRuntime)
-  })
-
-  it("uses the neutral loader once the flag is explicitly on", async () => {
-    process.env.EDITOR_NEUTRAL_CHAT = "1"
-    const l = loaders()
-    expect(await resolveChatRuntime("openai", l)).toBe(neutralRuntime)
-  })
-
-  it("never touches the SDK loader on a neutral dispatch", async () => {
+  it("never touches the sidecar loader on a neutral dispatch", async () => {
     const l = loaders()
     await resolveChatRuntime("openai", l)
-    expect((l as unknown as { loadRunChatTurnSdk: ReturnType<typeof vi.fn> }).loadRunChatTurnSdk)
-      .not.toHaveBeenCalled()
+    expect(
+      (l as unknown as { loadRunChatTurnSidecar: ReturnType<typeof vi.fn> }).loadRunChatTurnSidecar,
+    ).not.toHaveBeenCalled()
   })
 
-  it("lets the dev override force the neutral lane for an Anthropic session", async () => {
-    process.env.EDITOR_CHAT_RUNTIME_OVERRIDE = "neutral"
+  it("never touches the neutral loader on a sidecar dispatch", async () => {
+    process.env.EDITOR_USE_CLAUDE_SUBSCRIPTION = "1"
     const l = loaders()
-    expect(await resolveChatRuntime("anthropic", l)).toBe(neutralRuntime)
-  })
-
-  it("refuses the dev override too while the flag is explicitly off", async () => {
-    process.env.EDITOR_NEUTRAL_CHAT = "0"
-    process.env.EDITOR_CHAT_RUNTIME_OVERRIDE = "neutral"
-    await expect(resolveChatRuntime("anthropic", loaders())).rejects.toThrow(/dormant/i)
+    await resolveChatRuntime("anthropic", l)
+    expect(
+      (l as unknown as { loadRunChatTurnNeutral: ReturnType<typeof vi.fn> }).loadRunChatTurnNeutral,
+    ).not.toHaveBeenCalled()
   })
 
   it("refuses a provider nobody registered", async () => {
@@ -85,17 +82,34 @@ describe("resolveChatRuntime", () => {
   })
 
   /**
-   * `resolveChatRuntime` takes no project-config argument today, so there is
-   * nothing for a caller to widen the gate with directly. What pins the rule
-   * is the call site inside it: it must always call the zero-argument
-   * `isNeutralChatEnabled()`, never a variant that threads a project config
-   * through, so a later refactor cannot silently let `.desde/config.json`
-   * open a gate that today only `EDITOR_NEUTRAL_CHAT` can.
+   * The rare stale client: it saw the sidecar available (opt-in on, no key)
+   * a moment ago and asks for it by name. If the switch has since gone off —
+   * a key got configured, or the opt-in got unset — the computed kind is
+   * `'neutral'` and this refuses rather than silently downgrading the turn
+   * onto a runtime the caller never asked to run on.
    */
-  it("reads the environment only: isNeutralChatEnabled is called with no arguments", async () => {
-    process.env.EDITOR_NEUTRAL_CHAT = "0"
-    const spy = vi.spyOn(dormantSurfaces, "isNeutralChatEnabled")
-    await expect(resolveChatRuntime("openai", loaders())).rejects.toThrow(/neutral/i)
-    expect(spy).toHaveBeenCalledWith()
+  it("refuses a stale sidecar request once the switch is off, naming the switch", async () => {
+    // No EDITOR_USE_CLAUDE_SUBSCRIPTION set: the switch is off, so the
+    // computed kind is neutral even though the request explicitly names the
+    // sidecar.
+    await expect(
+      resolveChatRuntime("anthropic", loaders(), "sidecar"),
+    ).rejects.toThrow(/EDITOR_USE_CLAUDE_SUBSCRIPTION/)
+  })
+
+  it("does not load either runtime when it refuses a stale sidecar request", async () => {
+    const l = loaders()
+    await expect(resolveChatRuntime("anthropic", l, "sidecar")).rejects.toThrow()
+    expect(
+      (l as unknown as { loadRunChatTurnSidecar: ReturnType<typeof vi.fn> }).loadRunChatTurnSidecar,
+    ).not.toHaveBeenCalled()
+    expect(
+      (l as unknown as { loadRunChatTurnNeutral: ReturnType<typeof vi.fn> }).loadRunChatTurnNeutral,
+    ).not.toHaveBeenCalled()
+  })
+
+  it("a sidecar request is a no-op once the computed kind already agrees", async () => {
+    process.env.EDITOR_USE_CLAUDE_SUBSCRIPTION = "1"
+    expect(await resolveChatRuntime("anthropic", loaders(), "sidecar")).toBe(sidecarRuntime)
   })
 })

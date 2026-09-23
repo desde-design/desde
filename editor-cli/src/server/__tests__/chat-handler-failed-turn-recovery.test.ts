@@ -101,15 +101,18 @@ function makeLoaders(opts: {
   onDisk?: () => ChatSession
 }): ChatHandlerLoaders {
   return {
-    loadRunChatTurnSdk: async () =>
-      ({ runChatTurnSdk: opts.run }) as unknown as Awaited<
-        ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>
+    loadRunChatTurnNeutral: async () =>
+      ({ runChatTurnNeutral: opts.run }) as unknown as Awaited<
+        ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>
       >,
-    loadRunChatTurnNeutral: async () => ({
-      runChatTurnNeutral: async () => {
-        throw new Error("makeLoaders: this suite's turns run on the SDK loader, not neutral")
-      },
-    }),
+    loadRunChatTurnSidecar: async () =>
+      ({
+        runChatTurnSdk: async () => {
+          throw new Error(
+            "makeLoaders: this suite's turns run on the neutral loader (the default dispatch for a keyed Anthropic session), not the sidecar",
+          )
+        },
+      }) as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnSidecar"]>>,
     loadSessionStore: async () =>
       ({
         loadSession: async () => ({
@@ -183,13 +186,13 @@ describe("chat handler — a turn that dies in the handler", () => {
     })
     let firstSave = true
     const loaders = {
-      loadRunChatTurnSdk: async () =>
+      loadRunChatTurnNeutral: async () =>
         ({
-          runChatTurnSdk: async () => ({
+          runChatTurnNeutral: async () => ({
             session: withRunnerTurn(),
             turn: runnerTurn,
           }),
-        }) as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>>,
+        }) as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>>,
       loadSessionStore: async () =>
         ({
           // Disk already has the runner's turn — the save landed before

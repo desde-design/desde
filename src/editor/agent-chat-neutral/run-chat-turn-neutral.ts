@@ -686,11 +686,11 @@ async function runInner(
           // it can report is exact, not an approximation from whenever the
           // steer was accepted.
           //
-          // This lane emits `steered` ITSELF, and the steer route suppresses
-          // its own frame for a neutral turn (`chat-handler.ts`, keyed on
-          // `LiveTurn.runtimeEmitsSteered`) so exactly one frame reaches the
-          // client per steer. The emitter has to be the side that knows WHERE
-          // the steer landed: the client cuts its transcript on this frame,
+          // This lane emits `steered` ITSELF, and the steer route
+          // (`handleSteerRequest` in `chat-handler.ts`) never emits one of
+          // its own for either lane (Task 26) — so exactly one frame reaches
+          // the client per steer. The emitter has to be the side that knows
+          // WHERE the steer landed: the client cuts its transcript on this frame,
           // and the position recorded a line above is stamped at this same
           // moment. Emitting from the route instead moves the live cut to
           // accept time, which is a different moment from the position

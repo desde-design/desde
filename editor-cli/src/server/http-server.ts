@@ -458,12 +458,6 @@ export interface HttpServerOptions {
      * the whole gate here.
      */
     vscodeLink?: boolean
-    // No `neutralChat` field here. That gate is opt-OUT and env-only
-    // (`EDITOR_NEUTRAL_CHAT=0` disables it) with no project-config
-    // equivalent, so there is nothing for the bootstrap to surface: the
-    // model catalog response is what tells the client whether the OpenAI
-    // group exists at all. See `isNeutralChatEnabled` in
-    // `dormant-surfaces.ts`.
   }
   /**
    * Resolved read-roots registry for the chat handler's git tools.

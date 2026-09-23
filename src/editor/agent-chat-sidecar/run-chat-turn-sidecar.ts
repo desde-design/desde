@@ -623,6 +623,19 @@ async function runChatTurnSdkInner(
           // here — same rule as the turn's own opening images.
           afterAssistantBlocks: assistantContent.length,
         })
+        // Exactly one `steered` frame must reach the client per steer: the
+        // client draws the bubble on it AND cuts the transcript there. This
+        // hook is the only moment this runtime knows where the steer landed
+        // (accept time is all a sidecar turn ever has — there is no later
+        // step boundary the way the neutral loop has one), so it emits here
+        // instead of leaving it to `/api/editor/chat/steer` to guess. The
+        // route itself emits nothing for either lane any more (Task 26).
+        opts.emit({
+          kind: 'steered',
+          sessionId: opts.session.id.sessionId,
+          userMessage: steer.text,
+          imageCount: steer.images?.length ?? 0,
+        })
       },
     },
   )
