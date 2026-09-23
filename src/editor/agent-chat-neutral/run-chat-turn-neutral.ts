@@ -956,6 +956,12 @@ async function runOneTool(
         `${call.name} was not run: the turn was stopped while this call was being checked.`,
       )
     }
+    const ctx = { ...(signal ? { signal } : {}), toolUseId: call.id }
+    // An MCP server's tool carries its own JSON Schema and no zod shape, and
+    // the server validates its own arguments. Parsing against the empty
+    // `inputShape` would not check anything: `z.object({})` STRIPS unknown
+    // keys, so every argument the model sent would be dropped on the way in.
+    if (spec.inputJsonSchema) return await spec.handler(input, ctx)
     const parsed = z.object(spec.inputShape).safeParse(input)
     if (!parsed.success) {
       return errResult(
@@ -964,10 +970,7 @@ async function runOneTool(
           .join('; ')}`,
       )
     }
-    return await spec.handler(parsed.data as Record<string, unknown>, {
-      ...(signal ? { signal } : {}),
-      toolUseId: call.id,
-    })
+    return await spec.handler(parsed.data as Record<string, unknown>, ctx)
   } catch (err) {
     return errResult(
       `${call.name} failed: ${err instanceof Error ? err.message : String(err)}`,

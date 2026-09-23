@@ -54,11 +54,26 @@ export interface ToolSpec {
   description: string
   /** Zod raw shape, as the SDK's `tool()` third argument. `{}` for no input. */
   inputShape: z.ZodRawShape
+  /**
+   * A JSON Schema that REPLACES `inputShape` on the wire, when set.
+   *
+   * Only an MCP server's tool sets this (`kind: 'extension'`). Its schema
+   * arrives as JSON Schema from the server, and there is no zod shape to
+   * convert. The server validates its own arguments, so the neutral loop
+   * skips its zod parse for a spec that carries this and passes the model's
+   * input through as sent. `inputShape` is `{}` on such a spec.
+   */
+  inputJsonSchema?: Record<string, unknown>
   handler(
     input: Record<string, unknown>,
     ctx: ToolHandlerContext,
   ): Promise<ToolHandlerResult>
-  kind: 'editor' | 'builtin'
+  /**
+   * `editor` and `builtin` are Desde's own tools. `extension` is a tool from
+   * a customer MCP server (Figma, `.mcp.json`), connected per turn by
+   * `agent-chat-neutral/mcp-client-tools.ts`.
+   */
+  kind: 'editor' | 'builtin' | 'extension'
 }
 
 /**
@@ -82,9 +97,14 @@ export function toToolDefs(specs: readonly ToolSpec[]): FunctionToolDef[] {
       throw new Error(`toToolDefs: duplicate tool name '${spec.name}'`)
     }
     seen.add(spec.name)
-    const schema = z.toJSONSchema(z.object(spec.inputShape), {
-      io: 'input',
-    }) as Record<string, unknown>
+    // A copy either way, so deleting `$schema` never reaches the caller's
+    // object. An MCP server's schema is sent as the server wrote it, less that
+    // one key: it is rejected for the same reason on either path.
+    const schema = spec.inputJsonSchema
+      ? { ...spec.inputJsonSchema }
+      : (z.toJSONSchema(z.object(spec.inputShape), {
+          io: 'input',
+        }) as Record<string, unknown>)
     delete schema.$schema
     return {
       name: spec.name,
