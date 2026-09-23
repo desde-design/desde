@@ -95,20 +95,30 @@ export interface PayloadChildOptions {
   /** Base environment to spawn with. Defaults to `process.env`; tests override to keep the check hermetic. */
   env?: NodeJS.ProcessEnv
   /**
-   * The desktop-managed `claude` runtime's app-support root (see
-   * `claude-runtime-installer.ts` / `../src/editor/llm-providers/
-   * resolve-claude-executable.ts`) — set as `EDITOR_CLAUDE_RUNTIME_DIR` on
-   * the launcher child. A plain path string, known SYNCHRONOUSLY at spawn
-   * time (no need to wait for the install itself, which may still be
-   * running in the background) — the CLI-side resolver does its own live
-   * filesystem check against it on every `query()` call, so it doesn't
-   * matter whether the actual binary lands before or after this spawn.
+   * The desktop-managed `claude` runtime's WELL-KNOWN binary path (see
+   * `claude-runtime-installer.ts` / `claude-runtime-controller.ts`'s
+   * `getClaudeExecutablePath()`) — set as `EDITOR_CLAUDE_EXECUTABLE_PATH`
+   * on the launcher child. A plain path string, known SYNCHRONOUSLY at
+   * spawn time from the app-support dir + SDK version alone (no need to
+   * wait for the install itself, which may still be running in the
+   * background) — the sidecar's `resolveClaudeOnPath` does its own live
+   * filesystem check against this exact path on every call
+   * (`accessSync`/`statSync`, never cached), so it doesn't matter whether
+   * the actual binary lands before or after this spawn: a turn attempted
+   * before install finishes just finds nothing there yet, and the next one
+   * after install finishes finds it.
+   *
    * Env inherits to the launcher's own per-project grandchildren the same
    * way `ELECTRON_RUN_AS_NODE` already does (see this file's own module
    * doc comment, C2). Omitted in a plain terminal-CLI run — this option
-   * only ever gets set by `main.ts`.
+   * only ever gets set by `main.ts`. This is the bridge that keeps
+   * desktop's subscription lane working now that the shared sidecar
+   * resolver reads `EDITOR_CLAUDE_EXECUTABLE_PATH` / `PATH` instead of
+   * `EDITOR_CLAUDE_RUNTIME_DIR` (task 24 of the chat-runtime-consolidation
+   * series); it goes away with the rest of the desktop installer in a
+   * later task in that series.
    */
-  claudeRuntimeAppSupportDir?: string
+  claudeExecutablePath?: string
   /**
    * Injected for tests — a fake tracker (fake killer, short grace period) in
    * place of a real one. Production callers never pass this.
@@ -133,25 +143,26 @@ export async function spawnPayloadChild(opts: PayloadChildOptions): Promise<Payl
     ...(opts.shellPort !== undefined ? ["--shell-port", String(opts.shellPort)] : []),
   ]
 
-  // Never let an inherited EDITOR_CLAUDE_EXECUTABLE_PATH reach the child:
+  // Never let an INHERITED EDITOR_CLAUDE_EXECUTABLE_PATH reach the child:
   // Electron inherits its launch environment (a Terminal-started app gets
-  // the shell's exports), and the resolver's escape-hatch branch would
-  // otherwise hand that path — ANY executable, content-unverified — to the
-  // SDK's spawn. The resolver itself already ignores the override whenever
-  // EDITOR_CLAUDE_RUNTIME_DIR is set (the class fix, covering grandchildren
-  // too); this scrub is defense in depth at the one spawn seam desktop/
-  // owns. Delete-after-spread, not `undefined`-assignment: spawn() passes
-  // an `undefined` value through as the STRING "undefined" on some
-  // platforms, and either way the key must simply not exist.
+  // the shell's exports), and the sidecar resolver's override branch would
+  // otherwise hand that inherited path — ANY executable, content-unverified
+  // — to the SDK's spawn. So the value is always scrubbed first, THEN set
+  // back to the desktop's OWN verified path when one is given — the
+  // opposite of trusting whatever arrived from outside, which is exactly
+  // what this scrub defends against. Delete-then-reassign, not a
+  // conditional spread: spawn() passes an `undefined` value through as the
+  // STRING "undefined" on some platforms, and either way an inherited key
+  // must simply not survive un-overwritten.
   const childEnv: NodeJS.ProcessEnv = {
     ...(opts.env ?? process.env),
     ELECTRON_RUN_AS_NODE: "1",
     EDITOR_PAYLOAD_ROOT: opts.payloadRoot,
-    ...(opts.claudeRuntimeAppSupportDir
-      ? { EDITOR_CLAUDE_RUNTIME_DIR: opts.claudeRuntimeAppSupportDir }
-      : {}),
   }
   delete childEnv.EDITOR_CLAUDE_EXECUTABLE_PATH
+  if (opts.claudeExecutablePath) {
+    childEnv.EDITOR_CLAUDE_EXECUTABLE_PATH = opts.claudeExecutablePath
+  }
 
   const child = spawn(opts.execPath, args, {
     cwd: opts.cwd,

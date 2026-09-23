@@ -18,6 +18,7 @@ import {
   type ClaudeRuntimeInstallCause,
   type EnsureClaudeRuntimeOptions,
 } from "./claude-runtime-installer.js"
+import { resolveClaudeExecutablePathIn, resolveClaudeRuntimeDir } from "./claude-runtime-location.js"
 
 export interface ClaudeRuntimeState {
   phase: "checking" | "downloading" | "ready" | "error"
@@ -37,6 +38,25 @@ export interface ClaudeRuntimeController {
    * action; they're the exact same call.
    */
   ensure(): void
+  /**
+   * The WELL-KNOWN path `ensure()` verifies against — the same
+   * `resolveClaudeExecutablePathIn(resolveClaudeRuntimeDir(...))`
+   * computation `ensureClaudeRuntime` does internally before it does any
+   * I/O. Computed once at construction, from `appSupportDir` + `sdkVersion`
+   * alone, so it is available IMMEDIATELY, independent of whether `ensure()`
+   * has been called yet or has finished — `main.ts` reads it synchronously,
+   * right after firing `ensure()` in the background, to hand the launcher
+   * child a value to pass through as `EDITOR_CLAUDE_EXECUTABLE_PATH`
+   * (`child.ts`'s `claudeExecutablePath`). This is deliberately NOT gated on
+   * install success: the sidecar resolver does its own live
+   * exists-and-is-a-file check against this exact path on every call, so a
+   * path that names nothing YET (install still running, or never
+   * attempted) is the correct value to hand down — the same "known
+   * synchronously, checked live forever after" shape the old
+   * `EDITOR_CLAUDE_RUNTIME_DIR` design used, just narrowed from a directory
+   * to the one file inside it.
+   */
+  getClaudeExecutablePath(): string
 }
 
 export interface CreateClaudeRuntimeControllerOptions {
@@ -54,6 +74,13 @@ export function createClaudeRuntimeController(
   let state: ClaudeRuntimeState = { phase: "checking" }
   const listeners = new Set<(state: ClaudeRuntimeState) => void>()
   let inFlight = false
+
+  // Pure path math, computed once — see getClaudeExecutablePath's doc
+  // comment for why this must NOT wait on ensure() resolving.
+  const claudeExecutablePath = resolveClaudeExecutablePathIn({
+    runtimeDir: resolveClaudeRuntimeDir({ appSupportDir: opts.appSupportDir, sdkVersion: opts.sdkVersion }),
+    platform: process.platform,
+  })
 
   function setState(next: ClaudeRuntimeState): void {
     state = next
@@ -94,5 +121,6 @@ export function createClaudeRuntimeController(
       return () => listeners.delete(cb)
     },
     ensure,
+    getClaudeExecutablePath: () => claudeExecutablePath,
   }
 }

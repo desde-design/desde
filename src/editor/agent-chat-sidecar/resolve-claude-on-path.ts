@@ -19,7 +19,7 @@
  * `llm-boot-graph-sdk-laziness.test.ts`).
  */
 
-import { accessSync, constants as fsConstants } from "node:fs"
+import { accessSync, constants as fsConstants, statSync } from "node:fs"
 import { delimiter as pathDelimiter, join as joinPath } from "node:path"
 
 /**
@@ -29,10 +29,21 @@ import { delimiter as pathDelimiter, join as joinPath } from "node:path"
 export const SIDECAR_NO_BINARY_MESSAGE =
   "The Claude subscription path needs the claude command line tool on your PATH. Install Claude Code, or turn EDITOR_USE_CLAUDE_SUBSCRIPTION off and add an API key from the settings gear."
 
+/**
+ * `accessSync(X_OK)` alone says nothing about what KIND of thing is at
+ * `path` — a directory named `claude` (which `PATH` can easily contain,
+ * e.g. a build output dir, a git worktree, an unrelated package) is
+ * executable-bit-set by convention (that bit means "traversable" for a
+ * directory) and would pass an access-only check, then fail when the SDK
+ * actually tries to spawn it. `statSync(path).isFile()` rules that out
+ * before the caller commits to this candidate; any stat error (missing,
+ * permission denied, a broken symlink) is treated the same as "not it" so
+ * the `PATH` walk continues to the next entry instead of throwing.
+ */
 function isExecutableFile(path: string): boolean {
   try {
     accessSync(path, fsConstants.X_OK)
-    return true
+    return statSync(path).isFile()
   } catch {
     return false
   }
@@ -51,7 +62,15 @@ function candidateFileNames(platform: NodeJS.Platform): string[] {
  * only requirement is that the path names an executable file; unlike the old
  * desktop-app resolver, there is no runtime-dir gate on when this override is
  * honoured, because there is no longer a well-known verified path to route
- * around.
+ * around. (The old resolver's "ignore the override while a runtime dir is
+ * set" guard defended against an INHERITED override letting a caller skip
+ * verification of a bundled runtime — there is no verification left to skip.
+ * The desktop app now sets this variable deliberately, to the path its own
+ * installer already verified — see `desktop/child.ts` — and scrubs any
+ * value it inherited from its own launch environment before doing so, which
+ * is the equivalent protection in the new shape: this module trusts
+ * whatever value is in `env` because the one caller who sets it on purpose
+ * is also the one who cleans up anyone else's attempt to.)
  *
  * Otherwise walks `env.PATH`, split on the platform's `path.delimiter`,
  * checking each directory for an executable `claude` (or, on win32,

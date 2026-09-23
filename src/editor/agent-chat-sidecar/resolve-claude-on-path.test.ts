@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter as pathDelimiter, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -64,6 +64,25 @@ describe("resolveClaudeOnPath", () => {
     writeFileSync(join(dir, "claude"), FIXTURE_SCRIPT, { mode: 0o644 })
 
     expect(resolveClaudeOnPath({ PATH: dir })).toBeUndefined()
+  })
+
+  it("skips a directory named claude and keeps walking later PATH entries", () => {
+    const withDir = makeTempDir()
+    mkdirSync(join(withDir, "claude"))
+
+    const withShim = makeTempDir()
+    const shim = writeExecutable(withShim, "claude")
+
+    expect(
+      resolveClaudeOnPath({ PATH: [withDir, withShim].join(pathDelimiter) }),
+    ).toBe(shim)
+  })
+
+  it("returns undefined when PATH names only a directory called claude", () => {
+    const withDir = makeTempDir()
+    mkdirSync(join(withDir, "claude"))
+
+    expect(resolveClaudeOnPath({ PATH: withDir })).toBeUndefined()
   })
 
   describe("EDITOR_CLAUDE_EXECUTABLE_PATH override", () => {

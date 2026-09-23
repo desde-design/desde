@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { ClaudeRuntimeInstallError } from "../claude-runtime-installer.js"
 import { createClaudeRuntimeController } from "../claude-runtime-controller.js"
+import { resolveClaudeExecutablePathIn, resolveClaudeRuntimeDir } from "../claude-runtime-location.js"
 
 function deferred<T>() {
   let resolve!: (v: T) => void
@@ -132,6 +133,26 @@ describe("createClaudeRuntimeController", () => {
     await promise
 
     expect(seen).toEqual([]) // unsubscribed before ensure() ever fired
+  })
+
+  it("getClaudeExecutablePath() computes the well-known path synchronously, before ensure() is ever called", () => {
+    const controller = createClaudeRuntimeController({
+      appSupportDir: "/fake",
+      sdkVersion: "0.3.143",
+      expectedIntegrity: "sha512-dGVzdC1leHBlY3RhdGlvbg==",
+      ensureFn: vi.fn(),
+    })
+    const expected = resolveClaudeExecutablePathIn({
+      runtimeDir: resolveClaudeRuntimeDir({ appSupportDir: "/fake", sdkVersion: "0.3.143" }),
+      platform: process.platform,
+    })
+
+    // Available immediately — no ensure() call, no await — because it's
+    // pure path math from appSupportDir + sdkVersion, the same computation
+    // ensureClaudeRuntime does internally before any I/O. This is what
+    // lets desktop/main.ts hand it to spawnPayloadChild right after firing
+    // ensure() in the background, without waiting on that promise.
+    expect(controller.getClaudeExecutablePath()).toBe(expected)
   })
 
   it("passes the signed-anchor expectedIntegrity through to every ensureFn call (F1 plumbing)", async () => {

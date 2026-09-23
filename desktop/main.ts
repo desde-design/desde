@@ -731,11 +731,18 @@ async function boot(): Promise<void> {
   // compute NOW and pass to spawnPayloadChild below regardless of whether
   // the install itself has finished. `claudeRuntime.ensure()` is fired
   // WITHOUT awaiting: boot must never block on a ~200MB network download
-  // (the brief's explicit constraint), and the CLI-side resolver
-  // (`resolve-claude-executable.ts`) does a live filesystem check on every
-  // `query()` call rather than trusting a value cached at spawn time — see
-  // that module's doc comment for why the two never need to be
-  // synchronized more tightly than this.
+  // (the brief's explicit constraint). The launcher child gets
+  // `claudeRuntime.getClaudeExecutablePath()` — the well-known binary path,
+  // computed synchronously from this same app-support dir + the SDK
+  // version, independent of whether `ensure()` has resolved yet — as
+  // `EDITOR_CLAUDE_EXECUTABLE_PATH` (see `child.ts`'s `claudeExecutablePath`
+  // doc comment). The shared sidecar resolver
+  // (`src/editor/agent-chat-sidecar/resolve-claude-on-path.ts`) does a live
+  // filesystem check against that exact path on every call rather than
+  // trusting a value cached at spawn time, so it doesn't matter whether the
+  // actual binary lands before or after this spawn — this bridge is
+  // temporary, removed along with the rest of the desktop installer in a
+  // later task of the chat-runtime-consolidation series.
   const claudeRuntimeAppSupportDir = resolveAppSupportDir({
     home: homedir(),
     platform: process.platform,
@@ -812,7 +819,7 @@ async function boot(): Promise<void> {
   childHandle = await spawnPayloadChild({
     execPath: process.execPath,
     payloadRoot,
-    claudeRuntimeAppSupportDir,
+    claudeExecutablePath: claudeRuntime.getClaudeExecutablePath(),
     // NOT process.cwd() — Electron main's own cwd depends on how it was
     // launched (`desktop/` under `npm --prefix desktop run …`, the repo
     // root, or whatever a packaged app's OS-level launch happens to set)
