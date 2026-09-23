@@ -30,7 +30,7 @@ import { promises as fs } from 'node:fs'
 import { isAbsolute, relative as relativePath, resolve as resolvePath } from 'node:path'
 
 import type { HookCallback, PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk'
-import { isRootEscape } from './root-escape'
+import { isRootEscape } from '../agent-chat/root-escape'
 
 export interface WriteInvalidateHookOptions {
   /** Absolute path of the repo root the SDK is editing (branch mode: the user's working tree). */

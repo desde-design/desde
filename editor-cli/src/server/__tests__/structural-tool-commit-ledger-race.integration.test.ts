@@ -3,7 +3,7 @@
  * *structural* write tools (`insert_component`, `delete_file`,
  * `rename_file`, `scaffold_route`, `insert_element`, `manage_package`,
  * `download_asset` — handlers in
- * `../../../../src/editor/agent-chat-sdk/fs-structural-tools.ts`) call
+ * `../../../../src/editor/agent-chat/fs-structural-tools.ts`) call
  * `brokeredWrite` directly with NO outer tree-gate wrapping at all — unlike
  * the CLI edit route, which already wraps its own `brokeredWrite`/`applyEdit`
  * call in `withEditLocks` at the route layer. So a structural tool's
@@ -99,9 +99,9 @@ vi.mock("../../../../src/editor/ledger/edit-ledger.js", async (importOriginal) =
 import { startHttpServer, type HttpServerHandle } from "../http-server.js"
 import { newSecurityContext } from "../auth.js"
 import { acquireTreeGateShared } from "../session-lock.js"
-import { renameFileHandler } from "../../../../src/editor/agent-chat-sdk/fs-structural-tools.js"
+import { renameFileHandler } from "../../../../src/editor/agent-chat/fs-structural-tools.js"
 import type { EditProposalPayload } from "../../../../src/editor/agent-tools/types.js"
-import type { EmitEditResult } from "../../../../src/editor/agent-chat-sdk/editor-tools.js"
+import type { EmitEditResult } from "../../../../src/editor/agent-chat/editor-tools.js"
 
 const run = promisify(execFile)
 

@@ -388,7 +388,7 @@ export async function withFileEditLocks<T>(
  * file serialize against each other.
  *
  * The caller MUST release. `createSdkWriteGuard`
- * (src/editor/agent-chat-sdk/sdk-write-guard.ts) releases on
+ * (src/editor/agent-chat-sidecar/sdk-write-guard.ts) releases on
  * PostToolUse/PostToolUseFailure/PermissionDenied, on a watchdog timeout, and
  * on a turn-end sweep. A leaked hold blocks every later edit to that file for
  * the life of the process — which is why the guard has three independent
@@ -423,7 +423,7 @@ export async function acquireFileEditLock(
  * Acquire/release form of the repo's tree gate in SHARED mode ALONE — no
  * per-file mutex (A2, round-2 whole-branch review finding, 2026-08-19).
  *
- * Built for `brokeredWrite` (`src/editor/agent-chat-sdk/write-broker.ts`)
+ * Built for `brokeredWrite` (`src/editor/agent-chat/write-broker.ts`)
  * to inject as its optional `acquireTreeGate` dependency: the SDK's
  * *structural* write tools (`insert_component`, `delete_file`,
  * `rename_file`, `scaffold_route`, `insert_element`, `manage_package`,

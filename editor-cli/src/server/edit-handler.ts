@@ -60,16 +60,16 @@ async function loadSharedFileLockManager(): Promise<FileLockManager> {
 /**
  * Dynamic loader for the shared write broker (audit Task 12) — the ONE
  * journal → locked write → invalidate → emit path, shared with the SDK's
- * structural write tools (`src/editor/agent-chat-sdk/fs-structural-tools.ts`).
+ * structural write tools (`src/editor/agent-chat/fs-structural-tools.ts`).
  * Dynamic for the same tsx-resolver reason as `loadSharedFileLockManager`.
  */
 async function loadBrokeredWrite(): Promise<
   Pick<
-    typeof import("../../../src/editor/agent-chat-sdk/write-broker"),
+    typeof import("../../../src/editor/agent-chat/write-broker"),
     "brokeredWrite" | "rollbackWarning"
   >
 > {
-  const mod = await import("../../../src/editor/agent-chat-sdk/write-broker")
+  const mod = await import("../../../src/editor/agent-chat/write-broker")
   return { brokeredWrite: mod.brokeredWrite, rollbackWarning: mod.rollbackWarning }
 }
 
@@ -107,7 +107,7 @@ async function loadBrokeredWrite(): Promise<
  * git's always-forward-slash porcelain output, silently marking a
  * still-dirty Windows edit "committed" forever (the ledger is
  * append-only). The chat lane's equivalent (`toRel` in
- * `src/editor/agent-chat-sdk/edit-ack.ts`) has done this same
+ * `src/editor/agent-chat/edit-ack.ts`) has done this same
  * normalization since the Task 14 review; this was the one producer
  * that hadn't caught up. See `normalizeLedgerPath`'s doc comment for
  * the full picture.
@@ -287,7 +287,7 @@ export interface ApplyEditOpts {
    * absent in older callers/tests — the mini-turn then runs without the
    * grounding tools registered.
    */
-  getGrounding?: import("../../../src/editor/agent-chat-sdk/edit-fix-mini-turn").EditFixMiniTurnInput["getGrounding"]
+  getGrounding?: import("../../../src/editor/agent-chat/edit-fix-mini-turn").EditFixMiniTurnInput["getGrounding"]
   /**
    * Factory for a headless review surface the mini-turn can verify against
    * (null when Playwright can't launch). The fallback creates it lazily
@@ -1683,7 +1683,7 @@ export interface ApplicatorLoaders {
    * (skipping still escalates to chat in 'chat' mode).
    */
   loadRunEditFixMiniTurn?: () => Promise<
-    typeof import("../../../src/editor/agent-chat-sdk/edit-fix-mini-turn")
+    typeof import("../../../src/editor/agent-chat/edit-fix-mini-turn")
   >
 }
 
@@ -1890,7 +1890,7 @@ async function restoreMiniTurnSideEffects(
  * that changed nothing, parse-validate a changed target, and journal the
  * original to .desde/backups/. (Since audit Task 13 the SDK runtime ALSO
  * journals each built-in write from a PreToolUse hook — see
- * `src/editor/agent-chat-sdk/sdk-write-guard.ts`. That guard's per-file
+ * `src/editor/agent-chat-sidecar/sdk-write-guard.ts`. That guard's per-file
  * lock is intentionally NOT wired for this lane: we already run under the
  * EXCLUSIVE tree gate, and its shared acquisition would self-deadlock.)
  *
@@ -1944,7 +1944,7 @@ async function tryPropEditLLMFallback(args: {
   llmFallbackMode?: "patch" | "chat"
   applicatorLoaders: ApplicatorLoaders
   /** Design-system grounding provider, threaded from the route context. */
-  getGrounding?: import("../../../src/editor/agent-chat-sdk/edit-fix-mini-turn").EditFixMiniTurnInput["getGrounding"]
+  getGrounding?: import("../../../src/editor/agent-chat/edit-fix-mini-turn").EditFixMiniTurnInput["getGrounding"]
   createReviewSurface?: ApplyEditOpts["createReviewSurface"]
   /**
    * P2-2 (codex review round 3, 2026-08-20). See `EditRequestBody.correlationId`.
@@ -2312,7 +2312,7 @@ async function tryPropEditLLMFallback(args: {
   // `history.record` failure inside that try must not also suppress the
   // ledger append, and vice versa; they are two separate best-effort
   // affordances, not one.
-  const historyFiles: import("../../../src/editor/agent-chat-sdk/write-broker").RecordedFile[] = []
+  const historyFiles: import("../../../src/editor/agent-chat/write-broker").RecordedFile[] = []
   try {
     if (targetChanged) {
       historyFiles.push({
@@ -3448,7 +3448,7 @@ async function writePatchedFilesThroughBroker(args: {
     journal.push({ file: repoRelOf(args.rootReal, target), content })
   }
 
-  const ops: import("../../../src/editor/agent-chat-sdk/write-broker").BrokerOp[] = []
+  const ops: import("../../../src/editor/agent-chat/write-broker").BrokerOp[] = []
   for (const [file, newSource] of args.patchedFiles) {
     const target = args.targetPaths.get(file)
     if (!target) {
@@ -3658,5 +3658,5 @@ export const defaultApplicatorLoaders: ApplicatorLoaders = {
   loadProjectKnowledge: () =>
     import("../../../src/editor/edit-service/load-project-knowledge"),
   loadRunEditFixMiniTurn: () =>
-    import("../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+    import("../../../src/editor/agent-chat/edit-fix-mini-turn"),
 }

@@ -23,7 +23,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { join, isAbsolute } from 'node:path'
 
-import { deleteProposalBlobsForSession, readProposalBlob } from '../agent-chat-sdk/proposal-blob-store'
+import { deleteProposalBlobsForSession, readProposalBlob } from '../agent-chat/proposal-blob-store'
 import { mergeContent } from './merge-content'
 import { saveSession } from './session-store'
 import type { ChatSession } from './types'

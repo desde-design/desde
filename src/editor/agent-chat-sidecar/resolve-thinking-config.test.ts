@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest'
 import {
   resolveAnthropicThinkingConfig,
   supportsAnthropicAdaptiveThinking,
-} from './run-chat-turn-sdk'
+} from './run-chat-turn-sidecar'
 import { ANTHROPIC_MODEL_CATALOG } from '../llm-providers/anthropic-model-catalog'
 
 /**

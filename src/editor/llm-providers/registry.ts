@@ -29,7 +29,7 @@ import { ANTHROPIC_DEFAULT_MODEL } from './anthropic-provider'
 import {
   ClaudeAgentSdkProvider,
   CLAUDE_AGENT_SDK_DEFAULT_MODEL,
-} from './claude-agent-sdk-provider'
+} from '../agent-chat-sidecar/claude-agent-sdk-provider'
 import { CLAUDE_SUBSCRIPTION_ENV, isClaudeSubscriptionOptIn } from './claude-subscription'
 import {
   credentialsFromEnv,

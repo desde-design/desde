@@ -58,7 +58,7 @@ async function main(): Promise<void> {
   })
 
   // Tool descriptions mirror the in-process SDK server in
-  // `src/editor/agent-chat-sdk/editor-tools.ts` so the model's
+  // `src/editor/agent-chat/editor-tools.ts` so the model's
   // tool-selection prompt context is identical across runtimes.
   server.registerTool(
     "get_selection",

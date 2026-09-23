@@ -20,7 +20,7 @@
  * The verification / vision suite (`verify_edit`, `verify_goal`,
  * `capture_screenshot`, `run_verification`) is likewise NOT exposed here — it
  * is a Editor-chat-runtime feature (registered in
- * `agent-chat-sdk/editor-tools.ts`). External `claude` CLI sessions inspect
+ * `agent-chat/editor-tools.ts`). External `claude` CLI sessions inspect
  * with the read tools above and verify with their own tooling. If we ever want
  * the verification loop in the external proxy, add the whole suite together —
  * not one tool — so the behavior stays coherent.
@@ -33,7 +33,7 @@ import {
   getSelection,
   pinSelections,
   type EditorToolResult,
-} from "../../../src/editor/agent-chat-sdk/editor-tool-handlers.js"
+} from "../../../src/editor/agent-chat/editor-tool-handlers.js"
 import { enqueueShellBridgeQuery } from "./shell-bridge.js"
 import { readRawBody, BodyTooLargeError } from "./http-body.js"
 

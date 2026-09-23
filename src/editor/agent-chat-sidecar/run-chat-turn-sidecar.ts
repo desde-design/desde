@@ -63,26 +63,26 @@ import {
 
 export { resolveAnthropicThinkingConfig, supportsAnthropicAdaptiveThinking }
 
-import { buildEditorToolServer } from './editor-tools'
+import { buildEditorToolServer } from './editor-tool-server'
 import {
   lookupRecentCrossSessionWriter,
   recordCrossSessionWrite,
-} from './cross-session-write-log'
-import { buildCanUseTool, type OverwriteConflictDetected } from './edit-ack'
-import { createReadSnapshotHook, type FileReadRecord } from './file-read-snapshot'
-import { createSecretReadGuard } from './secret-read-guard'
+} from '../agent-chat/cross-session-write-log'
+import { buildCanUseTool, type OverwriteConflictDetected } from '../agent-chat/edit-ack'
+import { createReadSnapshotHook, type FileReadRecord } from '../agent-chat/file-read-snapshot'
+import { createSecretReadGuard } from '../agent-chat/secret-read-guard'
 import { createSdkWriteGuard } from './sdk-write-guard'
 import { createWriteInvalidateHook } from './write-invalidate-hook'
-import { writeProposalBlob } from './proposal-blob-store'
+import { writeProposalBlob } from '../agent-chat/proposal-blob-store'
 import { createSdkEventAdapter } from './sdk-event-adapter'
 import { flattenSdkMessage } from './sdk-message-flatten'
 import {
   attachSteerReconciliation,
   createTurnInputChannel,
   readAssistantMessageBoundaryId,
-} from './turn-input-channel'
-import { buildSdkSystemPrompt } from './system-prompt'
-import { buildGroundingDigest } from './grounding-tools'
+} from '../agent-chat/turn-input-channel'
+import { buildSdkSystemPrompt } from '../agent-chat/system-prompt'
+import { buildGroundingDigest } from '../agent-chat/grounding-tools'
 import type { RunChatTurnOpts, RunChatTurnResult } from '../agent-chat/run-chat-turn'
 
 /** Built-in tools we expose to the model on the SDK runtime. */

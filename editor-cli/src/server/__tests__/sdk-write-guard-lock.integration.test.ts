@@ -22,7 +22,7 @@ import { execFileSync } from "node:child_process"
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createSdkWriteGuard } from "../../../../src/editor/agent-chat-sdk/sdk-write-guard.js"
+import { createSdkWriteGuard } from "../../../../src/editor/agent-chat-sidecar/sdk-write-guard.js"
 import { startHttpServer, type HttpServerHandle } from "../http-server.js"
 import { newSecurityContext } from "../auth.js"
 import {

@@ -44,11 +44,11 @@ import type { ChatSteeredMessage } from "../../../src/editor/agent-chat/types.js
 import {
   createTurnInputChannel,
   type TurnInputChannel,
-} from "../../../src/editor/agent-chat-sdk/turn-input-channel.js"
+} from "../../../src/editor/agent-chat/turn-input-channel.js"
 import {
   imageFromDataUrl,
   type ModelImageContent,
-} from "../../../src/editor/agent-chat-sdk/media-content.js"
+} from "../../../src/editor/agent-chat/media-content.js"
 import { getSharedConcurrencyCap } from "../../../src/editor/agent-chat/concurrency-cap.js"
 import type { ProjectKnowledgeConfig } from "../../../src/editor/edit-service/load-project-knowledge.js"
 import type { GroundingService } from "../../../src/editor/core"
@@ -83,7 +83,7 @@ export interface ChatHandlerLoaders {
    * binary instead of an `ANTHROPIC_API_KEY`.
    */
   loadRunChatTurnSdk: () => Promise<
-    typeof import("../../../src/editor/agent-chat-sdk/run-chat-turn-sdk")
+    typeof import("../../../src/editor/agent-chat-sidecar/run-chat-turn-sidecar")
   >
   /**
    * Loads the Node/npm verification adapter factory. Called once per
@@ -146,7 +146,7 @@ export const defaultChatLoaders: ChatHandlerLoaders = {
   loadProjectKnowledge: () =>
     import("../../../src/editor/edit-service/load-project-knowledge"),
   loadRunChatTurnSdk: () =>
-    import("../../../src/editor/agent-chat-sdk/run-chat-turn-sdk"),
+    import("../../../src/editor/agent-chat-sidecar/run-chat-turn-sidecar"),
   loadRunChatTurnNeutral: () =>
     import("../../../src/editor/agent-chat-neutral/run-chat-turn-neutral"),
   loadVerificationAdapter: () =>
@@ -1204,7 +1204,7 @@ export async function handleChatRequest(
       // runtime, so the only way they can serialize against a concurrent
       // `/api/editor/edit` write is a lock held across the tool call by
       // the runtime's PreToolUse/PostToolUse hooks. Injecting the acquirer
-      // here (rather than importing session-lock inside agent-chat-sdk)
+      // here (rather than importing session-lock inside agent-chat-sidecar)
       // keeps the lock namespace owned by the CLI while putting chat writes
       // in the SAME namespace as route edits.
       //
@@ -1773,7 +1773,7 @@ export interface SteerRequestBody {
  * turn reconciles every accepted steer against what it can observe (did the SDK
  * pull it out of the channel; did any model output follow) and emits
  * `resubmit_required` for each one it cannot account for — see
- * `takeUndeliveredSteers` in `src/editor/agent-chat-sdk/turn-input-channel.ts`
+ * `takeUndeliveredSteers` in `src/editor/agent-chat/turn-input-channel.ts`
  * and the event's docblock in `src/editor/agent-chat/chat-stream-events.ts`.
  *
  * So the client contract is: on `accepted: true`, show the message and keep it

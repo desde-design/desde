@@ -14,7 +14,7 @@ import {
   type LLMConfig,
 } from './registry'
 import { AnthropicProvider } from './anthropic-provider'
-import { ClaudeAgentSdkProvider } from './claude-agent-sdk-provider'
+import { ClaudeAgentSdkProvider } from '../agent-chat-sidecar/claude-agent-sdk-provider'
 import { registerDescriptorForTests } from './provider-registry'
 import { OPENAI_DESCRIPTOR } from './descriptors/openai'
 import type { ProviderDescriptor } from './provider-descriptor'

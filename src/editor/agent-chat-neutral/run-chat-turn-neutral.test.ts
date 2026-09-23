@@ -15,8 +15,8 @@ import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
 import { resolveSessionConflict } from '../agent-chat/resolve-conflict'
 import { ELIDED_TOOL_IMAGE } from './context-budget'
 import { makeEmptySession } from '../agent-chat/types'
-import { readProposalBlob } from '../agent-chat-sdk/proposal-blob-store'
-import { createTurnInputChannel } from '../agent-chat-sdk/turn-input-channel'
+import { readProposalBlob } from '../agent-chat/proposal-blob-store'
+import { createTurnInputChannel } from '../agent-chat/turn-input-channel'
 import { OPENAI_DESCRIPTOR } from '../llm-providers/descriptors/openai'
 import { resolveAnthropicThinkingConfig } from '../llm-providers/anthropic-adaptive-thinking'
 import type { LLMProvider, ProviderEvent, StreamOpts, TextBlock } from '../llm-providers/types'
@@ -2262,7 +2262,7 @@ describe('MCP servers on the neutral lane (Figma, .mcp.json)', () => {
   })
 
   it('serves the legacy figma block under mcp__figma__, gated by its own prefixes, with the Figma prompt block', async () => {
-    const { FIGMA_APPEND_BLOCK } = await import('../agent-chat-sdk/system-prompt')
+    const { FIGMA_APPEND_BLOCK } = await import('../agent-chat/system-prompt')
     const { events, calls } = await run(
       [toolStep('tu_1', 'mcp__figma__echo', { text: 'frame' }), textStep('ok')],
       { figmaConfig: { mcpServer: echoServer, allowedToolPrefixes: ['echo'] } },

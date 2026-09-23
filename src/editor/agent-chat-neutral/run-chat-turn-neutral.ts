@@ -69,15 +69,15 @@ import type {
   ChatTurn,
 } from '../agent-chat/types'
 import type { ToolPermissionGate } from '../agent-chat/tool-permission'
-import type { OverwriteConflictDetected } from '../agent-chat-sdk/edit-ack'
-import { buildToolPermissionGate } from '../agent-chat-sdk/edit-ack'
-import { captureReadSnapshot } from '../agent-chat-sdk/file-read-snapshot'
-import { buildGroundingDigest } from '../agent-chat-sdk/grounding-tools'
-import { writeProposalBlob } from '../agent-chat-sdk/proposal-blob-store'
+import type { OverwriteConflictDetected } from '../agent-chat/edit-ack'
+import { buildToolPermissionGate } from '../agent-chat/edit-ack'
+import { captureReadSnapshot } from '../agent-chat/file-read-snapshot'
+import { buildGroundingDigest } from '../agent-chat/grounding-tools'
+import { writeProposalBlob } from '../agent-chat/proposal-blob-store'
 import {
   attachSteerReconciliation,
   createTurnInputChannel,
-} from '../agent-chat-sdk/turn-input-channel'
+} from '../agent-chat/turn-input-channel'
 import type { EditProposalPayload } from '../agent-tools/types'
 import { computeSessionCost } from '../agent-chat/session-cost'
 import type { EffortLevel } from '../core/model-catalog'

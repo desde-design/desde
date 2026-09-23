@@ -1,14 +1,17 @@
 /**
- * In-process MCP server exposing Editor's domain-specific tools to
- * the Claude Agent SDK. Mirrors the bridge-coupled tools from the
- * legacy `agent-tools/` registry — `read_file`, `list_files`,
+ * Vendor-neutral declarations for Editor's domain-specific tools — name,
+ * description, input shape (zod), and handler. Mirrors the bridge-coupled
+ * tools from the legacy `agent-tools/` registry — `read_file`, `list_files`,
  * `search_files`, `propose_overwrite`, `propose_new_file` are dropped
- * in favor of the SDK's built-in `Read`, `Glob`, `Grep`, `Edit`, and
+ * in favor of each lane's own built-in `Read`, `Glob`, `Grep`, `Edit`, and
  * `Write`. See Phase 1 spec, "Tool mapping" section.
  *
- * The server runs in the same Node process as the SDK runtime — no
- * subprocess, no transport overhead. Its tools become available to the
- * model under the namespace `mcp__editor__<toolname>`.
+ * `buildEditorToolSpecs` is the one declaration both chat lanes consume:
+ * the Claude Agent SDK lane binds it to `tool()`/`createSdkMcpServer()` in
+ * `../agent-chat-sidecar/editor-tool-server.ts` (`buildEditorToolServer`);
+ * the neutral lane consumes the identical `ToolSpec[]` directly. Tools
+ * become available to the model under the namespace `mcp__editor__<toolname>`
+ * on the SDK lane.
  *
  * Tool inventory:
  *   - get_selection / get_page_info / pin_selections — round-trip to
@@ -27,22 +30,19 @@
  * handlers in `editor-tool-handlers.ts`, the read-root/git/verification
  * family in `read-root-tools.ts`, and the filesystem-structural write
  * tools (delete/rename/insert/scaffold/manage-package) in
- * `fs-structural-tools.ts`. This file keeps the `tool()` schema
+ * `fs-structural-tools.ts`. This file keeps the tool schema
  * declarations and wires them to those handlers. `propose_prop_edit` is
  * the exception — it needs the orchestrator's `emitEdit` callback, which
- * only exists inside the SDK runtime.
+ * only exists inside a chat runtime.
  */
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
-import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 
 import type {
   BridgeClient,
   EditProposalPayload,
 } from '../agent-tools/types'
-import type { ToolHandlerResult, ToolSpec } from '../agent-chat/tool-spec'
+import type { ToolHandlerResult, ToolSpec } from './tool-spec'
 import { saveScreenshotPlanHandler } from './save-screenshot-plan-tool'
 import { healPlanStepHandler } from './heal-plan-step-tool'
 import type { ScreenshotPlanStep } from '../core'
@@ -1028,32 +1028,6 @@ export function buildEditorToolSpecs(opts: BuildEditorToolServerOpts): ToolSpec[
     // available — see `groundingTools` above).
     ...groundingTools,
   ]
-}
-
-/**
- * The SDK binding. One line per spec; the declaration lives in
- * `buildEditorToolSpecs` so the neutral lane can consume the identical list.
- *
- * `tool()` validates `input` against `inputShape` before calling, so the
- * handler's cast in each spec is checked on this lane. The neutral lane does
- * the same validation itself, against the same shape, before it calls the
- * handler (see `run-chat-turn-neutral.ts`).
- */
-export function buildEditorToolServer(
-  opts: BuildEditorToolServerOpts,
-): McpSdkServerConfigWithInstance {
-  return createSdkMcpServer({
-    name: 'editor',
-    version: '1',
-    tools: buildEditorToolSpecs(opts).map((spec) =>
-      tool(spec.name, spec.description, spec.inputShape, (input) =>
-        // `ToolHandlerResult` is structurally a subset of the SDK's
-        // `CallToolResult` (see tool-spec.ts) but lacks its forward-compat
-        // index signature; the runtime shape is identical.
-        spec.handler(input as Record<string, unknown>, { signal: opts.signal }) as Promise<CallToolResult>,
-      ),
-    ),
-  })
 }
 
 /**

@@ -1,7 +1,7 @@
 /**
  * Unit tests for `EditorEditHistory` (Task 1 of the toolbar undo/redo
  * plan). Mirrors the temp-dir + real-fs + real-`brokeredWrite` pattern from
- * `src/editor/agent-chat-sdk/write-broker.test.ts` — no mocks: every
+ * `src/editor/agent-chat/write-broker.test.ts` — no mocks: every
  * undo/redo goes through the real broker against real files on disk.
  */
 import { mkdtemp, readFile, writeFile, mkdir, rm, realpath } from 'node:fs/promises'
@@ -15,7 +15,7 @@ import {
   type RecordedFile,
   type HistoryFileState,
 } from './edit-history'
-import { brokeredWrite } from '../agent-chat-sdk/write-broker'
+import { brokeredWrite } from '../agent-chat/write-broker'
 import { createFileLockManager, type FileLockManager } from './file-lock-manager'
 
 const exists = (content: string): HistoryFileState => ({ exists: true, content: Buffer.from(content) })

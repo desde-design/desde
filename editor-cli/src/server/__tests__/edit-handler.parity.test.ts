@@ -625,7 +625,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             writeFileSync(join(dir, "App.vue"), REWRITTEN_SOURCE)
             return { outcome: "applied", notes: "Rewrote filterPlaceholder binding" }
           },
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
       ...overrides,
     }
   }
@@ -872,7 +872,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             writeFileSync(join(dir, "New.ts"), "export const y = 1\n")
             return { outcome: "applied", notes: "Rewrote App.vue and added New.ts" }
           },
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const body: EditRequestBody = {
@@ -953,7 +953,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             writeFileSync(join(dir, "Other.ts"), "export const x = 3 // agent's fix\n")
             return { outcome: "applied", notes: "Fixed Other.ts" }
           },
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const body: EditRequestBody = {
@@ -998,7 +998,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             writeFileSync(join(dir, "Other.ts"), "export const x = 3 // agent's fix\n")
             return { outcome: "applied", notes: "Rewrote filterPlaceholder binding" }
           },
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const body: EditRequestBody = {
@@ -1045,7 +1045,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             outcome: "refused",
             notes: "The agent could not find a safe rewrite.",
           }),
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const body: EditRequestBody = {
@@ -1087,7 +1087,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             outcome: "refused",
             notes: "Agent could not locate the binding definition.",
           }),
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const result = await applyEdit(body, dir, loaders)
@@ -1156,7 +1156,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
               notes: "Agent could not locate the binding definition.",
             }
           },
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const result = await applyEdit(body, dir, loaders)
@@ -1193,7 +1193,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             outcome: "refused",
             notes: "Agent could not locate the binding definition.",
           }),
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const result = await applyEdit(body, dir, loaders)
@@ -1295,7 +1295,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             miniTurnCalls.push(1)
             return { outcome: "refused", notes: "should not be called" }
           },
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const body: EditRequestBody = {
@@ -1352,7 +1352,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             outcome: "applied",
             notes: "I changed the binding source.",
           }),
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const body: EditRequestBody = {
@@ -1385,7 +1385,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             writeFileSync(join(dir, "App.vue"), UNPARSEABLE_SOURCE)
             return { outcome: "applied", notes: "I changed the binding source." }
           },
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const body: EditRequestBody = {
@@ -1449,7 +1449,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             writeFileSync(join(dir, "App.vue"), UNPARSEABLE_SOURCE)
             return { outcome: "applied", notes: "I changed the binding source." }
           },
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const body: EditRequestBody = {
@@ -1479,7 +1479,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             outcome: "refused",
             notes: "Agent could not locate the binding definition.",
           }),
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const body: EditRequestBody = {
@@ -1525,7 +1525,7 @@ describe("CLI prop-edit agent mini-turn fallback (parity with web route)", () =>
             writeFileSync(join(dir, "newdir", "extra.ts"), "export const x = 1\n")
             return { outcome: "applied", notes: "Rewrote filterPlaceholder binding" }
           },
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     })
 
     const body: EditRequestBody = {
@@ -1634,7 +1634,7 @@ describe("the edit-fix mini-turn runs on the project's default provider (Task 43
             seen.push({ model: input.model, providerId: input.providerId })
             return { outcome: "refused", notes: "not the point of this test" }
           },
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     } as ApplicatorLoaders
 
     const result = await applyEdit(boundBindingPropEdit, dir, loaders, undefined, {
@@ -1664,7 +1664,7 @@ describe("the edit-fix mini-turn runs on the project's default provider (Task 43
             seen.push({ model: input.model, providerId: input.providerId })
             return { outcome: "refused", notes: "not the point of this test" }
           },
-        }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     } as ApplicatorLoaders
 
     const result = await applyEdit(boundBindingPropEdit, dir, loaders, undefined, {
@@ -1693,7 +1693,7 @@ describe("the edit-fix mini-turn runs on the project's default provider (Task 43
     const loaders: ApplicatorLoaders = {
       ...APPLICATORS_REFUSING_BOUND_BINDING,
       loadRunEditFixMiniTurn: async () =>
-        ({ runEditFixMiniTurn }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+        ({ runEditFixMiniTurn }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
     } as ApplicatorLoaders
 
     const result = await applyEdit(boundBindingPropEdit, dir, loaders, undefined, {

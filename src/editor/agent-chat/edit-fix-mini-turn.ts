@@ -53,7 +53,7 @@ import { makeEmptySession } from '../agent-chat/types'
 import type { PropEditFallbackHint } from '../edit-service/apply-prop-edit'
 import type { ProjectKnowledge } from '../core/project-knowledge'
 import type { RunChatTurn, RunChatTurnOpts, RunChatTurnResult } from '../agent-chat/run-chat-turn'
-import { runChatTurnSdk } from './run-chat-turn-sdk'
+import { runChatTurnSdk } from '../agent-chat-sidecar/run-chat-turn-sidecar'
 import { desdeRemovalPath, DesdeDirSymlinkError } from '../worktree/desde-dir'
 
 export interface EditFixMiniTurnInput {

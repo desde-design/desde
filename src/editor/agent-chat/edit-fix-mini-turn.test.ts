@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { runEditFixMiniTurn } from './edit-fix-mini-turn'
 import type { EditFixMiniTurnInput } from './edit-fix-mini-turn'
-import type { RunChatTurnSdkOpts, RunChatTurnSdkResult } from './run-chat-turn-sdk'
+import type { RunChatTurnSdkOpts, RunChatTurnSdkResult } from '../agent-chat-sidecar/run-chat-turn-sidecar'
 import { makeEmptySession } from '../agent-chat/types'
 
 function makeInput(repoRoot: string, overrides: Partial<EditFixMiniTurnInput> = {}): EditFixMiniTurnInput {

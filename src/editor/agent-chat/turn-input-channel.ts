@@ -57,7 +57,7 @@
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { MessageParam } from '@anthropic-ai/sdk/resources'
 
-import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
+import type { ChatStreamEvent } from './chat-stream-events'
 import type { ModelImageContent } from './media-content'
 
 /**

@@ -1,6 +1,6 @@
 /**
  * A1 (round-2 whole-branch review finding, 2026-08-19): `createSdkWriteGuard`'s
- * `release` callback (`../../../../src/editor/agent-chat-sdk/sdk-write-guard.ts`)
+ * `release` callback (`../../../../src/editor/agent-chat-sidecar/sdk-write-guard.ts`)
  * used to call `finishToolUse` BEFORE awaiting `recordLedgerEntry` — i.e. it
  * released the repo's SHARED tree gate before the ledger append for the
  * write it just released had actually landed.
@@ -111,8 +111,8 @@ vi.mock("../../../../src/editor/ledger/edit-ledger.js", async (importOriginal) =
 import { startHttpServer, type HttpServerHandle } from "../http-server.js"
 import { newSecurityContext } from "../auth.js"
 import { acquireFileEditLock } from "../session-lock.js"
-import { createSdkWriteGuard } from "../../../../src/editor/agent-chat-sdk/sdk-write-guard.js"
-import type { HistoryRecorder } from "../../../../src/editor/agent-chat-sdk/write-broker.js"
+import { createSdkWriteGuard } from "../../../../src/editor/agent-chat-sidecar/sdk-write-guard.js"
+import type { HistoryRecorder } from "../../../../src/editor/agent-chat/write-broker.js"
 
 const run = promisify(execFile)
 

@@ -17,7 +17,7 @@
  *     apply-llm-patch).
  *   - `streamConversation()` is intentionally NOT implemented — the
  *     legacy chat orchestrator that calls it is being superseded by
- *     the SDK runtime in `agent-chat-sdk/run-chat-turn-sdk.ts`. If
+ *     the SDK runtime in `agent-chat-sidecar/run-chat-turn-sidecar.ts`. If
  *     someone routes a legacy chat through this provider it will throw
  *     with a clear "use runChatTurnSdk instead" message.
  *
@@ -32,7 +32,7 @@
  */
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk'
 
-import { assertClaudeRuntimeReady, resolveClaudeExecutablePath } from './resolve-claude-executable'
+import { assertClaudeRuntimeReady, resolveClaudeExecutablePath } from '../llm-providers/resolve-claude-executable'
 import type {
   CompleteOpts,
   CompleteResult,
@@ -43,7 +43,7 @@ import type {
   StreamOpts,
   SystemContent,
   UserContent,
-} from './types'
+} from '../llm-providers/types'
 
 export const CLAUDE_AGENT_SDK_DEFAULT_MODEL = 'claude-sonnet-4-6'
 

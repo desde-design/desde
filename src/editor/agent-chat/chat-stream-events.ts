@@ -1,5 +1,5 @@
 /**
- * SSE event types emitted by `agent-chat-sdk/run-chat-turn-sdk.runChatTurnSdk`
+ * SSE event types emitted by `agent-chat-sidecar/run-chat-turn-sidecar.runChatTurnSdk`
  * and consumed by the shell's `useEditorChat` hook.
  *
  * Append-only — each event is independently meaningful so the UI can
@@ -14,7 +14,7 @@
  * as a tool_result.
  */
 
-import type { ModelImageContent } from '../agent-chat-sdk/media-content'
+import type { ModelImageContent } from '../agent-chat/media-content'
 import type { StopReason } from '../llm-providers/types'
 
 /**
@@ -167,7 +167,7 @@ export type ChatStreamEvent =
        * channel. The model receives it at the next model boundary INSIDE this
        * same turn — measured 2026-08-14: pushed at 4.0s, the in-flight tool
        * result returned at 8.5s, the model consumed it at 10.2s, all before
-       * the turn's `result`. See `agent-chat-sdk/turn-input-channel.ts`.
+       * the turn's `result`. See `agent-chat/turn-input-channel.ts`.
        *
        * Emitted on the OWNING turn's stream rather than only returned to the
        * steering request, because those can be two different clients. The
@@ -207,7 +207,7 @@ export type ChatStreamEvent =
        * consumption is not observable. `POST /steer` hands the message to the
        * SDK's stdin and nothing acknowledges that the model folded it into a
        * request. So the turn watches for model output after the hand-over —
-       * see `takeUndeliveredSteers` in `agent-chat-sdk/turn-input-channel.ts`.
+       * see `takeUndeliveredSteers` in `agent-chat/turn-input-channel.ts`.
        * A turn that ends without producing anything since the hand-over is
        * reported here.
        *

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { ALLOWED_NEW_FILE_EXTENSIONS } from '../agent-chat-sdk/edit-ack'
+import { ALLOWED_NEW_FILE_EXTENSIONS } from '../agent-chat/edit-ack'
 import { EDIT_HANDOFF_MARKER } from '../edit-service/build-edit-escalation-prompt'
 import {
   CONTEXT_ENVELOPE_BLOCK,
@@ -11,7 +11,7 @@ import {
   SCREENSHOT_PLAN_APPEND_BLOCK,
   SECRET_READS_ALLOWED_BLOCK,
   VERIFY_EDITS_BLOCK,
-} from '../agent-chat-sdk/system-prompt'
+} from '../agent-chat/system-prompt'
 import {
   buildNeutralSystemPrompt,
   NEUTRAL_IDENTITY_BLOCK,

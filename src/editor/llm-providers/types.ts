@@ -240,7 +240,7 @@ export interface ToolResultContent {
  * A vision input block on a user message.
  *
  * `data` is base64 WITHOUT the `data:` prefix, matching
- * `ModelImageContent` in `agent-chat-sdk/media-content.ts` — the one place
+ * `ModelImageContent` in `agent-chat/media-content.ts` — the one place
  * an image is validated and byte-capped before it reaches a provider. The
  * field is named `mediaType` rather than `mimeType` because that is the
  * name both wire formats use (`source.media_type`, and the `data:` URL's

@@ -89,7 +89,7 @@ import {
 import type { StalenessCacheHolder } from "./server/design-systems-handler.js"
 import { resetGroundingCache } from "./server/grounding-context.js"
 import { prewarmManifestsAtBoot } from "./server/manifest-prewarm.js"
-import { runRetentionGc } from "../../src/editor/agent-chat-sdk/retention-gc.js"
+import { runRetentionGc } from "../../src/editor/agent-chat/retention-gc.js"
 
 /**
  * CSS side-effect imports the compose-isolation route (`composeIsolationPlugin`,

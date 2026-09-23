@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { HookInput } from '@anthropic-ai/claude-agent-sdk'
 import { createSdkWriteGuard } from './sdk-write-guard'
-import type { HistoryRecorder } from './write-broker'
+import type { HistoryRecorder } from '../agent-chat/write-broker'
 import { hashContent, readLedger } from '../ledger/edit-ledger'
 import type { LedgerEditEntry } from '../ledger/entry'
 import { planLedgerUndo, type UndoDeps } from '../ledger/undo-entry'

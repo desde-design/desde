@@ -66,7 +66,7 @@ import {
   brokeredWrite,
   rollbackWarning,
   type BrokerOp,
-} from "../../../src/editor/agent-chat-sdk/write-broker.js"
+} from "../../../src/editor/agent-chat/write-broker.js"
 import { handleStatusQuery, type McpHandlerContext } from "./mcp-handler.js"
 import {
   handleChatRequest,
@@ -241,8 +241,8 @@ import {
   serveBootstrapJs,
   serveStatic,
 } from "./static-assets.js"
-import { runRetentionGc } from "../../../src/editor/agent-chat-sdk/retention-gc.js"
-import { gcAllProposalBlobs } from "../../../src/editor/agent-chat-sdk/proposal-blob-gc.js"
+import { runRetentionGc } from "../../../src/editor/agent-chat/retention-gc.js"
+import { gcAllProposalBlobs } from "../../../src/editor/agent-chat/proposal-blob-gc.js"
 import { resolveLlmConfig } from "./llm-config.js"
 import { getProvider } from "../../../src/editor/llm-providers/registry.js"
 

@@ -29,7 +29,7 @@ import { sep as platformSep } from 'node:path'
  *    reach backward into an append-only log.
  *
  * This mirrors an identical, already-shipped fix in the chat lane:
- * `toRel` (`src/editor/agent-chat-sdk/edit-ack.ts`) has done exactly this
+ * `toRel` (`src/editor/agent-chat/edit-ack.ts`) has done exactly this
  * — `.split('\\').join('/')` — since the Task 14 review. The direct lane
  * (`edit-handler.ts`'s `repoRelOf`) was the one place that never got it.
  *

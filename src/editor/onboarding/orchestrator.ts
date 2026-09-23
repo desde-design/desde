@@ -122,7 +122,7 @@ export async function onboardDesignSystem(
     // file whose name happens to start with two dots (`..config.d.ts`) —
     // require the `..` + separator an actual escape carries (Task 14
     // review round-2 P2 audit; same bug class as `toRel` in
-    // `agent-chat-sdk/edit-ack.ts`, found via the same grep).
+    // `agent-chat/edit-ack.ts`, found via the same grep).
     const rels = detection.entryFiles
       .map((f) => path.relative(packageRoot, f))
       .filter((r) => r && r !== '..' && !r.startsWith('..' + path.sep))

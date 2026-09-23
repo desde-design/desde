@@ -2211,7 +2211,7 @@ describe("handleSteerRequest — mid-turn steering", () => {
         // is taken and before the turn runtime runs.
         if (opts.beforeStart) await opts.beforeStart
         const { createTurnInputChannel } = await import(
-          "../../../../src/editor/agent-chat-sdk/turn-input-channel.js"
+          "../../../../src/editor/agent-chat/turn-input-channel.js"
         )
         const { makeEmptySession } = await import(
           "../../../../src/editor/agent-chat/types.js"
@@ -2222,7 +2222,7 @@ describe("handleSteerRequest — mid-turn steering", () => {
               ev: import("../../../../src/editor/agent-chat/chat-stream-events").ChatStreamEvent,
             ) => void
             userMessage: string
-            inputChannel?: import("../../../../src/editor/agent-chat-sdk/turn-input-channel").TurnInputChannel
+            inputChannel?: import("../../../../src/editor/agent-chat/turn-input-channel").TurnInputChannel
           }) => {
             const channel = callOpts.inputChannel ?? createTurnInputChannel()
             channel.begin({ text: callOpts.userMessage })

@@ -18,11 +18,11 @@ import { describe, expect, it } from 'vitest'
 
 import type { BridgeClient } from '../agent-tools/types'
 import { toToolDefs } from '../agent-chat/tool-spec'
+import { buildEditorToolServer } from './editor-tool-server'
 import {
-  buildEditorToolServer,
   buildEditorToolSpecs,
   type EmitEditResult,
-} from './editor-tools'
+} from '../agent-chat/editor-tools'
 
 function stubBridge(): BridgeClient {
   return { send: async () => null }

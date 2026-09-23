@@ -46,8 +46,8 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 
 // Now import. The mock has been registered, so the orchestrator's
 // `import {query}` will resolve to `queryMock`.
-import { runChatTurnSdk } from './run-chat-turn-sdk'
-import { createTurnInputChannel } from './turn-input-channel'
+import { runChatTurnSdk } from './run-chat-turn-sidecar'
+import { createTurnInputChannel } from '../agent-chat/turn-input-channel'
 
 function makeBridge(): BridgeClient {
   return { send: vi.fn(async () => null) }
@@ -1655,7 +1655,7 @@ describe('runChatTurnSdk', () => {
     it('persists proposed newSource to .desde/.../proposals/<editId>.txt on Write (Phase 4 §4)', async () => {
       const fs = await import('node:fs')
       const path = await import('node:path')
-      const { proposalBlobPath } = await import('./proposal-blob-store')
+      const { proposalBlobPath } = await import('../agent-chat/proposal-blob-store')
       const target = path.join(root, 'src', 'Target.vue')
       fs.mkdirSync(path.join(root, 'src'), { recursive: true })
       fs.writeFileSync(target, '<template>before</template>')

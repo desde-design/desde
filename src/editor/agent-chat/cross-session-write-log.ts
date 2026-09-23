@@ -2,7 +2,7 @@
  * Process-global in-memory write log for cross-session attribution on
  * `edit_overwrite_warning`.
  *
- * The persisted scan in [`findRecentWriterForFile`](../agent-chat/session-store.ts)
+ * The persisted scan in [`findRecentWriterForFile`](./session-store.ts)
  * only finds chat sessions whose turns have already been `saveSession`'d.
  * That misses the case the warning was designed for: an OTHER chat
  * session that wrote the file mid-stream and hasn't finished its turn

@@ -11,7 +11,7 @@
  * stated here.
  *
  * Everything that is EDITOR-specific rather than preset-supplied is reused
- * from `agent-chat-sdk/system-prompt.ts` by importing the block, not by
+ * from `agent-chat/system-prompt.ts` by importing the block, not by
  * copying its text. Those blocks are frozen against a byte fixture, so the
  * two lanes cannot describe the editor tools, the edit lifecycle, the context
  * envelope or the verification discipline differently.
@@ -55,7 +55,7 @@ import {
   SCREENSHOT_PLAN_APPEND_BLOCK,
   VERIFY_EDITS_BLOCK,
   WORKING_STYLE_BLOCK,
-} from '../agent-chat-sdk/system-prompt'
+} from '../agent-chat/system-prompt'
 import type { ProjectKnowledge } from '../core/project-knowledge'
 import type { ServerToolId } from '../llm-providers/types'
 import {

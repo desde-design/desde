@@ -5,7 +5,7 @@
  * (b) surface the conventions block only when a digest is provided.
  *
  * The chat agent's own project-knowledge folding is covered by
- * `agent-chat-sdk/system-prompt.test.ts` (`buildSdkSystemPrompt`) — the
+ * `agent-chat/system-prompt.test.ts` (`buildSdkSystemPrompt`) — the
  * legacy in-house chat orchestrator's `buildChatSystemPrompt` was removed
  * 2026-07-21 along with the rest of the legacy runtime. The former Tier 3
  * free-form-prompt agent (`buildAgentPrompt` / `POST /api/editor/agent`)

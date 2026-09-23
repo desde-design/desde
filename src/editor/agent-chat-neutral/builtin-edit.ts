@@ -24,13 +24,13 @@
 import { z } from 'zod'
 
 import type { ToolHandlerContext } from '../agent-chat/tool-spec'
-import type { OverwriteConflictDetected } from '../agent-chat-sdk/edit-ack'
-import { reconstructWriteEdit, sha256 } from '../agent-chat-sdk/edit-ack'
+import type { OverwriteConflictDetected } from '../agent-chat/edit-ack'
+import { reconstructWriteEdit, sha256 } from '../agent-chat/edit-ack'
 import {
   brokeredWrite,
   rollbackWarning,
   type AcquireTreeGate,
-} from '../agent-chat-sdk/write-broker'
+} from '../agent-chat/write-broker'
 import type { EditProposalPayload } from '../agent-tools/types'
 import { getSharedEditHistory } from '../edit-service/edit-history'
 

@@ -212,7 +212,7 @@ export interface ProjectConfig {
    * GC: the per-edit backup journal (`.desde/backups/`) and the
    * chat-session turns array (unbounded append-only history). Omitted
    * sub-blocks/fields fall back to the documented defaults; the GC
-   * sweeps themselves live in `src/editor/agent-chat-sdk/backups-gc.ts`
+   * sweeps themselves live in `src/editor/agent-chat/backups-gc.ts`
    * / `read-snapshot-gc.ts` and `src/editor/agent-chat/session-turns-archive.ts`.
    *
    * **Blast radius (codex round 1, deliberate — not a Task 15

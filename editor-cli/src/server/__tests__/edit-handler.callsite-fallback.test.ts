@@ -275,7 +275,7 @@ const propEditBodyThatRefuses: EditRequestBody = {
  * gave is worse than declining. That trade is over: the mini-turn now
  * resolves the same runtime chat does, for ANY project provider, rather than
  * refusing everything but Anthropic (see Task 43,
- * `src/editor/agent-chat-sdk/edit-fix-mini-turn.ts`'s module doc).
+ * `src/editor/agent-chat/edit-fix-mini-turn.ts`'s module doc).
  */
 describe("the edit-fix mini-turn runs on the project's own provider", () => {
   let dir: string

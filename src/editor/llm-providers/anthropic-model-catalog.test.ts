@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ANTHROPIC_MODEL_CATALOG } from './anthropic-model-catalog'
 import { defaultModelConfig } from '../core/model-catalog'
-import { DEFAULT_SDK_MODEL } from '../agent-chat-sdk/run-chat-turn-sdk'
+import { DEFAULT_SDK_MODEL } from '../agent-chat-sidecar/run-chat-turn-sidecar'
 import { getRateCard, UNKNOWN_MODEL_RATE } from './rate-cards'
 
 describe('ANTHROPIC_MODEL_CATALOG', () => {

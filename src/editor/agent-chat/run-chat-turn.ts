@@ -2,20 +2,22 @@
  * The chat-turn contract. One function type, two runtimes.
  *
  * These types were `RunChatTurnSdkOpts` / `RunChatTurnSdkResult` in
- * `agent-chat-sdk/run-chat-turn-sdk.ts` and moved here VERBATIM. Exactly one
+ * `agent-chat-sidecar/run-chat-turn-sidecar.ts` and moved here VERBATIM. Exactly one
  * field is vendor-shaped and stays as an optional hint: `adaptiveThinking`,
  * which only the Anthropic lane reads. Everything else already described
  * work rather than a vendor.
  *
- * ## Why the type-only imports from `agent-chat-sdk/` are not a layering leak
+ * ## Why the type-only import of `AcquireWriteLock` is not a layering leak
  *
- * `TurnInputChannel`, `AcquireWriteLock`, `AcquireTreeGate` and
- * `ModelImageContent` live under `agent-chat-sdk/` for historical reasons and
- * are imported here with `import type`, which TypeScript erases entirely. So
- * a boot that never touches the Anthropic lane still never loads
- * `@anthropic-ai/claude-agent-sdk`, which is the property the lazy dispatch
- * in `chat-runtime-dispatch.ts` exists to protect. Re-declaring them here
- * instead would buy nothing and create four shapes that can drift.
+ * `TurnInputChannel`, `AcquireTreeGate` and `ModelImageContent` are
+ * colocated here in `agent-chat/` (they're shared by both chat lanes).
+ * `AcquireWriteLock` alone still lives in `agent-chat-sidecar/sdk-write-guard.ts`
+ * (the Claude Agent SDK write-lock acquisition helper) and is imported here
+ * with `import type`, which TypeScript erases entirely. So a boot that never
+ * touches the Anthropic lane still never loads `@anthropic-ai/claude-agent-sdk`,
+ * which is the property the lazy dispatch in `chat-runtime-dispatch.ts` exists
+ * to protect. Re-declaring it here instead would buy nothing and create a
+ * second shape that can drift.
  */
 
 import type { BridgeClient } from '../agent-tools/types'
@@ -30,10 +32,10 @@ import type { EffortLevel } from '../core/model-catalog'
 import type { GroundingService } from '../core/grounding'
 import type { ProjectKnowledge } from '../core/project-knowledge'
 import type { ReadRootRegistry } from '../core/read-roots'
-import type { ModelImageContent } from '../agent-chat-sdk/media-content'
-import type { TurnInputChannel } from '../agent-chat-sdk/turn-input-channel'
-import type { AcquireWriteLock } from '../agent-chat-sdk/sdk-write-guard'
-import type { AcquireTreeGate } from '../agent-chat-sdk/write-broker'
+import type { ModelImageContent } from '../agent-chat/media-content'
+import type { TurnInputChannel } from '../agent-chat/turn-input-channel'
+import type { AcquireWriteLock } from '../agent-chat-sidecar/sdk-write-guard'
+import type { AcquireTreeGate } from '../agent-chat/write-broker'
 
 export interface RunChatTurnOpts {
   bridge: BridgeClient

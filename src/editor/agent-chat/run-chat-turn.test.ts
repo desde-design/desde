@@ -10,8 +10,8 @@ import { makeEmptySession } from './types'
 import type {
   RunChatTurnSdkOpts,
   RunChatTurnSdkResult,
-} from '../agent-chat-sdk/run-chat-turn-sdk'
-import { runChatTurnSdk } from '../agent-chat-sdk/run-chat-turn-sdk'
+} from '../agent-chat-sidecar/run-chat-turn-sidecar'
+import { runChatTurnSdk } from '../agent-chat-sidecar/run-chat-turn-sidecar'
 
 /**
  * The contract is a TYPE, so the assertions are type-level. They compile or

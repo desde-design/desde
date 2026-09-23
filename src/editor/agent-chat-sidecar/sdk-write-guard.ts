@@ -177,10 +177,10 @@ import {
   BackupJournalPathEscapeError,
   type BackupJournalResult,
   type BackupEntry,
-} from './backup-journal'
-import { isRootEscape } from './root-escape'
+} from '../agent-chat/backup-journal'
+import { isRootEscape } from '../agent-chat/root-escape'
 import { DesdeDirSymlinkError } from '../worktree/desde-dir'
-import type { HistoryRecorder, HistoryFileState } from './write-broker'
+import type { HistoryRecorder, HistoryFileState } from '../agent-chat/write-broker'
 import { appendLedgerEntry, hashContent, resolveBranchCached } from '../ledger/edit-ledger'
 
 /**

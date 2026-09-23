@@ -139,7 +139,7 @@ export interface ChatTurn {
  *
  * Deliberately NOT the full delivery record. Whether the model provably read
  * it is a live-turn concern (`takeUndeliveredSteers` in
- * `agent-chat-sdk/turn-input-channel.ts` decides that, and the client resubmits
+ * `agent-chat/turn-input-channel.ts` decides that, and the client resubmits
  * what could not be accounted for). What is persisted here is what the user
  * typed and where it sat in the conversation.
  *

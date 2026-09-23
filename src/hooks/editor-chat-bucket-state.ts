@@ -29,7 +29,7 @@
  * per-bucket ref cannot be forgotten; it has to be refused or handled.
  */
 
-import type { ModelImageContent } from "@/editor/agent-chat-sdk/media-content"
+import type { ModelImageContent } from "@/editor/agent-chat/media-content"
 
 /**
  * One steer this client has SENT but whose fate it does not yet know.

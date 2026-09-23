@@ -66,7 +66,7 @@ import type {
   PermissionDecision,
   ToolPermissionContext,
   ToolPermissionGate,
-} from '../agent-chat/tool-permission'
+} from './tool-permission'
 
 /**
  * Renderable component / source-module extensions. Spans both
