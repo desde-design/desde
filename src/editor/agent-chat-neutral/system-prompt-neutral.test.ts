@@ -128,10 +128,14 @@ describe('buildNeutralSystemPrompt', () => {
     expect(buildNeutralSystemPrompt({ webTools: [] })).toBe(buildNeutralSystemPrompt({}))
   })
 
-  it('describes steering as boundary delivery, not as a system reminder', () => {
+  it('describes steering as interrupt delivery, not as a system reminder', () => {
     const p = buildNeutralSystemPrompt({})
-    expect(p).toContain('Delivery lands between steps')
+    expect(p).toContain('A message can arrive mid-answer')
+    expect(p).toContain('kept exactly as far as it got')
+    expect(p).not.toContain('Delivery lands between steps')
     expect(p).not.toContain('system-reminder')
+    // House rule for model-facing copy on this lane.
+    expect(NEUTRAL_STEERING_BLOCK).not.toContain('\u2014')
   })
 
   it('appends the grounding and canvas blocks only when those surfaces are on', () => {

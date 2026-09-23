@@ -241,7 +241,8 @@ interface LiveTurn {
    * choice — it has to be the side that knows where the steer landed. The SDK
    * runtime emits none, and accept time is the only position it has, so the
    * route emits for that lane. The neutral runtime appends the message itself
-   * at a step boundary and stamps `afterAssistantBlocks` there, so it emits
+   * where it delivers it (a step boundary, or right after the text of a step
+   * the steer interrupted) and stamps `afterAssistantBlocks` there, so it emits
    * for its own lane and the route stands down; emitting from the route would
    * cut the live transcript at accept time while hydration replays the
    * delivery position, and the two would disagree.
