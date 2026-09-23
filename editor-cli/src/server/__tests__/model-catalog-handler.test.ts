@@ -59,7 +59,10 @@ describe('buildModelCatalogResponse: the default is a decision, not an index', (
     const openai = body.catalogs.find((c) => c.providerId === 'openai')
     expect(anthropic?.capabilities.midTurnSteering).toBe(true)
     expect(openai?.capabilities.midTurnSteering).toBe(false)
-    expect(openai?.capabilities.vendorRateLimitEvents).toBe(false)
+    // The neutral loop raises rate_limit_warning off a bare 429 now, so
+    // every provider on that lane has this true — see
+    // OPENAI_DESCRIPTOR.capabilities.vendorRateLimitEvents.
+    expect(openai?.capabilities.vendorRateLimitEvents).toBe(true)
   })
 
   it('still carries the models and the source untouched', () => {

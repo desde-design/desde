@@ -20,6 +20,12 @@ import {
 import { makeEmptySession } from './types'
 import { runChatTurnSdk } from '../agent-chat-sdk/run-chat-turn-sdk'
 import { runChatTurnNeutral } from '../agent-chat-neutral/run-chat-turn-neutral'
+// Re-exported from the one file allowed to import the AI SDK — see the fence
+// in `ai-sdk-provider.ts`. Building a REAL `APICallError` for the neutral
+// script's 429, rather than a hand-shaped object, is what proves the neutral
+// lane's `rate_limit_warning` comes from the actual retry path and not from
+// a test double that happens to look 429-shaped.
+import { APICallError } from '../llm-providers/ai-sdk-provider'
 import type { LLMProvider } from '../llm-providers/types'
 
 /**
@@ -27,9 +33,10 @@ import type { LLMProvider } from '../llm-providers/types'
  *
  * Both runtimes are driven over the SAME script: text, reasoning, a tool call,
  * its result, usage, completion. The SDK script additionally carries a
- * rate-limit event, because that is the one kind this design deliberately
- * keeps on one lane, and a test that never produced it could not tell
- * "Anthropic-only" from "nobody emits this".
+ * structured rate-limit event, and the neutral script additionally carries a
+ * retried 429 — each lane's own way of producing `rate_limit_warning` — so
+ * this test actually OBSERVES both lanes emitting it, rather than declaring
+ * one of them exempt.
  *
  * A kind that only one lane emits and that is NOT on the Anthropic-only list
  * is a parity gap. A kind the NEUTRAL lane emits that the SDK lane does not is
@@ -44,8 +51,8 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 describe('ChatStreamEvent kind coverage', () => {
-  it('lists exactly rate_limit_warning as Anthropic-only', () => {
-    expect([...ANTHROPIC_ONLY_EVENT_KINDS]).toEqual(['rate_limit_warning'])
+  it('lists nothing as Anthropic-only, now that both lanes raise rate_limit_warning', () => {
+    expect([...ANTHROPIC_ONLY_EVENT_KINDS]).toEqual([])
   })
 
   it('emits `steered` exactly once per steer, from the side that knows the position', () => {
@@ -134,6 +141,21 @@ async function runtimeKinds(): Promise<{ sdk: Set<string>; neutral: Set<string> 
       }
       yield { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'ok' }] } }
       yield { type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning' } }
+      // Matches the neutral script's own 429 retry below (`thisCall === 0`),
+      // so `api_retry` is observed on BOTH lanes here. Without this, adding
+      // a real retry to the neutral script alone would make `api_retry`
+      // neutral-only in this run and fail "emits no kind on the neutral
+      // lane that the SDK lane does not also emit" — a parity gap this
+      // script did not actually have, only a script that did not exercise
+      // the SDK's own retry message.
+      yield {
+        type: 'system',
+        subtype: 'api_retry',
+        retry_delay_ms: 1000,
+        attempt: 1,
+        max_retries: 3,
+        error_status: 429,
+      }
       yield {
         type: 'result',
         subtype: 'success',
@@ -156,10 +178,27 @@ async function runtimeKinds(): Promise<{ sdk: Set<string>; neutral: Set<string> 
     defaultModel: 'x',
     complete: async () => ({ text: '', stopReason: 'end_turn' }),
     streamConversation: (() => {
-      let step = 0
+      // A plain call counter, not a step counter: `streamStepWithRetry`
+      // calls `streamConversation` again for a RETRY, so call 0 is step 0's
+      // first (failing) attempt, call 1 is step 0's successful retry, and
+      // call 2 is step 1. This is what makes `rate_limit_warning` come out
+      // of a real run of the retry path, the same way every other kind here
+      // comes out of a real run of its own path.
+      let call = 0
       return () =>
         (async function* () {
-          if (step++ === 0) {
+          const thisCall = call++
+          if (thisCall === 0) {
+            throw new APICallError({
+              message: 'Rate limit reached. Please try again later.',
+              url: 'https://api.anthropic.com/v1/messages',
+              requestBodyValues: {},
+              statusCode: 429,
+              responseHeaders: { 'retry-after': '1' },
+              isRetryable: true,
+            })
+          }
+          if (thisCall === 1) {
             yield { kind: 'reasoning_delta', delta: 'hm' }
             yield { kind: 'text_delta', delta: 'reading' }
             yield { kind: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'a.ts' } }

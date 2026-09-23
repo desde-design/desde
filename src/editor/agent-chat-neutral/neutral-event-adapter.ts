@@ -10,9 +10,14 @@
  *    the turn on the first tool call.
  *  - `edit_proposed` and `edit_overwrite_warning`: those come out of the
  *    permission gate and `brokeredWrite`, exactly as they do on the SDK lane.
- *  - `rate_limit_warning`: Anthropic-only by decision. Its fields model
- *    Anthropic's subscription overage pool and its banner says "this Claude
- *    account". See `ANTHROPIC_ONLY_EVENT_KINDS` in `chat-stream-events.ts`.
+ *  - `rate_limit_warning`: not from THIS adapter. A `ProviderEvent` stream
+ *    carries no such signal to translate — the neutral loop's only rate-limit
+ *    signal is a 429 transport error, which surfaces as a thrown error, not
+ *    a `ProviderEvent`. `streamStepWithRetry` (`run-chat-turn-neutral.ts`)
+ *    catches that error and raises `rate_limit_warning` itself, directly,
+ *    before this adapter (or anything else here) ever runs. See
+ *    `ANTHROPIC_ONLY_EVENT_KINDS` in `chat-stream-events.ts` for why that
+ *    kind is no longer Anthropic-only.
  *
  * A server tool (the vendor-run web search and fetch) is shown with the SAME
  * two frames a Desde-run tool uses, `tool_use_start` then `tool_result`, so

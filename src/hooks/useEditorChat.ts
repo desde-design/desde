@@ -126,13 +126,22 @@ export type ChatMessage =
     }
   | {
       /**
-       * Phase 5 follow-up — SDK structured rate-limit warning. Fires
-       * when the Anthropic API signals `status: 'allowed_warning'`
-       * (approaching the ceiling) OR `status: 'rejected'` (hard
-       * limit). Distinct from the post-failure
-       * `statusFailureKind: 'rate-limited'` — this is a LIVE banner
-       * so the user knows pressure is mounting OR the request was
-       * rejected before/in addition to any classifier fallback.
+       * Phase 5 follow-up — structured rate-limit warning. Fires when the
+       * Claude Agent SDK lane's own signal says `status: 'allowed_warning'`
+       * (approaching the ceiling) OR `status: 'rejected'` (hard limit).
+       * Distinct from the post-failure `statusFailureKind: 'rate-limited'`
+       * — this is a LIVE banner so the user knows pressure is mounting OR
+       * the request was rejected before/in addition to any classifier
+       * fallback.
+       *
+       * No longer Claude-only: the neutral loop raises this too, off a bare
+       * 429 transport error (see `retryAfterSeconds`, its only field). Every
+       * other field here (`rateLimitType`, `resetsAt`, `utilization`,
+       * `overageStatus`, `overageResetsAt`) models the Claude Agent SDK's
+       * structured telemetry and a neutral-lane event never carries them —
+       * `RateLimitWarningBanner` (`chat-status-banners.tsx`) checks for
+       * `rateLimitType`/`overageStatus` before rendering copy specific to
+       * that account.
        *
        * Latest-wins: a new warning during the same turn overwrites
        * the prior banner so the user always sees the most recent
@@ -146,6 +155,8 @@ export type ChatMessage =
       utilization?: number
       overageStatus?: "allowed_warning" | "rejected"
       overageResetsAt?: number
+      /** Seconds until a retry is safe, off a 429's `retry-after` header. Neutral lane only. */
+      retryAfterSeconds?: number
     }
   | {
       /**
@@ -1348,7 +1359,13 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
             ],
           }))
           break
-        case "rate_limit_warning":
+        case "rate_limit_warning": {
+          // Converted once, here, when the event arrives — not in the
+          // banner's render, where `Date.now()` would be an impure call
+          // re-evaluated on every re-render (flagged by react-hooks/purity)
+          // and would give a different "resets in Ns" countdown on every one
+          // of those re-renders besides. See `deriveRateLimitResetsAt`.
+          const derivedResetsAt = deriveRateLimitResetsAt(event)
           // Latest-wins per turn: replace any prior rate_limit_warning
           // OR api_retry in the bucket. See the legacy comment for the
           // full rationale.
@@ -1366,8 +1383,8 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
                 ...(event.rateLimitType
                   ? { rateLimitType: event.rateLimitType }
                   : {}),
-                ...(event.resetsAt !== undefined
-                  ? { resetsAt: event.resetsAt }
+                ...(derivedResetsAt !== undefined
+                  ? { resetsAt: derivedResetsAt }
                   : {}),
                 ...(event.utilization !== undefined
                   ? { utilization: event.utilization }
@@ -1378,10 +1395,14 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
                 ...(event.overageResetsAt !== undefined
                   ? { overageResetsAt: event.overageResetsAt }
                   : {}),
+                ...(event.retryAfterSeconds !== undefined
+                  ? { retryAfterSeconds: event.retryAfterSeconds }
+                  : {}),
               },
             ],
           }))
           break
+        }
         case "api_retry":
           updateBucket(turnId, (b) => ({
             ...b,
@@ -2090,6 +2111,34 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
       setModelConfig,
       seedModelConfig,
     ],
+  )
+}
+
+/**
+ * Convert a `rate_limit_warning` event's timing fields into the one absolute
+ * timestamp `RateLimitWarningBanner` renders off of.
+ *
+ * The Claude Agent SDK lane's events carry `resetsAt` already, an absolute
+ * epoch ms straight off the vendor. The neutral lane's events (raised by
+ * `streamStepWithRetry` in `run-chat-turn-neutral.ts`, off a bare 429) carry
+ * `retryAfterSeconds` instead — seconds from now, the only timing field a
+ * transport error exposes. `resetsAt` wins when both are present (never
+ * happens in practice, but a real vendor value should never lose to a
+ * locally-derived approximation), and this is the only place `Date.now()` is
+ * called for it: once, when the event arrives, exported so a test can pin
+ * the conversion with a mocked clock rather than driving a full turn through
+ * the hook to observe a message that a turn-end backstop clears the instant
+ * the turn finishes (see the `finally` block in `runSubmit`, below).
+ */
+export function deriveRateLimitResetsAt(event: {
+  resetsAt?: number
+  retryAfterSeconds?: number
+}): number | undefined {
+  return (
+    event.resetsAt ??
+    (event.retryAfterSeconds !== undefined
+      ? Date.now() + event.retryAfterSeconds * 1000
+      : undefined)
   )
 }
 

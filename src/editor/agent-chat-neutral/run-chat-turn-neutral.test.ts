@@ -1641,6 +1641,43 @@ describe('runChatTurnNeutral: a steer interrupts the step in flight', () => {
     expect(result.turn.error).toBeUndefined()
   })
 
+  it('emits no rate_limit_warning for a 429 that arrives after the step was interrupted', async () => {
+    // Same shape as the 503 case above, but the failure IS the kind that
+    // would otherwise raise rate_limit_warning. `interrupted()` is checked
+    // before the 429/status branch runs, so the step returns before either
+    // rate_limit_warning or api_retry is emitted — the steer is what the
+    // user asked for, not a retried request for the turn that was cut off.
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (_o, i) {
+      if (i === 0) {
+        channel.push('stop, do X')
+        await new Promise((r) => setTimeout(r, 0))
+        throw new APICallError({
+          message: 'Rate limit reached. Please try again later.',
+          url: 'https://api.openai.com/v1/responses',
+          requestBodyValues: {},
+          statusCode: 429,
+          responseHeaders: { 'retry-after': '7' },
+          isRetryable: true,
+        })
+      }
+      yield* textStep('done')
+    })
+    const events: ChatStreamEvent[] = []
+    const { result } = await runSteered(provider, channel, {
+      emit: (e: ChatStreamEvent) => events.push(e),
+    })
+    // Two calls, not three: the 429 was not retried, and no wait was taken.
+    expect(calls).toHaveLength(2)
+    expect(events.filter((e) => e.kind === 'rate_limit_warning')).toEqual([])
+    expect(events.filter((e) => e.kind === 'api_retry')).toEqual([])
+    expect(calls[1].messages.at(-1)).toEqual({
+      role: 'user',
+      content: [{ type: 'text', text: 'stop, do X' }],
+    })
+    expect(result.turn.error).toBeUndefined()
+  })
+
   it('abandons a retry wait for the steer instead of re-sending the stale request', async () => {
     const channel = createTurnInputChannel()
     const { provider, calls } = stepwiseProvider(async function* (_o, i) {

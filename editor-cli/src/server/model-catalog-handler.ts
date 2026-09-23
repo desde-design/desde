@@ -68,6 +68,17 @@ const FALLBACK_CAPABILITIES: ProviderCapabilities = {
 /** A served catalog plus the asymmetries the client has to gate on. */
 export interface ModelCatalogEntry extends ProviderModelCatalog {
   capabilities: ProviderCapabilities
+  /**
+   * The provider's display label (its descriptor's `label`, e.g. "Anthropic"
+   * or "OpenAI"). Added so the client can name the account a rate-limit
+   * banner is about (`ChatStatusBanners`' `providerLabel`) instead of
+   * hard-coding "Claude" — see `RateLimitWarningBanner` in
+   * `chat-status-banners.tsx`. Falls back to the raw `providerId` for a
+   * catalog entry with no matching descriptor, same as `FALLBACK_CAPABILITIES`
+   * below; that case does not happen through the real resolver, only a
+   * hand-built `ResolvedModelCatalogs` in a test.
+   */
+  label: string
 }
 
 export interface ModelCatalogResponse {
@@ -120,6 +131,7 @@ export function buildModelCatalogResponse(
       ...catalog,
       capabilities:
         getDescriptor(catalog.providerId)?.capabilities ?? FALLBACK_CAPABILITIES,
+      label: getDescriptor(catalog.providerId)?.label ?? catalog.providerId,
     })),
     defaultProviderId: primary.providerId,
     default: defaultModelConfig(primary),
