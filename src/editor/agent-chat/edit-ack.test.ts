@@ -20,6 +20,7 @@ import {
   ALLOWED_COMPONENT_EXTENSIONS,
   ALLOWED_NEW_FILE_EXTENSIONS,
   buildCanUseTool,
+  bareToolName,
   buildToolPermissionGate,
   reconstructWriteEdit,
   toRel,
@@ -1282,6 +1283,97 @@ describe('buildToolPermissionGate', () => {
     expect(viaSdk).not.toBeNull()
     expect(viaSdk!.behavior).toBe('deny')
     expect((viaSdk as { message: string }).message).toBe((viaGate as { message: string }).message)
+  })
+})
+
+// The Claude Agent SDK sidecar registers Desde's OWN built-ins on its
+// in-process MCP server, and the SDK prefixes every MCP tool with the server's
+// namespace. So the sidecar's gate sees `mcp__editor__Write` where the neutral
+// lane's sees `Write`. Same tool, same input, so it must get the same answer.
+describe('buildToolPermissionGate — namespaced built-ins (sidecar)', () => {
+  let root: string
+  const noEmit = async () => ({ ok: true as const, editId: 'e1' })
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'editor-tool-gate-ns-')))
+  })
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  function message(d: { behavior: string }): string | undefined {
+    return (d as { message?: string }).message
+  }
+
+  it('bareToolName strips only the editor namespace', () => {
+    expect(bareToolName('mcp__editor__Write')).toBe('Write')
+    expect(bareToolName('Write')).toBe('Write')
+    expect(bareToolName('mcp__figma__get_file')).toBe('mcp__figma__get_file')
+    expect(bareToolName('mcp__editor__get_selection')).toBe('get_selection')
+  })
+
+  for (const rel of ['.mcp.json', '.claude/settings.json', 'vite.config.ts', 'CLAUDE.md']) {
+    it(`denies mcp__editor__Write to ${rel} exactly like Write`, async () => {
+      const gate = buildToolPermissionGate({ worktreeRoot: root, emitEditProposal: noEmit })
+      const input = { file_path: rel, content: '{}' }
+      const bare = await gate('Write', input, {})
+      const namespaced = await gate('mcp__editor__Write', input, {})
+      expect(bare.behavior).toBe('deny')
+      expect(namespaced).toEqual(bare)
+    })
+
+    it(`denies mcp__editor__Edit of ${rel} exactly like Edit`, async () => {
+      const target = join(root, rel)
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, '{"a":1}')
+      const gate = buildToolPermissionGate({ worktreeRoot: root, emitEditProposal: noEmit })
+      const input = { file_path: rel, old_string: '{"a":1}', new_string: '{"a":2}' }
+      const bare = await gate('Edit', input, {})
+      const namespaced = await gate('mcp__editor__Edit', input, {})
+      expect(bare.behavior).toBe('deny')
+      expect(namespaced).toEqual(bare)
+    })
+  }
+
+  it('denies mcp__editor__Read outside the worktree exactly like Read', async () => {
+    const gate = buildToolPermissionGate({ worktreeRoot: root, emitEditProposal: noEmit })
+    const input = { file_path: '/etc/passwd' }
+    const bare = await gate('Read', input, {})
+    const namespaced = await gate('mcp__editor__Read', input, {})
+    expect(bare.behavior).toBe('deny')
+    expect(message(namespaced)).toBe(message(bare))
+  })
+
+  it('denies mcp__editor__Read of a secret file exactly like Read when secret reads are blocked', async () => {
+    writeFileSync(join(root, '.env'), 'KEY=1')
+    const gate = buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: noEmit,
+      blockSecretReads: true,
+    })
+    const input = { file_path: '.env' }
+    const bare = await gate('Read', input, {})
+    const namespaced = await gate('mcp__editor__Read', input, {})
+    expect(bare.behavior).toBe('deny')
+    expect(message(namespaced)).toBe(message(bare))
+  })
+
+  it('allows an ordinary mcp__editor__Write the same as Write', async () => {
+    const gate = buildToolPermissionGate({ worktreeRoot: root, emitEditProposal: noEmit })
+    const input = { file_path: 'src/data.json', content: '{"ok":true}' }
+    expect((await gate('mcp__editor__Write', input, {})).behavior).toBe('allow')
+    expect((await gate('Write', input, {})).behavior).toBe('allow')
+  })
+
+  it('still applies the editor-tool secret check to a non-built-in editor tool', async () => {
+    const gate = buildToolPermissionGate({
+      worktreeRoot: root,
+      emitEditProposal: noEmit,
+      blockSecretReads: true,
+    })
+    const d = await gate('mcp__editor__read_file_at_commit', { path: '.env', sha: 'HEAD' }, {})
+    expect(d.behavior).toBe('deny')
   })
 })
 

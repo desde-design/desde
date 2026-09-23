@@ -289,10 +289,14 @@ export function buildToolPermissionGate(
       return deny(`SDK flagged path '${ctx.blockedPath}' as out of bounds`)
     }
 
-    if (toolName === 'Write') {
+    // The built-in's name with the editor namespace removed. See
+    // `bareToolName` for why the same tool can arrive under two names.
+    const builtin = bareToolName(toolName)
+
+    if (builtin === 'Write') {
       return handleWrite(toolInput, opts)
     }
-    if (toolName === 'Edit') {
+    if (builtin === 'Edit') {
       return handleEdit(toolInput, opts)
     }
     if (toolName === 'WebFetch') {
@@ -315,14 +319,22 @@ export function buildToolPermissionGate(
     // credential to a name neither Read guard refuses. The check reads the
     // ARGUMENTS, so an editor tool added later is covered the day it is
     // added rather than the day someone remembers this list.
-    if (toolName.startsWith('mcp__editor__') && opts.blockSecretReads === true) {
+    //
+    // Not for a namespaced BUILT-IN (`mcp__editor__Grep` on the sidecar): the
+    // built-in branches below decide those, so the sidecar and the neutral
+    // lane reach the identical decision for the identical tool.
+    if (
+      toolName.startsWith('mcp__editor__') &&
+      !NAMESPACED_BUILTINS.has(toolName) &&
+      opts.blockSecretReads === true
+    ) {
       const refusal = await editorToolSecretRefusal(opts.worktreeRoot, toolInput)
       if (refusal !== null) return deny(refusal)
     }
     // Defense in depth: for Read, validate the file_path is in-root
     // even when the SDK didn't preset blockedPath. Matches the legacy
     // `read_file` tool's traversal protection.
-    if (toolName === 'Read') {
+    if (builtin === 'Read') {
       const filePath = (toolInput as { file_path?: unknown }).file_path
       if (typeof filePath === 'string' && filePath.length > 0) {
         const safe = await resolveRepoPath(opts.worktreeRoot, filePath)
@@ -373,7 +385,7 @@ export function buildToolPermissionGate(
     // the SDK's own Glob, which no `PreToolUse` hook can filter; that was
     // already true of every broad pattern and is stated in
     // `secret-read-guard.ts`'s header.
-    if (toolName === 'Glob' || toolName === 'Grep') {
+    if (builtin === 'Glob' || builtin === 'Grep') {
       if (opts.blockSecretReads === true) {
         const input = toolInput as { glob?: unknown; path?: unknown; output_mode?: unknown }
         // FX17 item 3b. The SDK's Grep in `output_mode: "content"` returns
@@ -387,7 +399,7 @@ export function buildToolPermissionGate(
         // The neutral lane never reaches it: its Grep declares no
         // `output_mode` at all, so the branch is false for every call it
         // makes, and its result filter stays the mechanism there.
-        if (toolName === 'Grep' && input.output_mode === 'content') {
+        if (builtin === 'Grep' && input.output_mode === 'content') {
           const free = await grepContentScopeIsSecretFree(opts.worktreeRoot, input as GrepScope)
           if (!free) return deny(grepContentDenial())
         }
@@ -396,6 +408,34 @@ export function buildToolPermissionGate(
     return allow()
   }
 }
+
+/** The namespace the SDK gives every tool on the in-process `editor` server. */
+const EDITOR_NAMESPACE = 'mcp__editor__'
+
+/**
+ * A tool name with the `mcp__editor__` namespace removed, for matching the
+ * built-in branches of the gate (`Write`, `Edit`, `Read`, `Glob`, `Grep`).
+ *
+ * The same built-in reaches this gate under two names. The neutral lane runs
+ * Desde's own `Read`/`Write`/`Edit`/`Glob`/`Grep` under their bare names. The
+ * Claude Agent SDK sidecar registers those SAME tool specs on its in-process
+ * MCP server, and the SDK prefixes every MCP tool with its server's namespace,
+ * so there they arrive as `mcp__editor__Write` and so on. Without this, a
+ * protected-path Write on the sidecar would skip `handleWrite` entirely and
+ * fall through to `allow()`.
+ *
+ * Only the built-in comparisons use it. No editor tool shares a built-in's
+ * capitalised name, so an ordinary editor tool (`mcp__editor__get_selection`)
+ * strips to a name no branch matches and is decided exactly as before.
+ */
+export function bareToolName(name: string): string {
+  return name.startsWith(EDITOR_NAMESPACE) ? name.slice(EDITOR_NAMESPACE.length) : name
+}
+
+/** Desde's own built-ins as the sidecar's MCP registration names them. */
+const NAMESPACED_BUILTINS: ReadonlySet<string> = new Set(
+  ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'TodoWrite'].map((n) => `${EDITOR_NAMESPACE}${n}`),
+)
 
 /**
  * The SDK binding. `PermissionResult` and `PermissionDecision` are
