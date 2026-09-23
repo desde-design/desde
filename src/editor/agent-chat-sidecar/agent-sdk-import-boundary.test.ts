@@ -80,13 +80,7 @@ function isAllowed(file: string): boolean {
 
 describe('Claude Agent SDK import boundary', () => {
   it('only src/editor/agent-chat-sidecar/** (plus the one dynamic import in model-catalog-source.ts) may reference the SDK', async () => {
-    // `desktop` is excluded for now: another implementer is mid-edit on
-    // desktop/** (deleting the claude-runtime-*.ts installer/verify files)
-    // as part of this same branch's chat-runtime consolidation, and that
-    // work is expected to touch how desktop resolves the SDK's installed
-    // version. Re-add it as a root once that work lands — see
-    // task-30-report.md.
-    const roots = ['src', 'editor-cli/src']
+    const roots = ['src', 'editor-cli/src', 'desktop']
     const offenders: string[] = []
     for (const root of roots) {
       for (const file of await walk(root)) {
