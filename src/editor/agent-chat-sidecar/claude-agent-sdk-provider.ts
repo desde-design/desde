@@ -48,7 +48,7 @@ import type {
 export const CLAUDE_AGENT_SDK_DEFAULT_MODEL = 'claude-sonnet-4-6'
 
 export interface ClaudeAgentSdkProviderOptions {
-  /** Default model. Defaults to `claude-sonnet-4-6` (matches AnthropicProvider). */
+  /** Default model. Defaults to `claude-sonnet-4-6` (matches ANTHROPIC_DEFAULT_MODEL). */
   defaultModel?: string
   /**
    * Working directory the SDK uses for tool resolution / settings. Not
