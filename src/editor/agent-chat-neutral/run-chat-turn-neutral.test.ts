@@ -14,7 +14,7 @@ import { makeEmptySession } from '../agent-chat/types'
 import { readProposalBlob } from '../agent-chat-sdk/proposal-blob-store'
 import { createTurnInputChannel } from '../agent-chat-sdk/turn-input-channel'
 import { OPENAI_DESCRIPTOR } from '../llm-providers/descriptors/openai'
-import type { LLMProvider, ProviderEvent, StreamOpts } from '../llm-providers/types'
+import type { LLMProvider, ProviderEvent, StreamOpts, TextBlock } from '../llm-providers/types'
 import {
   API_RETRY_MAX_ATTEMPTS,
   MAX_NEUTRAL_STEPS,
@@ -195,6 +195,39 @@ describe('runChatTurnNeutral: one text turn', () => {
     })
     const first = calls[0].messages[0] as unknown as { content: Array<Record<string, unknown>> }
     expect(first.content[1]).toEqual({ type: 'image', mediaType: 'image/png', data: 'AAAA' })
+  })
+
+  it('sends the system prompt as one cache-hinted block', async () => {
+    const { calls } = await run([textStep('ok')])
+    const sys = calls[0].system as TextBlock[]
+    expect(sys[0]).toMatchObject({ cacheHint: 'ephemeral' })
+    expect(sys).toHaveLength(1)
+  })
+
+  it('puts the budget notice in its own unhinted block, after the cached prompt block', async () => {
+    // Force `applyContextBudget` to elide: one prior turn whose tool result
+    // is bigger than `DEFAULT_CONTEXT_BUDGET_CHARS` (600k chars).
+    const spent = {
+      ...makeEmptySession('p1'),
+      turns: [
+        {
+          id: 't0',
+          startedAt: '2026-09-03T00:00:00.000Z',
+          userMessage: 'read the file',
+          assistantContent: [
+            { type: 'tool_use' as const, toolUseId: 'tu_1', name: 'Read', input: {} },
+          ],
+          toolResults: { tu_1: { ok: true, output: 'x'.repeat(700_000) } },
+          editProposals: [],
+        },
+      ],
+    }
+    const { calls } = await run([textStep('ok')], { session: spent })
+    const sys = calls[0].system as TextBlock[]
+    expect(sys).toHaveLength(2)
+    expect(sys[0]).toMatchObject({ cacheHint: 'ephemeral' })
+    expect(sys[1]?.cacheHint).toBeUndefined()
+    expect(sys[1]?.text).toMatch(/shortened to fit/)
   })
 })
 

@@ -89,6 +89,7 @@ import type {
   Message,
   ProviderEvent,
   StreamOpts,
+  TextBlock,
   Usage,
 } from '../llm-providers/types'
 import { branchModeRootCommitSha } from '../worktree/git-branches'
@@ -466,8 +467,13 @@ async function runInner(
   const messages: Message[] = budgeted.messages
   // The notice rides on the SYSTEM prompt rather than as a message, because a
   // synthetic user message would replay into the next turn's history as
-  // something the user said.
-  const systemWithNotice = budgeted.notice ? `${system}\n\n${budgeted.notice}` : system
+  // something the user said. It is sent as its own block, AFTER the
+  // cache-hinted prompt block, so the cached prefix stays byte-identical
+  // across turns even when the notice's content changes turn to turn.
+  const systemWithNotice: TextBlock[] = [
+    { type: 'text', text: system, cacheHint: 'ephemeral' },
+    ...(budgeted.notice ? [{ type: 'text' as const, text: budgeted.notice }] : []),
+  ]
 
   const adapter = createNeutralEventAdapter(turnId)
   const assistantContent: ChatAssistantBlock[] = []
