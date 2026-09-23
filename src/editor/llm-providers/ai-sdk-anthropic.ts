@@ -30,9 +30,9 @@
  * `npm run typecheck`, not by that test.
  */
 
-import { createAnthropic } from '@ai-sdk/anthropic'
+import { createAnthropic, type AnthropicProvider } from '@ai-sdk/anthropic'
 import { AiSdkProvider } from './ai-sdk-provider'
-import type { LLMProvider } from './types'
+import type { LLMProvider, ServerToolDef } from './types'
 
 /**
  * Provider-options key. `@ai-sdk/anthropic` looks its own options
@@ -67,5 +67,34 @@ export function buildAnthropicProvider(input: BuildAnthropicProviderInput): LLMP
     languageModel: (modelId) => anthropic(modelId),
     providerOptionsKey: ANTHROPIC_PROVIDER_OPTIONS_KEY,
     cacheControl: 'anthropic',
+    serverTool: (def) => anthropicServerTool(def, anthropic.tools),
   })
+}
+
+/**
+ * Anthropic's own web tools for a server def. Both are served.
+ *
+ * The `_20260318` versions are the newest the installed `@ai-sdk/anthropic`
+ * ships. They can filter results with code execution on the vendor's side,
+ * which the vendor allows implicitly; those calls stream back as
+ * provider-executed `code_execution` parts and are carried like any other
+ * server block.
+ *
+ * `tools` is the namespace off the `createAnthropic` instance, passed in
+ * rather than read off the package's default export so this stays a pure
+ * mapping a test can call with a real instance.
+ *
+ * Note the vendor's `allowedDomains` also admits SUBDOMAINS of each entry,
+ * where the web policy's own check (`isWebFetchAllowed`) is exact-host. Its
+ * list is still the only thing that decides which sites are reachable.
+ */
+export function anthropicServerTool(
+  def: ServerToolDef,
+  tools: AnthropicProvider['tools'],
+): ReturnType<AnthropicProvider['tools']['webSearch_20260318']> | ReturnType<AnthropicProvider['tools']['webFetch_20260318']> {
+  const opts = {
+    ...(def.allowedDomains ? { allowedDomains: def.allowedDomains } : {}),
+    ...(def.maxUses ? { maxUses: def.maxUses } : {}),
+  }
+  return def.id === 'web_search' ? tools.webSearch_20260318(opts) : tools.webFetch_20260318(opts)
 }

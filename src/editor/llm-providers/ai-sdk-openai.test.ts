@@ -11,11 +11,12 @@ import { describe, expect, it, vi } from 'vitest'
 const createOpenAIMock = vi.fn()
 const responsesMock = vi.fn()
 const aiSdkProviderCtorMock = vi.fn()
+const webSearchMock = vi.fn(() => ({ type: 'provider' }))
 
 vi.mock('@ai-sdk/openai', () => ({
   createOpenAI: (...args: unknown[]) => {
     createOpenAIMock(...args)
-    return { responses: responsesMock }
+    return { responses: responsesMock, tools: { webSearch: webSearchMock } }
   },
 }))
 
@@ -87,6 +88,18 @@ describe('buildOpenAiProvider', () => {
   it('returns a provider named openai', () => {
     const provider = buildOpenAiProvider({ apiKey: 'sk-test' })
     expect(provider.name).toBe('openai')
+  })
+
+  it('offers web_search as a server tool and declines web_fetch, which OpenAI does not have', () => {
+    aiSdkProviderCtorMock.mockClear()
+    buildOpenAiProvider({ apiKey: 'sk-test' })
+    const opts = aiSdkProviderCtorMock.mock.calls.at(-1)?.[0] as {
+      serverTool?: (def: unknown) => unknown
+    }
+    expect(opts.serverTool!({ kind: 'server', id: 'web_fetch', allowedDomains: ['example.com'] })).toBeUndefined()
+    expect(webSearchMock).not.toHaveBeenCalled()
+    opts.serverTool!({ kind: 'server', id: 'web_search', allowedDomains: ['example.com'] })
+    expect(webSearchMock).toHaveBeenCalledWith({ filters: { allowedDomains: ['example.com'] } })
   })
 
   it('refuses to build a provider without a key rather than sending an empty bearer token', () => {

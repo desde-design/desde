@@ -38,6 +38,13 @@
  *    same `function_call_output` and the flag itself does not reach the
  *    model. Anthropic's `is_error` does survive, so without the marker the
  *    two lanes disagreed.
+ *  - Server tools (the vendor-run web tools, `ToolDef` of kind `server`) are
+ *    the one exception to "no `execute`, the loop runs it": the VENDOR runs
+ *    them inside the same response. Their call and result arrive as
+ *    `providerExecuted` stream parts and become `server_tool_use` /
+ *    `server_tool_result` blocks, never a pending call. This file stays
+ *    vendor-free about them: the descriptor's own `serverTool` factory
+ *    (`ai-sdk-anthropic.ts`, `ai-sdk-openai.ts`) builds each one.
  *  - `result.stream` is used, not `result.fullStream`, and `result.usage`, not
  *    `result.totalUsage`: both of the latter are deprecated in ai@7. The one
  *    surviving `totalUsage` is the field name on the `finish` stream part,
@@ -53,12 +60,14 @@ import {
   RetryError,
   streamText,
   tool,
+  type AssistantModelMessage,
   type FinishReason,
   type JSONValue,
   type LanguageModel,
   type LanguageModelUsage,
   type ModelMessage,
   type SystemModelMessage,
+  type Tool,
   type ToolSet,
 } from 'ai'
 
@@ -84,6 +93,7 @@ import type {
   Message,
   ProviderEvent,
   StopReason,
+  ServerToolDef,
   StreamOpts,
   SystemContent,
   ToolDef,
@@ -120,6 +130,14 @@ export interface AiSdkProviderOptions {
    * on the marked system block.
    */
   cacheControl?: 'anthropic'
+  /**
+   * Builds the vendor's own tool for a server def (`web_search`,
+   * `web_fetch`). Supplied by the vendor file, so this adapter never names a
+   * vendor tool factory. Returns `undefined` for an id the vendor does not
+   * have (OpenAI has no fetch tool), and the def is then left out of the
+   * request. Absent entirely means the provider serves no server tools.
+   */
+  serverTool?: (def: ServerToolDef) => Tool | undefined
 }
 
 export class AiSdkProvider implements LLMProvider {
@@ -129,6 +147,7 @@ export class AiSdkProvider implements LLMProvider {
   private readonly providerOptionsKey: string
   private readonly defaultProviderOptions: Record<string, JSONValue> | undefined
   private readonly cacheControl: 'anthropic' | undefined
+  private readonly serverTool: ((def: ServerToolDef) => Tool | undefined) | undefined
 
   constructor(opts: AiSdkProviderOptions) {
     this.name = opts.name
@@ -137,6 +156,7 @@ export class AiSdkProvider implements LLMProvider {
     this.providerOptionsKey = opts.providerOptionsKey
     this.defaultProviderOptions = opts.defaultProviderOptions
     this.cacheControl = opts.cacheControl
+    this.serverTool = opts.serverTool
   }
 
   /**
@@ -279,7 +299,7 @@ export class AiSdkProvider implements LLMProvider {
       model,
       system: this.toSystem(opts.system),
       messages: toModelMessages(opts.messages),
-      tools: toToolSet(opts.tools),
+      tools: toToolSet(opts.tools, this.serverTool),
       ...(opts.maxTokens !== undefined ? { maxOutputTokens: opts.maxTokens } : {}),
       // `StreamOpts.providerOptions` is deliberately `Record<string, unknown>`:
       // only the descriptor that produced it knows what its own vendor accepts.
@@ -324,8 +344,56 @@ export class AiSdkProvider implements LLMProvider {
           break
         case 'tool-call':
           flushText()
+          if (part.providerExecuted === true) {
+            // The vendor already ran it, inside this response. Recorded for
+            // the transcript and for replay; the loop must not run it again.
+            blocks.push({
+              type: 'server_tool_use',
+              id: part.toolCallId,
+              name: part.toolName,
+              input: part.input,
+              ...metadataOf(part.providerMetadata),
+            })
+            yield {
+              kind: 'server_tool_use',
+              id: part.toolCallId,
+              name: part.toolName,
+              input: part.input,
+            }
+            break
+          }
           blocks.push({ type: 'tool_use', id: part.toolCallId, name: part.toolName, input: part.input })
           yield { kind: 'tool_use', id: part.toolCallId, name: part.toolName, input: part.input }
+          break
+        case 'tool-result':
+        case 'tool-error': {
+          // Only a provider-executed result can reach here: our function
+          // tools carry no `execute`, so the library never produces a result
+          // for one. The guard keeps that an assertion rather than a guess.
+          if (part.providerExecuted !== true) break
+          flushText()
+          const isError = part.type === 'tool-error'
+          const output = isError ? part.error : part.output
+          blocks.push({
+            type: 'server_tool_result',
+            toolUseId: part.toolCallId,
+            name: part.toolName,
+            output,
+            ...(isError ? { isError: true } : {}),
+            ...metadataOf(part.providerMetadata),
+          })
+          yield {
+            kind: 'server_tool_result',
+            toolUseId: part.toolCallId,
+            name: part.toolName,
+            output,
+            ...(isError ? { isError: true } : {}),
+          }
+          break
+        }
+        case 'source':
+          // Search citations. The result block already carries every URL the
+          // vendor returned, so these add nothing the transcript needs.
           break
         case 'abort':
           aborted = true
@@ -616,9 +684,36 @@ function mapFinishReason(finish: FinishReason | undefined): StopReason {
   }
 }
 
-function toToolSet(tools: readonly ToolDef[]): ToolSet {
+/**
+ * `providerMetadata` off a stream part, as the optional field the neutral
+ * block carries. Omitted when the vendor sent none, so a block without it
+ * compares equal to one built by hand.
+ */
+function metadataOf(
+  metadata: Record<string, unknown> | undefined,
+): { providerMetadata?: Record<string, unknown> } {
+  return metadata !== undefined && Object.keys(metadata).length > 0
+    ? { providerMetadata: metadata }
+    : {}
+}
+
+function toToolSet(
+  tools: readonly ToolDef[],
+  serverTool: ((def: ServerToolDef) => Tool | undefined) | undefined,
+): ToolSet {
   const set: ToolSet = {}
   for (const def of tools) {
+    if (def.kind === 'server') {
+      // Keyed by the id, which is also the name both vendors give the tool
+      // on the wire. That matters on REPLAY: `@ai-sdk/anthropic` maps a
+      // replayed call's name back to its own tool name through the CURRENT
+      // request's tool set, and falls back to the name itself when the tool
+      // is not declared this time (the user switched web search off between
+      // turns). Keying by the id makes both paths land on `web_search`.
+      const built = serverTool?.(def)
+      if (built !== undefined) set[def.id] = built
+      continue
+    }
     set[def.name] = tool({
       description: def.description,
       inputSchema: jsonSchema(def.inputSchema),
@@ -639,6 +734,9 @@ function toToolSet(tools: readonly ToolDef[]): ToolSet {
  * message, because a dropped result desynchronises the transcript and the model
  * then answers a question it never saw the answer to.
  */
+/** One part of an assistant `ModelMessage`'s content array. */
+type AssistantModelPart = Exclude<AssistantModelMessage['content'], string>[number]
+
 function toModelMessages(messages: readonly Message[]): ModelMessage[] {
   const toolNameById = new Map<string, string>()
   for (const msg of messages) {
@@ -651,16 +749,51 @@ function toModelMessages(messages: readonly Message[]): ModelMessage[] {
   const out: ModelMessage[] = []
   for (const msg of messages) {
     if (msg.role === 'assistant') {
-      const content = msg.content.map((block) =>
-        block.type === 'text'
-          ? ({ type: 'text', text: block.text } as const)
-          : ({
+      const content = msg.content.map((block): AssistantModelPart => {
+        switch (block.type) {
+          case 'text':
+            return { type: 'text', text: block.text }
+          case 'tool_use':
+            return {
               type: 'tool-call',
               toolCallId: block.id,
               toolName: block.name,
               input: block.input ?? {},
-            } as const),
-      )
+            }
+          // Server-tool blocks stay INSIDE the assistant message. The vendor
+          // produced the call and the result in one response, and both
+          // vendor mappings read them back from there: a `tool` role message
+          // is for results Desde produced, and the vendor would read this one
+          // as an answer to a function call it never made.
+          case 'server_tool_use':
+            return {
+              type: 'tool-call',
+              toolCallId: block.id,
+              toolName: block.name,
+              input: block.input ?? {},
+              providerExecuted: true,
+              ...(block.providerMetadata
+                ? { providerOptions: block.providerMetadata as Record<string, Record<string, JSONValue>> }
+                : {}),
+            }
+          case 'server_tool_result':
+            return {
+              type: 'tool-result',
+              toolCallId: block.toolUseId,
+              toolName: block.name,
+              // `error-json` for a vendor-reported failure, because the vendor
+              // validates a `json` output against its SUCCESS schema on the
+              // way back in, and an error payload fails that validation and
+              // takes the whole request down with it.
+              output: block.isError
+                ? { type: 'error-json', value: block.output as JSONValue }
+                : { type: 'json', value: block.output as JSONValue },
+              ...(block.providerMetadata
+                ? { providerOptions: block.providerMetadata as Record<string, Record<string, JSONValue>> }
+                : {}),
+            }
+        }
+      })
       out.push({ role: 'assistant', content })
       continue
     }

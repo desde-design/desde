@@ -41,7 +41,7 @@ export const OPENAI_DESCRIPTOR: ProviderDescriptor = {
     reasoningVisibility: true,
     vendorRateLimitEvents: false,
     imagesInPrompt: true,
-    webTools: false,
+    webTools: ['web_search'],
   },
   credentials: {
     apiKeyEnvVar: 'OPENAI_API_KEY',

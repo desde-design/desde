@@ -14,7 +14,7 @@
  */
 import type { EffortLevel, ProviderModelCatalog } from '../core/model-catalog'
 import type { DefaultAliasRule, LiveModel } from './live-model-catalog'
-import type { LLMProvider } from './types'
+import type { LLMProvider, ServerToolId } from './types'
 
 /** Which turn runtime serves this provider's chat. */
 export type ChatRuntimeKind = 'claude-agent-sdk' | 'neutral'
@@ -32,8 +32,13 @@ export interface ProviderCapabilities {
   /** rate_limit_warning events. Anthropic-only. */
   vendorRateLimitEvents: boolean
   imagesInPrompt: boolean
-  /** WebFetch / WebSearch built-ins. */
-  webTools: boolean
+  /**
+   * The web tools this provider's VENDOR runs server-side, by id. The neutral
+   * loop declares only ids listed here, and only when the web policy turns
+   * them on; the AI SDK transport's `serverTool` factory is the other end of
+   * the same gate. Empty means the provider has none.
+   */
+  webTools: ReadonlyArray<ServerToolId>
 }
 
 export interface ProviderCredentialSpec {

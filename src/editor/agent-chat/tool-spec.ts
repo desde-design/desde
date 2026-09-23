@@ -16,7 +16,7 @@
 
 import { z } from 'zod'
 
-import type { ToolDef } from '../llm-providers/types'
+import type { FunctionToolDef } from '../llm-providers/types'
 
 /** What a handler is told about the call it is answering. */
 export interface ToolHandlerContext {
@@ -75,7 +75,7 @@ export interface ToolSpec {
  * wire formats reject a duplicate at request time, and a 400 naming an
  * unrelated field is a much worse way to find out.
  */
-export function toToolDefs(specs: readonly ToolSpec[]): ToolDef[] {
+export function toToolDefs(specs: readonly ToolSpec[]): FunctionToolDef[] {
   const seen = new Set<string>()
   return specs.map((spec) => {
     if (seen.has(spec.name)) {

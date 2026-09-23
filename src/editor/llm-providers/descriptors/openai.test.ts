@@ -19,7 +19,7 @@ describe('OPENAI_DESCRIPTOR', () => {
     expect(OPENAI_DESCRIPTOR.capabilities.midTurnSteering).toBe(false)
     expect(OPENAI_DESCRIPTOR.capabilities.vendorRateLimitEvents).toBe(false)
     expect(OPENAI_DESCRIPTOR.capabilities.inTurnBudgetStop).toBe('step-boundary')
-    expect(OPENAI_DESCRIPTOR.capabilities.webTools).toBe(false)
+    expect(OPENAI_DESCRIPTOR.capabilities.webTools).toEqual(['web_search'])
   })
 
   it('serves the real static catalog with exactly one default', () => {

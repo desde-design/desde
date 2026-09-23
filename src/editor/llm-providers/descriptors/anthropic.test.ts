@@ -25,7 +25,7 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
       reasoningVisibility: true,
       vendorRateLimitEvents: true,
       imagesInPrompt: true,
-      webTools: true,
+      webTools: ['web_search', 'web_fetch'],
     })
   })
 

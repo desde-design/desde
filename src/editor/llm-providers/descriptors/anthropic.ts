@@ -32,7 +32,7 @@ export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
     reasoningVisibility: true,
     vendorRateLimitEvents: true,
     imagesInPrompt: true,
-    webTools: true,
+    webTools: ['web_search', 'web_fetch'],
   },
   credentials: {
     apiKeyEnvVar: 'ANTHROPIC_API_KEY',

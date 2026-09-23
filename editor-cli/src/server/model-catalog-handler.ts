@@ -62,7 +62,7 @@ const FALLBACK_CAPABILITIES: ProviderCapabilities = {
   reasoningVisibility: false,
   vendorRateLimitEvents: false,
   imagesInPrompt: false,
-  webTools: false,
+  webTools: [],
 }
 
 /** A served catalog plus the asymmetries the client has to gate on. */

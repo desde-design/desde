@@ -146,17 +146,47 @@ export interface CompleteResult {
 // ─── Streaming + tool-use surface (Phase 1) ─────────────────────────
 
 /**
- * Vendor-neutral tool definition. Schemas are plain JSON Schema —
- * the provider impl translates to native (Anthropic `tools[].input_schema`,
- * OpenAI `functions[].parameters`, etc.).
+ * Vendor-neutral tool definition.
+ *
+ * Two kinds. A FUNCTION tool (the default, `kind` omitted) is one Desde runs
+ * itself: its schema is plain JSON Schema, which the provider impl translates
+ * to native (Anthropic `tools[].input_schema`, OpenAI `functions[].parameters`,
+ * etc.), and the model's call comes back to the loop to be gated and executed.
+ *
+ * A SERVER tool is one the VENDOR runs, inside the same response, with no
+ * round trip through the loop. Only the two web tools exist today. It carries
+ * no schema because the vendor owns it; the provider impl maps `id` to its
+ * own tool factory, and a provider that has no such tool leaves it out of the
+ * request. Which ids a provider can serve is `ProviderCapabilities.webTools`,
+ * and the loop only declares ids listed there.
  */
-export interface ToolDef {
+export type ToolDef = FunctionToolDef | ServerToolDef
+
+export interface FunctionToolDef {
+  kind?: 'function'
   /** Tool name. Must be unique within a call. */
   name: string
   /** One-line description surfaced to the model in the tool registry. */
   description: string
   /** JSON Schema for the tool's input. */
   inputSchema: Record<string, unknown>
+}
+
+/** Server-side tool ids a provider may serve. */
+export type ServerToolId = 'web_search' | 'web_fetch'
+
+export interface ServerToolDef {
+  kind: 'server'
+  id: ServerToolId
+  /**
+   * Domains the vendor may reach. Absent means the vendor's own default,
+   * which for search is "anywhere". `web_fetch` is only ever declared WITH
+   * this list: the web policy's allowlist is the whole reason fetch is safe
+   * to offer.
+   */
+  allowedDomains?: string[]
+  /** Cap on uses within one request, where the vendor supports one. */
+  maxUses?: number
 }
 
 export interface TextContent {
@@ -237,7 +267,50 @@ export interface DocumentContent {
   name?: string
 }
 
-export type AssistantContent = TextContent | ToolUseContent
+/**
+ * A call to a SERVER tool (see {@link ServerToolDef}) that the vendor made and
+ * ran itself. It sits in the assistant message, never in the loop's pending
+ * calls: there is nothing for Desde to execute.
+ *
+ * `providerMetadata` is opaque vendor data carried from the stream back into
+ * the request on replay, keyed by provider name like `StreamOpts
+ * .providerOptions`. Anthropic records here which code-execution block a web
+ * call came from (`caller`), and replaying the call without it changes what
+ * the vendor is told happened.
+ */
+export interface ServerToolUseContent {
+  type: 'server_tool_use'
+  id: string
+  name: string
+  input: unknown
+  providerMetadata?: Record<string, unknown>
+}
+
+/**
+ * The vendor's result for a {@link ServerToolUseContent}. Also in the
+ * assistant message, directly after its call, because the vendor produced
+ * both inside one response.
+ *
+ * `output` is kept exactly as the vendor returned it. It is replayed to the
+ * same vendor on the next request, which validates it against its own
+ * schema, so a summarised or trimmed output would turn the next request into
+ * a 400. `isError` marks a vendor-reported failure (a fetch the vendor could
+ * not complete), which is replayed as an error so the vendor reads it as one.
+ */
+export interface ServerToolResultContent {
+  type: 'server_tool_result'
+  toolUseId: string
+  name: string
+  output: unknown
+  isError?: boolean
+  providerMetadata?: Record<string, unknown>
+}
+
+export type AssistantContent =
+  | TextContent
+  | ToolUseContent
+  | ServerToolUseContent
+  | ServerToolResultContent
 export type ChatUserContent = TextContent | ToolResultContent | ImageContent | DocumentContent
 
 /**
@@ -287,6 +360,10 @@ export interface StreamOpts {
  *   delta events are buffered internally; UIs that want a "tool is
  *   forming…" indicator can use `tool_use_started` / `tool_use_partial`
  *   (added in a later phase if needed).
+ * - `server_tool_use` / `server_tool_result` — a call to a server tool
+ *   (see `ServerToolDef`) and its result, both made by the VENDOR inside
+ *   this response. Announced for display and persistence only. They are
+ *   never pending calls: the loop has nothing to run.
  * - `usage` — token usage so far (may fire mid-stream and at end).
  * - `message_complete` — terminal event; carries the stop reason and
  *   the final assistant message (the full sequence of content blocks
@@ -300,6 +377,14 @@ export type ProviderEvent =
   | { kind: 'text_delta'; delta: string }
   | { kind: 'reasoning_delta'; delta: string }
   | { kind: 'tool_use'; id: string; name: string; input: unknown }
+  | { kind: 'server_tool_use'; id: string; name: string; input: unknown }
+  | {
+      kind: 'server_tool_result'
+      toolUseId: string
+      name: string
+      output: unknown
+      isError?: boolean
+    }
   | {
       kind: 'usage'
       inputTokens: number

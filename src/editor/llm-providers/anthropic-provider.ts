@@ -285,7 +285,11 @@ export class AnthropicProvider implements LLMProvider {
       system: toAnthropicSystem(opts.system) as unknown as
         Anthropic.Messages.MessageCreateParams['system'],
       messages: opts.messages.map(toAnthropicMessage),
-      tools: opts.tools.map(toAnthropicTool),
+      // Server tools (the vendor-run web tools) are served only by the AI SDK
+      // transport, `ai-sdk-anthropic.ts`. This provider is the one Task 11
+      // retires, so it declares function tools only and the loop's server
+      // defs are left out rather than half-supported here.
+      tools: opts.tools.flatMap((t) => (t.kind === 'server' ? [] : [toAnthropicTool(t)])),
       // Descriptor-supplied vendor fields (`thinking`, cache knobs). Spread
       // LAST so a descriptor can override a default we set above, and never
       // the other way round: the descriptor is the thing that knows.
@@ -546,17 +550,24 @@ function toAnthropicMessage(msg: Message): Anthropic.Messages.MessageParam {
     return { role: 'user', content }
   }
   // assistant
-  const content = msg.content.map((b) => {
+  //
+  // Server-tool blocks are dropped, both halves together. This provider never
+  // declares a server tool (see `streamConversation`), so it only meets them
+  // in history written by the AI SDK transport, and a lone call without its
+  // result would be a 400.
+  const content = msg.content.flatMap((b): Anthropic.Messages.ContentBlockParam[] => {
     if (b.type === 'text') {
-      return { type: 'text' as const, text: b.text }
+      return [{ type: 'text' as const, text: b.text }]
     }
-    // tool_use
-    return {
-      type: 'tool_use' as const,
-      id: b.id,
-      name: b.name,
-      input: (b.input ?? {}) as Record<string, unknown>,
-    }
+    if (b.type === 'server_tool_use' || b.type === 'server_tool_result') return []
+    return [
+      {
+        type: 'tool_use' as const,
+        id: b.id,
+        name: b.name,
+        input: (b.input ?? {}) as Record<string, unknown>,
+      },
+    ]
   })
   return { role: 'assistant', content }
 }
