@@ -53,7 +53,7 @@ export interface ProviderCredentialSpec {
   /**
    * True only for a provider with a local subscription runtime (Anthropic's
    * bundled `claude` binary). Gates the dev-mode rungs of the credential
-   * ladder and `isClaudeRuntimeResolvable`. Never generalise this.
+   * ladder and `isClaudeOnPath`. Never generalise this.
    */
   hasSubscriptionRuntime?: boolean
 }

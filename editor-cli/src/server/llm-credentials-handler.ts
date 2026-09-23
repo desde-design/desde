@@ -103,7 +103,7 @@ export interface LlmCredentialsDeps {
   home?: string
   /** Mutated on write so a new key takes effect without a CLI restart. */
   env?: NodeJS.ProcessEnv
-  claudeRuntimeResolvable?: boolean
+  claudeOnPath?: boolean
   /** Launch-time baseline. Defaults to the module-level capture. */
   inherited?: InheritedLlmEnv
   fetchImpl?: typeof fetch
@@ -129,7 +129,7 @@ function isHttpUrl(value: string): boolean {
 async function buildStatus(
   home: string,
   inherited: InheritedLlmEnv,
-  claudeRuntimeResolvable: boolean,
+  claudeOnPath: boolean,
   descriptors: readonly ProviderDescriptor[],
 ): Promise<LlmCredentialsStatus> {
   const stored = await readLlmCredentials(home)
@@ -143,7 +143,7 @@ async function buildStatus(
       descriptor: d,
       inheritedApiKey: inherited.vars[d.credentials.apiKeyEnvVar],
       stored,
-      claudeRuntimeResolvable,
+      claudeOnPath,
       subscriptionOptIn,
     })
     const slot = stored.providers[d.id]
@@ -194,7 +194,7 @@ export async function handleLlmCredentialsRoute(
 ): Promise<void> {
   const home = deps.home ?? homedir()
   const env = deps.env ?? process.env
-  const runtimeResolvable = deps.claudeRuntimeResolvable ?? false
+  const claudeOnPath = deps.claudeOnPath ?? false
   const inherited = deps.inherited ?? inheritedLlmEnv()
   const descriptors = deps.descriptors ?? PROVIDER_DESCRIPTORS
   const readBody =
@@ -214,7 +214,7 @@ export async function handleLlmCredentialsRoute(
       }
       await setLlmDevMode(body.devMode, home)
       await reapplyEnv(home, env, inherited)
-      sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable, descriptors))
+      sendJson(res, 200, await buildStatus(home, inherited, claudeOnPath, descriptors))
       return
     }
 
@@ -229,7 +229,7 @@ export async function handleLlmCredentialsRoute(
         return
       }
       await setPromptDismissed(body.dismissed, home)
-      sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable, descriptors))
+      sendJson(res, 200, await buildStatus(home, inherited, claudeOnPath, descriptors))
       return
     }
 
@@ -336,7 +336,7 @@ export async function handleLlmCredentialsRoute(
           return
         }
         await reapplyEnv(home, env, inherited)
-        sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable, descriptors))
+        sendJson(res, 200, await buildStatus(home, inherited, claudeOnPath, descriptors))
         return
       }
       if (req.method === "DELETE") {
@@ -345,7 +345,7 @@ export async function handleLlmCredentialsRoute(
         // the public endpoint.
         await clearLlmApiKey(descriptor.id, home)
         await reapplyEnv(home, env, inherited)
-        sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable, descriptors))
+        sendJson(res, 200, await buildStatus(home, inherited, claudeOnPath, descriptors))
         return
       }
       sendJson(res, 405, { error: "Method not allowed." })
@@ -365,7 +365,7 @@ export async function handleLlmCredentialsRoute(
       // editor pick the change up on its next load rather than at restart.
       // Residual, accepted: a process whose UI is never reloaded stays stale.
       await reapplyEnv(home, env, inherited)
-      sendJson(res, 200, await buildStatus(home, inherited, runtimeResolvable, descriptors))
+      sendJson(res, 200, await buildStatus(home, inherited, claudeOnPath, descriptors))
       return
     }
 

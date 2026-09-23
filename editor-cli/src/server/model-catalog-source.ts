@@ -68,9 +68,9 @@ import { listAnthropicLiveModels, fromAgentSdk } from "../../../src/editor/llm-p
 import { mergeLiveModels, type LiveModel } from "../../../src/editor/llm-providers/live-model-catalog.js"
 import { isClaudeSubscriptionOptIn } from "../../../src/editor/llm-providers/claude-subscription.js"
 import {
-  assertClaudeRuntimeReady,
-  resolveClaudeExecutablePath,
-} from "../../../src/editor/llm-providers/resolve-claude-executable.js"
+  resolveClaudeOnPath,
+  SIDECAR_NO_BINARY_MESSAGE,
+} from "../../../src/editor/agent-chat-sidecar/resolve-claude-on-path.js"
 // From the SDK-FREE sibling, not `run-chat-turn-sdk.js` (which imports the
 // Agent SDK at module scope): this module is on the boot graph, so pulling
 // that in here would put the SDK on every boot, OpenAI-only included (M1,
@@ -217,8 +217,10 @@ export function chatRuntimeServable(descriptor: ProviderDescriptor): boolean {
  * exactly the laziness `resolveChatRuntime`'s loaders exist to preserve.
  */
 export async function listViaClaudeCli(signal: AbortSignal): Promise<LiveModel[]> {
-  const claudeExecutablePath = resolveClaudeExecutablePath()
-  assertClaudeRuntimeReady(claudeExecutablePath)
+  const claudeExecutablePath = resolveClaudeOnPath()
+  if (claudeExecutablePath === undefined) {
+    throw new Error(SIDECAR_NO_BINARY_MESSAGE)
+  }
   const { query } = await import("@anthropic-ai/claude-agent-sdk")
   const idle = (async function* (): AsyncGenerator<SDKUserMessage, void> {
     await new Promise<void>((resolve) => {
@@ -230,7 +232,7 @@ export async function listViaClaudeCli(signal: AbortSignal): Promise<LiveModel[]
     prompt: idle,
     options: {
       cwd: tmpdir(),
-      ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
+      pathToClaudeCodeExecutable: claudeExecutablePath,
       maxTurns: 1,
       tools: [],
     },

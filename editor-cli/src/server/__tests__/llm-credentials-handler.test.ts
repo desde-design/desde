@@ -48,7 +48,7 @@ describe("GET /api/editor/llm-credentials", () => {
     await handleLlmCredentialsRoute(req("GET"), asRes(res), url(), {
       home,
       env: {},
-      claudeRuntimeResolvable: false,
+      claudeOnPath: false,
       fetchImpl: okFetch(),
     })
     const body = JSON.parse(res.body) as { providers: Record<string, Record<string, unknown>>; devMode: boolean }
@@ -83,7 +83,7 @@ describe("GET /api/editor/llm-credentials", () => {
     await handleLlmCredentialsRoute(req("GET"), asRes(res), url(), {
       home,
       env: {},
-      claudeRuntimeResolvable: false,
+      claudeOnPath: false,
       fetchImpl: okFetch(),
     })
     const body = JSON.parse(res.body) as { providers: Record<string, Record<string, unknown>>; devMode: boolean }
@@ -100,7 +100,7 @@ describe("GET /api/editor/llm-credentials", () => {
       // alone no longer implies that: boot injects stored keys there too, and
       // conflating the two is what reported every stored key as `env`.
       inherited: { vars: { ANTHROPIC_API_KEY: "sk-ant-fromtheshell1111" } },
-      claudeRuntimeResolvable: false,
+      claudeOnPath: false,
       fetchImpl: okFetch(),
     })
     const body = JSON.parse(res.body) as { providers: Record<string, Record<string, unknown>>; devMode: boolean }
@@ -123,7 +123,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: fetchImpl as unknown as typeof fetch,
         readBody: async () => ({ apiKey: "sk-new1234", baseUrl: "https://gateway.internal/v1" }),
       },
@@ -146,7 +146,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: fetchImpl as unknown as typeof fetch,
         readBody: async () => ({ apiKey: "sk-first1234", baseUrl: "https://gateway.internal" }),
       },
@@ -166,7 +166,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: fetchImpl as unknown as typeof fetch,
         readBody: async () => ({ apiKey: "sk-second5678" }),
       },
@@ -188,7 +188,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: fetchImpl as unknown as typeof fetch,
         readBody: async () => ({ apiKey: "sk-first1234", baseUrl: "https://gateway.internal" }),
       },
@@ -209,7 +209,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: fetchImpl as unknown as typeof fetch,
         readBody: async () => ({ apiKey: "sk-first1234", baseUrl: "" }),
       },
@@ -230,7 +230,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: fetchImpl as unknown as typeof fetch,
         readBody: async () => ({ apiKey: "sk-first1234", baseUrl: "https://wrong.internal" }),
       },
@@ -248,7 +248,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: fetchImpl as unknown as typeof fetch,
         readBody: async () => ({ baseUrl: "https://gateway.internal/v1" }),
       },
@@ -278,7 +278,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: fetchImpl as unknown as typeof fetch,
         readBody: async () => ({ baseUrl: "https://gateway.internal" }),
       },
@@ -298,7 +298,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: fetchImpl as unknown as typeof fetch,
         readBody: async () => ({ apiKey: "sk-bad" }),
       },
@@ -318,7 +318,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: f,
         readBody: async () => ({ apiKey: "   " }),
       },
@@ -337,7 +337,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env,
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ apiKey: "sk-ant-good1234" }),
       },
@@ -354,7 +354,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       req("PUT"),
       asRes(res),
       url("/api/editor/llm-credentials/moonshot"),
-      { home, env: {}, claudeRuntimeResolvable: false, readBody: async () => ({ apiKey: "x" }) },
+      { home, env: {}, claudeOnPath: false, readBody: async () => ({ apiKey: "x" }) },
     )
     expect(res.statusCode).toBe(404)
   })
@@ -368,7 +368,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ apiKey: "sk-ant-x", baseUrl: "https://nope.internal" }),
       },
@@ -384,7 +384,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       req("DELETE"),
       asRes(res),
       url("/api/editor/llm-credentials/openai"),
-      { home, env: {}, claudeRuntimeResolvable: false },
+      { home, env: {}, claudeOnPath: false },
     )
     expect(res.statusCode).toBe(200)
     const stored = await readLlmCredentials(home)
@@ -403,7 +403,7 @@ describe("PUT /api/editor/llm-credentials/:providerId", () => {
       {
         home,
         env,
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: okFetch(),
       },
     )
@@ -435,7 +435,7 @@ describe("dev-mode", () => {
       {
         home,
         env,
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ devMode: true }),
       },
@@ -457,7 +457,7 @@ describe("dev-mode", () => {
       {
         home,
         env,
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ devMode: false }),
       },
@@ -475,7 +475,7 @@ describe("dev-mode", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ devMode: "yes" }),
       },
@@ -488,7 +488,7 @@ describe("dev-mode", () => {
     await handleLlmCredentialsRoute(req("POST"), asRes(res), url(), {
       home,
       env: {},
-      claudeRuntimeResolvable: false,
+      claudeOnPath: false,
       fetchImpl: okFetch(),
     })
     expect(res.statusCode).toBe(405)
@@ -515,7 +515,7 @@ describe("stored keys stay owned by the app after injection", () => {
       home,
       env,
       inherited: { vars: {} }, // the shell exported nothing
-      claudeRuntimeResolvable: true,
+      claudeOnPath: true,
       fetchImpl: okFetch(),
     })
     const body = JSON.parse(res.body) as { providers: Record<string, Record<string, unknown>>; devMode: boolean }
@@ -534,7 +534,7 @@ describe("stored keys stay owned by the app after injection", () => {
       home,
       env: { ANTHROPIC_API_KEY: "sk-ant-exported1111" },
       inherited: { vars: { ANTHROPIC_API_KEY: "sk-ant-exported1111" } },
-      claudeRuntimeResolvable: true,
+      claudeOnPath: true,
       fetchImpl: okFetch(),
     })
     // A stored key exists too, and stays reported and manageable even though
@@ -559,7 +559,7 @@ describe("stored keys stay owned by the app after injection", () => {
         home,
         env,
         inherited: { vars: {} },
-        claudeRuntimeResolvable: true,
+        claudeOnPath: true,
         fetchImpl: okFetch(),
         readBody: async () => ({ apiKey: "sk-ant-fresh4321" }),
       },
@@ -584,7 +584,7 @@ describe("stored keys stay owned by the app after injection", () => {
       home,
       env,
       inherited,
-      claudeRuntimeResolvable: true,
+      claudeOnPath: true,
       fetchImpl: okFetch(),
       readBody: async () => ({ devMode: true }),
     })
@@ -594,7 +594,7 @@ describe("stored keys stay owned by the app after injection", () => {
       home,
       env,
       inherited,
-      claudeRuntimeResolvable: true,
+      claudeOnPath: true,
       fetchImpl: okFetch(),
       readBody: async () => ({ devMode: false }),
     })
@@ -614,7 +614,7 @@ describe("PUT /api/editor/llm-credentials/dismiss-prompt", () => {
         home,
         env: {},
         inherited: { vars: {} },
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ dismissed: true }),
       },
@@ -632,7 +632,7 @@ describe("PUT /api/editor/llm-credentials/dismiss-prompt", () => {
         home,
         env: {},
         inherited: { vars: {} },
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ dismissed: true }),
       },
@@ -646,7 +646,7 @@ describe("PUT /api/editor/llm-credentials/dismiss-prompt", () => {
         home,
         env: {},
         inherited: { vars: {} },
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ apiKey: "sk-ant-good1234" }),
       },
@@ -664,7 +664,7 @@ describe("PUT /api/editor/llm-credentials/dismiss-prompt", () => {
         home,
         env: {},
         inherited: { vars: {} },
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: okFetch(),
         readBody: async () => ({ dismissed: "yes" }),
       },
@@ -686,7 +686,7 @@ describe("GET re-applies the store to this process's environment", () => {
       home,
       env,
       inherited: { vars: {} },
-      claudeRuntimeResolvable: false,
+      claudeOnPath: false,
       fetchImpl: okFetch(),
     })
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-fromelsewhere")
@@ -698,7 +698,7 @@ describe("GET re-applies the store to this process's environment", () => {
       home,
       env,
       inherited: { vars: {} },
-      claudeRuntimeResolvable: false,
+      claudeOnPath: false,
       fetchImpl: okFetch(),
     })
     expect("ANTHROPIC_API_KEY" in env).toBe(false)
@@ -718,7 +718,7 @@ describe("FX4 item 4: a credential file written by a newer Desde", () => {
       req("PUT"),
       asRes(res),
       url("/api/editor/llm-credentials/dev-mode"),
-      { home, env: {}, claudeRuntimeResolvable: false, readBody: async () => ({ devMode: true }) },
+      { home, env: {}, claudeOnPath: false, readBody: async () => ({ devMode: true }) },
     )
     expect(res.statusCode).toBe(409)
     expect(JSON.parse(res.body)).toEqual({
@@ -756,7 +756,7 @@ describe("FX10 item 3: read, validate and write are one transaction", () => {
       {
         home,
         env: {},
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         fetchImpl: fetchImpl as typeof fetch,
         readBody: async () => body,
       },

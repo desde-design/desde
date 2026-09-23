@@ -43,7 +43,7 @@ export interface CredentialProbeInput {
    */
   inheritedApiKey?: string
   stored: StoredCredentials
-  claudeRuntimeResolvable: boolean
+  claudeOnPath: boolean
   /**
    * Whether the caller has explicitly opted into the Claude-subscription
    * path: dev mode in the settings dialog, or `EDITOR_USE_CLAUDE_SUBSCRIPTION`
@@ -93,7 +93,7 @@ function presentKey(value: string | undefined): string | undefined {
  *
  * ## Why subscription is opt-in, and no longer a silent fallthrough
  *
- * This rung used to fire on `claudeRuntimeResolvable` ALONE. The effect was
+ * This rung used to fire on `claudeOnPath` ALONE. The effect was
  * that anyone whose `claude` binary happened to be signed in got a working
  * Editor and was never asked for anything, which is what made the old
  * quickstart able to say "Nothing extra to set."
@@ -143,10 +143,10 @@ export function probeCredential(input: CredentialProbeInput): CredentialProbeRes
       maskedHint: maskKey(storedKey, maskPrefix),
     }
   }
-  // Rung 3, same gate. `isClaudeRuntimeResolvable` is a presence heuristic for
-  // ONE bundled binary; generalising it would misdescribe every provider that
-  // has none, so it is simply never consulted for them.
-  if (hasSubscriptionRuntime && input.subscriptionOptIn && input.claudeRuntimeResolvable) {
+  // Rung 3, same gate. `isClaudeOnPath` is a presence heuristic for ONE
+  // dev-installed binary; generalising it would misdescribe every provider
+  // that has none, so it is simply never consulted for them.
+  if (hasSubscriptionRuntime && input.subscriptionOptIn && input.claudeOnPath) {
     return { credentialed: true, source: 'subscription' }
   }
   return { credentialed: false, source: 'none' }

@@ -47,11 +47,7 @@ import { runWithChatSession } from '../edit-service/chat-session-context'
 import { getSharedEditHistory } from '../edit-service/edit-history'
 import { findRecentWriterForFile } from '../agent-chat/session-store'
 import { branchModeRootCommitSha } from '../worktree/git-branches'
-import {
-  assertClaudeRuntimeReady,
-  DESKTOP_CLAUDE_RUNTIME_NOT_READY_MESSAGE,
-  resolveClaudeExecutablePath,
-} from '../llm-providers/resolve-claude-executable'
+import { resolveClaudeOnPath, SIDECAR_NO_BINARY_MESSAGE } from './resolve-claude-on-path'
 // Re-exported below (not defined here, M1 / final-review-report.md): this
 // file imports the Agent SDK at module scope, and
 // `model-catalog-source.ts` (on the boot graph) needs this predicate
@@ -630,21 +626,22 @@ async function runChatTurnSdkInner(
   let sdkSessionId: string | undefined = opts.session.sdkSessionId
 
   try {
-    // Desktop-app seam (tasks/electron-app.md "fetch the claude binary on
-    // first run"): `undefined` on the terminal CLI, unchanged from before —
-    // the SDK falls through to its own default resolution. Inside the try
-    // so a not-ready desktop runtime is reported through the SAME
-    // error/turn_complete path as any other query failure, not an unhandled
-    // throw. See resolve-claude-executable.ts's module doc comment.
-    const claudeExecutablePath = resolveClaudeExecutablePath()
-    assertClaudeRuntimeReady(claudeExecutablePath)
+    // Dev-only sidecar seam: this lane spawns whatever `claude` binary is on
+    // the developer's own PATH — see resolve-claude-on-path.ts's module doc
+    // comment. Inside the try so a missing binary is reported through the
+    // SAME error/turn_complete path as any other query failure, not an
+    // unhandled throw.
+    const claudeExecutablePath = resolveClaudeOnPath()
+    if (claudeExecutablePath === undefined) {
+      throw new Error(SIDECAR_NO_BINARY_MESSAGE)
+    }
 
     const q = query({
       prompt: turnChannel.stream(),
       options: {
         cwd: opts.worktreeRoot,
         model,
-        ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
+        pathToClaudeCodeExecutable: claudeExecutablePath,
         // Extended thinking — surfaced to the chat UI as a collapsible
         // "reasoning" block (see sdk-event-adapter `reasoning_delta`). Adaptive
         // (Opus 4.6+) lets the model decide when/how much to think (it skips
@@ -903,11 +900,11 @@ async function runChatTurnSdkInner(
   } catch (err) {
     if (opts.signal?.aborted) {
       errorMessage = 'turn aborted'
-    } else if ((err as Error).message === DESKTOP_CLAUDE_RUNTIME_NOT_READY_MESSAGE) {
-      // Our own assertClaudeRuntimeReady() throw, not an SDK failure — say
-      // it plainly rather than wrapping it in "SDK query failed: …", which
-      // would misattribute a desktop-install-in-progress state to the SDK.
-      errorMessage = DESKTOP_CLAUDE_RUNTIME_NOT_READY_MESSAGE
+    } else if ((err as Error).message === SIDECAR_NO_BINARY_MESSAGE) {
+      // Our own no-binary throw, not an SDK failure — say it plainly rather
+      // than wrapping it in "SDK query failed: …", which would misattribute
+      // a missing local install to the SDK.
+      errorMessage = SIDECAR_NO_BINARY_MESSAGE
     } else {
       // Phase 5 rate-limit codex round-1 #1: extract retry-after from
       // the error's HTTP response header (if any) and embed it in a

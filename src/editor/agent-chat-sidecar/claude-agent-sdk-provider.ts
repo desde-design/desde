@@ -32,7 +32,7 @@
  */
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk'
 
-import { assertClaudeRuntimeReady, resolveClaudeExecutablePath } from '../llm-providers/resolve-claude-executable'
+import { resolveClaudeOnPath, SIDECAR_NO_BINARY_MESSAGE } from './resolve-claude-on-path'
 import type {
   CompleteOpts,
   CompleteResult,
@@ -98,12 +98,13 @@ export class ClaudeAgentSdkProvider implements LLMProvider {
     const systemText = stringifyContent(opts.system)
     const userText = stringifyContent(opts.user)
 
-    // Desktop-app seam (tasks/electron-app.md "fetch the claude binary on
-    // first run"): `undefined` on the terminal CLI, unchanged from before —
-    // the SDK falls through to its own default resolution. See
-    // resolve-claude-executable.ts's module doc comment.
-    const claudeExecutablePath = resolveClaudeExecutablePath()
-    assertClaudeRuntimeReady(claudeExecutablePath)
+    // Dev-only sidecar seam: this lane spawns whatever `claude` binary is on
+    // the developer's own PATH — see resolve-claude-on-path.ts's module doc
+    // comment.
+    const claudeExecutablePath = resolveClaudeOnPath()
+    if (claudeExecutablePath === undefined) {
+      throw new Error(SIDECAR_NO_BINARY_MESSAGE)
+    }
 
     const options: Options = {
       model,
@@ -117,7 +118,7 @@ export class ClaudeAgentSdkProvider implements LLMProvider {
       // preset) — we provide our own via the appended user prompt.
       systemPrompt: systemText.length > 0 ? systemText : '',
       includePartialMessages: onTextDelta !== undefined,
-      ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
+      pathToClaudeCodeExecutable: claudeExecutablePath,
     }
 
     if (opts.responseFormat?.kind === 'json_schema') {

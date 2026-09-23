@@ -6,7 +6,7 @@
  *
  * `hasSubscriptionRuntime` is the one flag that must never be copied onto
  * another vendor. It is what makes the credential ladder's dev-mode rungs and
- * `isClaudeRuntimeResolvable` unreachable for everyone else by construction
+ * `isClaudeOnPath` unreachable for everyone else by construction
  * rather than by an `if`.
  */
 import { EFFORT_LEVELS } from '../../core/model-catalog'

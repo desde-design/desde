@@ -23,7 +23,7 @@ describe('probeCredential: rungs 0 and 3 are unreachable without a subscription 
       probeCredential({
         descriptor: ANTHROPIC_DESCRIPTOR,
         stored,
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         subscriptionOptIn: true,
       }),
     ).toEqual({ credentialed: true, source: 'subscription' })
@@ -31,7 +31,7 @@ describe('probeCredential: rungs 0 and 3 are unreachable without a subscription 
       probeCredential({
         descriptor: OPENAI_DESCRIPTOR,
         stored,
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         subscriptionOptIn: true,
       }),
     ).toEqual({ credentialed: false, source: 'none' })
@@ -42,13 +42,13 @@ describe('probeCredential: rungs 0 and 3 are unreachable without a subscription 
       probeCredential({
         descriptor: OPENAI_DESCRIPTOR,
         stored: empty,
-        claudeRuntimeResolvable: true,
+        claudeOnPath: true,
         subscriptionOptIn: true,
       }),
     ).toEqual({ credentialed: false, source: 'none' })
   })
 
-  // The BYO-key cutover. This rung used to fire on `claudeRuntimeResolvable`
+  // The BYO-key cutover. This rung used to fire on `claudeOnPath`
   // alone, so anyone whose `claude` binary happened to be signed in got a
   // working product and was never asked for anything. Anthropic's Agent SDK
   // terms do not allow a distributed product to offer claude.ai login that
@@ -58,7 +58,7 @@ describe('probeCredential: rungs 0 and 3 are unreachable without a subscription 
       probeCredential({
         descriptor: ANTHROPIC_DESCRIPTOR,
         stored: empty,
-        claudeRuntimeResolvable: true,
+        claudeOnPath: true,
       }),
     ).toEqual({ credentialed: false, source: 'none' })
   })
@@ -68,7 +68,7 @@ describe('probeCredential: rungs 0 and 3 are unreachable without a subscription 
       probeCredential({
         descriptor: ANTHROPIC_DESCRIPTOR,
         stored: empty,
-        claudeRuntimeResolvable: true,
+        claudeOnPath: true,
         subscriptionOptIn: true,
       }),
     ).toEqual({ credentialed: true, source: 'subscription' })
@@ -81,7 +81,7 @@ describe('probeCredential: rungs 0 and 3 are unreachable without a subscription 
       probeCredential({
         descriptor: ANTHROPIC_DESCRIPTOR,
         stored: empty,
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
         subscriptionOptIn: true,
       }),
     ).toEqual({ credentialed: false, source: 'none' })
@@ -95,7 +95,7 @@ describe('probeCredential: rungs 0 and 3 are unreachable without a subscription 
         descriptor: ANTHROPIC_DESCRIPTOR,
         inheritedApiKey: 'sk-ant-envkey1234',
         stored: empty,
-        claudeRuntimeResolvable: true,
+        claudeOnPath: true,
         subscriptionOptIn: true,
       }),
     ).toEqual({
@@ -110,7 +110,7 @@ describe('probeCredential: rungs 0 and 3 are unreachable without a subscription 
       probeCredential({
         descriptor: ANTHROPIC_DESCRIPTOR,
         stored: empty,
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
       }),
     ).toEqual({ credentialed: false, source: 'none' })
   })
@@ -121,7 +121,7 @@ describe('probeCredential: rungs 0 and 3 are unreachable without a subscription 
         descriptor: ANTHROPIC_DESCRIPTOR,
         inheritedApiKey: '   ',
         stored: empty,
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
       }),
     ).toEqual({ credentialed: false, source: 'none' })
   })
@@ -137,7 +137,7 @@ describe('probeCredential: the env and stored rungs are per provider', () => {
       probeCredential({
         descriptor: ANTHROPIC_DESCRIPTOR,
         stored,
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
       }),
     ).toEqual({
       credentialed: true,
@@ -148,7 +148,7 @@ describe('probeCredential: the env and stored rungs are per provider', () => {
       probeCredential({
         descriptor: OPENAI_DESCRIPTOR,
         stored,
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
       }),
     ).toEqual({ credentialed: false, source: 'none' })
   })
@@ -159,7 +159,7 @@ describe('probeCredential: the env and stored rungs are per provider', () => {
         descriptor: OPENAI_DESCRIPTOR,
         inheritedApiKey: 'sk-proj-env1234',
         stored: { providers: { openai: { apiKey: 'sk-stored' } }, devMode: false },
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
       }),
     ).toEqual({ credentialed: true, source: 'env', maskedHint: 'sk-…1234' })
   })
@@ -169,7 +169,7 @@ describe('probeCredential: the env and stored rungs are per provider', () => {
       probeCredential({
         descriptor: OPENAI_DESCRIPTOR,
         stored: { providers: { openai: { apiKey: '   ' } }, devMode: false },
-        claudeRuntimeResolvable: false,
+        claudeOnPath: false,
       }),
     ).toEqual({ credentialed: false, source: 'none' })
   })

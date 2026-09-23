@@ -22,7 +22,7 @@ import {
   handleLlmCredentialsRoute,
   providerIdFromPath,
 } from "./llm-credentials-handler.js"
-import { isClaudeRuntimeResolvable } from "./claude-runtime-available.js"
+import { isClaudeOnPath } from "../../../src/editor/agent-chat-sidecar/resolve-claude-on-path.js"
 import {
   VIEWER_PROBE_ROUTE,
   VIEWER_PROJECTS_ROUTE,
@@ -2276,7 +2276,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-if-present",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+        claudeOnPath: isClaudeOnPath(),
       }),
   },
   {
@@ -2285,7 +2285,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+        claudeOnPath: isClaudeOnPath(),
       }),
   },
   {
@@ -2294,7 +2294,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+        claudeOnPath: isClaudeOnPath(),
       }),
   },
   // Provider-scoped writes. These sit AFTER the two reserved sub-routes above:
@@ -2308,7 +2308,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+        claudeOnPath: isClaudeOnPath(),
       }),
   },
   {
@@ -2318,7 +2318,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+        claudeOnPath: isClaudeOnPath(),
       }),
   },
   {
