@@ -111,7 +111,10 @@ export interface Usage {
    * Tokens served from the provider's prompt cache. Disjoint from
    * `inputTokens` — a cache-read token is never also counted as a fresh
    * input token. Optional: absent on providers/turns that never reported
-   * a figure, not zero.
+   * a figure, not zero. A provider that DID report usage but had no cache
+   * activity this call (e.g. OpenAI, which always includes the field) sets
+   * this to an explicit `0` rather than omitting it — only omit for a
+   * provider/turn that never reports the field at all.
    */
   cacheReadInputTokens?: number
   /**

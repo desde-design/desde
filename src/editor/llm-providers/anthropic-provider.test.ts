@@ -121,7 +121,70 @@ describe('AnthropicProvider.streamConversation', () => {
     if (complete?.kind !== 'message_complete') return
     expect(complete.stopReason).toBe('end_turn')
     expect(complete.message.content).toEqual([{ type: 'text', text: 'Hello' }])
-    expect(complete.usage).toEqual({ inputTokens: 10, outputTokens: 5 })
+    // cacheReadInputTokens/cacheCreationInputTokens default to 0 the same way
+    // inputTokens/outputTokens always have — this fixture's message_start
+    // usage carries no cache fields, so both read as their `?? 0` default.
+    expect(complete.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+    })
+  })
+
+  it('reads cache-read and cache-creation tokens off message_start usage and includes them on the usage event', async () => {
+    const events = [
+      {
+        type: 'message_start',
+        message: {
+          usage: {
+            input_tokens: 10,
+            output_tokens: 0,
+            cache_read_input_tokens: 1000,
+            cache_creation_input_tokens: 500,
+          },
+        },
+      },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
+      { type: 'message_stop' },
+    ]
+    const { client } = makeStreamingClient(events)
+    const provider = new AnthropicProvider({ client })
+
+    const collected: ProviderEvent[] = []
+    for await (const ev of provider.streamConversation({
+      system: 's',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [],
+    })) {
+      collected.push(ev)
+    }
+
+    // Anthropic's `input_tokens` already EXCLUDES cache reads and writes
+    // (unlike the AI SDK adapter's grand-total `inputTokens`, which has to
+    // be un-folded via `inputTokenDetails.noCacheTokens` — see
+    // `ai-sdk-provider.ts`), so no subtraction happens here: `input_tokens`
+    // reads straight onto `Usage.inputTokens`.
+    const usageEvent = collected.find((e) => e.kind === 'usage')
+    expect(usageEvent).toEqual({
+      kind: 'usage',
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadInputTokens: 1000,
+      cacheCreationInputTokens: 500,
+    })
+
+    const complete = collected.find((e) => e.kind === 'message_complete')
+    if (complete?.kind !== 'message_complete') throw new Error('expected message_complete')
+    expect(complete.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadInputTokens: 1000,
+      cacheCreationInputTokens: 500,
+    })
   })
 
   it('reassembles a tool_use block from input_json_delta and emits a single tool_use event with parsed input', async () => {

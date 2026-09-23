@@ -314,13 +314,27 @@ export class AnthropicProvider implements LLMProvider {
     let vendorStopReason: string | undefined
     let inputTokens = 0
     let outputTokens = 0
+    let cacheReadInputTokens = 0
+    let cacheCreationInputTokens = 0
 
     for await (const event of stream) {
       switch (event.type) {
         case 'message_start': {
           if (event.message.usage) {
+            // Anthropic's `input_tokens` EXCLUDES cache reads and writes —
+            // the API's own doc comment states "Total input tokens in a
+            // request is the summation of `input_tokens`,
+            // `cache_creation_input_tokens`, and `cache_read_input_tokens`."
+            // That is the opposite of the AI SDK's normalized usage (see
+            // `toUsage` in `ai-sdk-provider.ts`), whose top-level
+            // `inputTokens` is the GRAND TOTAL including both cache
+            // counters and has to be un-folded to stay disjoint. Here
+            // `input_tokens` is already disjoint, so no subtraction is
+            // needed — it can be read straight onto `Usage.inputTokens`.
             inputTokens = event.message.usage.input_tokens ?? 0
             outputTokens = event.message.usage.output_tokens ?? 0
+            cacheReadInputTokens = event.message.usage.cache_read_input_tokens ?? 0
+            cacheCreationInputTokens = event.message.usage.cache_creation_input_tokens ?? 0
           }
           break
         }
@@ -396,7 +410,12 @@ export class AnthropicProvider implements LLMProvider {
             vendorStopReason = event.delta.stop_reason
           }
           if (event.usage) {
+            // `MessageDeltaUsage`'s cache fields are cumulative too, same as
+            // `output_tokens` above.
             outputTokens = event.usage.output_tokens ?? outputTokens
+            cacheReadInputTokens = event.usage.cache_read_input_tokens ?? cacheReadInputTokens
+            cacheCreationInputTokens =
+              event.usage.cache_creation_input_tokens ?? cacheCreationInputTokens
           }
           break
         }
@@ -416,7 +435,7 @@ export class AnthropicProvider implements LLMProvider {
         kind: 'message_complete',
         stopReason: 'error',
         message: { role: 'assistant', content: [] },
-        usage: { inputTokens, outputTokens },
+        usage: { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens },
         vendorStopReason: 'aborted',
       }
       return
@@ -428,12 +447,12 @@ export class AnthropicProvider implements LLMProvider {
       (i) => blocksByIndex.get(i)!,
     )
 
-    yield { kind: 'usage', inputTokens, outputTokens }
+    yield { kind: 'usage', inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens }
     yield {
       kind: 'message_complete',
       stopReason: finalStopReason,
       message: { role: 'assistant', content: finalContent },
-      usage: { inputTokens, outputTokens },
+      usage: { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens },
       vendorStopReason,
     }
   }
