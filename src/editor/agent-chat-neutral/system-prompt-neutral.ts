@@ -47,6 +47,7 @@ import {
   EDIT_HANDOFF_BLOCK,
   EDIT_LIFECYCLE_BLOCK,
   EDITOR_TOOLS_BLOCK_BODY,
+  FIGMA_APPEND_BLOCK,
   FILESYSTEM_SCOPE_BLOCK,
   SECRET_READS_ALLOWED_BLOCK,
   GROUNDING_QUERY_TOOLS_BLOCK,
@@ -201,6 +202,12 @@ export interface BuildNeutralSystemPromptOptions {
   groundingDigest?: string
   /** Appends the screenshot-plan discipline when the canvas surface is on. */
   canvasEnabled?: boolean
+  /**
+   * Appends `FIGMA_APPEND_BLOCK`, the same block the SDK lane appends, when a
+   * Figma MCP server is connected for this turn and its `mcp__figma__*`
+   * tools are in the catalog.
+   */
+  figmaEnabled?: boolean
   /** The prototype's documented conventions. */
   projectKnowledge?: ProjectKnowledge
   /** Section naming capabilities that exist but are off. Appended last. */
@@ -245,6 +252,7 @@ export function buildNeutralSystemPrompt(
   if (opts.blockSecretReads !== true) parts.push(SECRET_READS_ALLOWED_BLOCK)
   if (opts.webTools && opts.webTools.length > 0) parts.push(neutralWebToolsBlock(opts.webTools))
   if (opts.canvasEnabled === true) parts.push(SCREENSHOT_PLAN_APPEND_BLOCK)
+  if (opts.figmaEnabled === true) parts.push(FIGMA_APPEND_BLOCK)
   if (opts.groundingEnabled === true) parts.push(GROUNDING_QUERY_TOOLS_BLOCK)
   if (opts.groundingDigest) parts.push(opts.groundingDigest)
   parts.push(PROJECT_KNOWLEDGE_GUIDANCE)

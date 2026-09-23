@@ -95,12 +95,14 @@ import type {
   ToolDef,
   Usage,
 } from '../llm-providers/types'
+import type { McpStdioServerConfig } from '../core/mcp-server-config'
 import type { WebPolicy } from '../core/web-policy'
 import { branchModeRootCommitSha } from '../worktree/git-branches'
 
 import { applyContextBudget, capToolResultImageBytes } from './context-budget'
 import { createCostGuard } from './cost-guard'
 import { replayHistory } from './history-replay'
+import { connectMcpClientTools, type McpClientTools } from './mcp-client-tools'
 import {
   createNeutralEventAdapter,
   toolResultContent,
@@ -164,15 +166,25 @@ export async function runChatTurnNeutral(
   opts: RunChatTurnOpts,
   deps: RunChatTurnNeutralDeps = {},
 ): Promise<RunChatTurnResult> {
-  return runWithChatSession(
-    { sessionId: opts.session.id.sessionId, repoRoot: opts.worktreeRoot },
-    () => runInner(opts, deps),
-  )
+  // The MCP servers this turn started. The loop's own `finally` closes them;
+  // this one is the backstop for a throw between connecting and the loop
+  // (building the tool list, replaying history). `close()` is idempotent, so
+  // the common path pays nothing for it.
+  const mcpSessions: McpClientTools[] = []
+  try {
+    return await runWithChatSession(
+      { sessionId: opts.session.id.sessionId, repoRoot: opts.worktreeRoot },
+      () => runInner(opts, deps, mcpSessions),
+    )
+  } finally {
+    await closeMcpSessions(mcpSessions)
+  }
 }
 
 async function runInner(
   opts: RunChatTurnOpts,
   deps: RunChatTurnNeutralDeps,
+  mcpSessions: McpClientTools[],
 ): Promise<RunChatTurnResult> {
   const turnId = randomUUID()
   const startedAt = new Date().toISOString()
@@ -417,7 +429,13 @@ async function runInner(
     // policy, and the tool is the code that opens the file.
     ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
   })
-  const byName = new Map(catalog.map((spec) => [spec.name, spec]))
+  // Figma and `.mcp.json` servers, spawned for this turn. See
+  // `connectTurnMcpServers` for what a failure to start does (it does not end
+  // the turn).
+  const mcp = await connectTurnMcpServers(opts, mcpSessions)
+  const deniedMcp = new Set(opts.disallowedTools ?? [])
+  const turnTools = [...catalog, ...mcp.specs.filter((spec) => !deniedMcp.has(spec.name))]
+  const byName = new Map(turnTools.map((spec) => [spec.name, spec]))
 
   const builtGate = buildToolPermissionGate({
     worktreeRoot: opts.worktreeRoot,
@@ -428,6 +446,13 @@ async function runInner(
     emitEditProposal: async () => ({ ok: true, editId: '' }),
     readRoots: opts.readRoots,
     webPolicy: opts.webPolicy,
+    // The read-only prefix policy for `mcp__<id>__*` tools, the same two
+    // options the SDK lane passes. Without them `handleExtensionTool` denies
+    // every extension call as "not configured".
+    figmaAllowedToolPrefixes: opts.figmaConfig?.allowedToolPrefixes,
+    extensionToolPolicy: new Map(
+      (opts.extensions ?? []).map((e) => [e.id, e.allowedToolPrefixes]),
+    ),
     // `getFileReads` and `onConflictDetected` are deliberately NOT passed
     // here, and that is the FX14 item 2 fix. The gate detects an overwrite by
     // re-reading the file and comparing it to the model's baseline, but on
@@ -453,17 +478,24 @@ async function runInner(
     descriptor.capabilities.webTools,
     provider.serverToolIds ?? [],
   )
-  const system = buildNeutralSystemPrompt({
-    writeToolsEnabled: byName.has('Write'),
-    ...(serverTools.length > 0 ? { webTools: serverTools.map((t) => t.id) } : {}),
-    groundingEnabled: opts.getGrounding !== undefined,
-    ...(groundingDigest ? { groundingDigest } : {}),
-    canvasEnabled: opts.canvasEnabled === true,
-    blockSecretReads: opts.blockSecretReads === true,
-    ...(opts.projectKnowledge ? { projectKnowledge: opts.projectKnowledge } : {}),
-    disabledCapabilities: opts.disabledCapabilities ?? null,
-  })
-  const tools: ToolDef[] = [...toToolDefs(catalog), ...serverTools]
+  const system = [
+    buildNeutralSystemPrompt({
+      writeToolsEnabled: byName.has('Write'),
+      ...(serverTools.length > 0 ? { webTools: serverTools.map((t) => t.id) } : {}),
+      groundingEnabled: opts.getGrounding !== undefined,
+      ...(groundingDigest ? { groundingDigest } : {}),
+      canvasEnabled: opts.canvasEnabled === true,
+      blockSecretReads: opts.blockSecretReads === true,
+      ...(opts.projectKnowledge ? { projectKnowledge: opts.projectKnowledge } : {}),
+      disabledCapabilities: opts.disabledCapabilities ?? null,
+      figmaEnabled: mcp.connectedIds.has('figma'),
+    }),
+    // After `disabledCapabilities`, which is the prompt's last section: one
+    // sentence per server that failed to start. Present only on a turn where
+    // one did, so a healthy prompt is unchanged byte for byte.
+    ...mcp.startupNotices,
+  ].join('\n\n')
+  const tools: ToolDef[] = [...toToolDefs(turnTools), ...serverTools]
 
   const history = await replayHistory({
     session: opts.session,
@@ -850,6 +882,9 @@ async function runInner(
     // one-shot, so the common case (already reconciled at abort) costs
     // nothing, while a turn that died holding a steer still reports it.
     closeChannelAndReportUndelivered()
+    // Every MCP child this turn started. Bounded: `close()` returns after
+    // `MCP_CLOSE_WAIT_MS` even when a server ignores its closed stdin.
+    await closeMcpSessions(mcpSessions)
   }
 
   if (stopReason === 'error') {
@@ -898,6 +933,63 @@ async function runInner(
     ...(Object.keys(conflicts).length > 0 ? { conflicts } : {}),
   }
   return { session, turn }
+}
+
+/**
+ * Start this turn's MCP servers: the legacy `figma` block (id `figma`) and
+ * every `.mcp.json` extension (its own id). An extension with the id `figma`
+ * replaces the legacy block, the same precedence the SDK lane's `mcpServers`
+ * map gives it.
+ *
+ * All start at once. A server that fails to start or to list its tools does
+ * NOT end the turn: chat has to keep working when an optional capability is
+ * broken. It is logged once with its error, left out, and named in one
+ * sentence of the system prompt so the model can tell the user rather than
+ * fail with no idea why. Each server that did start is pushed onto
+ * `sessions` for the caller to close.
+ */
+async function connectTurnMcpServers(
+  opts: RunChatTurnOpts,
+  sessions: McpClientTools[],
+): Promise<{ specs: ToolSpec[]; connectedIds: Set<string>; startupNotices: string[] }> {
+  const servers = new Map<string, McpStdioServerConfig>()
+  if (opts.figmaConfig) servers.set('figma', opts.figmaConfig.mcpServer)
+  for (const e of opts.extensions ?? []) servers.set(e.id, e.mcpServer)
+
+  const entries = [...servers]
+  const settled = await Promise.allSettled(
+    entries.map(([id, server]) =>
+      connectMcpClientTools({
+        id,
+        server,
+        env: process.env,
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      }),
+    ),
+  )
+  const specs: ToolSpec[] = []
+  const connectedIds = new Set<string>()
+  const startupNotices: string[] = []
+  settled.forEach((outcome, i) => {
+    const id = entries[i]![0]
+    if (outcome.status === 'fulfilled') {
+      sessions.push(outcome.value)
+      connectedIds.add(id)
+      specs.push(...outcome.value.specs)
+    } else {
+      const reason =
+        outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)
+      console.warn(`[runChatTurnNeutral] MCP server "${id}" could not be started: ${reason}`)
+      startupNotices.push(
+        `The MCP server "${id}" could not be started this turn, so its tools are unavailable.`,
+      )
+    }
+  })
+  return { specs, connectedIds, startupNotices }
+}
+
+async function closeMcpSessions(sessions: readonly McpClientTools[]): Promise<void> {
+  await Promise.all(sessions.map((s) => s.close()))
 }
 
 /**

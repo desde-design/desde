@@ -1575,3 +1575,137 @@ describe('stopping a turn', () => {
     expect(result.turn.toolResults?.tu_1?.ok).toBe(false)
   })
 })
+
+describe('MCP servers on the neutral lane (Figma, .mcp.json)', () => {
+  // `__dirname`, not `import.meta.url`: this file runs under jsdom, whose
+  // `URL` is not the one `fileURLToPath` accepts.
+  const FIXTURE = join(__dirname, '__fixtures__', 'echo-mcp-server.mjs')
+  const echoServer = { command: process.execPath, args: [FIXTURE] }
+  const echoExtension = (allowedToolPrefixes: string[] | null, env?: Record<string, string>) => ({
+    id: 'echo',
+    mcpServer: { ...echoServer, ...(env ? { env } : {}) },
+    allowedToolPrefixes,
+  })
+
+  it("offers a connected server's tools to the model under mcp__<id>__, with the server's schema", async () => {
+    const { calls } = await run([textStep('ok')], { extensions: [echoExtension(null)] })
+    const echo = calls[0]!.tools!.find((t) => 'name' in t && t.name === 'mcp__echo__echo') as
+      | { inputSchema: Record<string, unknown> }
+      | undefined
+    expect(echo).toBeDefined()
+    expect(echo!.inputSchema).toMatchObject({
+      type: 'object',
+      properties: { text: { type: 'string' } },
+      required: ['text'],
+    })
+    // The editor tools are still there alongside it.
+    expect(calls[0]!.tools!.some((t) => 'name' in t && t.name === 'mcp__editor__get_selection')).toBe(
+      true,
+    )
+  })
+
+  it('runs an allowed call through the server and hands the model its arguments unstripped', async () => {
+    // `z.object({})` would strip `text`, and the fixture would then echo
+    // nothing. The echoed text proves the loop passed the input through.
+    const { events, result } = await run(
+      [toolStep('tu_1', 'mcp__echo__echo', { text: 'hi there' }), textStep('done')],
+      { extensions: [echoExtension(null)] },
+    )
+    const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; output: unknown }
+    expect(res.ok).toBe(true)
+    expect(JSON.stringify(res.output)).toContain('hi there')
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it("applies the extension's read-only prefix policy, the same gate the SDK lane uses", async () => {
+    const { events } = await run(
+      [toolStep('tu_1', 'mcp__echo__echo', { text: 'hi' }), textStep('ok')],
+      { extensions: [echoExtension(['get_'])] },
+    )
+    const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; error: string }
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/read-only by contract/)
+  })
+
+  it('serves the legacy figma block under mcp__figma__, gated by its own prefixes, with the Figma prompt block', async () => {
+    const { FIGMA_APPEND_BLOCK } = await import('../agent-chat-sdk/system-prompt')
+    const { events, calls } = await run(
+      [toolStep('tu_1', 'mcp__figma__echo', { text: 'frame' }), textStep('ok')],
+      { figmaConfig: { mcpServer: echoServer, allowedToolPrefixes: ['echo'] } },
+    )
+    const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; output: unknown }
+    expect(res.ok).toBe(true)
+    expect(JSON.stringify(res.output)).toContain('frame')
+    expect((calls[0]!.system as TextBlock[])[0]!.text).toContain(FIGMA_APPEND_BLOCK)
+  })
+
+  it('reports a server-side tool failure to the model as an isError result', async () => {
+    const { events } = await run(
+      [toolStep('tu_1', 'mcp__echo__fail', {}), textStep('ok')],
+      { extensions: [echoExtension(null)] },
+    )
+    const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; error: string }
+    expect(res.ok).toBe(false)
+    expect(res.error).toContain('fixture failure')
+  })
+
+  it('removes a disallowed MCP tool by full name, as the SDK option does', async () => {
+    const { calls } = await run([textStep('ok')], {
+      extensions: [echoExtension(null)],
+      disallowedTools: ['mcp__echo__fail'],
+    })
+    const names = calls[0]!.tools!.map((t) => ('name' in t ? t.name : ''))
+    expect(names).toContain('mcp__echo__echo')
+    expect(names).not.toContain('mcp__echo__fail')
+  })
+
+  it('finishes the turn without the server when it cannot start, and says so in the prompt', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { events, calls, result } = await run([textStep('ok')], {
+        extensions: [
+          { id: 'ghost', mcpServer: { command: '/nonexistent-binary' }, allowedToolPrefixes: null },
+          echoExtension(null),
+        ],
+        disabledCapabilities: '# Off right now\nNothing.',
+      })
+      expect(events.some((e) => e.kind === 'error')).toBe(false)
+      expect(result.turn.error).toBeUndefined()
+      const text = (calls[0]!.system as TextBlock[])[0]!.text
+      const notice =
+        'The MCP server "ghost" could not be started this turn, so its tools are unavailable.'
+      expect(text).toContain(notice)
+      // After disabledCapabilities, the prompt's last section.
+      expect(text.indexOf(notice)).toBeGreaterThan(text.indexOf('# Off right now'))
+      // The server that did start is still offered.
+      const names = calls[0]!.tools!.map((t) => ('name' in t ? t.name : ''))
+      expect(names).toContain('mcp__echo__echo')
+      expect(names.some((n) => n.startsWith('mcp__ghost__'))).toBe(false)
+      // One warning for the failed server. (The fixture's `dotted.name` tool
+      // raises a separate one of its own.)
+      const ghostWarnings = warn.mock.calls.filter((c) => String(c[0]).includes('"ghost"'))
+      expect(ghostWarnings).toHaveLength(1)
+      expect(String(ghostWarnings[0]![0])).toMatch(/MCP server "ghost" could not be started/)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('leaves the prompt unchanged when no MCP server is configured', async () => {
+    const plain = await run([textStep('ok')])
+    const withNone = await run([textStep('ok')], { extensions: [] })
+    expect((withNone.calls[0]!.system as TextBlock[])[0]!.text).toBe(
+      (plain.calls[0]!.system as TextBlock[])[0]!.text,
+    )
+  })
+
+  it('stops the server once the turn is over', async () => {
+    const pidFile = join(root, 'echo.pid')
+    await run([textStep('ok')], {
+      extensions: [echoExtension(null, { ECHO_MCP_PIDFILE: pidFile })],
+    })
+    const pid = Number(readFileSync(pidFile, 'utf8'))
+    expect(pid).toBeGreaterThan(0)
+    expect(() => process.kill(pid, 0)).toThrow()
+  })
+})

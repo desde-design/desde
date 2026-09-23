@@ -6,6 +6,7 @@ import {
   CONTEXT_ENVELOPE_BLOCK,
   EDIT_HANDOFF_BLOCK,
   EDITOR_TOOLS_BLOCK_BODY,
+  FIGMA_APPEND_BLOCK,
   GROUNDING_QUERY_TOOLS_BLOCK,
   SCREENSHOT_PLAN_APPEND_BLOCK,
   SECRET_READS_ALLOWED_BLOCK,
@@ -142,6 +143,12 @@ describe('buildNeutralSystemPrompt', () => {
     expect(buildNeutralSystemPrompt({ canvasEnabled: true })).toContain(
       SCREENSHOT_PLAN_APPEND_BLOCK,
     )
+  })
+
+  it('appends the SDK lane\'s own Figma block only when a Figma server is connected', () => {
+    expect(buildNeutralSystemPrompt({})).not.toContain(FIGMA_APPEND_BLOCK)
+    expect(buildNeutralSystemPrompt({ figmaEnabled: false })).not.toContain(FIGMA_APPEND_BLOCK)
+    expect(buildNeutralSystemPrompt({ figmaEnabled: true })).toContain(FIGMA_APPEND_BLOCK)
   })
 
   it('carries the secret-file handling rules by default, and drops them when blocked', () => {
