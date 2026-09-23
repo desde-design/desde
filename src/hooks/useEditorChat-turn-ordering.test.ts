@@ -108,19 +108,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 // ---------------------------------------------------------------------------
 // SDK mock — the turn runtime's `query()` is driven from a script below.
+// `@anthropic-ai/claude-agent-sdk` may only be imported (including via
+// `vi.mock`) from `src/editor/agent-chat-sidecar/**`, so the mock itself
+// lives there and this file imports the resulting `queryMock` — see
+// `mock-sdk-query.ts`.
 // ---------------------------------------------------------------------------
 
-type QueryArgs = { prompt: unknown; options?: Record<string, unknown> }
-
-const { queryMock } = vi.hoisted(() => ({
-  queryMock: vi.fn<(args: QueryArgs) => AsyncGenerator<unknown, void, void>>(),
-}))
-
-vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
-  query: queryMock,
-  createSdkMcpServer: vi.fn(() => ({ type: "sdk", name: "editor", instance: {} })),
-  tool: vi.fn((name: string) => ({ name })),
-}))
+import { queryMock } from "@/editor/agent-chat-sidecar/mock-sdk-query"
 
 const fetchMock = vi.fn()
 vi.mock("@/lib/editor-fetch", () => ({

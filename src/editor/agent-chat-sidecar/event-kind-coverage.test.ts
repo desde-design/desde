@@ -16,9 +16,9 @@ import {
   HANDLER_OWNED_EVENT_KINDS,
   SCRIPT_EXEMPT_EVENT_KINDS,
   type ChatStreamEvent,
-} from './chat-stream-events'
-import { makeEmptySession } from './types'
-import { runChatTurnSdk } from '../agent-chat-sidecar/run-chat-turn-sidecar'
+} from '../agent-chat/chat-stream-events'
+import { makeEmptySession } from '../agent-chat/types'
+import { runChatTurnSdk } from './run-chat-turn-sidecar'
 import { runChatTurnNeutral } from '../agent-chat-neutral/run-chat-turn-neutral'
 // Re-exported from the one file allowed to import the AI SDK — see the fence
 // in `ai-sdk-provider.ts`. Building a REAL `APICallError` for the neutral
@@ -76,7 +76,7 @@ describe('ChatStreamEvent kind coverage', () => {
       join(__dirname, '../agent-chat-neutral/run-chat-turn-neutral.ts'),
       'utf8',
     )
-    const sdkSrc = readFileSync(join(__dirname, '../agent-chat-sidecar/run-chat-turn-sidecar.ts'), 'utf8')
+    const sdkSrc = readFileSync(join(__dirname, './run-chat-turn-sidecar.ts'), 'utf8')
     const routeSrc = readFileSync(
       join(__dirname, '../../../editor-cli/src/server/chat-handler.ts'),
       'utf8',
