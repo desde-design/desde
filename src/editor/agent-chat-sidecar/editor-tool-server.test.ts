@@ -18,7 +18,8 @@ import { describe, expect, it } from 'vitest'
 
 import type { BridgeClient } from '../agent-tools/types'
 import { toToolDefs } from '../agent-chat/tool-spec'
-import { buildEditorToolServer } from './editor-tool-server'
+import { buildEditorToolServer, buildSidecarToolServer } from './editor-tool-server'
+import { buildNeutralToolCatalog } from '../agent-chat-neutral/tool-catalog'
 import {
   buildEditorToolSpecs,
   type EmitEditResult,
@@ -32,7 +33,7 @@ async function stubEmitEdit(): Promise<EmitEditResult> {
   return { ok: true, editId: 'eid-1' }
 }
 
-function registeredToolNames(server: ReturnType<typeof buildEditorToolServer>): string[] {
+function registeredToolNames(server: ReturnType<typeof buildSidecarToolServer>): string[] {
   const instance = server.instance as unknown as {
     _registeredTools: Record<string, unknown>
   }
@@ -194,5 +195,57 @@ describe('buildEditorToolSpecs', () => {
     expect(out.isError).toBeUndefined()
     expect(out.content[0]).toMatchObject({ type: 'text' })
     expect(String((out.content[0] as { text: string }).text)).toContain('e9')
+  })
+})
+
+/**
+ * The sidecar registers Desde's WHOLE neutral catalog, built-ins included, on
+ * this one server, so the SDK's own built-ins can stay off.
+ */
+describe('buildSidecarToolServer', () => {
+  const catalog = () =>
+    buildNeutralToolCatalog({
+      worktreeRoot: '/tmp/does-not-matter',
+      writeToolsEnabled: true,
+      writeOpts: {
+        worktreeRoot: '/tmp/does-not-matter',
+        emitEdit: stubEmitEdit,
+      },
+      editorToolOpts: {
+        bridge: stubBridge(),
+        emitEdit: stubEmitEdit,
+        worktreeRoot: '/tmp/does-not-matter',
+      },
+    })
+
+  it('registers the built-ins and the editor tools under bare names (the SDK adds mcp__editor__)', () => {
+    const names = registeredToolNames(buildSidecarToolServer(catalog()))
+    for (const builtin of ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'TodoWrite']) {
+      expect(names).toContain(builtin)
+    }
+    expect(names).toContain('get_selection')
+    expect(names).toContain('propose_prop_edit')
+    expect(names.some((n) => n.startsWith('mcp__'))).toBe(false)
+  })
+
+  it('registers exactly the catalog, one tool per spec', () => {
+    const specs = catalog()
+    const names = registeredToolNames(buildSidecarToolServer(specs))
+    expect(names).toEqual(specs.map((s) => s.name.replace(/^mcp__editor__/, '')))
+  })
+
+  it('refuses a spec that carries a raw JSON Schema rather than registering it unvalidated', () => {
+    expect(() =>
+      buildSidecarToolServer([
+        {
+          name: 'mcp__figma__get_file',
+          description: 'x',
+          inputShape: {},
+          inputJsonSchema: { type: 'object' },
+          handler: async () => ({ content: [] }),
+          kind: 'extension',
+        },
+      ]),
+    ).toThrow(/JSON Schema/)
   })
 })
