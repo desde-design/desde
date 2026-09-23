@@ -24,6 +24,14 @@
  *
  * ## Env
  *
+ * The child does NOT inherit the CLI's environment. It gets the MCP SDK's
+ * safe default set (`getDefaultEnvironment()`: HOME, LOGNAME, PATH, SHELL,
+ * TERM and USER on macOS and Linux, the Windows equivalents there), the same
+ * allowlist the Claude Agent SDK starts its servers with, and then the
+ * server's own `env` block on top. The CLI's env holds the user's model API
+ * keys, and a repo-configured server has no business reading them. A server
+ * that needs a secret names it in its `env` block.
+ *
  * `server.env` arrives already interpolated. Both loaders
  * (`loadExtensions`, `loadFigmaConfig`) resolve `${VAR}` before a config
  * reaches the runtime, and skip an entry whose variable is unset. This module
@@ -32,7 +40,10 @@
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import {
+  getDefaultEnvironment,
+  StdioClientTransport,
+} from '@modelcontextprotocol/sdk/client/stdio.js'
 
 import type { ToolHandlerResult, ToolSpec } from '../agent-chat/tool-spec'
 import type { McpStdioServerConfig } from '../core/mcp-server-config'
@@ -41,8 +52,6 @@ export interface McpClientToolsInput {
   /** The MCP namespace id: `figma`, or the key in `.mcp.json`. */
   id: string
   server: McpStdioServerConfig
-  /** The env the child inherits, under `server.env`. Usually `process.env`. */
-  env: NodeJS.ProcessEnv
   /** Aborts the startup handshake when the turn is cancelled. */
   signal?: AbortSignal
 }
@@ -94,14 +103,11 @@ const WIRE_SAFE_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/
 export async function connectMcpClientTools(
   input: McpClientToolsInput,
 ): Promise<McpClientTools> {
-  const inherited: Record<string, string> = {}
-  for (const [key, value] of Object.entries(input.env)) {
-    if (value !== undefined) inherited[key] = value
-  }
   const transport = new StdioClientTransport({
     command: input.server.command,
     args: input.server.args ?? [],
-    env: { ...inherited, ...(input.server.env ?? {}) },
+    // The safe default set, then the server's own block. See "Env" above.
+    env: { ...getDefaultEnvironment(), ...(input.server.env ?? {}) },
     // Piped, not inherited: a chatty server must not write over the CLI's
     // terminal. The tail is kept for the startup error message only.
     stderr: 'pipe',

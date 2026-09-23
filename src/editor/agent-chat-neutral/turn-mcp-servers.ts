@@ -59,7 +59,6 @@ export async function connectTurnMcpServers(
         ? connectMcpClientTools({
             id,
             server,
-            env: process.env,
             ...(opts.signal ? { signal: opts.signal } : {}),
           })
         : Promise.reject(

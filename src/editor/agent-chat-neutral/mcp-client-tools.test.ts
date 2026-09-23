@@ -1,8 +1,39 @@
 // @vitest-environment node
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import type { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { describe, expect, it, vi } from 'vitest'
 
 import { connectMcpClientTools } from './mcp-client-tools'
+
+// Records what the client hands the transport, then behaves exactly like the
+// real one: the child still starts and the tests still talk to it.
+const { transportParams } = vi.hoisted(() => ({
+  transportParams: [] as StdioServerParameters[],
+}))
+vi.mock('@modelcontextprotocol/sdk/client/stdio.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@modelcontextprotocol/sdk/client/stdio.js')>()
+  class RecordingStdioClientTransport extends real.StdioClientTransport {
+    constructor(params: StdioServerParameters) {
+      transportParams.push(params)
+      super(params)
+    }
+  }
+  return { ...real, StdioClientTransport: RecordingStdioClientTransport }
+})
+
+/** Run `fn` with extra variables set on `process.env`, then restore them. */
+async function withProcessEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+  const before = new Map(Object.keys(vars).map((k) => [k, process.env[k]]))
+  Object.assign(process.env, vars)
+  try {
+    return await fn()
+  } finally {
+    for (const [k, v] of before) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+}
 
 const FIXTURE = fileURLToPath(new URL('./__fixtures__/echo-mcp-server.mjs', import.meta.url))
 
@@ -10,7 +41,7 @@ const echoServer = { command: process.execPath, args: [FIXTURE] }
 
 describe('connectMcpClientTools', () => {
   it("lists a stdio server's tools under the mcp__<id>__ namespace and calls one", async () => {
-    const tools = await connectMcpClientTools({ id: 'echo', server: echoServer, env: process.env })
+    const tools = await connectMcpClientTools({ id: 'echo', server: echoServer })
     try {
       // `dotted.name` is left out: a provider refuses a `.` in a tool name,
       // and one refused name would fail every request of the turn.
@@ -33,7 +64,7 @@ describe('connectMcpClientTools', () => {
   })
 
   it("reports a server-side tool failure as an isError result, not a throw", async () => {
-    const tools = await connectMcpClientTools({ id: 'echo', server: echoServer, env: process.env })
+    const tools = await connectMcpClientTools({ id: 'echo', server: echoServer })
     try {
       const fail = tools.specs.find((s) => s.name === 'mcp__echo__fail')!
       const out = await fail.handler({}, {})
@@ -44,17 +75,18 @@ describe('connectMcpClientTools', () => {
     }
   })
 
-  it('starts the child with the config env laid over the inherited one', async () => {
-    const tools = await connectMcpClientTools({
-      id: 'echo',
-      server: {
-        ...echoServer,
-        // ECHO_MCP_STDERR makes the fixture write to stderr at startup. The
-        // pipe keeps it off the runner's terminal; the call still answers.
-        env: { ECHO_MCP_PREFIX: 'config:', ECHO_MCP_STDERR: 'hello from stderr' },
-      },
-      env: { ...process.env, ECHO_MCP_PREFIX: 'inherited:', UNSET_IN_CHILD: undefined },
-    })
+  it('starts the child with the config env laid over the safe default env', async () => {
+    const tools = await withProcessEnv({ ECHO_MCP_PREFIX: 'inherited:' }, () =>
+      connectMcpClientTools({
+        id: 'echo',
+        server: {
+          ...echoServer,
+          // ECHO_MCP_STDERR makes the fixture write to stderr at startup. The
+          // pipe keeps it off the runner's terminal; the call still answers.
+          env: { ECHO_MCP_PREFIX: 'config:', ECHO_MCP_STDERR: 'hello from stderr' },
+        },
+      }),
+    )
     try {
       const spec = tools.specs.find((s) => s.name === 'mcp__echo__echo')!
       const out = await spec.handler({ text: 'hi' }, {})
@@ -64,8 +96,40 @@ describe('connectMcpClientTools', () => {
     }
   })
 
+  it("does not hand the CLI's own env to the child: API keys stay behind", async () => {
+    transportParams.length = 0
+    const tools = await withProcessEnv(
+      {
+        ANTHROPIC_API_KEY: 'sk-ant-secret',
+        OPENAI_API_KEY: 'sk-openai-secret',
+        // The fixture echoes this one, so the child's view of it is visible.
+        ECHO_MCP_PREFIX: 'leaked:',
+      },
+      () =>
+        connectMcpClientTools({
+          id: 'echo',
+          server: { ...echoServer, env: { FROM_CONFIG: 'yes' } },
+        }),
+    )
+    try {
+      expect(transportParams).toHaveLength(1)
+      const env = transportParams[0]!.env ?? {}
+      expect(env).not.toHaveProperty('ANTHROPIC_API_KEY')
+      expect(env).not.toHaveProperty('OPENAI_API_KEY')
+      expect(env).not.toHaveProperty('ECHO_MCP_PREFIX')
+      expect(env.FROM_CONFIG).toBe('yes')
+      expect(env.PATH).toBe(process.env.PATH)
+      // And the running child agrees: the CLI's variable never reached it.
+      const spec = tools.specs.find((s) => s.name === 'mcp__echo__echo')!
+      const out = await spec.handler({ text: 'hi' }, {})
+      expect(out.content[0]).toMatchObject({ type: 'text', text: 'hi' })
+    } finally {
+      await tools.close()
+    }
+  })
+
   it('closes the child, after which a call fails rather than hanging', async () => {
-    const tools = await connectMcpClientTools({ id: 'echo', server: echoServer, env: process.env })
+    const tools = await connectMcpClientTools({ id: 'echo', server: echoServer })
     const spec = tools.specs.find((s) => s.name === 'mcp__echo__echo')!
     await tools.close()
     await expect(spec.handler({ text: 'late' }, {})).rejects.toThrow()
@@ -78,7 +142,6 @@ describe('connectMcpClientTools', () => {
       connectMcpClientTools({
         id: 'ghost',
         server: { command: '/nonexistent-binary' },
-        env: process.env,
       }),
     ).rejects.toThrow(/MCP server "ghost"/)
   })
@@ -94,8 +157,7 @@ describe('connectMcpClientTools', () => {
         connectMcpClientTools({
           id: 'pager',
           server: { ...echoServer, env: { ECHO_MCP_CURSOR: mode } },
-          env: process.env,
-        }),
+          }),
       ).rejects.toThrow(message)
       // Ended by the cap, not by the 30s startup deadline.
       expect(Date.now() - started).toBeLessThan(10_000)
@@ -110,7 +172,6 @@ describe('connectMcpClientTools', () => {
           command: process.execPath,
           args: ['-e', 'process.stderr.write("boom: missing token\\n"); process.exit(3)'],
         },
-        env: process.env,
       }),
     ).rejects.toThrow(/MCP server "crasher": [\s\S]*boom: missing token/)
   })
