@@ -545,6 +545,44 @@ describe('AiSdkProvider.streamConversation', () => {
     expect((sys[0] as { providerOptions?: unknown }).providerOptions).toBeUndefined()
   })
 
+  it('marks only the hinted block when the system prompt has several, in order', async () => {
+    // The production caller (`run-chat-turn-neutral.ts`) sends a two-block
+    // system: a cache-hinted prompt block followed by an unhinted notice
+    // block. `toSystem` maps EVERY block to its own `SystemModelMessage`
+    // once any block is hinted, so this proves the unhinted sibling does not
+    // pick up `providerOptions` by accident and that order survives the map.
+    const model = new MockLanguageModelV4({
+      doStream: answeredStream(),
+    })
+    const provider = new AiSdkProvider({
+      name: 'anthropic',
+      defaultModel: 'm',
+      languageModel: () => model,
+      providerOptionsKey: 'anthropic',
+      cacheControl: 'anthropic',
+    })
+    await collect(
+      provider.streamConversation({
+        system: [
+          { type: 'text', text: 'SYS', cacheHint: 'ephemeral' },
+          { type: 'text', text: 'NOTICE' },
+        ],
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+      }),
+    )
+    const prompt = model.doStreamCalls[0]!.prompt
+    const sys = prompt.filter((m) => m.role === 'system')
+    expect(sys).toHaveLength(2)
+    expect(sys[0]).toMatchObject({
+      role: 'system',
+      content: 'SYS',
+      providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
+    })
+    expect(sys[1]).toMatchObject({ role: 'system', content: 'NOTICE' })
+    expect((sys[1] as { providerOptions?: unknown }).providerOptions).toBeUndefined()
+  })
+
   it('reports an aborted stream as an error stop with the work so far preserved', async () => {
     // `controller.abort()` used to run BEFORE `streamConversation` was even
     // called, which only ever exercised the `opts.signal?.aborted` fallback
